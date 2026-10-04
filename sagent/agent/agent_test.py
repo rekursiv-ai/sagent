@@ -35,6 +35,7 @@ from sagent.agent.agent import (
     SystemPromptArg,
     _AgentCompactor,
     _AgentTool,
+    _ObservedModel,
     _provider_knows_model,
     _repair_compact_payload,
     _resolve_target_spec,
@@ -88,8 +89,10 @@ from sagent.types.model import (
     ModelRecipe,
     ModelRequest,
     ModelResponse,
+    ModelTerminationError,
     PromptTooLongError,
     RequestTooLargeError,
+    StreamInterruptedError,
     UsageSnapshot,
     UsageWindow,
 )
@@ -348,6 +351,23 @@ class StubModel:
         resource-free model satisfies it by returning immediately.
         """
         return
+
+
+@pytest.mark.asyncio
+async def test_observed_model_delegates_exact_token_measurement() -> None:
+    """The accounting wrapper preserves exact provider token measurement."""
+
+    class _TokenModel(StubModel):
+        @override
+        async def actual_image_tokens(self, data: bytes) -> int:
+            return len(data)
+
+    observed = _ObservedModel(_TokenModel(), lambda _response: None)
+
+    assert await observed.actual_text_tokens("abcdefgh") == 2
+    assert await observed.actual_image_tokens(b"image") == 5
+    request = ModelRequest(messages=[UserMessage(text="abcdefgh")])
+    assert await observed.actual_request_tokens(request) > 0
 
 
 _STUB_SCHEMA: JSON = json_freeze({"type": "object"})
@@ -913,6 +933,30 @@ async def test_drive_until_first_idle_returns_first_post_work_result() -> None:
     assert result.content == "real answer"
     # ``drive_until_first_idle`` does NOT shut down; the loop is still live.
     assert not a._shutting_down
+    a.shutdown(force=True)
+
+
+@pytest.mark.asyncio
+async def test_drive_until_first_idle_propagates_model_error() -> None:
+    """A terminal model failure must not become an empty successful result."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _FailingModel(StubModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del request, publish
+            raise RuntimeError("provider failed")
+
+    a = _build_agent(model=_FailingModel())
+    a.max_attempts = 1
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        _ = await a.drive_until_first_idle(UserMessage(text="go"))
+
     a.shutdown(force=True)
 
 
@@ -3884,6 +3928,96 @@ async def test_compact_now_returns_true_on_success() -> None:
     a.runtime.append_history(UserMessage(text="old"))
     ok = await a.compact_now()
     assert ok is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "max_budget_usd", "expected_error"),
+    [
+        ("model_finished", 0.1, BudgetExhaustedError),
+        ("model_refusal", 1.0, ModelTerminationError),
+    ],
+)
+async def test_compactor_model_calls_share_accounting_and_termination_gate(
+    stop_reason: str,
+    max_budget_usd: float,
+    expected_error: type[Exception],
+) -> None:
+    """Compaction cannot bypass paid-response accounting or validation."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _CompactionModel(StubModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del request, publish
+            return ModelResponse(
+                message=AssistantMessage(text="<summary>done</summary>"),
+                stop_reason=stop_reason,
+                spend=TokenCost(request=0.25),
+            )
+
+    @dataclass(slots=True, kw_only=True)
+    class _CallingCompactor:
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
+        def should_compact(
+            self,
+            current_tokens: int,
+            largest_context: int,
+            system_tokens: int = 0,
+        ) -> bool:
+            del current_tokens, largest_context, system_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[ModelContextEvent],
+            model: object,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, custom_instructions
+            rich_model = cast(Model, model)
+            _ = await rich_model.stream(
+                ModelRequest(messages=[UserMessage(text="summarize")]),
+            )
+            return _summary_override(
+                [UserMessage(text="[summary]")],
+                mint_ref,
+                tape=tape,
+            )
+
+        def maintain(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[ModelContextEvent],
+            tools: object,
+            mint_ref: Callable[[], TapeRef],
+        ) -> tuple[ContextSplice, ...]:
+            del tape, context, tools, mint_ref
+            return ()
+
+    a = Agent(
+        model=_CompactionModel(),
+        tools=[],
+        compactor=_CallingCompactor(),
+        max_budget_usd=max_budget_usd,
+    )
+    a.runtime.append_history(UserMessage(text="old"))
+
+    assert await a.compact_now() is False
+    assert isinstance(a.last_compact_error, expected_error)
+    assert a.cost_tracker.spend.total == pytest.approx(0.25)
 
 
 @pytest.mark.asyncio
@@ -7534,6 +7668,93 @@ async def test_stream_forwards_publish_sink_to_inner_model() -> None:
     assert any(
         isinstance(e, ModelResponsePartial) and e.text == "hello" for e in delivered
     ), "inner-model-published text chunk did not reach the runtime publisher"
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_normalized_refusal_after_recording_cost() -> None:
+    """A provider refusal is an error, not a successful empty assistant turn."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _RefusingModel(StubModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del request, publish
+            return ModelResponse(
+                message=AssistantMessage(text=""),
+                stop_reason="model_refusal",
+                request_id="req_refused",
+                spend=TokenCost(request=0.25),
+            )
+
+    a = _build_agent(model=_RefusingModel())
+    delivered: list[RuntimeEvent] = []
+
+    with pytest.raises(ModelTerminationError) as raised:
+        _ = await a._agent_model.stream([UserMessage(text="hi")], delivered.append)
+
+    assert raised.value.stop_reason == "model_refusal"
+    assert raised.value.response.request_id == "req_refused"
+    assert a.cost_tracker.spend.total == pytest.approx(0.25)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["model_continuing", "max_tokens"])
+async def test_stream_rejects_every_normalized_non_success(
+    stop_reason: str,
+) -> None:
+    """Normalized non-success outcomes cannot collapse into assistant success."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _TerminatingModel(StubModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del request, publish
+            return ModelResponse(
+                message=AssistantMessage(text="partial output"),
+                stop_reason=stop_reason,
+                request_id="req_terminated",
+            )
+
+    a = _build_agent(model=_TerminatingModel())
+
+    with pytest.raises(ModelTerminationError) as raised:
+        _ = await a._agent_model.stream([UserMessage(text="hi")], lambda _: None)
+
+    assert raised.value.stop_reason == stop_reason
+    assert raised.value.response.message.text == "partial output"
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_tool_use_without_tool_calls() -> None:
+    """The shared boundary enforces stop-reason/content consistency."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _BrokenToolModel(StubModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del request, publish
+            return ModelResponse(
+                message=AssistantMessage(text=""),
+                stop_reason="model_tool_use",
+            )
+
+    a = _build_agent(model=_BrokenToolModel())
+    a.max_attempts = 1
+
+    with pytest.raises(StreamInterruptedError):
+        _ = await a._agent_model.stream([UserMessage(text="hi")], lambda _: None)
 
 
 def test_subagent_inherits_root_cost_tracker() -> None:

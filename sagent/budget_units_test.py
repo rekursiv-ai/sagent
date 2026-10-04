@@ -22,6 +22,9 @@ import ast
 
 import pytest
 
+from sagent.lib.files.glob import glob
+from sagent.lib.files.grep import Query, grep
+
 
 _CWD: Final = Path(__file__).resolve().parent
 
@@ -81,7 +84,7 @@ _BANNED_NAMES: Final = (
 def _sources() -> tuple[tuple[str, str], ...]:
     """Return ``(relative_path, text)`` for every shipped non-test module."""
     found: list[tuple[str, str]] = []
-    for path in sorted(_CWD.rglob("*.py")):
+    for path in glob(_CWD, "**/*.py"):
         rel = path.relative_to(_CWD)
         if any(part.startswith(".") for part in rel.parts):
             continue
@@ -100,7 +103,16 @@ def test_the_deleted_constants_stay_deleted(banned: str) -> None:
     the grounds that Read bounded itself, which stopped being true the
     moment that bound was expressed in lines.
     """
-    offenders = [rel for rel, text in _sources() if banned in text]
+    offenders = [
+        str(path.relative_to(_CWD))
+        for path_text in grep(
+            _CWD,
+            Query(pattern=banned, glob="**/*.py", exclude="**/.*"),
+        )
+        for path in [Path(path_text)]
+        if not path.name.endswith("_test.py")
+        and path.relative_to(_CWD).parts[0] != "examples"
+    ]
     assert not offenders, (
         f"{banned} is back in {offenders}. It expresses a budget in a unit"
         " the provider does not enforce; bound by tokens instead."

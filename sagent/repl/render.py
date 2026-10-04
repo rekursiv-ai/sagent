@@ -24,6 +24,7 @@ import re
 import time
 
 from sagent.lib.durations import humanize_duration
+from sagent.providers.lib.errors import PolicyBlockedError
 from sagent.repl.render_diff import find_stable_boundary
 from sagent.tools.display import (
     OutputSpec,
@@ -34,6 +35,10 @@ from sagent.types.exceptions import (
     AuthRefreshError,
     ContextOverflowError,
     UserFacingError,
+)
+from sagent.types.model import (
+    ModelTerminationError,
+    RequestTooLargeError,
 )
 from sagent.types.runtime import (
     AgentSendDeferredMessage,
@@ -75,7 +80,7 @@ logger = logging.getLogger(__name__)
 # ``_stream_buf`` until the next paragraph break. A 100K+-char in-progress
 # fenced block would let the buffer grow for the entire round; flush
 # unconditionally past this cap so memory stays bounded.
-_STREAM_BUF_FLUSH_BYTES = (
+_STREAM_BUF_FLUSH_CHARS = (
     64 * 1024
 )  # house-ignore[globals] -- Stream-buf flush cap, display pref.
 
@@ -112,6 +117,12 @@ HALT_MESSAGE_AUTH: Final = (
 )
 HALT_MESSAGE_CONTEXT: Final = (
     "agent halted -- run /compact <hints>, /clear, or /model to reduce context"
+)
+HALT_MESSAGE_POLICY: Final = (
+    "agent halted -- do not retry this context; run /clear, /model, or /quit"
+)
+HALT_MESSAGE_REQUEST_TOO_LARGE: Final = (
+    "agent halted -- reduce request data or run /clear or /quit"
 )
 
 
@@ -662,6 +673,13 @@ class RenderObserver:
                     self._printer.write_halt(HALT_MESSAGE_AUTH)
                 elif isinstance(exc, ContextOverflowError):
                     self._printer.write_halt(HALT_MESSAGE_CONTEXT)
+                elif isinstance(exc, RequestTooLargeError):
+                    self._printer.write_halt(HALT_MESSAGE_REQUEST_TOO_LARGE)
+                elif isinstance(exc, PolicyBlockedError) or (
+                    isinstance(exc, ModelTerminationError)
+                    and exc.stop_reason == "model_refusal"
+                ):
+                    self._printer.write_halt(HALT_MESSAGE_POLICY)
                 else:
                     self._printer.write_halt(HALT_MESSAGE)
             case ModelSwitchRejected(exception=exc):
@@ -720,7 +738,7 @@ class RenderObserver:
             # bound for the rest of the round. Flush at the cap so
             # memory stays bounded even if the model never emits a
             # closing fence.
-            if len(self._stream_buf) > _STREAM_BUF_FLUSH_BYTES:
+            if len(self._stream_buf) > _STREAM_BUF_FLUSH_CHARS:
                 self._flush_stream()
             return
         stable = self._stream_buf[:boundary].rstrip("\n")
@@ -766,7 +784,7 @@ class RenderObserver:
                 # long-running unclosed fence (no ``\n\n`` boundary)
                 # would otherwise let ``_child_text[label]`` grow
                 # without bound for the whole round.
-                if len(buf) > _STREAM_BUF_FLUSH_BYTES:
+                if len(buf) > _STREAM_BUF_FLUSH_CHARS:
                     self._move_text_to_items(label)
                     self._emit_child(label)
                 return

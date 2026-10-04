@@ -13,9 +13,7 @@ import pytest
 
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import FakeAgent, with_fake_agent
-from sagent.tools.grep import (
-    Grep,
-)
+from sagent.tools.grep import Grep
 from sagent.tools.lib.bash import parse_bash
 from sagent.types.runtime import ToolResult
 
@@ -43,7 +41,7 @@ def _no_rg_fake_agent() -> Generator[FakeAgent]:
     """Force the Python fallback by hiding ripgrep."""
     with ExitStack() as stack:
         stack.enter_context(
-            patch("sagent.tools.grep._rg_path", return_value=None),
+            patch("sagent.lib.files.grep.shutil.which", return_value=None),
         )
         yield stack.enter_context(with_fake_agent())
 
@@ -351,6 +349,21 @@ async def test_grep_python_fallback_skips_vcs_dirs(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_grep_fallback_skips_a_gitignored_dir(tmp_path: Path) -> None:
+    """Rg honours ``.gitignore`` in a repo; the fallback searches the same files."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "out.py").write_text("hit\n", encoding="utf-8")
+    (tmp_path / "kept.py").write_text("hit\n", encoding="utf-8")
+    args = {"pattern": "hit", "path": str(tmp_path)}
+    rg = await _run_grep(dict(args), tmp_path)
+    py = await _run_grep_py(dict(args), tmp_path)
+    assert "out.py" not in py.content, py.content
+    assert rg.content == py.content
+
+
+@pytest.mark.asyncio
 async def test_grep_python_fallback_single_file_honors_type(tmp_path: Path) -> None:
     f = tmp_path / "x.md"
     f.write_text("alpha\n")
@@ -404,11 +417,7 @@ async def test_grep_python_fallback_context_matches_rg_format(tmp_path: Path) ->
         tmp_path,
     )
 
-    assert f"{f}:1:a" in result.content
-    assert f"{f}:2:MATCH" in result.content
-    assert f"{f}:3:c" in result.content
-    assert "> MATCH" not in result.content
-    assert ":  a" not in result.content
+    assert result.content == f"{f}-1-a\n{f}:2:MATCH\n{f}-3-c"
 
 
 @pytest.mark.asyncio
@@ -681,6 +690,29 @@ def test_an_untranslatable_flag_drops_only_the_example(command: str) -> None:
     hint = grep.bash_match(trees) or ""
     assert hint.startswith(_NUDGE)
     assert "Try: Grep" not in hint
+
+
+@pytest.mark.parametrize(
+    ("command", "fields"),
+    [
+        ("grep foo f.txt | head -5", " keep_first=5"),
+        ("grep foo f.txt | head -n 7", " keep_first=7"),
+        ("grep foo f.txt | tail -3", " keep_last=3"),
+        ("grep foo f.txt | wc -l", ' output_mode="count"'),
+        ("grep foo f.txt | head -5 | wc -l", ' output_mode="count" keep_first=5'),
+        # One field per counting sink, joined with nothing between them.
+        ("grep foo f.txt | wc -l | wc -l", ' output_mode="count" output_mode="count"'),
+        # ``-l`` counts lines only under ``wc``; ``head -l`` is no count.
+        ("grep foo f.txt | head -l", ""),
+        ("grep foo f.txt", ""),
+    ],
+)
+def test_a_folded_sink_renders_exactly_its_fields(command: str, fields: str) -> None:
+    """A bounding or counting sink is part of the search the nudge replaces."""
+    trees = parse_bash(command)
+    assert trees is not None
+    hint = grep.bash_match(trees) or ""
+    assert hint.endswith(f"Try: Grep pattern='foo' path='f.txt'{fields}"), hint
 
 
 def test_bash_match_grep_value_flag_missing_value() -> None:

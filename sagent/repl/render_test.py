@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 from typing import cast, override
+from unittest.mock import patch
 
 import time
 
 import pytest
 
+from sagent.providers.lib.errors import PolicyBlockedError
 from sagent.repl.render import (
-    _STREAM_BUF_FLUSH_BYTES,
+    _STREAM_BUF_FLUSH_CHARS,
     HALT_MESSAGE,
     HELP_TEXT,
     RecordingPrinter,
@@ -22,6 +24,11 @@ from sagent.tools.display import OutputSpec
 from sagent.types.exceptions import (
     AuthRefreshError,
     ContextOverflowError,
+)
+from sagent.types.model import (
+    ModelResponse,
+    ModelTerminationError,
+    RequestTooLargeError,
 )
 from sagent.types.runtime import (
     AgentSendDeferredMessage,
@@ -196,6 +203,41 @@ def test_model_response_partial_buffers_until_boundary() -> None:
     obs(ModelResponsePartial(text="first para\n\nsecond para"))
     # First paragraph committed; second still buffered.
     assert p.markdowns == ["first para"]
+
+
+def test_model_response_partial_accumulates_chunks_and_preserves_tail() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+
+    obs(ModelResponsePartial(text="ends"))
+    obs(ModelResponsePartial(text="X\n\nnext"))
+    assert p.markdowns == ["endsX"]
+
+    obs(ModelResponseComplete(message=AssistantMessage(text="endsX\n\nnext")))
+    assert p.markdowns == ["endsX", "next"]
+
+
+def test_model_response_partial_preserves_trailing_space() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+
+    obs(ModelResponsePartial(text="kept \n\nnext"))
+
+    assert p.markdowns == ["kept "]
+
+
+def test_model_response_partial_honors_a_one_character_boundary() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+
+    with patch(
+        "sagent.repl.render.find_stable_boundary",
+        return_value=1,
+    ):
+        obs(ModelResponsePartial(text="ab"))
+
+    assert p.markdowns == ["a"]
+    assert obs._stream_buf == "b"
 
 
 def test_model_response_complete_flushes_remaining() -> None:
@@ -444,6 +486,64 @@ def test_context_overflow_error_uses_context_specific_halt_banner() -> None:
     assert "/compact" in banner
     assert "/model" in banner
     assert "retry" not in banner.lower()
+
+
+def test_policy_block_error_warns_against_same_context_retry() -> None:
+    """A safeguard block needs context repair, not the generic retry advice."""
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    exc = PolicyBlockedError(
+        provider_name="Anthropic",
+        provider_message="Output blocked by content filtering policy",
+        request_id="req_policy_block",
+    )
+    obs(ModelResponseError(exception=exc))
+
+    rendered = " ".join(p.tool_errors)
+    assert "Output blocked by content filtering policy" in rendered
+    assert "req_policy_block" in rendered
+    assert "PolicyBlockedError" not in rendered
+    assert len(p.halts) == 1
+    banner = p.halts[0]
+    assert banner != HALT_MESSAGE
+    assert "/clear" in banner
+    assert "/model" in banner
+    assert "do not retry" in banner.lower()
+
+
+def test_normalized_model_refusal_warns_against_same_context_retry() -> None:
+    """HTTP-200 refusals use the same non-retry recovery path as policy 400s."""
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    response = ModelResponse(
+        message=AssistantMessage(text=""),
+        stop_reason="model_refusal",
+        request_id="req_refused",
+    )
+    obs(ModelResponseError(exception=ModelTerminationError(response)))
+
+    rendered = " ".join(p.tool_errors)
+    assert "model_refusal" in rendered
+    assert "req_refused" in rendered
+    assert len(p.halts) == 1
+    banner = p.halts[0]
+    assert banner != HALT_MESSAGE
+    assert "/clear" in banner
+    assert "/model" in banner
+    assert "do not retry" in banner.lower()
+
+
+def test_request_too_large_error_does_not_recommend_retry() -> None:
+    """An unchanged oversized request deterministically fails again."""
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(ModelResponseError(exception=RequestTooLargeError("attach less data")))
+
+    assert len(p.halts) == 1
+    banner = p.halts[0]
+    assert banner != HALT_MESSAGE
+    assert "retry" not in banner.lower()
+    assert "/clear" in banner
 
 
 def test_plain_exception_keeps_class_name_prefix_and_generic_banner() -> None:
@@ -708,8 +808,19 @@ def test_stream_buf_flushes_at_size_cap() -> None:
     obs = make_render_observer(p)
     # Open a fence and stream a long single-line body so
     # ``find_stable_boundary`` returns 0 (no paragraph break).
-    obs(ModelResponsePartial(text="```\n" + "x" * (_STREAM_BUF_FLUSH_BYTES + 1)))
+    obs(ModelResponsePartial(text="```\n" + "x" * (_STREAM_BUF_FLUSH_CHARS + 1)))
     assert p.markdowns, "stream buffer must flush once past the size cap"
+
+
+def test_stream_buf_does_not_flush_at_exact_size_cap() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    chunk = "```\n" + "x" * (_STREAM_BUF_FLUSH_CHARS - 4)
+
+    obs(ModelResponsePartial(text=chunk))
+
+    assert not p.markdowns
+    assert obs._stream_buf == chunk
 
 
 def test_strict_observer_reraises_dispatch_failures() -> None:
@@ -751,16 +862,16 @@ def test_child_stream_buf_flushes_at_size_cap() -> None:
         ChildEvent(
             label="Agent_0",
             inner=ModelResponsePartial(
-                text="```\n" + "x" * (_STREAM_BUF_FLUSH_BYTES + 1),
+                text="```\n" + "x" * (_STREAM_BUF_FLUSH_CHARS + 1),
             ),
         ),
     )
     # The buffer for Agent_0 must be bounded by the same cap as the
     # parent stream buffer.
     child_text = obs._child_text.get("Agent_0", "")
-    assert len(child_text) <= _STREAM_BUF_FLUSH_BYTES, (
+    assert len(child_text) <= _STREAM_BUF_FLUSH_CHARS, (
         f"child stream buffer must flush at size cap;"
-        f" len={len(child_text)} cap={_STREAM_BUF_FLUSH_BYTES}"
+        f" len={len(child_text)} cap={_STREAM_BUF_FLUSH_CHARS}"
     )
 
 
@@ -808,6 +919,12 @@ def test_recording_printer_rendered_text_concats() -> None:
     p.write_markdown("a")
     p.write_markdown("b")
     assert p.rendered_text == "ab"
+
+
+def test_recording_printer_write_line_records_text() -> None:
+    p = RecordingPrinter()
+    p.write_line("hello")
+    assert p.lines == ["hello"]
 
 
 def test_help_text_contains_core_commands() -> None:

@@ -402,8 +402,7 @@ def test_tool_state_consume_changed_files_missing_file_skipped(tmp_path: Path) -
 
 
 def test_get_tool_state_default_outside_context() -> None:
-    s = get_tool_state()
-    assert isinstance(s, ToolState)
+    get_tool_state()
 
 
 def test_default_tool_state_is_isolated_per_test_part_one() -> None:

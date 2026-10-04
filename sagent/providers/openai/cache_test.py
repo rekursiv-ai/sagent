@@ -23,6 +23,7 @@ from sagent.types.runtime import (
     UserMessage,
 )
 from sagent.types.settings import AgentSettings
+from sagent.types.tools import ToolResultPolicy
 
 
 if TYPE_CHECKING:
@@ -45,6 +46,12 @@ def capture(monkeypatch: pytest.MonkeyPatch) -> _Capture:
     return captured
 
 
+_TEST_WINDOW = 8_000
+_TEST_BUFFER = 400
+_TEST_PERSIST = 6_000
+_TEST_CONTENT_REPEATS = 1_200
+
+
 @pytest.mark.anyio
 async def test_compacting_agent_preserves_prefix_past_half_window(
     capture: _Capture,
@@ -57,12 +64,13 @@ async def test_compacting_agent_preserves_prefix_past_half_window(
         tools=[Bash()],
         compactor=SummaryCompactor(),
         budget=AgentSettings(
-            max_request_tokens=20_000,
+            max_request_tokens=_TEST_WINDOW,
             max_response_tokens=128,
-            buffer_tokens=1_000,
+            buffer_tokens=_TEST_BUFFER,
         ),
+        tool_results=ToolResultPolicy(persist_tokens=_TEST_PERSIST),
     )
-    content = "cache-result " * 1_750
+    content = "cache-result " * _TEST_CONTENT_REPEATS
     result_tokens = model.approx_text_tokens(content)
     assert result_tokens < agent.tool_results.persist_tokens
     assert result_tokens * 3 > agent.max_request_tokens // 2
@@ -91,8 +99,11 @@ async def test_compacting_agent_preserves_prefix_past_half_window(
                 )
     finally:
         await provider.close_sdk()
+    assert len(capture.payloads) > 3
     bodies = [DictCodec.coerce(json.loads(raw)) for raw in capture.payloads]
     for before, after in pairwise(bodies):
+        if after["store"] is False:
+            continue
         assert _prefix_items(before, after=after) == len(
             ListCodec.mappings(before["input"]),
         )

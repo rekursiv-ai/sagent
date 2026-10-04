@@ -64,3 +64,14 @@
 +    def set_content(self, msg: Message, obj: object, *args: object, **kw: object) -> None: ...
      def add_get_handler(self, key: str, handler: Callable[..., Incomplete]) -> None: ...
      def add_set_handler(self, typekey: type, handler: Callable[..., Incomplete]) -> None: ...
+--- a/stdlib/inspect.pyi
++++ b/stdlib/inspect.pyi
+@@ -1157,7 +1157,7 @@
+     set of unbound names that could not be resolved is also provided.
+     """
+
+-def unwrap(func: Callable[..., Any], *, stop: Callable[[Callable[..., Any]], Any] | None = None) -> Any:
++def unwrap(func: _F, *, stop: Callable[[Callable[..., Any]], Any] | None = None) -> _F:
+     """Get the object wrapped by *func*.
+
+     Follows the chain of :attr:`__wrapped__` attributes returning the last

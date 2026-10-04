@@ -86,7 +86,10 @@ def test_stream_interrupted_names_tool_use_only_when_tools_were_announced() -> N
     reported tool use for both, so a text-only connection drop read as a
     tool-call failure and sent the reader after tools never in play.
     """
-    tool_turn = ModelResponse(message=AssistantMessage(text=""), stop_reason="tool_use")
+    tool_turn = ModelResponse(
+        message=AssistantMessage(text=""),
+        stop_reason="model_tool_use",
+    )
     assert "tool_use" in str(StreamInterruptedError(tool_turn))
 
     text_turn = ModelResponse(

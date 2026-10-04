@@ -29,7 +29,10 @@ from sagent.providers.anthropic.api import (
     _tool_use_block,
     build_context_management,
 )
-from sagent.providers.lib.errors import StreamingResponseNotReadError
+from sagent.providers.lib.errors import (
+    PolicyBlockedError,
+    StreamingResponseNotReadError,
+)
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.types.capability import (
     ModelCapability,
@@ -1077,10 +1080,19 @@ async def test_anthropic_stream_request_too_large_raises_typed_error() -> None:
     )
 
 
-def _api_status_error(status_code: int, message: str) -> anthropic_sdk.APIStatusError:
+def _api_status_error(
+    status_code: int,
+    message: str,
+    *,
+    request_id: str = "",
+) -> anthropic_sdk.APIStatusError:
     """Construct an APIStatusError as the SDK would, with an arbitrary status."""
     request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    response = httpx2.Response(status_code, request=request)
+    response = httpx2.Response(
+        status_code,
+        request=request,
+        headers={"request-id": request_id} if request_id else None,
+    )
     body = {
         "type": "error",
         "error": {"type": "invalid_request_error", "message": message},
@@ -1161,6 +1173,112 @@ async def test_anthropic_stream_uses_structured_overflow_body() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Output blocked by content filtering policy",
+        "Fable 5's safeguards flagged this message under the Usage Policy.",
+        "This request has been blocked by our content filters.",
+        "Request rejected for safety reasons.",
+    ],
+)
+async def test_anthropic_stream_raises_policy_blocked_error(message: str) -> None:
+    """Safeguard 400s preserve Anthropic's reason and stop same-context retries."""
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    request_id = "req_policy_block"
+    err = _api_status_error(400, message, request_id=request_id)
+
+    with (
+        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
+        patch(
+            "sagent.providers.anthropic.api._stream_impl",
+            AsyncMock(side_effect=err),
+        ),
+        pytest.raises(PolicyBlockedError) as raised,
+    ):
+        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+
+    assert raised.value.provider_message == message
+    assert raised.value.request_id == request_id
+    assert message in str(raised.value)
+    assert request_id in str(raised.value)
+    assert "do not retry" in str(raised.value).lower()
+    assert raised.value.__cause__ is err
+
+
+@pytest.mark.asyncio
+async def test_anthropic_auth_retry_normalizes_policy_error() -> None:
+    """The second request must pass through the same error boundary as the first."""
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx2.Response(401, request=request)
+    auth_error = anthropic_sdk.AuthenticationError(
+        "Unauthorized",
+        response=response,
+        body=None,
+    )
+    policy_error = _api_status_error(
+        400,
+        "This request has been blocked by our content filters.",
+    )
+
+    with (
+        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
+        patch.object(p, "handle_auth_error", AsyncMock()) as handle_auth,
+        patch(
+            "sagent.providers.anthropic.api._stream_impl",
+            AsyncMock(side_effect=[auth_error, policy_error]),
+        ),
+        pytest.raises(PolicyBlockedError),
+    ):
+        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+
+    handle_auth.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_preserves_unrelated_invalid_request() -> None:
+    """An ordinary invalid request must retain the SDK's diagnostic taxonomy."""
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = _api_status_error(400, "tools.0.name is invalid")
+
+    with (
+        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
+        patch(
+            "sagent.providers.anthropic.api._stream_impl",
+            AsyncMock(side_effect=err),
+        ),
+        pytest.raises(anthropic_sdk.APIStatusError) as raised,
+    ):
+        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+
+    assert raised.value is err
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_does_not_misclassify_unrelated_block() -> None:
+    """A generic access block is not evidence of a provider safety decision."""
+    p = Anthropic.from_key("k")
+    m = p.model("claude-opus-4-7")
+    err = _api_status_error(400, "Request blocked because this key lacks access")
+
+    with (
+        patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
+        patch(
+            "sagent.providers.anthropic.api._stream_impl",
+            AsyncMock(side_effect=err),
+        ),
+        pytest.raises(anthropic_sdk.APIStatusError) as raised,
+    ):
+        await m.stream(ModelRequest(messages=[UserMessage(text="hi")]))
+
+    assert raised.value is err
+
+
+@pytest.mark.asyncio
 async def test_anthropic_raw_stream_reads_status_error_body() -> None:
     p = Anthropic.from_key("k")
     sdk = await p.get_sdk()
@@ -1177,7 +1295,11 @@ async def test_anthropic_raw_stream_reads_status_error_body() -> None:
         },
     )
     with (
-        patch.object(sdk._client, "send", AsyncMock(return_value=response)),
+        patch.object(
+            sdk._client,
+            "send",
+            AsyncMock(return_value=response),
+        ) as send,
         pytest.raises(anthropic_sdk.APIStatusError) as raised,
     ):
         await _raw_message_stream(
@@ -1197,6 +1319,11 @@ async def test_anthropic_raw_stream_reads_status_error_body() -> None:
         },
     }
     assert raised.value.status_code == 400
+    call = send.await_args
+    assert call is not None
+    sent_request = cast(httpx2.Request, call.args[0])
+    assert sent_request.method == "POST"
+    assert call.kwargs == {"stream": True}
 
 
 @pytest.mark.asyncio
@@ -1312,6 +1439,17 @@ async def test_anthropic_provider_close_sdk_closes_shared_sdk() -> None:
 
 
 @pytest.mark.asyncio
+async def test_anthropic_provider_close_sdk_accepts_client_without_close() -> None:
+    """A transport client without a close hook still clears provider state."""
+    p = Anthropic.from_key("k")
+    p._sdk = cast("anthropic_sdk.AsyncAnthropic", MagicMock(spec=[]))
+
+    await p.close_sdk()
+
+    assert p._sdk is None
+
+
+@pytest.mark.asyncio
 async def test_closing_one_model_leaves_a_sibling_model_usable() -> None:
     """The SDK belongs to the provider, so one model may not destroy it.
 
@@ -1391,6 +1529,16 @@ def test_anthropic_provider_extra_headers_redact_thinking_opt_in() -> None:
 def test_anthropic_provider_extra_headers_redact_thinking_default_off() -> None:
     p = Anthropic.from_key("k")
     model = p.model("claude-opus-4-7")
+    headers = p.extra_headers(model.capability, model.settings)
+    assert "redact-thinking-2026-02-12" not in headers.get("anthropic-beta", "")
+
+
+def test_anthropic_constructor_defaults_keep_optional_features_off() -> None:
+    """Direct construction has the same conservative defaults as ``from_key``."""
+    p = Anthropic(api_key="k")
+    model = p.model("claude-opus-4-7")
+
+    assert p.server_side_context_management is False
     headers = p.extra_headers(model.capability, model.settings)
     assert "redact-thinking-2026-02-12" not in headers.get("anthropic-beta", "")
 

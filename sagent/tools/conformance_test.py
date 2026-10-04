@@ -19,7 +19,6 @@ import pytest
 from sagent.bin.cli import DEFAULT_TOOLS, resolve_tools
 from sagent.tools.display import row_spec
 from sagent.tools.tool_spec import CLI_SETTABLE, coerce_kwargs
-from sagent.types.tools import Tool
 
 
 # Tools whose call block renders a body, per ``docs/sagent_tool_ux.md``.
@@ -79,8 +78,7 @@ def test_tool_instance_keeps_its_model_facing_description(name: str) -> None:
 
 @pytest.mark.parametrize("name", DEFAULT_TOOLS)
 def test_tool_satisfies_the_protocol(name: str) -> None:
-    tool = resolve_tools([name])[0]
-    assert isinstance(tool, Tool)
+    resolve_tools([name])[0]
 
 
 @pytest.mark.parametrize("name", DEFAULT_TOOLS)

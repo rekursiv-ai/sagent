@@ -68,6 +68,8 @@ dependencies = [
     "wrapt",
     # misc
     "bashlex>=0.18",
+    # gitignore-aware tree walks: the `ignore` crate behind ripgrep and fd
+    "rignore>=0.8.1",
 ]
 
 [project.optional-dependencies]

@@ -39,7 +39,7 @@ BENIGN_STOP_REASONS: frozenset[str] = frozenset(
     {
         "model_finished",  # Natural completion.
         "model_tool_use",  # Model emitted tool call(s)
-        "model_continuing",  # long-running request, client should continue.
+        "stop_sequence",  # Caller-requested stop sequence matched.
     },
 )
 
@@ -72,9 +72,9 @@ _GOOGLE_MAP: Final[dict[str, str]] = {
     "PROHIBITED_CONTENT": "model_refusal",
     "SPII": "model_refusal",
     "IMAGE_SAFETY": "model_refusal",
-    "MALFORMED_FUNCTION_CALL": "model_refusal",
-    "OTHER": "model_finished",
-    "FINISH_REASON_UNSPECIFIED": "model_finished",
+    "MALFORMED_FUNCTION_CALL": "model_malformed_tool_call",
+    "OTHER": "model_unknown",
+    "FINISH_REASON_UNSPECIFIED": "model_unknown",
 }
 
 

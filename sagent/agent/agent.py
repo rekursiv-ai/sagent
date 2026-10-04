@@ -57,7 +57,11 @@ from sagent.agent.compaction import (
 )
 from sagent.agent.cost_tracker import CostTracker
 from sagent.agent.result_storage import post_process_result
-from sagent.agent.retry import send_with_retry, service_error_snapshot
+from sagent.agent.retry import (
+    send_with_retry,
+    service_error_snapshot,
+    validate_model_response,
+)
 from sagent.agent.runtime import (
     AgentRuntime,
     GatedDeque,
@@ -108,6 +112,8 @@ from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     RequestTooLargeError,
+    StreamInterruptedError,
+    UsageSnapshot,
 )
 from sagent.types.providers import (
     AuthReloadable,
@@ -136,6 +142,11 @@ from sagent.types.tools import (
 if TYPE_CHECKING:
     import contextvars
 
+    from sagent.types.capability import (
+        ModelCapability,
+        ModelLimits,
+        ModelSettings,
+    )
     from sagent.types.compactor import (
         Compactor,
     )
@@ -1383,15 +1394,17 @@ class Agent:
             )
         self._run_active = True
         first_idle: asyncio.Event = asyncio.Event()
+        terminal_errors: list[BaseException] = []
 
         def _watch(event: runtime.RuntimeEvent) -> None:
             # Two terminal edges. (1) A post-work ``AgentIdle`` -- the normal
             # first-result return. (2) A ``ModelResponseError`` -- the child
             # produced no work idle, so returning lets the caller surface the
             # error instead of blocking until the (still-live) loop is shut down.
-            if isinstance(event, runtime.ModelResponseError) or (
-                isinstance(event, runtime.AgentIdle) and bool(self.history)
-            ):
+            if isinstance(event, runtime.ModelResponseError):
+                terminal_errors.append(event.exception)
+                first_idle.set()
+            elif isinstance(event, runtime.AgentIdle) and bool(self.history):
                 first_idle.set()
 
         self.runtime.observers.append(_watch)
@@ -1421,6 +1434,8 @@ class Agent:
                 exc = drive.exception()
                 if exc is not None:
                     raise exc
+            if terminal_errors:
+                raise terminal_errors[0]
             extractor = result_of or _default_last_assistant_result
             return extractor(self.history)
         finally:
@@ -2420,6 +2435,131 @@ def _schedule_close(model: Model) -> None:
     )
 
 
+class _ObservedModel:
+    """Record and validate every completed call through a rich model.
+
+    Both foreground turns and compaction receive this wrapper, so neither
+    path can discard billed usage or consume a refusal/truncated response as
+    ordinary assistant output.  Delegated metadata and token helpers retain
+    the wrapped model's exact behavior.
+    """
+
+    def __init__(
+        self,
+        inner: Model,
+        observe: Callable[[ModelResponse], None],
+    ) -> None:
+        self._inner = inner
+        self._observe = observe
+
+    @property
+    def capability(self) -> ModelCapability:
+        """Return the wrapped model's capability."""
+        return self._inner.capability
+
+    @property
+    def settings(self) -> ModelSettings:
+        """Return the wrapped model's selected settings."""
+        return self._inner.settings
+
+    @property
+    def limits(self) -> ModelLimits:
+        """Return the wrapped model's active limits."""
+        return self._inner.limits
+
+    @property
+    def tagged_model_id(self) -> str:
+        """Return the wrapped model's display id."""
+        return self._inner.tagged_model_id
+
+    def approx_text_tokens(self, text: str) -> int:
+        """Delegate local text-token estimation."""
+        return self._inner.approx_text_tokens(text)
+
+    def approx_image_tokens(self, data: bytes) -> int:
+        """Delegate local image-token estimation."""
+        return self._inner.approx_image_tokens(data)
+
+    def approx_request_tokens(self, request: ModelRequest) -> int:
+        """Delegate local request-token estimation."""
+        return self._inner.approx_request_tokens(request)
+
+    async def actual_text_tokens(self, text: str) -> int:
+        """Delegate exact text-token measurement."""
+        return await self._inner.actual_text_tokens(text)
+
+    async def actual_image_tokens(self, data: bytes) -> int:
+        """Delegate exact image-token measurement."""
+        return await self._inner.actual_image_tokens(data)
+
+    async def actual_request_tokens(self, request: ModelRequest) -> int:
+        """Delegate exact request-token measurement."""
+        return await self._inner.actual_request_tokens(request)
+
+    async def buffer(self, request: ModelRequest) -> ModelResponse:
+        """Buffer one response, then account and validate it.
+
+        Args:
+          request: Provider request to buffer.
+
+        Returns:
+          response: Accounted, validated provider response.
+
+        """
+        try:
+            response = await self._inner.buffer(request)
+        except StreamInterruptedError as exc:
+            self._observe(exc.response)
+            raise
+        self._observe(response)
+        validate_model_response(response)
+        return response
+
+    async def stream(
+        self,
+        request: ModelRequest,
+        publish: Callable[[runtime.RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
+        """Stream one response, then account and validate it.
+
+        Args:
+          request: Provider request to stream.
+          publish: Optional sink for live runtime events.
+
+        Returns:
+          response: Accounted, validated provider response.
+
+        """
+        try:
+            response = await self._inner.stream(request, publish)
+        except StreamInterruptedError as exc:
+            self._observe(exc.response)
+            raise
+        self._observe(response)
+        validate_model_response(response)
+        return response
+
+    def spend(self, tokens: TokenCount) -> TokenCost:
+        """Delegate token pricing."""
+        return self._inner.spend(tokens)
+
+    def is_context_overflow(self, error: Exception) -> bool:
+        """Delegate context-overflow classification."""
+        return self._inner.is_context_overflow(error)
+
+    def is_retryable_provider_error(self, error: Exception) -> bool:
+        """Delegate provider retry classification."""
+        return self._inner.is_retryable_provider_error(error)
+
+    def usage_snapshot(self) -> UsageSnapshot | None:
+        """Delegate normalized rate-limit telemetry."""
+        return self._inner.usage_snapshot()
+
+    async def close(self) -> None:
+        """Delegate resource teardown."""
+        await self._inner.close()
+
+
 class _AgentModel:
     """Bridges rich provider ``Model`` to runtime ``Model`` protocol.
 
@@ -2556,6 +2696,7 @@ class _AgentModel:
         # mid-iteration.
         resume_retry_at = self._agent.runtime.resume_retry_at
         self._agent.runtime.resume_retry_at = None
+        observed_model = _ObservedModel(self._inner, self._agent.record_response)
 
         for attempt in range(MAX_OVERFLOW_RECOVERY + 1):
             request = materialize_request(
@@ -2577,7 +2718,7 @@ class _AgentModel:
             resume_retry_at = None
             try:
                 response = await send_with_retry(
-                    self._inner,
+                    observed_model,
                     request,
                     publish=publish,
                     max_attempts=self._agent.max_attempts,
@@ -2586,7 +2727,6 @@ class _AgentModel:
                         "recoverable: %s",
                         text,
                     ),
-                    on_discarded_response=self._agent.record_response,
                     on_service_suspended=self._agent.publish_service_suspended,
                     resume_retry_at=attempt_resume_retry_at,
                 )
@@ -2638,12 +2778,6 @@ class _AgentModel:
                 # barrier override.
                 history = self._agent.runtime.context().messages
                 continue
-            # Record cost out-of-band; the runtime's
-            # types.runtime.ModelResponseComplete event has tokens=0 by
-            # design (the runtime can't see tokens). Returning inside
-            # the loop avoids the dead ``response is not None`` assert
-            # the prior shape needed for type narrowing.
-            self._agent.record_response(response)
             return response.message
         # Unreachable: the loop either ``return``s on success or raises
         # on the final attempt. Kept as a typed safety net under -O
@@ -3024,7 +3158,7 @@ class _AgentCompactor:
         override = await self._inner.compact(
             tape=tape,
             context=context,
-            model=self._agent.model,
+            model=_ObservedModel(self._agent.model, self._agent.record_response),
             mint_ref=mint_ref,
             custom_instructions=custom_instructions,
         )

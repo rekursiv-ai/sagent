@@ -1,19 +1,16 @@
-"""Grep tool: ripgrep-first content search with Python fallback."""
+"""Grep tool: the agent-facing schema over ``sagent.lib.files.grep``."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final
+from typing import TYPE_CHECKING, Annotated, Final, cast, get_args
 
-import logging
-import os
 import re
-import shutil
-import subprocess
 
 from sagent.agent.state import approx_tokens, get_tool_state
 from sagent.lib.custom_json import BoolCodec, IntCodec, json_freeze
+from sagent.lib.files.grep import GrepError, OutputMode, Query, grep
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,
@@ -42,28 +39,6 @@ if TYPE_CHECKING:
     from bashlex.ast import (
         node as BashlexNode,  # noqa: N812 -- PascalCase for the type name; bashlex spells it lowercase.
     )
-
-
-logger = logging.getLogger(__name__)
-
-# File type extensions for grep --type filter.
-_TYPE_GLOBS: Final[dict[str, list[str]]] = {
-    "py": ["*.py"],
-    "js": ["*.js", "*.jsx", "*.mjs"],
-    "ts": ["*.ts", "*.tsx"],
-    "rust": ["*.rs"],
-    "go": ["*.go"],
-    "java": ["*.java"],
-    "c": ["*.c", "*.h"],
-    "cpp": ["*.cpp", "*.hpp", "*.cc", "*.cxx"],
-    "md": ["*.md"],
-    "yaml": ["*.yaml", "*.yml"],
-    "json": ["*.json"],
-    "toml": ["*.toml"],
-    "html": ["*.html", "*.htm"],
-    "css": ["*.css"],
-    "sh": ["*.sh", "*.bash"],
-}
 
 
 # Short grep flags whose semantics we know how to express via the
@@ -118,11 +93,6 @@ _GREP_EXES: frozenset[str] = frozenset({"grep", "rg"})
 # point of ``grep -q x f && action``. A tool call returns matches, not a
 # status a later shell command can branch on, so Bash is necessary.
 _GREP_DENY: frozenset[str] = frozenset({"-v", "--invert-match", "-q", "--quiet"})
-
-# Mirrors the ``output_mode`` enum advertised in ``directive_schema``.
-# Validated at runtime so an unknown value errors instead of silently
-# behaving like ``files_with_matches``.
-_OUTPUT_MODES: frozenset[str] = frozenset({"content", "files_with_matches", "count"})
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -279,24 +249,12 @@ class Grep:
             per ``output_mode``.
 
         """
-        # Extract known params explicitly; everything else flows through
-        # as **kwargs (-B/-A/-C/-i/glob/type/pcre/exclude/context).
-        known = {
-            "pattern",
-            "path",
-            "output_mode",
-            "keep_first",
-            "keep_last",
-            "offset",
-            "multiline",
-        }
-        kwargs: dict[str, object] = {k: v for k, v in args.items() if k not in known}
         keep_first = IntCodec.coerce(args.get("keep_first"), 0)
         keep_last = IntCodec.coerce(args.get("keep_last"), 0)
         offset = IntCodec.coerce(args.get("offset"), 0)
-        context_before = _kw_int(kwargs, "-B", "context_before")
-        context_after = _kw_int(kwargs, "-A", "context_after")
-        context_symmetric = _kw_int(kwargs, "-C", "context")
+        context = _int_arg(args, "-C", "context")
+        context_before = max(_int_arg(args, "-B"), context)
+        context_after = max(_int_arg(args, "-A"), context)
         # Schema declares all pagination/context knobs as ``minimum: 0``
         # integers but ``IntCodec.coerce`` accepts negatives, which then index
         # from the end of the result list (``lines[-N:]`` returns the
@@ -307,114 +265,37 @@ class Grep:
             ("keep_first", keep_first, args.get("keep_first")),
             ("keep_last", keep_last, args.get("keep_last")),
             ("offset", offset, args.get("offset")),
-            ("-B", context_before, args.get("-B")),
-            ("-A", context_after, args.get("-A")),
-            ("-C", context_symmetric, args.get("-C") or args.get("context")),
+            ("-B", _int_arg(args, "-B"), args.get("-B")),
+            ("-A", _int_arg(args, "-A"), args.get("-A")),
+            ("-C", context, args.get("-C") or args.get("context")),
         )
         if bounds_err is not None:
             return bounds_err
-        return await run_sync(
-            self._run,
+        output_mode = str(args.get("output_mode", "files_with_matches"))
+        if output_mode not in get_args(OutputMode):
+            return _error(
+                f"unknown output_mode: {output_mode!r}"
+                f" (expected one of {sorted(get_args(OutputMode))})",
+            )
+        query = Query(
             pattern=str(args.get("pattern", "")),
-            path=str(args.get("path", ".")),
-            output_mode=str(args.get("output_mode", "files_with_matches")),
-            keep_first=keep_first,
-            keep_last=keep_last,
-            offset=offset,
-            multiline=BoolCodec.coerce(args.get("multiline"), False),
-            **kwargs,
-        )
-
-    def _run(
-        self,
-        *,
-        pattern: str = "",
-        path: str = ".",
-        output_mode: str = "files_with_matches",
-        keep_first: int = 0,
-        keep_last: int = 0,
-        offset: int = 0,
-        multiline: bool = False,
-        **kwargs: object,  # Non-identifier params: -B, -A, -C, -i, glob, type.
-    ) -> str | ToolResult:
-        """Dispatch the grep search to ripgrep or the Python fallback."""
-        if output_mode not in _OUTPUT_MODES:
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"unknown output_mode: {output_mode!r}"
-                    f" (expected one of {sorted(_OUTPUT_MODES)})"
-                ),
-                is_error=True,
-            )
-        glob_filter = _kw_str(kwargs, "glob", "glob_filter")
-        file_type = _kw_str(kwargs, "type", "file_type")
-        exclude = _kw_str(kwargs, "exclude")
-        pcre = _kw_bool(kwargs, "pcre")
-        context_before = _kw_int(kwargs, "-B", "context_before")
-        context_after = _kw_int(kwargs, "-A", "context_after")
-        context_symmetric = _kw_int(kwargs, "-C", "context")
-        case_insensitive = _kw_bool(kwargs, "-i", "case_insensitive")
-        show_line_numbers = _kw_bool(kwargs, "-n", "show_line_numbers", default=True)
-        if not Path(path).is_absolute():
-            path = str(Path(get_tool_state().bash_cwd) / path)
-        if context_symmetric > 0:
-            context_before = max(context_before, context_symmetric)
-            context_after = max(context_after, context_symmetric)
-        # Checked before dispatch so both backends agree. ``rg`` exits 2
-        # on an unknown type; the fallback's ``.get`` miss fell through to
-        # ``["*"]`` and searched the whole tree instead.
-        if file_type and file_type not in _TYPE_GLOBS:
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"unknown type: {file_type!r}"
-                    f" (expected one of {sorted(_TYPE_GLOBS)})"
-                ),
-                is_error=True,
-            )
-        # Checked once, before dispatch: rg exits 2 on a missing path
-        # while the fallback walked it and reported ``(no matches)`` --
-        # "found nothing" and "no such path" are different answers.
-        if not Path(path).exists():
-            return ToolResult(
-                call_id="",
-                content=f"no such file or directory: {path}",
-                is_error=True,
-            )
-        if _rg_path():
-            return _grep_rg(
-                pattern=pattern,
-                path=path,
-                glob_filter=glob_filter,
-                file_type=file_type,
-                exclude=exclude,
-                pcre=pcre,
-                output_mode=output_mode,
-                keep_first=keep_first,
-                keep_last=keep_last,
-                context_before=context_before,
-                context_after=context_after,
-                case_insensitive=case_insensitive,
-                show_line_numbers=show_line_numbers,
-                multiline=multiline,
-                offset=offset,
-            )
-        return _grep_python(
-            pattern=pattern,
-            path=path,
-            glob_filter=glob_filter,
-            file_type=file_type,
-            exclude=exclude,
-            pcre=pcre,
-            output_mode=output_mode,
-            keep_first=keep_first,
-            keep_last=keep_last,
+            glob=str(args.get("glob") or ""),
+            exclude=str(args.get("exclude") or ""),
+            file_type=str(args.get("type") or ""),
+            output_mode=cast("OutputMode", output_mode),
             context_before=context_before,
             context_after=context_after,
-            case_insensitive=case_insensitive,
-            show_line_numbers=show_line_numbers,
-            multiline=multiline,
+            case_insensitive=BoolCodec.coerce(args.get("-i"), False),
+            line_numbers=BoolCodec.coerce(args.get("-n"), True),
+            multiline=BoolCodec.coerce(args.get("multiline"), False),
+            pcre=BoolCodec.coerce(args.get("pcre"), False),
+        )
+        return await run_sync(
+            _search,
+            path=Path(get_tool_state().bash_cwd) / str(args.get("path", ".")),
+            query=query,
+            keep_first=keep_first,
+            keep_last=keep_last,
             offset=offset,
         )
 
@@ -439,67 +320,6 @@ class Grep:
             ):
                 return _nudge_for(inv)
         return None
-
-
-# Kwargs accessors for schema keys like ``-B`` / ``-A`` that aren't
-# valid Python identifiers. These flow through ``**kwargs`` with
-# ``object`` value type; the helpers coerce and supply defaults.
-
-
-def _kw_str(
-    kwargs: dict[str, object],
-    key: str,
-    *fallbacks: str,
-    default: str = "",
-) -> str:
-    """Coerce the first non-None kwargs entry among aliases to a string."""
-    for k in (key, *fallbacks):
-        v = kwargs.get(k)
-        if v is not None:
-            return str(v)
-    return default
-
-
-# Unparseable values fall back to ``default`` rather than raising: ``Tool.run`` must not
-# raise, and the schema gate already rejects non-integers on the production path. This
-# keeps a direct ``_run`` caller (tests, internal reuse) from escaping the tool envelope
-# -- the same defense-in-depth ``Read._check_minimum`` provides.
-def _kw_int(
-    kwargs: dict[str, object],
-    key: str,
-    *fallbacks: str,
-    default: int = 0,
-) -> int:
-    """Coerce the first non-None kwargs entry among aliases to an int."""
-    for k in (key, *fallbacks):
-        v = kwargs.get(k)
-        if v is None:
-            continue
-        if isinstance(v, bool):
-            return default
-        if isinstance(v, (int, float)):
-            return int(v)
-        if isinstance(v, str):
-            try:
-                return int(v)
-            except ValueError:
-                return default
-        return default
-    return default
-
-
-def _kw_bool(
-    kwargs: dict[str, object],
-    key: str,
-    *fallbacks: str,
-    default: bool = False,
-) -> bool:
-    """Coerce the first non-None kwargs entry among aliases to a bool."""
-    for k in (key, *fallbacks):
-        v = kwargs.get(k)
-        if v is not None:
-            return BoolCodec.coerce(v, default)
-    return default
 
 
 # Translation runs AFTER detection and may fail freely: an untranslated flag costs the
@@ -758,6 +578,22 @@ def _parse_find_for_grep(args: tuple[str, ...]) -> bool:
     return True
 
 
+def _search(
+    *,
+    path: Path,
+    query: Query,
+    keep_first: int,
+    keep_last: int,
+    offset: int,
+) -> str | ToolResult:
+    """Run ``query`` and page its lines; a failed search is a tool error."""
+    try:
+        lines = grep(path, query)
+    except GrepError as error:
+        return _error(str(error))
+    return _paginate(lines, keep_first=keep_first, keep_last=keep_last, offset=offset)
+
+
 # The single place either backend slices. Both produce one entry per line for every
 # ``output_mode``, so slicing here means ``offset`` and ``keep_first`` mean the same
 # thing in ripgrep and in the fallback -- and in ``content``, ``count``, and
@@ -769,11 +605,14 @@ def _parse_find_for_grep(args: tuple[str, ...]) -> bool:
 # the reader to pass it -- a resume note that cannot be followed. Slicing rendered lines
 # is agnostic to how they were produced, so context rows page like any others; a group
 # separator inside the window is simply one more entry.
-def _paginate(text: str, *, keep_first: int, keep_last: int, offset: int) -> str:
-    """Apply the pagination knobs to already-rendered output."""
-    if not text or text == "(no matches)":
-        return text or "(no matches)"
-    lines = text.split("\n")
+def _paginate(
+    lines: list[str],
+    *,
+    keep_first: int,
+    keep_last: int,
+    offset: int,
+) -> str:
+    """Apply the pagination knobs to already-rendered output lines."""
     # Where the shown window BEGINS in the full match set. Every resume
     # note is phrased from this, never from the caller's ``offset``:
     # ``keep_last`` slices a tail and leaves ``offset`` at 0, so a note
@@ -789,7 +628,7 @@ def _paginate(text: str, *, keep_first: int, keep_last: int, offset: int) -> str
             lines = lines[offset:]
         if keep_first > 0:
             lines = lines[:keep_first]
-    if not lines or not lines[0]:
+    if not lines:
         return "(no matches)"
     # The token bound is the backstop for an unpaginated search: the
     # caller's knobs are a window, and neither says how wide a match is.
@@ -815,398 +654,6 @@ def _resume_note(*, withheld: int, resume: int) -> str:
     return f"\n... ({withheld} more entries; pass offset={resume} to continue)"
 
 
-def _grep_rg(
-    *,
-    pattern: str,
-    path: str,
-    glob_filter: str,
-    file_type: str,
-    exclude: str,
-    pcre: bool,
-    output_mode: str,
-    keep_first: int,
-    keep_last: int,
-    context_before: int,
-    context_after: int,
-    case_insensitive: bool,
-    show_line_numbers: bool,
-    multiline: bool,
-    offset: int,
-) -> str | ToolResult:
-    """Grep using ripgrep."""
-    cmd = _build_rg_cmd(
-        pattern=pattern,
-        path=path,
-        glob_filter=glob_filter,
-        file_type=file_type,
-        exclude=exclude,
-        pcre=pcre,
-        output_mode=output_mode,
-        context_before=context_before,
-        context_after=context_after,
-        case_insensitive=case_insensitive,
-        show_line_numbers=show_line_numbers,
-        multiline=multiline,
-    )
-    try:
-        result = subprocess.run(  # noqa: S603 -- The command is assembled internally for the trusted ripgrep executable and fixed options.
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        # ``Tool.run`` returns failures; a raised exception reaches the
-        # agent loop as a crash rather than a tool error.
-        return ToolResult(
-            call_id="",
-            content="ripgrep timed out after 30s; narrow the path or pattern.",
-            is_error=True,
-        )
-    if result.returncode >= 2:
-        err = result.stderr.strip() or "unknown"
-        if not multiline and 'the literal "\\n" is not allowed' in err:
-            err = (
-                "pattern references a newline but multiline is off. "
-                'Pass multiline=true to match across lines (literal "\\n" '
-                "or `.` spanning newlines)."
-            )
-        return ToolResult(
-            call_id="",
-            content=f"ripgrep error (exit {result.returncode}): {err}",
-            is_error=True,
-        )
-    return _paginate(
-        result.stdout.strip(),
-        keep_first=keep_first,
-        keep_last=keep_last,
-        offset=offset,
-    )
-
-
-def _build_rg_cmd(
-    *,
-    pattern: str,
-    path: str,
-    glob_filter: str,
-    file_type: str,
-    exclude: str,
-    pcre: bool,
-    output_mode: str,
-    context_before: int,
-    context_after: int,
-    case_insensitive: bool,
-    show_line_numbers: bool,
-    multiline: bool,
-) -> list[str]:
-    """Build the ripgrep argv."""
-    rg_path = _rg_path()
-    if rg_path is None:
-        raise ValueError("Expected rg_path is not None.")
-    cmd = [
-        rg_path,
-        "--no-heading",
-        "--hidden",
-        # Deterministic order. ripgrep's default parallel walk emits files
-        # in whatever order the workers finish, so ``offset`` selects a
-        # different slice run to run -- and the Python fallback, which
-        # walks ``sorted()``, disagrees with it on every query.
-        "--sort",
-        "path",
-        # No column cap. ``--max-columns`` replaces a long line with a
-        # placeholder, and ``--max-columns-preview`` only restores its
-        # LEADING columns -- a match further right (a needle in a minified
-        # bundle) stays invisible, while the Python fallback returns the
-        # line whole. Total size is bounded downstream by the tool-result
-        # cap, which says what it dropped.
-        "--glob",
-        "!.git",
-        "--glob",
-        "!.svn",
-        "--glob",
-        "!.hg",
-    ]
-    if show_line_numbers:
-        cmd.append("-n")
-    if case_insensitive:
-        cmd.append("-i")
-    if multiline:
-        cmd.extend(["-U", "--multiline-dotall"])
-    if output_mode == "files_with_matches":
-        cmd.append("-l")
-    elif output_mode == "count":
-        cmd.append("-c")
-    if context_before > 0:
-        cmd.extend(["-B", str(context_before)])
-    if context_after > 0:
-        cmd.extend(["-A", str(context_after)])
-    if glob_filter:
-        cmd.extend(["--glob", glob_filter])
-    if exclude:
-        cmd.extend(["--glob", f"!{exclude}"])
-    if file_type:
-        cmd.extend(["--type", file_type])
-    if pcre:
-        cmd.append("-P")
-    cmd.extend(["--", pattern, path])
-    return cmd
-
-
-class _GrepState:
-    """Accumulator for Python-fallback grep results."""
-
-    __slots__ = (
-        "context_after",
-        "context_before",
-        "file_counts",
-        "matches",
-        "output_mode",
-        "show_line_numbers",
-    )
-
-    def __init__(
-        self,
-        *,
-        output_mode: str,
-        context_before: int,
-        context_after: int,
-        show_line_numbers: bool,
-    ) -> None:
-        self.output_mode = output_mode
-        self.context_before = context_before
-        self.context_after = context_after
-        self.show_line_numbers = show_line_numbers
-        self.matches: list[str] = []
-        self.file_counts: dict[str, int] = {}
-
-    def process_multiline(self, pat: re.Pattern[str], text: str, filepath: str) -> None:
-        """Accumulate matches for one file in multiline mode.
-
-        Args:
-          pat: Compiled regex applied to the full file body.
-          text: File contents (entire text used for cross-line matches).
-          filepath: Path string used in result lines.
-
-        """
-        found = list(pat.finditer(text))
-        if not found:
-            return
-        if self.output_mode == "files_with_matches":
-            self.matches.append(filepath)
-            return
-        if self.output_mode == "count":
-            self.file_counts[filepath] = len(found)
-            return
-        for m in found:
-            line_num = text[: m.start()].count("\n") + 1
-            matched_text = m.group()
-            if self.show_line_numbers:
-                self.matches.append(f"{filepath}:{line_num}:{matched_text}")
-            else:
-                self.matches.append(f"{filepath}:{matched_text}")
-
-    def process_lines(
-        self,
-        pat: re.Pattern[str],
-        lines: list[str],
-        filepath: str,
-    ) -> None:
-        """Accumulate matches for one file in line-by-line mode.
-
-        Args:
-          pat: Compiled regex applied per-line.
-          lines: Pre-split file contents (one entry per line).
-          filepath: Path string used in result lines.
-
-        """
-        hits = [i for i, line in enumerate(lines) if pat.search(line)]
-        if not hits:
-            return
-        if self.output_mode == "files_with_matches":
-            self.matches.append(filepath)
-            return
-        if self.output_mode == "count":
-            self.file_counts[filepath] = len(hits)
-            return
-        if self.context_before <= 0 and self.context_after <= 0:
-            for i in hits:
-                self._append_content_line(filepath, i, lines[i])
-            return
-        for start, end in self._context_groups(hits, len(lines)):
-            for j in range(start, end):
-                self._append_content_line(filepath, j, lines[j])
-            self.matches.append("--")
-
-    # One group per match repeated the shared lines: two matches a line apart printed
-    # the overlap twice, so a caller counting occurrences in the output counted them
-    # twice. ripgrep merges instead.
-    def _context_groups(self, hits: list[int], total: int) -> list[tuple[int, int]]:
-        """Merge each match's context window with its overlapping neighbours."""
-        groups: list[tuple[int, int]] = []
-        for i in hits:
-            start = max(0, i - self.context_before)
-            end = min(total, i + self.context_after + 1)
-            if groups and start <= groups[-1][1]:
-                groups[-1] = (groups[-1][0], max(groups[-1][1], end))
-                continue
-            groups.append((start, end))
-        return groups
-
-    def _append_content_line(self, filepath: str, i: int, line: str) -> None:
-        if self.show_line_numbers:
-            self.matches.append(f"{filepath}:{i + 1}:{line}")
-        else:
-            self.matches.append(f"{filepath}:{line}")
-
-    def format(self) -> str:
-        """Render accumulated results, one entry per line.
-
-        Pagination is applied afterwards by :func:`_paginate`, uniformly
-        with the ripgrep path.
-
-        Returns:
-          text: Newline-joined output, or ``(no matches)`` when empty.
-
-        """
-        if self.output_mode == "count":
-            counts = self.file_counts.items()
-            return "\n".join(f"{p}:{c}" for p, c in counts) or "(no matches)"
-        return "\n".join(self.matches) or "(no matches)"
-
-
-def _grep_python(
-    *,
-    pattern: str,
-    path: str,
-    glob_filter: str,
-    file_type: str,
-    exclude: str,
-    output_mode: str,
-    keep_first: int,
-    keep_last: int,
-    context_before: int,
-    context_after: int,
-    case_insensitive: bool,
-    show_line_numbers: bool,
-    multiline: bool,
-    offset: int,
-    pcre: bool = False,
-) -> str | ToolResult:
-    """Grep using Python regex (fallback)."""
-    if pcre:
-        # The schema promises PCRE2 (lookaround, backrefs). Python ``re``
-        # is a different language, and silently substituting it returns
-        # results under a name that does not describe them.
-        return ToolResult(
-            call_id="",
-            content=(
-                "pcre=true requires ripgrep, which is not installed;"
-                " the Python fallback cannot provide PCRE2 semantics."
-            ),
-            is_error=True,
-        )
-    if not multiline and r"\n" in pattern:
-        return ToolResult(
-            call_id="",
-            content=(
-                "pattern references a newline but multiline is off. "
-                'Pass multiline=true to match across lines (literal "\\n" '
-                "or `.` spanning newlines)."
-            ),
-            is_error=True,
-        )
-    flags = 0
-    if multiline:
-        flags |= re.DOTALL
-    if case_insensitive:
-        flags |= re.IGNORECASE
-    try:
-        pat = re.compile(pattern, flags)
-    except re.error as exc:
-        return ToolResult(
-            call_id="",
-            content=f"ripgrep error (Python fallback): invalid regex pattern: {exc}",
-            is_error=True,
-        )
-    state = _GrepState(
-        output_mode=output_mode,
-        context_before=context_before,
-        context_after=context_after,
-        show_line_numbers=show_line_numbers,
-    )
-    for f in _collect_files(Path(path), glob_filter, file_type, exclude):
-        if not f.is_file():
-            continue
-        try:
-            text = f.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        filepath = str(f)
-        if multiline:
-            state.process_multiline(pat, text, filepath)
-        else:
-            state.process_lines(pat, text.splitlines(), filepath)
-    return _paginate(
-        state.format(),
-        keep_first=keep_first,
-        keep_last=keep_last,
-        offset=offset,
-    )
-
-
-def _collect_files(
-    root: Path,
-    glob_filter: str,
-    file_type: str,
-    exclude: str,
-) -> list[Path]:
-    """Walk *root* and return files matching the glob/type/exclude filters."""
-    globs = _TYPE_GLOBS[file_type] if file_type else []
-    if glob_filter:
-        globs = _expand_braces(glob_filter)
-    if not globs:
-        globs = ["*"]
-    if root.is_file():
-        return [root] if _path_matches(root.name, globs, exclude) else []
-    files: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(root):
-        rel_dir = Path(dirpath).relative_to(root)
-        dirnames[:] = [
-            dirname
-            for dirname in dirnames
-            if dirname not in {".git", ".svn", ".hg"}
-            and not (exclude and (rel_dir / dirname).match(exclude))
-        ]
-        dirnames.sort()
-        for fname in sorted(filenames):
-            fpath = Path(dirpath) / fname
-            rel = fpath.relative_to(root)
-            if _path_matches(str(rel), globs, exclude):
-                files.append(fpath)
-    return files
-
-
-# ``Path.match`` has no brace syntax, so the ``"*.{ts,tsx}"`` the schema advertises
-# matched NOTHING in this backend while ripgrep matched both extensions. One group is
-# enough for the documented shape; a glob with several is passed through and simply
-# matches literally, as before.
-def _expand_braces(glob: str) -> list[str]:
-    """Expand one ``{a,b}`` alternation into separate globs."""
-    before, brace, rest = glob.partition("{")
-    body, close, after = rest.partition("}")
-    if not brace or not close or "{" in after:
-        return [glob]
-    return [f"{before}{alt}{after}" for alt in body.split(",")]
-
-
-def _path_matches(path: str, globs: Sequence[str], exclude: str) -> bool:
-    rel = Path(path)
-    if exclude and rel.match(exclude):
-        return False
-    return any(rel.match(glob) for glob in globs)
-
-
 # Each tuple is ``(name, coerced, raw)``: when the caller supplied ``raw`` (anything but
 # ``None``) but the coerced int is negative, surface a tool error instead of letting it
 # index from the end of a result slice downstream.
@@ -1218,14 +665,24 @@ def _check_nonnegative(
         if raw is None:
             continue
         if coerced < 0:
-            return ToolResult(
-                call_id="",
-                content=f"'{name}' must be ≥ 0, got {coerced}.",
-                is_error=True,
-            )
+            return _error(f"'{name}' must be ≥ 0, got {coerced}.")
     return None
 
 
-def _rg_path() -> str | None:
-    """Return the ripgrep executable path, if installed."""
-    return shutil.which("rg")
+# ``-B``/``-A``/``-C`` are not identifiers, so they arrive as raw mapping
+# entries. Unparseable values become 0 rather than raising: ``Tool.run`` must
+# not raise, and the schema gate already rejects non-integers in production.
+def _int_arg(args: Mapping[str, object], *keys: str) -> int:
+    """Return the first present ``keys`` entry as an int, or 0."""
+    value = next((args[k] for k in keys if args.get(k) is not None), 0)
+    if isinstance(value, bool) or not isinstance(value, int | float | str):
+        return 0
+    try:
+        return int(value)
+    except ValueError:
+        return 0
+
+
+def _error(message: str) -> ToolResult:
+    """Return ``message`` as a failed tool result."""
+    return ToolResult(call_id="", content=message, is_error=True)

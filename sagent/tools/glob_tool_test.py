@@ -53,6 +53,36 @@ async def test_star_excludes_dotfiles_as_documented(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_dot_segment_opts_into_its_hidden_directory(tmp_path: Path) -> None:
+    """``.config/*.json`` names a hidden directory, so its contents match."""
+    (tmp_path / ".config").mkdir()
+    (tmp_path / ".config" / "x.json").write_text("", encoding="utf-8")
+    shown = await _run_glob({"pattern": ".config/*.json"}, tmp_path)
+    assert "x.json" in shown.content, shown.content
+
+
+@pytest.mark.asyncio
+async def test_gitignored_paths_never_match(tmp_path: Path) -> None:
+    """``Path.glob`` returned ``.venv/**`` and build output; ``.gitignore`` rules."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text("build/\n", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "out.py").write_text("", encoding="utf-8")
+    (tmp_path / "kept.py").write_text("", encoding="utf-8")
+    shown = await _run_glob({"pattern": "**/*.py", "path": str(tmp_path)}, tmp_path)
+    assert "kept.py" in shown.content
+    assert "out.py" not in shown.content, shown.content
+
+
+@pytest.mark.asyncio
+async def test_glob_returns_files_not_directories(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "x.py").write_text("", encoding="utf-8")
+    shown = await _run_glob({"pattern": "*", "path": str(tmp_path)}, tmp_path)
+    assert shown.content == "(no matches)", shown.content
+
+
+@pytest.mark.asyncio
 async def test_glob_basic(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("")
     (tmp_path / "b.py").write_text("")

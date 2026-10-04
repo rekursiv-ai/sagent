@@ -38,11 +38,13 @@ else:
     httpx2 = lazy_import("httpx2")  # 168ms.
 
 from sagent.lib.durations import humanize_duration
+from sagent.providers.lib.stop_reason import BENIGN_STOP_REASONS
 from sagent.types import runtime
 from sagent.types.model import (
     Model,
     ModelRequest,
     ModelResponse,
+    ModelTerminationError,
     RequestTooLargeError,
     StreamInterruptedError,
 )
@@ -339,6 +341,29 @@ def service_error_snapshot(error: Exception) -> runtime.ServiceErrorSnapshot:
     )
 
 
+def validate_model_response(response: ModelResponse) -> None:
+    """Reject a completed provider envelope that is not safe to consume.
+
+    Provider adapters normalize native termination reasons before this
+    boundary.  A normal assistant turn either finished naturally or
+    delivered at least one tool call.  Every other reason is an explicit
+    failure: returning the message would otherwise turn refusals and
+    truncations into successful, often empty, assistant turns.
+
+    Args:
+      response: Completed, normalized provider response.
+
+    Raises:
+      StreamInterruptedError: ``model_tool_use`` announced no tool calls.
+      ModelTerminationError: The normalized stop reason is not successful.
+
+    """
+    if response.stop_reason == "model_tool_use" and not response.message.tool_calls:
+        raise StreamInterruptedError(response)
+    if response.stop_reason not in BENIGN_STOP_REASONS:
+        raise ModelTerminationError(response)
+
+
 async def send_with_retry(
     model: Model,
     request: ModelRequest,
@@ -438,6 +463,7 @@ async def send_with_retry(
         stream_attempt += 1
         try:
             resp = await model.stream(request=request, publish=sink)
+            validate_model_response(resp)
             full = "".join(chunks)
             if publish is not None and not live and full != prior_emitted:
                 if full.startswith(prior_emitted):
@@ -468,11 +494,11 @@ async def send_with_retry(
             if stream_interrupts > _MAX_STREAM_INTERRUPT_RETRIES:
                 logger.warning(
                     "Stream indicated tool_use but delivered"
-                    " no blocks after %d retries;"
-                    " returning partial response.",
+                    " no blocks after %d retries; raising the final"
+                    " interrupted response.",
                     stream_interrupts - 1,
                 )
-                return e.response
+                raise
             if on_discarded_response is not None:
                 on_discarded_response(
                     e.response,

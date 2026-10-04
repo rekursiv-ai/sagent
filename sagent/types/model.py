@@ -251,7 +251,7 @@ class StreamInterruptedError(Exception):
         tokens = response.tokens
         what = (
             "indicated tool_use but delivered no tool blocks"
-            if response.stop_reason == "tool_use"
+            if response.stop_reason == "model_tool_use"
             else "ended before completing"
         )
         super().__init__(
@@ -263,16 +263,17 @@ class StreamInterruptedError(Exception):
         self.response = response
 
 
-class ModelTerminationError(Exception):
-    """Model stopped with an unrecognized non-benign ``stop_reason``."""
+class ModelTerminationError(UserFacingError):
+    """Model stopped with a normalized non-success ``stop_reason``."""
 
     def __init__(self, response: ModelResponse) -> None:
         tool_count = len(response.message.tool_calls)
         text_len = len(response.message.text)
+        request = f", request_id={response.request_id!r}" if response.request_id else ""
         super().__init__(
-            f"Model stopped with unrecognized stop_reason="
+            f"Model stopped without completing: stop_reason="
             f"{response.stop_reason!r} (tool_calls={tool_count}, "
-            f"text_len={text_len}).",
+            f"text_len={text_len}{request}).",
         )
         self.response = response
         self.stop_reason = response.stop_reason

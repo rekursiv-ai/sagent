@@ -60,6 +60,7 @@ from sagent.catalog.anthropic import api, models, usage_tokens
 from sagent.lib import debug_log
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.errors import (
+    PolicyBlockedError,
     StreamingResponseNotReadError,
     error_status_code,
     find_response_not_read,
@@ -481,6 +482,50 @@ def _api_status_body(error: anthropic.APIStatusError) -> Mapping[str, object] | 
     return cast(Mapping[str, object], body) if isinstance(body, Mapping) else None
 
 
+def _policy_block_message(error_body: Mapping[str, object] | None) -> str | None:
+    """Return Anthropic's safeguard message from a structured error body."""
+    if error_body is None:
+        return None
+    nested = error_body.get("error")
+    if not isinstance(nested, Mapping):
+        return None
+    nested_map = cast(Mapping[str, object], nested)
+    if nested_map.get("type") != "invalid_request_error":
+        return None
+    message = nested_map.get("message")
+    if not isinstance(message, str):
+        return None
+    lower = message.lower()
+    signals = (
+        "content filtering policy",
+        "safeguards flagged",
+        "usage policy",
+        "cyber-related safeguards",
+    )
+    if any(signal in lower for signal in signals):
+        return message
+    actions = ("block", "flag", "reject", "refus")
+    safety_terms = ("content filter", "policy", "safeguard", "safety")
+    return (
+        message
+        if any(a in lower for a in actions)
+        and any(term in lower for term in safety_terms)
+        else None
+    )
+
+
+def _raise_if_policy_blocked(error: anthropic.APIStatusError) -> None:
+    """Raise a user-facing error when Anthropic rejected the conversation."""
+    message = _policy_block_message(_api_status_body(error))
+    if message is None:
+        return
+    raise PolicyBlockedError(
+        provider_name="Anthropic",
+        provider_message=message,
+        request_id=_request_id(error),
+    ) from error
+
+
 def _raise_if_prompt_too_long(e: anthropic.APIStatusError) -> None:
     """Re-raise as PromptTooLongError if this is a prompt-too-long error."""
     raw = str(e)
@@ -847,51 +892,67 @@ class _AnthropicModel(ModelDefaults):
             speed=extra_body.get("speed"),
             fast_beta=_FAST_MODE_BETA in extra_headers.get("anthropic-beta", ""),
         )
-        try:
-            raw = await _stream_impl(sdk, kwargs, publish)
-        except anthropic.AuthenticationError:
-            await self._provider.handle_auth_error()
-            sdk = await self._provider.get_sdk()
-            kwargs["system"] = self._provider.build_system(
-                request.system,
-                messages,
-                cache_ttl=self._cache_ttl_wire(),
-            )
-            raw = await _stream_impl(sdk, kwargs, publish)
-        except anthropic.APIStatusError as e:
-            # Do NOT wrap a status-bearing error as StreamingResponseNotReadError
-            # even when it chains a ResponseNotRead: that would turn a
-            # retryable 429/529 fatal. The status carries the retry signal;
-            # the unread-body crash is handled downstream in
-            # ``retry.py::_response_body_excerpt``. Let the error re-raise so
-            # the classifier sees the status.
-            raise_if_request_too_large(getattr(e, "status_code", None), str(e), cause=e)
-            if not _is_prompt_too_long_text(str(e), error_body=_api_status_body(e)):
+        auth_retry = True
+        while True:
+            try:
+                raw = await _stream_impl(sdk, kwargs, publish)
+            except anthropic.AuthenticationError:
+                if not auth_retry:
+                    raise
+                auth_retry = False
+                await self._provider.handle_auth_error()
+                sdk = await self._provider.get_sdk()
+                kwargs["system"] = self._provider.build_system(
+                    request.system,
+                    messages,
+                    cache_ttl=self._cache_ttl_wire(),
+                )
+                continue
+            except anthropic.APIStatusError as e:
+                # Do NOT wrap a status-bearing error as StreamingResponseNotReadError
+                # even when it chains a ResponseNotRead: that would turn a
+                # retryable 429/529 fatal. The status carries the retry signal;
+                # the unread-body crash is handled downstream in
+                # ``retry.py::_response_body_excerpt``. Let the error re-raise so
+                # the classifier sees the status.
+                raise_if_request_too_large(
+                    getattr(e, "status_code", None),
+                    str(e),
+                    cause=e,
+                )
+                _raise_if_policy_blocked(e)
+                if not _is_prompt_too_long_text(
+                    str(e),
+                    error_body=_api_status_body(e),
+                ):
+                    raise
+                debug_log.trace_error(
+                    "bad_request",
+                    kind="stream",
+                    model=self.capability.model_id,
+                    error=str(e),
+                    status=getattr(e, "status_code", None),
+                    request_id=_request_id(e),
+                    roles=debug_log.role_sequence(messages),
+                    messages=debug_log.summarize_messages(messages),
+                    tools=_tool_names_from_kwargs(kwargs),
+                    thinking=kwargs.get("thinking"),
+                    system_preview=str(kwargs.get("system", ""))[:400],
+                )
+                _raise_if_prompt_too_long(e)
                 raise
-            debug_log.trace_error(
-                "bad_request",
-                kind="stream",
-                model=self.capability.model_id,
-                error=str(e),
-                status=getattr(e, "status_code", None),
-                request_id=_request_id(e),
-                roles=debug_log.role_sequence(messages),
-                messages=debug_log.summarize_messages(messages),
-                tools=_tool_names_from_kwargs(kwargs),
-                thinking=kwargs.get("thinking"),
-                system_preview=str(kwargs.get("system", ""))[:400],
-            )
-            _raise_if_prompt_too_long(e)
-            raise
-        except Exception as e:
-            # A bare or non-status ``ResponseNotRead`` (directly or chained)
-            # is neither an APIStatusError (so the overflow branch misses
-            # it) nor a transport error (so the retry classifier deems it
-            # fatal); re-wrap into a user-facing error with remediation.
-            not_read = find_response_not_read(e)
-            if not_read is not None:
-                raise StreamingResponseNotReadError(provider_name="Anthropic") from e
-            raise
+            except Exception as e:
+                # A bare or non-status ``ResponseNotRead`` (directly or chained)
+                # is neither an APIStatusError (so the overflow branch misses
+                # it) nor a transport error (so the retry classifier deems it
+                # fatal); re-wrap into a user-facing error with remediation.
+                not_read = find_response_not_read(e)
+                if not_read is not None:
+                    raise StreamingResponseNotReadError(
+                        provider_name="Anthropic",
+                    ) from e
+                raise
+            break
         resp = _parse_response(raw, self)
         self._last_response_time = time.time()
         # Clear stale usage when a path yields no headers, so ``usage_snapshot``

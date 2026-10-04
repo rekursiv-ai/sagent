@@ -238,6 +238,35 @@ class StreamingResponseNotReadError(UserFacingError):
         )
 
 
+class PolicyBlockedError(UserFacingError):
+    """Provider safeguard rejected the current conversation context.
+
+    Args:
+      provider_name: Provider that rejected the request.
+      provider_message: Exact diagnostic returned by the provider.
+      request_id: Provider request ID, when supplied.
+
+    """
+
+    def __init__(
+        self,
+        *,
+        provider_name: str,
+        provider_message: str,
+        request_id: str | None = None,
+    ) -> None:
+        self.provider_name = provider_name
+        self.provider_message = provider_message
+        self.request_id = request_id
+        request_line = f"\nRequest ID: {request_id}" if request_id else ""
+        super().__init__(
+            f"{provider_name} blocked this request under its safety policy:\n"
+            f"{provider_message}{request_line}\n"
+            "Do not retry the same conversation context. Run /clear, start a new "
+            "session, or use /model to switch providers.",
+        )
+
+
 def find_response_not_read(exc: BaseException) -> httpx2.ResponseNotRead | None:
     """Walk the ``__cause__``/``__context__`` chain for a ``ResponseNotRead``.
 

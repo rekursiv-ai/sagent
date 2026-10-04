@@ -407,20 +407,23 @@ repos:
         # and lets a `*` in a filename glob against the worktree. The harvester
         # emits one path per line for the same reason, and `--` keeps a
         # leading-dash filename from parsing as an option.
+        #
+        # A literal (`|`) script, not folded: the copybarista markers below are
+        # shell comments, and folding would join the rest of the script onto them.
         args:
           - WORKERS_BASEDPYRIGHT
-          - >-
-            files=("$@");
-            depth=${PRECOMMIT_CODEGRAPH_BASEDPYRIGHT:-};
-            case "$depth" in ""|0*|*[!0-9]*) depth=;; esac;
+          - |
+            files=("$@")
+            depth=${PRECOMMIT_CODEGRAPH_BASEDPYRIGHT:-}
+            case "$depth" in ""|0*|*[!0-9]*) depth=;; esac
             if [ -n "$depth" ] && [ -x ops/git/precommit/affected.py ]; then
               harvested=$(ops/git/precommit/affected.py --emit files --depth "$depth" --workers "$WORKERS" --explain -- "$@") &&
                 [ -n "$harvested" ] &&
-                IFS=$'\n' read -r -d '' -a files < <(printf "%s" "$harvested" && printf '\0');
-            fi;
-            exec env NODE_OPTIONS=--max-old-space-size=2048
-            uv --quiet run --frozen --group pre-commit
-            basedpyright --threads="$WORKERS" "${files[@]}"
+                IFS=$'\n' read -r -d '' -a files < <(printf "%s" "$harvested" && printf '\0')
+            fi
+            check=(basedpyright --threads="$WORKERS")
+            exec env NODE_OPTIONS=--max-old-space-size=2048 \
+              uv --quiet run --frozen --group pre-commit "${check[@]}" "${files[@]}"
         exclude: |
           (?x)^(
             typings/

@@ -102,6 +102,21 @@ class TestCheckWheel:
 
         assert check_wheel.main() == 0
 
+    def test_a_gitignored_module_is_not_required(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Hatch leaves ``.gitignore``d files out of the wheel, so so does the check."""
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".git").mkdir()
+        (tmp_path / ".gitignore").write_text("generated/\n")
+        _write_sagent_wheel(tmp_path, _BASE_FILES | _RECIPE_FILES)
+        (tmp_path / "sagent" / "generated").mkdir()
+        (tmp_path / "sagent" / "generated" / "x.py").write_text("")
+
+        assert check_wheel.main() == 0
+
     def test_rejects_missing_prompt_assets(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -298,6 +313,161 @@ class TestCheckWheelErrors:
         _write_sagent_wheel(tmp_path, files)
         with pytest.raises(SystemExit, match=r"must stay inside sagent/assets"):
             _ = check_wheel.main()
+
+
+def _main_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    files: dict[str, str],
+) -> str:
+    """Run ``main`` on a wheel of ``files``; return its ``SystemExit`` message."""
+    monkeypatch.chdir(tmp_path)
+    _write_sagent_wheel(tmp_path, files)
+    with pytest.raises(SystemExit) as raised:
+        _ = check_wheel.main()
+    return str(raised.value)
+
+
+class TestCheckWheelMessages:
+    """Each failure says exactly what is wrong, joined as a reader expects."""
+
+    def test_no_wheel(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "dist").mkdir()
+        with pytest.raises(SystemExit) as raised:
+            _ = check_wheel.main()
+        assert str(raised.value) == "uv build produced no Sagent wheel"
+
+    def test_missing_modules_are_comma_joined(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        del files["sagent/bin/cli.py"], files["sagent/bin/slack.py"]
+        assert _main_error(monkeypatch, tmp_path, files) == (
+            "wheel is missing source modules: sagent/bin/cli.py, sagent/bin/slack.py"
+        )
+
+    def test_missing_entry_points(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        del files["sagent-0.1.0.dist-info/entry_points.txt"]
+        assert _main_error(monkeypatch, tmp_path, files) == (
+            "wheel is missing *.dist-info/entry_points.txt"
+        )
+
+    def test_missing_console_scripts_are_comma_joined(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent-0.1.0.dist-info/entry_points.txt"] = "[console_scripts]\n"
+        assert _main_error(monkeypatch, tmp_path, files) == (
+            "wheel is missing required console scripts: "
+            "sagent = sagent.bin.cli:main, sagent-slack = sagent.bin.slack:main"
+        )
+
+    def test_missing_asset_names_its_include_chain(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent/assets/default/tools_bash.md"] = "{{include: gone.md}}"
+        assert _main_error(monkeypatch, tmp_path, files) == (
+            "wheel is missing recipe asset: default/tools_bash.md -> gone.md"
+        )
+
+    def test_include_cycle_names_the_whole_cycle(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent/assets/default/tools_bash.md"] = "{{include: b.md}}"
+        files["sagent/assets/b.md"] = "{{include: default/tools_bash.md}}"
+        assert _main_error(monkeypatch, tmp_path, files) == (
+            "wheel asset include cycle: "
+            "default/tools_bash.md -> b.md -> default/tools_bash.md"
+        )
+
+    def test_an_escaping_include_names_the_chain_it_came_through(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent/assets/default/tools_bash.md"] = "{{include: ../x.md}}"
+        assert _main_error(monkeypatch, tmp_path, files) == (
+            "invalid sagent/assets/sagent.yaml: default/tools_bash.md "
+            "must stay inside sagent/assets"
+        )
+
+    def test_an_escaping_recipe_entry_names_its_section_and_key(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent/assets/sagent.yaml"] = "compactor:\n  full: a/../../x.md\n"
+        assert _main_error(monkeypatch, tmp_path, files) == (
+            "invalid sagent/assets/sagent.yaml: compactor.full "
+            "must stay inside sagent/assets"
+        )
+
+    def test_a_nested_include_names_every_hop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent/assets/default/tools_bash.md"] = "{{include: b.md}}"
+        files["sagent/assets/b.md"] = "{{include: ../x.md}}"
+        assert _main_error(monkeypatch, tmp_path, files) == (
+            "invalid sagent/assets/sagent.yaml: default/tools_bash.md -> b.md "
+            "must stay inside sagent/assets"
+        )
+
+    def test_a_non_mapping_section_skips_only_itself(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """``system_prompt`` comes first; the sections after it still count."""
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent/assets/sagent.yaml"] = (
+            "system_prompt: not-a-mapping\ncompactor:\n  full: gone.md\n"
+        )
+        assert _main_error(monkeypatch, tmp_path, files) == (
+            "wheel is missing recipe asset: gone.md"
+        )
+
+
+@pytest.mark.parametrize(
+    "pyproject",
+    [
+        "",
+        "[tool]\n",
+        "[tool.hatch]\n",
+        "[tool.hatch.build]\n",
+        "[tool.hatch.build.targets]\n",
+        "[tool.hatch.build.targets.wheel]\n",
+    ],
+    ids=["empty", "tool", "hatch", "build", "targets", "wheel"],
+)
+def test_a_build_config_without_packages_expects_no_modules(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    pyproject: str,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(pyproject)
+    assert check_wheel.expected_modules() == frozenset()
 
 
 if __name__ == "__main__":

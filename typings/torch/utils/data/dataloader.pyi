@@ -42,7 +42,7 @@ class DataLoader(Generic[_T_co]):
     pin_memory: bool
     drop_last: bool
     timeout: float
-    sampler: Sampler | Iterable
+    sampler: Sampler[int] | Iterable[int]
     pin_memory_device: str
     prefetch_factor: int | None
     _iterator: _BaseDataLoaderIter[_T_co] | None

@@ -30,12 +30,14 @@ from sagent.agent.retry import (
     is_retryable,
     send_with_retry,
     service_error_snapshot,
+    validate_model_response,
 )
 from sagent.testing import MockModelCaps
 from sagent.types.model import (
     Model,
     ModelRequest,
     ModelResponse,
+    ModelTerminationError,
     RequestTooLargeError,
     StreamInterruptedError,
 )
@@ -133,6 +135,26 @@ def _request() -> ModelRequest:
 
 def _resp(text: str = "ok") -> ModelResponse:
     return ModelResponse(message=AssistantMessage(text=text))
+
+
+def test_validate_model_response_accepts_configured_stop_sequence() -> None:
+    response = ModelResponse(
+        message=AssistantMessage(text="done"),
+        stop_reason="stop_sequence",
+        stop_sequence="END",
+    )
+
+    validate_model_response(response)
+
+
+def test_validate_model_response_rejects_missing_stop_metadata() -> None:
+    response = ModelResponse(
+        message=AssistantMessage(text="partial"),
+        stop_reason="model_unknown",
+    )
+
+    with pytest.raises(ModelTerminationError, match="model_unknown"):
+        validate_model_response(response)
 
 
 def _silent(arg: object) -> None:
@@ -1340,19 +1362,20 @@ async def test_send_with_retry_corrects_divergent_retry_output() -> None:
 
 
 @pytest.mark.asyncio
-async def test_send_with_retry_stream_interruption_returns_partial_after_cap() -> None:
+async def test_send_with_retry_stream_interruption_raises_after_cap() -> None:
     partial = _resp("partial")
     err = StreamInterruptedError(partial)
     model = _ScriptedModel(stream_responses=[err, err, err])
-    resp = await send_with_retry(
-        model,
-        _request(),
-        publish=_silent,
-        max_attempts=5,
-        persistent_retry=False,
-        publish_recoverable=_silent,
-    )
-    assert resp is partial
+    with pytest.raises(StreamInterruptedError) as raised:
+        _ = await send_with_retry(
+            model,
+            _request(),
+            publish=_silent,
+            max_attempts=5,
+            persistent_retry=False,
+            publish_recoverable=_silent,
+        )
+    assert raised.value.response is partial
 
 
 @pytest.mark.asyncio

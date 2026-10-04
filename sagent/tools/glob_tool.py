@@ -10,6 +10,7 @@ import time
 
 from sagent.agent.state import approx_tokens, get_tool_state
 from sagent.lib.custom_json import BoolCodec, IntCodec, json_freeze
+from sagent.lib.files.glob import glob
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,
@@ -56,7 +57,7 @@ class Glob:
     Differences vs the List tool (when both could apply to "what's in
     DIR?"):
       * Glob returns full resolved paths; List returns basenames.
-      * Glob does not append ``/`` to directories; List does.
+      * Glob returns only files, skipping ``.gitignore``d paths.
       * Glob's pattern controls dotfile inclusion (``*`` excludes,
         ``.*`` matches only). List has an explicit ``show_hidden``
         toggle that returns visible + hidden in a single call -- Glob
@@ -220,28 +221,18 @@ class Glob:
                 content=f"offset must be >= 0; got {offset}.",
                 is_error=True,
             )
-        # Python's Path.glob requires a relative pattern. If the
-        # caller passes an absolute pattern (e.g. ``/abs/dir/*.py``),
-        # split it at the first component containing a glob char.
-        # Everything before becomes the root; everything after is
-        # the relative pattern. Matches what shell globs expect.
-        pat_path = Path(pattern)
-        if pat_path.is_absolute():
-            parts = pat_path.parts
+        # An absolute pattern (``/abs/dir/*.py``) splits at its first
+        # component holding a glob char: the head is the root, the rest the
+        # pattern, as a shell reads it.
+        root, rel = Path(get_tool_state().bash_cwd) / path, pattern
+        parts = Path(pattern).parts
+        if Path(pattern).is_absolute():
             split_at = next(
                 (i for i, part in enumerate(parts) if any(c in part for c in "*?[")),
                 len(parts),
             )
-            root = Path(*parts[:split_at]) if split_at > 0 else Path("/")
-            rel = str(Path(*parts[split_at:])) if split_at < len(parts) else ""
-            matches = list(root.glob(rel)) if rel else ([root] if root.exists() else [])
-        else:
-            if not Path(path).is_absolute():
-                path = str(Path(get_tool_state().bash_cwd) / path)
-            root = Path(path)
-            matches = list(root.glob(pattern))
-
-        matches = _honor_dotfile_rule(matches, pattern=pattern, root=root)
+            root, rel = Path(*parts[:split_at]), "/".join(parts[split_at:])
+        matches = glob(root, rel) if rel else [root] if root.exists() else []
         sort_paths(matches, sort)
         if not matches:
             return "(no matches)"
@@ -300,45 +291,6 @@ class Glob:
                 f"Replaces: `{render_command(inv)}`.{call}"
             )
         return None
-
-
-# The shell rule this tool advertises: ``*`` does not match a leading dot, ``.*``
-# matches only those. ``Path.glob`` implements neither, so an unfiltered ``*`` handed
-# back ``.env`` and every ``.git`` entry to a caller who asked for visible files -- and
-# List's ``show_hidden`` toggle exists precisely because Glob was supposed to answer
-# this through the pattern instead.
-#
-# Matched PER SEGMENT against the pattern's corresponding segment, since
-# ``.config/*.json`` names a hidden directory explicitly and its contents are then not
-# hidden by the caller's reckoning.
-def _honor_dotfile_rule(matches: list[Path], *, pattern: str, root: Path) -> list[Path]:
-    """Drop hidden matches unless the pattern's own segment asks for them."""
-    segments = Path(pattern).parts
-    if not any(part.startswith(".") for part in segments):
-        wants_hidden = ()
-    else:
-        wants_hidden = tuple(part.startswith(".") for part in segments)
-    kept: list[Path] = []
-    for match in matches:
-        try:
-            relative = match.relative_to(root).parts
-        except ValueError:
-            kept.append(match)
-            continue
-        hidden = [i for i, part in enumerate(relative) if part.startswith(".")]
-        # ``**`` spans any depth, so a positional pattern segment does not
-        # line up; require the pattern to name a dot somewhere instead.
-        recursive = "**" in segments
-        if all(
-            (
-                wants_hidden[i]
-                if i < len(wants_hidden) and not recursive
-                else bool(wants_hidden)
-            )
-            for i in hidden
-        ):
-            kept.append(match)
-    return kept
 
 
 def _plain_line(p: Path) -> str:

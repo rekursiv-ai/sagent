@@ -24,6 +24,8 @@ import zipfile
 
 import yaml
 
+from sagent.lib.files.glob import glob
+
 
 _RECIPE_PATH: Final = "sagent/assets/sagent.yaml"
 
@@ -45,7 +47,7 @@ def main() -> int:
         raise SystemExit("uv build produced no Sagent wheel")
     with zipfile.ZipFile(wheels[-1]) as archive:
         names = frozenset(archive.namelist())
-        missing = sorted(_expected_modules() - names)
+        missing = sorted(expected_modules() - names)
         if missing:
             raise SystemExit("wheel is missing source modules: " + ", ".join(missing))
         entry_points_name = _entry_points_name(names)
@@ -69,12 +71,20 @@ def main() -> int:
 
 
 # Derived from ``[tool.hatch.build.targets.wheel]`` in ``pyproject.toml``: every ``.py``
-# under each configured package, minus the wheel ``exclude`` globs. Reading the build
+# under each configured package that git tracks (hatch honors ``.gitignore``),
+# minus the wheel ``exclude`` globs. Reading the build
 # config here keeps the check from drifting when modules are added, renamed, or
 # restructured.
-def _expected_modules() -> frozenset[str]:
-    """Return package ``.py`` paths that must appear in the wheel."""
-    config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+def expected_modules() -> frozenset[str]:
+    """Return the package ``.py`` paths, relative to the cwd, the wheel must hold.
+
+    Returns:
+      modules: Every ``.py`` under each configured package that git would track,
+        minus the wheel ``exclude`` globs.
+
+    """
+    # TOML is UTF-8 by spec; bytes skip the locale.
+    config = tomllib.loads(Path("pyproject.toml").read_bytes().decode())
     wheel = (
         config.get("tool", {})
         .get("hatch", {})
@@ -86,7 +96,7 @@ def _expected_modules() -> frozenset[str]:
     excludes = [str(v) for v in wheel.get("exclude", [])]
     expected: set[str] = set()
     for package in packages:
-        for path in Path(package).rglob("*.py"):
+        for path in glob(Path(package), "**/*.py"):
             posix = path.as_posix()
             if not any(fnmatch(posix, pat) for pat in excludes):
                 expected.add(posix)
@@ -123,7 +133,7 @@ def _recipe_assets(recipe: dict[str, object]) -> list[str]:
     """Return asset paths referenced by recipe sections that package prompts."""
     assets: list[str] = []
     for section_name in ("system_prompt", "compactor", "tool_descriptions"):
-        section = recipe.get(section_name, {})
+        section = recipe.get(section_name)
         if not isinstance(section, dict):
             continue
         values = cast(dict[object, object], section)

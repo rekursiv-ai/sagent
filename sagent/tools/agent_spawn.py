@@ -635,11 +635,17 @@ class AgentSpawn:
         child.runtime.observers.append(_capture_error)
         if forwarder is not None:
             child.runtime.observers.append(forwarder)
+        result: ToolResult | None = None
         try:
             result = await child.drive_until_first_idle(
                 UserMessage(text=prompt),
                 result_of=_last_assistant_result,
             )
+        except Exception as error:
+            # A terminal model error already reached ``_capture_error``; it is
+            # reported below as the spawn's error result. Anything else is a crash.
+            if not any(error is captured for captured in child_errors):
+                raise
         finally:
             if forwarder is not None and forwarder in child.runtime.observers:
                 child.runtime.observers.remove(forwarder)
@@ -668,7 +674,7 @@ class AgentSpawn:
                 state="completed",
                 notify_on_asleep=False,
             )
-        if child_errors:
+        if child_errors or result is None:
             child_error = child_errors[-1]
             return ToolResult(
                 call_id="",

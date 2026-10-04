@@ -94,6 +94,20 @@ def test_email_content_methods_are_annotated(
     assert found == methods
 
 
+@pytest.mark.parametrize("checker", ["ty", "basedpyright"])
+def test_installed_unwrap_returns_its_argument_type(checker: str) -> None:
+    path = _INSTALLED / checker / "stdlib" / "inspect.pyi"
+    unwrap = next(
+        node
+        for node in ast.parse(path.read_text()).body
+        if isinstance(node, ast.FunctionDef) and node.name == "unwrap"
+    )
+    func = unwrap.args.args[0].annotation
+    assert isinstance(func, ast.Name)
+    assert isinstance(unwrap.returns, ast.Name)
+    assert (func.id, unwrap.returns.id) == ("_F", "_F")
+
+
 def test_installed_tree_matches_the_installed_checkers() -> None:
     """A checker bump without a package rebuild leaves the tree stale."""
     bundle_commit = (

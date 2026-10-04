@@ -13,7 +13,8 @@ from sagent.providers.lib.stop_reason import (
 def test_benign_stop_reasons_membership() -> None:
     assert "model_finished" in BENIGN_STOP_REASONS
     assert "model_tool_use" in BENIGN_STOP_REASONS
-    assert "model_continuing" in BENIGN_STOP_REASONS
+    assert "stop_sequence" in BENIGN_STOP_REASONS
+    assert "model_continuing" not in BENIGN_STOP_REASONS
     assert "max_tokens" not in BENIGN_STOP_REASONS
 
 
@@ -95,9 +96,9 @@ def test_openai_length_not_upgraded_with_tool_use() -> None:
         ("PROHIBITED_CONTENT", "model_refusal"),
         ("SPII", "model_refusal"),
         ("IMAGE_SAFETY", "model_refusal"),
-        ("MALFORMED_FUNCTION_CALL", "model_refusal"),
-        ("OTHER", "model_finished"),
-        ("FINISH_REASON_UNSPECIFIED", "model_finished"),
+        ("MALFORMED_FUNCTION_CALL", "model_malformed_tool_call"),
+        ("OTHER", "model_unknown"),
+        ("FINISH_REASON_UNSPECIFIED", "model_unknown"),
     ],
 )
 def test_google_known_mappings(raw: str, expected: str) -> None:
