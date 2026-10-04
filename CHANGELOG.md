@@ -52,6 +52,10 @@ All notable sagent changes are documented here. This project follows
   `AgentSpawn(tool_results=...)` take a `ToolResultPolicy` for the
   per-result off-load threshold and the aggregate tool-result budget.
   `Agent.tool_gate` limits which tools the next requests offer.
+- When Anthropic's safeguards reject a conversation, the run stops with
+  `PolicyBlockedError`, which carries the provider's message and request
+  ID, instead of a generic request error. The REPL halts with advice not
+  to retry that context: run `/clear`, `/model` or `/quit`.
 
 ### Changed
 
@@ -80,6 +84,10 @@ All notable sagent changes are documented here. This project follows
   `store: false`, keep encrypted reasoning and image-bearing tool
   results, and allow parallel tool calls. Existing sessions need no
   conversion.
+- `Glob` returns files only and skips paths `.gitignore` excludes, as
+  `fd` does, and runs `fd` when it is installed. Without ripgrep, `Grep`
+  skips the same ignored files ripgrep does, so both backends agree. Both
+  walk trees with the new `rignore` dependency.
 - **Breaking:** fast serving moved from the `+fast` model-ID tag to the
   `priority` service tier. Request it with
   `model_options={"service_tier": "priority"}` on `AgentSelf` or
@@ -166,6 +174,14 @@ All notable sagent changes are documented here. This project follows
   `max_result_tokens`. The `BudgetReset` runtime event is gone.
   `PriceKey` replaces `PriceCatalogProduct`, and `TokenCount` and
   `TokenPrice` carry a `cache_write_1h` meter.
+- **Breaking:** a model response that ends any way other than finishing
+  or calling tools raises `ModelTerminationError`, now a
+  `UserFacingError`, instead of coming back as an empty or partial
+  assistant turn: a refusal, a token-limit cut-off, a malformed tool call
+  or an unrecognized reason. Gemini's `MALFORMED_FUNCTION_CALL` and
+  `OTHER` no longer pass as a refusal and a normal finish. A stream that
+  announces tool calls but delivers none raises after its retries instead
+  of returning what arrived.
 
 ### Fixed
 
@@ -198,6 +214,8 @@ All notable sagent changes are documented here. This project follows
 - A detached task keeps its claim until it exits, so a second driver can
   no longer attach to the same inbox, and a message arriving mid-stream
   no longer races a backgrounded tool group's edits.
+- Compaction calls, and responses that end in an error, count toward the
+  session's cost and its `max_budget_usd` cap.
 
 ### Removed
 
