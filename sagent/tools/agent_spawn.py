@@ -41,18 +41,15 @@ from sagent.agent.state import (
     get_tool_state,
     max_depth_var,
 )
-from sagent.lib.custom_json import JSON, BoolCodec, json_freeze
+from sagent.lib.custom_json import JSON, convert, json_freeze
 from sagent.providers import PROVIDER_NAMES
 from sagent.providers.providers import (
-    build_provider,
+    build_provider_with_account_fallback,
     default_auth_for_provider,
     infer_provider,
 )
 from sagent.thinking import apply_thinking_command
-from sagent.tools.agent_self import (
-    CACHE_TTL_SEC,
-    plan_model_options,
-)
+from sagent.tools.agent_self import plan_model_options
 from sagent.tools.core import (
     load_tool_description,
     opt_int,
@@ -106,9 +103,9 @@ class AgentSpawn:
     - ``provider``, ``auth``, ``model_id``, ``account`` - mirroring
     ``cli.py``'s CLI flags. Each follows the standard ``LLM arg →
     factory arg → parent.model_recipe.<field>`` fallthrough. When every
-    field matches the parent's spec the child simply reuses
-    ``parent.model``; otherwise a fresh ``Model`` is built via
-    :func:`providers.build_provider`.
+    field matches the parent's spec, a fresh ``Model`` is built via
+    :func:`providers.build_provider_with_account_fallback`. A missing inherited
+    named account may retry the destination provider's default credentials.
 
     ``allow_providers`` narrows the set of providers exposed to the
     LLM in :attr:`directive_schema` and gated in :meth:`_build_child_model`.
@@ -204,8 +201,8 @@ class AgentSpawn:
                         "type": "string",
                         "description": (
                             "Model ID for the chosen provider (e.g."
-                            " ``sonnet-4.6``, ``gemini-3.1-pro-preview``,"
-                            " ``sol-6``). Defaults to inheriting the parent's"
+                            " ``sonnet-4.6``, ``gemini-pro-3.1``,"
+                            " ``sol-6.0``). Defaults to inheriting the parent's"
                             " model id."
                         ),
                     },
@@ -414,9 +411,9 @@ class AgentSpawn:
                 content=f"'max_depth' must be ≥ 0, got {max_depth}.",
                 is_error=True,
             )
-        persistent = BoolCodec.coerce(args.get("persistent"), False)
-        notify_on_asleep = BoolCodec.coerce(args.get("notify_on_asleep"), True)
-        hot = BoolCodec.coerce(args.get("hot"), False)
+        persistent = convert(args.get("persistent"), bool, default=False)
+        notify_on_asleep = convert(args.get("notify_on_asleep"), bool, default=True)
+        hot = convert(args.get("hot"), bool, default=False)
         custom_label = opt_str(args, "label")
         parent_agent = _current_agent()
         if parent_agent is None:
@@ -533,10 +530,8 @@ class AgentSpawn:
             )
         if "effort" in model_options:
             settings.thinking_effort = cast(ThinkingEffort, model_options["effort"])
-        if "cache_ttl" in model_options:
-            settings.cache_ttl_sec = CACHE_TTL_SEC[
-                cast(str, model_options["cache_ttl"])
-            ]
+        if "cache_ttl_sec" in model_options:
+            settings.cache_ttl_sec = cast(float, model_options["cache_ttl_sec"])
         if "service_tier" in model_options:
             settings.service_tier = cast(ServiceTier, model_options["service_tier"])
         agent_class = Agent
@@ -635,7 +630,6 @@ class AgentSpawn:
         child.runtime.observers.append(_capture_error)
         if forwarder is not None:
             child.runtime.observers.append(forwarder)
-        result: ToolResult | None = None
         try:
             result = await child.drive_until_first_idle(
                 UserMessage(text=prompt),
@@ -646,6 +640,7 @@ class AgentSpawn:
             # reported below as the spawn's error result. Anything else is a crash.
             if not any(error is captured for captured in child_errors):
                 raise
+            result = _child_error_result(label, error)
         finally:
             if forwarder is not None and forwarder in child.runtime.observers:
                 child.runtime.observers.remove(forwarder)
@@ -674,16 +669,8 @@ class AgentSpawn:
                 state="completed",
                 notify_on_asleep=False,
             )
-        if child_errors or result is None:
-            child_error = child_errors[-1]
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"Child agent {label!r} failed:"
-                    f" {type(child_error).__name__}: {child_error}"
-                ),
-                is_error=True,
-            )
+        if child_errors:
+            return _child_error_result(label, child_errors[-1])
         return result
 
     # Registers the child in ``agent_registry``, attaches the parent forwarder as an
@@ -867,8 +854,8 @@ class AgentSpawn:
 
     # Per-field fallthrough: ``LLM arg → factory arg → parent.model_recipe.<field>``.
     # Whenever a rebuildable spec results (provider + auth + model_id all resolved), a
-    # FRESH transport is built via ``build_provider(...).model(...)`` -- including the
-    # common case where the child simply inherits the parent's spec. Each child must own
+    # FRESH transport is built with inherited-account fallback -- including the common
+    # case where the child simply inherits the parent's spec. Each child must own
     # an independent transport so N spawns run concurrently on N processes; aliasing
     # ``parent.model`` would serialize (and, on subprocess providers, corrupt) them
     # through one transport.
@@ -984,8 +971,25 @@ class AgentSpawn:
                 self._allow_providers,
                 parent_provider,
             )
-        built_provider = build_provider(p, a, account=ac)
-        new_model = built_provider.model(m)
+        try:
+            built_provider, ac = build_provider_with_account_fallback(
+                p,
+                a,
+                account=ac,
+                fallback_to_default=(
+                    account is None
+                    and self._account is None
+                    and parent_spec is not None
+                    and p != parent_spec.provider
+                ),
+            )
+            new_model = built_provider.model(m)
+        except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as exc:
+            return ToolResult(
+                call_id="",
+                content=f"Failed to build model {m!r}: {exc}",
+                is_error=True,
+            )
         new_spec = ModelRecipe(
             provider=p,
             auth=a,
@@ -1311,6 +1315,15 @@ def _build_forwarder(
         label=label,
         notify_on_asleep=notify_on_asleep,
         skip_first_work_idle=skip_first_work_idle,
+    )
+
+
+def _child_error_result(label: str, error: BaseException) -> ToolResult:
+    """Report a child's terminal model error as the spawn's error result."""
+    return ToolResult(
+        call_id="",
+        content=f"Child agent {label!r} failed: {type(error).__name__}: {error}",
+        is_error=True,
     )
 
 

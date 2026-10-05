@@ -1094,6 +1094,10 @@ class AgentRuntime:
         """
         return self.detached.pop(call_id, None)
 
+    def record_at(self, ref: TapeRef) -> TapeRecord | None:
+        """Return the tape record ``ref`` names, or ``None`` if none does."""
+        return self._tape_by_ref.get(ref)
+
     def context(self) -> ResolvedContext:
         """Return the provider-facing context resolved from the tape.
 

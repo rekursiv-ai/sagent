@@ -8,8 +8,13 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.providers.dashscope.api import DashScope, _DashScopeModel
-from sagent.types.capability import ModelSettings, ThinkingEffort
+from sagent.types.capability import (
+    ModelSettings,
+    ThinkingBudget,
+    ThinkingEffort,
+)
 from sagent.types.model import ModelRequest
+from sagent.types.runtime import UserMessage
 
 
 if TYPE_CHECKING:
@@ -32,7 +37,6 @@ def test_dashscope_default_model() -> None:
     p = DashScope.from_key("k")
     m = p.model()
     assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
-    # Reasoning is surfaced via ``reasoning_content`` on Qwen3.
     assert m.capability.thinking.budget != frozenset({"none"})
 
 
@@ -42,145 +46,139 @@ def test_dashscope_unknown_model_raises() -> None:
         _ = p.model("not-qwen")
 
 
-@pytest.mark.parametrize(
-    ("model_id", "is_effort"),
-    [
-        ("qwen3-32b", True),
-        # The qwen3.6 family (including the default) is Qwen3-generation and
-        # MUST expose the effort knob; the prefix has to match the dotted form.
-        ("qwen3.6-plus", True),
-        ("qwen3.6-max-preview", True),
-        ("qwen3.6-flash", True),
-        ("qwen-plus", True),
-        ("qwen-max", True),
-        ("qvq-test", True),
-        ("qwq-test", True),
-        ("kimi-k2.6", False),
-        ("qwen2.5-vl", False),  # pre-Qwen3 vision model: no thinking knob.
-        # ``-instruct`` / ``-coder`` qwen3 ids are NON-reasoning models (Alibaba
-        # ships them without the enable_thinking toggle). A bare ``qwen3`` prefix
-        # match wrongly flags them; they must be excluded like the suffix-stripped
-        # ``-thinking`` ids are. All three are registered in KNOWN_MODELS.
-        ("qwen3-235b-a22b-instruct-2507", False),
-        ("qwen3-30b-a3b-instruct-2507", False),
-        ("qwen3-coder-480b-a35b-instruct", False),
-        # ``-thinking`` qwen3 ids ARE reasoning models -- must stay effort-capable.
-        ("qwen3-235b-a22b-thinking-2507", True),
-    ],
-)
-def test_dashscope_is_effort_model(model_id: str, is_effort: bool) -> None:
-    p = DashScope.from_key("k")
-    # Use a known profile id to construct the model; the predicate runs
-    # over the supplied model id regardless of profile.
-    m = p.model("qwen3-32b")
-    assert m._is_effort_model(model_id) is is_effort
-
-
-@pytest.mark.parametrize("model_id", sorted(DashScope.catalog.rows))
-def test_the_effort_predicate_agrees_with_every_row(model_id: str) -> None:
-    """The id-shape predicate and the catalog row must say the same thing.
-
-    ``_is_effort_model`` matches id PREFIXES while the row states the axis
-    directly -- two vocabularies for one fact, which is the bug class
-    ``wire_conformance_test`` exists to catch. The cases above pin the
-    predicate against hand-written ids; nothing pinned it against the
-    catalog it actually runs on.
-    """
-    model = DashScope.from_key("k").model(model_id)
-    offers_effort = model.capability.thinking.effort != frozenset({"none"})
-    assert model._is_effort_model(model.capability.model_id) is offers_effort
-
-
-# Not defaulted to ``"none"``: a ``-thinking`` row withholds that value, so forcing it
-# would make the helper unusable on exactly the rows whose thinking behaviour these
-# tests cover.
-def _model(model_id: str, effort: ThinkingEffort | None = None) -> _DashScopeModel:
-    """Return a model with ``effort`` selected, or its own narrowest when omitted."""
+def _model(
+    model_id: str,
+    *,
+    budget: ThinkingBudget | None = None,
+    effort: ThinkingEffort | None = None,
+) -> _DashScopeModel:
+    """Return a model with the given axes selected over its own narrowest."""
     m = cast(_DashScopeModel, DashScope.from_key("k").model(model_id))
+    settings = ModelSettings.narrowest(m.capability)
+    if budget is not None:
+        settings.thinking_budget = budget
     if effort is not None:
-        m._settings = ModelSettings(capability=m.capability, thinking_effort=effort)
+        settings.thinking_effort = effort
+    m._settings = settings
     return m
 
 
-def test_dashscope_transform_body_maps_effort_to_enable_thinking() -> None:
-    m = _model("qwen3-32b", "low")
-    # The base's ``reasoning_effort`` (which DashScope rejects) is dropped.
-    body: MutableJSON = {"model": "qwen3-32b", "reasoning_effort": "low"}
-    out = m._transform_body(body, ModelRequest(messages=[]))
+def _body(m: _DashScopeModel, body: MutableJSON | None = None) -> MutableJSON:
+    return m._transform_body(
+        body if body is not None else {},
+        ModelRequest(messages=[]),
+    )
+
+
+def test_a_fixed_budget_caps_reasoning_with_thinking_budget() -> None:
+    m = _model("qwen-plus-3.7", budget="fixed", effort="low")
+    out = _body(m, {"model": "qwen3.7-plus", "reasoning_effort": "low"})
     assert "reasoning_effort" not in out
     assert out["enable_thinking"] is True
-    # The level drives a reasoning-token budget, not just an on/off flag.
     assert out["thinking_budget"] == 4_096
 
 
-def test_dashscope_transform_body_effort_levels_map_distinct_budgets() -> None:
-    high = _model("qwen3-32b", "high")._transform_body({}, ModelRequest(messages=[]))
-    maxi = _model("qwen3-32b", "max")._transform_body({}, ModelRequest(messages=[]))
+def test_effort_levels_map_to_distinct_budgets() -> None:
+    high = _body(_model("qwen-32b-3.0", budget="fixed", effort="high"))
+    maxi = _body(_model("qwen-32b-3.0", budget="fixed", effort="max"))
     assert high["thinking_budget"] == 16_384
     assert maxi["thinking_budget"] == 24_576
 
 
-def test_dashscope_transform_body_none_effort_means_disabled() -> None:
-    # ``none`` is the catalog's zero budget; Qwen spells it as a toggle, so no
-    # ``thinking_budget`` accompanies it.
-    out = _model("qwen3-32b")._transform_body(
-        {"reasoning_effort": "minimal"},
-        ModelRequest(messages=[]),
-    )
-    assert out["enable_thinking"] is False
-    assert "thinking_budget" not in out
+def test_an_auto_budget_thinks_at_the_model_default() -> None:
+    out = _body(_model("qwen-plus-3.7", budget="auto", effort="high"))
+    assert out == {"enable_thinking": True}
 
 
-def test_dashscope_thinking_suffix_model_never_disables_thinking() -> None:
-    """``*-thinking-2507`` is thinking-only: ``enable_thinking`` stays True.
-
-    Model Studio rejects ``enable_thinking=false`` on these ids, so the row
-    withholds ``none`` and the wire never sends the toggle down.
-    """
-    m = _model("qwen3-235b-a22b-thinking-2507", "low")
-    assert "none" not in m.capability.thinking.effort
-    out = m._transform_body({}, ModelRequest(messages=[]))
-    assert out["enable_thinking"] is True
-    assert out["thinking_budget"] == 4_096
+def test_a_none_budget_disables_thinking() -> None:
+    out = _body(_model("qwen-plus-3.7"), {"reasoning_effort": "minimal"})
+    assert out == {"enable_thinking": False}
 
 
-def test_dashscope_a_thinking_only_row_cannot_select_none() -> None:
-    """The capability rejects it up front rather than 400ing on the wire."""
-    m = _model("qwen3-235b-a22b-thinking-2507")
-    with pytest.raises(ValueError, match="thinking_effort"):
-        m.settings.thinking_effort = "none"
+def test_a_level_row_sends_reasoning_effort_and_never_a_budget() -> None:
+    """Qwen 3.8 errors when ``reasoning_effort`` and ``thinking_budget`` co-occur."""
+    out = _body(_model("qwen-max-3.8", budget="auto", effort="xhigh"))
+    assert out == {"enable_thinking": True, "reasoning_effort": "xhigh"}
 
 
-@pytest.mark.parametrize("model_id", ["qwen-turbo", "qwen3-235b-a22b-instruct-2507"])
-def test_dashscope_non_reasoning_model_gets_no_thinking_knobs(model_id: str) -> None:
-    """A row offering only ``none`` claims the model REJECTS the knob."""
+def test_a_level_row_with_no_effort_leaves_the_server_default() -> None:
+    out = _body(_model("qwen-flash-3.8", budget="auto"))
+    assert out == {"enable_thinking": True}
+
+
+def test_an_instruct_row_shares_the_qwen3_prefix_yet_gets_no_knob() -> None:
+    """An id-prefix rule once sent ``enable_thinking`` to every ``qwen3*`` id."""
+    m = _model("qwen-235b-a22b-instruct-3.0")
+    assert m.capability.thinking.budget == frozenset({"none"})
+    assert _body(m) == {}
+
+
+def test_a_thinking_only_row_never_disables_thinking() -> None:
+    """Model Studio rejects ``enable_thinking=false`` on ``*-thinking-2507``."""
+    m = _model("qwen-235b-a22b-thinking-3.0", effort="low")
+    assert "none" not in m.capability.thinking.budget
+    assert _body(m)["enable_thinking"] is True
+    with pytest.raises(ValueError, match="thinking_budget"):
+        m.settings.thinking_budget = "none"
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    ["qwen-235b-a22b-instruct-3.0", "qwen-coder-480b-a35b-3.0"],
+)
+def test_a_non_reasoning_row_gets_no_thinking_knobs(model_id: str) -> None:
     m = _model(model_id)
     assert m.capability.thinking.effort == frozenset({"none"})
-    out = m._transform_body({}, ModelRequest(messages=[]))
+    out = _body(m)
     assert "enable_thinking" not in out
     assert "thinking_budget" not in out
 
 
-def test_dashscope_default_model_supports_effort_end_to_end() -> None:
-    """Effort must be selectable on the DEFAULT model.
+@pytest.mark.parametrize("model_id", sorted(DashScope.catalog.models))
+def test_the_wire_follows_the_row_not_the_id(model_id: str) -> None:
+    """A row offering a budget sends the toggle; one that does not, never does."""
+    m = _model(model_id)
+    sends_toggle = "enable_thinking" in _body(m)
+    assert sends_toggle is (m.capability.thinking.budget != frozenset({"none"}))
 
-    Otherwise the module docstring's effort->enable_thinking promise is
-    unreachable for default use.
+
+@pytest.mark.parametrize(
+    ("model_id", "field"),
+    [
+        ("qwen-max-3.8", "max_completion_tokens"),
+        ("qwen-flash-3.8", "max_completion_tokens"),
+        ("qwen-plus-3.7", "max_completion_tokens"),
+        ("qwen-flash-3.6", "max_completion_tokens"),
+        ("qwen-27b-3.8", "max_tokens"),
+        ("qwen-max-3.6", "max_tokens"),
+        ("qwen-turbo-3.0", "max_tokens"),
+        ("qwen-32b-3.0", "max_tokens"),
+        ("qwen-235b-a22b-instruct-3.0", "max_tokens"),
+    ],
+)
+def test_the_output_cap_uses_the_field_the_model_supports(
+    model_id: str,
+    field: str,
+) -> None:
+    """qwen-api-via-openai-chat-completions lists ``max_completion_tokens`` models.
+
+    Elsewhere only ``max_tokens`` is honored, and it caps the answer alone.
     """
+    body = _model(model_id)._build_body(
+        ModelRequest(messages=[UserMessage(text="x")], max_response_tokens=42),
+        stream=False,
+    )
+    assert {k for k in ("max_tokens", "max_completion_tokens") if k in body} == {
+        field,
+    }
+    assert body[field] == 42
+
+
+def test_the_default_model_supports_effort_end_to_end() -> None:
     m = DashScope.from_key("k").model()
-    assert m.capability.thinking.effort != frozenset({"none"})
     agent = Agent(model=m)
     agent.model.settings.thinking_effort = "medium"
     assert m.settings.thinking_effort == "medium"
-
-
-def test_dashscope_transform_body_no_effort_unchanged() -> None:
-    m = _model("qwen3-32b")
-    body: MutableJSON = {"model": "qwen3-32b"}
-    out = m._transform_body(body, ModelRequest(messages=[]))
-    assert out["enable_thinking"] is False
-    assert "thinking_budget" not in out
-    assert out["model"] == "qwen3-32b"
 
 
 if __name__ == "__main__":

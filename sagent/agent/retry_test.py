@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, ClassVar, cast, override
 
 import asyncio
+import logging
 import time
 
 import httpx2
@@ -45,6 +46,7 @@ from sagent.types.runtime import (
     AssistantMessage,
     ModelResponsePartial,
     RuntimeEvent,
+    ToolCall,
 )
 
 
@@ -147,14 +149,98 @@ def test_validate_model_response_accepts_configured_stop_sequence() -> None:
     validate_model_response(response)
 
 
-def test_validate_model_response_rejects_missing_stop_metadata() -> None:
+@pytest.mark.parametrize("stop_reason", ["model_unknown", "eos", "tool_call"])
+def test_validate_model_response_accepts_unrecognized_stop_reason(
+    stop_reason: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A vendor value outside the canonical vocabulary warns, never kills a turn."""
     response = ModelResponse(
-        message=AssistantMessage(text="partial"),
-        stop_reason="model_unknown",
+        message=AssistantMessage(text="done"),
+        stop_reason=stop_reason,
     )
 
-    with pytest.raises(ModelTerminationError, match="model_unknown"):
+    with caplog.at_level(logging.WARNING):
         validate_model_response(response)
+
+    assert stop_reason in caplog.text
+
+
+@pytest.mark.parametrize("stop_reason", ["max_tokens", "model_context_window_exceeded"])
+def test_validate_model_response_accepts_truncated_text(stop_reason: str) -> None:
+    """Truncated prose is still the model's answer; dropping it loses billed output."""
+    response = ModelResponse(
+        message=AssistantMessage(text="partial answer"),
+        stop_reason=stop_reason,
+    )
+
+    validate_model_response(response)
+
+
+def test_validate_model_response_rejects_truncated_tool_call() -> None:
+    """A tool call cut off by the cap may carry truncated arguments."""
+    response = ModelResponse(
+        message=AssistantMessage(
+            text="",
+            tool_calls=(ToolCall(id="c1", name="Read", args={"file_path": "/t"}),),
+        ),
+        stop_reason="max_tokens",
+    )
+
+    with pytest.raises(ModelTerminationError, match="max_tokens"):
+        validate_model_response(response)
+
+
+def test_validate_model_response_treats_malformed_tool_call_as_interrupted() -> None:
+    """Gemini's malformed call is transient; the retry path resends it."""
+    response = ModelResponse(
+        message=AssistantMessage(text=""),
+        stop_reason="model_malformed_tool_call",
+    )
+
+    with pytest.raises(StreamInterruptedError):
+        validate_model_response(response)
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_resends_malformed_tool_call() -> None:
+    malformed = ModelResponse(
+        message=AssistantMessage(text=""),
+        stop_reason="model_malformed_tool_call",
+    )
+    model = _ScriptedModel(stream_responses=[malformed, _resp("done")])
+
+    resp = await send_with_retry(
+        model,
+        _request(),
+        publish=_silent,
+        max_attempts=1,
+        persistent_retry=False,
+        publish_recoverable=_silent,
+    )
+
+    assert resp.message.text == "done"
+    assert model.stream_calls == 2
+
+
+@pytest.mark.parametrize("stop_reason", ["model_refusal", "model_cancelled"])
+def test_validate_model_response_rejects_failed_stop(stop_reason: str) -> None:
+    response = ModelResponse(
+        message=AssistantMessage(text=""),
+        stop_reason=stop_reason,
+    )
+
+    with pytest.raises(ModelTerminationError, match=stop_reason):
+        validate_model_response(response)
+
+
+def test_validate_model_response_accepts_pause_turn() -> None:
+    response = ModelResponse(
+        message=AssistantMessage(text="searching"),
+        stop_reason="model_continuing",
+    )
+
+    validate_model_response(response)
 
 
 def _silent(arg: object) -> None:
@@ -1376,29 +1462,6 @@ async def test_send_with_retry_stream_interruption_raises_after_cap() -> None:
             publish_recoverable=_silent,
         )
     assert raised.value.response is partial
-
-
-@pytest.mark.asyncio
-async def test_send_with_retry_stream_interrupt_on_discarded_response_called() -> None:
-    partial = _resp("partial")
-    model = _ScriptedModel(
-        stream_responses=[
-            StreamInterruptedError(partial),
-            _resp("done"),
-        ],
-    )
-    discarded: list[ModelResponse] = []
-    resp = await send_with_retry(
-        model,
-        _request(),
-        publish=_silent,
-        max_attempts=3,
-        persistent_retry=False,
-        publish_recoverable=_silent,
-        on_discarded_response=discarded.append,
-    )
-    assert resp.message.text == "done"
-    assert discarded == [partial]
 
 
 def test_error_diagnostics_includes_status_headers_body() -> None:

@@ -6,19 +6,15 @@ import pytest
 
 from sagent.catalog.anthropic import models
 from sagent.types.capability import (
-    ContextTag,
     ModelCapability,
 )
 from sagent.types.cost import (
     TokenCount,
 )
 from sagent.types.model import (
-    CONTEXT_TAGS,
     ModelRecipe,
     ModelResponse,
     StreamInterruptedError,
-    base_model_id,
-    split_model_id,
 )
 from sagent.types.runtime import AssistantMessage
 from sagent.types.settings import AgentSettings
@@ -200,57 +196,13 @@ def test_stream_interrupted_message_embeds_response_counts() -> None:
     assert "tool_use" in text
 
 
-# ---- model-id tags ---------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("model_id", "base"),
-    [
-        ("opus-4.7+1m", "opus-4.7"),
-        ("opus-4.7+200k", "opus-4.7"),
-        ("opus-4.7", "opus-4.7"),
-        ("Opus-4.7+1M", "Opus-4.7"),
-    ],
-)
-def test_base_model_id_strips_the_context_tag(model_id: str, base: str) -> None:
-    assert base_model_id(model_id) == base
-
-
-@pytest.mark.parametrize(
-    ("model_id", "base", "tags"),
-    [
-        ("opus-4.8", "opus-4.8", frozenset[ContextTag]()),
-        ("opus-4.8+1m", "opus-4.8", frozenset({"+1m"})),
-        ("opus-4.8+200k", "opus-4.8", frozenset({"+200k"})),
-        ("astra-6+272k", "astra-6", frozenset({"+272k"})),
-        ("Opus-4.8+1M", "Opus-4.8", frozenset({"+1m"})),
-        ("model+unknown", "model+unknown", frozenset[ContextTag]()),
-    ],
-)
-def test_split_model_id(model_id: str, base: str, tags: frozenset[ContextTag]) -> None:
-    assert split_model_id(model_id) == (base, tags)
-
-
-def test_context_tags_derive_from_the_literal() -> None:
-    """A tag the type admits but the tuple omits would be unparseable."""
-    assert set(CONTEXT_TAGS) == {"+1m", "+272k", "+200k"}
-
-
-def test_no_latency_tag_survives() -> None:
-    """``+fast`` was a second spelling of ``service_tier="priority"``."""
-    assert split_model_id("opus-5+fast") == (
-        "opus-5+fast",
-        frozenset(),
-    )
-
-
 # ---- catalog facts ---------------------------------------------------------
 
 
 @pytest.mark.parametrize(
     ("model_id", "priority"),
     [
-        ("opus-5", True),
+        ("opus-5.0", True),
         ("opus-4.8", True),
         # Fast mode was removed from 4-7 on 2026-07-24 and never shipped on
         # 4-6: a fast request there is served at standard speed and billed at
@@ -274,7 +226,7 @@ def test_only_documented_models_offer_the_priority_tier(
 @pytest.mark.parametrize(
     ("model_id", "divisor"),
     [
-        ("opus-5", 2.38),
+        ("opus-5.0", 2.38),
         ("opus-4.8", 2.38),
         ("opus-4.6", 3.12),
         ("haiku-4.5", 3.12),

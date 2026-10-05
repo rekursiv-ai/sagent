@@ -25,12 +25,12 @@ Usage::
     ./cli.py --provider OpenAISubscription --model sol-6
 
     # Google
-    ./cli.py --provider Google --auth env --model gemini-3.1-pro-preview
+    ./cli.py --provider Google --auth env --model gemini-pro-3.1
 
     # Moonshot / DashScope / MiniMax (OpenAI chat-completions compatible)
-    ./cli.py --provider Moonshot --model kimi-k2.6
-    ./cli.py --provider DashScope --model qwen3.6-plus
-    ./cli.py --provider MiniMax --model MiniMax-M2.7
+    ./cli.py --provider Moonshot --model kimi-2.6
+    ./cli.py --provider DashScope --model qwen-plus-3.7
+    ./cli.py --provider MiniMax --model minimax-2.7
 
     # Models default to their largest window; append +200k for the smaller one.
     ./cli.py --model sonnet-4.6+200k
@@ -76,14 +76,17 @@ from sagent.agent.session_io import (
     unpersisted_session_error,
 )
 from sagent.agent.state import agent_registry, unique_registry_label
+from sagent.catalog.table import UnknownModelError, UnsupportedTagError
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.custom_json import DictCodec, MutableJSON, StrCodec
+from sagent.lib.custom_json import convert
 from sagent.lib.userdirs import data_dir
 from sagent.prompt import build_system
 from sagent.providers import (
     PROVIDER_NAMES,
-    build_provider,
     default_auth_for_provider,
+)
+from sagent.providers.providers import (
+    build_provider_with_account_fallback,
 )
 from sagent.repl.run_repl import run_repl
 from sagent.thinking import (
@@ -111,8 +114,6 @@ from sagent.types.providers import (
     ModelResolver,
     Provider,
     ProviderCloseable,
-    UnknownModelError,
-    UnsupportedTagError,
 )
 from sagent.types.runtime import (
     AssistantMessage,
@@ -132,6 +133,7 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
 
+    from sagent.lib.custom_json import MutableJSON
     from sagent.types.tools import (
         Tool,
     )
@@ -1025,7 +1027,16 @@ def _build_provider_model_once(
     if args.provider == "SelfHosted":
         auth = model_id or "env"
         model_id = None
-    provider = build_provider(provider_name, auth, account=args.account)
+    provider, account = build_provider_with_account_fallback(
+        provider_name,
+        auth,
+        account=args.account,
+        fallback_to_default=(
+            bool(getattr(args, "provider_from_resume", False))
+            and not bool(getattr(args, "account_explicit", False))
+        ),
+    )
+    args.account = account
     model = provider.model(None if model_id == "default" else model_id)
     return provider, model, auth
 
@@ -1262,10 +1273,11 @@ def _build_persistent_child(
     parent_label: str,
 ) -> Agent:
     """Construct a persistent child from its lifecycle record."""
-    provider = build_provider(
+    provider, account = build_provider_with_account_fallback(
         record.provider,
         record.auth,
         account=record.account or None,
+        fallback_to_default=True,
     )
     model = provider.model(record.model_id)
     # ``take`` rather than assignment: a record written against a wider
@@ -1284,7 +1296,7 @@ def _build_persistent_child(
             provider=record.provider,
             auth=record.auth,
             model_id=model.tagged_model_id,
-            account=record.account,
+            account=account,
         ),
         system=_augment_system_for_persistent(record.system, parent_label=parent_label),
         tools=resolve_tools(list(record.tools), allow_providers=allow_providers),
@@ -1496,15 +1508,11 @@ def _parse_stream_json(raw: str) -> str:
             obj: object = json.loads(line)
         except json.JSONDecodeError as e:
             raise ValueError(f"invalid JSON line in stream-json input: {e}") from e
-        # ``DictCodec.coerce`` maps any non-object to ``{}``, which is also what a
-        # legitimate empty object yields -- so compare against the parsed
-        # value rather than testing emptiness. A bare ``{}`` is a valid
-        # prompt-less line and must be skipped, exactly like the
-        # prompt-less ``{"other": "data"}``; only a non-object is fatal.
-        record = DictCodec.coerce(obj)
-        if not record and obj != {}:
-            raise TypeError("stream-json input requires JSON objects per line.")
-        p = StrCodec.coerce(record.get("prompt"))
+        # ``read`` raises on a non-object, which is fatal. A bare ``{}`` is a
+        # valid prompt-less line and must be skipped, exactly like the
+        # prompt-less ``{"other": "data"}``.
+        record = convert(obj, dict[str, object])
+        p = convert(record.get("prompt"), str, default="")
         if p:
             prompts.append(p)
     return "\n\n".join(prompts)

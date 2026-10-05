@@ -51,6 +51,9 @@ dependencies = [
     # llm
     "anthropic>=0.72.0",
     "openai>=2.20",
+    # serialization
+    "fastjsonschema>=2.22.2",
+    "msgspec>=0.22.0",
     # config
     "pyyaml>=6.0",
     # text / docs
@@ -331,6 +334,7 @@ extend-safe-fixes = [
     "PT018",  # Split composite assertions.
     "PYI034", # Annotate __enter__/__new__/__iadd__ returns as Self.
     "RET504", # Remove unnecessary local assignment directly before return.
+    "RUF007", # Prefer `itertools.pairwise()` over `zip()` when iterating over successive pairs.
     "SIM102", # Collapse nested if statements.
     "SIM105", # Use contextlib.suppress instead of try-except-pass.
     "TC",     # Type-checking import and annotation rewrites.

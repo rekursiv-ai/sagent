@@ -21,23 +21,16 @@ primitive.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal
 
 import asyncio
 import dataclasses
 
-from sagent.lib.custom_json import (
-    JSON,
-    BoolCodec,
-    IntCodec,
-    MutableJSON,
-    MutableJSONValue,
-    json_freeze,
-    json_unfreeze,
-)
+from sagent.lib.custom_json import convert, json_unfreeze
 
 
 if TYPE_CHECKING:
+    from sagent.lib.custom_json import JSON
     from sagent.types.runtime import ToolResult
     from sagent.types.tools import Tool
 
@@ -139,7 +132,7 @@ def bg_augmented_schema(directive_schema: JSON) -> JSON:
           ``properties`` there yields a schema strict validators reject.
 
     """
-    schema: MutableJSON = json_unfreeze(directive_schema)
+    schema = json_unfreeze(directive_schema)
     schema_type = schema.get("type")
     if schema_type is not None and schema_type != "object":
         raise ValueError(
@@ -150,11 +143,7 @@ def bg_augmented_schema(directive_schema: JSON) -> JSON:
     # Inject even when the inner schema is schemaless (no ``properties``):
     # JSON Schema allows ``type: object`` without ``properties``, but
     # skipping injection there would silently disable backgrounding.
-    props: MutableJSON = (
-        cast(MutableJSON, dict(raw_props))
-        if isinstance(raw_props, Mapping)
-        else cast(MutableJSON, {})
-    )
+    props = dict(raw_props) if isinstance(raw_props, Mapping) else {}
     props.update(
         {
             "background": {
@@ -172,8 +161,8 @@ def bg_augmented_schema(directive_schema: JSON) -> JSON:
             },
         },
     )
-    schema["properties"] = cast(MutableJSONValue, props)
-    return json_freeze(schema)
+    schema["properties"] = props
+    return schema
 
 
 class BackgroundAwareTool:
@@ -297,8 +286,6 @@ def split_bg_args(
     clean = {k: v for k, v in args.items() if k not in ("background", "delay")}
     # Negative ``delay`` is meaningless; coerce to zero rather than
     # waiting an unbounded duration backwards or raising mid-dispatch.
-    delay_sec = max(0.0, float(IntCodec.coerce(args.get("delay"), 0)))
-    background = (
-        BoolCodec.coerce(args.get("background"), default=False) or delay_sec > 0
-    )
+    delay_sec = max(0.0, float(convert(args.get("delay"), int, default=0)))
+    background = convert(args.get("background"), bool, default=False) or delay_sec > 0
     return background, delay_sec, clean

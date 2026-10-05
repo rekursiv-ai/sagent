@@ -11,7 +11,7 @@ Both entry points share provider, model, tool, compaction, budget, and prompt fl
 
 ```bash
 export GOOGLE_API_KEY=...
-sagent --provider Google --model gemini-3.1-pro-preview
+sagent --provider Google --model gemini-pro-3.1
 ```
 
 The public package defaults to API-key auth with `--auth env`. Provider API keys are read from the provider's environment variable.
@@ -20,7 +20,7 @@ For non-interactive use, pipe a prompt on stdin:
 
 ```bash
 printf 'Summarize this repository in five bullets.' | \
-  sagent --provider Google --model gemini-3.1-pro-preview --output-format json
+  sagent --provider Google --model gemini-pro-3.1 --output-format json
 ```
 
 `sagent` starts the REPL only when both `--input-format` and `--output-format` are `text`. Any machine-readable format runs one headless request and exits.
@@ -30,10 +30,10 @@ printf 'Summarize this repository in five bullets.' | \
 ```bash
 sagent --provider Anthropic --model sonnet-4.6
 sagent --provider OpenAI --model sol-6
-sagent --provider Google --model gemini-3.1-pro-preview
-sagent --provider Moonshot --model kimi-k2.6
-sagent --provider DashScope --model qwen3.6-plus
-sagent --provider MiniMax --model MiniMax-M2.7
+sagent --provider Google --model gemini-pro-3.1
+sagent --provider Moonshot --model kimi-2.6
+sagent --provider DashScope --model qwen-plus-3.7
+sagent --provider MiniMax --model minimax-2.7
 sagent --provider SelfHosted
 sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
 ```
@@ -144,7 +144,7 @@ Compaction keeps long sessions within the model context window and writes pre-co
 
 ```bash
 printf '{"prompt":"Say hi"}\n' | \
-  sagent --provider Google --model gemini-3.1-pro-preview \
+  sagent --provider Google --model gemini-pro-3.1 \
   --input-format stream-json --output-format stream-json
 ```
 
@@ -236,7 +236,7 @@ model, retry timestamps, and a sanitized error snapshot.
 export SLACK_APP_TOKEN=xapp-...
 export SLACK_BOT_TOKEN=xoxb-...
 export GOOGLE_API_KEY=...
-sagent-slack --provider Google --model gemini-3.1-pro-preview
+sagent-slack --provider Google --model gemini-pro-3.1
 ```
 
 Slack app setup:

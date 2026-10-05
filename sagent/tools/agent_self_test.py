@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast, override
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -13,6 +13,7 @@ import pytest
 from sagent import providers
 from sagent.agent.agent import Agent
 from sagent.agent.state import current_agent_var, tool_state_var
+from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.testing import MockModelCaps
 from sagent.tools.agent_self import AgentSelf
 from sagent.types.capability import (
@@ -26,7 +27,6 @@ from sagent.types.model import (
     ModelRequest,
     ModelResponse,
 )
-from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AssistantMessage,
     Clear,
@@ -73,7 +73,7 @@ def _catalog_stub(capabilities: Mapping[str, ModelCapability]) -> type:
 
     class StubCatalog:
         catalog = ModelCatalog(
-            rows=capabilities,
+            models=ModelTable(rows=tuple(capabilities.values())),
             transport=ModelCapability(),
         )
 
@@ -172,6 +172,17 @@ async def test_run_empty_status_is_error() -> None:
     with _active(agent):
         result = await t.run({"status": "   "})
     assert result.is_error
+    assert result.call_id == ""
+    assert result.content == "status cannot be empty when provided."
+
+
+@pytest.mark.asyncio
+async def test_non_string_status_is_error() -> None:
+    agent = _make_agent()
+    with _active(agent):
+        result = await AgentSelf().run({"status": 42})
+    assert result.is_error
+    assert result.content == "status must be a string."
 
 
 @pytest.mark.asyncio
@@ -182,6 +193,15 @@ async def test_context_prompt_without_context_is_error() -> None:
         result = await t.run({"context_prompt": "x"})
     assert result.is_error
     assert "context_prompt is only valid" in result.content
+
+
+@pytest.mark.asyncio
+async def test_non_string_context_prompt_is_error() -> None:
+    agent = _make_agent()
+    with _active(agent):
+        result = await AgentSelf().run({"context": "compact", "context_prompt": 42})
+    assert result.is_error
+    assert result.content == "context_prompt must be a string."
 
 
 @pytest.mark.asyncio
@@ -202,6 +222,30 @@ async def test_invalid_model_options_object_errors() -> None:
         result = await t.run({"model_options": "not-an-object"})
     assert result.is_error
     assert "model_options must be an object" in result.content
+
+
+@pytest.mark.asyncio
+async def test_non_string_model_option_key_is_error() -> None:
+    agent = _make_agent()
+    options = cast(dict[str, object], cast(object, {1: "value"}))
+    with _active(agent):
+        result = await AgentSelf().run({"model_options": options})
+    assert result.is_error
+    assert result.content == "model_options keys must be strings."
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["cache_ttl", "service_tier"])
+@pytest.mark.parametrize("value", [[], {}])
+async def test_unhashable_model_option_value_is_error(
+    key: str,
+    value: object,
+) -> None:
+    agent = Agent(model=TierStubModel(), tools=[])
+    with _active(agent):
+        result = await AgentSelf().run({"model_options": {key: value}})
+    assert result.is_error
+    assert key in result.content
 
 
 @pytest.mark.asyncio
@@ -332,21 +376,21 @@ async def test_exceeds_cap_suggests_window_variant_when_one_exists() -> None:
 async def test_exceeds_smaller_profile_suggests_the_maximal_bare_id() -> None:
     agent = Agent(
         model=StubProviderModel(
-            model_id="astra-6+272k",
+            model_id="astra-6.0+272k",
             max_request_tokens=272_000,
         ),
         tools=[],
         model_recipe=ModelRecipe(
             provider="OpenAI",
             auth="env",
-            model_id="astra-6+272k",
+            model_id="astra-6.0+272k",
             account="",
         ),
     )
     with _active(agent):
         result = await AgentSelf().run({"max_request_tokens": 500_000})
     assert result.is_error
-    assert "model_id=astra-6 " in result.content
+    assert "model_id=astra-6.0 " in result.content
 
 
 @pytest.mark.asyncio
@@ -410,7 +454,7 @@ async def test_model_change_auth_without_model_id_preserves_current_model() -> N
     with (
         _active(agent),
         patch(
-            "sagent.tools.agent_self.build_provider",
+            "sagent.providers.providers.build_provider",
         ) as bp,
     ):
         bp.return_value = MagicMock(model=MagicMock(return_value=StubProviderModel()))
@@ -518,6 +562,35 @@ async def test_model_options_unsupported_key_errors() -> None:
         result = await t.run({"model_options": {"thinking": True}})
     assert result.is_error
     assert "Unsupported model_options" in result.content
+
+
+@dataclass(slots=True, kw_only=True)
+class OptionsStubModel(StubProviderModel):
+    """Stub model advertising effort and cache-TTL choices."""
+
+    valid_efforts: tuple[ThinkingEffort, ...] = ("low", "high")
+
+    @property
+    @override
+    def capability(self) -> ModelCapability:
+        return replace(
+            super(OptionsStubModel, self).capability,
+            cache_ttl_sec=frozenset({0.0, 300.0}),
+        )
+
+
+@pytest.mark.asyncio
+async def test_null_effort_and_cache_ttl_clear_settings() -> None:
+    agent = Agent(model=OptionsStubModel(), tools=[])
+    agent.model.settings.thinking_effort = "high"
+    agent.model.settings.cache_ttl_sec = 300.0
+    with _active(agent):
+        result = await AgentSelf().run(
+            {"model_options": {"effort": None, "cache_ttl": None}},
+        )
+    assert not result.is_error, result.content
+    assert agent.model.settings.thinking_effort == "none"
+    assert agent.model.settings.cache_ttl_sec == 0.0
 
 
 @dataclass(slots=True, kw_only=True)
@@ -643,7 +716,7 @@ async def test_provider_change_without_auth_uses_target_default() -> None:
     fake_provider = MagicMock()
     fake_provider.model.return_value = StubProviderModel(model_id="gemini-3-pro")
     with patch(
-        "sagent.tools.agent_self.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ) as build:
         t = AgentSelf()
@@ -651,6 +724,86 @@ async def test_provider_change_without_auth_uses_target_default() -> None:
             result = await t.run({"provider": "Google", "model_id": "gemini-3-pro"})
     assert not result.is_error
     build.assert_called_once_with("Google", "env", account="work")
+
+
+@pytest.mark.asyncio
+async def test_provider_change_falls_back_when_inherited_account_is_missing() -> None:
+    agent = _make_agent(
+        spec=ModelRecipe(
+            provider="StubSource",
+            auth="credentials",
+            model_id="source-model",
+            account="work",
+        ),
+    )
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(model_id="gpt-5.5")
+    calls: list[tuple[str, str, str | None]] = []
+
+    def build(provider: str, auth: str, *, account: str | None) -> MagicMock:
+        calls.append((provider, auth, account))
+        if account == "work":
+            raise FileNotFoundError("No credentials for work")
+        return fake_provider
+
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            side_effect=build,
+        ),
+        patch(
+            "sagent.tools.agent_self.default_auth_for_provider",
+            return_value="credentials",
+        ),
+        _active(agent),
+    ):
+        result = await AgentSelf(allow_providers=("StubTarget",)).run(
+            {"provider": "StubTarget", "model_id": "gpt-5.5"},
+        )
+    assert not result.is_error, result.content
+    assert calls == [
+        ("StubTarget", "credentials", "work"),
+        ("StubTarget", "credentials", None),
+    ]
+    assert agent.model_recipe is not None
+    assert agent.model_recipe.account is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_missing_account_does_not_fall_back() -> None:
+    agent = _make_agent(
+        spec=ModelRecipe(
+            provider="StubSource",
+            auth="credentials",
+            model_id="source-model",
+            account="default",
+        ),
+    )
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            side_effect=FileNotFoundError("No credentials for work"),
+        ) as build,
+        patch(
+            "sagent.tools.agent_self.default_auth_for_provider",
+            return_value="credentials",
+        ),
+        _active(agent),
+    ):
+        result = await AgentSelf(allow_providers=("StubTarget",)).run(
+            {
+                "provider": "StubTarget",
+                "model_id": "gpt-5.5",
+                "account": "work",
+            },
+        )
+    assert result.is_error
+    assert "No credentials for work" in result.content
+    build.assert_called_once_with(
+        "StubTarget",
+        "credentials",
+        account="work",
+    )
 
 
 @pytest.mark.asyncio
@@ -666,7 +819,7 @@ async def test_account_default_string_is_preserved() -> None:
     fake_provider = MagicMock()
     fake_provider.model.return_value = StubProviderModel(model_id="gpt-5")
     with patch(
-        "sagent.tools.agent_self.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ) as build:
         t = AgentSelf()
@@ -698,7 +851,7 @@ async def test_model_swap_shrinks_budget_to_new_model_window() -> None:
         max_request_tokens=50_000,
     )
     with patch(
-        "sagent.tools.agent_self.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ):
         t = AgentSelf()
@@ -727,7 +880,7 @@ async def test_model_swap_with_explicit_budget_lands_in_one_step() -> None:
         max_request_tokens=50_000,
     )
     with patch(
-        "sagent.tools.agent_self.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ):
         t = AgentSelf()
@@ -770,7 +923,7 @@ async def test_model_swap_clears_effort_and_reports_unset() -> None:
     fake_provider = MagicMock()
     fake_provider.model.return_value = StubProviderModel(model_id="plain-stub")
     with patch(
-        "sagent.tools.agent_self.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ):
         t = AgentSelf()
@@ -890,7 +1043,7 @@ async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> No
     fake_provider = MagicMock()
     fake_provider.model.return_value = StubProviderModel(model_id="plain-stub")
     with patch(
-        "sagent.tools.agent_self.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ):
         t = AgentSelf()

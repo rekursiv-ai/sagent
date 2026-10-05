@@ -17,7 +17,8 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
-from sagent.lib.custom_json import DictCodec, IntCodec
+from sagent.catalog.table import ModelTable
+from sagent.lib.custom_json import convert
 from sagent.types.capability import (
     ContextTag,
     ModelCapability,
@@ -53,10 +54,12 @@ __all__ = [
 CACHE_TTL_SEC: Final = frozenset({300.0, 3600.0})
 
 
-# Thinking capability measured against the live API (Jun 2026). ``auto`` is
-# ``thinking.type=adaptive`` (no budget); ``fixed`` is ``enabled`` +
-# ``budget_tokens``. A model missing ``text`` reasons but returns a
-# signed-but-empty block -- the plaintext is never delivered.
+# Thinking capability per https://platform.claude.com/docs/en/build-with-claude/thinking
+# (verified 2026-10-03). ``auto`` is ``thinking.type=adaptive`` (no budget);
+# ``fixed`` is ``enabled`` + ``budget_tokens``. Output ``text`` sends
+# ``display: "summarized"`` and ``redacted`` sends ``"omitted"``; every row
+# offers both, because 4.7-and-later default to ``omitted`` but accept an
+# explicit ``summarized``.
 #
 # Every row states ``none`` in each thinking set: a model that CAN think can
 # also omit an explicit thinking request, and the axis is total, so omitting it
@@ -64,8 +67,8 @@ CACHE_TTL_SEC: Final = frozenset({300.0, 3600.0})
 #
 # Knowledge cutoffs are the vendor's "reliable knowledge cutoff", and prices
 # its published table (input, output, 5m/1h cache write, cache hit), both
-# verified on 2026-09-24.
-def models() -> Mapping[str, ModelCapability]:
+# verified on 2026-10-03.
+def models() -> ModelTable:
     """Return every Anthropic model, as the API-key transport sees it.
 
     Returns:
@@ -93,50 +96,53 @@ def models() -> Mapping[str, ModelCapability]:
         thinking=ThinkingCapability(
             effort=frozenset({"none", "low", "medium", "high", "xhigh", "max"}),
             budget=frozenset({"none", "auto"}),
-            output=frozenset({"none", "redacted"}),
+            output=frozenset({"none", "text", "redacted"}),
         ),
     )
-    # The 4.6-and-earlier reasoning contract: readable thinking and a fixed
-    # budget alongside adaptive.
+    # The 4.6-and-earlier reasoning contract: a fixed budget alongside adaptive.
     extended = replace(
         default.thinking,
         budget=frozenset({"none", "auto", "fixed"}),
-        output=frozenset({"none", "text", "redacted"}),
+    )
+    fable_5_1 = replace(
+        default,
+        model_id="fable-5.1",
+        wire_model_id="claude-fable-5-1",
+        prices=_prices(
+            _card(
+                request=10.0,
+                response=50.0,
+                cache_write=12.5,
+                cache_write_1h=20.0,
+                cache_read=0.25,
+            ),
+        ),
+    )
+    fable_5_0 = replace(
+        default,
+        model_id="fable-5.0",
+        wire_model_id="claude-fable-5",
+        knowledge_cutoff="January 2026",
+        prices=_prices(
+            _card(
+                request=10.0,
+                response=50.0,
+                cache_write=12.5,
+                cache_write_1h=20.0,
+                cache_read=1.0,
+            ),
+        ),
     )
     rows = (
-        replace(
-            default,
-            model_id="fable-5.1",
-            wire_model_id="claude-fable-5-1",
-            prices=_prices(
-                _card(
-                    request=10.0,
-                    response=50.0,
-                    cache_write=12.5,
-                    cache_write_1h=20.0,
-                    cache_read=0.25,
-                ),
-            ),
-        ),
-        replace(
-            default,
-            model_id="fable-5",
-            wire_model_id="claude-fable-5",
-            knowledge_cutoff="January 2026",
-            prices=_prices(
-                _card(
-                    request=10.0,
-                    response=50.0,
-                    cache_write=12.5,
-                    cache_write_1h=20.0,
-                    cache_read=1.0,
-                ),
-            ),
-        ),
+        fable_5_1,
+        fable_5_0,
+        # Invitation-only (Project Glasswing); same specs and prices as Fable.
+        replace(fable_5_1, model_id="mythos-5.1", wire_model_id="claude-mythos-5-1"),
+        replace(fable_5_0, model_id="mythos-5.0", wire_model_id="claude-mythos-5"),
         default,
         replace(
             default,
-            model_id="opus-5",
+            model_id="opus-5.0",
             wire_model_id="claude-opus-5",
             knowledge_cutoff="May 2026",
             prices=_prices(
@@ -156,7 +162,6 @@ def models() -> Mapping[str, ModelCapability]:
             model_id="opus-4.8",
             wire_model_id="claude-opus-4-8",
             knowledge_cutoff="January 2026",
-            context=_limits(beta="context-1m-2025-08-07"),
             prices=_prices(
                 _card(
                     request=5.0,
@@ -177,7 +182,6 @@ def models() -> Mapping[str, ModelCapability]:
             model_id="opus-4.7",
             wire_model_id="claude-opus-4-7",
             knowledge_cutoff="January 2026",
-            context=_limits(beta="context-1m-2025-08-07"),
             prices=_prices(
                 _card(
                     request=5.0,
@@ -194,7 +198,7 @@ def models() -> Mapping[str, ModelCapability]:
             wire_model_id="claude-opus-4-6",
             knowledge_cutoff="May 2025",
             approx_chars_per_token=3.12,
-            context=_limits(beta="context-1m-2025-08-07", image_edge_px=1568),
+            context=_limits(image_edge_px=1568),
             prices=_prices(
                 _card(
                     request=5.0,
@@ -235,11 +239,23 @@ def models() -> Mapping[str, ModelCapability]:
                 budget=frozenset({"none", "fixed"}),
             ),
         ),
-        # $2/$10 was introductory pricing through 2026-08-31; the scheduled
-        # rise to $3/$15 on 2026-09-01 was cancelled and this is now standard.
         replace(
             default,
-            model_id="sonnet-5",
+            model_id="sonnet-5.5",
+            wire_model_id="claude-sonnet-5-5",
+            prices=_prices(
+                _card(
+                    request=2.0,
+                    response=10.0,
+                    cache_write=2.5,
+                    cache_write_1h=4.0,
+                    cache_read=0.2,
+                ),
+            ),
+        ),
+        replace(
+            default,
+            model_id="sonnet-5.0",
             wire_model_id="claude-sonnet-5",
             knowledge_cutoff="January 2026",
             prices=_prices(
@@ -258,7 +274,7 @@ def models() -> Mapping[str, ModelCapability]:
             wire_model_id="claude-sonnet-4-6",
             knowledge_cutoff="August 2025",
             approx_chars_per_token=3.12,
-            context=_limits(beta="context-1m-2025-08-07", image_edge_px=1568),
+            context=_limits(image_edge_px=1568),
             prices=_prices(
                 _card(
                     request=3.0,
@@ -326,28 +342,12 @@ def models() -> Mapping[str, ModelCapability]:
             ),
         ),
     )
-    # Unverified: claude-sonnet-5-5's published prices are not recorded. This row
-    # copies the sonnet-5 card as a stand-in. Appended last so the family alias
-    # keeps pointing at sonnet-5.
-    sonnet_5 = next(row for row in rows if row.model_id == "sonnet-5")
-    rows = (
-        *rows,
-        replace(sonnet_5, model_id="sonnet-5.5", wire_model_id="claude-sonnet-5-5"),
-    )
     # A tier is offered exactly when it is priced.
     rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
-    # Rows run newest-first within each family, so the first match is the latest.
-
-    # And a new release moves its alias without an edit here.
-    latest = {
-        alias: next(row for row in rows if row.model_id.startswith(f"{family}-"))
-        for alias, family in (
-            ("best", "fable"),
-            ("default", "opus"),
-            ("utility", "sonnet"),
-        )
-    }
-    return MappingProxyType(latest | {row.model_id: row for row in rows})
+    return ModelTable(
+        rows=rows,
+        roles={"best": "fable", "default": "opus", "utility": "sonnet"},
+    )
 
 
 # A row carries only what the MODEL can do; caching, retry, and auth mode are
@@ -360,9 +360,9 @@ def api() -> ModelCapability:
 
     One model, three ways in::
 
-        models()["opus-5"] & api()          # API key: full tiers, cache
-        models()["opus-5"] & subscription() # same wire, OAuth-billed
-        models()["opus-5"] & cli()          # subprocess: no effort/tier
+        models()["opus-5.0"] & api()          # API key: full tiers, cache
+        models()["opus-5.0"] & subscription() # same wire, OAuth-billed
+        models()["opus-5.0"] & cli()          # subprocess: no effort/tier
 
     Returns:
       capability: The API transport's restrictions.
@@ -389,9 +389,9 @@ def cli() -> ModelCapability:
 
     One model, three ways in::
 
-        models()["opus-5"] & api()          # API key: full tiers, cache
-        models()["opus-5"] & subscription() # same wire, OAuth-billed
-        models()["opus-5"] & cli()          # subprocess: no effort/tier
+        models()["opus-5.0"] & api()          # API key: full tiers, cache
+        models()["opus-5.0"] & subscription() # same wire, OAuth-billed
+        models()["opus-5.0"] & cli()          # subprocess: no effort/tier
 
     Returns:
       capability: The CLI transport's restrictions.
@@ -412,9 +412,9 @@ def subscription() -> ModelCapability:
 
     One model, three ways in::
 
-        models()["opus-5"] & api()          # API key: full tiers, cache
-        models()["opus-5"] & subscription() # same wire, OAuth-billed
-        models()["opus-5"] & cli()          # subprocess: no effort/tier
+        models()["opus-5.0"] & api()          # API key: full tiers, cache
+        models()["opus-5.0"] & subscription() # same wire, OAuth-billed
+        models()["opus-5.0"] & cli()          # subprocess: no effort/tier
 
     Returns:
       capability: The subscription transport's restrictions.
@@ -438,18 +438,18 @@ def usage_tokens(usage: Mapping[str, object], *, cache_ttl_sec: float) -> TokenC
       tokens: The request's usage.
 
     """
-    written = IntCodec.coerce(usage.get("cache_creation_input_tokens"), 0)
-    split = DictCodec.coerce(usage.get("cache_creation"))
+    written = convert(usage.get("cache_creation_input_tokens"), int, default=0)
+    split = convert(usage.get("cache_creation"), dict[str, object], default={})
     if split:
-        written_1h = IntCodec.coerce(split.get("ephemeral_1h_input_tokens"), 0)
+        written_1h = convert(split.get("ephemeral_1h_input_tokens"), int, default=0)
     else:
         written_1h = written if cache_ttl_sec >= 3600.0 else 0
     return TokenCount(
-        request=IntCodec.coerce(usage.get("input_tokens"), 0),
-        response=IntCodec.coerce(usage.get("output_tokens"), 0),
+        request=convert(usage.get("input_tokens"), int, default=0),
+        response=convert(usage.get("output_tokens"), int, default=0),
         cache_write=written - written_1h,
         cache_write_1h=written_1h,
-        cache_read=IntCodec.coerce(usage.get("cache_read_input_tokens"), 0),
+        cache_read=convert(usage.get("cache_read_input_tokens"), int, default=0),
     )
 
 
@@ -496,7 +496,6 @@ def _prices(
 def _limits(
     *,
     max_tokens: int = 1_000_000,
-    beta: str = "",
     output_tokens: int = 128_000,
     image_edge_px: int = 2576,
 ) -> Mapping[ContextTag, ModelLimits]:
@@ -506,14 +505,11 @@ def _limits(
         max_response_tokens=output_tokens,
         max_request_bytes=32 * 1024 * 1024,
         max_image_edge_px=image_edge_px,
-        max_image_bytes=5 * 1024 * 1024,
-        request_betas=frozenset({beta} if beta else ()),
+        # The vision page caps 10 MB *base64-encoded*; this cap is applied to raw
+        # bytes before encoding, which inflates them by 4/3.
+        max_image_bytes=10 * 1000 * 1000 * 3 // 4,
     )
     context: dict[ContextTag, ModelLimits] = {"": limits}
     if max_tokens > 200_000:
-        context["+200k"] = replace(
-            limits,
-            max_request_tokens=200_000,
-            request_betas=frozenset(),
-        )
+        context["+200k"] = replace(limits, max_request_tokens=200_000)
     return MappingProxyType(context)

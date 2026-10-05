@@ -197,8 +197,8 @@ repos:
       # It sizes $WORKERS, then runs the hook's command line from the single
       # `args` entry; per-hook differences (env vars, marker filters, exit-5
       # tolerance, capability guards) live in that arg, so the arithmetic exists
-      # once. Inline rather than under ops/ because this file is copied verbatim
-      # into public repos that get no ops/.
+      # once. Inline rather than in a helper module, because this file is
+      # copied verbatim into public repos, which carry no such module.
       #
       # Appended filenames reach the inner command as "$@" after an explicit
       # `bash` $0: plain `bash -c "$@"` would eat the first FILENAME as $0 and
@@ -399,8 +399,9 @@ repos:
         types_or: [python, pyi]
         entry: *worker-entry
         # `files` stays `"$@"` unless BOTH the opt-in is set and the harvester
-        # exists -- the latter never does in an exported package, which ships no
-        # `ops/` tree.
+        # exists. An exported package has neither: the fenced block below is
+        # stripped from the exported config, because the harvester's monorepo
+        # path would trip the `monorepo-references` leak check.
         #
         # An ARRAY throughout, never a scalar. Flattening argv into a string and
         # re-splitting on IFS turns `dir with space/mod.py` into three arguments
@@ -414,13 +415,6 @@ repos:
           - WORKERS_BASEDPYRIGHT
           - |
             files=("$@")
-            depth=${PRECOMMIT_CODEGRAPH_BASEDPYRIGHT:-}
-            case "$depth" in ""|0*|*[!0-9]*) depth=;; esac
-            if [ -n "$depth" ] && [ -x ops/git/precommit/affected.py ]; then
-              harvested=$(ops/git/precommit/affected.py --emit files --depth "$depth" --workers "$WORKERS" --explain -- "$@") &&
-                [ -n "$harvested" ] &&
-                IFS=$'\n' read -r -d '' -a files < <(printf "%s" "$harvested" && printf '\0')
-            fi
             check=(basedpyright --threads="$WORKERS")
             exec env NODE_OPTIONS=--max-old-space-size=2048 \
               uv --quiet run --frozen --group pre-commit "${check[@]}" "${files[@]}"
@@ -495,24 +489,23 @@ repos:
         types: [python]
         entry: *worker-entry
         # The inline loop is the SIDECAR PROBE and it is the DEFAULT. The
-        # harvester supersedes it only under `PRECOMMIT_CODEGRAPH_PYTEST`, and never
-        # in an exported package, which ships no `ops/` tree.
+        # harvester supersedes it only under `PRECOMMIT_CODEGRAPH_PYTEST`, and
+        # never in an exported package: the fenced block below is stripped from
+        # the exported config, because the harvester's monorepo path would trip
+        # the `monorepo-references` leak check.
         #
         # The probe also runs whenever the harvester yields NOTHING -- a nonzero
         # exit or an empty selection. Without that, a corrupt or stale index
         # made this hook run zero tests and exit green, which is worse than not
         # having the index at all.
+        #
+        # A literal (`|`) script, not folded, for the reason `basedpyright`
+        # gives above: the copybarista markers below are shell comments, and
+        # folding would join the rest of the script onto them.
         args:
           - WORKERS_PYTEST
-          - >-
+          - |
             tests=();
-            depth=${PRECOMMIT_CODEGRAPH_PYTEST:-};
-            case "$depth" in ""|0*|*[!0-9]*) depth=;; esac;
-            if [ -n "$depth" ] && [ -x ops/git/precommit/affected.py ]; then
-              ids=$(ops/git/precommit/affected.py --emit nodeids --depth "$depth" --workers "$WORKERS" --explain -- "$@") &&
-                [ -n "$ids" ] &&
-                IFS=$'\n' read -r -d '' -a tests < <(printf "%s" "$ids" && printf '\0');
-            fi;
             if [ ${#tests[@]} -eq 0 ]; then
               for f in "$@"; do
                 dir=$(dirname "$f");
@@ -545,8 +538,8 @@ repos:
                 fi;
               fi;
             fi;
-            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" "${cov[@]}" -q --tb=short -- "${tests[@]}"
-            || test "$?" = 5
+            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" "${cov[@]}" -q --tb=short -- "${tests[@]}" ||
+              test "$?" = 5
 
       # Keep after pytest: pre-commit runs hooks in declaration order.
       # Missing coverage is normal when no source module was tested.

@@ -13,6 +13,7 @@ from sagent.providers.lib.errors import PolicyBlockedError
 from sagent.repl.render import (
     _STREAM_BUF_FLUSH_CHARS,
     HALT_MESSAGE,
+    HALT_MESSAGE_POLICY,
     HELP_TEXT,
     RecordingPrinter,
     make_render_observer,
@@ -488,8 +489,8 @@ def test_context_overflow_error_uses_context_specific_halt_banner() -> None:
     assert "retry" not in banner.lower()
 
 
-def test_policy_block_error_warns_against_same_context_retry() -> None:
-    """A safeguard block needs context repair, not the generic retry advice."""
+def test_policy_block_error_uses_the_refusal_banner() -> None:
+    """A safeguard block withholds its input and keeps the session going."""
     p = RecordingPrinter()
     obs = make_render_observer(p)
     exc = PolicyBlockedError(
@@ -505,14 +506,17 @@ def test_policy_block_error_warns_against_same_context_retry() -> None:
     assert "PolicyBlockedError" not in rendered
     assert len(p.halts) == 1
     banner = p.halts[0]
-    assert banner != HALT_MESSAGE
-    assert "/clear" in banner
-    assert "/model" in banner
-    assert "do not retry" in banner.lower()
+    assert banner == HALT_MESSAGE_POLICY
 
 
-def test_normalized_model_refusal_warns_against_same_context_retry() -> None:
-    """HTTP-200 refusals use the same non-retry recovery path as policy 400s."""
+def test_the_refusal_banner_claims_only_what_always_holds() -> None:
+    """A refusal with nothing after the last answer withholds nothing."""
+    assert "dropped" not in HALT_MESSAGE_POLICY
+    assert "type to continue" in HALT_MESSAGE_POLICY
+
+
+def test_normalized_model_refusal_uses_the_refusal_banner() -> None:
+    """HTTP-200 refusals take the same path as policy 400s."""
     p = RecordingPrinter()
     obs = make_render_observer(p)
     response = ModelResponse(
@@ -527,10 +531,7 @@ def test_normalized_model_refusal_warns_against_same_context_retry() -> None:
     assert "req_refused" in rendered
     assert len(p.halts) == 1
     banner = p.halts[0]
-    assert banner != HALT_MESSAGE
-    assert "/clear" in banner
-    assert "/model" in banner
-    assert "do not retry" in banner.lower()
+    assert banner == HALT_MESSAGE_POLICY
 
 
 def test_request_too_large_error_does_not_recommend_retry() -> None:

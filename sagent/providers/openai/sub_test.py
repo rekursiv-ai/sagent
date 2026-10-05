@@ -49,13 +49,13 @@ if TYPE_CHECKING:
 
 
 def test_subscription_context_clamps_request_tokens() -> None:
-    clamped = subscription_models()["astra-6"].context[""]
+    clamped = subscription_models()["astra-6.0"].context[""]
     assert clamped.max_request_tokens == 272_000
     assert clamped.max_response_tokens == 32_000
 
 
 def test_subscription_context_keeps_small_windows() -> None:
-    clamped = subscription_models()["gpt-4"].context[""]
+    clamped = subscription_models()["gpt-4.0"].context[""]
     assert clamped.max_request_tokens == 8_192
     assert clamped.max_response_tokens == 8_192
 
@@ -71,8 +71,8 @@ def test_subscription_context_inherits_size_caps_from_parent() -> None:
     # caps are a property of the underlying model and must flow through
     # unchanged, not be overwritten by a stale local constant. A divergent
     # parent capability proves inheritance rather than a hardcoded match.
-    api = models()["astra-6"].context[""]
-    clamped = subscription_models()["astra-6"].context[""]
+    api = models()["astra-6.0"].context[""]
+    clamped = subscription_models()["astra-6.0"].context[""]
     assert clamped.max_image_edge_px == api.max_image_edge_px
     assert clamped.max_image_bytes == api.max_image_bytes
     assert clamped.max_request_bytes == api.max_request_bytes
@@ -332,10 +332,10 @@ def test_subscription_model_uses_default_when_unset() -> None:
 
 def test_subscription_default_model_is_openai_default_without_1m() -> None:
     """Sub default = the API default's base id (``+1m`` is not in the catalog)."""
-    assert OpenAISubscription.catalog.resolve("default")[0].model_id == "astra-6"
-    assert OpenAI.catalog.resolve("default")[0].model_id == "astra-6"
+    assert OpenAISubscription.catalog.resolve("default")[0].model_id == "sol-6.1"
+    assert OpenAI.catalog.resolve("default")[0].model_id == "sol-6.1"
     # The narrowed default must resolve against the narrowed catalog.
-    assert "default" in OpenAISubscription.catalog.rows
+    assert "default" in OpenAISubscription.catalog.models
 
 
 def test_subscription_default_utility_model_inherits_from_openai() -> None:
@@ -347,7 +347,7 @@ def test_subscription_default_utility_model_inherits_from_openai() -> None:
 
 def test_subscription_utility_model_uses_utility_default() -> None:
     m = _make_provider().model("utility")
-    assert m.capability.model_id == "luna-6"
+    assert m.capability.model_id == "luna-6.0"
 
 
 def test_subscription_model_clamps_against_wire_contract() -> None:
@@ -360,9 +360,9 @@ def test_subscription_model_clamps_against_wire_contract() -> None:
 def test_subscription_rejects_1m_ids() -> None:
     """``+1m`` buys nothing under the wire contract, so it is not a known id."""
     p = _make_provider()
-    with pytest.raises(ValueError, match="Unknown model"):
+    with pytest.raises(ValueError, match=r"has no \+1m context"):
         _ = p.model("sol-5.6+1m")
-    assert not any(name.endswith("+1m") for name in OpenAISubscription.catalog.rows)
+    assert not any(name.endswith("+1m") for name in OpenAISubscription.catalog.models)
 
 
 def test_subscription_model_supports_thinking_via_reasoning_effort() -> None:
@@ -560,7 +560,7 @@ def test_subscription_stream_maps_pre_56_effort_to_wire_vocabulary(
 
 @pytest.mark.parametrize(
     ("effort", "wire_effort"),
-    [("min", "none"), ("medium", "medium"), ("xhigh", "xhigh"), ("max", "max")],
+    [("low", "low"), ("medium", "medium"), ("xhigh", "xhigh"), ("max", "max")],
 )
 def test_subscription_stream_preserves_gpt_56_effort(
     effort: ThinkingEffort,
@@ -577,7 +577,7 @@ def test_subscription_catalog_efforts_are_all_buildable() -> None:
         assert _wire_effort_for(
             model_id=model_id,
             effort=effort,
-        ) == reasoning_effort(effort, model_id=model_id)
+        ) == reasoning_effort(effort)
 
 
 def test_subscription_stream_requests_reasoning_summary_when_thinking() -> None:

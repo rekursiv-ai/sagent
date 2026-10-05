@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Final
+from typing import IO, TYPE_CHECKING, Final, cast
 
 import contextlib
 import json
@@ -38,7 +38,7 @@ import sys
 import time
 import uuid
 
-from sagent.lib.custom_json import DictCodec, MutableJSON, json_unfreeze
+from sagent.lib.custom_json import convert
 from sagent.lib.userdirs import data_dir
 
 
@@ -777,25 +777,22 @@ def _safe_scope(scope: str) -> str:
     return scope
 
 
-def _iter_jsonl(lines: Iterable[str]) -> Iterator[MutableJSON]:
+def _iter_jsonl(lines: Iterable[str]) -> Iterator[dict[str, object]]:
     """Yield one JSON dict per line, logging malformed and non-dict entries."""
     for raw in lines:
         line = raw.strip()
         if not line:
             continue
         try:
-            parsed = json.loads(line)
+            parsed: object = json.loads(line)
         except json.JSONDecodeError:
             logger.warning("Skipping malformed JSONL line: %r", line[:120])
             continue
-        # ``DictCodec.coerce`` narrows without a cast, but maps a non-object to an
-        # empty dict -- indistinguishable from ``{}`` on the wire. Compare
-        # against the parsed value to keep the non-dict warning honest.
-        record = DictCodec.coerce(parsed)
-        if record or parsed == {}:
-            yield json_unfreeze(record)
-        else:
+        if not isinstance(parsed, dict):
             logger.warning("Skipping non-dict JSONL record: %r", line[:120])
+            continue
+        record = convert(cast(object, parsed), dict[str, object])
+        yield record
 
 
 # Returns None if the session file is missing or corrupt. Scans the file to pull the

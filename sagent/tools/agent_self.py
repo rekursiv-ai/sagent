@@ -22,10 +22,16 @@ from sagent.agent.state import (
     AgentLike,
     current_agent_var,
 )
+from sagent.catalog.table import (
+    CONTEXT_TAGS,
+    UnknownModelError,
+    UnsupportedTagError,
+    base_model_id,
+)
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.providers.providers import (
     PROVIDER_NAMES,
-    build_provider,
+    build_provider_with_account_fallback,
     default_auth_for_provider,
     infer_provider,
     provider_class,
@@ -37,17 +43,8 @@ from sagent.tools.core import (
 )
 from sagent.types.capability import ThinkingEffort
 from sagent.types.cost import ServiceTier
-from sagent.types.model import (
-    CONTEXT_TAGS,
-    Model,
-    ModelRecipe,
-    base_model_id,
-)
-from sagent.types.providers import (
-    ModelResolver,
-    UnknownModelError,
-    UnsupportedTagError,
-)
+from sagent.types.model import Model, ModelRecipe
+from sagent.types.providers import ModelResolver
 from sagent.types.runtime import (
     Clear,
     Compact,
@@ -280,17 +277,10 @@ class _PatchPlan:
     model: _ModelPlan | None = None
     """Pending model swap, or ``None`` to keep."""
 
-    thinking: bool | None = None
-    """Toggle for extended-thinking; ``None`` to keep."""
-
-    effort: ThinkingEffort | None = None
-    """Effort level; ``None`` means leave unchanged."""
-
-    cache_ttl: str | None = None
-    """Cache TTL (``"5m"`` / ``"1h"``); ``None`` to keep."""
-
-    service_tier: ServiceTier | None = None
-    """Speed/price tier; ``None`` means leave unchanged."""
+    model_options: Mapping[str, object] = dataclasses.field(
+        default_factory=dict[str, object],
+    )
+    """Normalized concrete model settings; absent keys remain unchanged."""
 
     max_request_tokens: int | None = None
     """New per-request input budget; ``None`` to keep."""
@@ -325,7 +315,22 @@ def plan_model_options(
     raw = d.get("model_options")
     if raw is None:
         return {}
-    options = cast(Mapping[str, object], raw)
+    if not isinstance(raw, Mapping):
+        return ToolResult(
+            call_id="",
+            content="model_options must be an object.",
+            is_error=True,
+        )
+    untyped_options = cast(Mapping[object, object], raw)
+    options: dict[str, object] = {}
+    for key, value in untyped_options.items():
+        if not isinstance(key, str):
+            return ToolResult(
+                call_id="",
+                content="model_options keys must be strings.",
+                is_error=True,
+            )
+        options[key] = value
     if "latency" in options:
         # Redirect beats the generic unsupported-key error: this knob was
         # renamed rather than removed.
@@ -362,15 +367,16 @@ def plan_model_options(
             )
         planned["thinking"] = value
     if "effort" in options:
-        value = options["effort"]
-        if value is not None and not isinstance(value, str):
+        raw_value = options["effort"]
+        value = "none" if raw_value is None else raw_value
+        if not isinstance(value, str):
             return ToolResult(
                 call_id="",
                 content="model_options.effort must be a string or null.",
                 is_error=True,
             )
         valid = model.capability.thinking.effort
-        if value is not None and value not in valid:
+        if value not in valid:
             quoted = ", ".join(repr(e) for e in valid) or "(none)"
             return ToolResult(
                 call_id="",
@@ -382,21 +388,37 @@ def plan_model_options(
             )
         planned["effort"] = value
     if "cache_ttl" in options:
-        value = options["cache_ttl"]
-        if value is not None and value not in CACHE_TTL_SEC:
+        raw_value = options["cache_ttl"]
+        if raw_value is None:
+            value = 0.0
+        elif isinstance(raw_value, str) and raw_value in CACHE_TTL_SEC:
+            value = CACHE_TTL_SEC[raw_value]
+        else:
             quoted = ", ".join(repr(k) for k in CACHE_TTL_SEC)
             return ToolResult(
                 call_id="",
                 content=f"model_options.cache_ttl must be one of {quoted} or null.",
                 is_error=True,
             )
-        planned["cache_ttl"] = value
+        if value not in model.capability.cache_ttl_sec:
+            return ToolResult(
+                call_id="",
+                content=(
+                    f"model_options.cache_ttl for {model.tagged_model_id}"
+                    f" does not support {raw_value!r}."
+                ),
+                is_error=True,
+            )
+        planned["cache_ttl_sec"] = value
     if "service_tier" in options:
-        # ``null`` means "let the vendor pick", which is the axis's own unset
-        # value rather than an absent one.
-        value = (
-            options["service_tier"] if options["service_tier"] is not None else ("auto")
-        )
+        raw_value = options["service_tier"]
+        value = "auto" if raw_value is None else raw_value
+        if not isinstance(value, str):
+            return ToolResult(
+                call_id="",
+                content="model_options.service_tier must be a string or null.",
+                is_error=True,
+            )
         valid = model.capability.service_tier
         if value not in valid:
             quoted = ", ".join(repr(t) for t in sorted(valid))
@@ -621,11 +643,10 @@ def _model_catalog_lines(provider_name: str) -> list[str]:
         ]
     lines = [f"Provider catalog: {provider_name}"]
     if isinstance(provider_cls, ModelResolver):
-        default, _ = provider_cls.catalog.resolve("default")
-        lines.append(f"Default model: {default.model_id}")
-        model_ids = list(provider_cls.catalog.rows)
-        models = ", ".join(sorted(model_ids))
-        lines.append(f"Known models: {models or 'none'}")
+        table = provider_cls.catalog.models
+        roles = ", ".join(f"{role}={table[role].model_id}" for role in table.roles)
+        lines.append(f"Roles: {roles or 'none'}")
+        lines.append(f"Known models: {', '.join(table) or 'none'}")
     else:
         lines.append("Known models: unavailable for this provider.")
     return lines
@@ -780,9 +801,6 @@ def _build_patch_plan(
     if isinstance(options_or_err, ToolResult):
         return options_or_err
     options = options_or_err
-    thinking = cast(bool | None, options.get("thinking"))
-    cache_ttl = cast(str | None, options.get("cache_ttl"))
-    service_tier = cast(ServiceTier | None, options.get("service_tier"))
     has_explicit_limits = "max_request_tokens" in d or "max_response_tokens" in d
     if has_explicit_limits:
         limits = _plan_limits(agent, target_model, d)
@@ -794,14 +812,11 @@ def _build_patch_plan(
     return _PatchPlan(
         status=status,
         model=model_plan,
-        thinking=thinking,
-        effort=cast(ThinkingEffort | None, options.get("effort")),
-        cache_ttl=cache_ttl,
-        service_tier=service_tier,
+        model_options=options,
         max_request_tokens=limits.get("max_request_tokens"),
         max_response_tokens=limits.get("max_response_tokens"),
         context=context,
-        context_prompt=str(d.get("context_prompt", "")),
+        context_prompt=cast(str, d.get("context_prompt", "")),
     )
 
 
@@ -826,22 +841,27 @@ def _commit_patch_plan(agent: AgentSelfAgent, plan: _PatchPlan) -> list[str]:
             if was != now:
                 parts.append(f"{name}={now} (unsupported)")
     settings = agent.model.settings
-    if plan.thinking is not None:
+    options = plan.model_options
+    if "thinking" in options:
+        thinking = cast(bool, options["thinking"])
         _ = apply_thinking_command(
-            "adaptive" if plan.thinking else "off",
+            "adaptive" if thinking else "off",
             settings,
             show=False,
         )
-        parts.append(f"thinking={'on' if plan.thinking else 'off'}")
-    if plan.effort is not None:
-        settings.thinking_effort = plan.effort
-        parts.append(f"effort={plan.effort}")
-    if plan.cache_ttl is not None:
-        settings.cache_ttl_sec = CACHE_TTL_SEC[plan.cache_ttl]
-        parts.append(f"cache_ttl={plan.cache_ttl}")
-    if plan.service_tier is not None:
-        settings.service_tier = plan.service_tier
-        parts.append(f"service_tier={plan.service_tier}")
+        parts.append(f"thinking={'on' if thinking else 'off'}")
+    if "effort" in options:
+        effort = cast(ThinkingEffort, options["effort"])
+        settings.thinking_effort = effort
+        parts.append(f"effort={effort}")
+    if "cache_ttl_sec" in options:
+        cache_ttl_sec = cast(float, options["cache_ttl_sec"])
+        settings.cache_ttl_sec = cache_ttl_sec
+        parts.append(f"cache_ttl={cache_ttl_sec:g}s")
+    if "service_tier" in options:
+        service_tier = cast(ServiceTier, options["service_tier"])
+        settings.service_tier = service_tier
+        parts.append(f"service_tier={service_tier}")
     if plan.max_request_tokens is not None:
         agent.max_request_tokens = plan.max_request_tokens
         parts.append(f"max_request_tokens={agent.max_request_tokens:,}")
@@ -856,6 +876,12 @@ def _commit_patch_plan(agent: AgentSelfAgent, plan: _PatchPlan) -> list[str]:
 
 def _validate_patch(d: Mapping[str, object]) -> ToolResult | None:
     """Validate cross-field AgentSelf patch constraints."""
+    if "context_prompt" in d and not isinstance(d["context_prompt"], str):
+        return ToolResult(
+            call_id="",
+            content="context_prompt must be a string.",
+            is_error=True,
+        )
     if "context_prompt" in d and "context" not in d:
         return ToolResult(
             call_id="",
@@ -897,7 +923,13 @@ def _plan_status(d: Mapping[str, object]) -> str | ToolResult | None:
     raw = d.get("status")
     if raw is None:
         return None
-    status = str(raw).strip()
+    if not isinstance(raw, str):
+        return ToolResult(
+            call_id="",
+            content="status must be a string.",
+            is_error=True,
+        )
+    status = raw.strip()
     if not status:
         return ToolResult(
             call_id="",
@@ -954,13 +986,14 @@ def _plan_model(
     if prov_name != spec.provider and prov_name not in allow:
         return provider_not_allowed_result(prov_name, allow, spec.provider)
     try:
-        prov = build_provider(
+        prov, account = build_provider_with_account_fallback(
             prov_name,
             auth,
             account=account,
+            fallback_to_default="account" not in d and prov_name != spec.provider,
         )
         new_model = prov.model(model_id)
-    except (AttributeError, RuntimeError, ValueError) as exc:
+    except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as exc:
         return ToolResult(
             call_id="",
             content=f"Failed to build model {model_id!r}: {exc}",

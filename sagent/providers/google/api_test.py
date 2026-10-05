@@ -452,42 +452,73 @@ def test_google_model_default_uses_default_model() -> None:
 
 
 def test_google_utility_model_uses_flash_lite() -> None:
-    """Utility model resolves to the cheapest current-gen Gemini.
-
-    ``gemini-2.5-flash-lite`` is the cheapest non-deprecated entry in
-    ``KNOWN_MODELS`` -- both transports (API key and CLI) inherit it.
-    """
+    """Utility resolves to the Flash-Lite Google names for new projects."""
     p = Google.from_key("k")
     m = p.model("utility")
-    assert m.capability.model_id == p.catalog.resolve("utility")[0].model_id
+    assert m.capability.model_id == "gemini-flash-lite-3.5"
 
 
 def test_google_model_properties() -> None:
     p = Google.from_key("k")
     m = p.model("gemini-2.5-pro")
-    assert m.limits.max_request_tokens == 1_000_000
+    assert m.limits.max_request_tokens == 1_048_576
     assert m.capability.thinking.budget != frozenset({"none"})
     assert m.capability.thinking.effort != frozenset({"none"})
     assert m.capability.cache_ttl_sec == frozenset({0.0})
     # Gemini publishes no per-image pixel or byte cap (images are tiled
-    # server-side); the only documented limit is the 20 MB total request size.
+    # server-side); the only documented limit is the 100 MB total request size.
     assert m.limits.max_image_edge_px == 0
     assert m.limits.max_image_bytes == 0
-    assert m.limits.max_request_bytes == 20 * 1024 * 1024
+    assert m.limits.max_request_bytes == 100 * 1024 * 1024
 
 
-def test_legacy_gemini_models_do_not_support_thinking() -> None:
-    """Legacy ``gemini-1.5-*`` models reject ``thinkingConfig``.
+def _level_wire(model_id: str, effort: ThinkingEffort) -> object:
+    """Return the ``thinkingConfig`` a fixed ``effort`` sends on ``model_id``."""
+    capability = Google.from_key("k").model(model_id).capability
+    settings = ModelSettings(
+        capability=capability,
+        thinking_effort=effort,
+        thinking_budget="fixed",
+        thinking_output="text",
+    )
+    body = _build_request(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        capability,
+        settings,
+        settings.limits,
+    )
+    return cast(MutableJSON, body["generationConfig"]).get("thinkingConfig")
 
-    The Google API answers HTTP 400 ``thinkingConfig is not supported`` for
-    these snapshots; capability advertisement must match so the local layer
-    short-circuits before the request flies.
-    """
-    p = Google.from_key("k")
-    off = frozenset({"none"})
-    for mid in ("gemini-1.5-flash", "gemini-1.5-pro"):
-        assert p.model(mid).capability.thinking.budget == off
-        assert p.model(mid).capability.thinking.effort == off
+
+@pytest.mark.parametrize(
+    ("effort", "level"),
+    [("min", "minimal"), ("low", "low"), ("medium", "medium"), ("high", "high")],
+)
+def test_gemini_3_sends_a_thinking_level_not_a_budget(
+    effort: ThinkingEffort,
+    level: str,
+) -> None:
+    """Gemini 3 takes ``thinkingLevel``; ``thinkingBudget`` is backward-compat only."""
+    assert _level_wire("gemini-3.6-flash", effort) == {
+        "includeThoughts": True,
+        "thinkingLevel": level,
+    }
+
+
+def test_gemini_3_effort_none_sends_no_level() -> None:
+    """``none`` lets the model's default level apply; it never asks for "off"."""
+    assert _level_wire("gemini-3.1-pro-preview", "none") == {"includeThoughts": True}
+
+
+def test_gemini_3_8_cannot_select_the_minimal_level() -> None:
+    """3.8 Flash answers ``minimal`` with an error, so the row withholds it."""
+    with pytest.raises(ValueError, match="thinking_effort='min'"):
+        _level_wire("gemini-3.8-flash", "min")
+
+
+def test_gemini_2_5_fixed_effort_none_sends_no_budget() -> None:
+    """No effort, no cap: 2.5 then thinks at its own default."""
+    assert _level_wire("gemini-2.5-flash", "none") == {"includeThoughts": True}
 
 
 def test_build_request_adaptive_thinking_uses_dynamic_budget() -> None:

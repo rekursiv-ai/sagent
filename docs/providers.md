@@ -6,12 +6,12 @@ Sagent separates providers from models. A provider owns authentication and creat
 
 | Provider class | Environment variable | Default model | Utility model | Notes |
 | --- | --- | --- | --- | --- |
-| `Anthropic` | `ANTHROPIC_API_KEY` | `opus-5.5` | `sonnet-5` | Anthropic API-key provider; `best` resolves to `fable-5.1`. |
-| `OpenAI` | `OPENAI_API_KEY` | `astra-6` | `luna-6` | OpenAI API provider. |
-| `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` | `gemini-2.5-flash-lite` | Google Gemini provider. |
-| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` | `kimi-k2-0905-preview` | OpenAI-compatible Kimi provider. |
-| `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` | `qwen3.6-flash` | Alibaba DashScope provider. |
-| `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M2.7` | `MiniMax-Text-01` | MiniMax provider. |
+| `Anthropic` | `ANTHROPIC_API_KEY` | `opus-5.5` | `sonnet-5.5` | Anthropic API-key provider; `best` resolves to `fable-5.1`. |
+| `OpenAI` | `OPENAI_API_KEY` | `sol-6.1` | `luna-6.0` | OpenAI API provider. |
+| `Google` | `GOOGLE_API_KEY` | `gemini-pro-3.1` | `gemini-flash-lite-3.5` | Google Gemini provider. |
+| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-3.0` | `kimi-2.6` | OpenAI-compatible Kimi provider. |
+| `DashScope` | `DASHSCOPE_API_KEY` | `qwen-plus-3.7` | `qwen-flash-3.8` | Alibaba DashScope provider. |
+| `MiniMax` | `MINIMAX_API_KEY` | `minimax-3.0` | `minimax-3.0` | MiniMax provider. |
 | `SelfHosted` | none | `Qwen/Qwen3.6-27B` | configured snapshot | Local HF transformers provider. |
 | `OpenAICompat` | subclass-defined | subclass-defined | subclass-defined | Base class for chat-completions-compatible APIs. |
 
@@ -23,7 +23,7 @@ The public package is designed around API-key providers.
 from sagent.providers import Google
 
 provider = Google.from_env()
-model = provider.model("gemini-3.1-pro-preview")
+model = provider.model("gemini-pro-3.1")
 utility = provider.model("utility")
 ```
 
@@ -38,9 +38,12 @@ ProviderClass.from_env().model("utility")
 
 `model(None)` uses the provider's default model. Unknown model IDs raise with the provider's known model list.
 
-Catalog keys use short names such as `astra-6`, `sol-6`, `luna-6`, and
-`terra-5.6`; vendor wire IDs remain accepted as compatibility aliases. A bare
-model ID selects its largest context window. Append `+272k` for a smaller
+Catalog keys are exact names of the form `family-major.minor`, such as
+`sol-6.1`, `luna-6.0`, and `opus-5.5`. A prefix names the newest model it
+starts: `sol` and `sol-6` both mean `sol-6.1`, and `opus-4` means `opus-4.8`.
+The roles `default`, `utility`, and `best` resolve the same way. Vendor wire
+IDs remain accepted as compatibility aliases. A bare model ID selects its
+largest context window. Append `+272k` for a smaller
 OpenAI window or `+200k` for a smaller Anthropic window when the model offers
 one. An explicit `+1m` is also accepted when the bare model already provides
 that window. Both OpenAI providers use the Responses API. Supported reasoning
@@ -54,7 +57,7 @@ reasoning and image-bearing tool results. Existing sessions need no conversion.
 ## CLI dispatch
 
 ```bash
-sagent --provider Google --auth env --model gemini-3.1-pro-preview
+sagent --provider Google --auth env --model gemini-pro-3.1
 ```
 
 `--provider` is the provider class name from `sagent.providers`. `--auth env` calls `Google.from_env()`.
@@ -65,7 +68,7 @@ for API keys so secrets do not land in shell history.
 ## Provider inference
 
 Agent tools first infer a provider from catalog membership, so short IDs such
-as `opus-4.8` and `luna-6` can switch providers without a separate provider
+as `opus-4.8` and `luna-6.0` can switch providers without a separate provider
 argument. Vendor prefixes remain as compatibility fallbacks:
 
 | Prefix | Provider |

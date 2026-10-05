@@ -27,7 +27,7 @@ export GOOGLE_API_KEY=...
 ## 2. Start the CLI
 
 ```bash
-sagent --provider Google --model gemini-3.1-pro-preview
+sagent --provider Google --model gemini-pro-3.1
 ```
 
 Ask a question at the prompt. The CLI stores a session for the current working directory by default.
@@ -36,7 +36,7 @@ For one-shot use, pipe a prompt on stdin:
 
 ```bash
 printf 'Say hi in one sentence.' | \
-  sagent --provider Google --model gemini-3.1-pro-preview --output-format json
+  sagent --provider Google --model gemini-pro-3.1 --output-format json
 ```
 
 ## 3. Create a tiny corpus
@@ -65,7 +65,7 @@ from sagent.providers import Google
 
 async def main() -> None:
     agent = Agent(
-        model=Google.from_env().model("gemini-3.1-pro-preview"),
+        model=Google.from_env().model("gemini-pro-3.1"),
         system="You summarize local project files concisely.",
         tools=[tools.Read(), tools.Glob(), tools.Grep()],
     )
@@ -92,7 +92,7 @@ Use an explicit session directory when follow-up calls should share state:
 
 ```python
 agent = Agent(
-    model=Google.from_env().model("gemini-3.1-pro-preview"),
+    model=Google.from_env().model("gemini-pro-3.1"),
     system="You summarize local project files concisely.",
     tools=[tools.Read(), tools.Glob(), tools.Grep()],
     session_dir="/tmp/sagent-demo/session",
@@ -102,8 +102,8 @@ agent = Agent(
 CLI equivalent:
 
 ```bash
-sagent --provider Google --model gemini-3.1-pro-preview --session /tmp/sagent-demo/session
-sagent --provider Google --model gemini-3.1-pro-preview --continue
+sagent --provider Google --model gemini-pro-3.1 --session /tmp/sagent-demo/session
+sagent --provider Google --model gemini-pro-3.1 --continue
 ```
 
 Use `--ephemeral` for prompts that should not write conversation state or auto-memory to disk.
@@ -114,7 +114,7 @@ For scripts, use `--output-format json` or `stream-json`:
 
 ```bash
 printf 'Summarize /tmp/sagent-demo/notes.md' | \
-  sagent --provider Google --model gemini-3.1-pro-preview \
+  sagent --provider Google --model gemini-pro-3.1 \
   --tools Read \
   --output-format stream-json
 ```
@@ -127,7 +127,7 @@ printf 'Summarize /tmp/sagent-demo/notes.md' | \
 
 ```python
 agent = Agent(
-    model=Google.from_env().model("gemini-3.1-pro-preview"),
+    model=Google.from_env().model("gemini-pro-3.1"),
     system="Draft a short answer, then spawn a reviewer before finalizing.",
     tools=[tools.AgentSpawn()],
 )

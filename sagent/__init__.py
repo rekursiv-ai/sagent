@@ -7,7 +7,7 @@
     from sagent.providers import Google
 
     agent = Agent(
-        model=Google.from_env().model("gemini-3.1-pro-preview"),
+        model=Google.from_env().model("gemini-pro-3.1"),
         system="You are a scientist.",
         tools=[tools.Bash(), tools.Read(), tools.Grep()],
     )

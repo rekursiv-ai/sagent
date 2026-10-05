@@ -20,7 +20,7 @@ import pytest
 from sagent.agent.retry import is_rate_limited, is_retryable
 from sagent.agent.session_io import _entry_from_json, _entry_to_json
 from sagent.catalog.openai import reasoning_effort
-from sagent.lib.custom_json import DictCodec, JSONValue, MutableJSON
+from sagent.lib.custom_json import convert, parse
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.responses import (
@@ -62,6 +62,8 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from sagent.lib.custom_json import JSONValue, MutableJSON
+
 
 @dataclass(slots=True, kw_only=True)
 class _Wire:
@@ -70,7 +72,7 @@ class _Wire:
 
     async def send(self, request: httpx2.Request) -> httpx2.Response:
         self.paths.append(request.url.path)
-        self.requests.append(DictCodec.coerce(json.loads(request.content)))
+        self.requests.append(parse(request.content, dict[str, object]))
         if request.url.path != "/v1/responses":
             return httpx2.Response(
                 404,
@@ -199,7 +201,7 @@ async def test_api_stream_uses_responses_with_supported_knobs(
     assert response.tokens.cache_read == 4
     assert wire.paths == ["/v1/responses"]
     records = [
-        DictCodec.coerce(json.loads(line)) for line in log_path.read_text().splitlines()
+        parse(line, dict[str, object]) for line in log_path.read_text().splitlines()
     ]
     assert any(
         record.get("event") == "api_call"
@@ -215,7 +217,7 @@ async def test_api_stream_uses_responses_with_supported_knobs(
         assert "reasoning" not in body
     else:
         assert "temperature" not in body
-        assert DictCodec.coerce(body["reasoning"])["effort"] == "high"
+        assert convert(body["reasoning"], dict[str, object])["effort"] == "high"
         assert body["include"] == ["reasoning.encrypted_content"]
 
 
@@ -249,11 +251,12 @@ def test_responses_preserves_image_bearing_tool_results() -> None:
         ],
     )
     items = _build_input(request)
-    output = DictCodec.coerce(items[-1])["output"]
+    output = convert(items[-1], dict[str, object])["output"]
     assert isinstance(output, list)
     assert "data:image/" in json.dumps(output)
     assert (
-        DictCodec.coerce(items[0])["call_id"] == DictCodec.coerce(items[-1])["call_id"]
+        convert(items[0], dict[str, object])["call_id"]
+        == convert(items[-1], dict[str, object])["call_id"]
     )
 
 
@@ -280,7 +283,7 @@ def test_earlier_gpt5_catalog_keeps_native_efforts(model_id: str) -> None:
     assert model.capability.thinking.effort == frozenset(
         {"none", "low", "medium", "high", "xhigh"},
     )
-    assert reasoning_effort("xhigh", model_id=model_id) == "xhigh"
+    assert reasoning_effort("xhigh") == "xhigh"
 
 
 def _free_model() -> _OpenAIResponsesModel:
@@ -1208,7 +1211,10 @@ async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
         assert isinstance(number, int)
         assert (number % 17, number % 19, number % 23) == (12, 7, 5)
         restored = _entry_from_json(
-            DictCodec.coerce(json.loads(json.dumps(_entry_to_json(first.message)))),
+            parse(
+                json.dumps(_entry_to_json(first.message)),
+                dict[str, object],
+            ),
         )
         assert isinstance(restored, AssistantMessage)
         assert restored == first.message

@@ -56,6 +56,7 @@ from sagent.bin.cli import (
     parse_agent_args,
     resolve_tools,
 )
+from sagent.lib.custom_json import ReadError
 from sagent.providers import PROVIDER_NAMES
 from sagent.sessions import SessionInfo, project_dir
 from sagent.testing import FakeAgent, MockModelCaps
@@ -158,7 +159,7 @@ def _child_record(**overrides: object) -> PersistentAgentRecord:
 
 
 def _stub_build_provider(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub ``cli.build_provider`` with one handing out ``_ChildStubModel``."""
+    """Stub provider construction with one handing out ``_ChildStubModel``."""
 
     def fake_build_provider(
         provider_name: str,
@@ -175,7 +176,7 @@ def _stub_build_provider(monkeypatch: pytest.MonkeyPatch) -> None:
         return _Provider()
 
     monkeypatch.setattr(
-        "sagent.bin.cli.build_provider",
+        "sagent.providers.providers.build_provider",
         fake_build_provider,
     )
 
@@ -246,6 +247,84 @@ def test_build_persistent_child_restores_frozen_system(
     record = _child_record(frozen_system=True)
     child = _build_persistent_child(record, allow_providers=(), parent_label="parent")
     assert child.frozen_system is True
+
+
+def test_resumed_persistent_child_missing_account_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persistent child's recorded account is inherited state."""
+    accounts: list[str | None] = []
+
+    def fake_build_provider(
+        provider_name: str,
+        auth: str,
+        *,
+        account: str | None = None,
+    ) -> object:
+        assert provider_name == "Anthropic"
+        assert auth == "env"
+        accounts.append(account)
+        if account == "work":
+            raise FileNotFoundError("missing work credentials")
+
+        class _Provider:
+            def model(self, model_id: str | None = None) -> _ChildStubModel:
+                return _ChildStubModel(model_id=model_id or "claude-opus-4-8")
+
+        return _Provider()
+
+    monkeypatch.setattr(
+        "sagent.providers.providers.build_provider",
+        fake_build_provider,
+    )
+
+    child = _build_persistent_child(
+        _child_record(account="work"),
+        allow_providers=(),
+        parent_label="parent",
+    )
+
+    assert accounts == ["work", None]
+    assert child.model_recipe is not None
+    assert child.model_recipe.account is None
+
+
+def test_resumed_persistent_child_preserves_available_named_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A recorded account remains selected when its credentials exist."""
+    accounts: list[str | None] = []
+
+    def fake_build_provider(
+        provider_name: str,
+        auth: str,
+        *,
+        account: str | None = None,
+    ) -> object:
+        assert provider_name == "Anthropic"
+        assert auth == "env"
+        accounts.append(account)
+
+        class _Provider:
+            def model(self, model_id: str | None = None) -> _ChildStubModel:
+                return _ChildStubModel(model_id=model_id or "claude-opus-4-8")
+
+        return _Provider()
+
+    monkeypatch.setattr(
+        "sagent.providers.providers.build_provider",
+        fake_build_provider,
+    )
+
+    child = _build_persistent_child(
+        _child_record(account="work"),
+        allow_providers=(),
+        parent_label="parent",
+    )
+
+    assert accounts == ["work"]
+    assert child.model_recipe is not None
+    assert child.model_recipe.account == "work"
 
 
 def test_resumed_persistent_child_default_limits_follow_model_switch(
@@ -341,7 +420,7 @@ def test_implicit_provider_derives_auth_from_provider(
         return _Provider()
 
     monkeypatch.setattr(
-        "sagent.bin.cli.build_provider",
+        "sagent.providers.providers.build_provider",
         fake_build_provider,
     )
 
@@ -375,7 +454,10 @@ def test_implicit_startup_falls_back_from_missing_api_key_to_claude_login(
             return _Provider()
         raise AssertionError(f"unexpected provider {provider_name}")
 
-    monkeypatch.setattr("sagent.bin.cli.build_provider", fake_build_provider)
+    monkeypatch.setattr(
+        "sagent.providers.providers.build_provider",
+        fake_build_provider,
+    )
 
     _, model, auth = _build_provider_model(
         ns,
@@ -416,7 +498,7 @@ def test_resumed_provider_never_implicitly_falls_back(
         raise RuntimeError("Anthropic API key not configured.")
 
     monkeypatch.setattr(
-        "sagent.bin.cli.build_provider",
+        "sagent.providers.providers.build_provider",
         fake_build_provider,
     )
 
@@ -429,6 +511,85 @@ def test_resumed_provider_never_implicitly_falls_back(
     assert calls == [("Anthropic", "env")]
     assert ns.provider == "Anthropic"
     assert ns.model == "claude-sonnet-4-6"
+
+
+def test_resumed_missing_named_account_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A persisted account is inherited state, so missing credentials use default."""
+    ns = _parse(["--resume", "abc123"])
+    _apply_resume_model_defaults(
+        ns,
+        SessionMeta(
+            provider="OpenAISubscription",
+            auth="credentials",
+            account="work",
+            model_id="gpt-5.5",
+        ),
+    )
+    ns.provider_from_resume = True
+    accounts: list[str | None] = []
+
+    class _Provider:
+        @classmethod
+        def from_credentials(cls, *, account: str | None = None) -> _Provider:
+            accounts.append(account)
+            if account == "work":
+                raise FileNotFoundError("missing work credentials")
+            return cls()
+
+        def model(self, model_id: str | None = None) -> object:
+            return argparse.Namespace(tagged_model_id=model_id or "gpt-5.5")
+
+    monkeypatch.setattr(
+        "sagent.providers.OpenAISubscription",
+        _Provider,
+    )
+
+    _, model, auth = _build_provider_model(
+        ns,
+        allow_providers=("OpenAISubscription",),
+    )
+
+    assert accounts == ["work", None]
+    assert ns.account is None
+    assert model.tagged_model_id == "gpt-5.5"
+    assert auth == "credentials"
+
+
+def test_resumed_explicit_missing_named_account_stays_strict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit account is authoritative even while resuming a session."""
+    ns = _parse(["--resume", "abc123", "--account", "work"])
+    _apply_resume_model_defaults(
+        ns,
+        SessionMeta(
+            provider="OpenAISubscription",
+            auth="credentials",
+            account="old",
+            model_id="gpt-5.5",
+        ),
+    )
+    ns.provider_from_resume = True
+    accounts: list[str | None] = []
+
+    class _Provider:
+        @classmethod
+        def from_credentials(cls, *, account: str | None = None) -> _Provider:
+            accounts.append(account)
+            raise FileNotFoundError("missing work credentials")
+
+    monkeypatch.setattr(
+        "sagent.providers.OpenAISubscription",
+        _Provider,
+    )
+
+    with pytest.raises(RuntimeError, match="missing work credentials"):
+        _build_provider_model(ns, allow_providers=("OpenAISubscription",))
+
+    assert accounts == ["work"]
+    assert ns.account == "work"
 
 
 def test_implicit_startup_fallback_honors_allow_providers(
@@ -456,7 +617,7 @@ def test_implicit_startup_fallback_honors_allow_providers(
         raise AssertionError(f"excluded provider was attempted: {provider_name}")
 
     monkeypatch.setattr(
-        "sagent.bin.cli.build_provider",
+        "sagent.providers.providers.build_provider",
         fake_build_provider,
     )
 
@@ -618,7 +779,7 @@ def test_parse_stream_json_accepts_empty_object_line() -> None:
 
 def test_parse_stream_json_rejects_non_object_line() -> None:
     """A non-object line is still a hard error at the stdin trust boundary."""
-    with pytest.raises(TypeError, match="JSON objects per line"):
+    with pytest.raises(ReadError):
         _ = _parse_stream_json("[1, 2]\n")
 
 
@@ -1003,7 +1164,7 @@ def test_parse_stream_json_invalid_json_raises() -> None:
 
 
 def test_parse_stream_json_non_object_raises() -> None:
-    with pytest.raises(TypeError, match="JSON objects per line"):
+    with pytest.raises(ReadError):
         _ = _parse_stream_json(json.dumps(["a", "list"]))
 
 

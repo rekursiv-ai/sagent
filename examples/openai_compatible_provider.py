@@ -12,6 +12,7 @@ import sys
 
 from sagent.agent.agent import Agent
 from sagent.catalog.openai import compatible
+from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.providers.openai.compat import OpenAICompat
 from sagent.types.capability import ModelCapability, ModelLimits
 from sagent.types.cost import (
@@ -19,7 +20,6 @@ from sagent.types.cost import (
     PriceKey,
     TokenPrice,
 )
-from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import AssistantMessage, UserMessage
 
 
@@ -54,7 +54,10 @@ class LocalOpenAI(OpenAICompat):
         ),
     )
     catalog = ModelCatalog(
-        rows=MappingProxyType({model_id: row, "default": row, "utility": row}),
+        models=ModelTable(
+            rows=(row,),
+            roles={"default": model_id, "utility": model_id},
+        ),
         transport=compatible(),
     )
 

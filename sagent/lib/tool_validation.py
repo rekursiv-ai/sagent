@@ -2,10 +2,19 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from typing import cast
+from collections.abc import Callable, Mapping, Sequence
+from functools import cache
+from typing import TYPE_CHECKING, cast
 
-from sagent.lib.custom_json import JSON, validate_json_schema
+import json
+
+import fastjsonschema
+
+from sagent.lib.custom_json import json_unfreeze
+
+
+if TYPE_CHECKING:
+    from sagent.lib.custom_json import JSON
 
 
 def validate_tool_input(
@@ -24,8 +33,12 @@ def validate_tool_input(
       error: Multi-line input-validation error, or ``None`` for valid input.
 
     """
-    issues = validate_json_schema(schema, args)
-    if not issues:
+    try:
+        schema_text = json.dumps(json_unfreeze(schema), sort_keys=True)
+        _compile_schema(schema_text)(args)
+    except fastjsonschema.JsonSchemaValueException as error:
+        issues = [error.message]
+    else:
         return None
     plural = "issues" if len(issues) > 1 else "issue"
     parts = [
@@ -38,11 +51,7 @@ def validate_tool_input(
     if required:
         keys = ", ".join(f"`{k}`" for k in required)
         parts.append(f"\n{tool_name} requires: {keys}.")
-    # ``validate_json_schema`` returns this literal prefix when
-    # ``additionalProperties: false`` rejects a key; branch on it because the
-    # upstream function returns plain strings. Changes to that prefix must be
-    # reflected here.
-    if any(issue.startswith("Unexpected parameter") for issue in issues) and accepted:
+    if "must not contain" in issues[0] and accepted:
         keys = ", ".join(f"`{k}`" for k in accepted)
         parts.append(f"{tool_name} accepts: {keys}.")
     parts.append(
@@ -60,3 +69,8 @@ def _schema_strings(value: object) -> list[str]:
         return []
     items = cast(Sequence[object], value)
     return [item for item in items if isinstance(item, str)]
+
+
+@cache
+def _compile_schema(schema_text: str) -> Callable[[object], object]:
+    return fastjsonschema.compile(cast(dict[str, object], json.loads(schema_text)))

@@ -907,6 +907,47 @@ async def test_compact_returns_fallback_when_all_attempts_fail() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compact_refused_summary_returns_fallback() -> None:
+    """A refused summary degrades to the fallback splice instead of failing."""
+    refusal = ModelResponse(
+        message=AssistantMessage(text=""),
+        stop_reason="model_refusal",
+    )
+    model = _ScriptedModel(stream_responses=[refusal])
+    compactor = SummaryCompactor(max_attempts=3)
+    history: list[ModelContextEvent] = [
+        UserMessage(text="round1"),
+        AssistantMessage(text="resp1"),
+    ]
+
+    override = await _build_compact_override(compactor, history, model)
+
+    assert override.strategy == "summary_fallback"
+    assert "model_refusal" in override.fallback_reason
+    assert model.stream_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_compact_truncated_summary_returns_fallback() -> None:
+    """A summary cut off by the cap lacks ``</summary>`` and falls back."""
+    truncated = ModelResponse(
+        message=AssistantMessage(text="<summary>\npartial"),
+        stop_reason="max_tokens",
+    )
+    model = _ScriptedModel(stream_responses=[truncated])
+    compactor = SummaryCompactor()
+    history: list[ModelContextEvent] = [
+        UserMessage(text="round1"),
+        AssistantMessage(text="resp1"),
+    ]
+
+    override = await _build_compact_override(compactor, history, model)
+
+    assert override.strategy == "summary_fallback"
+    assert override.fallback_reason == "missing <summary>"
+
+
+@pytest.mark.asyncio
 async def test_compact_failure_preserves_current_user_turn() -> None:
     overflow = PromptTooLongError(actual_tokens=10, limit_tokens=4)
     model = _ScriptedModel(stream_responses=[overflow, overflow, overflow])
@@ -1419,6 +1460,40 @@ def test_strip_attachments_drops_entry_with_empty_text_and_no_markers() -> None:
     entry = UserMessage(text="", attachments=(fake,))
     out = _strip_attachments([entry])
     assert out == []
+
+
+def test_strip_attachments_drop_keeps_later_entries_and_logs_why(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A dropped entry is skipped, not the end of the walk, and says what it dropped."""
+
+    class _UnknownAttachment:
+        pass
+
+    fake = cast(BytesMessage, _UnknownAttachment())
+    after_user = UserMessage(text="after user")
+    after_tool = UserMessage(text="after tool")
+    history: list[ModelContextEvent] = [
+        AgentSendMessage(source="peer", text="", attachments=(fake,)),
+        after_user,
+        ToolResult(call_id="call_9", content="", attachments=(fake,)),
+        after_tool,
+    ]
+
+    with caplog.at_level(
+        logging.DEBUG,
+        logger="sagent.compaction.summary",
+    ):
+        out = _strip_attachments(history)
+
+    assert out == [after_user, after_tool]
+    assert caplog.messages == [
+        "compaction dropped an empty AgentSendMessage with no markable attachments",
+        (
+            "compaction dropped an empty ToolResult with no markable attachments"
+            " (call_id=call_9)"
+        ),
+    ]
 
 
 # --- M63: direction Literal runtime-checked ------------------------------

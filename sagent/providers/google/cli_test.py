@@ -13,6 +13,7 @@ import time
 
 import pytest
 
+from sagent.agent.retry import validate_model_response
 from sagent.providers.google import cli
 from sagent.providers.google.api import Google
 from sagent.providers.google.cli import (
@@ -30,7 +31,7 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
-from sagent.types.model import ModelRequest
+from sagent.types.model import ModelRequest, ModelTerminationError
 from sagent.types.runtime import (
     AssistantMessage,
     ModelResponsePartial,
@@ -193,11 +194,11 @@ def test_model_uses_default_when_unset() -> None:
 
 
 def test_catalog_inherits_from_google() -> None:
-    assert tuple(GoogleCLI.catalog.rows) == tuple(Google.catalog.rows)
+    assert tuple(GoogleCLI.catalog.models) == tuple(Google.catalog.models)
 
 
 def test_utility_model_picks_flash_lite() -> None:
-    """``utility_model`` returns the cheapest Gemini in ``KNOWN_MODELS``."""
+    """``utility`` resolves the same row on the CLI as on the API."""
     provider = GoogleCLI()
     model = provider.model("utility")
     assert model.capability.model_id == provider.catalog.resolve("utility")[0].model_id
@@ -214,24 +215,12 @@ def test_model_capabilities() -> None:
     assert model.capability.account_auth is True
 
 
-def test_google_cli_legacy_model_does_not_support_thinking() -> None:
-    """Legacy ``gemini-1.5-*`` snapshots can't accept ``thinkingConfig``.
-
-    Even via ACP the CLI cannot enable thinking on these models, so capability
-    advertisement must honor the per-model profile flag.
-    """
-    provider = GoogleCLI()
-    off = frozenset({"none"})
-    assert provider.model("gemini-1.5-flash").capability.thinking.budget == off
-    assert provider.model("gemini-1.5-pro").capability.thinking.budget == off
-
-
 def test_max_image_limits() -> None:
-    """Gemini has no per-image pixel/byte cap; only the 20 MB total applies."""
+    """Gemini has no per-image pixel/byte cap; only the 100 MB total applies."""
     model = GoogleCLI().model("gemini-2.5-flash")
     assert model.limits.max_image_edge_px == 0
     assert model.limits.max_image_bytes == 0
-    assert model.limits.max_request_bytes == 20 * 1024 * 1024
+    assert model.limits.max_request_bytes == 100 * 1024 * 1024
 
 
 def test_is_context_overflow_text_markers() -> None:
@@ -578,7 +567,7 @@ async def test_stream_system_change_discards_warmed_old_system_spare(
     ) -> str | None:
         del proc, prompt_blocks, text_parts, thinking_parts, publish
         used_systems.append(model._system_hash)
-        return "STOP"
+        return "end_turn"
 
     monkeypatch.setattr(model, "_send_prompt", send_prompt)
     model._hot_spare = HotSpare(spawn_initialized)
@@ -636,7 +625,7 @@ async def test_hot_spare_warmup_does_not_overwrite_active_session_id(
     ) -> str | None:
         del prompt_blocks, text_parts, thinking_parts, publish
         cast(_DummyProc, proc).session_ids.append(model._session_id)
-        return "STOP"
+        return "end_turn"
 
     monkeypatch.setattr(model, "_send_prompt", send_prompt)
     model._hot_spare = HotSpare(spawn_initialized)
@@ -666,7 +655,7 @@ async def test_exchange_turn_skips_assistant_replay(
     ) -> str | None:
         del proc, text_parts, thinking_parts, publish
         prompts.append(prompt_blocks)
-        return "STOP"
+        return "end_turn"
 
     monkeypatch.setattr(model, "_send_prompt", send_prompt)
     response = await model._exchange_turn(
@@ -718,7 +707,7 @@ async def test_stream_writeback_failure_returns_response(
     ) -> str | None:
         del proc, prompt_blocks, thinking_parts, publish
         text_parts.append("ok")
-        return "STOP"
+        return "end_turn"
 
     async def writeback_credentials() -> None:
         raise OSError("credential writeback failed")
@@ -770,7 +759,7 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
         publish: Callable[[RuntimeEvent], None] | None,
     ) -> str | None:
         del proc, prompt_blocks, text_parts, thinking_parts, publish
-        return "STOP"
+        return "end_turn"
 
     model._system_hash = _hash_system(None)
     model._session_id = "session"
@@ -806,7 +795,7 @@ async def test_exchange_turn_returns_current_output_only(
         text_parts.append(text)
         if publish is not None:
             publish(ModelResponsePartial(text))
-        return "STOP"
+        return "end_turn"
 
     def _sink(ev: RuntimeEvent) -> None:
         if isinstance(ev, ModelResponsePartial):
@@ -877,7 +866,7 @@ def test_build_response_estimates_tokens_and_cost() -> None:
     response = model._build_response(
         text_parts=["hello"],
         thinking_parts=["thinking..."],
-        stop_reason="STOP",
+        stop_reason="end_turn",
         request=request,
     )
     assert response.message.text == "hello"
@@ -886,6 +875,26 @@ def test_build_response_estimates_tokens_and_cost() -> None:
     assert response.tokens.response == 1
     assert response.total_cost >= 0.0
     assert len(response.message.thinking_blocks) == 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "accepted"),
+    [("end_turn", True), ("max_turn_requests", True), ("refusal", False)],
+)
+def test_build_response_normalizes_acp_stop_reasons(raw: str, accepted: bool) -> None:
+    """ACP reports ``end_turn`` for every normal turn; it must not fail the turn."""
+    model = GoogleCLI().model("gemini-2.5-flash")
+    response = model._build_response(
+        text_parts=["hello"],
+        thinking_parts=[],
+        stop_reason=raw,
+        request=ModelRequest(messages=[UserMessage(text="hi")]),
+    )
+    if accepted:
+        validate_model_response(response)
+    else:
+        with pytest.raises(ModelTerminationError):
+            validate_model_response(response)
 
 
 @pytest.mark.asyncio

@@ -6,12 +6,11 @@ Third-party providers (Kimi, Qwen, MiniMax, any local vLLM/SGLang
     class Kimi(OpenAICompat):
         ENV_VAR = "MOONSHOT_API_KEY"
         BASE_URL = "https://api.moonshot.ai/v1"
-        catalog = ModelCatalog(rows=models(), transport=openai.compatible())
+        catalog = ModelCatalog(models=models(), transport=openai.compatible())
 
 The model backend (``OpenAICompatModel``) exposes hooks for
-provider-specific tweaks (``_reasoning_field``, ``_is_effort_model``,
-``_transform_body``). Overriding one method on a subclass is enough
-for most provider divergence.
+provider-specific tweaks (``_reasoning_field``, ``_transform_body``).
+Overriding one on a subclass is enough for most provider divergence.
 
 Usage::
 
@@ -44,13 +43,14 @@ else:
     image = lazy_import("sagent.lib.image")
 
 from sagent.catalog.openai import compatible
+from sagent.catalog.table import ModelCatalog, ModelTable, base_model_id
 from sagent.lib import debug_log
 from sagent.lib.custom_json import (
-    DictCodec,
-    IntCodec,
     MutableJSON,
     MutableJSONValue,
+    convert,
     json_unfreeze,
+    parse,
 )
 from sagent.providers.lib.errors import (
     error_status_code,
@@ -71,9 +71,7 @@ from sagent.types.model import (
     PromptTooLongError,
     StreamInterruptedError,
     UsageSnapshot,
-    base_model_id,
 )
-from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -97,7 +95,7 @@ class OpenAICompat:
 
     ENV_VAR: ClassVar[str] = ""
     BASE_URL: ClassVar[str] = ""
-    catalog = ModelCatalog(rows={}, transport=compatible())
+    catalog = ModelCatalog(models=ModelTable(rows=()), transport=compatible())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]]
 
@@ -173,8 +171,8 @@ class OpenAICompat:
 class OpenAICompatModel(ModelDefaults):
     """Chat-completions model backend.
 
-    Hook methods (``_reasoning_field``, ``_is_effort_model``,
-    ``_transform_body``) are cheap overrides for provider quirks.
+    Hooks (``_reasoning_field``, ``_transform_body``) are cheap overrides for
+    provider quirks.
     """
 
     # Message field carrying reasoning/thinking text on responses.
@@ -316,13 +314,6 @@ class OpenAICompatModel(ModelDefaults):
         if client is not None:
             await client.aclose()
 
-    # Catalog-backed vendors answer from the row. A vendor whose reasoning ids are only
-    # recognizable by shape (DashScope) overrides this with a predicate.
-    def _is_effort_model(self, model_id: str) -> bool:
-        """Whether ``model_id`` accepts a reasoning-effort knob."""
-        del model_id
-        return self.capability.thinking.effort != frozenset({"none"})
-
     def _transform_body(
         self,
         body: MutableJSON,
@@ -360,12 +351,12 @@ class OpenAICompatModel(ModelDefaults):
         }
         if request.max_response_tokens is not None:
             # OpenAI reasoning models (gpt-5 / o-series) reject ``max_tokens``
-            # with a 400 and require ``max_completion_tokens``; the same model
-            # set is gated by ``supports_effort``. Other compat vendors
-            # (Moonshot, MiniMax, DashScope) still take ``max_tokens``.
+            # with a 400 and require ``max_completion_tokens``; a row offering an
+            # effort is one. A vendor whose ids differ rewrites the field in
+            # ``_transform_body``.
             field = (
                 "max_completion_tokens"
-                if self._is_effort_model(self.capability.model_id)
+                if self.capability.thinking.effort != frozenset({"none"})
                 else "max_tokens"
             )
             body[field] = request.max_response_tokens
@@ -602,14 +593,14 @@ def _is_image_mime(descriptor: str) -> bool:
 
 def _extract_usage(usage: MutableJSON) -> tuple[int, int, int, int]:
     """Return total input, output, cache-read, and cache-write token counts."""
-    input_tokens = IntCodec.coerce(usage.get("prompt_tokens"), 0)
-    output_tokens = IntCodec.coerce(usage.get("completion_tokens"), 0)
+    input_tokens = convert(usage.get("prompt_tokens"), int, default=0)
+    output_tokens = convert(usage.get("completion_tokens"), int, default=0)
     raw_details = usage.get("prompt_tokens_details")
     details: MutableJSON = (
         cast(MutableJSON, raw_details) if isinstance(raw_details, dict) else {}
     )
-    cache_read = IntCodec.coerce(details.get("cached_tokens"), 0)
-    cache_write = IntCodec.coerce(details.get("cache_write_tokens"), 0)
+    cache_read = convert(details.get("cached_tokens"), int, default=0)
+    cache_write = convert(details.get("cache_write_tokens"), int, default=0)
     return input_tokens, output_tokens, cache_read, cache_write
 
 
@@ -662,7 +653,7 @@ async def consume_stream(
                 saw_done = True
                 break
             try:
-                event = DictCodec.coerce(json.loads(data_str))
+                event = parse(data_str, dict[str, object])
             except json.JSONDecodeError:
                 continue
             if not message_id:

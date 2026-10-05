@@ -119,7 +119,7 @@ HALT_MESSAGE_CONTEXT: Final = (
     "agent halted -- run /compact <hints>, /clear, or /model to reduce context"
 )
 HALT_MESSAGE_POLICY: Final = (
-    "agent halted -- do not retry this context; run /clear, /model, or /quit"
+    "refused -- input since the last answer is withheld; type to continue"
 )
 HALT_MESSAGE_REQUEST_TOO_LARGE: Final = (
     "agent halted -- reduce request data or run /clear or /quit"

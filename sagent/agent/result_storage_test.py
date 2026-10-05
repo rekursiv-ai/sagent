@@ -5,11 +5,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import hashlib
 import os
 import re
 
 from sagent.agent.result_storage import (
+    _MAX_STEM,
     PERSISTED_TAG,
+    _safe_stem,
     post_process_result,
 )
 from sagent.types.runtime import BytesMessage, ToolResult
@@ -185,6 +188,26 @@ def test_a_long_call_id_still_persists(tmp_path: Path) -> None:
     assert written[0].read_text() == body
 
 
+def test_a_long_call_id_stem_is_a_bounded_head_and_a_16_char_digest() -> None:
+    """The stem keeps ``_`` and ``-``, a fixed-width head, and a 16-hex digest."""
+    call_id = "call_a-b" + "x" * 300
+    digest = hashlib.sha256(call_id.encode()).hexdigest()[:16]
+
+    stem = _safe_stem(call_id)
+
+    assert stem == f"{call_id[: _MAX_STEM - 17]}-{digest}"
+    assert len(stem) == _MAX_STEM
+
+
+def test_a_call_id_exactly_at_the_stem_limit_is_kept_verbatim() -> None:
+    call_id = "a" * _MAX_STEM
+    assert _safe_stem(call_id) == call_id
+
+
+def test_only_underscore_and_dash_survive_sanitizing() -> None:
+    assert _safe_stem("a_b-c/X.d") == "a_b-cXd"
+
+
 def test_long_call_ids_sharing_a_prefix_do_not_collide(tmp_path: Path) -> None:
     """Truncating alone would map two distinct ids onto one file."""
     first = post_process_result(
@@ -236,6 +259,33 @@ def test_threshold_zero_disables_persist(tmp_path: Path) -> None:
     out = post_process_result(result, "Bash", session_dir=tmp_path, persist_tokens=0)
     assert out.content == body
     assert not (tmp_path / "tool-results").exists()
+
+
+def test_a_result_over_max_chars_persists_under_the_token_threshold(
+    tmp_path: Path,
+) -> None:
+    body = "X" * 5_000
+    out = post_process_result(
+        ToolResult(call_id="chars", content=body),
+        "Grep",
+        session_dir=tmp_path,
+        persist_tokens=0,
+        max_chars=4_999,
+    )
+    assert PERSISTED_TAG in out.content
+    assert (tmp_path / "tool-results" / "chars.txt").read_text() == body
+
+
+def test_a_result_at_max_chars_stays_inline(tmp_path: Path) -> None:
+    body = "X" * 5_000
+    out = post_process_result(
+        ToolResult(call_id="chars", content=body),
+        "Grep",
+        session_dir=tmp_path,
+        persist_tokens=0,
+        max_chars=5_000,
+    )
+    assert out.content == body
 
 
 def test_persist_dedup_on_existing_file(tmp_path: Path) -> None:

@@ -13,7 +13,7 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.custom_json import DictCodec, ListCodec
+from sagent.lib.custom_json import convert, parse
 from sagent.providers.openai.api import OpenAI
 from sagent.tools.bash import Bash
 from sagent.types.runtime import (
@@ -57,7 +57,7 @@ async def test_compacting_agent_preserves_prefix_past_half_window(
     capture: _Capture,
 ) -> None:
     provider = OpenAI.from_key("offline")
-    model = provider.model("sol-6")
+    model = provider.model("sol-6.0")
     agent = Agent(
         model=model,
         system="Stable instructions",
@@ -100,12 +100,12 @@ async def test_compacting_agent_preserves_prefix_past_half_window(
     finally:
         await provider.close_sdk()
     assert len(capture.payloads) > 3
-    bodies = [DictCodec.coerce(json.loads(raw)) for raw in capture.payloads]
+    bodies = [parse(raw, dict[str, object]) for raw in capture.payloads]
     for before, after in pairwise(bodies):
         if after["store"] is False:
             continue
         assert _prefix_items(before, after=after) == len(
-            ListCodec.mappings(before["input"]),
+            convert(before["input"], list[dict[str, object]]),
         )
         assert (
             json.dumps(before["tools"]).encode() == json.dumps(after["tools"]).encode()
@@ -136,8 +136,8 @@ class _Capture:
 
 
 def _prefix_items(before: Mapping[str, object], *, after: Mapping[str, object]) -> int:
-    old_items = ListCodec.mappings(before["input"])
-    new_items = ListCodec.mappings(after["input"])
+    old_items = convert(before["input"], list[dict[str, object]])
+    new_items = convert(after["input"], list[dict[str, object]])
     for index, (old, new) in enumerate(zip(old_items, new_items, strict=False)):
         if json.dumps(old).encode() != json.dumps(new).encode():
             return index

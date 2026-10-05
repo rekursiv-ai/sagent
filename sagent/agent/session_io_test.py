@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import dataclasses
 import json
@@ -2813,9 +2813,13 @@ def test_restore_tool_state_drops_bad_read_cache_entries() -> None:
 
 def test_restore_model_returns_none_when_missing_provider_or_model() -> None:
     """``restore_model`` short-circuits to None for missing fields."""
-    assert restore_model(SessionMeta()) is None
-    assert restore_model(SessionMeta(provider="P")) is None
-    assert restore_model(SessionMeta(model_id="m")) is None
+    with patch(
+        "sagent.providers.providers.build_provider",
+    ) as build:
+        assert restore_model(SessionMeta()) is None
+        assert restore_model(SessionMeta(provider="P")) is None
+        assert restore_model(SessionMeta(model_id="m")) is None
+    build.assert_not_called()
 
 
 def test_restore_model_returns_none_on_attribute_error(
@@ -2825,7 +2829,10 @@ def test_restore_model_returns_none_on_attribute_error(
     meta = SessionMeta(provider="DoesNotExist", model_id="m", auth="env")
     with caplog.at_level("WARNING"):
         assert restore_model(meta) is None
-    assert "Failed to restore model" in caplog.text
+    assert caplog.records[-1].getMessage() == (
+        "Failed to restore model DoesNotExist/m; keeping default"
+    )
+    assert "AttributeError: unknown provider 'DoesNotExist'" in caplog.text
 
 
 def test_restore_model_success_path() -> None:
@@ -2836,7 +2843,7 @@ def test_restore_model_success_path() -> None:
 
     class _FakeProvider:
         def model(self, model_id: str) -> _FakeModel:
-            del model_id
+            assert model_id == "fake-m"
             return _FakeModel()
 
     def fake_build_provider(
@@ -2849,13 +2856,49 @@ def test_restore_model_success_path() -> None:
         return _FakeProvider()
 
     meta = SessionMeta(provider="Fake", model_id="fake-m", auth="env", account="me")
-    with patch.object(session_io, "build_provider", fake_build_provider):
+    with patch(
+        "sagent.providers.providers.build_provider",
+        fake_build_provider,
+    ):
         result = restore_model(meta)
     assert result is not None
     _, spec = result
     assert spec.provider == "Fake"
     assert spec.model_id == "fake-m"
     assert spec.account == "me"
+
+
+def test_restore_model_missing_named_account_falls_back_to_default() -> None:
+    """A persisted missing account retries and records default credentials."""
+
+    class _FakeModel:
+        tagged_model_id: str = "fake-m"
+
+    class _FakeProvider:
+        def model(self, model_id: str) -> _FakeModel:
+            assert model_id == "fake-m"
+            return _FakeModel()
+
+    with patch(
+        "sagent.providers.providers.build_provider",
+        side_effect=[FileNotFoundError, _FakeProvider()],
+    ) as build:
+        result = restore_model(
+            SessionMeta(
+                provider="OpenAISubscription",
+                model_id="fake-m",
+                auth="credentials",
+                account="work",
+            ),
+        )
+
+    assert result is not None
+    _, spec = result
+    assert spec.account is None
+    assert build.call_args_list == [
+        call("OpenAISubscription", "credentials", account="work"),
+        call("OpenAISubscription", "credentials", account=None),
+    ]
 
 
 def test_repair_synthesizes_missing_tool_result() -> None:

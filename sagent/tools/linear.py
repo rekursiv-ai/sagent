@@ -22,13 +22,12 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final, cast
 
 import asyncio
-import json
 import os
 
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
-from sagent.lib.custom_json import JSON, DictCodec, IntCodec, MutableJSON, json_freeze
+from sagent.lib.custom_json import JSON, MutableJSON, convert, json_freeze, parse
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
@@ -134,7 +133,7 @@ class Linear:
             description=str(args.get("description", "")),
             body=str(args.get("body", "")),
             state_id=str(args.get("state_id", "")),
-            limit=IntCodec.coerce(args.get("limit"), 25),
+            limit=convert(args.get("limit"), int, default=25),
         )
         if isinstance(result, ToolResult):
             return result
@@ -467,7 +466,7 @@ async def _gql(
             content=(f"Linear API HTTP {e.status}: {e.body.decode(errors='replace')}"),
             is_error=True,
         )
-    body = DictCodec.coerce(json.loads(raw[0]))
+    body = parse(raw[0], dict[str, object])
     if errors := body.get("errors"):
         return ToolResult(
             call_id="",

@@ -50,8 +50,10 @@ from sagent.agent.state import (
     ReadCacheEntry,
     ToolState,
 )
-from sagent.lib.custom_json import FloatCodec, IntCodec
-from sagent.providers.providers import build_provider
+from sagent.lib.custom_json import convert
+from sagent.providers.providers import (
+    build_provider_with_account_fallback,
+)
 from sagent.sessions import restrict_path
 from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.model import Model, ModelRecipe
@@ -217,10 +219,10 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
             if not isinstance(path, str) or not path:
                 continue
             state.read_cache[path] = ReadCacheEntry(
-                offset=IntCodec.coerce(e.get("offset"), 0),
-                limit=IntCodec.coerce(e.get("limit"), 0),
-                last_lines=IntCodec.coerce(e.get("last_lines"), 0),
-                mtime=FloatCodec.coerce(e.get("mtime"), 0.0),
+                offset=convert(e.get("offset"), int, default=0),
+                limit=convert(e.get("limit"), int, default=0),
+                last_lines=convert(e.get("last_lines"), int, default=0),
+                mtime=convert(e.get("mtime"), float, default=0.0),
             )
     raw_recent = snapshot.get("recent_files")
     if isinstance(raw_recent, list):
@@ -253,11 +255,11 @@ def _spend_from_json(raw: object) -> TokenCost:
         return TokenCost()
     buckets = cast(Mapping[str, object], raw)
     return TokenCost(
-        request=FloatCodec.coerce(buckets.get("request"), 0.0),
-        response=FloatCodec.coerce(buckets.get("response"), 0.0),
-        cache_write=FloatCodec.coerce(buckets.get("cache_write"), 0.0),
-        cache_write_1h=FloatCodec.coerce(buckets.get("cache_write_1h"), 0.0),
-        cache_read=FloatCodec.coerce(buckets.get("cache_read"), 0.0),
+        request=convert(buckets.get("request"), float, default=0.0),
+        response=convert(buckets.get("response"), float, default=0.0),
+        cache_write=convert(buckets.get("cache_write"), float, default=0.0),
+        cache_write_1h=convert(buckets.get("cache_write_1h"), float, default=0.0),
+        cache_read=convert(buckets.get("cache_read"), float, default=0.0),
     )
 
 
@@ -368,22 +370,28 @@ class SessionMeta:
             name=str(d.get("name") or ""),
             status=str(d.get("status") or ""),
             tokens=TokenCount(
-                request=IntCodec.coerce(tokens_d.get("input_tokens"), 0),
-                response=IntCodec.coerce(tokens_d.get("output_tokens"), 0),
-                cache_write=IntCodec.coerce(tokens_d.get("cache_creation_tokens"), 0),
-                cache_write_1h=IntCodec.coerce(
-                    tokens_d.get("cache_creation_1h_tokens"),
-                    0,
+                request=convert(tokens_d.get("input_tokens"), int, default=0),
+                response=convert(tokens_d.get("output_tokens"), int, default=0),
+                cache_write=convert(
+                    tokens_d.get("cache_creation_tokens"),
+                    int,
+                    default=0,
                 ),
-                cache_read=IntCodec.coerce(tokens_d.get("cache_read_tokens"), 0),
+                cache_write_1h=convert(
+                    tokens_d.get("cache_creation_1h_tokens"),
+                    int,
+                    default=0,
+                ),
+                cache_read=convert(tokens_d.get("cache_read_tokens"), int, default=0),
             ),
             spend=_spend_from_json(d.get("spend")),
-            num_tool_call_rounds=IntCodec.coerce(d.get("num_tool_call_rounds"), 0),
-            compact_count=IntCodec.coerce(d.get("compact_count"), 0),
+            num_tool_call_rounds=convert(d.get("num_tool_call_rounds"), int, default=0),
+            compact_count=convert(d.get("compact_count"), int, default=0),
             bash_cwd=str(d.get("bash_cwd") or ""),
-            total_active_elapsed_seconds=FloatCodec.coerce(
+            total_active_elapsed_seconds=convert(
                 d.get("total_active_elapsed_seconds"),
-                0.0,
+                float,
+                default=0.0,
             ),
         )
 
@@ -950,26 +958,25 @@ def restore_model(
     if not meta.provider or not meta.model_id:
         return None
     try:
-        provider = build_provider(
+        provider, account = build_provider_with_account_fallback(
             meta.provider,
             meta.auth,
             account=meta.account or None,
+            fallback_to_default=True,
         )
         model = provider.model(meta.model_id)
         spec = ModelRecipe(
             provider=meta.provider,
             auth=meta.auth,
             model_id=model.tagged_model_id,
-            account=meta.account or None,
+            account=account,
         )
-        logger.info("Restored model %s/%s", meta.provider, meta.model_id)
         return model, spec
     except Exception:
-        logger.warning(
+        logger.exception(
             "Failed to restore model %s/%s; keeping default",
             meta.provider,
             meta.model_id,
-            exc_info=True,
         )
         return None
 
@@ -1270,10 +1277,10 @@ def _splice_from_json(
         insert_after=insert_after,
         payload=tuple(payload),
         strategy=str(rec.get("strategy") or ""),
-        token_before=IntCodec.coerce(rec.get("token_before"), 0),
-        token_after=IntCodec.coerce(rec.get("token_after"), 0),
+        token_before=convert(rec.get("token_before"), int, default=0),
+        token_after=convert(rec.get("token_after"), int, default=0),
         fallback_reason=str(rec.get("fallback_reason") or ""),
-        preserved_tail_count=IntCodec.coerce(rec.get("preserved_tail_count"), 0),
+        preserved_tail_count=convert(rec.get("preserved_tail_count"), int, default=0),
         paired_externally=paired,
     )
 
@@ -1337,10 +1344,10 @@ def _legacy_override_to_splice(
         insert_after=inject_after,
         payload=tuple(payload),
         strategy=str(rec.get("strategy") or ""),
-        token_before=IntCodec.coerce(rec.get("token_before"), 0),
-        token_after=IntCodec.coerce(rec.get("token_after"), 0),
+        token_before=convert(rec.get("token_before"), int, default=0),
+        token_after=convert(rec.get("token_after"), int, default=0),
         fallback_reason=str(rec.get("fallback_reason") or ""),
-        preserved_tail_count=IntCodec.coerce(rec.get("preserved_tail_count"), 0),
+        preserved_tail_count=convert(rec.get("preserved_tail_count"), int, default=0),
         paired_externally=paired,
     )
 
@@ -1394,20 +1401,20 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
         return CompactStarted()
     if t == "compact_complete":
         return CompactComplete(
-            token_before=IntCodec.coerce(d.get("token_before"), 0),
-            token_after=IntCodec.coerce(d.get("token_after"), 0),
-            payload_entries=IntCodec.coerce(d.get("payload_entries"), 0),
+            token_before=convert(d.get("token_before"), int, default=0),
+            token_after=convert(d.get("token_after"), int, default=0),
+            payload_entries=convert(d.get("payload_entries"), int, default=0),
             fallback_reason=str(d.get("fallback_reason") or ""),
-            preserved_tail_count=IntCodec.coerce(d.get("preserved_tail_count"), 0),
+            preserved_tail_count=convert(d.get("preserved_tail_count"), int, default=0),
         )
     if t == "compact_failed":
         return CompactFailed(
             exception=RuntimeError(str(d.get("message") or "")),
-            tape_len=IntCodec.coerce(d.get("tape_len"), 0),
+            tape_len=convert(d.get("tape_len"), int, default=0),
         )
-    entry_id = IntCodec.coerce(d.get("id"), 0)
-    parent_id = IntCodec.coerce(d.get("parent_id"), -1)
-    timestamp = FloatCodec.coerce(d.get("timestamp"), 0.0)
+    entry_id = convert(d.get("id"), int, default=0)
+    parent_id = convert(d.get("parent_id"), int, default=-1)
+    timestamp = convert(d.get("timestamp"), float, default=0.0)
     hidden = _json_bool(d.get("hidden"))
     if t == "user":
         return UserMessage(
@@ -1561,8 +1568,8 @@ def _runtime_event_from_json(record: Mapping[str, object]) -> RuntimeEvent | Non
             auth=str(record.get("auth") or ""),
             account=_optional_str(record.get("account")),
             model_id=str(record.get("model_id") or ""),
-            retry_at=FloatCodec.coerce(record.get("retry_at"), 0.0),
-            delay_sec=FloatCodec.coerce(record.get("delay_sec"), 0.0),
+            retry_at=convert(record.get("retry_at"), float, default=0.0),
+            delay_sec=convert(record.get("delay_sec"), float, default=0.0),
             server_supplied=_json_bool(record.get("server_supplied")),
             error=error,
         )
@@ -2077,7 +2084,7 @@ def _apply_update_in_place(
     rec: Mapping[str, object],
 ) -> None:
     """Apply a legacy ``kind=update`` patch to the matching ``ReferrableTapeEvent``."""
-    target_id = IntCodec.coerce(rec.get("id"), -1)
+    target_id = convert(rec.get("id"), int, default=-1)
     if target_id < 0:
         return
     for i, record in enumerate(tape):

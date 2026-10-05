@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Protocol, get_args
 
 import pytest
 
+from sagent.catalog.table import UnsupportedTagError
 from sagent.providers import PROVIDER_NAMES
 from sagent.providers.anthropic.api import Anthropic, _AnthropicModel
 from sagent.providers.dashscope.api import DashScope
@@ -44,10 +45,7 @@ from sagent.types.capability import (
     ThinkingOutput,
 )
 from sagent.types.model import ModelRequest
-from sagent.types.providers import (
-    ModelResolver,
-    UnsupportedTagError,
-)
+from sagent.types.providers import ModelResolver
 from sagent.types.runtime import UserMessage
 
 
@@ -128,7 +126,7 @@ def _rows() -> list[tuple[str, str]]:
     out: list[tuple[str, str]] = []
     for name, (make, _) in _WIRE_BUILDERS.items():
         provider = make()
-        out.extend((name, model_id) for model_id in provider.catalog.rows)
+        out.extend((name, model_id) for model_id in provider.catalog.models)
     return out
 
 
@@ -180,8 +178,7 @@ def test_a_row_with_no_efforts_sends_no_thinking_knob(
     """A row that advertises no effort must not send one.
 
     ``thinking_effort == {"none"}`` is a positive claim: the model
-    REJECTS the knob (gemini-1.5 rejects ``thinkingConfig`` outright, the
-    qwen ``-instruct`` ids reject ``enable_thinking``). A builder reading
+    REJECTS the knob (the qwen ``-instruct`` ids reject ``enable_thinking``). A builder reading
     a private table instead of the row sends it anyway and earns a 400.
     """
     make, thinking_of = _WIRE_BUILDERS[provider_name]

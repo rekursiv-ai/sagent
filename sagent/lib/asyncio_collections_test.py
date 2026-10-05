@@ -130,6 +130,12 @@ class TestUnbounded:
         q.put("x")
         assert q
 
+    def test_iteration_snapshots_front_to_back(self) -> None:
+        q: Deque[int] = Deque()
+        q.put(1)
+        q.put(2)
+        assert tuple(q) == (1, 2)
+
     @pytest.mark.asyncio
     async def test_get_fifo(self) -> None:
         q: Deque[str] = Deque()

@@ -5,28 +5,32 @@ Usage::
     from sagent.providers import MiniMax
 
     provider = MiniMax.from_env()       # MINIMAX_API_KEY
-    model = provider.model()            # MiniMax-M2.7
+    model = provider.model()            # minimax-3.0
     response = await model.buffer(request)
 
 Self-hosted::
 
     provider = MiniMax.from_key("empty", base_url="http://gpu-box:8000/v1")
 
-MiniMax-M2.7 exposes long context and reasoning traces. Tool-calling
-uses the standard ``tool_calls`` block.
+Reasoning surfaces via ``reasoning_content`` once ``reasoning_split`` is
+set. Tool-calling uses the standard ``tool_calls`` block.
 """
 
 from __future__ import annotations
 
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar, override
 
-from sagent.catalog.minimax import models
-from sagent.catalog.openai import compatible
+from sagent.catalog.minimax import api, models
+from sagent.catalog.table import ModelCatalog
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
 )
-from sagent.types.providers import ModelCatalog
+
+
+if TYPE_CHECKING:
+    from sagent.lib.custom_json import MutableJSON
+    from sagent.types.model import ModelRequest
 
 
 class _MiniMaxModel(OpenAICompatModel):
@@ -34,11 +38,27 @@ class _MiniMaxModel(OpenAICompatModel):
 
     _reasoning_field: ClassVar[str | None] = "reasoning_content"
 
-
-# MiniMax (OpenAI-compatible) publishes no per-image pixel or byte limit and no
-# request-body byte ceiling; images are preprocessed server-side. Use the
-# 0=unlimited sentinel rather than borrowing OpenAI's caps (verified Jun 2026.
-# https://platform.minimax.io/docs/api-reference/text-openai-api).
+    @override
+    def _transform_body(
+        self,
+        body: MutableJSON,
+        request: ModelRequest,
+    ) -> MutableJSON:
+        """Split reasoning out of ``content`` and send the thinking switch."""
+        del request
+        # Without it, thinking stays "inside ``content`` wrapped in
+        # ``<think>`` tags", which the parser would show as the answer.
+        body["reasoning_split"] = True
+        # Only M3 offers a switch; M2.x accepts ``disabled`` but ignores it,
+        # so its rows offer nothing to send.
+        if self.capability.thinking.budget == frozenset({"none"}):
+            return body
+        body["thinking"] = {
+            "type": "disabled"
+            if self.settings.thinking_budget == "none"
+            else "adaptive",
+        }
+        return body
 
 
 class MiniMax(OpenAICompat):
@@ -47,12 +67,6 @@ class MiniMax(OpenAICompat):
     ENV_VAR: ClassVar[str] = "MINIMAX_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.minimax.io/v1"
 
-    # Model limits and pricing.
-    # Source: https://platform.minimaxi.com/document/guides/chat-model/pro
-    # Cross-ref: https://github.com/taylorwilsdon/llm-context-limits
-    #
-    # To add a new model: check the MiniMax platform docs for the
-    # model's context window and max output tokens.
-    catalog = ModelCatalog(rows=models(), transport=compatible())
+    catalog = ModelCatalog(models=models(), transport=api())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MiniMaxModel

@@ -66,6 +66,20 @@ def test_cost_tracker_record_tokens_updates_last_request() -> None:
     assert t.last_request is r.tokens
 
 
+def test_cost_tracker_record_side_tokens_keeps_the_turn_baseline() -> None:
+    """A side call adds to totals but is not the turn cache detection compares."""
+    t = CostTracker()
+    turn = _make_response(request=10)
+    t.record_tokens(turn, model_id="m")
+    stamped = t.last_response_time
+    t.record_side_tokens(_make_response(request=3), model_id="advisor")
+    assert t.last_request is turn.tokens
+    assert t.last_model_id == "m"
+    assert t.last_response_time == stamped
+    assert t.total == TokenCount(request=13)
+    assert t.calls_by_model == {"m": 1, "advisor": 1}
+
+
 def test_cost_tracker_record_tokens_updates_last_model_id() -> None:
     t = CostTracker()
     t.record_tokens(_make_response(), model_id="claude-opus-4-8")

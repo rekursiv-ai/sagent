@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date
 
+import operator
+
 import pytest
 
 from sagent.types.cost import (
@@ -12,6 +14,7 @@ from sagent.types.cost import (
     TokenCost,
     TokenCount,
     TokenPrice,
+    TokenStats,
 )
 
 
@@ -33,8 +36,30 @@ def _price(
     )
 
 
+def _as_stats(value: TokenStats[int]) -> TokenStats[int]:
+    return value
+
+
 def test_count_is_default_constructible() -> None:
     assert TokenCount().total == 0
+
+
+def test_non_matching_stats_defer_arithmetic() -> None:
+    count = TokenCount(request=1)
+    other = TokenStats[int](
+        request=1,
+        response=0,
+        cache_write=0,
+        cache_write_1h=0,
+        cache_read=0,
+    )
+    stats = _as_stats(count)
+    with pytest.raises(TypeError, match="unsupported operand"):
+        operator.add(stats, other)
+    with pytest.raises(TypeError, match="unsupported operand"):
+        operator.sub(stats, other)
+    assert TokenCount._floor(3) == 3
+    assert TokenStats[int]._floor(3) == 3
 
 
 def test_add_is_per_meter() -> None:
@@ -210,6 +235,7 @@ def test_indexing_is_exact() -> None:
         _ = catalog[PriceKey("auto", 199_999)]
     assert len(catalog) == 3
     assert list(catalog) == sorted(catalog)
+    assert repr(catalog).startswith("PriceCatalog({")
 
 
 if __name__ == "__main__":

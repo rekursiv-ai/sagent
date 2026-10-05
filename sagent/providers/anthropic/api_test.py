@@ -8,13 +8,15 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, cast, override
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import json
 import operator
 
 import httpx2
 import pytest
 
 from sagent.agent.retry import error_status, is_retryable
-from sagent.lib.custom_json import IntCodec, MutableJSON
+from sagent.bin.cli import DEFAULT_TOOLS, resolve_tools
+from sagent.lib.custom_json import convert
 from sagent.providers.anthropic.api import (
     Anthropic,
     _AnthropicModel,
@@ -68,7 +70,10 @@ if TYPE_CHECKING:
 
     import anthropic as anthropic_sdk
 
+    from sagent.lib.custom_json import MutableJSON
+    from sagent.types.capability import ThinkingBudget, ThinkingOutput
     from sagent.types.tools import Tool
+
 else:
     from wrapt import lazy_import
 
@@ -141,25 +146,72 @@ def test_normalized_anthropic_id_uses_vendor_id_on_the_wire() -> None:
     assert kwargs["model"] == "claude-opus-5-5"
 
 
+def test_the_default_tools_serialize_as_request_json() -> None:
+    # Tool schemas are frozen (nested mappingproxy); the SDK posts them with
+    # ``json.dumps``, so a shallow copy fails at the first nested object.
+    model = Anthropic.from_key("k").model("opus-5.5")
+    kwargs = model._build_kwargs(
+        ModelRequest(
+            messages=[UserMessage(text="hello")],
+            tools=resolve_tools(list(DEFAULT_TOOLS)),
+        ),
+        [],
+    )
+    json.dumps(kwargs["tools"])
+
+
 @pytest.mark.parametrize(
-    ("model_id", "has_long_context_beta"),
-    [
-        ("opus-4.7", True),
-        ("opus-4.7+200k", False),
-        ("fable-5.1", False),
-        ("opus-5.5", False),
-    ],
+    "model_id",
+    ["opus-4.7", "opus-4.7+200k", "sonnet-4.6", "fable-5.1", "opus-5.5"],
 )
-def test_context_betas_come_from_the_selected_catalog_limits(
-    model_id: str,
-    has_long_context_beta: bool,
-) -> None:
+def test_no_model_sends_the_retired_1m_context_beta(model_id: str) -> None:
+    """1M is the default on every 1M model; the beta header is no longer needed."""
     model = Anthropic.from_key("k").model(model_id)
     kwargs = model._build_kwargs(ModelRequest(messages=[]), [])
     headers = cast(dict[str, str], kwargs["extra_headers"])
     betas = headers["anthropic-beta"].split(",")
-    assert ("context-1m-2025-08-07" in betas) is has_long_context_beta
+    assert "context-1m-2025-08-07" not in betas
     assert "context-management-2025-06-27" in betas
+
+
+@pytest.mark.parametrize(
+    ("model_id", "budget", "output", "display"),
+    [
+        ("opus-5.5", "auto", "text", "summarized"),
+        ("opus-4.8", "auto", "text", "summarized"),
+        ("sonnet-5.5", "auto", "redacted", "omitted"),
+        ("opus-4.6", "fixed", "text", "summarized"),
+        ("haiku-4.5", "fixed", "redacted", "omitted"),
+    ],
+)
+def test_thinking_output_selects_the_wire_display(
+    model_id: str,
+    budget: ThinkingBudget,
+    output: ThinkingOutput,
+    display: str,
+) -> None:
+    """4.7-and-later default ``display`` to omitted, so ``text`` must ask for it."""
+    model = Anthropic.from_key("k").model(model_id)
+    model.settings.thinking_budget = budget
+    model.settings.thinking_output = output
+    kwargs = model._build_kwargs(ModelRequest(messages=[]), [])
+    thinking = cast(dict[str, object], kwargs["thinking"])
+    assert thinking["display"] == display
+
+
+def test_thinking_without_an_output_choice_sends_no_display() -> None:
+    model = Anthropic.from_key("k").model("opus-5.5")
+    model.settings.thinking_budget = "auto"
+    kwargs = model._build_kwargs(ModelRequest(messages=[]), [])
+    assert kwargs["thinking"] == {"type": "adaptive"}
+
+
+def test_no_thinking_sends_no_display() -> None:
+    """``display`` is invalid with thinking off; nothing to display."""
+    model = Anthropic.from_key("k").model("opus-4.8")
+    model.settings.thinking_output = "text"
+    kwargs = model._build_kwargs(ModelRequest(messages=[]), [])
+    assert "thinking" not in kwargs
 
 
 @pytest.mark.parametrize(
@@ -678,7 +730,7 @@ def test_anthropic_roles_resolve_to_the_latest_of_each_family() -> None:
     p = Anthropic.from_key("k")
     assert p.catalog.resolve("best")[0].model_id == "fable-5.1"
     assert p.catalog.resolve("default")[0].model_id == "opus-5.5"
-    assert p.catalog.resolve("utility")[0].model_id == "sonnet-5"
+    assert p.catalog.resolve("utility")[0].model_id == "sonnet-5.5"
     assert p.model().limits.max_request_tokens == 1_000_000
     assert "context-1m-2025-08-07" not in p.model().limits.request_betas
 
@@ -694,7 +746,7 @@ def test_anthropic_opus_5_5_defaults_to_full_window() -> None:
 def test_anthropic_utility_model_uses_latest_sonnet() -> None:
     p = Anthropic.from_key("k")
     m = p.model("utility")
-    assert m.capability.model_id == "sonnet-5"
+    assert m.capability.model_id == "sonnet-5.5"
 
 
 def test_anthropic_subscription_property_false_on_api_key() -> None:
@@ -758,8 +810,8 @@ def test_anthropic_fable_model_profile() -> None:
 
 def test_anthropic_fable_smaller_context() -> None:
     p = Anthropic.from_key("k")
-    m = p.model("fable-5+200k")
-    assert m.tagged_model_id == "fable-5+200k"
+    m = p.model("fable-5.0+200k")
+    assert m.tagged_model_id == "fable-5.0+200k"
     assert m.limits.max_request_tokens == 200_000
 
 
@@ -779,8 +831,8 @@ def test_anthropic_sonnet_5_model_profile() -> None:
 
 def test_anthropic_sonnet_5_smaller_context() -> None:
     p = Anthropic.from_key("k")
-    m = p.model("sonnet-5+200k")
-    assert m.tagged_model_id == "sonnet-5+200k"
+    m = p.model("sonnet-5.0+200k")
+    assert m.tagged_model_id == "sonnet-5.0+200k"
     assert m.limits.max_request_tokens == 200_000
 
 
@@ -862,9 +914,9 @@ def test_anthropic_build_kwargs_enabled_thinking_respects_max_tokens_cap() -> No
     m = p.model("claude-opus-4-6")
     m._settings = replace(m.settings, thinking_budget="fixed")
     kwargs = m._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), [])
-    max_tokens = IntCodec.coerce(kwargs["max_tokens"], 0)
+    max_tokens = convert(kwargs["max_tokens"], int)
     thinking = cast(dict[str, object], kwargs["thinking"])
-    budget = IntCodec.coerce(thinking["budget_tokens"], 0)
+    budget = convert(thinking["budget_tokens"], int)
     assert max_tokens <= m.limits.max_response_tokens
     assert budget < max_tokens
 
@@ -876,17 +928,15 @@ def test_anthropic_thinking_axes_opus_4_6() -> None:
     assert m.capability.thinking.output == frozenset({"none", "text", "redacted"})
 
 
-def test_anthropic_thinking_axes_opus_4_8_adaptive_only_no_text() -> None:
-    """opus-4-8 returns a signed-but-empty block and rejects ``enabled``.
-
-    Measured via API key: it streams zero ``thinking_delta`` chars and 400s
-    on ``thinking.type=enabled``.
-    """
+def test_anthropic_thinking_axes_opus_4_8_adaptive_only() -> None:
+    """opus-4-8 rejects ``enabled``; ``display: summarized`` returns text."""
     p = Anthropic.from_key("k")
     for model_id in ("claude-opus-4-8", "claude-opus-4-8+200k"):
         m = p.model(model_id)
         assert m.capability.thinking.budget == frozenset({"none", "auto"}), model_id
-        assert m.capability.thinking.output == frozenset({"none", "redacted"}), model_id
+        assert m.capability.thinking.output == frozenset(
+            {"none", "text", "redacted"},
+        ), model_id
 
 
 def test_anthropic_thinking_axes_4_5_generation_enabled_only() -> None:
@@ -964,7 +1014,8 @@ def test_anthropic_model_image_limits() -> None:
     # opus-4-7 is a high-resolution model: native long edge 2576 px (server
     # downscales above this), per the Anthropic Vision docs.
     assert m.limits.max_image_edge_px == 2576
-    assert m.limits.max_image_bytes == 5 * 1024 * 1024
+    # 10 MB base64-encoded on the Claude API, i.e. 7.5 MB raw.
+    assert m.limits.max_image_bytes == 7_500_000
 
 
 def test_anthropic_standard_model_image_dim_is_native_1568() -> None:
@@ -1259,11 +1310,22 @@ async def test_anthropic_stream_preserves_unrelated_invalid_request() -> None:
 
 
 @pytest.mark.asyncio
-async def test_anthropic_stream_does_not_misclassify_unrelated_block() -> None:
-    """A generic access block is not evidence of a provider safety decision."""
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Request blocked because this key lacks access",
+        "cache_control rejected: at most 4 blocks are allowed by the caching policy",
+        "Request rejected under your organization's data retention policy",
+        "Unknown beta flag; see the API versioning policy",
+    ],
+)
+async def test_anthropic_stream_does_not_misclassify_unrelated_block(
+    message: str,
+) -> None:
+    """A rejection citing a non-safety policy is not a provider safety decision."""
     p = Anthropic.from_key("k")
     m = p.model("claude-opus-4-7")
-    err = _api_status_error(400, "Request blocked because this key lacks access")
+    err = _api_status_error(400, message)
 
     with (
         patch.object(p, "get_sdk", AsyncMock(return_value=MagicMock())),
@@ -1504,11 +1566,11 @@ def test_anthropic_model_is_retryable_provider_error_no_body_attr() -> None:
     assert m.is_retryable_provider_error(RuntimeError("x")) is False
 
 
-def test_anthropic_provider_extra_headers_for_1m_includes_beta() -> None:
+def test_anthropic_provider_extra_headers_for_1m_omit_the_context_beta() -> None:
     p = Anthropic.from_key("k")
     model = p.model("opus-4.7")
     headers = p.extra_headers(model.capability, model.settings)
-    assert headers.get("anthropic-beta", "").startswith("context-1m")
+    assert "context-1m" not in headers.get("anthropic-beta", "")
 
 
 def test_anthropic_provider_extra_headers_includes_context_management() -> None:

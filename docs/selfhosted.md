@@ -91,7 +91,7 @@ To force a local cache path, pass it as the model:
 sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
 ```
 
-Cloud Qwen model IDs such as `qwen3.6-plus` still route to DashScope. Use
+Cloud Qwen model IDs such as `qwen-plus-3.7` still route to DashScope. Use
 `SelfHosted` explicitly for local paths and HuggingFace snapshots.
 
 Other frontier open-weight HuggingFace repos to evaluate with the same provider:

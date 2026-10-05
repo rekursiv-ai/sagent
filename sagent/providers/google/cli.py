@@ -36,9 +36,12 @@ import os
 import shutil
 import tempfile
 
+import fastjsonschema
+
 from sagent.catalog.google import cli, models
+from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import JSON, FloatCodec, MutableJSON, validate_json_schema
+from sagent.lib.custom_json import JSON, MutableJSON, convert
 from sagent.providers.google.api import Google
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.errors import (
@@ -63,7 +66,6 @@ from sagent.types.model import (
     ModelRequest,
     ModelResponse,
 )
-from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -101,6 +103,7 @@ _CREDENTIALS_SCHEMA: Final[JSON] = {
         "expiry_date": {"type": "number"},
     },
 }
+_CREDENTIALS_VALIDATOR = fastjsonschema.compile(_CREDENTIALS_SCHEMA)
 
 
 class GoogleCLICredentials(TypedDict):
@@ -123,7 +126,7 @@ class GoogleCLI:
     does not surface per-turn usage on ``session/prompt`` responses.
     """
 
-    catalog = ModelCatalog(rows=models(), transport=cli())
+    catalog = ModelCatalog(models=models(), transport=cli())
 
     def __init__(self, *, account: str | None = None) -> None:
         self._account = account
@@ -759,7 +762,7 @@ class _GoogleCLIModel(ModelDefaults):
             tokens=tokens,
             stop_reason=normalize_stop_reason(
                 stop_reason,
-                kind="google",
+                kind="acp",
                 has_tool_use=False,
             ),
             message_id=self._session_id,
@@ -910,7 +913,7 @@ def _parse_cli_credentials(raw: MutableJSON) -> GoogleCLICredentials:
     creds = GoogleCLICredentials(
         access_token=str(raw["access_token"]),
         refresh_token=str(raw["refresh_token"]),
-        expiry_date=FloatCodec.coerce(raw["expiry_date"]),
+        expiry_date=convert(raw["expiry_date"], float),
     )
     for opt_key in ("project_id", "scope", "token_type"):
         value = raw.get(opt_key)
@@ -930,6 +933,8 @@ def _load_cli_credentials_file(path: Path) -> GoogleCLICredentials | None:
     if not isinstance(data, dict):
         return None
     raw = cast(MutableJSON, data)
-    if validate_json_schema(_CREDENTIALS_SCHEMA, raw):
+    try:
+        _CREDENTIALS_VALIDATOR(raw)
+    except fastjsonschema.JsonSchemaValueException:
         return None
     return _parse_cli_credentials(raw)

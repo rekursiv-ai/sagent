@@ -48,6 +48,7 @@ def post_process_result(
     *,
     session_dir: Path | None,
     persist_tokens: int,
+    max_chars: int = 0,
 ) -> ToolResult:
     """Persist oversized content and inject the empty-output marker.
 
@@ -66,6 +67,8 @@ def post_process_result(
       persist_tokens: Per-result token threshold. ``0`` disables
           persistence; results above it are off-loaded to disk and
           replaced with a preview.
+      max_chars: Per-result character threshold, applied alongside
+          ``persist_tokens``. ``0`` disables it.
 
     Returns:
       processed: Possibly-modified ``ToolResult``. ``call_id`` /
@@ -86,6 +89,7 @@ def post_process_result(
     if _should_persist(
         content,
         persist_tokens=persist_tokens,
+        max_chars=max_chars,
     ):
         preview = _persist_oversized(result.call_id, content, session_dir=session_dir)
         if preview is not None:
@@ -172,7 +176,7 @@ disabled by the id's length. Well under the limit, leaving room for the
 # a readable head AND a hash of the whole value.
 def _safe_stem(call_id: str) -> str:
     """Return a filesystem-safe, length-bounded stem for ``call_id``."""
-    safe = "".join(c for c in call_id if c.isalnum() or c in "_-")
+    safe = "".join(c for c in call_id if c.isalnum() or c in {"_", "-"})
     digest = hashlib.sha256(call_id.encode()).hexdigest()[:16]
     if not safe:
         return f"id_{digest}"
@@ -268,6 +272,7 @@ def _should_persist(
     content: str,
     *,
     persist_tokens: int,
+    max_chars: int,
 ) -> bool:
     """Return True when result content should be off-loaded."""
     tokens = approx_tokens(content)
@@ -277,4 +282,6 @@ def _should_persist(
     # them -- a 159-byte result came back as a ~600-byte preview.
     if tokens <= stub_cost_tokens(content):
         return False
-    return persist_tokens > 0 and tokens > persist_tokens
+    return (persist_tokens > 0 and tokens > persist_tokens) or (
+        max_chars > 0 and len(content) > max_chars
+    )

@@ -29,6 +29,7 @@ from sagent.types.model import (
     Model,
     ModelRequest,
     ModelResponse,
+    ModelTerminationError,
     PromptTooLongError,
 )
 from sagent.types.runtime import (
@@ -415,6 +416,16 @@ class SummaryCompactor:
                 )
                 summary_text = response.message.text
                 break
+            except ModelTerminationError as exc:
+                return _build_fallback_splice(
+                    f"summary stopped: {exc.stop_reason}",
+                    direction=direction,
+                    to_keep=to_keep,
+                    mint_ref=mint_ref,
+                    mask=mask,
+                    token_before=token_before,
+                    model=compact_model,
+                )
             except PromptTooLongError as exc:
                 if _shrink_groups_for_compaction(
                     groups,

@@ -56,9 +56,9 @@ import uuid
 
 from sagent.lib import token_count
 from sagent.lib.custom_json import (
-    DictCodec,
     MutableJSON,
     MutableJSONValue,
+    convert,
     json_unfreeze,
 )
 from sagent.providers.lib.id_remap import IdRemapper
@@ -1077,7 +1077,7 @@ def _parse_deepseek_tool_call(raw: str) -> ToolCall | None:
     return ToolCall(
         id=str(uuid.uuid4())[:12],
         name=name_match.group(1),
-        args=DictCodec.coerce(parsed),
+        args=convert(parsed, dict[str, object]),
     )
 
 

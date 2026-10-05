@@ -7,14 +7,8 @@ The ``Model`` Protocol, the request and response shapes, and the
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Protocol, get_args, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from sagent.types.capability import (
-    ContextTag,
-    ModelCapability,
-    ModelLimits,
-    ModelSettings,
-)
 from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.exceptions import UserFacingError
 from sagent.types.runtime import (
@@ -27,13 +21,17 @@ from sagent.types.tools import Tool
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from sagent.types.capability import (
+        ModelCapability,
+        ModelLimits,
+        ModelSettings,
+    )
     from sagent.types.runtime import (
         RuntimeEvent,
     )
 
 
 __all__ = [
-    "CONTEXT_TAGS",
     "Model",
     "ModelRecipe",
     "ModelRequest",
@@ -44,54 +42,7 @@ __all__ = [
     "StreamInterruptedError",
     "UsageSnapshot",
     "UsageWindow",
-    "base_model_id",
-    "split_model_id",
 ]
-
-
-# Derived from ``ContextTag``, not restated: a tag the type admits but a
-# hand-written tuple omitted would be unparseable while type-checking clean.
-# The default window's ``""`` is filtered out -- no id carries it.
-CONTEXT_TAGS: Final = tuple(t for t in get_args(ContextTag.__value__) if t)
-"""Window-size suffixes a model id may carry (e.g. ``...+1m``)."""
-
-
-def split_model_id(model_id: str) -> tuple[str, frozenset[ContextTag]]:
-    """Split a model id into its base id and trailing context tags.
-
-    Tags may appear in any order; matching is case-insensitive, and an
-    unknown suffix stays part of the base id.
-
-    Args:
-      model_id: Model id, possibly with trailing context tags.
-
-    Returns:
-      base_id: ``model_id`` without its tags.
-      tags: The stripped tags, lowercased (e.g. ``{"+1m"}``).
-
-    """
-    tags: set[ContextTag] = set()
-    base = model_id
-    while True:
-        lower = base.lower()
-        tag = next((t for t in CONTEXT_TAGS if lower.endswith(t)), None)
-        if tag is None:
-            return base, frozenset(tags)
-        tags.add(tag)
-        base = base[: -len(tag)]
-
-
-def base_model_id(model_id: str) -> str:
-    """Strip trailing context tags, yielding the canonical model id.
-
-    Args:
-      model_id: Model id, possibly with trailing context tags.
-
-    Returns:
-      base_id: ``model_id`` without its tags.
-
-    """
-    return split_model_id(model_id)[0]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -40,6 +40,7 @@ class WebFetch:
     name = "WebFetch"
     tool_id = "application/x-tool-webfetch"
     clearable_results = True
+    max_result_chars = 100_000
     description = load_tool_description("WebFetch")
     directive_schema = json_freeze(FetchBodyParamsSchema.json_schema())
 

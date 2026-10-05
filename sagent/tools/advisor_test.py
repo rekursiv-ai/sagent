@@ -3,21 +3,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import pytest
 
+from sagent.agent.agent import Agent
+from sagent.agent.state import current_agent_var
 from sagent.testing import MockModelCaps
-from sagent.tools.advisor import (
-    SYSTEM_NUDGE,
-    Advisor,
-    _AdvisorModel,
+from sagent.tools.advisor import SYSTEM_NUDGE, Advisor
+from sagent.types.cost import TokenCost
+from sagent.types.model import (
+    ModelRequest,
+    ModelResponse,
+    StreamInterruptedError,
 )
-from sagent.types.model import ModelRequest, ModelResponse
 from sagent.types.runtime import (
     AssistantMessage,
-    ModelResponsePartial,
     RuntimeEvent,
+    UserMessage,
 )
 
 
@@ -86,11 +89,7 @@ async def test_run_respects_max_uses() -> None:
 
 
 @pytest.mark.asyncio
-async def test_run_returns_empty_on_no_assistant_message() -> None:
-    # Empty-text response yields an empty content result. Used to
-    # exercise the "no assistant message" fallback indirectly: when
-    # the runtime's history *does* contain an assistant message but
-    # it's empty, the tool still returns it (content="").
+async def test_run_returns_empty_text_verbatim() -> None:
     model = StubProviderModel(text="")
     t = Advisor(model=model)
     result = await t.run({"prompt": "p"})
@@ -99,26 +98,111 @@ async def test_run_returns_empty_on_no_assistant_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_advisor_model_bridge_forwards_history_and_system() -> None:
+async def test_run_forwards_prompt_and_system() -> None:
     inner = StubProviderModel(text="bridged")
-    bridge = _AdvisorModel(inner, system="be brief")
-    captured_text: list[str] = []
-
-    def publish(event: RuntimeEvent) -> None:
-        if isinstance(event, ModelResponsePartial):
-            captured_text.append(event.text)
-
-    msg = await bridge.stream(history=[], publish=publish)
-    assert msg.text == "bridged"
+    result = await Advisor(model=inner, system="be brief").run({"prompt": "q"})
+    assert result.content == "bridged"
     assert inner.received[0].system == "be brief"
+    (message,) = inner.received[0].messages
+    assert isinstance(message, UserMessage)
+    assert message.text == "q"
 
 
 @pytest.mark.asyncio
-async def test_advisor_model_bridge_blank_system_is_none() -> None:
+async def test_run_bills_the_current_agent() -> None:
+    """The consult's cost lands on the agent that called the tool."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _PricedModel(StubProviderModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del publish
+            self.received.append(request)
+            return ModelResponse(
+                message=AssistantMessage(text="advice"),
+                spend=TokenCost(request=0.5),
+            )
+
+    agent = Agent(model=StubProviderModel())
+    agent.runtime.append_history(UserMessage(text="x" * 400_000))
+    measured = tuple(agent.runtime.context().messages)
+    agent._last_input_tokens = 100_000
+    agent._last_measured_history = measured
+    token = current_agent_var.set(agent)
+    try:
+        _ = await Advisor(model=_PricedModel()).run({"prompt": "p"})
+    finally:
+        current_agent_var.reset(token)
+
+    assert agent.cost_tracker.spend.total == pytest.approx(0.5)
+    # The consult must not stand in for the conversation's measured size.
+    assert agent._last_input_tokens == 100_000
+    assert agent._last_measured_history is measured
+
+
+@pytest.mark.asyncio
+async def test_advisor_reports_refusal_as_error() -> None:
+    """A refused consult is an error result, not empty advice."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _RefusingModel(StubProviderModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del publish
+            self.received.append(request)
+            return ModelResponse(
+                message=AssistantMessage(text=""),
+                stop_reason="model_refusal",
+            )
+
+    result = await Advisor(model=_RefusingModel()).run({"prompt": "p"})
+
+    assert result.is_error
+    assert "model_refusal" in result.content
+
+
+@pytest.mark.asyncio
+async def test_advisor_retries_transient_stream_interruption() -> None:
+    """The consult goes through the shared retry path."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _FlakyModel(StubProviderModel):
+        calls: int = 0
+
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del publish
+            self.received.append(request)
+            self.calls += 1
+            if self.calls == 1:
+                raise StreamInterruptedError(
+                    ModelResponse(message=AssistantMessage(text="")),
+                )
+            return ModelResponse(message=AssistantMessage(text="advice"))
+
+    model = _FlakyModel()
+    result = await Advisor(model=model).run({"prompt": "p"})
+
+    assert result.content == "advice"
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_run_blank_system_is_none() -> None:
     inner = StubProviderModel(text="ok")
-    bridge = _AdvisorModel(inner, system="")
-    _ = await bridge.stream(history=[], publish=lambda _event: None)
-    # Blank system collapses to None at the request level.
+    _ = await Advisor(model=inner, system="").run({"prompt": "p"})
     assert inner.received[0].system is None
 
 

@@ -64,14 +64,23 @@
 +    def set_content(self, msg: Message, obj: object, *args: object, **kw: object) -> None: ...
      def add_get_handler(self, key: str, handler: Callable[..., Incomplete]) -> None: ...
      def add_set_handler(self, typekey: type, handler: Callable[..., Incomplete]) -> None: ...
---- a/stdlib/inspect.pyi
-+++ b/stdlib/inspect.pyi
-@@ -1157,7 +1157,7 @@
-     set of unbound names that could not be resolved is also provided.
-     """
+--- a/stdlib/typing.pyi
++++ b/stdlib/typing.pyi
+@@ -2092,7 +2092,7 @@
+         include_extras: bool = False,
+         *,
+         format: Format | None = None,  # Default: Format.VALUE
+-    ) -> dict[str, Any]:  # AnnotationForm
++    ) -> dict[str, object]:  # AnnotationForm
+         """Return type hints for an object.
 
--def unwrap(func: Callable[..., Any], *, stop: Callable[[Callable[..., Any]], Any] | None = None) -> Any:
-+def unwrap(func: _F, *, stop: Callable[[Callable[..., Any]], Any] | None = None) -> _F:
-     """Get the object wrapped by *func*.
+         This is often the same as annotationlib.get_annotations(obj) or obj.__annotations__,
+@@ -2130,7 +2130,7 @@
+         globalns: dict[str, Any] | None = None,
+         localns: Mapping[str, Any] | None = None,
+         include_extras: bool = False,
+-    ) -> dict[str, Any]:  # AnnotationForm
++    ) -> dict[str, object]:  # AnnotationForm
+         """Return type hints for an object.
 
-     Follows the chain of :attr:`__wrapped__` attributes returning the last
+         This is often the same as inspect.get_annotations(obj) or obj.__annotations__,

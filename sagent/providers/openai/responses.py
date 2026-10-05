@@ -11,9 +11,14 @@ import inspect
 import json
 import logging
 
-from sagent.catalog.openai import reasoning_effort, served_tier
+from sagent.catalog.openai import (
+    keeps_reasoning_across_turns,
+    reasoning_effort,
+    served_tier,
+)
+from sagent.catalog.table import base_model_id
 from sagent.lib import debug_log
-from sagent.lib.custom_json import DictCodec, IntCodec, json_unfreeze
+from sagent.lib.custom_json import convert, json_unfreeze, parse
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     error_status_code,
@@ -35,7 +40,6 @@ from sagent.types.model import (
     PromptTooLongError,
     StreamInterruptedError,
     UsageSnapshot,
-    base_model_id,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -208,10 +212,7 @@ class _OpenAIResponsesModel(ModelDefaults):
     def _reasoning_effort(self) -> ReasoningEffort | None:
         if self.settings.thinking_effort == "none":
             return None
-        return reasoning_effort(
-            self.settings.thinking_effort,
-            model_id=self._wire_model_id,
-        )
+        return reasoning_effort(self.settings.thinking_effort)
 
     def _build_kwargs(self, request: ModelRequest) -> ResponseCreateParamsStreaming:
         body: ResponseCreateParamsStreaming = {
@@ -234,7 +235,7 @@ class _OpenAIResponsesModel(ModelDefaults):
         if effort is not None:
             body["reasoning"] = {"effort": effort, "summary": "auto"}
             body["include"] = ["reasoning.encrypted_content"]
-            if self._wire_model_id.startswith(("gpt-5.6", "gpt-6")):
+            if keeps_reasoning_across_turns(self._wire_model_id):
                 body["reasoning"]["context"] = "all_turns"
         if request.max_response_tokens is not None:
             body["max_output_tokens"] = request.max_response_tokens
@@ -479,8 +480,8 @@ def _terminal_metadata(response: object) -> tuple[str, str, int, int, int, int]:
     usage = getattr(response, "usage", None)
     if usage is None:
         return message_id, status, 0, 0, 0, 0
-    input_tokens = IntCodec.coerce(getattr(usage, "input_tokens", None), 0)
-    output_tokens = IntCodec.coerce(getattr(usage, "output_tokens", None), 0)
+    input_tokens = convert(getattr(usage, "input_tokens", None), int)
+    output_tokens = convert(getattr(usage, "output_tokens", None), int)
     cache_read = 0
     cache_write = 0
     details = getattr(usage, "input_tokens_details", None)
@@ -490,8 +491,8 @@ def _terminal_metadata(response: object) -> tuple[str, str, int, int, int, int]:
         # through ``to_dict``. Reading the mapping keeps new usage data without
         # an Any cast or waiting for an SDK schema release.
         raw_details = cast(_UsageDetails, details).to_dict()
-        cache_read = IntCodec.coerce(raw_details.get("cached_tokens"), 0)
-        cache_write = IntCodec.coerce(raw_details.get("cache_write_tokens"), 0)
+        cache_read = convert(raw_details.get("cached_tokens"), int, default=0)
+        cache_write = convert(raw_details.get("cache_write_tokens"), int, default=0)
     return (
         message_id,
         status,
@@ -815,7 +816,7 @@ def _parse_tool_arguments(
             continue
         saw_args = True
         try:
-            parsed = DictCodec.coerce(json.loads(args_str), default=None)
+            parsed = parse(args_str, dict[str, object])
         except json.JSONDecodeError:
             logger.warning(
                 "OpenAI Responses tool arguments were invalid JSON: "

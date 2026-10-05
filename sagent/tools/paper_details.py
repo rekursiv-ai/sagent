@@ -28,7 +28,7 @@ from wesearch.paper.render import (
 
 import cachetools
 
-from sagent.lib.custom_json import JSON, BoolCodec, json_freeze
+from sagent.lib.custom_json import JSON, convert, json_freeze
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     normalize_id_arg,
@@ -177,7 +177,7 @@ class PaperDetails:
 
         """
         operation = str(args.get("operation", ""))
-        influential_only = BoolCodec.coerce(args.get("influential_only"), False)
+        influential_only = convert(args.get("influential_only"), bool, default=False)
         year_from = opt_int(args, "year_from")
         limit = validate_limit(opt_int(args, "limit"))
         if isinstance(limit, ToolResult):

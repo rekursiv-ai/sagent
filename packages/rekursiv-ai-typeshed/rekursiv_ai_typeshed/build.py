@@ -1,7 +1,8 @@
 """Build the patched typeshed trees from the installed ``ty`` and ``basedpyright``.
 
-``typeshed.patch`` beside this module fixes numeric power return types and
-annotates email content-manager methods. Neither
+``typeshed.patch`` beside this module fixes numeric power return types, types
+``typing.get_type_hints`` as ``dict[str, object]``, and annotates email
+content-manager methods. Neither
 checker can take the builtins patch as a partial override -- basedpyright drops the ``BuiltIn``
 flag unless the file sits at ``stdlib/builtins.pyi`` inside a full typeshed tree,
 and ty binds ``builtins`` to its bundled stdlib -- so the patch is applied to a

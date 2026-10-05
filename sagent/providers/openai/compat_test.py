@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import MappingProxyType
 from typing import ClassVar, cast
 
@@ -12,6 +13,7 @@ import pytest
 import tiktoken
 
 from sagent.catalog.openai import compatible
+from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.lib.custom_json import MutableJSON
 from sagent.providers.openai.compat import (
     OpenAICompat,
@@ -24,6 +26,7 @@ from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
     ModelSettings,
+    ThinkingCapability,
 )
 from sagent.types.cost import (
     PriceCatalog,
@@ -36,7 +39,6 @@ from sagent.types.model import (
     RequestTooLargeError,
     StreamInterruptedError,
 )
-from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -513,12 +515,9 @@ class _DummyProvider(OpenAICompat):
     )
 
     catalog = ModelCatalog(
-        rows=MappingProxyType(
-            {
-                "default": _row,
-                "utility": _row,
-                "stub-1": _row,
-            },
+        models=ModelTable(
+            rows=(_row,),
+            roles={"default": "stub-1", "utility": "stub-1"},
         ),
         transport=compatible(),
     )
@@ -791,6 +790,22 @@ def test_build_body_strips_window_tag_from_wire_model() -> None:
         stream=False,
     )
     assert body["model"] == "stub-1"
+
+
+def test_a_reasoning_row_caps_output_with_max_completion_tokens() -> None:
+    """OpenAI reasoning models reject ``max_tokens``; the row says which it is."""
+    p = _DummyProvider.from_key("k")
+    m = p.model()
+    m._capability = replace(
+        m.capability,
+        thinking=ThinkingCapability(effort=frozenset({"none", "low"})),
+    )
+    body = m._build_body(
+        ModelRequest(messages=[UserMessage(text="x")], max_response_tokens=42),
+        stream=False,
+    )
+    assert body["max_completion_tokens"] == 42
+    assert "max_tokens" not in body
 
 
 def test_build_body_includes_max_tokens_when_set() -> None:

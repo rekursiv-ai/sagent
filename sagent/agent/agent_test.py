@@ -30,12 +30,13 @@ from sagent.agent import (
 )
 from sagent.agent.agent import (
     MAX_OVERFLOW_RECOVERY,
+    REFUSED_RESULT,
     ActivityTracker,
     Agent,
+    ObservedModel,
     SystemPromptArg,
     _AgentCompactor,
     _AgentTool,
-    _ObservedModel,
     _provider_knows_model,
     _repair_compact_payload,
     _resolve_target_spec,
@@ -49,6 +50,8 @@ from sagent.agent.background import (
     split_bg_args,
 )
 from sagent.agent.context import validate_context
+from sagent.agent.result_storage import PERSISTED_TAG
+from sagent.agent.retry import send_with_retry
 from sagent.agent.session_io import append_session, load_session
 from sagent.agent.state import (
     AgentLike,
@@ -59,7 +62,8 @@ from sagent.agent.state import (
 )
 from sagent.compaction.summary import SummaryCompactor
 from sagent.lib import last_models, token_count
-from sagent.lib.custom_json import JSON, json_freeze
+from sagent.lib.custom_json import JSON
+from sagent.providers.lib.errors import PolicyBlockedError
 from sagent.tools.read import Read
 from sagent.types.capability import (
     ModelCapability,
@@ -144,6 +148,9 @@ from sagent.types.tape import (
     full_tape_mask,
 )
 from sagent.types.tools import (
+    DEFAULT_MAX_RESULT_CHARS,
+    MAX_RESULT_TOKENS,
+    MAX_ROUND_RESULT_CHARS,
     Tool,
     ToolResultPolicy,
 )
@@ -362,7 +369,7 @@ async def test_observed_model_delegates_exact_token_measurement() -> None:
         async def actual_image_tokens(self, data: bytes) -> int:
             return len(data)
 
-    observed = _ObservedModel(_TokenModel(), lambda _response: None)
+    observed = ObservedModel(_TokenModel(), lambda _response: None)
 
     assert await observed.actual_text_tokens("abcdefgh") == 2
     assert await observed.actual_image_tokens(b"image") == 5
@@ -370,9 +377,7 @@ async def test_observed_model_delegates_exact_token_measurement() -> None:
     assert await observed.actual_request_tokens(request) > 0
 
 
-_STUB_SCHEMA: JSON = json_freeze({"type": "object"})
-_STRING_SCHEMA: JSON = json_freeze({"type": "string"})
-_TYPELESS_SCHEMA: JSON = json_freeze({})
+_STUB_SCHEMA: JSON = {"type": "object"}
 
 
 @dataclass(slots=True, kw_only=True)
@@ -382,7 +387,7 @@ class StubTool:
     name: str = "Echo"
     tool_id: str = "application/x-tool-echo"
     description: str = "Echo tool."
-    directive_schema: JSON = _STUB_SCHEMA
+    directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
     clearable_results: bool = False
     response: str | None = None
     calls: list[Mapping[str, object]] = field(default_factory=list)
@@ -469,10 +474,7 @@ def test_explicit_agent_caps_resolve_unknown_model_limits() -> None:
 
     assert agent.budget.max_request_tokens == 80_000
     assert agent.budget.max_response_tokens == 4_000
-    assert agent.tool_results == ToolResultPolicy(
-        persist_tokens=20_000,
-        message_budget_tokens=40_000,
-    )
+    assert agent.tool_results == ToolResultPolicy(message_budget_tokens=40_000)
 
 
 def test_explicit_ceiling_equal_initial_remains_on_model_switch() -> None:
@@ -525,19 +527,20 @@ def test_live_context_mutation_updates_budget_policy_without_swap() -> None:
     assert agent.budget.max_request_tokens == 1_000_000
     assert agent.budget.max_response_tokens == 8_000
     assert agent.budget.buffer_tokens == default_buffer_tokens(1_000_000)
-    assert agent.tool_results.persist_tokens == 250_000
+    assert agent.tool_results.message_budget_tokens == 500_000
     model.settings.context = ""
     assert agent.budget.max_request_tokens == 100_000
     assert agent.budget.buffer_tokens == default_buffer_tokens(100_000)
-    assert agent.tool_results.persist_tokens == 25_000
+    assert agent.tool_results.message_budget_tokens == 50_000
 
 
 def test_an_explicit_tool_result_policy_replaces_the_window_derived_one() -> None:
     policy = ToolResultPolicy(persist_tokens=10_000)
     model = StubModel(max_request_tokens=1_000_000)
 
-    assert Agent(model=model).tool_results.persist_tokens == 250_000
+    assert Agent(model=model).max_result_tokens == MAX_RESULT_TOKENS
     assert Agent(model=model, tool_results=policy).tool_results == policy
+    assert Agent(model=model, tool_results=policy).max_result_tokens == 10_000
 
 
 def test_explicit_buffer_equal_default_remains_explicit_on_switch() -> None:
@@ -553,9 +556,9 @@ def test_tool_policy_reads_switched_model_limits_live() -> None:
     small = StubModel(max_request_tokens=100_000)
     large = StubModel(max_request_tokens=1_000_000)
     agent = Agent(model=small)
-    assert agent.tool_results.persist_tokens == 25_000
+    assert agent.tool_results.message_budget_tokens == 50_000
     agent.swap_model(large)
-    assert agent.tool_results.persist_tokens == 250_000
+    assert agent.tool_results.message_budget_tokens == 500_000
     agent.swap_model(small)
     agent.swap_model(large)
     assert agent.tool_results.message_budget_tokens == 500_000
@@ -569,10 +572,48 @@ def test_token_delta_uses_measured_history_identity_not_last_assistant() -> None
     agent._last_measured_history = (measured,)
     synthetic = AssistantMessage(text="synthetic arrival")
     history = [measured, synthetic, UserMessage(text="fresh")]
-    delta = agent._tokens_appended_since_last_response(history, agent.model)
-    assert delta == agent.model.approx_request_tokens(
+    used = agent._estimated_request_tokens(history, agent.model)
+    assert used == 100 + agent.model.approx_request_tokens(
         ModelRequest(messages=[synthetic, history[-1]]),
     )
+
+
+@pytest.mark.asyncio
+async def test_divergent_history_replaces_the_measurement_instead_of_adding() -> None:
+    """A rewritten history (coalesced retype after an error) is not double-counted.
+
+    The measured prefix no longer prefixes the history, so the stale
+    measurement must be discarded rather than summed with a full re-estimate
+    of a conversation it already counted.
+    """
+    rec = _ThresholdCompactor()
+    a = Agent(
+        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=128_000),
+        tools=[],
+        compactor=rec,
+    )
+    # ~500k estimated tokens: alone it sits under the ~797k threshold, but
+    # summed with the stale 500k measurement of the same text it crosses it.
+    body = "x" * 2_000_000
+    a._last_input_tokens = 500_000
+    a._last_measured_history = (UserMessage(text=body),)
+    retyped: list[ModelContextEvent] = [UserMessage(text=f"{body}\n\nsecond")]
+
+    assert await a.compact_if_needed(retyped, a.model) is True
+    assert rec.compacted is False
+
+
+def test_account_swap_keeps_the_measurement_for_the_same_model() -> None:
+    """Same model under another account: same tokenizer, so the count stays valid."""
+    agent = Agent(model=StubModel(model_id="opus"))
+    measured = (UserMessage(text="m"),)
+    agent._last_input_tokens = 123
+    agent._last_measured_history = measured
+
+    agent.swap_model(StubModel(model_id="opus"))
+
+    assert agent._last_input_tokens == 123
+    assert agent._last_measured_history is measured
 
 
 @pytest.mark.asyncio
@@ -826,9 +867,7 @@ async def test_agent_request_tools_wrapped_in_background_aware() -> None:
     """
     model = StubModel()
     tool = StubTool(
-        directive_schema=json_freeze(
-            {"type": "object", "properties": {"msg": {"type": "string"}}},
-        ),
+        directive_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
     )
     a = _build_agent(model=model, tools=[tool])
     async for _ in a.run(UserMessage(text="hi")):
@@ -890,9 +929,7 @@ async def test_an_agent_that_forbids_background_offers_no_such_keys_and_runs_a_d
         ],
     )
     tool = StubTool(
-        directive_schema=json_freeze(
-            {"type": "object", "properties": {"msg": {"type": "string"}}},
-        ),
+        directive_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
     )
     a = Agent(model=model, tools=[tool], allow_background=False)
 
@@ -1118,7 +1155,7 @@ async def test_agent_run_waits_for_background_tool_result() -> None:
         name: str = "slow_echo"
         tool_id: str = "application/x-tool-slow-echo"
         description: str = "echoes after a brief async pause"
-        directive_schema: JSON = _STUB_SCHEMA
+        directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
         clearable_results: bool = False
 
         def summary(self, args: Mapping[str, object]) -> str:
@@ -1419,7 +1456,7 @@ async def test_background_result_lands_before_single_agent_idle() -> None:
         name: str = "slow_echo"
         tool_id: str = "application/x-tool-slow-echo"
         description: str = "echoes after a brief async pause"
-        directive_schema: JSON = _STUB_SCHEMA
+        directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
         clearable_results: bool = False
 
         def summary(self, args: Mapping[str, object]) -> str:
@@ -1553,6 +1590,134 @@ async def test_agent_tool_persists_with_runtime_call_id(tmp_path: Path) -> None:
 
     assert (tmp_path / "tool-results" / "tool_call_1.txt").read_text() == "X" * 5_000
     assert not (tmp_path / "tool-results" / "id_e3b0c44298fc1c14.txt").exists()
+
+
+@dataclass(slots=True, kw_only=True)
+class _CappedTool(StubTool):
+    """Stub that declares its own result character cap."""
+
+    max_result_chars: int = DEFAULT_MAX_RESULT_CHARS
+
+
+async def _run_one_round(
+    tool: StubTool,
+    *,
+    session_dir: Path,
+    calls: int = 1,
+    budget: AgentSettings | None = None,
+) -> list[ToolResult]:
+    """Run one round of ``calls`` parallel calls and return the stored results."""
+    round_calls = tuple(
+        ToolCall(id=f"c{i}", name="Echo", args={}) for i in range(calls)
+    )
+    model = StubModel(
+        max_request_tokens=1_000_000,
+        responses=[
+            AssistantMessage(tool_calls=round_calls),
+            AssistantMessage(text="done"),
+        ],
+    )
+    a = _build_agent(model=model, tools=[tool], session_dir=session_dir, budget=budget)
+    async for _ in a.run(UserMessage(text="hi")):
+        pass
+    return [m for m in a.history if isinstance(m, ToolResult)]
+
+
+@pytest.mark.asyncio
+async def test_a_result_over_its_tools_char_cap_is_persisted_on_a_huge_window(
+    tmp_path: Path,
+) -> None:
+    """Session ``ca1c4eb5``: a 453k-char Grep stayed inline on a 1M window.
+
+    The per-result cap was ``window // 4`` tokens, 250k on a 1M window, so the
+    result never reached disk. The cap is now characters and fixed per tool.
+    """
+    tool = _CappedTool(response="y" * 21_000, max_result_chars=20_000)
+
+    [stored] = await _run_one_round(tool, session_dir=tmp_path)
+
+    assert stored.content.startswith(PERSISTED_TAG), stored.content[:80]
+    assert (tmp_path / "tool-results" / "c0.txt").read_text() == "y" * 21_000
+
+
+@pytest.mark.asyncio
+async def test_a_declared_cap_above_the_global_default_is_clamped(
+    tmp_path: Path,
+) -> None:
+    tool = _CappedTool(
+        response="y" * (DEFAULT_MAX_RESULT_CHARS + 1),
+        max_result_chars=10**9,
+    )
+
+    [stored] = await _run_one_round(tool, session_dir=tmp_path)
+
+    assert stored.content.startswith(PERSISTED_TAG)
+
+
+@pytest.mark.asyncio
+async def test_a_tool_without_a_declared_cap_gets_the_global_default(
+    tmp_path: Path,
+) -> None:
+    under = StubTool(response="y" * DEFAULT_MAX_RESULT_CHARS)
+    over = StubTool(response="y" * (DEFAULT_MAX_RESULT_CHARS + 1))
+
+    [kept] = await _run_one_round(under, session_dir=tmp_path / "a")
+    [spilled] = await _run_one_round(over, session_dir=tmp_path / "b")
+
+    assert kept.content == "y" * DEFAULT_MAX_RESULT_CHARS
+    assert spilled.content.startswith(PERSISTED_TAG)
+
+
+@pytest.mark.asyncio
+async def test_a_round_of_parallel_results_shares_one_char_budget(
+    tmp_path: Path,
+) -> None:
+    """Five 45k results each pass the 50k cap; together they pass 200k."""
+    per = 45_000
+    calls = MAX_ROUND_RESULT_CHARS // per + 1
+    tool = StubTool(response="y" * per)
+
+    stored = await _run_one_round(tool, session_dir=tmp_path, calls=calls)
+
+    inline = [r for r in stored if not r.content.startswith(PERSISTED_TAG)]
+    assert len(inline) == MAX_ROUND_RESULT_CHARS // per
+    assert sum(len(r.content) for r in stored) < MAX_ROUND_RESULT_CHARS
+
+
+@pytest.mark.asyncio
+async def test_a_result_that_would_not_fit_the_context_is_persisted(
+    tmp_path: Path,
+) -> None:
+    """Under every char cap, yet bigger than the room left: still persisted."""
+    budget = AgentSettings(
+        max_request_tokens=8_000,
+        max_response_tokens=1_000,
+        buffer_tokens=1_000,
+    )
+    tool = StubTool(response="y" * 40_000)
+
+    [stored] = await _run_one_round(tool, session_dir=tmp_path, budget=budget)
+
+    assert stored.content.startswith(PERSISTED_TAG)
+
+
+@pytest.mark.asyncio
+async def test_an_exempt_tool_that_would_not_fit_is_refused_not_persisted(
+    tmp_path: Path,
+) -> None:
+    """Read is never persisted: its path back would be Read, which spills again."""
+    budget = AgentSettings(
+        max_request_tokens=8_000,
+        max_response_tokens=1_000,
+        buffer_tokens=1_000,
+    )
+    tool = _CappedTool(response="y" * 40_000, max_result_chars=0)
+
+    [stored] = await _run_one_round(tool, session_dir=tmp_path, budget=budget)
+
+    assert stored.is_error
+    assert "offset and limit" in stored.content
+    assert not (tmp_path / "tool-results").exists()
 
 
 @pytest.mark.asyncio
@@ -1847,9 +2012,75 @@ async def test_agent_shutdown_closes_active_model_once() -> None:
     model = ClosableStubModel()
     a = _build_agent(model=model)
     a.shutdown()
-    a.shutdown()
-    await asyncio.wait_for(model.closed_event.wait(), timeout=1.0)
+    await a.aclose()
+    await a.aclose()
+    assert model.closed_event.is_set()
     assert model.close_count == 1
+    assert a._close_task is not None
+    assert a._close_task.done()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["error", "cancel"])
+async def test_interrupted_run_releases_driver_without_closing_model(
+    interruption: str,
+) -> None:
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    closed = asyncio.Event()
+
+    class InterruptibleModel(StubModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            message = request.messages[-1]
+            assert isinstance(message, UserMessage)
+            if message.text == "interrupt":
+                if interruption == "error":
+                    raise ValueError("provider error")
+                started.set()
+                try:
+                    await asyncio.Future[None]()
+                finally:
+                    cancelled.set()
+            return await StubModel.stream(self, request, publish)
+
+        @override
+        async def close(self) -> None:
+            closed.set()
+
+    a = _build_agent(model=InterruptibleModel())
+    observers = tuple(a.runtime.observers)
+
+    async def consume() -> None:
+        async with contextlib.aclosing(a.run(UserMessage(text="interrupt"))) as events:
+            async for event in events:
+                if isinstance(event, ModelResponseError):
+                    raise event.exception
+
+    try:
+        if interruption == "error":
+            with pytest.raises(ValueError, match="provider error"):
+                await consume()
+        else:
+            task = asyncio.create_task(consume())
+            await asyncio.wait_for(started.wait(), timeout=1.0)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            await asyncio.wait_for(cancelled.wait(), timeout=1.0)
+        assert tuple(a.runtime.observers) == observers
+        assert not a._run_active
+        assert not closed.is_set()
+        events = [event async for event in a.run(UserMessage(text="retry"))]
+        assert any(isinstance(event, ModelResponseComplete) for event in events)
+        assert not closed.is_set()
+    finally:
+        a.shutdown()
+        await asyncio.wait_for(closed.wait(), timeout=1.0)
 
 
 def test_system_prompt_arg_type_alias_str_or_callable() -> None:
@@ -2572,6 +2803,73 @@ def test_resolve_target_spec_explicit_default_account_is_preserved() -> None:
         account="default",
     )
     assert target.account == "default"
+
+
+def test_change_model_missing_inherited_account_falls_back_to_default() -> None:
+    a = _build_agent()
+    a.model_recipe = ModelRecipe(
+        provider="StubSource",
+        auth="credentials",
+        model_id="source-model",
+        account="work",
+    )
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubModel(model_id="target-model")
+    calls: list[tuple[str, str, str | None]] = []
+
+    def build(provider: str, auth: str, *, account: str | None) -> MagicMock:
+        calls.append((provider, auth, account))
+        if account == "work":
+            raise FileNotFoundError("No credentials for work")
+        return fake_provider
+
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            side_effect=build,
+        ),
+        patch(
+            "sagent.providers.providers.default_auth_for_provider",
+            return_value="credentials",
+        ),
+    ):
+        target = a.change_model(provider="StubTarget", model_id="target-model")
+    assert calls == [
+        ("StubTarget", "credentials", "work"),
+        ("StubTarget", "credentials", None),
+    ]
+    assert target.account is None
+
+
+def test_change_model_explicit_missing_account_does_not_fallback() -> None:
+    a = _build_agent()
+    a.model_recipe = ModelRecipe(
+        provider="StubSource",
+        auth="credentials",
+        model_id="source-model",
+        account="source-work",
+    )
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            side_effect=FileNotFoundError("No credentials for target-work"),
+        ) as build,
+        patch(
+            "sagent.providers.providers.default_auth_for_provider",
+            return_value="credentials",
+        ),
+        pytest.raises(FileNotFoundError, match="target-work"),
+    ):
+        _ = a.change_model(
+            provider="StubTarget",
+            model_id="target-model",
+            account="target-work",
+        )
+    build.assert_called_once_with(
+        "StubTarget",
+        "credentials",
+        account="target-work",
+    )
 
 
 def test_change_model_provider_change_without_auth_uses_target_default(
@@ -3392,7 +3690,7 @@ async def test_run_bg_propagates_external_cancellation() -> None:
         name: str = "blocker"
         tool_id: str = "application/x-tool-blocker"
         description: str = ""
-        directive_schema: JSON = _STUB_SCHEMA
+        directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
         clearable_results: bool = False
 
         def summary(self, args: Mapping[str, object]) -> str:
@@ -3987,9 +4285,12 @@ async def test_compactor_model_calls_share_accounting_and_termination_gate(
             custom_instructions: str | None = None,
         ) -> ContextSplice:
             del context, custom_instructions
-            rich_model = cast(Model, model)
-            _ = await rich_model.stream(
+            _ = await send_with_retry(
+                cast(Model, model),
                 ModelRequest(messages=[UserMessage(text="summarize")]),
+                max_attempts=1,
+                persistent_retry=False,
+                publish_recoverable=lambda _text: None,
             )
             return _summary_override(
                 [UserMessage(text="[summary]")],
@@ -4014,10 +4315,52 @@ async def test_compactor_model_calls_share_accounting_and_termination_gate(
         max_budget_usd=max_budget_usd,
     )
     a.runtime.append_history(UserMessage(text="old"))
+    measured = tuple(a.runtime.context().messages)
+    a._last_input_tokens = 90_000
+    a._last_measured_history = measured
 
     assert await a.compact_now() is False
     assert isinstance(a.last_compact_error, expected_error)
     assert a.cost_tracker.spend.total == pytest.approx(0.25)
+    # The summary call is billed, but it did not measure the conversation.
+    assert a._last_input_tokens == 90_000
+    assert a._last_measured_history is measured
+
+
+def test_record_side_response_bills_without_measuring_the_conversation() -> None:
+    """A side call (advisor, summary) is paid for but says nothing about context size."""
+    a = _build_agent(max_budget_usd=1.0)
+    a.record_response(
+        ModelResponse(
+            message=AssistantMessage(text="turn"),
+            tokens=TokenCount(request=100_000),
+            spend=TokenCost(request=0.25),
+        ),
+    )
+    measured = a._last_measured_history
+    a.runtime.append_history(UserMessage(text="after"))
+
+    a.record_side_response(
+        ModelResponse(
+            message=AssistantMessage(text="advice"),
+            tokens=TokenCount(request=50, response=5),
+            spend=TokenCost(request=0.5),
+        ),
+    )
+
+    assert a._last_input_tokens == 100_000
+    assert a._last_measured_history is measured
+    assert a.cost_tracker.last_request == TokenCount(request=100_000)
+    assert a.cost_tracker.spend.total == pytest.approx(0.75)
+    assert a.cost_tracker.total == TokenCount(request=100_050, response=5)
+    assert a.cost_tracker.calls_by_model == {a.model.tagged_model_id: 2}
+    with pytest.raises(BudgetExhaustedError):
+        a.record_side_response(
+            ModelResponse(
+                message=AssistantMessage(text="advice"),
+                spend=TokenCost(request=0.5),
+            ),
+        )
 
 
 @pytest.mark.asyncio
@@ -5038,6 +5381,90 @@ async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> 
     assert visible_chars // 4 <= target, (
         f"post-scrunch view ({visible_chars // 4} tok) still exceeds target {target}"
     )
+
+
+@pytest.mark.asyncio
+async def test_agent_compactor_scrunch_passes_record_cost() -> None:
+    """Every summary call -- first pass and scrunch passes -- is billed."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _PayingCompactor:
+        compact_calls: int = 0
+
+        @property
+        def reattach(self) -> ReattachPolicy:
+            return ReattachPolicy()
+
+        def largest_context(self, settings: AgentSettings) -> int:
+            return _stub_largest_context(settings)
+
+        def should_compact(
+            self,
+            current_tokens: int,
+            largest_context: int,
+            system_tokens: int = 0,
+        ) -> bool:
+            del current_tokens, largest_context, system_tokens
+            return False
+
+        async def compact(
+            self,
+            tape: Sequence[TapeRecord],
+            context: Sequence[ModelContextEvent],
+            model: Model,
+            mint_ref: Callable[[], TapeRef],
+            custom_instructions: str | None = None,
+        ) -> ContextSplice:
+            del context, custom_instructions
+            self.compact_calls += 1
+            _ = await model.stream(ModelRequest(messages=[UserMessage(text="s")]))
+            payload_text = "X" * 5_000 if self.compact_calls == 1 else "ok"
+            return _summary_override(
+                [UserMessage(text=payload_text)],
+                mint_ref,
+                tape=tape or None,
+            )
+
+    @dataclass(slots=True, kw_only=True)
+    class _PricedModel(StubModel):
+        max_request_tokens: int = 1_000
+        max_response_tokens: int = 100
+
+        @override
+        def approx_request_tokens(self, request: ModelRequest) -> int:
+            return sum(
+                len(m.text) // 4
+                for m in request.messages
+                if isinstance(m, (UserMessage, AgentSendMessage))
+            )
+
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del request, publish
+            return ModelResponse(
+                message=AssistantMessage(text="<summary>s</summary>"),
+                spend=TokenCost(request=0.25),
+            )
+
+    compactor = _PayingCompactor()
+    a = Agent(
+        model=_PricedModel(),
+        compactor=compactor,
+        budget=AgentSettings(
+            max_request_tokens=1_000,
+            max_response_tokens=100,
+            buffer_tokens=100,
+        ),
+    )
+    a.runtime.append_history(UserMessage(text="x" * 4_000))
+
+    assert await a.compact_now() is True
+    assert compactor.compact_calls >= 2
+    assert a.cost_tracker.spend.total == pytest.approx(0.25 * compactor.compact_calls)
 
 
 @pytest.mark.asyncio
@@ -7105,14 +7532,12 @@ async def test_agent_tool_invalid_input_labels_then_errors() -> None:
     not invoked; the result is an ``InputValidationError`` naming the tool.
     """
     inner = StubTool(
-        directive_schema=json_freeze(
-            {
-                "type": "object",
-                "properties": {"msg": {"type": "string"}},
-                "required": ["msg"],
-                "additionalProperties": False,
-            },
-        ),
+        directive_schema={
+            "type": "object",
+            "properties": {"msg": {"type": "string"}},
+            "required": ["msg"],
+            "additionalProperties": False,
+        },
     )
     a = _build_agent(tools=[inner])
     labels: list[ToolLabel] = []
@@ -7702,14 +8127,15 @@ async def test_stream_rejects_normalized_refusal_after_recording_cost() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stop_reason", ["model_continuing", "max_tokens"])
-async def test_stream_rejects_every_normalized_non_success(
-    stop_reason: str,
-) -> None:
-    """Normalized non-success outcomes cannot collapse into assistant success."""
+@pytest.mark.parametrize(
+    "stop_reason",
+    ["model_continuing", "max_tokens", "model_context_window_exceeded"],
+)
+async def test_stream_keeps_truncated_or_paused_text(stop_reason: str) -> None:
+    """A truncated prose answer is delivered, not discarded after being billed."""
 
     @dataclass(slots=True, kw_only=True)
-    class _TerminatingModel(StubModel):
+    class _TruncatingModel(StubModel):
         @override
         async def stream(
             self,
@@ -7720,16 +8146,185 @@ async def test_stream_rejects_every_normalized_non_success(
             return ModelResponse(
                 message=AssistantMessage(text="partial output"),
                 stop_reason=stop_reason,
-                request_id="req_terminated",
             )
 
-    a = _build_agent(model=_TerminatingModel())
+    a = _build_agent(model=_TruncatingModel())
+
+    message = await a._agent_model.stream([UserMessage(text="hi")], lambda _: None)
+
+    assert message.text == "partial output"
+
+
+@dataclass(slots=True, kw_only=True)
+class _PolicyBlockingModel(StubModel):
+    """Raises a safeguard block on every call and counts the requests sent."""
+
+    calls: int = 0
+
+    @override
+    async def stream(
+        self,
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
+        del request, publish
+        self.calls += 1
+        raise PolicyBlockedError(provider_name="Anthropic", provider_message="flagged")
+
+
+@pytest.mark.asyncio
+async def test_a_policy_block_drops_the_refused_input_and_keeps_the_session() -> None:
+    """The flagged turn leaves the context; what came before it stays."""
+    model = _PolicyBlockingModel()
+    a = _build_agent(model=model)
+    a.runtime.append_history(UserMessage(text="earlier"))
+    a.runtime.append_history(AssistantMessage(text="earlier answer"))
+    a.runtime.append_history(UserMessage(text="flagged request"))
+
+    with pytest.raises(PolicyBlockedError):
+        _ = await a._agent_model.stream(a.history, lambda _: None)
+
+    user, assistant = a.history
+    assert isinstance(user, UserMessage)
+    assert user.text == "earlier"
+    assert isinstance(assistant, AssistantMessage)
+    assert assistant.text == "earlier answer"
+    a.runtime.append_history(UserMessage(text="next"))
+    assert [m.text for m in a.history if isinstance(m, UserMessage)] == [
+        "earlier",
+        "next",
+    ]
+
+
+@dataclass(slots=True, kw_only=True)
+class _RefusingAfterToolModel(StubModel):
+    """Refuses (HTTP 200, ``model_refusal``) whatever it is sent."""
+
+    @override
+    async def stream(
+        self,
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
+        del request, publish
+        return ModelResponse(
+            message=AssistantMessage(text=""),
+            stop_reason="model_refusal",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_stubs_the_tool_results_it_was_sent() -> None:
+    """A refused tool result becomes a stub so the call stays answered."""
+    a = _build_agent(model=_RefusingAfterToolModel())
+    call = ToolCall(id="c1", name="Read", args={})
+    a.runtime.append_history(UserMessage(text="read it"))
+    a.runtime.append_history(AssistantMessage(tool_calls=(call,)))
+    a.runtime.append_history(ToolResult(call_id="c1", content="flagged bytes"))
+
+    with pytest.raises(ModelTerminationError):
+        _ = await a._agent_model.stream(a.history, lambda _: None)
+
+    user, assistant, result = a.history
+    assert isinstance(user, UserMessage)
+    assert user.text == "read it"
+    assert isinstance(assistant, AssistantMessage)
+    assert assistant.tool_calls == (call,)
+    assert isinstance(result, ToolResult)
+    assert (result.call_id, result.content, result.is_error) == (
+        "c1",
+        REFUSED_RESULT,
+        True,
+    )
+
+
+def _texts(history: Sequence[ModelContextEvent]) -> list[str]:
+    return [m.text for m in history if isinstance(m, (UserMessage, AssistantMessage))]
+
+
+@pytest.mark.asyncio
+async def test_a_refused_coalesced_tail_leaves_no_part_of_it_behind() -> None:
+    """Masking the coalesce splice must not resurrect what IT had masked."""
+    a = _build_agent(model=_RefusingAfterToolModel())
+    a.runtime.append_history(UserMessage(text="earlier"))
+    a.runtime.append_history(AssistantMessage(text="answer"))
+    a.runtime.append_history(UserMessage(text="flagged1"))
+    a.runtime._append_or_coalesce_user(UserMessage(text="flagged2"))
+
+    with pytest.raises(ModelTerminationError):
+        _ = await a._agent_model.stream(a.history, lambda _: None)
+
+    assert _texts(a.history) == ["earlier", "answer"]
+    assert len(a.history) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_inside_a_summary_keeps_the_summary_not_what_it_replaced() -> (
+    None
+):
+    a = _build_agent(model=_RefusingAfterToolModel())
+    a.runtime.append_history(UserMessage(text="old q"))
+    a.runtime.append_history(AssistantMessage(text="old a"))
+    a.runtime.append_history(UserMessage(text="flagged"))
+    a.runtime.append_splice(
+        mask=full_tape_mask(a.runtime.tape),
+        insert_after=None,
+        payload=(
+            UserMessage(text="summary"),
+            AssistantMessage(text="ack"),
+            UserMessage(text="flagged"),
+        ),
+        strategy="summary",
+        discards_content=True,
+    )
+
+    with pytest.raises(ModelTerminationError):
+        _ = await a._agent_model.stream(a.history, lambda _: None)
+
+    assert _texts(a.history) == ["summary", "ack"]
+    assert len(a.history) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_with_nothing_after_the_last_answer_changes_nothing() -> None:
+    a = _build_agent(model=_RefusingAfterToolModel())
+    a.runtime.append_history(UserMessage(text="q"))
+    a.runtime.append_history(AssistantMessage(text="a"))
+    tape_len = len(a.runtime.tape)
+
+    with pytest.raises(ModelTerminationError):
+        _ = await a._agent_model.stream(a.history, lambda _: None)
+
+    assert len(a.runtime.tape) == tape_len
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_tool_call_truncated_by_the_cap() -> None:
+    """A capped tool call may carry cut-off arguments, so it must not dispatch."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _CappedToolModel(StubModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del request, publish
+            return ModelResponse(
+                message=AssistantMessage(
+                    text="",
+                    tool_calls=(ToolCall(id="c1", name="Echo", args={"msg": "x"}),),
+                ),
+                stop_reason="max_tokens",
+            )
+
+    a = _build_agent(model=_CappedToolModel())
 
     with pytest.raises(ModelTerminationError) as raised:
         _ = await a._agent_model.stream([UserMessage(text="hi")], lambda _: None)
 
-    assert raised.value.stop_reason == stop_reason
-    assert raised.value.response.message.text == "partial output"
+    assert raised.value.stop_reason == "max_tokens"
 
 
 @pytest.mark.asyncio
@@ -8146,9 +8741,7 @@ async def test_compactor_estimates_use_live_background_aware_tools() -> None:
 
     model = _RecordingModel()
     tool = StubTool(
-        directive_schema=json_freeze(
-            {"type": "object", "properties": {"msg": {"type": "string"}}},
-        ),
+        directive_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
     )
     a = Agent(model=model, tools=[tool], compactor=_NoopCompactor())
 
@@ -8258,9 +8851,7 @@ async def test_post_compact_estimates_use_live_background_aware_tools() -> None:
 
     model = _RecordingModel()
     tool = StubTool(
-        directive_schema=json_freeze(
-            {"type": "object", "properties": {"msg": {"type": "string"}}},
-        ),
+        directive_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
     )
     a = Agent(model=model, tools=[tool], compactor=_OkCompactor())
     a.runtime.append_history(UserMessage(text="x"))
@@ -9100,7 +9691,7 @@ def test_background_aware_tool_rejects_non_object_schema() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class StringSchemaTool(StubTool):
-        directive_schema: JSON = _STRING_SCHEMA
+        directive_schema: JSON = field(default_factory=lambda: {"type": "string"})
 
     with pytest.raises(ValueError, match="object-typed"):
         _ = BackgroundAwareTool(StringSchemaTool())
@@ -9111,7 +9702,7 @@ def test_background_aware_tool_accepts_typeless_schema() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class TypelessTool(StubTool):
-        directive_schema: JSON = _TYPELESS_SCHEMA
+        directive_schema: JSON = field(default_factory=lambda: cast(JSON, {}))
 
     wrap = BackgroundAwareTool(TypelessTool())
     # Injection still happens; the wrapper's whole job depends on it.

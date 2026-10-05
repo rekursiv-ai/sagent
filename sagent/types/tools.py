@@ -10,7 +10,7 @@ layer consumes the rest (``tool_id``, ``description``,
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 
 if TYPE_CHECKING:
@@ -22,21 +22,38 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "DEFAULT_MAX_RESULT_CHARS",
+    "MAX_RESULT_TOKENS",
+    "MAX_ROUND_RESULT_CHARS",
+    "ResultBounded",
     "Tool",
     "ToolResultPolicy",
 ]
 
 
+# Claude Code's limits (``constants/toolLimits.ts``, ``FileReadTool/limits.ts``).
+# Fixed, not window-derived: a fraction of a 1M window let one Grep result
+# carry 113k tokens, and a 450k-character line, into session ``ca1c4eb5``.
+DEFAULT_MAX_RESULT_CHARS: Final = 50_000
+"""Characters one result may hold before it is persisted; caps every tool's own."""
+
+MAX_ROUND_RESULT_CHARS: Final = 200_000
+"""Characters one round of parallel tool results may hold in total."""
+
+MAX_RESULT_TOKENS: Final = 25_000
+"""Tokens a self-bounding tool (Read, Grep, Glob, Bash) emits before paging."""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolResultPolicy:
-    """Bound stored and provider-visible tool results.
+    """Host overrides for stored and provider-visible tool results.
 
     ``persist_tokens`` bounds each stored result independently.
     ``message_budget_tokens`` bounds their aggregate request materialization.
     """
 
     persist_tokens: int = 0
-    """Per-result token threshold for disk off-loading; ``0`` disables."""
+    """Host per-result token cap; ``0`` leaves only the fixed limits."""
 
     message_budget_tokens: int = 0
     """Aggregate live tool-result budget for one request; ``0`` disables."""
@@ -52,13 +69,17 @@ class ToolResultPolicy:
 
     @classmethod
     def from_settings(cls, settings: AgentSettings) -> ToolResultPolicy:
-        """Derive proportional defaults from an agent's input window.
+        """Derive the aggregate budget from an agent's input window.
+
+        No per-result cap is derived: :data:`DEFAULT_MAX_RESULT_CHARS`, each
+        tool's ``max_result_chars``, and the room left in the window bound a
+        single result instead.
 
         Args:
           settings: The agent's chosen caps.
 
         Returns:
-          policy: Off-load thresholds proportional to ``max_request_tokens``.
+          policy: Aggregate budget proportional to ``max_request_tokens``.
 
         Raises:
           ValueError: If ``settings`` has not resolved its input window.
@@ -69,10 +90,26 @@ class ToolResultPolicy:
             raise ValueError(
                 "ToolResultPolicy.from_settings requires resolved AgentSettings",
             )
-        return cls(
-            persist_tokens=window // 4,
-            message_budget_tokens=window // 2,
-        )
+        return cls(message_budget_tokens=window // 2)
+
+
+@runtime_checkable
+class ResultBounded(Protocol):
+    """A tool that declares how many characters one of its results may hold.
+
+    Optional, so the many host and test tools that omit it keep satisfying
+    :class:`Tool`; those get :data:`DEFAULT_MAX_RESULT_CHARS`.
+    """
+
+    @property
+    def max_result_chars(self) -> int:
+        """Characters one result may hold before it is persisted to disk.
+
+        Clamped to :data:`DEFAULT_MAX_RESULT_CHARS`. ``0`` exempts a tool that
+        bounds itself and whose persisted output would be read back through
+        itself (Read): persisting it would only loop.
+        """
+        ...
 
 
 class ToolResultClearable(Protocol):

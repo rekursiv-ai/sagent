@@ -39,13 +39,9 @@ else:
     httpx2 = lazy_import("httpx2")  # 100ms cold.
     image = lazy_import("sagent.lib.image")
 
-from sagent.catalog.google import api, models, thinking_budget
-from sagent.lib.custom_json import (
-    IntCodec,
-    MutableJSON,
-    MutableJSONValue,
-    json_unfreeze,
-)
+from sagent.catalog.google import api, models, thinking_config
+from sagent.catalog.table import ModelCatalog
+from sagent.lib.custom_json import MutableJSON, MutableJSONValue, convert, json_unfreeze
 from sagent.providers.lib.errors import (
     error_status_code,
     is_context_overflow_text,
@@ -62,7 +58,6 @@ from sagent.types.model import (
     PromptTooLongError,
     StreamInterruptedError,
 )
-from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -86,15 +81,15 @@ _API_BASE: Final = "https://generativelanguage.googleapis.com/v1beta"
 #     server-side (https://ai.google.dev/gemini-api/docs/image-understanding;
 #     Firebase AI Logic input-file-requirements). So ``max_image_dim=0`` (no
 #     client resize) and ``max_image_bytes=0`` (no per-image cap).
-#   - The only documented limit is the 20 MB TOTAL inline request size
-#     (text + system + inline bytes), so ``max_request_bytes=20 MB``; the
-#     byte-aware compaction gate enforces it across the whole request.
+#   - The only documented limit is the TOTAL inline request size (text +
+#     system + inline bytes), carried as the catalog's ``max_request_bytes``;
+#     the byte-aware compaction gate enforces it across the whole request.
 
 
 class Google:
     """Google provider - creates Gemini model backends."""
 
-    catalog = ModelCatalog(rows=models(), transport=api())
+    catalog = ModelCatalog(models=models(), transport=api())
 
     def __init__(self, *, api_key: str) -> None:
         self.api_key = api_key
@@ -268,7 +263,7 @@ class _GeminiModel(ModelDefaults):
             if "too large" in msg or "too long" in msg or "exceeds the maximum" in msg:
                 raise PromptTooLongError(r.text)
         r.raise_for_status()
-        return IntCodec.coerce(cast(MutableJSON, r.json()).get("totalTokens"), 0)
+        return convert(cast(MutableJSON, r.json()).get("totalTokens"), int, default=0)
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify an error as a token context-window overflow.
@@ -454,14 +449,14 @@ def _build_request(
                     pending_tool_parts.append(block)
     _flush_tool_parts(contents, pending_tool_parts)
 
-    thinking_config = _thinking_config(capability, settings)
+    thinking = thinking_config(capability, settings)
     gen_config: MutableJSON = {}
-    if thinking_config is None:
+    if thinking is None:
         gen_config["temperature"] = request.temperature
     if request.max_response_tokens is not None:
         gen_config["maxOutputTokens"] = request.max_response_tokens
-    if thinking_config is not None:
-        gen_config["thinkingConfig"] = cast(MutableJSONValue, thinking_config)
+    if thinking is not None:
+        gen_config["thinkingConfig"] = cast(MutableJSONValue, thinking)
     body: MutableJSON = {
         "contents": [*contents],
         "generationConfig": gen_config,
@@ -493,22 +488,6 @@ def _build_request(
             ],
         )
     return body
-
-
-def _thinking_config(
-    capability: ModelCapability,
-    settings: ModelSettings,
-) -> MutableJSON | None:
-    """Return Gemini thinking config, or ``None`` when thinking is off."""
-    # gemini-1.5 rejects ``thinkingConfig`` outright, so an off row must send
-    # no key at all rather than a zero budget.
-    if settings.thinking_budget == "none" or "none" not in capability.thinking.budget:
-        return None
-    include = settings.thinking_output == "text"
-    if settings.thinking_budget == "auto":
-        return {"includeThoughts": include, "thinkingBudget": -1}
-    budget = thinking_budget(settings.thinking_effort)
-    return {"includeThoughts": include, "thinkingBudget": int(budget)}
 
 
 def _attachment_part(
@@ -656,13 +635,13 @@ def _build_response(
     model: _GeminiModel,
 ) -> ModelResponse:
     """Build a ``ModelResponse`` from Gemini's parsed stream fields."""
-    output_tokens = IntCodec.coerce(usage.get("candidatesTokenCount"), 0)
-    cache_read = IntCodec.coerce(usage.get("cachedContentTokenCount"), 0)
+    output_tokens = convert(usage.get("candidatesTokenCount"), int, default=0)
+    cache_read = convert(usage.get("cachedContentTokenCount"), int, default=0)
     # ``promptTokenCount`` is cache-inclusive; store the non-cached remainder so
     # ``TokenCount.input_tokens`` is disjoint from ``cache_read_tokens``.
     input_tokens = max(
         0,
-        IntCodec.coerce(usage.get("promptTokenCount"), 0) - cache_read,
+        convert(usage.get("promptTokenCount"), int, default=0) - cache_read,
     )
     tokens = TokenCount(
         request=input_tokens,

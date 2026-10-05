@@ -15,7 +15,7 @@ from sagent.agent.background import (
     BackgroundTaskEntry,
     split_bg_args,
 )
-from sagent.lib.custom_json import JSON, json_freeze
+from sagent.lib.custom_json import JSON
 from sagent.types.runtime import ToolResult
 
 
@@ -27,7 +27,7 @@ class _StubTool:
     tool_id: str = "application/x-tool-stub"
     description: str = "stub tool"
     directive_schema: JSON = field(
-        default_factory=lambda: json_freeze({"type": "object"}),
+        default_factory=lambda: {"type": "object"},
     )
     clearable_results: bool = False
     calls: list[Mapping[str, object]] = field(default_factory=list)
@@ -64,7 +64,7 @@ def test_background_aware_tool_injects_into_schemaless_tool() -> None:
     never learned about ``background`` / ``delay`` and silently lost
     the ability to schedule async tool runs.
     """
-    tool = _StubTool(directive_schema=json_freeze({"type": "object"}))
+    tool = _StubTool(directive_schema={"type": "object"})
     wrapped = BackgroundAwareTool(tool)
     props = _props(wrapped.directive_schema)
     assert "background" in props
@@ -74,9 +74,7 @@ def test_background_aware_tool_injects_into_schemaless_tool() -> None:
 def test_background_aware_tool_preserves_existing_properties() -> None:
     """Existing ``properties`` survive the merge unchanged."""
     tool = _StubTool(
-        directive_schema=json_freeze(
-            {"type": "object", "properties": {"msg": {"type": "string"}}},
-        ),
+        directive_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
     )
     wrapped = BackgroundAwareTool(tool)
     props = _props(wrapped.directive_schema)

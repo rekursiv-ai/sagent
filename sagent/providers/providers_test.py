@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock, patch
+
 import sys
 
 import pytest
@@ -19,6 +21,9 @@ from sagent.providers import (
     SelfHosted,
     build_provider,
     infer_provider,
+)
+from sagent.providers.providers import (
+    build_provider_with_account_fallback,
 )
 from sagent.types.cost import PriceKey, TokenCount
 from sagent.types.providers import ModelResolver
@@ -60,7 +65,7 @@ def test_infer_provider_returns_none_when_already_matches() -> None:
 
 @pytest.mark.parametrize(
     ("model_id", "provider"),
-    [("opus-4.8", "Anthropic"), ("luna-6", "OpenAI")],
+    [("opus-4.8", "Anthropic"), ("luna-6.0", "OpenAI")],
 )
 def test_infer_provider_uses_short_catalog_ids(model_id: str, provider: str) -> None:
     assert infer_provider(model_id, current_provider="Google") == (provider, "env")
@@ -186,6 +191,78 @@ def test_build_provider_account_kw_threaded_when_accepted(
     assert calls == [{"account": "work"}]
 
 
+def test_build_provider_with_account_fallback_retains_working_account() -> None:
+    provider = Mock()
+    with patch(
+        "sagent.providers.providers.build_provider",
+        return_value=provider,
+    ) as build:
+        result = build_provider_with_account_fallback(
+            "StubProv",
+            "credentials",
+            account="work",
+            fallback_to_default=True,
+        )
+    assert result == (provider, "work")
+    build.assert_called_once_with("StubProv", "credentials", account="work")
+
+
+def test_build_provider_with_account_fallback_retries_default() -> None:
+    provider = Mock()
+    with patch(
+        "sagent.providers.providers.build_provider",
+        side_effect=[FileNotFoundError("missing"), provider],
+    ) as build:
+        result = build_provider_with_account_fallback(
+            "StubProv",
+            "credentials",
+            account="work",
+            fallback_to_default=True,
+        )
+    assert result == (provider, None)
+    assert build.call_args_list == [
+        (("StubProv", "credentials"), {"account": "work"}),
+        (("StubProv", "credentials"), {"account": None}),
+    ]
+
+
+@pytest.mark.parametrize("account", [None, "", "default"])
+def test_build_provider_with_account_fallback_does_not_retry_default_like_account(
+    account: str | None,
+) -> None:
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            side_effect=FileNotFoundError("missing"),
+        ) as build,
+        pytest.raises(FileNotFoundError, match="missing"),
+    ):
+        _ = build_provider_with_account_fallback(
+            "StubProv",
+            "credentials",
+            account=account,
+            fallback_to_default=True,
+        )
+    build.assert_called_once_with("StubProv", "credentials", account=account)
+
+
+def test_build_provider_with_account_fallback_respects_disabled_fallback() -> None:
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            side_effect=FileNotFoundError("missing"),
+        ) as build,
+        pytest.raises(FileNotFoundError, match="missing"),
+    ):
+        _ = build_provider_with_account_fallback(
+            "StubProv",
+            "credentials",
+            account="work",
+            fallback_to_default=False,
+        )
+    build.assert_called_once_with("StubProv", "credentials", account="work")
+
+
 def test_build_provider_missing_auth_method_raises_even_with_from_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -267,7 +344,7 @@ def test_build_provider_forwards_account_only_where_declared(
         name
         for name in PROVIDER_NAMES
         if isinstance((cls := getattr(providers, name, None)), ModelResolver)
-        and cls.catalog.rows
+        and cls.catalog.models
     ),
 )
 def test_a_catalog_backed_provider_names_a_cheaper_utility_model(

@@ -34,16 +34,12 @@ import shutil
 import subprocess
 import tempfile
 
+import fastjsonschema
+
 from sagent.catalog.anthropic import cli, models
+from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import (
-    JSON,
-    FloatCodec,
-    IntCodec,
-    MutableJSON,
-    MutableJSONValue,
-    validate_json_schema,
-)
+from sagent.lib.custom_json import JSON, MutableJSON, MutableJSONValue, convert
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.lib.cli_respawn import respawn_for_cadence
 from sagent.providers.lib.errors import (
@@ -69,7 +65,6 @@ from sagent.types.model import (
     ModelRequest,
     ModelResponse,
 )
-from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -163,6 +158,7 @@ _CREDENTIALS_SCHEMA: Final[JSON] = {
         },
     },
 }
+_CREDENTIALS_VALIDATOR = fastjsonschema.compile(_CREDENTIALS_SCHEMA)
 
 
 # Current Claude Code stores credentials in the macOS Keychain, so the historical
@@ -344,7 +340,7 @@ class AnthropicCLI:
     the CLI emits on the terminal ``result`` event.
     """
 
-    catalog = ModelCatalog(rows=models(), transport=cli())
+    catalog = ModelCatalog(models=models(), transport=cli())
 
     supported_options: ClassVar[frozenset[str]] = frozenset[str]()
     """``from_credentials`` (the CLI wrapper) takes no construction options.
@@ -1542,7 +1538,7 @@ def _parse_cli_credentials(raw: MutableJSON) -> AnthropicCLICredentials:
     creds = AnthropicCLICredentials(
         access_token=str(oauth["accessToken"]),
         refresh_token=str(oauth["refreshToken"]),
-        expires_at=FloatCodec.coerce(oauth["expiresAt"]) / 1000.0,
+        expires_at=convert(oauth["expiresAt"], float) / 1000.0,
     )
     if "scopes" in oauth:
         creds["scopes"] = cast(list[str], oauth["scopes"])
@@ -1587,7 +1583,9 @@ def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
     if not isinstance(data, dict):
         return None
     raw = cast(MutableJSON, data)
-    if validate_json_schema(_CREDENTIALS_SCHEMA, raw):
+    try:
+        _CREDENTIALS_VALIDATOR(raw)
+    except fastjsonschema.JsonSchemaValueException:
         return None
     return _parse_cli_credentials(raw)
 
@@ -1978,9 +1976,9 @@ def _round_context_tokens(round_usage: MutableJSON | None) -> int:
     if round_usage is None:
         return 0
     return (
-        IntCodec.coerce(round_usage.get("input_tokens"), 0)
-        + IntCodec.coerce(round_usage.get("cache_creation_input_tokens"), 0)
-        + IntCodec.coerce(round_usage.get("cache_read_input_tokens"), 0)
+        convert(round_usage.get("input_tokens"), int, default=0)
+        + convert(round_usage.get("cache_creation_input_tokens"), int, default=0)
+        + convert(round_usage.get("cache_read_input_tokens"), int, default=0)
     )
 
 
@@ -2017,7 +2015,7 @@ def _build_model_response(
         if not isinstance(row, dict):
             continue
         row_map = cast(MutableJSON, row)
-        output_tokens += IntCodec.coerce(row_map.get("outputTokens"), 0)
+        output_tokens += convert(row_map.get("outputTokens"), int, default=0)
         cost = row_map.get("costUSD")
         if isinstance(cost, (int, float)):
             total_cost += float(cost)
@@ -2038,12 +2036,17 @@ def _build_model_response(
     cache_creation = 0
     cache_read = 0
     if last_round_usage is not None:
-        input_tokens = IntCodec.coerce(last_round_usage.get("input_tokens"), 0)
-        cache_creation = IntCodec.coerce(
+        input_tokens = convert(last_round_usage.get("input_tokens"), int, default=0)
+        cache_creation = convert(
             last_round_usage.get("cache_creation_input_tokens"),
-            0,
+            int,
+            default=0,
         )
-        cache_read = IntCodec.coerce(last_round_usage.get("cache_read_input_tokens"), 0)
+        cache_read = convert(
+            last_round_usage.get("cache_read_input_tokens"),
+            int,
+            default=0,
+        )
     # Build the single thinking block from the accumulated body + signature.
     # The signature MUST be present whenever the body is -- otherwise a
     # subsequent wire send rejects with ``thinking.signature: Field required``.

@@ -13,9 +13,11 @@ stay local:
   cost on ``Agent._own_spend`` for its ``max_budget_usd`` cap; the cap is
   per-agent, the rollup is tree-wide.
 
-Three methods, each named for what it does:
+Four methods, each named for what it does:
 
 - :meth:`record_tokens` -- token totals + per-call provenance, self-only.
+- :meth:`record_side_tokens` -- token totals only, for calls outside the
+  conversation (compaction, advisor) that must not become the turn baseline.
 - :meth:`record_cost` -- cumulative USD cost; root sink only.
 - :meth:`restore_totals` -- session-resume hook; overwrites cumulative
   totals (``spend`` + ``total``) from persisted metadata.
@@ -94,9 +96,23 @@ class CostTracker:
         """
         self.last_request = response.tokens
         self.last_response_time = time.time()
+        self.last_model_id = model_id
+        self.record_side_tokens(response, model_id=model_id)
+
+    def record_side_tokens(self, response: ModelResponse, *, model_id: str) -> None:
+        """Add a side call's tokens to the totals, leaving the turn baseline alone.
+
+        A compaction summary or advisor consult is billed like a turn, but its
+        prompt is not the conversation's: recording it as ``last_request``
+        would make cache-miss detection compare the next turn against it.
+
+        Args:
+          response: Completed side-call response with token counts.
+          model_id: Model identifier for per-model call tracking.
+
+        """
         self.total = self.total + response.tokens
         self.calls_by_model[model_id] = self.calls_by_model.get(model_id, 0) + 1
-        self.last_model_id = model_id
 
     def record_cache_miss(self, miss: CacheMiss, *, retention: int = 500) -> None:
         """Append a detected cache miss, trimming to the retention bound.

@@ -41,7 +41,7 @@ import base64
 import json
 import logging
 
-from sagent.lib.custom_json import IntCodec
+from sagent.lib.custom_json import convert
 
 
 logger = logging.getLogger(__name__)
@@ -163,12 +163,12 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
 
 def _id(rec: Mapping[str, object]) -> int:
     """Return the v3 record ``_id`` as an int, defaulting to ``0``."""
-    return IntCodec.coerce(rec.get("_id"), 0)
+    return convert(rec.get("_id"), int, default=0)
 
 
 def _parent_id(rec: Mapping[str, object]) -> int:
     """Return the v3 record ``_parent_id`` as an int, defaulting to ``-1``."""
-    return IntCodec.coerce(rec.get("_parent_id"), -1)
+    return convert(rec.get("_parent_id"), int, default=-1)
 
 
 def _decode_bytes_content(content: object) -> bytes | None:

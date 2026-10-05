@@ -528,13 +528,13 @@ def test_model_rejects_an_unknown_tag() -> None:
 
 
 def test_catalog_inherits_from_anthropic() -> None:
-    assert tuple(AnthropicCLI.catalog.rows) == tuple(Anthropic.catalog.rows)
+    assert tuple(AnthropicCLI.catalog.models) == tuple(Anthropic.catalog.models)
 
 
 def test_utility_model_picks_latest_sonnet() -> None:
     provider = AnthropicCLI()
     model = provider.model("utility")
-    assert model.capability.model_id == "sonnet-5"
+    assert model.capability.model_id == "sonnet-5.5"
 
 
 def test_model_capabilities() -> None:
@@ -1332,6 +1332,7 @@ class _FakeBridge:
         self._has_tools = has_tools
         self._will_list = will_list
         self.wait_calls: list[int] = []
+        self.wait_timeouts: list[float] = []
 
     def drain_detached_results(self) -> list[ToolResult]:
         self.drain_calls += 1
@@ -1353,8 +1354,8 @@ class _FakeBridge:
         return 0
 
     async def wait_listed(self, since: int, timeout_sec: float) -> bool:
-        del timeout_sec
         self.wait_calls.append(since)
+        self.wait_timeouts.append(timeout_sec)
         return self._will_list
 
     async def start(self) -> None:
@@ -1374,8 +1375,28 @@ async def test_await_mcp_listed_raises_when_catalog_never_connects() -> None:
     bridge = _FakeBridge([], has_tools=True, will_list=False)
     model._tools_bridge = cast(ToolsBridge, bridge)
     proc = cast(Subproc, object())
-    with pytest.raises(SubprocessTransportError, match=r"never.*connected"):
+    model._mcp_baseline_by_proc[id(proc)] = 3
+    with pytest.raises(SubprocessTransportError) as raised:
         await model._await_mcp_listed(proc)
+    timeout = model._mcp_connect_timeout_sec
+    assert str(raised.value) == (
+        f"AnthropicCLI: MCP bridge catalog not fetched within {timeout:.1f}s"
+        " (CLI MCP client never connected); respawning rather than running a"
+        " tool-less turn"
+    )
+    assert bridge.wait_timeouts == [timeout]
+    # A failed connect keeps the baseline: the respawn path reads it again.
+    assert model._mcp_baseline_by_proc[id(proc)] == 3
+
+
+@pytest.mark.asyncio
+async def test_await_mcp_listed_waits_from_zero_for_an_unrecorded_proc() -> None:
+    model = AnthropicCLI().model("claude-haiku-4-5")
+    bridge = _FakeBridge([], has_tools=True, will_list=True)
+    model._tools_bridge = cast(ToolsBridge, bridge)
+    await model._await_mcp_listed(cast(Subproc, object()))
+    assert bridge.wait_calls == [0]
+    assert model._mcp_baseline_by_proc == {}
 
 
 @pytest.mark.asyncio

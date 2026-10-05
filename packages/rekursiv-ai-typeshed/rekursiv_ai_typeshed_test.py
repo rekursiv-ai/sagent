@@ -94,18 +94,9 @@ def test_email_content_methods_are_annotated(
     assert found == methods
 
 
-@pytest.mark.parametrize("checker", ["ty", "basedpyright"])
-def test_installed_unwrap_returns_its_argument_type(checker: str) -> None:
-    path = _INSTALLED / checker / "stdlib" / "inspect.pyi"
-    unwrap = next(
-        node
-        for node in ast.parse(path.read_text()).body
-        if isinstance(node, ast.FunctionDef) and node.name == "unwrap"
-    )
-    func = unwrap.args.args[0].annotation
-    assert isinstance(func, ast.Name)
-    assert isinstance(unwrap.returns, ast.Name)
-    assert (func.id, unwrap.returns.id) == ("_F", "_F")
+def test_the_patch_leaves_inspect_unwrap_alone() -> None:
+    # ``unwrap`` follows ``__wrapped__`` to a different object, so ``-> _F`` lies.
+    assert "stdlib/inspect.pyi" not in _PATCH.read_text()
 
 
 def test_installed_tree_matches_the_installed_checkers() -> None:

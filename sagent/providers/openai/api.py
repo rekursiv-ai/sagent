@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING, ClassVar, Self
 import os
 
 from sagent.catalog.openai import api, models
+from sagent.catalog.table import ModelCatalog
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.openai.responses import _OpenAIResponsesModel
-from sagent.types.providers import ModelCatalog
 
 
 if TYPE_CHECKING:
@@ -28,7 +28,7 @@ class OpenAI:
 
     ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.openai.com/v1"
-    catalog = ModelCatalog(rows=models(), transport=api())
+    catalog = ModelCatalog(models=models(), transport=api())
 
     def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
         self.api_key = api_key

@@ -57,11 +57,7 @@ from sagent.agent.compaction import (
 )
 from sagent.agent.cost_tracker import CostTracker
 from sagent.agent.result_storage import post_process_result
-from sagent.agent.retry import (
-    send_with_retry,
-    service_error_snapshot,
-    validate_model_response,
-)
+from sagent.agent.retry import send_with_retry, service_error_snapshot
 from sagent.agent.runtime import (
     AgentRuntime,
     GatedDeque,
@@ -83,6 +79,7 @@ from sagent.agent.state import (
     tool_state_var,
     unique_registry_label,
 )
+from sagent.catalog.table import UnknownModelError, UnsupportedTagError
 from sagent.compaction.history import (
     MAX_CONSECUTIVE_COMPACT_FAILURES,
     estimate_entry_tokens,
@@ -94,6 +91,7 @@ from sagent.compaction.scrunch import (
 from sagent.lib import last_models
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.providers import providers
+from sagent.providers.lib.errors import PolicyBlockedError
 from sagent.request_materialization import materialize_request
 
 # The one module imported whole rather than by name: this file touches 36
@@ -111,29 +109,31 @@ from sagent.types.model import (
     ModelRecipe,
     ModelRequest,
     ModelResponse,
+    ModelTerminationError,
     RequestTooLargeError,
     StreamInterruptedError,
     UsageSnapshot,
 )
-from sagent.types.providers import (
-    AuthReloadable,
-    ModelResolver,
-    UnknownModelError,
-    UnsupportedTagError,
-)
+from sagent.types.providers import AuthReloadable, ModelResolver
 from sagent.types.settings import (
     AgentSettings,
     default_buffer_tokens,
 )
 from sagent.types.tape import (
     ContextSplice,
+    MaskRange,
     ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
+    merge_mask_ranges,
     splice_safe_repair,
     unpaired_call_ids,
 )
 from sagent.types.tools import (
+    DEFAULT_MAX_RESULT_CHARS,
+    MAX_RESULT_TOKENS,
+    MAX_ROUND_RESULT_CHARS,
+    ResultBounded,
     Tool,
     ToolResultPolicy,
 )
@@ -159,6 +159,7 @@ SystemPromptArg = str | Callable[[], str]
 re-invoked per request so cwd-aware sections stay live after ``cd``."""
 
 ERROR_MAX_TOOL_CALL_ROUNDS: Final = "error:max_tool_call_rounds"
+REFUSED_RESULT: Final = "[withheld: the model refused the request carrying this result]"
 MAX_OVERFLOW_RECOVERY = 3  # house-ignore[globals] -- Overflow-recovery retry count.
 
 # Utilization fraction at which a rate-limit window earns a UI advisory.
@@ -342,6 +343,7 @@ class Agent:
         self.tool_state = ToolState()
         self.compaction_state = CompactionState()
         self._bg: dict[str, BackgroundTaskEntry] = {}
+        self._round_result_chars = 0
         self.observers: list[Callable[[runtime.RuntimeEvent], None]] = []
         # ``_tool_registry`` maps cohort call_id → (tool_name, started_at)
         # so ``background`` can synthesize ``BackgroundTaskEntry`` rows
@@ -375,6 +377,7 @@ class Agent:
         # target every subagent while never routing to the root or to self.
         self._is_subagent: bool = False
         self._shutting_down: bool = False
+        self._close_task: asyncio.Task[None] | None = None
         self._run_active: bool = False
         # Live ``serve_forever`` task from ``drive_until_first_idle``, kept so
         # a one-shot caller can await the loop to completion after shutdown.
@@ -481,7 +484,7 @@ class Agent:
 
     @property
     def tool_results(self) -> ToolResultPolicy:
-        """Derive result limits; a compactor owns aggregate context pressure.
+        """Derive the aggregate budget; a compactor owns aggregate context pressure.
 
         Returns:
           policy: Per-result limits and the applicable aggregate request budget.
@@ -511,15 +514,97 @@ class Agent:
 
     @property
     def max_result_tokens(self) -> int:
-        """Return the per-result threshold for disk off-loading.
-
-        Aggregate request budgeting, when enabled, can further shorten results.
+        """Return the tokens a self-bounding tool emits before it pages.
 
         Returns:
-          tokens: Persistence threshold; zero disables per-result off-loading.
+          tokens: The host's per-result cap, else :data:`MAX_RESULT_TOKENS`.
 
         """
-        return self.tool_results.persist_tokens
+        return self.tool_results.persist_tokens or MAX_RESULT_TOKENS
+
+    def result_room_tokens(self) -> int:
+        """Return the tokens a fresh tool result may add and still fit the context.
+
+        A result over this is persisted when it arrives, so it never forces the
+        request past :meth:`Compactor.largest_context` on its own.
+
+        Returns:
+          tokens: Room left before the largest request; at least ``1``.
+
+        """
+        budget = self.budget
+        largest = (
+            self._agent_compactor.largest_context(budget)
+            if self._agent_compactor is not None
+            else (budget.max_request_tokens or 0)
+            - (budget.max_response_tokens or 0)
+            - (budget.buffer_tokens or 0)
+        )
+        used = self._estimated_request_tokens(
+            self.runtime.context().messages,
+            self.model,
+        )
+        return max(1, largest - used)
+
+    # Decided once, as the result arrives, and stored on the tape that way: a
+    # later rewrite would change a prefix the provider already cached.
+    def bound_result(
+        self,
+        result: runtime.ToolResult,
+        *,
+        tool: Tool,
+    ) -> runtime.ToolResult:
+        """Persist ``result`` past its tool's cap, the round's, or the context's.
+
+        Args:
+          result: Fresh result from ``tool``.
+          tool: The tool that produced it; its ``max_result_chars`` applies.
+
+        Returns:
+          bounded: ``result``, a persisted preview of it, or, for a tool that
+              is never persisted, an error asking for a smaller page.
+
+        """
+        declared = (
+            tool.max_result_chars
+            if isinstance(tool, ResultBounded)
+            else DEFAULT_MAX_RESULT_CHARS
+        )
+        host = self.tool_results.persist_tokens
+        room = self.result_room_tokens()
+        if declared > 0:
+            max_chars = min(
+                declared,
+                DEFAULT_MAX_RESULT_CHARS,
+                max(1, MAX_ROUND_RESULT_CHARS - self._round_result_chars),
+            )
+            persist_tokens = min(room, host) if host > 0 else room
+        else:
+            # Read pages itself; persisting it hands back a path that only
+            # Read can open, so the next read would spill again. A page that
+            # cannot fit is refused instead, as Claude Code's Read does.
+            tokens = self.approx_text_tokens(result.content)
+            if tokens > room:
+                return dataclasses.replace(
+                    result,
+                    content=(
+                        f"Result ({tokens:,} tokens) exceeds the {room:,} tokens"
+                        " left in context. Pass offset and limit to read a smaller"
+                        " part."
+                    ),
+                    is_error=True,
+                    attachments=(),
+                )
+            max_chars, persist_tokens = 0, host
+        processed = post_process_result(
+            result,
+            tool.name,
+            session_dir=self.session_dir,
+            persist_tokens=persist_tokens,
+            max_chars=max_chars,
+        )
+        self._round_result_chars += len(processed.content)
+        return processed
 
     def approx_text_tokens(self, text: str) -> int:
         """Delegate to the active model's tokenizer.
@@ -823,8 +908,12 @@ class Agent:
         carried = old.settings
         self.model = model
         self.model_recipe = spec
-        self._last_input_tokens = 0
-        self._last_measured_history = ()
+        # An account or auth change keeps the tokenizer, so the provider's
+        # count still measures this history; dropping it forced the cruder
+        # first-request estimate and could fire a spurious compaction.
+        if model.capability.model_id != old.capability.model_id:
+            self._last_input_tokens = 0
+            self._last_measured_history = ()
         self._agent_model.set_inner(model)
         self.runtime.model = self._agent_model
         model.settings.adopt(carried)
@@ -843,11 +932,12 @@ class Agent:
         """Resolve, build, and queue a model swap. The high-level API.
 
         Kwarg semantics: each defaults to ``None`` meaning "inherit from
-        the current ``model_recipe``." Note that ``account=None`` therefore
-        inherits the current account override; setting ``account`` to
-        the default backend account (literal ``None``) is not expressible
-        via this API -- construct a ``types.model.ModelRecipe`` and call
-        :meth:`swap_model` directly for that corner.
+        the current ``model_recipe``." On a cross-provider change, a missing
+        inherited named account retries the destination provider's default
+        credentials. Explicit accounts and same-provider changes remain strict.
+        Setting ``account`` to the default backend account (literal ``None``)
+        is otherwise not expressible via this API -- construct a
+        ``types.model.ModelRecipe`` and call :meth:`swap_model` directly.
 
         Cross-provider resolution when ``model_id`` is omitted:
         1. Prefer the current model id when the new provider's catalog
@@ -887,11 +977,13 @@ class Agent:
             model_id=model_id,
             account=account,
         )
-        provider_obj = providers.build_provider(
+        provider_obj, resolved_account = providers.build_provider_with_account_fallback(
             target.provider,
             target.auth,
             account=target.account,
+            fallback_to_default=(account is None and target.provider != spec.provider),
         )
+        target = dataclasses.replace(target, account=resolved_account)
         new_model = provider_obj.model(target.model_id)
         if target.provider != spec.provider:
             label = (
@@ -1117,8 +1209,18 @@ class Agent:
 
         """
         if not self._shutting_down:
-            _schedule_close(self.model)
+            self._close_task = _schedule_close(self.model)
         self._shutting_down = True
+        self._stop_driver(force=force)
+
+    async def aclose(self) -> None:
+        """Shut down the agent and await terminal model cleanup."""
+        self.shutdown()
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self.model.close())
+        await asyncio.shield(self._close_task)
+
+    def _stop_driver(self, *, force: bool = False) -> None:
         if force:
             self.kill_all_tools()
         self._cancel_all_detached()
@@ -1264,8 +1366,9 @@ class Agent:
         """Process one inbound message; drive rounds until idle.
 
         Convenience entrypoint used by tests and non-``serve_forever``
-        callers. **Single-driver contract**: this method owns ``shutdown``
-        in its ``finally`` block. Calling ``run`` while another task is
+        callers. **Single-driver contract**: this method stops its driver
+        in its ``finally`` block, retaining the model for subsequent runs.
+        Call ``aclose`` for terminal cleanup. Calling ``run`` while another task is
         already driving this agent (concurrent ``run`` or ``serve_forever``)
         would push a ``Quit()`` into the foreign driver's inbox on exit,
         killing it. The runtime guards via ``_run_active`` so the
@@ -1347,9 +1450,15 @@ class Agent:
                     if drive in done and events.empty():
                         break
             finally:
-                self.shutdown(force=False)
+                self._stop_driver()
                 with contextlib.suppress(asyncio.CancelledError):
                     await drive
+                for task in (self.runtime.model_call, self.runtime.compact_task):
+                    if task is not None:
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await task
+                self.runtime.model_call = None
+                self.runtime.compact_task = None
         finally:
             if _watch in self.runtime.observers:
                 self.runtime.observers.remove(_watch)
@@ -1593,19 +1702,113 @@ class Agent:
         previous_response_time = self.cost_tracker.last_response_time
         model_id = self.model.tagged_model_id
         self.cost_tracker.record_tokens(response, model_id=model_id)
-        cost_sink = cost_root_var.get(None) or self.cost_tracker
-        cost_sink.record_cost(response)
         self._record_cache_waste(
             previous=previous_tokens,
             current=response.tokens,
             idle_sec=time.time() - previous_response_time,
             model_changed=bool(previous_model_id) and previous_model_id != model_id,
         )
-        self._own_spend = self._own_spend + response.spend
         # Anchor the proactive compaction trigger on the provider's exact
         # prompt size, every cache pool included.
         self._last_input_tokens = response.tokens.prompt
         self._last_measured_history = tuple(self.runtime.context().messages)
+        self._bill(response)
+
+    # Re-sending a refused context only repeats the refusal (and, for a safeguard
+    # block, flags the account again), while halting until /clear threw away the
+    # whole session. The refused material is what arrived since the model last
+    # answered, so that tail alone leaves the context; the conversation before it
+    # stays, and the next input continues from there.
+    def withhold_refused_tail(self) -> None:
+        """Mask what arrived since the last assistant turn out of the context.
+
+        Tool results become error stubs that keep their call ids, so the
+        assistant turn that requested them stays paired; user-side messages
+        are dropped.
+        """
+        resolved = self.runtime.context()
+        messages, origins = resolved.messages, resolved.origins
+        tail = next(
+            (
+                i + 1
+                for i in range(len(messages) - 1, -1, -1)
+                if isinstance(messages[i], runtime.AssistantMessage)
+            ),
+            0,
+        )
+        if tail == len(messages):
+            return
+        masked = list(dict.fromkeys(origins[tail:]))
+        # A splice's payload renders as one contiguous segment, so the first
+        # masked origin may also carry entries before the tail; those ride in
+        # this payload rather than vanish with the splice.
+        start = origins.index(masked[0])
+        withheld = tuple(
+            runtime.ToolResult(
+                call_id=entry.call_id,
+                content=REFUSED_RESULT,
+                is_error=True,
+            )
+            for entry in messages[tail:]
+            if isinstance(entry, runtime.ToolResult)
+        )
+        payload = (*messages[start:tail], *withheld)
+        # Masking a splice's ref kills it, which lapses its own mask and would
+        # resurrect what it replaced (``_append_or_coalesce_user`` absorbs the
+        # same way), so its ranges are carried into this mask.
+        absorbed = (
+            r
+            for ref in masked
+            if isinstance(splice := self.runtime.record_at(ref), ContextSplice)
+            for r in splice.mask
+        )
+        self.runtime.append_splice(
+            mask=merge_mask_ranges(
+                (
+                    *absorbed,
+                    *(
+                        MaskRange(
+                            session_id=ref.session_id,
+                            lo=ref.ordinal,
+                            hi=ref.ordinal,
+                        )
+                        for ref in masked
+                    ),
+                ),
+            ),
+            insert_after=origins[start - 1] if start > 0 else None,
+            payload=payload,
+            strategy="refused_tail",
+            paired_externally=unpaired_call_ids(payload),
+            discards_content=True,
+        )
+
+    def record_side_response(self, response: ModelResponse) -> None:
+        """Bill a call made outside the conversation, such as a summary or consult.
+
+        Cost, token totals, and the budget cap apply exactly as for a turn.
+        The compaction anchor and the cache-miss baseline do not move: the
+        side call's prompt is not this conversation, so letting it stand in
+        for one made a full context read as nearly empty.
+
+        Args:
+          response: Completed side-call response with token counts and cost.
+
+        Raises:
+          BudgetExhaustedError: This agent's own cost reached ``max_budget_usd``.
+
+        """
+        self.cost_tracker.record_side_tokens(
+            response,
+            model_id=self.model.tagged_model_id,
+        )
+        self._bill(response)
+
+    def _bill(self, response: ModelResponse) -> None:
+        """Charge one response's cost and enforce this agent's budget cap."""
+        cost_sink = cost_root_var.get(None) or self.cost_tracker
+        cost_sink.record_cost(response)
+        self._own_spend = self._own_spend + response.spend
         if (
             self.max_budget_usd is not None
             and self._own_spend.total >= self.max_budget_usd
@@ -1760,6 +1963,7 @@ class Agent:
                 self._tool_registry[tc.id] = (tc.name, now)
             if event.message.tool_calls:
                 self.activity.num_tool_call_rounds += 1
+                self._round_result_chars = 0
             self._prune_tool_registry()
 
     # Detached and still-running calls are kept whatever their age: their results have
@@ -1993,31 +2197,7 @@ class Agent:
             )
         if self._agent_compactor is None:
             return True
-        used = self._last_input_tokens
-        if used <= 0:
-            # No response recorded yet (fresh start or resume): fall back to a
-            # client-side estimate of the request about to be sent. Estimated
-            # against ``live_tools()`` (``BackgroundAwareTool`` wrappers
-            # applied) so the injected ``background`` / ``delay`` schema counts
-            # toward the budget, matching what the next request will carry.
-            used = model.approx_request_tokens(
-                materialize_request(
-                    ModelRequest(
-                        messages=history,
-                        system=self.system_prompt() or None,
-                        tools=self.live_tools() or None,
-                    ),
-                    tool_result_budget_tokens=self.tool_results.message_budget_tokens,
-                ),
-            )
-        else:
-            # ``_last_input_tokens`` is the provider's count for the LAST
-            # request -- it does not include entries appended since (this
-            # turn's tool results, interleaved user messages). Add a
-            # client-side estimate of those so the gate reflects the request
-            # about to be sent, not the previous one; without it the
-            # proactive gate lags one turn behind the growing context.
-            used += self._tokens_appended_since_last_response(history, model)
+        used = self._estimated_request_tokens(history, model)
         token_gate = self._agent_compactor.should_compact(
             current_tokens=used,
             largest_context=self._agent_compactor.largest_context(self.budget),
@@ -2059,36 +2239,42 @@ class Agent:
             return False
         return await self.compact_now()
 
-    # ``_last_input_tokens`` covers the prompt as of the last ``AssistantMessage`` (the
-    # response the provider counted). Entries after it -- this turn's tool results and
-    # any interleaved user messages -- are not yet reflected. Estimate just those, with
-    # no system/tools (already in the anchor), so the proactive gate sees the full
-    # request about to be sent rather than the previous one.
-    def _tokens_appended_since_last_response(
+    # The provider's count for the last request is ground truth only while the
+    # history it measured still prefixes the one about to be sent; then just the
+    # appended entries (this turn's tool results, new user input) are estimated, with
+    # no system/tools since the anchor already counts them. Once the measured history
+    # is rewritten -- a coalesced retype after an error, a model swap -- the count
+    # describes a different request, so it is replaced by a full estimate. Adding the
+    # two counted the whole conversation twice and fired spurious compactions.
+    def _estimated_request_tokens(
         self,
         history: Sequence[runtime.ModelContextEvent],
         model: Model,
     ) -> int:
-        """Estimate tokens of entries appended after the last model response."""
+        """Estimate the token size of the request about to be sent."""
         anchor = self._last_measured_history
-        if (
-            not anchor
-            or len(history) < len(anchor)
-            or tuple(history[: len(anchor)]) != anchor
-        ):
-            return model.approx_request_tokens(
+        budget = self.tool_results.message_budget_tokens
+        if self._last_input_tokens > 0 and tuple(history[: len(anchor)]) == anchor:
+            since = history[len(anchor) :]
+            if not since:
+                return self._last_input_tokens
+            return self._last_input_tokens + model.approx_request_tokens(
                 materialize_request(
-                    ModelRequest(messages=list(history)),
-                    tool_result_budget_tokens=self.tool_results.message_budget_tokens,
+                    ModelRequest(messages=list(since)),
+                    tool_result_budget_tokens=budget,
                 ),
             )
-        since = history[len(anchor) :]
-        if not since:
-            return 0
+        # Estimated against ``live_tools()`` (``BackgroundAwareTool`` wrappers
+        # applied) so the injected ``background`` / ``delay`` schema counts toward
+        # the budget, matching what the next request will carry.
         return model.approx_request_tokens(
             materialize_request(
-                ModelRequest(messages=list(since)),
-                tool_result_budget_tokens=self.tool_results.message_budget_tokens,
+                ModelRequest(
+                    messages=list(history),
+                    system=self.system_prompt() or None,
+                    tools=self.live_tools() or None,
+                ),
+                tool_result_budget_tokens=budget,
             ),
         )
 
@@ -2423,25 +2609,26 @@ def _provider_knows_model(prov_name: str, model_id: str) -> bool:
 # running loop so the prior subprocess and its warming-spare task don't outlive the
 # swap. No-op when no event loop is running (e.g. ``Agent.resume`` before
 # ``serve_forever``): the model hasn't been used yet so there is nothing to close.
-def _schedule_close(model: Model) -> None:
-    """Fire-and-forget async teardown for a swapped-out model."""
+def _schedule_close(model: Model) -> asyncio.Task[None] | None:
+    """Schedule async teardown and return its task when a loop is running."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        return
+        return None
     task = loop.create_task(model.close())
     task.add_done_callback(
-        log_task_exception(logger, "swapped-out model close failed"),
+        log_task_exception(logger, "model close failed"),
     )
+    return task
 
 
-class _ObservedModel:
-    """Record and validate every completed call through a rich model.
+class ObservedModel:
+    """Record every completed call through a rich model, including discarded ones.
 
-    Both foreground turns and compaction receive this wrapper, so neither
-    path can discard billed usage or consume a refusal/truncated response as
-    ordinary assistant output.  Delegated metadata and token helpers retain
-    the wrapped model's exact behavior.
+    Foreground turns, compaction, and scrunch all receive this wrapper, so no
+    path can drop billed usage. Validation is ``send_with_retry``'s job, the
+    one boundary every model call crosses. Delegated metadata and token
+    helpers retain the wrapped model's exact behavior.
     """
 
     def __init__(
@@ -2497,13 +2684,13 @@ class _ObservedModel:
         return await self._inner.actual_request_tokens(request)
 
     async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Buffer one response, then account and validate it.
+        """Buffer one response, then account for it.
 
         Args:
           request: Provider request to buffer.
 
         Returns:
-          response: Accounted, validated provider response.
+          response: Accounted provider response.
 
         """
         try:
@@ -2512,7 +2699,6 @@ class _ObservedModel:
             self._observe(exc.response)
             raise
         self._observe(response)
-        validate_model_response(response)
         return response
 
     async def stream(
@@ -2520,14 +2706,14 @@ class _ObservedModel:
         request: ModelRequest,
         publish: Callable[[runtime.RuntimeEvent], None] | None = None,
     ) -> ModelResponse:
-        """Stream one response, then account and validate it.
+        """Stream one response, then account for it.
 
         Args:
           request: Provider request to stream.
           publish: Optional sink for live runtime events.
 
         Returns:
-          response: Accounted, validated provider response.
+          response: Accounted provider response.
 
         """
         try:
@@ -2536,7 +2722,6 @@ class _ObservedModel:
             self._observe(exc.response)
             raise
         self._observe(response)
-        validate_model_response(response)
         return response
 
     def spend(self, tokens: TokenCount) -> TokenCost:
@@ -2696,7 +2881,7 @@ class _AgentModel:
         # mid-iteration.
         resume_retry_at = self._agent.runtime.resume_retry_at
         self._agent.runtime.resume_retry_at = None
-        observed_model = _ObservedModel(self._inner, self._agent.record_response)
+        observed_model = ObservedModel(self._inner, self._agent.record_response)
 
         for attempt in range(MAX_OVERFLOW_RECOVERY + 1):
             request = materialize_request(
@@ -2730,6 +2915,13 @@ class _AgentModel:
                     on_service_suspended=self._agent.publish_service_suspended,
                     resume_retry_at=attempt_resume_retry_at,
                 )
+            except PolicyBlockedError:
+                self._agent.withhold_refused_tail()
+                raise
+            except ModelTerminationError as exc:
+                if exc.stop_reason == "model_refusal":
+                    self._agent.withhold_refused_tail()
+                raise
             except Exception as exc:
                 # Two distinct overflow conditions route to the same
                 # recovery action (compaction sheds history tokens AND
@@ -2945,12 +3137,7 @@ class _AgentTool:
         if not result.call_id:
             result = dataclasses.replace(result, call_id=call_id)
         result = self._inject_conditional_rules(result, clean_args)
-        return post_process_result(
-            result,
-            self._inner.name,
-            session_dir=self._agent.session_dir,
-            persist_tokens=self._agent.tool_results.persist_tokens,
-        )
+        return self._agent.bound_result(result, tool=self._inner)
 
     def _inject_conditional_rules(
         self,
@@ -2996,12 +3183,7 @@ class _AgentTool:
             if not result.call_id:
                 result = dataclasses.replace(result, call_id=call_id)
             result = self._inject_conditional_rules(result, args)
-            processed = post_process_result(
-                result,
-                self._inner.name,
-                session_dir=self._agent.session_dir,
-                persist_tokens=self._agent.tool_results.persist_tokens,
-            )
+            processed = self._agent.bound_result(result, tool=self._inner)
         except asyncio.CancelledError:
             # Two cancellation paths, distinguished by registry membership
             # at cancel time (checked below):
@@ -3158,7 +3340,7 @@ class _AgentCompactor:
         override = await self._inner.compact(
             tape=tape,
             context=context,
-            model=_ObservedModel(self._agent.model, self._agent.record_response),
+            model=ObservedModel(self._agent.model, self._agent.record_side_response),
             mint_ref=mint_ref,
             custom_instructions=custom_instructions,
         )
@@ -3383,7 +3565,10 @@ class _AgentCompactor:
             result = await scrunch_to_fit(
                 context=payload,
                 tape=scratch_tape,
-                model=self._agent.model,
+                model=ObservedModel(
+                    self._agent.model,
+                    self._agent.record_side_response,
+                ),
                 compactor=self._inner,
                 mint_ref=mint_ref,
                 target_input_tokens=target_input_tokens,

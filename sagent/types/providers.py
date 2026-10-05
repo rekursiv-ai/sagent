@@ -1,116 +1,26 @@
-"""Provider factory contract, model-id resolution, and the auth hook.
+"""Provider factory contract and the auth hook.
 
-A ``Provider`` builds ``Model`` instances from a catalog of
-``ModelCapability`` rows. ``resolve`` is the one place a tagged model id
-becomes a capability met with its transport plus the settings that id
-selected.
+Which model a name means, and what it can do over a transport, is
+``sagent.catalog.table``'s; a provider only holds its
+``ModelCatalog`` and builds ``Model`` instances from what it resolves.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, replace
-from types import MappingProxyType
-from typing import Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from sagent.types.capability import (
-    ContextTag,
-    ModelCapability,
-    ModelSettings,
-)
-from sagent.types.model import (
-    Model,
-    split_model_id,
-)
+
+if TYPE_CHECKING:
+    from sagent.catalog.table import ModelCatalog
+    from sagent.types.model import Model
 
 
 __all__ = [
     "AuthReloadable",
-    "ModelCatalog",
     "ModelResolver",
     "Provider",
     "ProviderCloseable",
-    "UnknownModelError",
-    "UnsupportedTagError",
 ]
-
-
-class UnknownModelError(ValueError):
-    """The base id is absent from the provider's catalog."""
-
-
-class UnsupportedTagError(ValueError):
-    """The id carries a context tag the model does not offer."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class ModelCatalog:
-    """Resolved model rows and the transport restrictions applied to them."""
-
-    rows: Mapping[str, ModelCapability]
-    transport: ModelCapability
-
-    def __post_init__(self) -> None:
-        """Snapshot rows so a global provider catalog cannot be mutated."""
-        object.__setattr__(self, "rows", MappingProxyType(dict(self.rows)))
-
-    def resolve(self, model_id: str) -> tuple[ModelCapability, ModelSettings]:
-        """Resolve ``model_id`` against this catalog's transport.
-
-        Args:
-          model_id: Catalog key or vendor wire id, optionally context-tagged.
-
-        Returns:
-          capability: The catalog capability narrowed by the transport.
-          settings: Settings selecting the requested context.
-
-        Raises:
-          UnknownModelError: The base id is absent.
-          UnsupportedTagError: Context tags conflict or are unavailable.
-
-        """
-        base, id_tags = split_model_id(model_id)
-        tags: list[ContextTag] = sorted(id_tags)
-        if len(tags) > 1:
-            joined = ", ".join(tags)
-            raise UnsupportedTagError(
-                f"Model {model_id!r} selects conflicting contexts: {joined}",
-            )
-        context: ContextTag = tags[0] if tags else ""
-        row = self.rows.get(base)
-        if row is None:
-            row = next(
-                (
-                    candidate
-                    for candidate in self.rows.values()
-                    if candidate.wire_model_id == base
-                ),
-                None,
-            )
-        if row is None:
-            known = ", ".join(sorted(self.rows))
-            raise UnknownModelError(
-                f"Unknown model {model_id!r}. Known models: {known}",
-            )
-        capability = row & self.transport
-        if (
-            context == "+1m"
-            and context not in capability.context
-            and capability.context[""].max_request_tokens >= 1_000_000
-        ):
-            capability = replace(
-                capability,
-                context=MappingProxyType(
-                    {**capability.context, "+1m": capability.context[""]},
-                ),
-            )
-        if context not in capability.context:
-            offered = ", ".join(sorted(t for t in capability.context if t)) or "(none)"
-            raise UnsupportedTagError(
-                f"Unknown model {model_id!r}: {base} has no {context} context;"
-                f" offers: {offered}",
-            )
-        return capability, ModelSettings.narrowest(capability, context=context)
 
 
 @runtime_checkable

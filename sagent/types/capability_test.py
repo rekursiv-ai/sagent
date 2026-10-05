@@ -112,6 +112,13 @@ def test_the_meet_passes_context_and_prices_through() -> None:
     assert met.prices == _row().prices
 
 
+def test_the_meet_keeps_the_rows_effort_spelling() -> None:
+    """A model fact: the transport can neither grant nor revoke it."""
+    level_row = ModelCapability(effort_as_level=True)
+    assert (level_row & ModelCapability()).effort_as_level is True
+    assert (_row() & ModelCapability(effort_as_level=True)).effort_as_level is False
+
+
 def test_the_transport_declares_retries_and_auth() -> None:
     """Not intersected: a catalog row cannot know who bills or retries it.
 

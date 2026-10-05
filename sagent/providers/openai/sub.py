@@ -97,12 +97,9 @@ else:
 
 
 from sagent.catalog.openai import subscription, subscription_models
+from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import (
-    DictCodec,
-    FloatCodec,
-    MutableJSON,
-)
+from sagent.lib.custom_json import MutableJSON, convert, parse
 from sagent.lib.userdirs import config_dir
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
@@ -117,7 +114,6 @@ from sagent.providers.openai.responses import _OpenAIResponsesModel
 from sagent.types.exceptions import (
     AuthRefreshError,
 )
-from sagent.types.providers import ModelCatalog
 
 
 logger = logging.getLogger(__name__)
@@ -167,7 +163,7 @@ class OpenAISubscription:
     regardless of auth mode.
     """
 
-    catalog = ModelCatalog(rows=subscription_models(), transport=subscription())
+    catalog = ModelCatalog(models=subscription_models(), transport=subscription())
 
     class Credentials(TypedDict):
         """OAuth credentials for an OpenAI ChatGPT subscription."""
@@ -796,16 +792,21 @@ def _jwt_payload(token: str) -> dict[str, object]:
     raw = parts[1]
     raw += "=" * (4 - len(raw) % 4)
     try:
-        return DictCodec.coerce(json.loads(base64.urlsafe_b64decode(raw)))
+        return parse(base64.urlsafe_b64decode(raw), dict[str, object])
     except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
         return {}
 
 
 def _jwt_exp(token: str) -> float:
     """Extract ``exp`` claim from a JWT without verification."""
-    return FloatCodec.coerce(_jwt_payload(token).get("exp"))
+    return convert(_jwt_payload(token).get("exp"), float, default=0.0)
 
 
 def _jwt_claim(token: str, namespace: str, key: str) -> str:
     """Extract a nested claim from a JWT namespace object."""
-    return str(DictCodec.coerce(_jwt_payload(token).get(namespace)).get(key, ""))
+    return str(
+        convert(_jwt_payload(token).get(namespace), dict[str, object], default={}).get(
+            key,
+            "",
+        ),
+    )

@@ -17,7 +17,7 @@ import shlex
 
 from sagent.agent.state import get_tool_state
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import BoolCodec, json_freeze
+from sagent.lib.custom_json import convert, json_freeze
 from sagent.tools.core import (
     file_lock_key,
     load_tool_description,
@@ -116,7 +116,7 @@ class Edit:
         file_path = resolve_tool_path(str(args.get("file_path", "")))
         old_string = str(args.get("old_string", ""))
         new_string = str(args.get("new_string", ""))
-        replace_all = BoolCodec.coerce(args.get("replace_all"), False)
+        replace_all = convert(args.get("replace_all"), bool, default=False)
         # Serialize against any other mutating tool on the same file.
         return await locked_file_write(
             file_path,

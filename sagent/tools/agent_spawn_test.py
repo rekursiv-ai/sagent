@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, override
 from unittest.mock import MagicMock, patch
 
@@ -28,6 +28,7 @@ from sagent.agent.state import (
 from sagent.providers import PROVIDER_NAMES
 from sagent.testing import MockModelCaps
 from sagent.tools import agent_spawn
+from sagent.tools.agent_self import plan_model_options
 from sagent.tools.agent_spawn import (
     AgentSpawn,
     ChildStats,
@@ -37,7 +38,7 @@ from sagent.tools.agent_spawn import (
     _pick_field,
 )
 from sagent.tools.background_task import BackgroundTask
-from sagent.types.capability import ThinkingEffort
+from sagent.types.capability import ModelCapability, ThinkingEffort
 from sagent.types.model import (
     Model,
     ModelRecipe,
@@ -789,7 +790,7 @@ def test_build_child_model_rebuilds_fresh_transport_when_spec_matches() -> None:
     fake_provider.model.side_effect = _stub_provider_model
     t = AgentSpawn()
     with patch(
-        "sagent.tools.agent_spawn.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ) as build:
         resolved = t._build_child_model(
@@ -824,7 +825,7 @@ def test_build_child_model_each_child_gets_distinct_transport() -> None:
     t = AgentSpawn()
     models: list[object] = []
     with patch(
-        "sagent.tools.agent_spawn.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ):
         for _ in range(5):
@@ -887,6 +888,42 @@ def test_build_child_applies_thinking_and_effort_from_model_options() -> None:
     assert child.model.settings.thinking_effort == "high"
 
 
+@dataclass(slots=True, kw_only=True)
+class _OptionModel(_ThinkingEffortModel):
+    """Stub model advertising cache-TTL choices."""
+
+    @property
+    @override
+    def capability(self) -> ModelCapability:
+        return replace(
+            super(_OptionModel, self).capability,
+            cache_ttl_sec=frozenset({0.0, 300.0}),
+        )
+
+
+def test_build_child_applies_normalized_option_clears() -> None:
+    parent = _make_parent(_OptionModel())
+    parent.model.settings.thinking_effort = "high"
+    parent.model.settings.cache_ttl_sec = 300.0
+    model = _OptionModel()
+    options = plan_model_options(
+        model,
+        {"model_options": {"effort": None, "cache_ttl": None}},
+    )
+    assert isinstance(options, dict)
+    child = AgentSpawn()._build_child(
+        system=None,
+        child_model=model,
+        child_spec=None,
+        child_tools=[],
+        max_rounds=None,
+        model_options=options,
+        parent_agent=parent,
+    )
+    assert child.model.settings.thinking_effort == "none"
+    assert child.model.settings.cache_ttl_sec == 0.0
+
+
 def test_build_child_takes_the_factorys_tool_result_policy() -> None:
     """A child bounds its tool results as its host chose, not by its own window."""
     parent = _make_parent()
@@ -947,6 +984,17 @@ def test_build_child_drops_an_inherited_knob_the_child_model_rejects() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_rejects_non_mapping_model_options() -> None:
+    parent = _make_parent()
+    with _parent_context(parent):
+        result = await AgentSpawn().run(
+            {"prompt": "p", "model_options": "not-an-object"},
+        )
+    assert result.is_error
+    assert result.content == "model_options must be an object."
+
+
+@pytest.mark.asyncio
 async def test_run_redirects_latency_option_to_service_tier() -> None:
     """``model_options.latency`` is gone; the error names its replacement."""
     parent = _make_parent()
@@ -969,7 +1017,7 @@ def test_build_child_model_provider_change_without_auth_uses_target_default() ->
     fake_provider = MagicMock()
     fake_provider.model.return_value = StubProviderModel(model_id="gemini-3-pro")
     with patch(
-        "sagent.tools.agent_spawn.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ) as build:
         resolved = AgentSpawn()._build_child_model(
@@ -990,6 +1038,78 @@ def test_build_child_model_provider_change_without_auth_uses_target_default() ->
     build.assert_called_once_with("Google", "env", account="work")
 
 
+def test_build_child_model_missing_inherited_account_falls_back() -> None:
+    parent = _make_parent()
+    parent.model_recipe = ModelRecipe(
+        provider="StubSource",
+        auth="credentials",
+        model_id="source-model",
+        account="work",
+    )
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(model_id="target-model")
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            side_effect=[FileNotFoundError("missing"), fake_provider],
+        ) as build,
+        patch(
+            "sagent.tools.agent_spawn.default_auth_for_provider",
+            return_value="credentials",
+        ),
+    ):
+        resolved = AgentSpawn(allow_providers=("StubTarget",))._build_child_model(
+            provider="StubTarget",
+            auth=None,
+            model_id="target-model",
+            account=None,
+            parent_agent=parent,
+        )
+    assert isinstance(resolved, tuple)
+    _, spec = resolved
+    assert spec is not None
+    assert spec.account is None
+    assert build.call_args_list == [
+        (("StubTarget", "credentials"), {"account": "work"}),
+        (("StubTarget", "credentials"), {"account": None}),
+    ]
+
+
+def test_build_child_model_explicit_missing_account_does_not_fallback() -> None:
+    parent = _make_parent()
+    parent.model_recipe = ModelRecipe(
+        provider="StubSource",
+        auth="credentials",
+        model_id="source-model",
+        account="source-work",
+    )
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            side_effect=FileNotFoundError("missing target-work"),
+        ) as build,
+        patch(
+            "sagent.tools.agent_spawn.default_auth_for_provider",
+            return_value="credentials",
+        ),
+    ):
+        result = AgentSpawn(allow_providers=("StubTarget",))._build_child_model(
+            provider="StubTarget",
+            auth=None,
+            model_id="target-model",
+            account="target-work",
+            parent_agent=parent,
+        )
+    assert isinstance(result, ToolResult)
+    assert result.is_error
+    assert "missing target-work" in result.content
+    build.assert_called_once_with(
+        "StubTarget",
+        "credentials",
+        account="target-work",
+    )
+
+
 def test_build_child_model_infers_provider_from_bare_model_id() -> None:
     parent = _make_parent()
     parent.model_recipe = ModelRecipe(
@@ -999,15 +1119,15 @@ def test_build_child_model_infers_provider_from_bare_model_id() -> None:
         account=None,
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="luna-6")
+    fake_provider.model.return_value = StubProviderModel(model_id="luna-6.0")
     with patch(
-        "sagent.tools.agent_spawn.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ) as build:
         resolved = AgentSpawn()._build_child_model(
             provider=None,
             auth=None,
-            model_id="luna-6",
+            model_id="luna-6.0",
             account=None,
             parent_agent=parent,
         )
@@ -1016,7 +1136,7 @@ def test_build_child_model_infers_provider_from_bare_model_id() -> None:
     assert spec == ModelRecipe(
         provider="OpenAI",
         auth="env",
-        model_id="luna-6",
+        model_id="luna-6.0",
         account=None,
     )
     build.assert_called_once_with("OpenAI", "env", account=None)
@@ -1031,15 +1151,15 @@ def test_build_child_model_inference_preserves_explicit_auth() -> None:
         account=None,
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="luna-6")
+    fake_provider.model.return_value = StubProviderModel(model_id="luna-6.0")
     with patch(
-        "sagent.tools.agent_spawn.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ) as build:
         resolved = AgentSpawn()._build_child_model(
             provider=None,
             auth="credentials",
-            model_id="luna-6",
+            model_id="luna-6.0",
             account=None,
             parent_agent=parent,
         )
@@ -2028,7 +2148,7 @@ def test_build_child_model_parent_provider_always_allowed() -> None:
     fake_provider.model.side_effect = _stub_provider_model
     t = AgentSpawn(allow_providers=("OpenAISubscription",))
     with patch(
-        "sagent.tools.agent_spawn.build_provider",
+        "sagent.providers.providers.build_provider",
         return_value=fake_provider,
     ) as build:
         resolved = t._build_child_model(

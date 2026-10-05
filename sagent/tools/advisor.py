@@ -17,21 +17,26 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final
 
-from sagent.agent import runtime
+import logging
+
+from sagent.agent.agent import Agent, ObservedModel
+from sagent.agent.retry import send_with_retry
+from sagent.agent.state import current_agent_var
 from sagent.lib import debug_log
 from sagent.lib.custom_json import JSON, json_freeze
-from sagent.types.model import Model, ModelRequest
-from sagent.types.runtime import (
-    AssistantMessage,
-    ModelContextEvent,
-    RuntimeEvent,
-    ToolResult,
-    UserMessage,
+from sagent.types.model import (
+    Model,
+    ModelRequest,
+    ModelTerminationError,
 )
+from sagent.types.runtime import ToolResult, UserMessage
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
+
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_NUDGE: Final = (
@@ -155,39 +160,30 @@ class Advisor:
             uses=self._uses,
             max_uses=self._max_uses,
         )
-        agent_runtime = runtime.AgentRuntime(
-            model=_AdvisorModel(self._model, self._system),
-            tools=[],
+        request = ModelRequest(
+            messages=[UserMessage(text=prompt)],
+            system=self._system or None,
         )
-        history = await agent_runtime.run(UserMessage(text=prompt))
-        for m in reversed(history):
-            if isinstance(m, AssistantMessage):
-                return ToolResult(call_id="", content=m.text)
-        return ToolResult(call_id="", content="")
+        try:
+            response = await send_with_retry(
+                self._consult_model(),
+                request,
+                max_attempts=3,
+                persistent_retry=False,
+                publish_recoverable=lambda text: logger.info(
+                    "advisor recoverable: %s",
+                    text,
+                ),
+            )
+        except ModelTerminationError as exc:
+            return ToolResult(call_id="", content=str(exc), is_error=True)
+        return ToolResult(call_id="", content=response.message.text)
 
-
-class _AdvisorModel:
-    """Bridge a provider ``Model`` to the runtime ``Model`` protocol."""
-
-    def __init__(self, inner: Model, system: str) -> None:
-        self._inner = inner
-        self._system = system
-
-    async def stream(
-        self,
-        history: list[ModelContextEvent],
-        publish: Callable[[RuntimeEvent], None],
-    ) -> AssistantMessage:
-        """Stream a provider response and adapt it to the runtime ``Model`` protocol.
-
-        Args:
-          history: Conversation history for the advisor consult.
-          publish: Runtime event sink for streamed events.
-
-        Returns:
-          message: Final ``AssistantMessage`` from the inner provider.
-
-        """
-        request = ModelRequest(messages=history, system=self._system or None)
-        response = await self._inner.stream(request, publish)
-        return response.message
+    # The consult bills the running agent: wrap the model so its cost and budget
+    # cap see the call, exactly like the agent's own turns.
+    def _consult_model(self) -> Model:
+        """Return the advisor model, accounted against the current agent."""
+        agent = current_agent_var.get(None)
+        if isinstance(agent, Agent):
+            return ObservedModel(self._model, agent.record_side_response)
+        return self._model

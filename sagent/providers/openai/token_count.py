@@ -1,12 +1,17 @@
-"""Local token-estimation functions shared by OpenAI wire transports."""
+"""Local token-estimation functions shared by OpenAI wire transports.
+
+Which tokenizer and which image formula a model uses are catalog facts
+(:mod:`sagent.catalog.openai`); this module only runs them. An id the
+OpenAI catalog does not carry -- an OpenAI-compatible vendor's -- falls back
+to the catalog character ratio and the catalog's 512px-tile estimate.
+"""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import math
-
-from sagent.types.model import base_model_id
+from sagent.catalog import openai
+from sagent.catalog.table import base_model_id
 
 
 if TYPE_CHECKING:
@@ -37,16 +42,14 @@ def approx_text_tokens(
       tokens: Local text token estimate.
 
     """
-    encoding = _tiktoken_encoding(model_id)
-    return (
-        len(encoding.encode_ordinary(text))
-        if encoding is not None
-        else int(len(text) / approx_chars_per_token)
-    )
+    encoding = openai.tokenizer(base_model_id(model_id))
+    if encoding is None:
+        return int(len(text) / approx_chars_per_token)
+    return len(tiktoken.get_encoding(encoding).encode_ordinary(text))
 
 
 def approx_image_tokens(data: bytes, *, model_id: str, max_edge: int) -> int:
-    """Estimate image tokens using the model family's published formula.
+    """Estimate image tokens using the model's published formula.
 
     Args:
       data: Encoded image bytes.
@@ -63,27 +66,8 @@ def approx_image_tokens(data: bytes, *, model_id: str, max_edge: int) -> int:
     dims = get_dimensions(data)
     if dims is None:
         return 0
-    if base_model_id(model_id) == "gpt-6-astra":
-        # Measured on eight sizes, 1x1 through 2048x1024, on 2026-09-04.
-        patches = math.ceil(dims[0] / 32) * math.ceil(dims[1] / 32)
-        return math.floor(1.2 * patches) + 1
-    if base_model_id(model_id).startswith("gpt-5.6"):
-        # GPT-5.6 preserves source dimensions rather than resizing into tiles.
-        return math.ceil(dims[0] / 32) * math.ceil(dims[1] / 32)
     width, height = _resized_dims(dims, max_edge)
-    tiles = math.ceil(width / 512) * math.ceil(height / 512)
-    return 85 + tiles * 170
-
-
-def _tiktoken_encoding(model_id: str) -> tiktoken.Encoding | None:
-    model_id = base_model_id(model_id)
-    try:
-        return tiktoken.encoding_for_model(model_id)
-    except KeyError:
-        # Tiktoken's registry predates dotted GPT-5 releases and GPT-6.
-        if model_id.startswith(("gpt-5.", "gpt-6")):
-            return tiktoken.get_encoding("o200k_base")
-        return None
+    return openai.image_tokens(base_model_id(model_id), width, height)
 
 
 def _resized_dims(dims: tuple[int, int], max_edge: int) -> tuple[int, int]:

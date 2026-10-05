@@ -28,7 +28,7 @@ from sagent.agent.state import (
     get_tool_state,
 )
 from sagent.lib import debug_log
-from sagent.lib.custom_json import BoolCodec, IntCodec, json_freeze
+from sagent.lib.custom_json import convert, json_freeze
 from sagent.lib.userdirs import config_dir
 from sagent.tools.core import (
     bound_by_tokens,
@@ -135,6 +135,7 @@ class Bash:
     tool_id = "application/x-tool-bash"
     description = _render_bash_description(load_tool_description("Bash"))
     clearable_results = True
+    max_result_chars = 30_000
     directive_schema = json_freeze(
         {
             "type": "object",
@@ -270,10 +271,11 @@ class Bash:
         """
         _register_exit_reaper()
         command = str(args.get("command", ""))
-        timeout = IntCodec.coerce(args.get("timeout"), BASH_DEFAULT_TIMEOUT_MS)
-        run_as_fully_detached = BoolCodec.coerce(
+        timeout = convert(args.get("timeout"), int, default=BASH_DEFAULT_TIMEOUT_MS)
+        run_as_fully_detached = convert(
             args.get("run_as_fully_detached"),
-            False,
+            bool,
+            default=False,
         )
         state = get_tool_state()
         _ensure_valid_cwd(state)

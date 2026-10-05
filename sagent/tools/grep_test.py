@@ -19,7 +19,7 @@ from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:
-    from collections.abc import Generator, Mapping
+    from collections.abc import Awaitable, Callable, Generator, Mapping
     from pathlib import Path
 
 
@@ -73,6 +73,47 @@ async def test_grep_content_mode(tmp_path: Path) -> None:
         tmp_path,
     )
     assert "alpha" in result.content
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runner", [_run_grep, _run_grep_py])
+async def test_a_wide_line_is_clipped_around_its_match(
+    tmp_path: Path,
+    runner: Callable[[Mapping[str, object], Path], Awaitable[ToolResult]],
+) -> None:
+    """Session ``ca1c4eb5``: one 450,791-character JSONL line came back whole.
+
+    The cut is centred on the match, not the line start, so a needle far
+    right in the line stays visible (``rg --max-columns`` would hide it).
+    """
+    (tmp_path / "wide.jsonl").write_text("a" * 200_000 + "NEEDLE" + "b" * 200_000)
+
+    result = await runner(
+        {"pattern": "NEEDLE", "path": str(tmp_path), "output_mode": "content"},
+        tmp_path,
+    )
+
+    assert "NEEDLE" in result.content
+    assert len(result.content) < 1_000, len(result.content)
+    assert "[200,000 chars]" not in result.content
+    assert "chars]" in result.content
+
+
+@pytest.mark.asyncio
+async def test_a_narrow_line_is_not_clipped(tmp_path: Path) -> None:
+    """The path prefix is not text: a long path must not clip a short line."""
+    line = "x" * 400 + "NEEDLE"
+    deep = tmp_path / ("d" * 200)
+    deep.mkdir()
+    (deep / "narrow.txt").write_text(line)
+
+    result = await _run_grep(
+        {"pattern": "NEEDLE", "path": str(tmp_path), "output_mode": "content"},
+        tmp_path,
+    )
+
+    assert line in result.content
+    assert "chars]" not in result.content
 
 
 @pytest.mark.asyncio
@@ -364,7 +405,10 @@ async def test_grep_fallback_skips_a_gitignored_dir(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_grep_python_fallback_single_file_honors_type(tmp_path: Path) -> None:
+async def test_grep_python_fallback_searches_a_named_file_whatever_its_type(
+    tmp_path: Path,
+) -> None:
+    """``rg --type py x.md`` still searches ``x.md``: a named file is never filtered."""
     f = tmp_path / "x.md"
     f.write_text("alpha\n")
 
@@ -378,7 +422,7 @@ async def test_grep_python_fallback_single_file_honors_type(tmp_path: Path) -> N
         tmp_path,
     )
 
-    assert "(no matches)" in result.content
+    assert str(f) in result.content
 
 
 @pytest.mark.asyncio
@@ -1051,7 +1095,11 @@ async def test_a_ripgrep_timeout_returns_a_tool_error(tmp_path: Path) -> None:
     def _timeout(*_args: object, **_kwargs: object) -> object:
         raise subprocess.TimeoutExpired(cmd="rg", timeout=30)
 
-    with patch("subprocess.run", _timeout):
+    # A tree this small is searched in-process; always using rg reaches it.
+    with (
+        patch("sagent.lib.files.grep.SMALL_FILES", -1),
+        patch("subprocess.run", _timeout),
+    ):
         result = await _run_grep({"pattern": "x", "path": str(tmp_path)}, tmp_path)
     assert result.is_error, result.content
     assert "timed out" in result.content.lower(), result.content

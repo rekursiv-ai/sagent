@@ -28,7 +28,9 @@ def files(directory: Path, /, *, hidden: bool = False) -> list[Path]:
             ignore_hidden=not hidden,
             should_exclude_entry=lambda entry: entry.name == ".git",
         )
-        if path.is_symlink() or not path.is_dir()
+        # The walk lists its start first; a start reached through a symlink
+        # would otherwise pass as a symlinked file.
+        if path != directory and (path.is_symlink() or not path.is_dir())
     )
 
 

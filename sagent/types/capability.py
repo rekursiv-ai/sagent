@@ -101,9 +101,10 @@ class ThinkingCapability:
 class ModelCapability:
     """What one model offers: every value a caller may select.
 
-    One catalog row, or one transport's restrictions. ``prices`` and the two
-    trailing transport facts have no :class:`ModelSettings` counterpart --
-    nothing selects a price, a retry policy, or an auth mode.
+    One catalog row, or one transport's restrictions. ``prices``,
+    ``effort_as_level``, and the trailing transport facts have no
+    :class:`ModelSettings` counterpart -- nothing selects a price, a wire
+    spelling, a retry policy, or an auth mode.
 
     ``temperature`` is absent: its domain is a continuous range, so it cannot
     join the membership check. It rides ``ModelRequest``.
@@ -131,6 +132,13 @@ class ModelCapability:
 
     thinking: ThinkingCapability = field(default_factory=ThinkingCapability)
     """Reasoning effort, budget, and visibility this transport accepts."""
+
+    effort_as_level: bool = False
+    """Whether the wire takes the effort as a named level.
+
+    Gemini 3 ``thinkingLevel``, Qwen 3.8 and Kimi K3 ``reasoning_effort``;
+    otherwise the wire takes a token budget derived from the effort.
+    """
 
     service_tier: frozenset[ServiceTier] = frozenset({"auto", "default"})
     """Speed/price tiers this transport accepts.

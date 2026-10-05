@@ -48,7 +48,7 @@ def test_startup_error_no_log() -> None:
 def test_startup_error_with_full_log() -> None:
     log = [f"line {i}" for i in range(30)]
     out = _startup_error("server died", log)
-    assert out.startswith("server died; recent log:")
+    assert out == "server died; recent log:\n" + "\n".join(log)
     # Whole log: llama.cpp announces the real cause in the FIRST lines
     # (missing model file, bad GPU layer count), which a tail dropped.
     assert "line 29" in out
@@ -86,8 +86,8 @@ def test_llamacpp_from_env_uses_env_var(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_llamacpp_known_models_include_local() -> None:
-    assert "local" in LlamaCpp.catalog.rows
-    assert "qwen3.6-27b-12gb" in LlamaCpp.catalog.rows
+    assert LlamaCpp.catalog.models["local"].model_id == "local-0.0"
+    assert LlamaCpp.catalog.models["qwen3.6-27b-12gb"].model_id == "qwen-27b-12gb-3.6"
 
 
 def test_llamacpp_close_idempotent() -> None:

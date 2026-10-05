@@ -3,7 +3,7 @@
 Source: n/a -- self-hosted
 
 A row carries only what the MODEL can do; caching, retry, and auth mode
-are transport facts declared on ``OpenAICompat.TRANSPORT``. These vendors
+are transport facts declared by ``openai.compatible()``. These vendors
 publish no image pixel or byte ceiling and preprocess images server-side,
 so ``ModelLimits`` carries only the two token windows.
 """
@@ -14,6 +14,7 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from sagent.catalog.table import ModelTable
 from sagent.types.capability import ContextTag, ModelCapability, ModelLimits
 from sagent.types.cost import (
     PriceCatalog,
@@ -29,7 +30,7 @@ if TYPE_CHECKING:
 __all__ = ["models"]
 
 
-def models() -> Mapping[str, ModelCapability]:
+def models() -> ModelTable:
     """Return every model this vendor serves, keyed by base id.
 
     Returns:
@@ -39,7 +40,8 @@ def models() -> Mapping[str, ModelCapability]:
     # The reference row: every other model states only how it differs from it.
     # A local server bills nothing, but a missing price row would raise.
     default = ModelCapability(
-        model_id="qwen3.6-27b-12gb",
+        model_id="qwen-27b-12gb-3.6",
+        wire_model_id="qwen3.6-27b-12gb",
         context=_limits(),
         prices=PriceCatalog(
             {
@@ -57,24 +59,24 @@ def models() -> Mapping[str, ModelCapability]:
         default,
         replace(
             default,
-            model_id="qwen3.6-27b-mtp-64k",
+            model_id="qwen-27b-mtp-64k-3.6",
+            wire_model_id="qwen3.6-27b-mtp-64k",
             context=_limits(max_tokens=65_536, output_tokens=4_096),
         ),
+        # Whatever the server happens to load; its version is unknowable, so
+        # ``0.0`` marks "unversioned" and the wire id stays the server's alias.
         replace(
             default,
-            model_id="local",
+            model_id="local-0.0",
+            wire_model_id="local",
             context=_limits(max_tokens=32_768, output_tokens=4_096),
         ),
     )
     # A tier is offered exactly when it is priced.
     rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
-    catalog = {row.model_id: row for row in rows}
-    return MappingProxyType(
-        {
-            "default": catalog[default.model_id],
-            "utility": catalog[default.model_id],
-            **catalog,
-        },
+    return ModelTable(
+        rows=rows,
+        roles={"default": default.model_id, "utility": default.model_id},
     )
 
 

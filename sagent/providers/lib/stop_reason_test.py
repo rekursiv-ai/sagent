@@ -6,6 +6,9 @@ import pytest
 
 from sagent.providers.lib.stop_reason import (
     BENIGN_STOP_REASONS,
+    FAILED_STOP_REASONS,
+    RETRYABLE_STOP_REASONS,
+    TRUNCATED_STOP_REASONS,
     normalize_stop_reason,
 )
 
@@ -14,8 +17,16 @@ def test_benign_stop_reasons_membership() -> None:
     assert "model_finished" in BENIGN_STOP_REASONS
     assert "model_tool_use" in BENIGN_STOP_REASONS
     assert "stop_sequence" in BENIGN_STOP_REASONS
-    assert "model_continuing" not in BENIGN_STOP_REASONS
+    assert "model_continuing" in BENIGN_STOP_REASONS
     assert "max_tokens" not in BENIGN_STOP_REASONS
+
+
+def test_truncated_and_failed_sets_are_disjoint_from_benign() -> None:
+    assert {"max_tokens", "model_context_window_exceeded"} == TRUNCATED_STOP_REASONS
+    assert "model_refusal" in FAILED_STOP_REASONS
+    assert {"model_malformed_tool_call"} == RETRYABLE_STOP_REASONS
+    others = TRUNCATED_STOP_REASONS | FAILED_STOP_REASONS | RETRYABLE_STOP_REASONS
+    assert not others & BENIGN_STOP_REASONS
 
 
 @pytest.mark.parametrize(
@@ -27,6 +38,7 @@ def test_benign_stop_reasons_membership() -> None:
         ("refusal", "model_refusal"),
         ("stop_sequence", "stop_sequence"),
         ("max_tokens", "max_tokens"),
+        ("model_context_window_exceeded", "model_context_window_exceeded"),
     ],
 )
 def test_anthropic_known_mappings(raw: str, expected: str) -> None:
@@ -116,6 +128,21 @@ def test_google_unknown_passthrough() -> None:
     assert (
         normalize_stop_reason("CUSTOM", kind="google", has_tool_use=False) == "CUSTOM"
     )
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("end_turn", "model_finished"),
+        ("max_tokens", "max_tokens"),
+        ("max_turn_requests", "model_continuing"),
+        ("refusal", "model_refusal"),
+        ("cancelled", "model_cancelled"),
+    ],
+)
+def test_acp_known_mappings(raw: str, expected: str) -> None:
+    """ACP ``session/prompt`` stop reasons (the GoogleCLI transport)."""
+    assert normalize_stop_reason(raw, kind="acp", has_tool_use=False) == expected
 
 
 if __name__ == "__main__":

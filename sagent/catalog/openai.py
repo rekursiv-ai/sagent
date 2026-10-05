@@ -12,11 +12,14 @@ either view with ``&``, which can only remove.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import cache
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
+import math
+
+from sagent.catalog.table import ModelTable
 from sagent.types.capability import (
     ContextTag,
     ModelCapability,
@@ -39,11 +42,14 @@ if TYPE_CHECKING:
 __all__ = [
     "api",
     "compatible",
+    "image_tokens",
+    "keeps_reasoning_across_turns",
     "models",
     "reasoning_effort",
     "served_tier",
     "subscription",
     "subscription_models",
+    "tokenizer",
 ]
 
 
@@ -66,13 +72,18 @@ def compatible() -> ModelCapability:
 
 
 # A row carries only what the MODEL can do; caching, retry, and auth mode are
-# transport facts declared on ``API`` / ``SUBSCRIPTION``, since ``&`` can only
+# transport facts declared by :func:`api` / :func:`subscription`, since ``&`` can only
 # remove. Every reasoning model takes an auto budget and returns readable text.
 #
-# Every card is the vendor's published table (standard, flex, and fast tabs),
-# verified 2026-09-24; a model missing from a tab does not offer that tier.
-# Sol 5.6's rate is promotional "at least through November 21, 2026" and needs
-# rechecking then.
+# Every card, window, cutoff, and effort set is the vendor's model page and
+# pricing table (standard, flex, and fast tabs), verified 2026-10-03; a model
+# missing from a tab does not offer that tier. Sol 5.6's rate is promotional
+# "at least through November 21, 2026" and needs rechecking then. Batch and
+# Ultrafast are not modeled: no transport here sends either tier.
+#
+# ``max_request_tokens`` is the page's "Maximum input tokens" where it states
+# one (922,000 under a 1,050,000 context window), not the context window: a
+# prompt above it is rejected even though output could still fit.
 # ``approx_chars_per_token`` measured from SERVER-reported ``usage.input_tokens``
 # on 347k chars of real session text (2026-08-22), differencing out the
 # per-request envelope. 3.71 across the whole range -- the catalog's prior
@@ -80,7 +91,7 @@ def compatible() -> ModelCapability:
 # every budget by ~7%. tiktoken says 3.81 locally; the gap is request
 # framing the local tokenizer never sees.
 @cache
-def models() -> Mapping[str, ModelCapability]:
+def models() -> ModelTable:
     """Return every OpenAI model, as the API-key transport sees it.
 
     Returns:
@@ -91,11 +102,11 @@ def models() -> Mapping[str, ModelCapability]:
     # Every GPT-6 rule here was measured on this id alone, so a later GPT-6
     # whose contract differs does not inherit a limit nothing verified for it.
     default = ModelCapability(
-        model_id="astra-6",
+        model_id="astra-6.0",
         wire_model_id="gpt-6-astra",
         knowledge_cutoff="April 30, 2026",
         approx_chars_per_token=3.71,
-        context=_limits(),
+        context=_limits(image_edge_px=65_535),
         prices=_prices(
             {
                 "auto": _card(
@@ -119,31 +130,68 @@ def models() -> Mapping[str, ModelCapability]:
             },
             long_context=True,
         ),
-        # Measured against the live API 2026-09-04: ``reasoning.effort`` takes
-        # low..max but rejects ``none`` and ``minimal``.
+        # "`reasoning.effort` supports `low`, `medium`, `high`, `xhigh`, and
+        # `max`" -- no ``none``, and no model page lists ``minimal``.
         thinking=ThinkingCapability(
             effort=frozenset({"low", "medium", "high", "xhigh", "max"}),
             budget=frozenset({"none", "auto"}),
             output=frozenset({"none", "text"}),
         ),
     )
-    # The rest of GPT-6 and all of GPT-5.6 also take ``none`` and ``min``.
+    # GPT-6 Sol/Luna and GPT-5.6: "none, low, medium (default), high, xhigh, and max".
     full = replace(
         default.thinking,
-        effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
+        effort=frozenset({"none", "low", "medium", "high", "xhigh", "max"}),
     )
-    # Pre-5.6: no ``min``, no ``max``.
+    # GPT-5.2 through 5.5: "none, low, medium, high and xhigh".
     legacy = replace(
         default.thinking,
         effort=frozenset({"none", "low", "medium", "high", "xhigh"}),
     )
+    # The Pro models: "medium, high, xhigh".
+    pro = replace(default.thinking, effort=frozenset({"medium", "high", "xhigh"}))
     rows = (
         default,
         replace(
             default,
-            model_id="sol-6",
+            model_id="sol-6.1",
+            wire_model_id="gpt-6.1-sol",
+            knowledge_cutoff="April 30, 2026",
+            prices=_prices(
+                {
+                    # "Cached input tokens are priced at 5% of the uncached
+                    # input token rate" -- half of every other GPT-6 card.
+                    "auto": _card(
+                        request=2.0,
+                        response=10.0,
+                        cache_write=2.5,
+                        cache_read=0.1,
+                    ),
+                    "flex": _card(
+                        request=1.0,
+                        response=5.0,
+                        cache_write=1.25,
+                        cache_read=0.05,
+                    ),
+                    "priority": _card(
+                        request=4.0,
+                        response=20.0,
+                        cache_write=5.0,
+                        cache_read=0.2,
+                    ),
+                },
+                long_context=True,
+            ),
+            # "The `none` and `minimal` reasoning efforts are not supported."
+            thinking=default.thinking,
+        ),
+        replace(
+            default,
+            model_id="sol-6.0",
             wire_model_id="gpt-6-sol",
             knowledge_cutoff="April 20, 2026",
+            # Absent from the images-vision sizing table: no resize edge published.
+            context=_limits(),
             prices=_prices(
                 {
                     "auto": _card(
@@ -171,9 +219,11 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             default,
-            model_id="luna-6",
+            model_id="luna-6.0",
             wire_model_id="gpt-6-luna",
             knowledge_cutoff="May 18, 2026",
+            # Absent from the images-vision sizing table: no resize edge published.
+            context=_limits(),
             prices=_prices(
                 {
                     "auto": _card(
@@ -204,6 +254,7 @@ def models() -> Mapping[str, ModelCapability]:
             model_id="sol-5.6",
             wire_model_id="gpt-5.6-sol",
             knowledge_cutoff="February 16, 2026",
+            context=_limits(image_edge_px=65_535),
             prices=_prices(
                 {
                     "auto": _card(
@@ -237,6 +288,7 @@ def models() -> Mapping[str, ModelCapability]:
             model_id="gpt-5.6",
             wire_model_id="gpt-5.6",
             knowledge_cutoff="February 16, 2026",
+            context=_limits(image_edge_px=65_535),
             prices=_prices(
                 {
                     "auto": _card(
@@ -267,6 +319,7 @@ def models() -> Mapping[str, ModelCapability]:
             model_id="luna-5.6",
             wire_model_id="gpt-5.6-luna",
             knowledge_cutoff="February 16, 2026",
+            context=_limits(image_edge_px=65_535),
             prices=_prices(
                 {
                     "auto": _card(
@@ -297,6 +350,7 @@ def models() -> Mapping[str, ModelCapability]:
             model_id="terra-5.6",
             wire_model_id="gpt-5.6-terra",
             knowledge_cutoff="February 16, 2026",
+            context=_limits(image_edge_px=65_535),
             prices=_prices(
                 {
                     "auto": _card(
@@ -326,8 +380,8 @@ def models() -> Mapping[str, ModelCapability]:
             default,
             model_id="gpt-5.5",
             wire_model_id="gpt-5.5",
-            knowledge_cutoff=None,
-            context=_limits(max_tokens=1_000_000, patch_images=False),
+            knowledge_cutoff="December 1, 2025",
+            context=_limits(max_tokens=1_050_000, image_edge_px=6000),
             prices=_prices(
                 {
                     "auto": _card(
@@ -350,15 +404,16 @@ def models() -> Mapping[str, ModelCapability]:
                     ),
                 },
                 long_context=True,
+                short_only=frozenset({"priority"}),
             ),
             thinking=legacy,
         ),
         replace(
             default,
-            model_id="gpt-5.5-pro",
+            model_id="gpt-pro-5.5",
             wire_model_id="gpt-5.5-pro",
-            knowledge_cutoff=None,
-            context=_limits(patch_images=False),
+            knowledge_cutoff="December 1, 2025",
+            context=_limits(max_tokens=1_050_000),
             prices=_prices(
                 {
                     "auto": _card(
@@ -375,18 +430,17 @@ def models() -> Mapping[str, ModelCapability]:
                     ),
                 },
                 long_context=True,
+                short_only=frozenset({"flex"}),
             ),
-            thinking=replace(
-                default.thinking,
-                effort=frozenset({"medium", "high", "xhigh"}),
-            ),
+            thinking=pro,
         ),
         replace(
             default,
             model_id="gpt-5.4",
             wire_model_id="gpt-5.4",
-            knowledge_cutoff=None,
-            context=_limits(patch_images=False),
+            knowledge_cutoff="August 31, 2025",
+            # "auto uses the same sizing behavior as high": 2048px.
+            context=_limits(max_tokens=1_050_000, image_edge_px=2048),
             prices=_prices(
                 {
                     "auto": _card(
@@ -409,15 +463,26 @@ def models() -> Mapping[str, ModelCapability]:
                     ),
                 },
                 long_context=True,
+                short_only=frozenset({"priority"}),
+                # Flex long: "$2.50 | $0.25 | - | $11.25" -- the cached rate is
+                # rounded, so 2x the short card's 0.13 would bill 0.26.
+                long_overrides={
+                    "flex": _card(
+                        request=2.5,
+                        response=11.25,
+                        cache_write=0.0,
+                        cache_read=0.25,
+                    ),
+                },
             ),
             thinking=legacy,
         ),
         replace(
             default,
-            model_id="gpt-5.4-pro",
+            model_id="gpt-pro-5.4",
             wire_model_id="gpt-5.4-pro",
-            knowledge_cutoff=None,
-            context=_limits(patch_images=False),
+            knowledge_cutoff="August 31, 2025",
+            context=_limits(max_tokens=1_050_000),
             prices=_prices(
                 {
                     "auto": _card(
@@ -435,17 +500,15 @@ def models() -> Mapping[str, ModelCapability]:
                 },
                 long_context=True,
             ),
-            thinking=replace(
-                default.thinking,
-                effort=frozenset({"medium", "high", "xhigh"}),
-            ),
+            thinking=pro,
         ),
         replace(
             default,
-            model_id="gpt-5.4-mini",
+            model_id="gpt-mini-5.4",
             wire_model_id="gpt-5.4-mini",
-            knowledge_cutoff=None,
-            context=_limits(max_tokens=400_000, windowed=False, patch_images=False),
+            knowledge_cutoff="August 31, 2025",
+            # "400,000 context window - Maximum input tokens: 272,000".
+            context=_limits(max_tokens=272_000, windowed=False, image_edge_px=2048),
             prices=_prices(
                 {
                     "auto": _card(
@@ -470,6 +533,30 @@ def models() -> Mapping[str, ModelCapability]:
             ),
             thinking=legacy,
         ),
+        replace(
+            default,
+            model_id="gpt-nano-5.4",
+            wire_model_id="gpt-5.4-nano",
+            knowledge_cutoff="August 31, 2025",
+            context=_limits(max_tokens=272_000, windowed=False, image_edge_px=2048),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=0.2,
+                        response=1.25,
+                        cache_write=0.0,
+                        cache_read=0.02,
+                    ),
+                    "flex": _card(
+                        request=0.1,
+                        response=0.625,
+                        cache_write=0.0,
+                        cache_read=0.01,
+                    ),
+                },
+            ),
+            thinking=legacy,
+        ),
         # No `*-chat-latest` row. Those aliases are listed by `/v1/models` but
         # rejected by `/v1/responses` with `model_not_found` (verified for
         # gpt-5, gpt-5.2 and gpt-5.3 variants), and the Responses API is the
@@ -479,8 +566,8 @@ def models() -> Mapping[str, ModelCapability]:
             default,
             model_id="gpt-5.2",
             wire_model_id="gpt-5.2",
-            knowledge_cutoff=None,
-            context=_limits(max_tokens=400_000, windowed=False, patch_images=False),
+            knowledge_cutoff="August 31, 2025",
+            context=_limits(max_tokens=400_000, windowed=False, image_edge_px=2048),
             prices=_prices(
                 {
                     "auto": _card(
@@ -507,14 +594,68 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             default,
-            model_id="o1",
+            model_id="gpt-pro-5.2",
+            wire_model_id="gpt-5.2-pro",
+            knowledge_cutoff="August 31, 2025",
+            context=_limits(max_tokens=400_000, windowed=False),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=21.0,
+                        response=168.0,
+                        cache_write=0.0,
+                        cache_read=0.0,
+                    ),
+                },
+            ),
+            thinking=pro,
+        ),
+        replace(
+            default,
+            model_id="gpt-5.1",
+            wire_model_id="gpt-5.1",
+            knowledge_cutoff="September 30, 2024",
+            context=_limits(max_tokens=400_000, windowed=False, image_edge_px=2048),
+            prices=_prices(
+                {
+                    "auto": _card(
+                        request=1.25,
+                        response=10.0,
+                        cache_write=0.0,
+                        cache_read=0.125,
+                    ),
+                    "flex": _card(
+                        request=0.625,
+                        response=5.0,
+                        cache_write=0.0,
+                        cache_read=0.0625,
+                    ),
+                    "priority": _card(
+                        request=2.5,
+                        response=20.0,
+                        cache_write=0.0,
+                        cache_read=0.25,
+                    ),
+                },
+            ),
+            # "none (default), low, medium, and high".
+            thinking=replace(
+                default.thinking,
+                effort=frozenset({"none", "low", "medium", "high"}),
+            ),
+        ),
+        # o1, o3-mini, gpt-4.1-nano, gpt-4-turbo, and gpt-4 shut down October
+        # 23, 2026 (https://developers.openai.com/api/docs/deprecations).
+        replace(
+            default,
+            model_id="o-1.0",
             wire_model_id="o1",
-            knowledge_cutoff=None,
+            knowledge_cutoff="October 1, 2023",
             context=_limits(
                 max_tokens=200_000,
                 output_tokens=100_000,
                 windowed=False,
-                patch_images=False,
+                image_edge_px=2048,
             ),
             prices=_prices(
                 {
@@ -533,14 +674,14 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             default,
-            model_id="o3-mini",
+            model_id="o-mini-3.0",
             wire_model_id="o3-mini",
-            knowledge_cutoff=None,
+            knowledge_cutoff="October 1, 2023",
+            # "Input modalities: text" -- no image input, so no image limits.
             context=_limits(
                 max_tokens=200_000,
                 output_tokens=100_000,
                 windowed=False,
-                patch_images=False,
             ),
             prices=_prices(
                 {
@@ -563,12 +704,12 @@ def models() -> Mapping[str, ModelCapability]:
             default,
             model_id="gpt-4.1",
             wire_model_id="gpt-4.1",
-            knowledge_cutoff=None,
+            knowledge_cutoff="June 1, 2024",
             context=_limits(
                 max_tokens=1_047_576,
                 output_tokens=32_768,
                 windowed=False,
-                patch_images=False,
+                image_edge_px=2048,
             ),
             prices=_prices(
                 {
@@ -590,14 +731,14 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             default,
-            model_id="gpt-4.1-mini",
+            model_id="gpt-mini-4.1",
             wire_model_id="gpt-4.1-mini",
-            knowledge_cutoff=None,
+            knowledge_cutoff="June 1, 2024",
             context=_limits(
                 max_tokens=1_047_576,
                 output_tokens=32_768,
                 windowed=False,
-                patch_images=False,
+                image_edge_px=2048,
             ),
             prices=_prices(
                 {
@@ -619,14 +760,14 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             default,
-            model_id="gpt-4.1-nano",
+            model_id="gpt-nano-4.1",
             wire_model_id="gpt-4.1-nano",
-            knowledge_cutoff=None,
+            knowledge_cutoff="June 1, 2024",
             context=_limits(
                 max_tokens=1_047_576,
                 output_tokens=32_768,
                 windowed=False,
-                patch_images=False,
+                image_edge_px=2048,
             ),
             prices=_prices(
                 {
@@ -648,14 +789,14 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             default,
-            model_id="gpt-4o",
+            model_id="gpt-omni-4.0",
             wire_model_id="gpt-4o",
-            knowledge_cutoff=None,
+            knowledge_cutoff="October 1, 2023",
             context=_limits(
                 max_tokens=128_000,
                 output_tokens=16_384,
                 windowed=False,
-                patch_images=False,
+                image_edge_px=2048,
             ),
             prices=_prices(
                 {
@@ -677,14 +818,14 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             default,
-            model_id="gpt-4o-mini",
+            model_id="gpt-omni-mini-4.0",
             wire_model_id="gpt-4o-mini",
-            knowledge_cutoff=None,
+            knowledge_cutoff="October 1, 2023",
             context=_limits(
                 max_tokens=128_000,
                 output_tokens=16_384,
                 windowed=False,
-                patch_images=False,
+                image_edge_px=2048,
             ),
             prices=_prices(
                 {
@@ -706,14 +847,14 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             default,
-            model_id="gpt-4-turbo",
+            model_id="gpt-turbo-4.0",
             wire_model_id="gpt-4-turbo",
-            knowledge_cutoff=None,
+            knowledge_cutoff="December 1, 2023",
             context=_limits(
                 max_tokens=128_000,
                 output_tokens=4_096,
                 windowed=False,
-                patch_images=False,
+                image_edge_px=2048,
             ),
             prices=_prices(
                 {
@@ -729,14 +870,14 @@ def models() -> Mapping[str, ModelCapability]:
         ),
         replace(
             default,
-            model_id="gpt-4",
+            model_id="gpt-4.0",
             wire_model_id="gpt-4",
-            knowledge_cutoff=None,
+            knowledge_cutoff="December 1, 2023",
+            # Text-only, like o3-mini.
             context=_limits(
                 max_tokens=8_192,
                 output_tokens=8_192,
                 windowed=False,
-                patch_images=False,
             ),
             prices=_prices(
                 {
@@ -751,57 +892,171 @@ def models() -> Mapping[str, ModelCapability]:
             thinking=ThinkingCapability(),
         ),
     )
-    # Unverified: gpt-6.1-sol's published prices are not recorded. This row copies
-    # the sol-6 card as a stand-in so a Sol 6.1 session is priced at a Sol rate
-    # and not at the dearest card. Replace it once the published table is read.
-    # Appended last so the family alias keeps pointing at sol-6.
-    sol_6 = next(row for row in rows if row.model_id == "sol-6")
-    rows = (*rows, replace(sol_6, model_id="sol-6.1", wire_model_id="gpt-6.1-sol"))
     # A tier is offered exactly when it is priced.
     rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
-    # Rows run newest-first within each family, so the first match is the latest
-    # and a new release moves its alias without an edit here.
-    latest = {
-        alias: next(row for row in rows if row.model_id.startswith(f"{family}-"))
-        for alias, family in (
-            ("default", "astra"),
-            ("utility", "luna"),
-        )
-    }
-    return MappingProxyType(latest | {row.model_id: row for row in rows})
+    return ModelTable(rows=rows, roles=_ROLES)
+
+
+_ROLES: Final = MappingProxyType({"default": "sol", "utility": "luna"})
 
 
 def reasoning_effort(
     effort: ThinkingEffort,
-    *,
-    model_id: str,
-) -> Literal["none", "low", "medium", "high", "xhigh", "max"]:
-    """Map a selected effort to the Responses vocabulary.
+) -> Literal["low", "medium", "high", "xhigh", "max"]:
+    """Return the Responses ``reasoning.effort`` a selected level sends.
+
+    Every level a row offers is spelled as the API spells it; the row has
+    already rejected any level the model does not take.
 
     Args:
       effort: Selected catalog effort.
-      model_id: Base model id.
 
     Returns:
       wire: Responses reasoning effort.
 
+    Raises:
+      ValueError: ``effort`` is ``none``, which omits ``reasoning`` instead,
+        or ``min``, which no model page lists.
+
     """
-    row = models().get(model_id)
+    match effort:
+        case "none" | "min":
+            raise ValueError(f"effort {effort!r} is not sent as reasoning.effort")
+        case "low" | "medium" | "high" | "xhigh" | "max":
+            return effort
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Patches:
+    """32x32-patch image tokenization (images-vision, "Patch-based")."""
+
+    multiplier: float
+    """Billable tokens per patch."""
+
+    budget: int = 0
+    """Patch budget ``detail: auto`` resizes into; ``0`` is none."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Tiles:
+    """512px-tile image tokenization (images-vision, "Tile-based")."""
+
+    base: int
+    """Tokens every image costs."""
+
+    tile: int
+    """Tokens per 512px tile after the 2048px / 768px short-side resize."""
+
+
+# images-vision multiplier and tile tables, and its sizing table for
+# ``detail: auto`` (2026-10-03). GPT-6 Sol/Luna and 6.1 Sol are absent from
+# both tables; they take Astra's GPT-6 rule.
+_VISION: Final[Mapping[str, _Patches | _Tiles]] = MappingProxyType(
+    {
+        "astra-6.0": _Patches(multiplier=1.2),
+        "sol-6.1": _Patches(multiplier=1.2),
+        "sol-6.0": _Patches(multiplier=1.2),
+        "luna-6.0": _Patches(multiplier=1.2),
+        "sol-5.6": _Patches(multiplier=1.2),
+        "gpt-5.6": _Patches(multiplier=1.2),
+        "terra-5.6": _Patches(multiplier=1.2),
+        "luna-5.6": _Patches(multiplier=1.2),
+        "gpt-5.5": _Patches(multiplier=1.2, budget=10_000),
+        "gpt-5.4": _Patches(multiplier=1.2, budget=2_500),
+        "gpt-mini-5.4": _Patches(multiplier=1.2, budget=2_500),
+        "gpt-nano-5.4": _Patches(multiplier=1.2, budget=2_500),
+        "gpt-5.2": _Patches(multiplier=1.2, budget=6_144),
+        "gpt-mini-4.1": _Patches(multiplier=1.62, budget=6_144),
+        "gpt-nano-4.1": _Patches(multiplier=2.46, budget=6_144),
+        "gpt-5.1": _Tiles(base=70, tile=140),
+        "gpt-4.1": _Tiles(base=85, tile=170),
+        "gpt-omni-4.0": _Tiles(base=85, tile=170),
+        "gpt-omni-mini-4.0": _Tiles(base=2833, tile=5667),
+        "o-1.0": _Tiles(base=75, tile=150),
+    },
+)
+
+
+def image_tokens(model_id: str, width: int, height: int) -> int:
+    """Estimate the input tokens one image bills under ``detail: auto``.
+
+    Args:
+      model_id: Catalog name or wire id; an id no row carries is estimated too.
+      width: Image width after the transport's own resize, in pixels.
+      height: Image height after the transport's own resize, in pixels.
+
+    Returns:
+      tokens: The published formula's count; the GPT-4o tile estimate for a
+        model that takes images but has no published formula (the Pro models,
+        ``gpt-4-turbo``, other vendors' ids); ``0`` for a text-only row.
+
+    References:
+      https://developers.openai.com/api/docs/guides/images-vision
+
+    """
+    row = models().exact(model_id)
+    name = row.model_id if row is not None else ""
+    if name in _TEXT_ONLY:
+        return 0
+    match _VISION.get(name, _Tiles(base=85, tile=170)):
+        case _Patches(multiplier=multiplier, budget=budget):
+            width, height = _fit_patch_budget(width, height, budget)
+            return math.ceil(_patch_count(width, height) * multiplier)
+        case _Tiles(base=base, tile=tile):
+            width, height = _fit_tiles(width, height)
+            return base + tile * math.ceil(width / 512) * math.ceil(height / 512)
+
+
+# "Input modalities: text" on each model page.
+_TEXT_ONLY: Final = frozenset({"o-mini-3.0", "gpt-4.0"})
+
+
+def tokenizer(model_id: str) -> str | None:
+    """Return the ``tiktoken`` encoding a model's text tokenizes with.
+
+    Args:
+      model_id: Catalog name or wire id.
+
+    Returns:
+      encoding: ``o200k_base`` for GPT-4o and later, ``cl100k_base`` for the
+        GPT-4 generation, ``None`` for an id no row carries.
+
+    """
+    row = models().exact(model_id)
     if row is None:
-        row = next(
-            (
-                candidate
-                for candidate in models().values()
-                if candidate.wire_model_id == model_id
-            ),
-            None,
-        )
-    canonical_id = row.model_id if row is not None else model_id
-    if effort == "min":
-        return "none" if canonical_id.endswith("-5.6") else "low"
-    if effort == "none" and canonical_id == "astra-6":
-        return "low"
-    return effort
+        return None
+    return (
+        "cl100k_base" if row.model_id in {"gpt-4.0", "gpt-turbo-4.0"} else "o200k_base"
+    )
+
+
+def keeps_reasoning_across_turns(model_id: str) -> bool:
+    """Whether a request asks the model to reason over every prior turn.
+
+    Args:
+      model_id: Catalog name or wire id.
+
+    Returns:
+      all_turns: True for GPT-5.6 and GPT-6, which take
+        ``reasoning.context = "all_turns"``.
+
+    """
+    row = models().exact(model_id)
+    return row is not None and row.model_id in _ALL_TURNS
+
+
+_ALL_TURNS: Final = frozenset(
+    {
+        "astra-6.0",
+        "sol-6.1",
+        "sol-6.0",
+        "luna-6.0",
+        "sol-5.6",
+        "gpt-5.6",
+        "terra-5.6",
+        "luna-5.6",
+    },
+)
 
 
 def api() -> ModelCapability:
@@ -853,29 +1108,31 @@ def subscription() -> ModelCapability:
 
 
 @cache
-def subscription_models() -> Mapping[str, ModelCapability]:
+def subscription_models() -> ModelTable:
     """Return catalog rows clamped to the ChatGPT backend contract.
 
     Returns:
       models: Subscription-visible rows with only their usable context.
 
     """
-    rows: dict[str, ModelCapability] = {}
-    for name, capability in models().items():
+    rows: list[ModelCapability] = []
+    for capability in models().rows:
         limits = capability.context[""]
-        rows[name] = replace(
-            capability,
-            context=MappingProxyType(
-                {
-                    "": replace(
-                        limits,
-                        max_request_tokens=min(limits.max_request_tokens, 272_000),
-                        max_response_tokens=min(limits.max_response_tokens, 32_000),
-                    ),
-                },
+        rows.append(
+            replace(
+                capability,
+                context=MappingProxyType(
+                    {
+                        "": replace(
+                            limits,
+                            max_request_tokens=min(limits.max_request_tokens, 272_000),
+                            max_response_tokens=min(limits.max_response_tokens, 32_000),
+                        ),
+                    },
+                ),
             ),
         )
-    return MappingProxyType(rows)
+    return ModelTable(rows=tuple(rows), roles=_ROLES)
 
 
 def served_tier(reported: str | None) -> ServiceTier:
@@ -920,12 +1177,17 @@ def _card(
 
 
 # "Prompts with >272K input tokens are priced at 2x input and 1.5x output for
-# the full request" -- every model page states it as this ratio, and the tables
-# publish the long column only for GPT-6, where it matches.
+# the full request" -- every 1.05M-window model page states it as this ratio.
+# The pricing tables publish that column per tier and leave it "-" for some
+# (the fast tier of GPT-5.5 and GPT-5.4, the flex tier of GPT-5.5 Pro), so
+# ``short_only`` names a tier that has no long band. ``long_overrides``
+# carries a published long card the ratio does not reproduce exactly.
 def _prices(
     tiers: Mapping[ServiceTier, TokenPrice],
     *,
     long_context: bool = False,
+    short_only: frozenset[ServiceTier] = frozenset(),
+    long_overrides: Mapping[ServiceTier, TokenPrice] | None = None,
 ) -> PriceCatalog:
     """Return each tier's published card, plus its >272K band when it has one."""
     cards = {PriceKey(tier): card for tier, card in tiers.items()}
@@ -939,35 +1201,63 @@ def _prices(
                 response=card.response * 1.5,
             )
             for tier, card in tiers.items()
+            if tier not in short_only
+        }
+        cards |= {
+            PriceKey(tier, 272_000): card
+            for tier, card in (long_overrides or {}).items()
         }
     return PriceCatalog(cards)
 
 
-# GPT-5.6 and later bill images by 32x32 patch and take a far larger body;
-# earlier models tile ``detail:high`` from a 2048px square under a 20MB cap.
+# Every current model takes "Up to 512 MB total payload per request"
+# (images-vision); no per-image byte cap is published. ``image_edge_px`` is the
+# long edge ``detail: auto`` resizes to, per that page's "Model sizing
+# behavior" table; ``0`` means the page states none for the model.
 def _limits(
     *,
-    max_tokens: int = 1_050_000,
+    max_tokens: int = 922_000,
     output_tokens: int = 128_000,
     windowed: bool = True,
-    patch_images: bool = True,
+    image_edge_px: int = 0,
 ) -> Mapping[ContextTag, ModelLimits]:
     """Serve ``max_tokens`` by default; ``+272k`` selects the cap below the surcharge."""
-    if patch_images:
-        limits = ModelLimits(
-            max_request_tokens=max_tokens,
-            max_response_tokens=output_tokens,
-            max_request_bytes=512 * 1024 * 1024,
-        )
-    else:
-        limits = ModelLimits(
-            max_request_tokens=max_tokens,
-            max_response_tokens=output_tokens,
-            max_request_bytes=20 * 1024 * 1024,
-            max_image_edge_px=2048,
-            max_image_bytes=20 * 1024 * 1024,
-        )
+    limits = ModelLimits(
+        max_request_tokens=max_tokens,
+        max_response_tokens=output_tokens,
+        max_request_bytes=512 * 1024 * 1024,
+        max_image_edge_px=image_edge_px,
+    )
     context: dict[ContextTag, ModelLimits] = {"": limits}
     if windowed:
         context["+272k"] = replace(limits, max_request_tokens=272_000)
     return MappingProxyType(context)
+
+
+def _patch_count(width: int, height: int) -> int:
+    return math.ceil(width / 32) * math.ceil(height / 32)
+
+
+def _fit_patch_budget(width: int, height: int, budget: int) -> tuple[int, int]:
+    """Shrink an image to the patch budget, as images-vision step B states it."""
+    if budget <= 0 or _patch_count(width, height) <= budget:
+        return width, height
+    shrink = ((32**2 * budget) / (width * height)) ** 0.5
+    adjusted = shrink * min(
+        math.floor(width * shrink / 32) / (width * shrink / 32),
+        math.floor(height * shrink / 32) / (height * shrink / 32),
+    )
+    return max(1, math.floor(width * adjusted)), max(1, math.floor(height * adjusted))
+
+
+def _fit_tiles(width: int, height: int) -> tuple[int, int]:
+    """Fit a 2048px square, then a 768px short side, as the tile rules state."""
+    scale = min(1.0, 2048 / max(width, height))
+    width, height = math.floor(width * scale), math.floor(height * scale)
+    short = min(width, height)
+    if short > 768:
+        width, height = (
+            math.floor(width * 768 / short),
+            math.floor(height * 768 / short),
+        )
+    return max(1, width), max(1, height)

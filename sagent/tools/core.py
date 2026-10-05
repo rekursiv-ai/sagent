@@ -36,7 +36,7 @@ from sagent.agent.state import (
     current_agent_var,
     get_tool_state,
 )
-from sagent.lib.custom_json import JSON, IntCodec, json_freeze
+from sagent.lib.custom_json import JSON, convert, json_freeze
 from sagent.types.runtime import ToolResult
 
 
@@ -487,7 +487,7 @@ def opt_int(directive: Mapping[str, object], key: str) -> int | None:
 
     """
     v = directive.get(key)
-    return None if v is None else IntCodec.coerce(v, 0)
+    return None if v is None else convert(v, int, strict=False)
 
 
 def opt_str(directive: Mapping[str, object], key: str) -> str | None:

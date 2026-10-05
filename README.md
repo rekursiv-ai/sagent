@@ -94,7 +94,7 @@ from sagent.lib.custom_json import json_freeze
 from sagent.providers import Google
 
 agent = Agent(
-    model=Google.from_env().model("gemini-3.1-pro-preview"),
+    model=Google.from_env().model("gemini-pro-3.1"),
     system="You are a scientist.",
     tools=[tools.Read(), tools.Glob(), tools.Grep()],
 )
@@ -213,11 +213,11 @@ to set the default value of the `--provider` flag.
 | --- | --- | --- |
 | `Anthropic` | `ANTHROPIC_API_KEY` | `fable-5.1` |
 | `AnthropicCLI` | none (`claude auth login --claudeai`) | `fable-5.1` |
-| `OpenAI` | `OPENAI_API_KEY` | `astra-6` |
-| `Google` | `GOOGLE_API_KEY` | `gemini-3.1-pro-preview` |
-| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-k2.6` |
-| `DashScope` | `DASHSCOPE_API_KEY` | `qwen3.6-plus` |
-| `MiniMax` | `MINIMAX_API_KEY` | `MiniMax-M2.7` |
+| `OpenAI` | `OPENAI_API_KEY` | `sol-6.1` |
+| `Google` | `GOOGLE_API_KEY` | `gemini-pro-3.1` |
+| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-2.6` |
+| `DashScope` | `DASHSCOPE_API_KEY` | `qwen-plus-3.7` |
+| `MiniMax` | `MINIMAX_API_KEY` | `minimax-2.7` |
 | `SelfHosted` | none | `Qwen/Qwen3.6-27B` |
 | `LlamaCpp` | none (uses `LLAMA_CPP_MODEL` + `LLAMA_CPP_SERVER`) | `qwen3.6-27b-12gb` |
 

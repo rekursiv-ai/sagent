@@ -57,6 +57,7 @@ else:
 
 
 from sagent.catalog.anthropic import api, models, usage_tokens
+from sagent.catalog.table import ModelCatalog
 from sagent.lib import debug_log
 from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
 from sagent.providers.lib.errors import (
@@ -80,7 +81,6 @@ from sagent.types.model import (
     StreamInterruptedError,
     UsageSnapshot,
 )
-from sagent.types.providers import ModelCatalog
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -200,7 +200,7 @@ class Anthropic:
     ``handle_auth_error``, ``subscription``.
     """
 
-    catalog = ModelCatalog(rows=models(), transport=api())
+    catalog = ModelCatalog(models=models(), transport=api())
 
     def __init__(
         self,
@@ -505,7 +505,10 @@ def _policy_block_message(error_body: Mapping[str, object] | None) -> str | None
     if any(signal in lower for signal in signals):
         return message
     actions = ("block", "flag", "reject", "refus")
-    safety_terms = ("content filter", "policy", "safeguard", "safety")
+    # Bare "policy" is absent on purpose: caching, retention, and versioning
+    # rejections cite policies too, and a false match tells the user to throw
+    # away a conversation that a corrected request would serve.
+    safety_terms = ("content filter", "safeguard", "safety")
     return (
         message
         if any(a in lower for a in actions)
@@ -800,6 +803,12 @@ class _AnthropicModel(ModelDefaults):
             }
             kwargs["max_tokens"] = total
             kwargs["temperature"] = 1.0
+        # "`display` works in both modes: set it alongside `type: "adaptive"` or
+        # `type: "enabled"`" -- and 4.7+ default to "omitted", so ``text`` must ask.
+        output = self.settings.thinking_output
+        if has_thinking and output != "none":
+            thinking = cast(dict[str, object], kwargs["thinking"])
+            thinking["display"] = "summarized" if output == "text" else "omitted"
         if request.tools:
             kwargs["tools"] = [
                 {

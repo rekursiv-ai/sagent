@@ -10,6 +10,8 @@ Each LLM backend reports response termination differently:
   ``LANGUAGE`` / ``BLOCKLIST`` / ``PROHIBITED_CONTENT`` / ``SPII`` /
   ``IMAGE_SAFETY`` / ``MALFORMED_FUNCTION_CALL`` / ``OTHER`` /
   ``FINISH_REASON_UNSPECIFIED``.
+- ACP (GoogleCLI's ``session/prompt``): ``end_turn`` / ``max_tokens`` /
+  ``max_turn_requests`` / ``refusal`` / ``cancelled``.
 
 The agent works in its own canonical vocabulary - providers translate at the
 adapter boundary so the agent's ``stop_reason`` guard
@@ -29,19 +31,30 @@ from __future__ import annotations
 from typing import Final, Literal
 
 
-ProviderKind = Literal["anthropic", "openai", "google"]
+ProviderKind = Literal["anthropic", "openai", "google", "acp"]
 
-# Stop reasons we consider a normal response termination. Anything else
-# means the model stopped for a non-happy-path reason (token cap,
-# refusal, context overflow) and any tool calls in the response may
-# carry truncated input JSON.
+# Normal terminations: the message is complete and safe to consume.
 BENIGN_STOP_REASONS: frozenset[str] = frozenset(
     {
         "model_finished",  # Natural completion.
         "model_tool_use",  # Model emitted tool call(s)
         "stop_sequence",  # Caller-requested stop sequence matched.
+        "model_continuing",  # Server-tool loop paused; content is valid.
     },
 )
+
+# The output hit a length ceiling. Prose is a usable partial answer; a tool
+# call may carry cut-off arguments and must not be dispatched.
+TRUNCATED_STOP_REASONS: frozenset[str] = frozenset(
+    {"max_tokens", "model_context_window_exceeded"},
+)
+
+# The model produced no usable answer.
+FAILED_STOP_REASONS: frozenset[str] = frozenset({"model_refusal", "model_cancelled"})
+
+# The model tried to call a tool and the vendor could not parse it. The turn
+# carries nothing to keep, but a resend usually succeeds.
+RETRYABLE_STOP_REASONS: frozenset[str] = frozenset({"model_malformed_tool_call"})
 
 _ANTHROPIC_MAP: Final[dict[str, str]] = {
     "end_turn": "model_finished",
@@ -50,6 +63,16 @@ _ANTHROPIC_MAP: Final[dict[str, str]] = {
     "refusal": "model_refusal",
     "stop_sequence": "stop_sequence",
     "max_tokens": "max_tokens",
+    "model_context_window_exceeded": "model_context_window_exceeded",
+}
+
+# Agent Client Protocol ``session/prompt`` result ``stopReason``.
+_ACP_MAP: Final[dict[str, str]] = {
+    "end_turn": "model_finished",
+    "max_tokens": "max_tokens",
+    "max_turn_requests": "model_continuing",
+    "refusal": "model_refusal",
+    "cancelled": "model_cancelled",
 }
 
 # OpenAI ``finish_reason`` → canonical vocabulary.
@@ -104,6 +127,8 @@ def normalize_stop_reason(
         translated = _ANTHROPIC_MAP.get(raw or "end_turn", raw or "model_finished")
     elif kind == "openai":
         translated = _OPENAI_MAP.get(raw or "", raw or "model_finished")
+    elif kind == "acp":
+        translated = _ACP_MAP.get(raw or "", raw or "model_finished")
     else:
         translated = _GOOGLE_MAP.get(raw or "", raw or "model_finished")
     # Upgrade model_finished → model_tool_use when the response carried

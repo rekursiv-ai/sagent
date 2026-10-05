@@ -38,7 +38,12 @@ else:
     httpx2 = lazy_import("httpx2")  # 168ms.
 
 from sagent.lib.durations import humanize_duration
-from sagent.providers.lib.stop_reason import BENIGN_STOP_REASONS
+from sagent.providers.lib.stop_reason import (
+    BENIGN_STOP_REASONS,
+    FAILED_STOP_REASONS,
+    RETRYABLE_STOP_REASONS,
+    TRUNCATED_STOP_REASONS,
+)
 from sagent.types import runtime
 from sagent.types.model import (
     Model,
@@ -345,23 +350,32 @@ def validate_model_response(response: ModelResponse) -> None:
     """Reject a completed provider envelope that is not safe to consume.
 
     Provider adapters normalize native termination reasons before this
-    boundary.  A normal assistant turn either finished naturally or
-    delivered at least one tool call.  Every other reason is an explicit
-    failure: returning the message would otherwise turn refusals and
-    truncations into successful, often empty, assistant turns.
+    boundary. Refusals and malformed or cancelled turns carry no usable
+    answer. A length-truncated turn keeps its prose (the user paid for it)
+    but not its tool calls, whose arguments may be cut off. A value outside
+    the canonical vocabulary is a vendor extension and only warns: failing
+    on it would break every turn of a provider that adds one.
 
     Args:
       response: Completed, normalized provider response.
 
     Raises:
-      StreamInterruptedError: ``model_tool_use`` announced no tool calls.
-      ModelTerminationError: The normalized stop reason is not successful.
+      StreamInterruptedError: ``model_tool_use`` announced no tool calls, or
+          the vendor rejected a malformed tool call; both resend.
+      ModelTerminationError: The turn failed, or was truncated mid tool call.
 
     """
-    if response.stop_reason == "model_tool_use" and not response.message.tool_calls:
+    reason = response.stop_reason
+    if reason in RETRYABLE_STOP_REASONS or (
+        reason == "model_tool_use" and not response.message.tool_calls
+    ):
         raise StreamInterruptedError(response)
-    if response.stop_reason not in BENIGN_STOP_REASONS:
+    if reason in FAILED_STOP_REASONS or (
+        reason in TRUNCATED_STOP_REASONS and response.message.tool_calls
+    ):
         raise ModelTerminationError(response)
+    if reason not in BENIGN_STOP_REASONS | TRUNCATED_STOP_REASONS:
+        logger.warning("Unrecognized stop_reason %r; consuming response.", reason)
 
 
 async def send_with_retry(
@@ -372,7 +386,6 @@ async def send_with_retry(
     max_attempts: int,
     persistent_retry: bool,
     publish_recoverable: Callable[[str], None],
-    on_discarded_response: Callable[[ModelResponse], None] | None = None,
     on_service_suspended: Callable[[float, float, bool, Exception], None] | None = None,
     resume_retry_at: float | None = None,
     max_persistent_attempts: int = DEFAULT_MAX_PERSISTENT_ATTEMPTS,
@@ -400,10 +413,6 @@ async def send_with_retry(
       publish_recoverable: Callback for transient errors that recovered;
           each retry attempt invokes it with a ``multipart/x-error`` Message
           carrying the underlying exception and a structured stack trace.
-      on_discarded_response: Called with the response from a completed
-          request that will be retried (e.g. StreamInterruptedError).
-          The API billed for these tokens; this callback lets the
-          caller account them.
       on_service_suspended: Called when a recoverable provider error
           schedules a retry sleep. Arguments are retry_at, delay_sec,
           server_supplied, and the original exception.
@@ -499,10 +508,6 @@ async def send_with_retry(
                     stream_interrupts - 1,
                 )
                 raise
-            if on_discarded_response is not None:
-                on_discarded_response(
-                    e.response,
-                )  # May raise (e.g. budget exhaustion) -- intentional.
             attempt -= 1
             continue
         except Exception as e:

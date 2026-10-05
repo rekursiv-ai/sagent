@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Final, cast, get_args
 import re
 
 from sagent.agent.state import approx_tokens, get_tool_state
-from sagent.lib.custom_json import BoolCodec, IntCodec, json_freeze
+from sagent.lib.custom_json import convert, json_freeze
 from sagent.lib.files.grep import GrepError, OutputMode, Query, grep
 from sagent.tools.core import (
     bound_by_tokens,
@@ -102,6 +102,7 @@ class Grep:
     name = "Grep"
     tool_id = "application/x-tool-grep"
     clearable_results = True
+    max_result_chars = 20_000
     description = load_tool_description("Grep")
     directive_schema = json_freeze(
         {
@@ -249,14 +250,14 @@ class Grep:
             per ``output_mode``.
 
         """
-        keep_first = IntCodec.coerce(args.get("keep_first"), 0)
-        keep_last = IntCodec.coerce(args.get("keep_last"), 0)
-        offset = IntCodec.coerce(args.get("offset"), 0)
+        keep_first = convert(args.get("keep_first"), int, default=0)
+        keep_last = convert(args.get("keep_last"), int, default=0)
+        offset = convert(args.get("offset"), int, default=0)
         context = _int_arg(args, "-C", "context")
         context_before = max(_int_arg(args, "-B"), context)
         context_after = max(_int_arg(args, "-A"), context)
         # Schema declares all pagination/context knobs as ``minimum: 0``
-        # integers but ``IntCodec.coerce`` accepts negatives, which then index
+        # integers but ``get(..., int)`` accepts negatives, which then index
         # from the end of the result list (``lines[-N:]`` returns the
         # tail instead of failing). Enforce the schema floor here so a
         # malformed directive surfaces as a tool error rather than
@@ -285,10 +286,10 @@ class Grep:
             output_mode=cast("OutputMode", output_mode),
             context_before=context_before,
             context_after=context_after,
-            case_insensitive=BoolCodec.coerce(args.get("-i"), False),
-            line_numbers=BoolCodec.coerce(args.get("-n"), True),
-            multiline=BoolCodec.coerce(args.get("multiline"), False),
-            pcre=BoolCodec.coerce(args.get("pcre"), False),
+            case_insensitive=convert(args.get("-i"), bool, default=False),
+            line_numbers=convert(args.get("-n"), bool, default=True),
+            multiline=convert(args.get("multiline"), bool, default=False),
+            pcre=convert(args.get("pcre"), bool, default=False),
         )
         return await run_sync(
             _search,
@@ -591,7 +592,21 @@ def _search(
         lines = grep(path, query)
     except GrepError as error:
         return _error(str(error))
-    return _paginate(lines, keep_first=keep_first, keep_last=keep_last, offset=offset)
+    try:
+        pattern = re.compile(
+            query.pattern,
+            re.IGNORECASE if query.case_insensitive else 0,
+        )
+    except re.error:
+        # Ripgrep syntax Python cannot compile: the clip window starts at 0.
+        pattern = None
+    return _paginate(
+        lines,
+        keep_first=keep_first,
+        keep_last=keep_last,
+        offset=offset,
+        pattern=pattern,
+    )
 
 
 # The single place either backend slices. Both produce one entry per line for every
@@ -611,6 +626,7 @@ def _paginate(
     keep_first: int,
     keep_last: int,
     offset: int,
+    pattern: re.Pattern[str] | None = None,
 ) -> str:
     """Apply the pagination knobs to already-rendered output lines."""
     # Where the shown window BEGINS in the full match set. Every resume
@@ -630,6 +646,7 @@ def _paginate(
             lines = lines[:keep_first]
     if not lines:
         return "(no matches)"
+    lines = [_clip(line, pattern=pattern) for line in lines]
     # The token bound is the backstop for an unpaginated search: the
     # caller's knobs are a window, and neither says how wide a match is.
     # The resume note is part of the result, so its own cost comes out of
@@ -647,6 +664,35 @@ def _paginate(
     if kept < len(lines):
         body += _resume_note(withheld=len(lines) - kept, resume=start + kept)
     return body
+
+
+_MAX_LINE_CHARS: Final = 500
+"""Claude Code's ``--max-columns 500``: one rendered line's character cap."""
+
+
+# Not ``rg --max-columns``: that keeps only a long line's LEADING columns, so a match
+# further right (a needle in minified JSON) vanished. The window is centred on the
+# first match instead, which is the part a search result exists to show.
+def _clip(line: str, *, pattern: re.Pattern[str] | None) -> str:
+    """Cut a row's text to :data:`_MAX_LINE_CHARS` around its first match."""
+    # The ``path:line:`` prefix is kept whole: it is how the row is located, and
+    # counting it made a long path clip a short line.
+    prefix = _ROW_PREFIX.match(line)
+    cut = prefix.end() if prefix is not None else 0
+    text = line[cut:]
+    if len(text) <= _MAX_LINE_CHARS:
+        return line
+    found = pattern.search(text) if pattern is not None else None
+    center = found.start() if found is not None else 0
+    start = max(0, min(center - _MAX_LINE_CHARS // 2, len(text) - _MAX_LINE_CHARS))
+    end = start + _MAX_LINE_CHARS
+    head = f"[{start:,} chars] " if start else ""
+    tail = f" [{len(text) - end:,} chars]" if end < len(text) else ""
+    return f"{line[:cut]}{head}{text[start:end]}{tail}"
+
+
+_ROW_PREFIX: Final = re.compile(r"^.*?[:-]\d+[:-]")
+"""A content row's ``path:N:`` (match) or ``path-N-`` (context) prefix."""
 
 
 def _resume_note(*, withheld: int, resume: int) -> str:

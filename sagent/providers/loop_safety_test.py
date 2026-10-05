@@ -133,7 +133,7 @@ def test_openai_api_sdk_is_loop_local_and_provider_owned() -> None:
 def test_google_client_survives_a_second_loop() -> None:
     """Google's per-model httpx2 client has the same binding."""
     provider = Google(api_key="test-key")
-    model = provider.model("gemini-2.0-flash")
+    model = provider.model("gemini-3.8-flash")
 
     async def work() -> None:
         async def take() -> None:

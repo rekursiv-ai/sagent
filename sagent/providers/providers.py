@@ -142,6 +142,33 @@ def build_provider(
     return factory(**kwargs)
 
 
+def build_provider_with_account_fallback(
+    provider_name: str,
+    auth: str,
+    *,
+    account: str | None,
+    fallback_to_default: bool,
+) -> tuple[Provider, str | None]:
+    """Build a provider, retrying its default account when permitted.
+
+    Args:
+      provider_name: Provider class name.
+      auth: Auth method suffix.
+      account: Credential account attempted first.
+      fallback_to_default: Whether a missing named account may retry default.
+
+    Returns:
+      provider_account: Constructed provider and the account that succeeded.
+
+    """
+    try:
+        return build_provider(provider_name, auth, account=account), account
+    except FileNotFoundError:
+        if not fallback_to_default or account in (None, "", "default"):
+            raise
+    return build_provider(provider_name, auth, account=None), None
+
+
 def default_auth_for_provider(provider_name: str) -> str:
     """Return the conventional auth method for ``provider_name``.
 
