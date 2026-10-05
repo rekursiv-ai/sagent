@@ -196,46 +196,16 @@ repos:
       #
       # It sizes $WORKERS, then runs the hook's command line from the single
       # `args` entry; per-hook differences (env vars, marker filters, exit-5
-      # tolerance, capability guards) live in that arg, so the arithmetic exists
-      # once. Inline rather than in a helper module, because this file is
-      # copied verbatim into public repos, which carry no such module.
+      # tolerance, capability guards) live in that arg, so the sizing exists
+      # once. The count comes from `python -m sagent.lib.worker_count`:
+      # it is the one place the formula lives (its docstring has the
+      # derivation), every tool that sizes a pool imports it, and every public
+      # export vendors it, so the gates and the tools agree.
+      #
       #
       # Appended filenames reach the inner command as "$@" after an explicit
       # `bash` $0: plain `bash -c "$@"` would eat the first FILENAME as $0 and
       # drop it from the check.
-      #
-      #   WORKERS = max(2, min(perf - 1, round(phys * 3/8)))
-      #
-      # `phys` counts physical cores (SMT deduped), `perf` those at the top
-      # clock. Deduped on `(physical_package_id, core_id)`, not `core_id`
-      # alone: core ids restart at 0 per socket, so a dual-socket host collapsed
-      # to one socket's worth of cores and ran half the workers it should.
-      # Both terms were FITTED to measured optima, not derived:
-      #
-      #
-      # Do NOT "simplify" this to a core count: physical cores, top frequency
-      # domain, and nproc/2 each overshot a box. The EPYC curve is a sawtooth
-      # (24, 32 fast; 20, 28 slow -- likely CCD alignment), so a nearby value is
-      # not interchangeable.
-      #
-      # Then a memory CEILING, not a ratio:
-      #
-      #   WORKERS = max(1, min(WORKERS, available_RAM / 2 GiB))
-      #
-      # "Available" is RAM free at launch, not installed RAM, so the ceiling
-      # binds only when memory is already short: a host keeps N workers unless
-      # under 2N GiB is free. It exists for a laptop whose browser and sibling
-      # agents already hold most of RAM: there the formula's 7 workers (~1-1.8
-      # GB each once torch loads) pushed into swap and froze the desktop. Reads
-      # `vm_stat` (macOS: free + file-backed + purgeable, i.e. Activity
-      # Monitor's free plus "Cached Files") or `MemAvailable` (Linux): memory
-      # reclaimable without paging out an application. Do NOT add macOS's
-      # inactive pages. On a laptop near its limit they are mostly idle
-      # application memory, freed only by compressing or swapping it -- the
-      # stall this ceiling exists to prevent. File-backed already includes
-      # speculative read-ahead; purgeable is anonymous memory an app marked
-      # disposable.
-      #
       #
       # The command also runs under `nice -n 19`, so interactive work wins the
       # CPU; on an idle box that costs nothing. `nice` alone is not enough: it
@@ -243,12 +213,12 @@ repos:
       #
       # Overriding, most specific first: each hook honors the variable named as
       # its FIRST arg (`WORKERS_PYTEST_INTEGRATION_GLOBAL=1`), then
-      # `WORKERS_DEFAULT`, then this formula. Per-hook is what CI needs -- the
-      # integration tier holds ~1.8 GB of torch/jax per worker and OOM-killed a
-      # 2-vCPU runner at two workers, while basedpyright on the same box wants
-      # more. A bare `WORKERS=` is deliberately NOT read: the wrapper exports
-      # `WORKERS`, so reusing that name as the input would leak one hook's
-      # resolved count into every later hook in the same shell.
+      # `WORKERS_DEFAULT` (read by the module), then the formula. Per-hook is
+      # what CI needs -- the integration tier holds ~1.8 GB of torch/jax per
+      # worker and OOM-killed a 2-vCPU runner at two workers, while basedpyright
+      # on the same box wants more. A bare `WORKERS=` is deliberately NOT read:
+      # the wrapper exports `WORKERS`, so reusing that name as the input would
+      # leak one hook's resolved count into every later hook in the same shell.
       - id: worker-sizing
         name: worker-sizing (anchor only; never runs)
         language: fail
@@ -258,40 +228,12 @@ repos:
         # `$WORKERS` is the resolved value every `args` command reads. Two names
         # because the override is optional -- a command reading
         # `$WORKERS_PYTEST_GLOBAL` directly would emit `-n=` on the usual run
-        # where nobody set it, and never reach the formula below.
+        # where nobody set it, and never reach the module.
         entry: &worker-entry >-
           bash -c '
-            eval "WORKERS=\${$1:-\${WORKERS_DEFAULT:-}}"; shift;
+            eval "WORKERS=\${$1:-}"; shift;
             if [ -z "$WORKERS" ]; then
-              cpu=/sys/devices/system/cpu;
-              if [ -d "$cpu/cpu0/topology" ]; then
-                key() { for d in "$@"; do printf "%s,%s\n" "$(cat $d/topology/physical_package_id 2>/dev/null)" "$(cat $d/topology/core_id 2>/dev/null)"; done | sort -u | wc -l; };
-                phys=$(key $cpu/cpu[0-9]*);
-                top=$(sort -rn $cpu/cpu*/cpufreq/cpuinfo_max_freq 2>/dev/null | head -1);
-                perf=$([ -n "$top" ] && key $(grep -lx "$top" $cpu/cpu*/cpufreq/cpuinfo_max_freq | xargs -n1 dirname | xargs -n1 dirname) || echo "$phys");
-              else
-                phys=$(sysctl -n hw.physicalcpu 2>/dev/null || getconf _NPROCESSORS_ONLN);
-                perf=0;
-                for i in $(seq 0 $(( $(sysctl -n hw.nperflevels 2>/dev/null || echo 1) - 1 ))); do
-                  [ "$(sysctl -n hw.perflevel$i.name 2>/dev/null)" = Efficiency ] && continue;
-                  perf=$(( perf + $(sysctl -n hw.perflevel$i.physicalcpu 2>/dev/null || echo 0) ));
-                done;
-                ((perf < 1)) && perf=$phys;
-              fi;
-              WORKERS=$(( (phys * 3 + 4) / 8 ));
-              ((WORKERS > perf - 1)) && WORKERS=$(( perf - 1 ));
-              ((WORKERS < 2)) && WORKERS=2;
-              # max(2, min(perf - 1, round(phys * 3/8))); +4 rounds to nearest.
-              if command -v vm_stat >/dev/null; then
-                avail=$(vm_stat | awk "/page size of/{ps=\$8} /^(Pages (free|purgeable)|File-backed pages):/{n+=\$NF} END{if (ps) print int(n*ps/1048576)}");
-              else
-                avail=$(awk "/^MemAvailable:/{print int(\$2/1024)}" /proc/meminfo 2>/dev/null);
-              fi;
-              if [ -n "$avail" ]; then
-                cap=$(( avail / 2048 ));
-                ((cap < 1)) && cap=1;
-                ((WORKERS > cap)) && WORKERS=$cap;
-              fi;
+              WORKERS=$(uv --quiet run --frozen python -m sagent.lib.worker_count) || exit 1;
             fi;
             export WORKERS;
             exec nice -n 19 bash -c "$1" bash "${@:2}"

@@ -4383,7 +4383,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.12"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#120c34e6762b50bb6b3ece8387d2fc6f55f51b78" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#41036128293a653d87b701cf04248544a7e5fcf4" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },
@@ -4391,6 +4391,7 @@ dependencies = [
     { name = "defusedxml" },
     { name = "html2text" },
     { name = "markdownify" },
+    { name = "msgspec" },
     { name = "trafilatura" },
     { name = "wrapt" },
     { name = "zendriver" },
