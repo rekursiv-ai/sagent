@@ -54,7 +54,6 @@ import importlib
 import json
 import math
 import operator
-import re
 import sys
 import weakref
 
@@ -86,14 +85,12 @@ __all__ = [
     "json_freeze",
     "json_unfreeze",
     "loads",
-    "loads_untagged",
     "parse",
     "read_field_keeping_invalid",
     "resolve_import",
     "restore_unmodeled_fields",
     "same_json_value",
     "to_builtins",
-    "untagged",
 ]
 
 
@@ -854,68 +851,6 @@ _SLOT_NAMES: Final[weakref.WeakKeyDictionary[type, tuple[str, ...]]] = (
 
 
 _OWNS_INLINE: Final[weakref.WeakKeyDictionary[type, bool]] = weakref.WeakKeyDictionary()
-
-
-_VALUE_TAG: Final = re.compile(
-    "|".join(f'"{re.escape(tag)}"' for tag in sorted(_HOLDER_TAGS | _SCALAR_TAGS)),
-)
-"""Any value tag as it appears quoted in JSON text, which ``to_builtins`` never writes.
-
-One alternation, not a scan per tag: on 60 MB it costs 20 ms against the
-parse's 180 ms, where seven substring scans cost 150 ms.
-"""
-
-
-def loads_untagged(text: str) -> MutableJSONValue:
-    """Parse JSON text in the old tagged format or the current one.
-
-    ``to_builtins`` writes no value tag, so text without one parses at full
-    msgspec speed: the check is one regex scan of the raw text. Only text
-    that holds a tag pays for the :func:`untagged` walk. A tag cannot be faked
-    by string content, whose quotes JSON escapes.
-
-    Args:
-      text: JSON document.
-
-    Returns:
-      value: The parsed value, with every value tag of the old format unwrapped.
-
-    Raises:
-      json.JSONDecodeError: ``text`` is not valid JSON.
-
-    """
-    value = loads(text)
-    if _VALUE_TAG.search(text):
-        return cast(MutableJSONValue, untagged(value))
-    return value
-
-
-def untagged(value: object) -> object:
-    """Unwrap the value tags of the old tagged format, keeping ``py/object``.
-
-    Data written before ``to_builtins`` wraps tuples, sets and special floats
-    (``{"py/tuple": [...]}``). Under a typed field ``convert`` unwraps them
-    itself, but under an untyped ``JSON`` field nothing fails and the tag would
-    survive, so a reader of archived data unwraps the whole value first.
-
-    Args:
-      value: Parsed JSON in the old tagged format, the new one, or a mix.
-
-    Returns:
-      plain: ``value`` with each value tag replaced by the value it wraps.
-
-    """
-    if _is_list(value):
-        return [untagged(item) for item in value]
-    if not _is_dict(value):
-        return value
-    if len(value) == 1:
-        tag, payload = next(iter(value.items()))
-        if tag in _SCALAR_TAGS:
-            return _decode_scalar_tag(tag, payload)
-        if tag in _HOLDER_TAGS:
-            return [untagged(item) for item in _listed(payload)]
-    return {key: untagged(item) for key, item in value.items()}
 
 
 def _builtins_hook(value: object) -> object:
@@ -2308,7 +2243,7 @@ def _convert(
         return cast(
             object,
             msgspec.convert(
-                untagged(value),
+                _untagged(value),
                 target,
                 strict=strict,
                 dec_hook=_read_hook,
@@ -2316,3 +2251,20 @@ def _convert(
         )
     except (msgspec.ValidationError, TypeError, ValueError):
         raise ReadError(str(failure)) from failure
+
+
+# Data written before ``to_builtins`` wraps tuples, sets and special floats
+# (``{"py/tuple": [...]}``); ``convert`` reads such a value through its second pass.
+def _untagged(value: object) -> object:
+    """Return ``value`` with each old value tag replaced by what it wraps."""
+    if _is_list(value):
+        return [_untagged(item) for item in value]
+    if not _is_dict(value):
+        return value
+    if len(value) == 1:
+        tag, payload = next(iter(value.items()))
+        if tag in _SCALAR_TAGS:
+            return _decode_scalar_tag(tag, payload)
+        if tag in _HOLDER_TAGS:
+            return [_untagged(item) for item in _listed(payload)]
+    return {key: _untagged(item) for key, item in value.items()}

@@ -63,7 +63,6 @@ from sagent.lib.custom_json import (
     json_freeze,
     json_unfreeze,
     loads,
-    loads_untagged,
     parse,
     read_field_keeping_invalid,
     resolve_import,
@@ -2100,21 +2099,6 @@ class TestReadOldTaggedFormat:
     def test_a_malformed_old_tag_raises_read_error(self) -> None:
         with pytest.raises(ReadError):
             convert({"py/float": "x"}, float)
-
-
-class TestLoadsUntagged:
-    def test_old_tags_unwrap_inside_free_form_data(self) -> None:
-        # Under ``object`` nothing fails, so ``convert`` alone keeps the tag.
-        text = '{"extra": {"names": {"py/tuple": ["a"]}, "at": {"py/float": "inf"}}}'
-        assert loads_untagged(text) == {"extra": {"names": ["a"], "at": math.inf}}
-
-    def test_the_object_tag_survives_the_unwrap(self) -> None:
-        text = '{"py/object": "m.C", "parts": {"py/set": [1]}}'
-        assert loads_untagged(text) == {"py/object": "m.C", "parts": [1]}
-
-    def test_current_text_parses_as_loads_does(self) -> None:
-        text = json.dumps({"py/object": "m.C", "names": ["a"], "said": '"py/tuple"'})
-        assert loads_untagged(text) == loads(text)
 
 
 class TestReadUnionOfCustomTypes:
