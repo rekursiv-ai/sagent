@@ -349,7 +349,7 @@ repos:
             |(.*/)?third_party/
           )
         entry: >-
-          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' basedpyright
+          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' basedpyright
       - id: basedpyright
         name: basedpyright
         language: system
@@ -379,7 +379,7 @@ repos:
         args:
           - WORKERS_BASEDPYRIGHT
           - |
-            p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/basedpyright.$p; files=(); [ -f "$spool" ] && mapfile -d "" -t files < "$spool"; rm -f "$spool"; set -- "${files[@]}";
+            p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/basedpyright.$p; files=(); if [ -f "$spool" ]; then while IFS= read -r -d "" f; do files+=("$f"); done < "$spool"; rm -f "$spool"; set -- "${files[@]}"; fi;
             files=("$@")
             check=(basedpyright --threads="$WORKERS")
             exec env NODE_OPTIONS=--max-old-space-size=2048 \
@@ -451,7 +451,7 @@ repos:
         require_serial: true
         types: [python]
         entry: >-
-          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' pytest
+          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' pytest
       - id: pytest
         name: pytest
         language: system
@@ -482,7 +482,7 @@ repos:
         args:
           - WORKERS_PYTEST
           - |
-            p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/pytest.$p; files=(); [ -f "$spool" ] && mapfile -d "" -t files < "$spool"; rm -f "$spool"; set -- "${files[@]}";
+            p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/pytest.$p; files=(); if [ -f "$spool" ]; then while IFS= read -r -d "" f; do files+=("$f"); done < "$spool"; rm -f "$spool"; set -- "${files[@]}"; fi;
             tests=();
             if [ ${#tests[@]} -eq 0 ]; then
               for f in "$@"; do
@@ -532,15 +532,12 @@ repos:
       # Keep after pytest: pre-commit runs hooks in declaration order.
       # Missing coverage is normal when no source module was tested.
       #
-      # Reports the CHANGED source files only. `pytest` measures each changed
-      # file's whole directory (`--cov=${f%/*}`), so an unfiltered report lists
-      # every untested sibling at 0% -- one edit in a 70-module directory
-      # buried the changed files' numbers under 70 lines of noise.
-      #
-      # A changed file coverage never measured (`scripts/`, `tools/` are
-      # omitted) leaves `--include` matching nothing, and coverage exits 1 with
-      # "No data to report." That is an empty summary, not a failure; every
-      # other coverage error still fails the hook.
+      # Lists the 20 worst CHANGED source files a test executed that are below
+      # 95%, then one count line for the rest. `pytest` measures each changed
+      # file's whole directory (`--cov=${f%/*}`), and `--all-files` printed
+      # 2,700 rows, 2,348 of them 0% files no test executed. Never
+      # `coverage report --include`: it matched 2,727 globs per file for 48s.
+      # An unreadable data file still fails the hook.
         # `coverage-summary` takes no filenames, so pre-commit cannot split its work
         # into argv chunks; this twin collects them into a spool file.
       - id: coverage-summary-pre
@@ -550,7 +547,7 @@ repos:
         require_serial: true
         types: [python]
         entry: >-
-          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' coverage-summary
+          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' coverage-summary
       - id: coverage-summary
         name: coverage-summary
         language: system
@@ -562,7 +559,7 @@ repos:
         verbose: true
         entry: >-
           bash -c '
-            p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/coverage-summary.$p; files=(); [ -f "$spool" ] && mapfile -d "" -t files < "$spool"; rm -f "$spool"; set -- "${files[@]}";
+            p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/coverage-summary.$p; files=(); if [ -f "$spool" ]; then while IFS= read -r -d "" f; do files+=("$f"); done < "$spool"; rm -f "$spool"; set -- "${files[@]}"; fi;
             uv --quiet run --frozen --group pre-commit python -c "import coverage" 2>/dev/null || exit 0;
             [ -f .coverage ] || exit 0;
             sources=();
@@ -573,11 +570,7 @@ repos:
               esac;
             done;
             ((${#sources[@]})) || exit 0;
-            report=$(printf "%s\n" "${sources[@]}" | uv --quiet run --frozen --group pre-commit python -c "import sys, coverage; c = coverage.Coverage(); c.load(); sys.exit(c.report(include=sys.stdin.read().split(), skip_covered=True, precision=1, sort=\"cover\") < 0)" 2>&1);
-            status=$?;
-            case "$report" in *"No data to report."*) exit 0;; esac;
-            printf "%s\n" "$report";
-            exit "$status"
+            printf "%s\n" "${sources[@]}" | uv --quiet run --frozen --group pre-commit python -c "import os, sys, coverage; c = coverage.Coverage(); c.load(); data = c.get_data(); files = sys.stdin.read().split(); ran = [f for f in files if data.lines(os.path.abspath(f))]; rows = sorted((100 * (len(s) - len(m)) / len(s), f, len(m), len(s), gaps) for f, s, _, m, gaps in map(c.analysis2, ran) if 100 * (len(s) - len(m)) < 95 * len(s)); rows and print(\"\n\".join(f\"{p:5.1f}%  {n:>4}/{t:<4} missed  {os.path.relpath(f)}  {g[:60]}\" for p, f, n, t, g in rows[:20])); rows[20:] and print(f\"... and {len(rows) - 20} more below 95%\"); print(f\"{len(ran) - len(rows)} changed file(s) at >= 95%; {len(files) - len(ran)} executed by no test.\")"
           ' bash
 
   # === Pre-Push Gates =========================================================
