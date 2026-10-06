@@ -330,10 +330,8 @@ repos:
         name: basedpyright
         language: system
         stages: [pre-commit]
-        # `--explain` writes the selected scope, and pre-commit discards a
-        # PASSING hook's output (see the Pre-Push Gates note on `verbose`), so
-        # without this the scope is visible only on failure -- exactly when it
-        # is least useful for confirming the hook looked at the right files.
+        # Pre-commit discards a PASSING hook's output (see the Pre-Push Gates
+        # note on `verbose`); this keeps basedpyright's summary line visible.
         verbose: true
         require_serial: true
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
@@ -462,7 +460,10 @@ repos:
             fi;
             [ ${#tests[@]} -eq 0 ] && exit 0;
             dist=();
-            ((${#tests[@]} >= ${SIDECAR_XDIST_MIN:-16})) && dist=(-n "$WORKERS");
+            # Files, not nodeids: the threshold was measured in files, and a
+            # harvest's dozens of nodeids from one file paid xdist startup.
+            nfiles=$(printf "%s\n" "${tests[@]%%::*}" | sort -u | wc -l);
+            ((nfiles >= ${SIDECAR_XDIST_MIN:-16})) && dist=(-n "$WORKERS");
             cov=();
             if uv --quiet run --frozen --group pre-commit python -c "import pytest_cov" 2>/dev/null; then
               for f in "$@"; do
@@ -480,7 +481,12 @@ repos:
                 fi;
               fi;
             fi;
-            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" "${cov[@]}" -q --tb=short -- "${tests[@]}" ||
+            # An @argfile, not argv: a deep harvest names thousands of nodeids,
+            # which overflowed ARG_MAX ("Argument list too long").
+            argfile=$(mktemp);
+            trap 'rm -f "$argfile"' EXIT;
+            printf "%s\n" "${tests[@]}" > "$argfile";
+            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" "${cov[@]}" -q --tb=short "@$argfile" ||
               test "$?" = 5
 
       # Keep after pytest: pre-commit runs hooks in declaration order.

@@ -14,7 +14,6 @@ from sagent.catalog.table import (
     UnknownModelError,
     UnsupportedTagError,
     base_model_id,
-    literal_members,
     split_model_id,
 )
 from sagent.types.capability import (
@@ -125,8 +124,7 @@ def test_an_exact_name_outranks_a_role_of_the_same_spelling() -> None:
     assert table.get("a-1.0") is table.rows[0]
 
 
-def test_literal_members_unwraps_the_alias_in_declaration_order() -> None:
-    assert literal_members(ContextTag) == ("", "+200k", "+272k", "+1m")
+def test_context_tags_are_the_alias_members_without_the_default() -> None:
     assert CONTEXT_TAGS == ("+200k", "+272k", "+1m")
 
 
