@@ -59,6 +59,31 @@ async def _run_grep_py(args: Mapping[str, object], cwd: Path) -> ToolResult:
 
 
 @pytest.mark.asyncio
+async def test_a_tilde_path_searches_the_home_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "h.py").write_text("needle\n")
+    result = await _run_grep({"pattern": "needle", "path": "~"}, tmp_path)
+    assert "h.py" in result.content, result.content
+
+
+@pytest.mark.asyncio
+async def test_a_long_row_keeps_a_path_holding_dash_digits_whole(
+    tmp_path: Path,
+) -> None:
+    """``a-1-b.py`` has a ``-1-`` that is not the row's line separator."""
+    (tmp_path / "a-1-b.py").write_text("x" * 600 + "needle\n")
+    result = await _run_grep(
+        {"pattern": "needle", "path": str(tmp_path), "output_mode": "content"},
+        tmp_path,
+    )
+    assert f"{tmp_path}/a-1-b.py:1:" in result.content, result.content
+
+
+@pytest.mark.asyncio
 async def test_grep_files_with_matches(tmp_path: Path) -> None:
     _setup_tree(tmp_path)
     result = await _run_grep({"pattern": "alpha", "path": str(tmp_path)}, tmp_path)

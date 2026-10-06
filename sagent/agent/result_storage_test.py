@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING
 import hashlib
 import os
 import re
+import stat
+import tempfile
 
+from sagent.agent import result_storage
 from sagent.agent.result_storage import (
     _MAX_STEM,
     PERSISTED_TAG,
@@ -112,57 +115,6 @@ def test_no_tool_is_exempt_from_persist(tmp_path: Path) -> None:
     out = post_process_result(result, "Read", session_dir=tmp_path, persist_tokens=100)
     assert PERSISTED_TAG in out.content
     assert (tmp_path / "tool-results" / "r1.txt").read_text() == body
-
-
-def test_rereading_a_persisted_result_does_not_grow_it(tmp_path: Path) -> None:
-    """The stub names a path; reading that path must terminate.
-
-    ``Read`` renders line numbers, so what reaches this seam is ALREADY
-    numbered -- and persisting it writes the numbered view. Reading the file
-    back numbers it again, so every recovery attempt grows the content and
-    re-spills: +2,555 chars per round on a 12,545-char source, without bound.
-    The stub therefore names a file that can never be recovered whole, which
-    is the one thing the stub exists to promise.
-
-    Persisting the RAW content makes the round trip a fixed point.
-    """
-    source = "".join(f"def f{i}(): return {i}\n" for i in range(400))
-    rendered = "".join(
-        f"{i:6d}\t{line}\n" for i, line in enumerate(source.splitlines(), 1)
-    )
-
-    out = post_process_result(
-        ToolResult(call_id="c1", content=rendered),
-        "Read",
-        session_dir=tmp_path,
-        persist_tokens=100,
-    )
-
-    assert PERSISTED_TAG in out.content, "fixture did not spill"
-    saved = (tmp_path / "tool-results" / "c1.txt").read_text()
-    assert saved == source, (
-        "persisted the line-numbered view; re-reading it renumbers on top and"
-        " the content grows without bound"
-    )
-
-
-def test_persisted_content_without_line_numbers_is_untouched(tmp_path: Path) -> None:
-    """Only a numbered render is stripped; ordinary output is written verbatim.
-
-    Bash dumps, tracebacks, and JSON payloads must survive byte-for-byte --
-    stripping a digits-and-tab pattern out of those would corrupt them.
-    """
-    body = "1\tnot a line number, just tab-separated data\n" * 200
-
-    out = post_process_result(
-        ToolResult(call_id="c2", content=body),
-        "Bash",
-        session_dir=tmp_path,
-        persist_tokens=100,
-    )
-
-    assert PERSISTED_TAG in out.content
-    assert (tmp_path / "tool-results" / "c2.txt").read_text() == body
 
 
 def test_a_long_call_id_still_persists(tmp_path: Path) -> None:
@@ -369,6 +321,63 @@ def test_persist_handles_posix_short_writes(
     assert PERSISTED_TAG in out.content
     on_disk = tmp_path / "tool-results" / "short_write.txt"
     assert on_disk.read_text() == body
+
+
+def test_a_wide_character_call_id_still_persists(tmp_path: Path) -> None:
+    """96 characters of ``界`` are 288 bytes, over the 255-byte name limit."""
+    out = post_process_result(
+        ToolResult(call_id="界" * 96, content="x" * 10_000),
+        "Bash",
+        session_dir=tmp_path,
+        persist_tokens=100,
+    )
+    assert PERSISTED_TAG in out.content
+    for written in (tmp_path / "tool-results").iterdir():
+        assert len(written.name.encode()) <= 255
+
+
+def test_the_fallback_dir_is_private_and_not_shared(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A shared ``/tmp/sagent_results`` parent is pre-creatable by anyone."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(result_storage, "_fallback_dir", None)
+    shared = tmp_path / "sagent_results"
+    shared.mkdir(mode=0o500)
+    try:
+        out = post_process_result(
+            ToolResult(call_id="c", content="x" * 10_000),
+            "Bash",
+            session_dir=None,
+            persist_tokens=100,
+        )
+    finally:
+        shared.chmod(0o700)
+    assert PERSISTED_TAG in out.content
+    match = re.search(r"Full output saved to: (.+)", out.content)
+    assert match is not None
+    parent = Path(match.group(1)).parent
+    assert shared not in parent.parents
+    assert not stat.S_IMODE(parent.stat().st_mode) & 0o077
+
+
+def test_persist_raises_on_a_zero_byte_write_instead_of_spinning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _no_progress(fd: int, data: bytes) -> int:
+        del fd, data
+        return 0
+
+    monkeypatch.setattr(os, "write", _no_progress)
+    out = post_process_result(
+        ToolResult(call_id="z", content="x" * 10_000),
+        "Bash",
+        session_dir=tmp_path,
+        persist_tokens=100,
+    )
+    assert PERSISTED_TAG not in out.content
 
 
 if __name__ == "__main__":

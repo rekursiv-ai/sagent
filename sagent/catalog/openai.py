@@ -53,6 +53,78 @@ __all__ = [
 ]
 
 
+_ROLES: Final = MappingProxyType({"default": "sol", "utility": "luna"})
+"""Role names both tables resolve, to the family each picks."""
+
+# "Input modalities: text" on each model page.
+_TEXT_ONLY: Final = frozenset({"o-mini-3.0", "gpt-4.0"})
+
+
+_ALL_TURNS: Final = frozenset(
+    {
+        "astra-6.0",
+        "sol-6.1",
+        "sol-6.0",
+        "luna-6.0",
+        "sol-5.6",
+        "gpt-5.6",
+        "terra-5.6",
+        "luna-5.6",
+    },
+)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Patches:
+    """32x32-patch image tokenization (images-vision, "Patch-based")."""
+
+    multiplier: float
+    """Billable tokens per patch."""
+
+    budget: int = 0
+    """Patch budget ``detail: auto`` resizes into; ``0`` is none."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Tiles:
+    """512px-tile image tokenization (images-vision, "Tile-based")."""
+
+    base: int
+    """Tokens every image costs."""
+
+    tile: int
+    """Tokens per 512px tile after the 2048px / 768px short-side resize."""
+
+
+# images-vision multiplier and tile tables, and its sizing table for
+# ``detail: auto`` (2026-10-03). GPT-6 Sol/Luna and 6.1 Sol are absent from
+# both tables; they take Astra's GPT-6 rule.
+_VISION: Final[Mapping[str, _Patches | _Tiles]] = MappingProxyType(
+    {
+        "astra-6.0": _Patches(multiplier=1.2),
+        "sol-6.1": _Patches(multiplier=1.2),
+        "sol-6.0": _Patches(multiplier=1.2),
+        "luna-6.0": _Patches(multiplier=1.2),
+        "sol-5.6": _Patches(multiplier=1.2),
+        "gpt-5.6": _Patches(multiplier=1.2),
+        "terra-5.6": _Patches(multiplier=1.2),
+        "luna-5.6": _Patches(multiplier=1.2),
+        "gpt-5.5": _Patches(multiplier=1.2, budget=10_000),
+        "gpt-5.4": _Patches(multiplier=1.2, budget=2_500),
+        "gpt-mini-5.4": _Patches(multiplier=1.2, budget=2_500),
+        "gpt-nano-5.4": _Patches(multiplier=1.2, budget=2_500),
+        "gpt-5.2": _Patches(multiplier=1.2, budget=6_144),
+        "gpt-mini-4.1": _Patches(multiplier=1.62, budget=6_144),
+        "gpt-nano-4.1": _Patches(multiplier=2.46, budget=6_144),
+        "gpt-5.1": _Tiles(base=70, tile=140),
+        "gpt-4.1": _Tiles(base=85, tile=170),
+        "gpt-omni-4.0": _Tiles(base=85, tile=170),
+        "gpt-omni-mini-4.0": _Tiles(base=2833, tile=5667),
+        "o-1.0": _Tiles(base=75, tile=150),
+    },
+)
+
+
 def compatible() -> ModelCapability:
     """Return the common Chat Completions transport capability.
 
@@ -78,8 +150,9 @@ def compatible() -> ModelCapability:
 # Every card, window, cutoff, and effort set is the vendor's model page and
 # pricing table (standard, flex, and fast tabs), verified 2026-10-03; a model
 # missing from a tab does not offer that tier. Sol 5.6's rate is promotional
-# "at least through November 21, 2026" and needs rechecking then. Batch and
-# Ultrafast are not modeled: no transport here sends either tier.
+# "at least through November 21, 2026" and needs rechecking then. Batch is not
+# modeled. Ultrafast is priced (Astra alone, 2026-10-05) so a response reporting
+# it bills correctly, but no transport offers it for selection.
 #
 # ``max_request_tokens`` is the page's "Maximum input tokens" where it states
 # one (922,000 under a 1,050,000 context window), not the context window: a
@@ -127,6 +200,12 @@ def models() -> ModelTable:
                     cache_write=25.0,
                     cache_read=2.0,
                 ),
+                "ultrafast": _card(
+                    request=60.0,
+                    response=300.0,
+                    cache_write=75.0,
+                    cache_read=6.0,
+                ),
             },
             long_context=True,
         ),
@@ -156,7 +235,8 @@ def models() -> ModelTable:
             default,
             model_id="sol-6.1",
             wire_model_id="gpt-6.1-sol",
-            knowledge_cutoff="April 30, 2026",
+            # "The `none` and `minimal` reasoning efforts are not supported":
+            # Astra's effort set, inherited along with its cutoff.
             prices=_prices(
                 {
                     # "Cached input tokens are priced at 5% of the uncached
@@ -182,8 +262,6 @@ def models() -> ModelTable:
                 },
                 long_context=True,
             ),
-            # "The `none` and `minimal` reasoning efforts are not supported."
-            thinking=default.thinking,
         ),
         replace(
             default,
@@ -254,7 +332,6 @@ def models() -> ModelTable:
             model_id="sol-5.6",
             wire_model_id="gpt-5.6-sol",
             knowledge_cutoff="February 16, 2026",
-            context=_limits(image_edge_px=65_535),
             prices=_prices(
                 {
                     "auto": _card(
@@ -288,7 +365,6 @@ def models() -> ModelTable:
             model_id="gpt-5.6",
             wire_model_id="gpt-5.6",
             knowledge_cutoff="February 16, 2026",
-            context=_limits(image_edge_px=65_535),
             prices=_prices(
                 {
                     "auto": _card(
@@ -319,7 +395,6 @@ def models() -> ModelTable:
             model_id="luna-5.6",
             wire_model_id="gpt-5.6-luna",
             knowledge_cutoff="February 16, 2026",
-            context=_limits(image_edge_px=65_535),
             prices=_prices(
                 {
                     "auto": _card(
@@ -350,7 +425,6 @@ def models() -> ModelTable:
             model_id="terra-5.6",
             wire_model_id="gpt-5.6-terra",
             knowledge_cutoff="February 16, 2026",
-            context=_limits(image_edge_px=65_535),
             prices=_prices(
                 {
                     "auto": _card(
@@ -897,9 +971,6 @@ def models() -> ModelTable:
     return ModelTable(rows=rows, roles=_ROLES)
 
 
-_ROLES: Final = MappingProxyType({"default": "sol", "utility": "luna"})
-
-
 def reasoning_effort(
     effort: ThinkingEffort,
 ) -> Literal["low", "medium", "high", "xhigh", "max"]:
@@ -924,57 +995,6 @@ def reasoning_effort(
             raise ValueError(f"effort {effort!r} is not sent as reasoning.effort")
         case "low" | "medium" | "high" | "xhigh" | "max":
             return effort
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _Patches:
-    """32x32-patch image tokenization (images-vision, "Patch-based")."""
-
-    multiplier: float
-    """Billable tokens per patch."""
-
-    budget: int = 0
-    """Patch budget ``detail: auto`` resizes into; ``0`` is none."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _Tiles:
-    """512px-tile image tokenization (images-vision, "Tile-based")."""
-
-    base: int
-    """Tokens every image costs."""
-
-    tile: int
-    """Tokens per 512px tile after the 2048px / 768px short-side resize."""
-
-
-# images-vision multiplier and tile tables, and its sizing table for
-# ``detail: auto`` (2026-10-03). GPT-6 Sol/Luna and 6.1 Sol are absent from
-# both tables; they take Astra's GPT-6 rule.
-_VISION: Final[Mapping[str, _Patches | _Tiles]] = MappingProxyType(
-    {
-        "astra-6.0": _Patches(multiplier=1.2),
-        "sol-6.1": _Patches(multiplier=1.2),
-        "sol-6.0": _Patches(multiplier=1.2),
-        "luna-6.0": _Patches(multiplier=1.2),
-        "sol-5.6": _Patches(multiplier=1.2),
-        "gpt-5.6": _Patches(multiplier=1.2),
-        "terra-5.6": _Patches(multiplier=1.2),
-        "luna-5.6": _Patches(multiplier=1.2),
-        "gpt-5.5": _Patches(multiplier=1.2, budget=10_000),
-        "gpt-5.4": _Patches(multiplier=1.2, budget=2_500),
-        "gpt-mini-5.4": _Patches(multiplier=1.2, budget=2_500),
-        "gpt-nano-5.4": _Patches(multiplier=1.2, budget=2_500),
-        "gpt-5.2": _Patches(multiplier=1.2, budget=6_144),
-        "gpt-mini-4.1": _Patches(multiplier=1.62, budget=6_144),
-        "gpt-nano-4.1": _Patches(multiplier=2.46, budget=6_144),
-        "gpt-5.1": _Tiles(base=70, tile=140),
-        "gpt-4.1": _Tiles(base=85, tile=170),
-        "gpt-omni-4.0": _Tiles(base=85, tile=170),
-        "gpt-omni-mini-4.0": _Tiles(base=2833, tile=5667),
-        "o-1.0": _Tiles(base=75, tile=150),
-    },
-)
 
 
 def image_tokens(model_id: str, width: int, height: int) -> int:
@@ -1005,10 +1025,6 @@ def image_tokens(model_id: str, width: int, height: int) -> int:
         case _Tiles(base=base, tile=tile):
             width, height = _fit_tiles(width, height)
             return base + tile * math.ceil(width / 512) * math.ceil(height / 512)
-
-
-# "Input modalities: text" on each model page.
-_TEXT_ONLY: Final = frozenset({"o-mini-3.0", "gpt-4.0"})
 
 
 def tokenizer(model_id: str) -> str | None:
@@ -1045,20 +1061,6 @@ def keeps_reasoning_across_turns(model_id: str) -> bool:
     return row is not None and row.model_id in _ALL_TURNS
 
 
-_ALL_TURNS: Final = frozenset(
-    {
-        "astra-6.0",
-        "sol-6.1",
-        "sol-6.0",
-        "luna-6.0",
-        "sol-5.6",
-        "gpt-5.6",
-        "terra-5.6",
-        "luna-5.6",
-    },
-)
-
-
 def api() -> ModelCapability:
     """Return what the Responses API adds on top of a model row.
 
@@ -1077,7 +1079,7 @@ def api() -> ModelCapability:
             budget=frozenset({"none", "auto", "fixed"}),
             output=frozenset({"none", "text", "redacted"}),
         ),
-        service_tier=frozenset({"auto", "default", "flex", "priority"}),
+        service_tier=frozenset({"auto", "default", "flex", "priority", "ultrafast"}),
     )
 
 
@@ -1135,28 +1137,30 @@ def subscription_models() -> ModelTable:
     return ModelTable(rows=tuple(rows), roles=_ROLES)
 
 
-def served_tier(reported: str | None) -> ServiceTier:
+def served_tier(reported: str | None) -> ServiceTier | None:
     """Map the ``service_tier`` a response reports to the tier it bills at.
 
     Args:
       reported: The response's ``service_tier``; absent means standard.
 
     Returns:
-      tier: Catalog tier whose card priced the request.
-
-    Raises:
-      ValueError: A tier this catalog cannot price.
+      tier: Catalog tier whose card priced the request; ``None`` for a tier
+        this catalog does not know. Not an error: the response is already paid
+        for, so the caller decides which rate to fall back to.
 
     """
     match reported:
-        case None | "auto" | "default":
+        # Scale Tier is prepaid capacity, metered at the standard card.
+        case None | "auto" | "default" | "scale":
             return "auto"
         case "flex":
             return "flex"
         case "priority" | "fast":
             return "priority"
+        case "ultrafast":
+            return "ultrafast"
         case _:
-            raise ValueError(f"unpriced OpenAI service_tier {reported!r}")
+            return None
 
 
 def _card(

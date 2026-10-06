@@ -1027,19 +1027,18 @@ def test_latest_session_avoids_full_peek_sort(tmp_path: Path) -> None:
     assert calls["n"] == 1
 
 
-# ``_LEGACY_SAGENT_HOME`` is pointed at a nonexistent temp path so the migration takes
-# the ``~/.claude`` squat branch (and never the host's real ``~/.sagent``). Tests of the
-# real-``~/.sagent`` branch set it explicitly.
+# ``_LEGACY_SAGENT_HOME`` is a temp symlink to the temp ``~/.claude``, the squat that
+# sends migration down the Claude branch (and never near the host's real homes). The
+# link dangles until a test creates ``claude``. Tests of the real-``~/.sagent`` branch
+# repoint it explicitly.
 def _setup_homes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]:
     """Point module globals at temp claude/xdg homes; return (claude, sagent)."""
     claude = tmp_path / "claude"
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
     sagent = data_dir() / "rekursiv-ai" / "sagent"
-    monkeypatch.setattr(
-        sessions,
-        "_LEGACY_SAGENT_HOME",
-        tmp_path / "nonexistent-sagent",
-    )
+    squat = tmp_path / "squatting-dot-sagent"
+    squat.symlink_to(claude, target_is_directory=True)
+    monkeypatch.setattr(sessions, "_LEGACY_SAGENT_HOME", squat)
     monkeypatch.setattr(sessions, "_LEGACY_CLAUDE_HOME", claude)
     return claude, sagent
 
@@ -1274,6 +1273,49 @@ def test_bridge_skills_symlink_when_claude_has_it(
     link = sagent / "skills"
     assert link.is_symlink()
     assert (link / "demo.md").read_text() == "skill\n"
+
+
+def test_a_plain_claude_user_gets_no_bridge_and_no_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without the squat, ``~/.claude`` is the Claude CLI's alone."""
+    claude, sagent = _setup_homes(tmp_path, monkeypatch)
+    monkeypatch.setattr(sessions, "_LEGACY_SAGENT_HOME", tmp_path / "no-dot-sagent")
+    (claude / "skills").mkdir(parents=True)
+    (claude / "papers").mkdir(parents=True)
+    (claude / "papers" / "p.pdf").write_bytes(b"%PDF")
+
+    sessions.migrate_legacy_home()
+
+    assert not (sagent / "skills").is_symlink()
+    assert not (sagent / "papers").exists()
+
+
+def test_an_unreadable_subdir_does_not_strand_its_siblings(tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    (src / "locked").mkdir(parents=True)
+    (src / "locked" / "x").write_text("x")
+    (src / "open").mkdir()
+    (src / "open" / "y").write_text("y")
+    (src / "locked").chmod(0)
+    try:
+        sessions._copy_tree_merge(src, tmp_path / "dst")
+    finally:
+        (src / "locked").chmod(0o700)
+    assert (tmp_path / "dst" / "open" / "y").read_text() == "y"
+
+
+def test_a_child_transcript_is_not_a_top_level_session(tmp_path: Path) -> None:
+    """A spawned child's transcript lives under its parent's session dir."""
+    projects = tmp_path / "projects"
+    parent = projects / "p" / "parent0001"
+    _write_session(parent, session_id="PARENT")
+    _write_session(parent / "child-uuid", session_id="CHILD")
+
+    found = list_all_sessions(projects_dir=projects)
+
+    assert [s.session_id for s in found] == ["PARENT"]
 
 
 def test_bridge_skills_absent_when_claude_lacks_it(

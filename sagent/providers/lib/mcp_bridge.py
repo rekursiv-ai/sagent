@@ -67,6 +67,7 @@ else:
     uvicorn = lazy_import("uvicorn")
 
 from sagent.agent.background import (
+    backgroundable,
     bg_augmented_schema,
     split_bg_args,
 )
@@ -420,7 +421,11 @@ class ToolsBridge:
                 mcp_types.Tool(
                     name=t.name,
                     description=t.description,
-                    input_schema=json_unfreeze(bg_augmented_schema(t.directive_schema)),
+                    input_schema=json_unfreeze(
+                        bg_augmented_schema(t.directive_schema)
+                        if backgroundable(t)
+                        else t.directive_schema,
+                    ),
                 )
                 for t in self._tools.values()
             ],
@@ -466,9 +471,12 @@ class ToolsBridge:
         # the control fields. Validating the stripped args instead would
         # let a malformed ``delay`` (e.g. ``"soon"``, ``-5``, ``1.5``)
         # slip past the schema and be silently coerced by ``split_bg_args``.
+        controlled = backgroundable(tool)
         validation_error = validate_tool_input(
             tool.name,
-            bg_augmented_schema(tool.directive_schema),
+            bg_augmented_schema(tool.directive_schema)
+            if controlled
+            else tool.directive_schema,
             arguments,
         )
         if validation_error is not None:
@@ -478,7 +486,9 @@ class ToolsBridge:
                     text=f"[Error] {validation_error}",
                 ),
             ]
-        bg_requested, delay_sec, clean_args = split_bg_args(arguments)
+        bg_requested, delay_sec, clean_args = (
+            split_bg_args(arguments) if controlled else (False, 0.0, arguments)
+        )
         # Surface a ``ToolLabel`` so the REPL renderer announces the
         # call even though the CLI's subprocess (not the sagent runtime)
         # drives the tool loop. ``_publish`` is the runtime sink the

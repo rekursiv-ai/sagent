@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, Final, Protocol, cast, override
+from typing import TYPE_CHECKING, Final, Protocol, cast, override
 
 import asyncio
 import base64
@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
     import anthropic
 
-    # The SDK's own transport types, not ours: anthropic 1.2 moved off httpx2 to
+    # The SDK's own transport types, not ours: anthropic 1.2 moved off httpx to
     # httpx2, and these Protocols model its internals (`_build_request`,
     # `_make_status_error`), so they must name the same package it does.
     import httpx2
@@ -78,7 +78,6 @@ from sagent.types.model import (
     ModelRequest,
     ModelResponse,
     PromptTooLongError,
-    StreamInterruptedError,
     UsageSnapshot,
 )
 from sagent.types.runtime import (
@@ -350,14 +349,8 @@ class Anthropic:
         """
         sdk = self._sdks.peek()
         self._sdks.clear()
-        if sdk is None:
-            return
-        close = getattr(sdk, "close", None)
-        if close is None:
-            return
-        result = close()
-        if asyncio.iscoroutine(result):
-            await result
+        if sdk is not None:
+            await sdk.close()
 
     def build_system(
         self,
@@ -435,9 +428,19 @@ class Anthropic:
             return None
         return {"context_management": cast(MutableJSONValue, cm)}
 
-    async def handle_auth_error(self) -> None:
-        """Handle a 401 from the API. No-op for API-key auth."""
-        return
+    async def handle_auth_error(
+        self,
+        *,
+        failed: anthropic.AsyncAnthropic | None = None,
+    ) -> None:
+        """Handle a 401 from the API. No-op for API-key auth.
+
+        Args:
+          failed: The client whose request was rejected; ``None`` forces a
+            reload regardless of which client is cached.
+
+        """
+        del failed
 
 
 # Statusless Anthropic errors with body-declared types in this set are
@@ -467,12 +470,7 @@ def _is_prompt_too_long_text(
             if error_type != "invalid_request_error":
                 return False
             inner = nested_map.get("message")
-            return isinstance(inner, str) and _matches_overflow_phrase(inner)
-    return _matches_overflow_phrase(msg)
-
-
-def _matches_overflow_phrase(msg: str) -> bool:
-    """Substring fallback for overflow phrases; the shared cross-vendor set."""
+            return isinstance(inner, str) and is_context_overflow_text(inner)
     return is_context_overflow_text(msg)
 
 
@@ -566,33 +564,6 @@ def _tool_names_from_kwargs(kwargs: dict[str, object]) -> list[str | None]:
         else:
             out.append(None)
     return out
-
-
-# Gates on actual content rather than the API's ``stop_reason``, which is unreliable.
-# When violated, the tool block was almost certainly dropped mid-stream; retry usually
-# recovers. The partial response is carried on the error so the retry layer can fall
-# back gracefully.
-def _guard_stream_interrupt(
-    resp: ModelResponse,
-    *,
-    kind: str,
-    model_id: str,
-) -> None:
-    """Raise ``StreamInterruptedError`` if a ``model_tool_use`` response arrived without any ``ToolCall``s."""
-    has_tool_calls = bool(resp.message.tool_calls)
-    if resp.stop_reason == "model_tool_use" and not has_tool_calls:
-        text = resp.message.text
-        debug_log.trace_error(
-            "stream_interrupted",
-            kind=kind,
-            model=model_id,
-            has_text=bool(text.strip()),
-            text_len=len(text),
-            thinking_blocks=len(resp.message.thinking_blocks),
-            request_id=resp.request_id,
-            message_id=resp.message_id,
-        )
-        raise StreamInterruptedError(resp)
 
 
 def _request_id(e: BaseException) -> str | None:
@@ -696,7 +667,7 @@ class _AnthropicModel(ModelDefaults):
         try:
             result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType] -- SDK overload omits dynamic kwargs.  # ty: ignore[invalid-argument-type] -- SDK overload cannot model validated dynamic kwargs.
         except anthropic.AuthenticationError:
-            await self._provider.handle_auth_error()
+            await self._provider.handle_auth_error(failed=sdk)
             sdk = await self._provider.get_sdk()
             kwargs["system"] = self._provider.build_system(
                 request.system,
@@ -795,11 +766,13 @@ class _AnthropicModel(ModelDefaults):
             # total must leave room for the visible reply. Double the
             # request, but clamp to the model cap (opus-4-8's cap equals
             # the API ceiling, where the raw double overflows). Split the
-            # total so ``budget_tokens`` stays strictly below ``max_tokens``.
-            total = min(max_tok * 2, self.limits.max_response_tokens)
+            # total so ``budget_tokens`` stays strictly below ``max_tokens``,
+            # and never below the API's 1024-token minimum budget.
+            budget = max(min(max_tok, self.limits.max_response_tokens // 2), 1024)
+            total = min(budget + max_tok, self.limits.max_response_tokens)
             kwargs["thinking"] = {
                 "type": "enabled",
-                "budget_tokens": total // 2,
+                "budget_tokens": budget,
             }
             kwargs["max_tokens"] = total
             kwargs["temperature"] = 1.0
@@ -909,7 +882,7 @@ class _AnthropicModel(ModelDefaults):
                 if not auth_retry:
                     raise
                 auth_retry = False
-                await self._provider.handle_auth_error()
+                await self._provider.handle_auth_error(failed=sdk)
                 sdk = await self._provider.get_sdk()
                 kwargs["system"] = self._provider.build_system(
                     request.system,
@@ -968,7 +941,6 @@ class _AnthropicModel(ModelDefaults):
         # never reports a prior request's windows for the current one.
         headers = _response_headers_var.get()
         self._last_usage = anthropic_usage(headers) if headers is not None else None
-        _guard_stream_interrupt(resp, kind="stream", model_id=self.capability.model_id)
         return resp
 
     @override
@@ -1012,7 +984,7 @@ async def _raw_message_stream(
     body = {
         key: value
         for key, value in kwargs.items()
-        if key not in {"extra_headers", "extra_body", "extra_query", "timeout"}
+        if key not in {"extra_headers", "extra_body"}
     }
     body["stream"] = True
     body = {
@@ -1047,9 +1019,8 @@ def _final_request_options(
         method="post",
         url="/v1/messages",
         json_data=body,
-        headers=cast(Any, kwargs.get("extra_headers")),
-        extra_json=cast(Any, kwargs.get("extra_body")),
-        timeout=cast(Any, kwargs.get("timeout", anthropic.NOT_GIVEN)),
+        headers=cast(Mapping[str, str], kwargs.get("extra_headers") or {}),
+        extra_json=cast(Mapping[str, object], kwargs.get("extra_body") or {}),
     )
 
 
@@ -1208,9 +1179,11 @@ def _user_blocks(
 # Thinking blocks are emitted verbatim (the wire dict from ``block.model_dump()`` stored
 # on the message), with two exceptions:
 #
-# 1. A ``thinking`` block whose ``signature`` is set but whose ``thinking`` body is
-# empty has lost its signed payload and cannot re-validate server-side (Anthropic
-# answers HTTP 400 ``thinking blocks ... cannot be modified``). Such orphans are elided.
+# 1. A ``thinking`` block missing either its ``signature`` or its ``thinking`` body
+# cannot re-validate server-side: a signed block whose body is gone answers HTTP 400
+# ``thinking blocks ... cannot be modified``, and an unsigned one (Gemini and ACP
+# thoughts share the ``thinking`` type but carry no signature) answers
+# ``thinking.signature: Field required``. Such orphans are elided.
 # 2. Non-native thinking-block types (e.g. ``{"type":"reasoning"}`` from OpenAI /
 # Moonshot / MiniMax / OpenAI-subscription) cannot be translated and would trip
 # Anthropic's content-block validator after a cross- provider session switch. They are
@@ -1240,11 +1213,9 @@ def _assistant_blocks(
 
 
 def _is_orphan_thinking(block: Mapping[str, object]) -> bool:
-    """Check whether a signed ``thinking`` block's signed body is gone."""
-    return (
-        block.get("type") == "thinking"
-        and bool(block.get("signature"))
-        and not block.get("thinking")
+    """Check whether a ``thinking`` block lacks a signed body Anthropic can verify."""
+    return block.get("type") == "thinking" and not (
+        block.get("signature") and block.get("thinking")
     )
 
 
@@ -1258,7 +1229,7 @@ def _tool_use_block(tc: ToolCall, ids: IdRemapper) -> dict[str, object]:
     }
 
 
-# Image attachments inline as image blocks alongside the text.
+# Image and PDF attachments inline as blocks alongside the text.
 def _tool_result_block(
     entry: ToolResult,
     ids: IdRemapper,
@@ -1266,21 +1237,15 @@ def _tool_result_block(
     max_image_bytes: int,
 ) -> dict[str, object]:
     """Build a single tool_result block for a ToolResult."""
-    image_attachments = [
-        att for att in entry.attachments if _is_image_mime(att.descriptor)
+    attachment_blocks = [
+        block
+        for att in entry.attachments
+        if (block := _attachment_block(att, max_image_dim, max_image_bytes)) is not None
     ]
-    tool_result_content: object
-    if image_attachments:
-        wire_blocks: list[dict[str, object]] = []
-        if entry.content:
-            wire_blocks.append({"type": "text", "text": entry.content})
-        for att in image_attachments:
-            block = _attachment_block(att, max_image_dim, max_image_bytes)
-            if block is not None:
-                wire_blocks.append(block)
-        tool_result_content = wire_blocks
-    else:
-        tool_result_content = entry.content
+    tool_result_content: object = entry.content
+    if attachment_blocks:
+        text_blocks = [{"type": "text", "text": entry.content}] if entry.content else []
+        tool_result_content = [*text_blocks, *attachment_blocks]
     return {
         "type": "tool_result",
         "tool_use_id": ids.map(entry.call_id),
@@ -1299,7 +1264,7 @@ def _attachment_block(
     descriptor = getattr(att, "descriptor", "")
     if not isinstance(data, bytes) or not isinstance(descriptor, str):
         return None
-    is_image = _is_image_mime(descriptor)
+    is_image = descriptor in {"image/jpeg", "image/png", "image/gif", "image/webp"}
     is_pdf = descriptor == "application/pdf"
     if not (is_image or is_pdf):
         logger.warning(
@@ -1322,11 +1287,6 @@ def _attachment_block(
     }
 
 
-def _is_image_mime(descriptor: str) -> bool:
-    """Check whether a MIME type is accepted by Anthropic image blocks."""
-    return descriptor in {"image/jpeg", "image/png", "image/gif", "image/webp"}
-
-
 def _flush_tool_results(
     messages: list[anthropic.types.MessageParam],
     pending: list[dict[str, object]],
@@ -1344,12 +1304,12 @@ def _flush_tool_results(
 
 
 # Filters template placeholders the model can echo back from the Anthropic server's
-# injected tool-use spec (e.g. ``$FUNCTION_NAME``, ``$TOOL_NAME``). Real registered
-# tools always have Python-identifier names; ``$FUNCTION_NAME`` is not an identifier so
-# ``isidentifier()`` alone rejects it.
+# injected tool-use spec (e.g. ``$FUNCTION_NAME``, ``$TOOL_NAME``). The pattern is the
+# API's own tool-name grammar, so every name it accepted at registration (hyphenated
+# MCP names included) passes and ``$``-prefixed placeholders do not.
 def _is_valid_tool_name(name: str) -> bool:
-    """Return True when ``name`` is a plausible registered tool name."""
-    return name.isidentifier()
+    """Return True when ``name`` matches Anthropic's tool-name grammar."""
+    return re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name) is not None
 
 
 class _Usage(Protocol):
@@ -1390,6 +1350,7 @@ def _parse_response(raw: _RawMessage, model: _AnthropicModel) -> ModelResponse:
     text_parts: list[str] = []
     tool_calls: list[ToolCall] = []
     thinking_blocks: list[Mapping[str, object]] = []
+    dropped_placeholder = False
 
     for block in raw.content:
         if isinstance(block, anthropic.types.TextBlock):
@@ -1409,6 +1370,7 @@ def _parse_response(raw: _RawMessage, model: _AnthropicModel) -> ModelResponse:
                     "anthropic: skipping tool_use with placeholder name %r",
                     block.name,
                 )
+                dropped_placeholder = True
                 continue
             tool_calls.append(
                 ToolCall(
@@ -1451,13 +1413,26 @@ def _parse_response(raw: _RawMessage, model: _AnthropicModel) -> ModelResponse:
     return ModelResponse(
         message=message,
         tokens=tokens,
-        stop_reason=normalize_stop_reason(
-            raw.stop_reason,
-            kind="anthropic",
-            has_tool_use=bool(tool_calls),
+        stop_reason=_reconcile_tool_use(
+            normalize_stop_reason(
+                raw.stop_reason,
+                kind="anthropic",
+                has_tool_use=bool(tool_calls),
+            ),
+            dropped_all_calls=dropped_placeholder and not tool_calls,
         ),
         stop_sequence=raw.stop_sequence,
         message_id=raw.id or "",
         request_id=getattr(raw, "_request_id", "") or "",
         spend=spend,
     )
+
+
+# A turn whose every ``tool_use`` was a filtered placeholder still reports
+# ``tool_use``; left as is, the retry layer reads "tool use announced, no calls"
+# as a dropped stream and resends the identical request until its cap.
+def _reconcile_tool_use(reason: str, *, dropped_all_calls: bool) -> str:
+    """Demote ``model_tool_use`` to ``model_finished`` when no call survived."""
+    if dropped_all_calls and reason == "model_tool_use":
+        return "model_finished"
+    return reason

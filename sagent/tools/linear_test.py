@@ -65,6 +65,21 @@ def test_list_issues_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     assert result.content == "(no issues)"
 
 
+def test_a_non_object_response_is_an_error_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("LINEAR_API_KEY", "lin_api_x")
+    with patch(
+        "sagent.tools.linear.fetch",
+        return_value=(b"[]", FetchSession()),
+    ):
+        result = asyncio.run(Linear().run({"operation": "list_issues"}))
+    assert (result.is_error, result.content) == (
+        True,
+        "Linear GraphQL returned a non-object body: []",
+    )
+
+
 def test_list_issues_renders(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LINEAR_API_KEY", "lin_api_x")
     nodes = [

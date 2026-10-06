@@ -7,7 +7,8 @@ All arguments optional:
 - `provider` -- optional provider class name override.
 - `auth` -- optional auth method suffix, for example `env` or `credentials`.
 - `account` -- optional credential account name.
-- `max_request_tokens` / `max_response_tokens` -- per-call limits. Cannot exceed the active model's own window; raising this never unlocks a larger context (use a `+1m`/`+200k` `model_id` for that).
-- `model_options` -- provider-specific (`thinking`, `effort`, `cache_ttl`, `service_tier`, `latency`). `latency: "fast"` selects fast serving on models that support it. `diagnostics=true` lists supported keys.
+- A model change (`model_id`/`provider`/`auth`/`account`) is QUEUED, like `/model`: it lands once the current model call finishes, and the reply marks it `(queued)`. `model_options` and token limits sent with it are validated against the NEW model and applied to it as it lands; an invalid one rejects the whole patch and nothing changes.
+- `max_request_tokens` / `max_response_tokens` -- per-call limits. Cannot exceed the target model's own window; raising this never unlocks a larger context (use a `+1m`/`+200k` `model_id` for that).
+- `model_options` -- provider-specific (`thinking`, `effort`, `cache_ttl`, `service_tier`). `service_tier: "priority"` selects fast serving on models that support it. `diagnostics=true` lists supported keys.
 - `diagnostics` -- current model, usage, limits, cache, options.
 - `catalog` -- `"providers"` or `"models"` (scoped by `catalog_provider`).

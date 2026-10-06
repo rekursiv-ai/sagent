@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from sagent.types import tools
 from sagent.types.settings import AgentSettings
 from sagent.types.tools import ToolResultPolicy
 
@@ -42,6 +43,11 @@ def test_defaults_disable_off_loading() -> None:
 def test_negative_thresholds_are_rejected(field: str, value: int) -> None:
     with pytest.raises(ValueError, match=field):
         _ = ToolResultPolicy(**{field: value})
+
+
+def test_every_public_protocol_is_exported() -> None:
+    """Providers import ``ToolResultClearable``; ``__all__`` must name it."""
+    assert "ToolResultClearable" in tools.__all__
 
 
 if __name__ == "__main__":

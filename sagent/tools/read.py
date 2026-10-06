@@ -280,12 +280,42 @@ class Read:
         """
         return ""
 
+    def bash_match(self, trees: Sequence[node]) -> str | None:
+        """Emit a hint if any command reads a file the Read tool could.
+
+        Detection is :func:`replaceable`; this decides only which
+        executables Read claims and which of their arguments make Bash
+        necessary. A ``sed`` that EDITS belongs to the Edit tool, and a
+        glob positional cannot be expressed by a single ``file_path``.
+
+        Args:
+          trees: Parsed bashlex command trees from the active Bash call.
+
+        Returns:
+          hint: Nudge string redirecting to the Read tool, or ``None``.
+
+        """
+        for inv in walk_commands(trees):
+            if not replaceable(inv, exes=_READ_EXES, deny=_READ_DENY):
+                continue
+            if inv.exe == "sed" and not _sed_reads(inv.args):
+                continue
+            if any(
+                (any(ch in a for ch in "*?["))
+                for a in inv.args
+                if not a.startswith("-")
+            ):
+                continue
+            hint = f"{inv.exe} via Bash is a bad UX. Use the Read tool."
+            return f"{hint} Replaces: `{render_command(inv)}`.{_read_call(inv)}"
+        return None
+
     def _run(
         self,
         *,
         file_path: str,
         offset: int = 1,
-        limit: int = 0,  # 0 = read to EOF; callers pass _default_line_limit()
+        limit: int = 0,  # 0 = read to EOF; the token bound stops the window.
         last_lines: int = 0,
         pages: str = "",
     ) -> ToolResult:
@@ -344,39 +374,22 @@ class Read:
             last_lines=last_lines,
         )
 
-    def bash_match(self, trees: Sequence[node]) -> str | None:
-        """Emit a hint if any command reads a file the Read tool could.
-
-        Detection is :func:`replaceable`; this decides only which
-        executables Read claims and which of their arguments make Bash
-        necessary. A ``sed`` that EDITS belongs to the Edit tool, and a
-        glob positional cannot be expressed by a single ``file_path``.
-
-        Args:
-          trees: Parsed bashlex command trees from the active Bash call.
-
-        Returns:
-          hint: Nudge string redirecting to the Read tool, or ``None``.
-
-        """
-        for inv in walk_commands(trees):
-            if not replaceable(inv, exes=_READ_EXES, deny=_READ_DENY):
-                continue
-            if inv.exe == "sed" and not _sed_reads(inv.args):
-                continue
-            if any(
-                (any(ch in a for ch in "*?["))
-                for a in inv.args
-                if not a.startswith("-")
-            ):
-                continue
-            hint = f"{inv.exe} via Bash is a bad UX. Use the Read tool."
-            return f"{hint} Replaces: `{render_command(inv)}`.{_read_call(inv)}"
-        return None
-
 
 def _read_image(p: Path, *, file_path: str, suffix: str) -> ToolResult:
     """Return an image file as a ToolResult with a JPEG/PNG attachment."""
+    # Bounded by the same per-read byte budget as a rendered PDF: an unbounded
+    # ``read_bytes`` loads the whole file and ships a request the wire refuses.
+    size = p.stat().st_size
+    budget = _rendered_byte_budget()
+    if size > budget:
+        return ToolResult(
+            call_id="",
+            content=(
+                f"Image too large: {file_path} is {size} bytes, over the"
+                f" {budget}-byte budget for one read. Downscale it with Bash first."
+            ),
+            is_error=True,
+        )
     return ToolResult(
         call_id="",
         content=f"[image: {file_path}]",
@@ -487,7 +500,7 @@ def _read_text(
             content=f"[Binary file: {file_path} ({size} bytes). Use Bash to inspect.]",
         )
     try:
-        text = p.read_text(encoding="utf-8")
+        text, mtime = _read_stable(p)
     except UnicodeDecodeError:
         size = p.stat().st_size
         return ToolResult(
@@ -497,15 +510,6 @@ def _read_text(
                 " Use Bash with an explicit decoder to inspect.]"
             ),
         )
-    # Stamp the mtime AFTER reading. A writer that lands between stat and read
-    # would otherwise pair a pre-write mtime with post-write content, and the
-    # next ``check_stale`` would see disk-mtime > cached-mtime, treat the entry
-    # as fresh, and silently adopt the new content. Stamping after read means a
-    # racing write bumps the mtime past what we cached, so staleness fires.
-    try:
-        mtime = p.stat().st_mtime
-    except OSError:
-        mtime = None
     mark_read(
         file_path,
         offset=offset,
@@ -527,6 +531,26 @@ def _read_text(
         last_lines=last_lines,
     )
     return ToolResult(call_id="", content=body)
+
+
+# The cache pairs content with a version, and ``check_stale`` trusts an mtime match
+# without rereading. So the mtime must be one the content was read UNDER: stamping
+# after the read paired a racing write's mtime with the pre-write text, which then
+# read as current forever. Bracketing the read with two stats and retrying until they
+# agree means the cached mtime names exactly the text that was cached.
+def _read_stable(p: Path, *, attempts: int = 3) -> tuple[str, float]:
+    """Read ``p`` as text along with an mtime no write landed inside."""
+    before = p.stat().st_mtime
+    text = p.read_text(encoding="utf-8")
+    for _ in range(attempts):
+        after = p.stat().st_mtime
+        if after == before:
+            return text, before
+        before = after
+        text = p.read_text(encoding="utf-8")
+    # Still being written: an mtime no file carries, so the next read rereads and
+    # the next staleness check compares content.
+    return text, 0.0
 
 
 def _window_text(
@@ -844,7 +868,7 @@ def _check_minimum(
     """Reject schema-violating windowing args at the tool entrypoint."""
     # Defense-in-depth: ``validate_tool_input`` (the JSON-schema gate run by
     # ``_AgentTool.run``) is the primary enforcer of these minima; this re-check
-    # covers direct ``._run()`` callers (tests, internal reuse) that bypass it.
+    # covers direct ``run()`` callers (tests, internal reuse) that bypass it.
     for name, coerced, raw in fields:
         if raw is None:
             continue

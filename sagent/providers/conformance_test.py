@@ -38,7 +38,7 @@ from sagent.providers.moonshot.api import _MoonshotModel
 from sagent.providers.openai.responses import _OpenAIResponsesModel
 from sagent.providers.openai.sub import _OpenAISubModel
 from sagent.types.model import Model
-from sagent.types.providers import Provider, ProviderCloseable
+from sagent.types.providers import Provider
 
 
 # Every concrete model class that claims to fulfil the ``Model``
@@ -268,7 +268,17 @@ def test_cli_shares_catalog_without_api_client(
     assert tuple(cli.catalog.models) == tuple(api.catalog.models)
     assert isinstance(cli.model(), model_class)
     assert isinstance(cli.model("utility"), model_class)
-    assert not isinstance(cli, ProviderCloseable)
+
+
+@pytest.mark.parametrize(
+    "provider_cls",
+    [AnthropicCLI, GoogleCLI, Anthropic, Google],
+    ids=lambda c: c.__name__,
+)
+def test_every_provider_offers_close_sdk(provider_cls: type) -> None:
+    """``close_sdk`` is part of the total ``Provider`` contract."""
+    assert "close_sdk" in _PROVIDER_MEMBERS
+    assert _public_members(provider_cls) >= _PROVIDER_MEMBERS
 
 
 if __name__ == "__main__":

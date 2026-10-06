@@ -1,4 +1,4 @@
-"""List a tree's files as ripgrep does, via ``rignore`` (ripgrep's own ``ignore`` create).
+"""List a tree's files as ripgrep does, via ``rignore`` (ripgrep's own ``ignore`` library).
 
 Hidden entries and everything git ignores are skipped; a symlink is listed as
 itself, never followed.

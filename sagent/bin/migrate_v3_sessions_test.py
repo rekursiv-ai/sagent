@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, cast
 import base64
 import json
 
+import pytest
+
 from sagent.bin.migrate_v3_sessions import (
     iter_v4_records,
     main,
@@ -236,6 +238,31 @@ def test_iter_v4_records_non_numeric_timestamp_zero() -> None:
     }
     out = _records(json.dumps(rec))
     assert out[0]["timestamp"] == 0.0
+
+
+def test_iter_v4_records_reads_ids_as_v3_wrote_them() -> None:
+    """String and integral-float ids convert; anything else takes the default."""
+    rec = {
+        "kind": "message",
+        "descriptor": "text/x-user-message",
+        "content": "x",
+    }
+    out = _records(
+        json.dumps({**rec, "_id": "7", "_parent_id": 3.0}),
+        json.dumps({**rec, "_id": "seven", "_parent_id": [1]}),
+    )
+    assert [(r["id"], r["parent_id"]) for r in out] == [(7, 3), (0, -1)]
+
+
+def test_a_failed_migration_leaves_no_partial_output(tmp_path: Path) -> None:
+    src = tmp_path / "session.jsonl"
+    src.write_bytes(
+        json.dumps({"kind": "clear"}).encode() + b"\n" + b"\xff\xfe not utf-8\n",
+    )
+    dst = tmp_path / "session.v4.jsonl"
+    with pytest.raises(UnicodeDecodeError):
+        migrate_file(src, dst)
+    assert list(tmp_path.iterdir()) == [src]
 
 
 def test_migrate_file_writes_v4_jsonl(tmp_path: Path) -> None:

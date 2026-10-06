@@ -114,6 +114,16 @@ def test_discontinued_models_are_gone(model_id: str) -> None:
     assert model_id not in minimax.models()
 
 
+def test_scaling_a_card_scales_every_meter() -> None:
+    """A priority multiple of a card with a write column bills writes at it too."""
+    card = minimax._m2_card(request=1.0, response=2.0, cache_read=0.1)
+    scaled = minimax._scaled(card, 1.5)
+    assert (scaled.cache_write, scaled.cache_write_1h) == (
+        card.cache_write * 1.5,
+        card.cache_write_1h * 1.5,
+    )
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.main import test_main
 

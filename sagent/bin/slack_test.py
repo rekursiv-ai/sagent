@@ -1232,6 +1232,24 @@ class TestListMembers:
         assert members == []
 
     @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        "body",
+        [[], "x", {"ok": True, "members": "U1"}, {"ok": True, "members": [1]}],
+    )
+    async def test_returns_empty_on_a_malformed_body(self, body: object) -> None:
+        adapter, _ = _make_adapter()
+        response = MagicMock()
+        response.is_success = True
+        response.json = MagicMock(return_value=body)
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+        client.get = AsyncMock(return_value=response)
+        with patch("httpx2.AsyncClient", return_value=client):
+            members = await adapter._list_members("C_SRC")
+        assert members == []
+
+    @pytest.mark.anyio
     async def test_returns_empty_on_not_ok(self) -> None:
         adapter, _ = _make_adapter()
         response = MagicMock()

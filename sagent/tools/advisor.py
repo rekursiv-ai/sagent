@@ -20,7 +20,12 @@ from typing import TYPE_CHECKING, Final
 import logging
 
 from sagent.agent.agent import Agent, ObservedModel
-from sagent.agent.retry import send_with_retry
+from sagent.agent.retry import (
+    RateLimitError,
+    RetriesExhaustedError,
+    RetryDeferredError,
+    send_with_retry,
+)
 from sagent.agent.state import current_agent_var
 from sagent.lib import debug_log
 from sagent.lib.custom_json import JSON, json_freeze
@@ -28,6 +33,7 @@ from sagent.types.model import (
     Model,
     ModelRequest,
     ModelTerminationError,
+    StreamInterruptedError,
 )
 from sagent.types.runtime import ToolResult, UserMessage
 
@@ -175,8 +181,21 @@ class Advisor:
                     text,
                 ),
             )
-        except ModelTerminationError as exc:
-            return ToolResult(call_id="", content=str(exc), is_error=True)
+        # Every way ``send_with_retry`` ends a consult is this tool's answer, not a
+        # crash. The calling agent's budget cap is not among them: it must stop
+        # that agent, not read as bad advice.
+        except (
+            ModelTerminationError,
+            RateLimitError,
+            RetriesExhaustedError,
+            RetryDeferredError,
+            StreamInterruptedError,
+        ) as exc:
+            return ToolResult(
+                call_id="",
+                content=f"Advisor consult failed: {type(exc).__name__}: {exc}",
+                is_error=True,
+            )
         return ToolResult(call_id="", content=response.message.text)
 
     # The consult bills the running agent: wrap the model so its cost and budget

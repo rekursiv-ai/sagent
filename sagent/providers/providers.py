@@ -51,16 +51,18 @@ def infer_provider(
     model_id: str,
     current_provider: str,
 ) -> tuple[str, str] | None:
-    """Infer ``(provider, auth)`` from catalog membership or a vendor prefix.
+    """Infer ``(provider, auth)`` from a local path or catalog membership.
 
     Args:
       model_id: Model identifier (e.g. ``"sonnet-4.6"``).
       current_provider: Name of the currently active provider.
 
     Returns:
-      provider_auth: ``(provider_name, auth_method)`` tuple, or ``None``
-          when the model already matches ``current_provider`` or can't
-          be mapped.
+      provider_auth: ``(provider_name, auth_method)`` tuple;
+          ``("SelfHosted", model_id)`` for a filesystem path, whose second
+          element is the path rather than an auth method; or ``None`` when
+          the current provider's catalog already accepts the model or no
+          single API provider's catalog does.
 
     """
     if model_id.startswith(("/", "./", "../", "~/")):
@@ -133,11 +135,7 @@ def build_provider(
             f"provider {provider_name!r} has no ``from_{auth}`` method",
         )
     kwargs: dict[str, object] = {}
-    try:
-        sig = inspect.signature(factory)
-    except (TypeError, ValueError):
-        sig = None
-    if sig is not None and "account" in sig.parameters:
+    if "account" in inspect.signature(factory).parameters:
         kwargs["account"] = account
     return factory(**kwargs)
 

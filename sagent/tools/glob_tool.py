@@ -8,12 +8,13 @@ from typing import TYPE_CHECKING, Annotated, Final
 
 import time
 
-from sagent.agent.state import approx_tokens, get_tool_state
+from sagent.agent.state import approx_tokens
 from sagent.lib.custom_json import convert, json_freeze
-from sagent.lib.files.glob import glob
+from sagent.lib.files.glob import GlobError, glob
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,
+    resolve_tool_path,
     result_token_budget,
     run_sync,
 )
@@ -35,6 +36,7 @@ from sagent.tools.lib.path_sort import (
 )
 from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
+from sagent.types.tools import DEFAULT_MAX_RESULT_CHARS
 
 
 if TYPE_CHECKING:
@@ -56,7 +58,7 @@ class Glob:
 
     Differences vs the List tool (when both could apply to "what's in
     DIR?"):
-      * Glob returns full resolved paths; List returns basenames.
+      * Glob returns absolute paths; List returns basenames.
       * Glob returns only files, skipping ``.gitignore``d paths.
       * Glob's pattern controls dotfile inclusion (``*`` excludes,
         ``.*`` matches only). List has an explicit ``show_hidden``
@@ -75,7 +77,7 @@ class Glob:
     name = "Glob"
     tool_id = "application/x-tool-glob"
     clearable_results = True
-    max_result_chars = 100_000
+    max_result_chars = DEFAULT_MAX_RESULT_CHARS
     description = load_tool_description("Glob")
     directive_schema = json_freeze(
         {
@@ -180,7 +182,7 @@ class Glob:
               / ``long`` / ``max_results`` / ``offset``.
 
         Returns:
-          result: One match per line (resolved paths), or ``(no matches)``.
+          result: One match per line (absolute paths), or ``(no matches)``.
 
         """
         return await run_sync(
@@ -222,18 +224,16 @@ class Glob:
                 content=f"offset must be >= 0; got {offset}.",
                 is_error=True,
             )
-        # An absolute pattern (``/abs/dir/*.py``) splits at its first
-        # component holding a glob char: the head is the root, the rest the
-        # pattern, as a shell reads it.
-        root, rel = Path(get_tool_state().bash_cwd) / path, pattern
-        parts = Path(pattern).parts
+        # An absolute pattern is a pattern anchored at ``/``: the backend owns
+        # the literal-prefix split, so its metacharacter set is the only one.
         if Path(pattern).is_absolute():
-            split_at = next(
-                (i for i, part in enumerate(parts) if any(c in part for c in "*?[")),
-                len(parts),
-            )
-            root, rel = Path(*parts[:split_at]), "/".join(parts[split_at:])
-        matches = glob(root, rel) if rel else [root] if root.exists() else []
+            root, rel = Path("/"), pattern.lstrip("/")
+        else:
+            root, rel = Path(resolve_tool_path(path or ".")), pattern
+        try:
+            matches = glob(root, rel)
+        except GlobError as error:
+            return ToolResult(call_id="", content=str(error), is_error=True)
         sort_paths(matches, sort)
         if not matches:
             return "(no matches)"
@@ -294,9 +294,10 @@ class Glob:
         return None
 
 
+# ``absolute``, not ``resolve``: a symlink is listed under its own path, as the backend
+# lists it, so two links to one target stay two rows.
 def _plain_line(p: Path) -> str:
-    resolved = p.resolve()
-    return f"{resolved}\n"
+    return f"{p.absolute()}\n"
 
 
 def _long_line(p: Path) -> str:
@@ -306,7 +307,7 @@ def _long_line(p: Path) -> str:
     mtime = (
         time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime_raw)) if mtime_raw else "?"
     )
-    return f"{size:>10}  {mtime}  {p.resolve()}\n"
+    return f"{size:>10}  {mtime}  {p.absolute()}\n"
 
 
 # Runs after detection, so an unsupported predicate (``-newer``, ``-maxdepth``) costs

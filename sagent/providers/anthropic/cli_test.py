@@ -12,6 +12,7 @@ import json
 import operator
 import os
 import re
+import tempfile
 
 import pytest
 
@@ -24,16 +25,15 @@ from sagent.providers.anthropic.cli import (
     _build_anthropic_argv,
     _build_model_response,
     _claude_auth_status,
+    _claude_config_dir,
     _dispatch_stream_event,
     _extract_retry_after_ms,
-    _hash_system,
     _is_event_retryable,
-    _real_home,
     _round_context_tokens,
-    _serialize_for_stdin,
     _session_jsonl_path,
     _user_line,
 )
+from sagent.providers.lib.cli_respawn import hash_system
 from sagent.providers.lib.hotspare import HotSpare
 from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.providers.lib.subproc import (
@@ -58,7 +58,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from sagent.lib.custom_json import MutableJSON
-    from sagent.types.tape import TapeEvent
 
 
 def _noop_sync_tools_bridge(
@@ -687,7 +686,7 @@ def test_model_session_id_initialises_session_persistent_mode() -> None:
     sid = "deadbeef-1234-5678-9abc-deadbeef1234"
     m = provider.model("claude-haiku-4-5", session_id=sid)
     assert m._session_id == sid
-    assert m._session_initialized is False
+    assert m._session_on_disk is False
     assert m._hot_spare is None
     assert m._active_proc is None
     # Stateless companion still works.
@@ -715,8 +714,8 @@ def test_session_jsonl_path_is_cwd_aware(tmp_path: Path) -> None:
     cwd_a.mkdir()
     cwd_b.mkdir()
 
-    path_a = _session_jsonl_path(sid, cwd=cwd_a, home=h)
-    path_b = _session_jsonl_path(sid, cwd=cwd_b, home=h)
+    path_a = _session_jsonl_path(sid, cwd=cwd_a, config_dir=h / ".claude")
+    path_b = _session_jsonl_path(sid, cwd=cwd_b, config_dir=h / ".claude")
 
     # Different cwds -> different encoded project dirs -> different paths.
     assert path_a != path_b
@@ -733,16 +732,6 @@ def test_user_line_text_only() -> None:
         max_image_bytes=5 * 1024 * 1024,
     )
     assert line == {"type": "user", "message": {"role": "user", "content": "hello"}}
-
-
-def test_serialize_for_stdin_rejects_tool_result() -> None:
-    """Tool results never traverse stdin -- the MCP bridge handles them."""
-    with pytest.raises(RuntimeError, match="ToolResult in history"):
-        _ = _serialize_for_stdin(
-            ToolResult(call_id="x", content="done"),
-            max_image_dim=8000,
-            max_image_bytes=5 * 1024 * 1024,
-        )
 
 
 def test_anthropic_subprocess_env_overrides_home_when_tmpdir_set(
@@ -880,10 +869,7 @@ async def test_stateless_named_account_uses_isolated_file_home(
     def fake_mkdtemp(**_kwargs: object) -> str:
         return str(isolated)
 
-    monkeypatch.setattr(
-        "sagent.providers.anthropic.cli.tempfile.mkdtemp",
-        fake_mkdtemp,
-    )
+    monkeypatch.setattr(tempfile, "mkdtemp", fake_mkdtemp)
     captured: dict[str, object] = {}
 
     class _CaptureSubproc:
@@ -911,6 +897,30 @@ async def test_stateless_named_account_uses_isolated_file_home(
     assert env["HOME"] == str(isolated)
     assert captured["tmpdir"] == isolated
     assert (isolated / ".claude" / ".credentials.json").exists()
+
+
+def test_named_account_tmpdir_removed_when_population_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A credential copy that fails must not strand the mkdtemp dir."""
+    monkeypatch.setattr(
+        "sagent.providers.anthropic.cli._CREDS_PATH",
+        tmp_path / ".credentials.json",
+    )
+    made: list[Path] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _tracking_mkdtemp(**kwargs: str) -> str:
+        path = real_mkdtemp(dir=tmp_path, **kwargs)
+        made.append(Path(path))
+        return path
+
+    monkeypatch.setattr(tempfile, "mkdtemp", _tracking_mkdtemp)
+    with pytest.raises(ValueError, match="Invalid credentials"):
+        AnthropicCLI(account="work").model("claude-haiku-4-5", session_id="s")
+    assert made
+    assert not any(path.exists() for path in made)
 
 
 def test_build_model_response_normalizes_input_to_last_round() -> None:
@@ -949,8 +959,7 @@ def test_build_model_response_normalizes_input_to_last_round() -> None:
         usage_event=usage_event,
         last_round_usage=last_round_usage,
         text="done",
-        thinking_parts=[],
-        signature_parts=[],
+        thinking_blocks=[],
         stop_reason="end_turn",
         fallback_message_id="m1",
     )
@@ -1138,10 +1147,10 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
     # Stage 1: pretend two turns of conversation already happened
     # (``_last_sent_index == 2``, on-disk session JSONL present).
     model._last_sent_index = 2
-    model._session_initialized = True
+    model._session_on_disk = True
     # Place the JSONL where the provider computes the path: the resolved
     # cwd encoded into the project dir, under the tmp HOME.
-    jsonl = _session_jsonl_path(sid, cwd=Path.cwd(), home=tmp_path)
+    jsonl = _session_jsonl_path(sid, cwd=Path.cwd(), config_dir=tmp_path / ".claude")
     jsonl.parent.mkdir(parents=True, exist_ok=True)
     jsonl.write_text("{}\n", encoding="utf-8")
     assert jsonl.exists()
@@ -1165,148 +1174,156 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
     # Provider state was reset: next real call will use ``--session-id``
     # (not ``--resume``).
     assert model._last_sent_index == 0
-    assert model._session_initialized is False
+    assert model._session_on_disk is False
 
     # The stale on-disk JSONL was removed so the next ``--session-id``
     # spawn doesn't error with "Session ID is already in use".
     assert not jsonl.exists()
 
 
+class _ScriptedClaude:
+    """Fake ``claude --print`` that answers each stdin line with one result.
+
+    ``fail_turns`` names 1-based turns that end in a retryable
+    ``aborted_streaming`` error after claude has stored the input.
+    """
+
+    def __init__(self, log: list[str], *, fail_turns: frozenset[int]) -> None:
+        self._log = log
+        self._fail_turns = fail_turns
+        self._pending: list[MutableJSON] = []
+        self.closed = False
+
+    async def write_line(self, line: str) -> None:
+        self._log.append(line)
+        turn = len(self._log)
+        if turn in self._fail_turns:
+            self._pending.append(
+                {
+                    "type": "result",
+                    "is_error": True,
+                    "terminal_reason": "aborted_streaming",
+                },
+            )
+            return
+        text = json.loads(line)["message"]["content"]
+        self._pending.extend(
+            [
+                {
+                    "type": "stream_event",
+                    "event": {
+                        "type": "content_block_delta",
+                        "delta": {"type": "text_delta", "text": f"re: {text}"},
+                    },
+                },
+                {"type": "result", "stop_reason": "end_turn", "modelUsage": {}},
+            ],
+        )
+
+    async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
+        del skip_non_json
+        return self._pending.pop(0)
+
+    def interrupt(self) -> bool:
+        return True
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+def _session_model_with_fake_claude(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    fail_turns: frozenset[int] = frozenset(),
+) -> tuple[object, list[str], list[bool]]:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    model = AnthropicCLI().model(
+        "claude-haiku-4-5",
+        session_id="33333333-4444-5555-6666-777777777777",
+    )
+    lines: list[str] = []
+    resumes: list[bool] = []
+
+    async def _spawn() -> Subproc:
+        resumes.append(model._session_on_disk)
+        return cast(Subproc, _ScriptedClaude(lines, fail_turns=fail_turns))
+
+    monkeypatch.setattr(model, "_spawn_initialized", _spawn)
+    monkeypatch.setattr(model, "_ensure_tools_bridge", AsyncMock())
+    monkeypatch.setattr(model, "_sync_tools_bridge", _noop_sync_tools_bridge)
+    return model, lines, resumes
+
+
 @pytest.mark.asyncio
-async def test_session_persistent_advances_sent_index_per_entry_on_partial_failure(
+async def test_session_retry_after_failed_first_turn_resumes_and_answers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for 2026-06-03 ~14:30 SWE bug: when multiple new
-    user-like entries are queued and the drain aborts partway through,
-    ``_last_sent_index`` must reflect every entry already WRITTEN to
-    stdin -- not just the entries whose drain completed.
+    """A failed first turn left the session on disk with an unanswered input.
 
-    Otherwise the next ``--resume`` re-writes the entries that already
-    landed in claude's session JSONL (producing duplicates) AND fails
-    to reach the entries that came after the abort point (silently
-    dropping them). The SWE symptom was an early "Great smoke" inbound
-    appearing 3× in the session JSONL while five subsequent TL STOP
-    directives never appeared at all.
+    The retry must ``--resume`` (``--session-id`` would collide with the
+    stored session) and resend the input, returning claude's real answer --
+    not a synthetic empty "success".
     """
-    _write_creds(tmp_path)
-    monkeypatch.setattr(
-        "sagent.providers.anthropic.cli._CREDS_PATH",
-        tmp_path / ".credentials.json",
+    model, lines, resumes = _session_model_with_fake_claude(
+        monkeypatch,
+        tmp_path,
+        fail_turns=frozenset({1}),
     )
-    monkeypatch.setattr(
-        "sagent.providers.anthropic.cli.shutil.which",
-        _which_claude_stub,
+    assert isinstance(model, cli._AnthropicCLIModel)
+    request = ModelRequest(messages=[UserMessage(text="hello")])
+    with pytest.raises(AnthropicCLIRetryableError):
+        await model.stream(request)
+    response = await model.stream(request)
+    assert response.message.text == "re: hello"
+    assert resumes == [False, True]
+    assert len(lines) == 2
+
+
+@pytest.mark.asyncio
+async def test_session_retry_with_new_input_resumes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model, _, resumes = _session_model_with_fake_claude(
+        monkeypatch,
+        tmp_path,
+        fail_turns=frozenset({1}),
     )
-    monkeypatch.setattr(
-        "sagent.providers.anthropic.cli.shutil.which",
-        _which_claude_stub,
-    )
-    monkeypatch.setenv("HOME", str(tmp_path))
+    assert isinstance(model, cli._AnthropicCLIModel)
+    first = UserMessage(text="one")
+    with pytest.raises(AnthropicCLIRetryableError):
+        await model.stream(ModelRequest(messages=[first]))
+    second = UserMessage(text="two")
+    response = await model.stream(ModelRequest(messages=[first, second]))
+    assert resumes == [False, True]
+    assert response.message.text == "re: two"
 
-    sid = "deadbeef-1234-5678-9abc-deadbeef1234"
-    provider = AnthropicCLI.from_credentials()
-    model = provider.model("claude-haiku-4-5", session_id=sid)
-    # Pretend a turn already landed so we're past the first-spawn case.
-    model._session_initialized = True
-    model._last_sent_index = 5
 
-    # Replace the heavy I/O with mocks:
-    #   * _ensure_tools_bridge / _sync_tools_bridge: no-op
-    #   * _spawn_initialized: returns a fake proc
-    #   * _send_entry: records the entry written
-    #   * _drain_until_result: returns OK on the first call (entry index
-    #     5 succeeds end-to-end), raises SubprocessTransportError on the
-    #     second (simulating aborted_streaming on the second entry's
-    #     model_call)
-    bridge_calls: list[object] = []
-    sent_entries: list[TapeEvent] = []
-
-    async def _ensure() -> None:
-        bridge_calls.append("ensure")
-
-    monkeypatch.setattr(model, "_ensure_tools_bridge", _ensure)
-
-    def _sync(
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> None:
-        bridge_calls.append(("sync", request, publish))
-
-    monkeypatch.setattr(model, "_sync_tools_bridge", _sync)
-
-    fake_proc = MagicMock()
-    fake_proc.close = AsyncMock()
-    monkeypatch.setattr(model, "_spawn_initialized", AsyncMock(return_value=fake_proc))
-
-    async def _send_entry(proc: object, entry: TapeEvent) -> None:
-        del proc
-        sent_entries.append(entry)
-
-    monkeypatch.setattr(model, "_send_entry", _send_entry)
-
-    drain_calls = 0
-
-    async def _drain(
-        proc: object,
-        publish: object = None,
-        update_input_tokens: bool = True,
-    ):
-        del proc, publish, update_input_tokens
-        nonlocal drain_calls
-        drain_calls += 1
-        if drain_calls == 1:
-            # First drain (for the FIRST entry) succeeds: this would be
-            # the equivalent of "Great smoke" being acknowledged.
-            return ModelResponse(
-                message=AssistantMessage(text="ack 1", tool_calls=()),
-                stop_reason="model_finished",
-            )
-        # Second drain (for the SECOND entry) aborts mid-stream: this
-        # is the equivalent of the aborted_streaming on the abort cycle
-        # that prevented TL's STOP from being processed in production.
-        raise SubprocessTransportError("simulated abort on entry 2")
-
-    monkeypatch.setattr(model, "_drain_until_result", _drain)
-
-    # Three entries queued. _last_sent_index = 5 means request.messages
-    # has 8 entries; entries 5, 6, 7 are the new user-like ones.
-    msg_E1 = AgentSendMessage(source="tl", text="entry 1 -- should land cleanly")
-    msg_E2 = AgentSendMessage(source="tl", text="entry 2 -- drain aborts on this one")
-    msg_E3 = AgentSendMessage(
-        source="tl",
-        text="entry 3 -- STOP directive that must NOT be lost",
-    )
+@pytest.mark.asyncio
+async def test_session_rebuild_feeds_history_as_one_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rebuilding from a 3-user-entry tape costs one model turn, not three."""
+    model, lines, _ = _session_model_with_fake_claude(monkeypatch, tmp_path)
+    assert isinstance(model, cli._AnthropicCLIModel)
     request = ModelRequest(
-        system="x",
         messages=[
-            UserMessage(text="old turn 1"),
-            UserMessage(text="old turn 2"),
-            UserMessage(text="old turn 3"),
-            UserMessage(text="old turn 4"),
-            UserMessage(text="old turn 5"),
-            msg_E1,
-            msg_E2,
-            msg_E3,
+            UserMessage(text="a"),
+            AssistantMessage(text="x"),
+            UserMessage(text="b"),
+            AssistantMessage(text="y"),
+            UserMessage(text="c"),
         ],
-        tools=[],
     )
-
-    with pytest.raises(SubprocessTransportError):
-        await model.stream(request, publish=None)
-
-    # Both E1 and E2 were written to stdin before the drain raised on
-    # E2's model_call. E3 was NOT written -- the loop short-circuited.
-    assert sent_entries == [msg_E1, msg_E2]
-
-    # The CRITICAL regression assertion: _last_sent_index now reflects
-    # both writes (5 + 2 entries = position 7, pointing at E3 which is
-    # the FIRST entry the next --resume must deliver).
-    # Pre-fix behaviour would have left _last_sent_index at 5, causing
-    # the next retry to re-write E1 (duplicate in claude's session) and
-    # re-attempt the same drain abort sequence, leaving E3 perpetually
-    # stranded.
-    assert model._last_sent_index == 7
+    response = await model.stream(request)
+    assert len(lines) == 1
+    assert json.loads(lines[0])["message"]["content"] == "a\n\nb\n\nc"
+    assert response.message.text == "re: a\n\nb\n\nc"
+    assert model._last_sent_index == len(request.messages)
 
 
 class _FakeBridge:
@@ -1544,7 +1561,7 @@ async def test_session_persistent_delivers_detached_result_as_trailing_entry(
     provider = AnthropicCLI.from_credentials()
     model = provider.model("claude-haiku-4-5", session_id=sid)
     # A prior turn already established the session; history is fully sent.
-    model._session_initialized = True
+    model._session_on_disk = True
     model._last_sent_index = 1
 
     # Bridge already exists with one completed detached run pending.
@@ -1563,9 +1580,9 @@ async def test_session_persistent_delivers_detached_result_as_trailing_entry(
     fake_proc.close = AsyncMock()
     monkeypatch.setattr(model, "_spawn_initialized", AsyncMock(return_value=fake_proc))
 
-    sent_entries: list[TapeEvent] = []
+    sent_entries: list[UserMessage | AgentSendMessage] = []
 
-    async def _send_entry(proc: object, entry: TapeEvent) -> None:
+    async def _send_entry(proc: object, entry: UserMessage | AgentSendMessage) -> None:
         del proc
         sent_entries.append(entry)
 
@@ -1574,9 +1591,8 @@ async def test_session_persistent_delivers_detached_result_as_trailing_entry(
     async def _drain(
         proc: object,
         publish: object = None,
-        update_input_tokens: bool = True,
     ) -> ModelResponse:
-        del proc, publish, update_input_tokens
+        del proc, publish
         return ModelResponse(
             message=AssistantMessage(text="ack", tool_calls=()),
             stop_reason="model_finished",
@@ -1624,18 +1640,17 @@ async def test_stateless_exchange_delivers_pending_detached_result(
     bridge = _FakeBridge([ToolResult(call_id="", content="BG RESULT")])
     model._tools_bridge = cast(ToolsBridge, bridge)
 
-    sent_entries: list[TapeEvent] = []
+    sent_entries: list[UserMessage | AgentSendMessage] = []
 
-    async def _send_entry(proc: object, entry: TapeEvent) -> None:
+    async def _send_entry(proc: object, entry: UserMessage | AgentSendMessage) -> None:
         del proc
         sent_entries.append(entry)
 
     async def _drain(
         proc: object,
         publish: object = None,
-        update_input_tokens: bool = True,
     ) -> ModelResponse:
-        del proc, publish, update_input_tokens
+        del proc, publish
         return ModelResponse(
             message=AssistantMessage(text="ack", tool_calls=()),
             stop_reason="model_finished",
@@ -1653,13 +1668,11 @@ async def test_stateless_exchange_delivers_pending_detached_result(
     fake_proc = cast(Subproc, object())
     response = await model._exchange_turn(fake_proc, request, publish=None)
 
-    # Both the real user entry and the detached delivery were sent, in
-    # order, with the detached result trailing.
-    assert len(sent_entries) == 2
-    assert isinstance(sent_entries[0], UserMessage)
-    assert sent_entries[0].text == "hello"
-    assert isinstance(sent_entries[1], UserMessage)
-    assert sent_entries[1].text == "[detached tool result] BG RESULT"
+    # The real user entry and the detached delivery travel as one line, with
+    # the detached result trailing.
+    assert [entry.text for entry in sent_entries] == [
+        "hello\n\n[detached tool result] BG RESULT",
+    ]
     assert response.message.text == "ack"
 
 
@@ -1791,8 +1804,7 @@ def test_anthropic_subprocess_env_inherits_real_home_when_tmpdir_none() -> None:
 def test_dispatch_stream_event_routes_text_and_thinking() -> None:
     """``content_block_delta`` events fan text/thinking into separate buckets."""
     text_parts: list[str] = []
-    thinking_parts: list[str] = []
-    signature_parts: list[str] = []
+    thinking_blocks: list[dict[str, str]] = []
     text_chunks: list[str] = []
     thinking_chunks: list[str] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
@@ -1814,22 +1826,21 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
     _dispatch_stream_event(
         text_event,
         text_parts,
-        thinking_parts,
-        signature_parts=signature_parts,
+        thinking_blocks,
         tool_use_blocks=tool_use_blocks,
         publish=publish,
     )
     _dispatch_stream_event(
         thinking_event,
         text_parts,
-        thinking_parts,
-        signature_parts=signature_parts,
+        thinking_blocks,
         tool_use_blocks=tool_use_blocks,
         publish=publish,
     )
     assert text_parts == ["hello"]
-    assert thinking_parts == ["reflecting"]
-    assert signature_parts == []  # No signature_delta yet.
+    assert thinking_blocks == [
+        {"type": "thinking", "thinking": "reflecting", "signature": ""},
+    ]
     assert text_chunks == ["hello"]
     assert thinking_chunks == ["reflecting"]
 
@@ -1848,8 +1859,7 @@ def test_dispatch_stream_event_captures_signature_delta() -> None:
     ``b4fe5972-...`` after TL sent a thank-you AgentSendMessage.
     """
     text_parts: list[str] = []
-    thinking_parts: list[str] = []
-    signature_parts: list[str] = []
+    thinking_blocks: list[dict[str, str]] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
     sig_event: MutableJSON = {
         "type": "content_block_delta",
@@ -1858,14 +1868,69 @@ def test_dispatch_stream_event_captures_signature_delta() -> None:
     _dispatch_stream_event(
         sig_event,
         text_parts,
-        thinking_parts,
-        signature_parts=signature_parts,
+        thinking_blocks,
         tool_use_blocks=tool_use_blocks,
         publish=None,
     )
-    assert signature_parts == ["abc123"]
+    assert thinking_blocks == [
+        {"type": "thinking", "thinking": "", "signature": "abc123"},
+    ]
     assert text_parts == []
-    assert thinking_parts == []
+
+
+@pytest.mark.asyncio
+async def test_drain_keeps_one_signed_block_per_thinking_round() -> None:
+    """Two internal rounds yield two blocks, each with its own signature.
+
+    Concatenating them into one block pairs the joined bodies with a joined
+    signature that matches neither, and an API replay rejects it.
+    """
+
+    def _round(body: str, signature: str) -> list[MutableJSON]:
+        return [
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": "thinking", "thinking": ""},
+                },
+            },
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "thinking_delta", "thinking": body},
+                },
+            },
+            {
+                "type": "stream_event",
+                "event": {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": "signature_delta", "signature": signature},
+                },
+            },
+        ]
+
+    events: list[MutableJSON] = [
+        *_round("first", "sig1"),
+        *_round("second", "sig2"),
+        {"type": "result", "stop_reason": "end_turn", "modelUsage": {}},
+    ]
+
+    class _Proc:
+        async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
+            del skip_non_json
+            return events.pop(0)
+
+    model = AnthropicCLI().model("claude-haiku-4-5")
+    response = await model._drain_until_result(cast(Subproc, _Proc()), publish=None)
+    assert response.message.thinking_blocks == (
+        {"type": "thinking", "thinking": "first", "signature": "sig1"},
+        {"type": "thinking", "thinking": "second", "signature": "sig2"},
+    )
 
 
 def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
@@ -1874,8 +1939,7 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
     """
     published: list[RuntimeEvent] = []
     text_parts: list[str] = []
-    thinking_parts: list[str] = []
-    signature_parts: list[str] = []
+    thinking_blocks: list[dict[str, str]] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
     # 1) start: registers tool_use at index 0 -- NO label published yet.
     start_event: MutableJSON = {
@@ -1891,8 +1955,7 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
     _dispatch_stream_event(
         start_event,
         text_parts,
-        thinking_parts,
-        signature_parts=signature_parts,
+        thinking_blocks,
         tool_use_blocks=tool_use_blocks,
         publish=published.append,
     )
@@ -1907,8 +1970,7 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
         _dispatch_stream_event(
             delta_event,
             text_parts,
-            thinking_parts,
-            signature_parts=signature_parts,
+            thinking_blocks,
             tool_use_blocks=tool_use_blocks,
             publish=published.append,
         )
@@ -1918,8 +1980,7 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
     _dispatch_stream_event(
         stop_event,
         text_parts,
-        thinking_parts,
-        signature_parts=signature_parts,
+        thinking_blocks,
         tool_use_blocks=tool_use_blocks,
         publish=published.append,
     )
@@ -1944,7 +2005,6 @@ def test_dispatch_stream_event_no_label_for_text_block_start() -> None:
         start_event,
         [],
         [],
-        signature_parts=[],
         tool_use_blocks=tool_use_blocks,
         publish=published.append,
     )
@@ -1954,7 +2014,6 @@ def test_dispatch_stream_event_no_label_for_text_block_start() -> None:
         stop_event,
         [],
         [],
-        signature_parts=[],
         tool_use_blocks=tool_use_blocks,
         publish=published.append,
     )
@@ -1973,8 +2032,7 @@ def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
     semantics -- the parser stays inert on shapes it doesn't know.
     """
     text_parts: list[str] = []
-    thinking_parts: list[str] = []
-    signature_parts: list[str] = []
+    thinking_blocks: list[dict[str, str]] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
     unknown_event: MutableJSON = {
         "type": "content_block_delta",
@@ -1983,14 +2041,12 @@ def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
     _dispatch_stream_event(
         unknown_event,
         text_parts,
-        thinking_parts,
-        signature_parts=signature_parts,
+        thinking_blocks,
         tool_use_blocks=tool_use_blocks,
         publish=None,
     )
     assert text_parts == []
-    assert thinking_parts == []
-    assert signature_parts == []
+    assert thinking_blocks == []
 
 
 def test_build_model_response_sums_model_usage_rows() -> None:
@@ -2017,8 +2073,9 @@ def test_build_model_response_sums_model_usage_rows() -> None:
         usage_event=usage_event,
         last_round_usage=None,
         text="reply",
-        thinking_parts=["thought"],
-        signature_parts=["sig-bytes"],
+        thinking_blocks=[
+            {"type": "thinking", "thinking": "thought", "signature": "sig-bytes"},
+        ],
         stop_reason="end_turn",
         fallback_message_id="fallback",
     )
@@ -2053,23 +2110,11 @@ def test_build_model_response_falls_back_to_total_cost_usd() -> None:
         usage_event=usage_event,
         last_round_usage=None,
         text="",
-        thinking_parts=[],
-        signature_parts=[],
+        thinking_blocks=[],
         stop_reason="end_turn",
         fallback_message_id="m",
     )
     assert response.total_cost == pytest.approx(0.005)
-
-
-def test_hash_system_stable_and_distinguishes() -> None:
-    """``_hash_system`` is deterministic and distinguishes different prompts."""
-    a = _hash_system("be brief")
-    b = _hash_system("be brief")
-    c = _hash_system("be verbose")
-    d = _hash_system(None)
-    assert a == b
-    assert a != c
-    assert d == _hash_system("")
 
 
 def test_should_respawn_triggers() -> None:
@@ -2088,11 +2133,11 @@ def test_should_respawn_triggers() -> None:
     request = ModelRequest(messages=[user])
 
     # System hash mismatch -> respawn.
-    model._system_hash = _hash_system("different")
+    model._system_hash = hash_system("different")
     assert model._should_respawn(request) is True
 
     # Sync hash; head mismatch -> respawn.
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     model._sent_history_head = UserMessage(text="something else")
     assert model._should_respawn(request) is True
 
@@ -2138,7 +2183,7 @@ async def test_stream_eof_respawns_and_resets_sent_index(
             respawn_count += 1
             return cast(Subproc, _DeadProc())
 
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
     with pytest.raises(Exception, match="stdout closed"):
@@ -2175,7 +2220,7 @@ async def test_stream_read_timeout_respawns_and_resets_sent_index(
             respawn_count += 1
             return cast(Subproc, _StalledProc())
 
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
     with pytest.raises(Exception, match="stdout idle timeout"):
@@ -2214,7 +2259,7 @@ async def test_stream_repeated_transport_failures_trip_budget(
                 raise RuntimeError("transport failure budget exhausted")
             return cast(Subproc, _DeadProc())
 
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
 
@@ -2259,7 +2304,7 @@ async def test_stream_application_error_does_not_respawn(
         del proc, publish
         raise AssertionError("unreachable")
 
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     monkeypatch.setattr(model, "_send_entry", _send_entry)
     monkeypatch.setattr(model, "_drain_until_result", _drain_until_result)
@@ -2312,7 +2357,7 @@ async def test_stream_failed_turn_keeps_proven_system_hash(
         del proc, request, publish
         raise SubprocessTransportError("boom")
 
-    model._system_hash = _hash_system("proven system")
+    model._system_hash = hash_system("proven system")
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     monkeypatch.setattr(model, "_exchange_turn", _exchange_turn)
 
@@ -2321,7 +2366,7 @@ async def test_stream_failed_turn_keeps_proven_system_hash(
             ModelRequest(messages=[UserMessage(text="hi")], system=system),
         )
 
-    assert model._system_hash == _hash_system("proven system")
+    assert model._system_hash == hash_system("proven system")
 
 
 @pytest.mark.asyncio
@@ -2357,7 +2402,7 @@ async def test_stream_same_system_after_first_acquire_does_not_respawn(
         def record_success(self) -> None:
             pass
 
-    async def _send_entry(proc: Subproc, entry: TapeEvent) -> None:
+    async def _send_entry(proc: Subproc, entry: UserMessage | AgentSendMessage) -> None:
         del proc, entry
 
     async def _drain_until_result(
@@ -2377,7 +2422,7 @@ async def test_stream_same_system_after_first_acquire_does_not_respawn(
     _ = await model.stream(ModelRequest(messages=[first, second], system=system))
 
     assert respawn_count == 0
-    assert model._system_hash == _hash_system(system)
+    assert model._system_hash == hash_system(system)
 
 
 @pytest.mark.asyncio
@@ -2403,17 +2448,15 @@ async def test_stream_system_change_discards_warmed_old_system_spare(
             warmed.set()
         return cast(Subproc, _Proc(model._pending_system))
 
-    async def send_entry(proc: Subproc, entry: TapeEvent) -> None:
+    async def send_entry(proc: Subproc, entry: UserMessage | AgentSendMessage) -> None:
         del entry
         used_systems.append(cast(_Proc, proc).system)
 
     async def drain_until_result(
         proc: Subproc,
         publish: Callable[[RuntimeEvent], None] | None,
-        *,
-        update_input_tokens: bool = True,
     ) -> ModelResponse:
-        del proc, publish, update_input_tokens
+        del proc, publish
         return ModelResponse(message=AssistantMessage(text="ok"))
 
     model._hot_spare = HotSpare(spawn_initialized)
@@ -2458,8 +2501,7 @@ async def test_exchange_turn_skips_assistant_replay() -> None:
     payloads = [json.loads(line) for line in lines]
     assert response.message.text == ""
     assert [payload["message"]["content"] for payload in payloads] == [
-        "first",
-        "second",
+        "first\n\nsecond",
     ]
 
 
@@ -2486,7 +2528,10 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
         def record_success(self) -> None:
             pass
 
-    async def _send_entry(proc: Subproc, history: TapeEvent) -> None:
+    async def _send_entry(
+        proc: Subproc,
+        history: UserMessage | AgentSendMessage,
+    ) -> None:
         del proc, history
 
     async def _drain_until_result(
@@ -2496,7 +2541,7 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
         del proc, publish
         return response
 
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     monkeypatch.setattr(model, "_send_entry", _send_entry)
     monkeypatch.setattr(model, "_drain_until_result", _drain_until_result)
@@ -2557,7 +2602,7 @@ async def test_terminal_is_error_respawns_and_resets_state(
             return cast(Subproc, _ErrorProc())
 
     user = UserMessage(text="hi")
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     model._last_sent_index = 0
     model._sent_history_head = user
     model._turn_count = 9
@@ -2575,27 +2620,11 @@ async def test_terminal_is_error_respawns_and_resets_state(
 
 
 @pytest.mark.asyncio
-async def test_exchange_turn_drains_each_user_like_entry() -> None:
-    provider = AnthropicCLI()
-    model = provider.model("claude-haiku-4-5")
-
-    class _Proc:
-        pending = False
-
-        async def write_line(self, line: str) -> None:
-            del line
-            assert not self.pending
-            self.pending = True
-
-        async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
-            del skip_non_json
-            assert self.pending
-            self.pending = False
-            return {"type": "result", "usage": {}}
-
-    proc = _Proc()
-
-    _ = await model._exchange_turn(
+async def test_exchange_turn_replays_history_as_one_line() -> None:
+    model = AnthropicCLI().model("claude-haiku-4-5")
+    lines: list[str] = []
+    proc = _ScriptedClaude(lines, fail_turns=frozenset())
+    response = await model._exchange_turn(
         cast(Subproc, proc),
         ModelRequest(
             messages=[
@@ -2606,56 +2635,33 @@ async def test_exchange_turn_drains_each_user_like_entry() -> None:
         ),
         publish=None,
     )
-
-    assert proc.pending is False
+    assert [json.loads(line)["message"]["content"] for line in lines] == [
+        "first\n\ncurrent",
+    ]
+    assert response.message.text == "re: first\n\ncurrent"
 
 
 @pytest.mark.asyncio
-async def test_exchange_turn_replay_drain_does_not_update_input_tokens() -> None:
-    provider = AnthropicCLI()
-    model = provider.model("claude-haiku-4-5")
-    model._last_input_tokens = 7
-    drain_count = 0
+async def test_exchange_turn_without_input_returns_without_reading() -> None:
+    """No unseen input: answer at once instead of blocking on a silent stdout."""
+    model = AnthropicCLI().model("claude-haiku-4-5")
+    model._last_sent_index = 1
 
-    class _Proc:
+    class _SilentProc:
         async def write_line(self, line: str) -> None:
-            del line
+            raise AssertionError(f"unexpected write {line!r}")
 
-        async def read_json_line(
-            self,
-            *,
-            skip_non_json: bool = False,
-        ) -> MutableJSON | None:
+        async def read_json_line(self, *, skip_non_json: bool = False) -> None:
             del skip_non_json
-            nonlocal drain_count
-            drain_count += 1
-            if drain_count == 1:
-                return {
-                    "type": "result",
-                    "usage": {"input_tokens": model.limits.max_request_tokens},
-                }
-            return None
+            raise AssertionError("must not read")
 
-    with pytest.raises(SubprocessTransportError, match="stdout closed"):
-        _ = await model._exchange_turn(
-            cast(Subproc, _Proc()),
-            ModelRequest(
-                messages=[UserMessage(text="replay"), UserMessage(text="current")],
-            ),
-            publish=None,
-        )
-
-    assert model._last_input_tokens == 7
-
-
-def test_serialize_for_stdin_user_passthrough() -> None:
-    """``UserMessage`` falls through ``_serialize_for_stdin`` to ``_user_line``."""
-    line = _serialize_for_stdin(
-        UserMessage(text="ping"),
-        max_image_dim=8000,
-        max_image_bytes=5 * 1024 * 1024,
+    response = await model._exchange_turn(
+        cast(Subproc, _SilentProc()),
+        ModelRequest(messages=[UserMessage(text="seen")]),
+        publish=None,
     )
-    assert line["type"] == "user"
+    assert response.message.text == ""
+    assert response.stop_reason == "model_finished"
 
 
 def test_interrupt_active_proc_returns_false_when_no_active_subprocess(
@@ -2761,7 +2767,7 @@ async def test_stateless_stream_cancelled_interrupts_and_reraises(
             respawn_count += 1
             return cast(Subproc, proc)
 
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
 
@@ -2826,38 +2832,37 @@ async def test_session_persistent_stream_cancelled_interrupts_and_reraises(
 # ----------------------------------------------------------------------
 
 
-def test_real_home_honors_claude_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_real_home`` returns the parent of ``CLAUDE_CONFIG_DIR`` when set.
-
-    claude stores ``projects/`` under ``$CLAUDE_CONFIG_DIR`` (treated as
-    the ``.claude`` dir). ``_real_home`` returns its parent so the shared
-    ``/.claude/projects`` suffix in ``_session_jsonl_path`` resolves to
-    claude's actual projects root.
-    """
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/custom/cfg/.claude")
-    assert _real_home() == Path("/custom/cfg")
+def test_config_dir_honors_claude_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``CLAUDE_CONFIG_DIR`` names claude's config dir itself, any name."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/custom/cfg")
+    assert _claude_config_dir() == Path("/custom/cfg")
 
 
-def test_real_home_falls_back_to_home(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Without ``CLAUDE_CONFIG_DIR``, ``_real_home`` uses ``$HOME``."""
+def test_config_dir_falls_back_to_home(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
     monkeypatch.setenv("HOME", "/home/operator")
-    assert _real_home() == Path("/home/operator")
+    assert _claude_config_dir() == Path("/home/operator/.claude")
 
 
-def test_session_jsonl_path_under_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
-    """End-to-end: with ``CLAUDE_CONFIG_DIR`` the session path lands under it."""
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "/custom/cfg/.claude")
+def test_construction_deletes_stale_session_under_custom_config_dir(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A config dir not named ``.claude`` still has its stale session removed."""
+    config = tmp_path / "custom-config"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
     sid = "abc12345-aaaa-bbbb-cccc-dddddddddddd"
-    path = _session_jsonl_path(sid, cwd=Path("/work/repo"), home=_real_home())
-    assert path == Path(
-        f"/custom/cfg/.claude/projects/-work-repo/{sid}.jsonl",
-    )
+    stale = _session_jsonl_path(sid, cwd=Path.cwd(), config_dir=config)
+    assert stale.is_relative_to(config / "projects")
+    stale.parent.mkdir(parents=True)
+    stale.write_text("{}\n", encoding="utf-8")
+    AnthropicCLI().model("claude-haiku-4-5", session_id=sid)
+    assert not stale.exists()
 
 
 # ----------------------------------------------------------------------
 # Multi-turn session lifecycle: turn 1 mints (--session-id), turn 2
-# resumes (--resume). Verifies the _session_initialized flip + that the
+# resumes (--resume). Verifies the _session_on_disk flip + that the
 # argv switches accordingly across two real stream() turns.
 # ----------------------------------------------------------------------
 
@@ -2892,16 +2897,16 @@ async def test_session_persistent_two_turns_mint_then_resume(
             return
 
     # Capture the resume_existing flag the argv builder would receive by
-    # intercepting the spawn (which reads model._session_initialized).
+    # intercepting the spawn (which reads model._session_on_disk).
     async def _fake_spawn() -> Subproc:
-        resume_existing_seen.append(model._session_initialized)
+        resume_existing_seen.append(model._session_on_disk)
         return cast(Subproc, _OkProc())
 
     monkeypatch.setattr(model, "_spawn_initialized", _fake_spawn)
     monkeypatch.setattr(model, "_ensure_tools_bridge", AsyncMock())
     monkeypatch.setattr(model, "_sync_tools_bridge", _noop_sync_tools_bridge)
 
-    # Turn 1: fresh session → mint (_session_initialized False at spawn).
+    # Turn 1: fresh session → mint (_session_on_disk False at spawn).
     await model.stream(ModelRequest(messages=[UserMessage(text="one")]))
     # Turn 2: same session, one new entry → resume.
     await model.stream(

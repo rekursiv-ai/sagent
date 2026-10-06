@@ -7,6 +7,7 @@ from types import MappingProxyType
 from typing import ClassVar, cast
 
 import json
+import logging
 
 import httpx2
 import pytest
@@ -15,6 +16,10 @@ import tiktoken
 from sagent.catalog.openai import compatible
 from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.lib.custom_json import MutableJSON
+from sagent.providers.dashscope.api import DashScope
+from sagent.providers.lib.errors import error_status_code
+from sagent.providers.minimax.api import MiniMax
+from sagent.providers.moonshot.api import Moonshot
 from sagent.providers.openai.compat import (
     OpenAICompat,
     OpenAICompatModel,
@@ -33,6 +38,7 @@ from sagent.types.cost import (
     PriceKey,
     TokenPrice,
 )
+from sagent.types.exceptions import UserFacingError
 from sagent.types.model import (
     ModelRequest,
     PromptTooLongError,
@@ -41,6 +47,7 @@ from sagent.types.model import (
 )
 from sagent.types.runtime import (
     AssistantMessage,
+    BytesMessage,
     ModelContextEvent,
     ModelResponsePartial,
     ModelResponseThinking,
@@ -194,6 +201,57 @@ def test_build_messages_tool_result_error_prefixes_marker() -> None:
 
 def test_build_messages_empty_history_returns_empty_list() -> None:
     assert build_messages(_make_request(messages=[])) == []
+
+
+def _reasoning_turn() -> AssistantMessage:
+    return AssistantMessage(
+        text="",
+        thinking_blocks=(
+            {"type": "reasoning", "text": "t"},
+            {"type": "reasoning", "text": "u"},
+        ),
+        tool_calls=(ToolCall(id="c", name="N", args={}),),
+    )
+
+
+def test_build_messages_replays_reasoning_in_the_vendor_field() -> None:
+    msgs = build_messages(
+        _make_request(messages=[_reasoning_turn()]),
+        reasoning_field="reasoning_content",
+    )
+    assert msgs[0]["reasoning_content"] == "tu"
+
+
+def test_build_messages_omits_reasoning_without_a_vendor_field() -> None:
+    msgs = build_messages(_make_request(messages=[_reasoning_turn()]))
+    assert "reasoning_content" not in msgs[0]
+
+
+@pytest.mark.parametrize("provider", [Moonshot, DashScope, MiniMax])
+def test_reasoning_vendors_replay_reasoning_through_build_body(
+    provider: type[OpenAICompat],
+) -> None:
+    model = provider.from_key("k").model()
+    body = model._build_body(
+        _make_request(messages=[UserMessage(text="q"), _reasoning_turn()]),
+        stream=True,
+    )
+    messages = cast(list[MutableJSON], body["messages"])
+    assert messages[-1]["reasoning_content"] == "tu"
+
+
+def test_build_messages_warns_on_a_non_image_tool_attachment(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    result = ToolResult(
+        call_id="c",
+        content="done",
+        attachments=(BytesMessage(data=b"x", descriptor="text/plain"),),
+    )
+    with caplog.at_level(logging.WARNING):
+        msgs = build_messages(_make_request(messages=[result]))
+    assert "skipping non-image attachment (mime=text/plain)" in caplog.text
+    assert msgs == [{"role": "tool", "tool_call_id": "call_0", "content": "done"}]
 
 
 def test_extract_usage_reports_full_input_and_cache_read_separately() -> None:
@@ -462,6 +520,46 @@ async def test_consume_stream_skips_malformed_data() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("payload", [b"[1]", b"null", b'"text"', b"42"])
+async def test_consume_stream_skips_well_formed_non_object_data(payload: bytes) -> None:
+    body = (
+        b"data: " + payload + b"\n\n"
+        b'data: {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}\n\n'
+        b"data: [DONE]\n\n"
+    )
+    resp = await consume_stream(
+        _sse_response_body(body),
+        publish=None,
+        model=_free_model(),
+        reasoning_field=None,
+    )
+    assert resp.message.text == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event", "status"),
+    [
+        ({"object": "error", "message": "boom", "code": "server_error"}, 500),
+        ({"error": {"message": "boom", "code": "rate_limit_exceeded"}}, 429),
+        ({"error": {"message": "boom"}}, None),
+    ],
+)
+async def test_consume_stream_raises_an_in_band_error_event(
+    event: MutableJSON,
+    status: int | None,
+) -> None:
+    with pytest.raises(UserFacingError, match="boom") as raised:
+        await consume_stream(
+            _sse_response([event]),
+            publish=None,
+            model=_free_model(),
+            reasoning_field=None,
+        )
+    assert error_status_code(raised.value) == status
+
+
+@pytest.mark.asyncio
 async def test_consume_stream_eof_without_done_raises_interrupted() -> None:
     body = (
         b'data: {"id": "stream-1", "choices": '
@@ -534,6 +632,12 @@ def test_provider_from_env_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
     p = _DummyProvider.from_env()
     assert p.api_key == "the-key"
     assert p.base_url == "https://stub.test/v1"
+
+
+def test_provider_from_key_keeps_the_key_and_endpoint() -> None:
+    p = _DummyProvider.from_key("the-key", base_url="https://other.test/v1")
+    assert (p.api_key, p.base_url) == ("the-key", "https://other.test/v1")
+    assert _DummyProvider.from_key("k").base_url == "https://stub.test/v1"
 
 
 def test_provider_from_env_requires_env_var_set() -> None:
@@ -655,10 +759,10 @@ async def test_model_close_closes_reusable_http_client() -> None:
     p = _DummyProvider.from_key("k")
     m = p.model("stub-1")
     client = httpx2.AsyncClient()
-    m._client = client
+    m._clients.set(client)
     await m.close()
     assert client.is_closed
-    assert m._client is None
+    assert m._clients.peek() is None
 
 
 def _make_provider_with_mock(
@@ -667,7 +771,7 @@ def _make_provider_with_mock(
     p = _DummyProvider.from_key("test-key")
     m = p.model()
     # Inject a pre-built client so ``_get_client`` returns it.
-    m._client = httpx2.AsyncClient(transport=handler)
+    m._clients.set(httpx2.AsyncClient(transport=handler))
     return p, m
 
 

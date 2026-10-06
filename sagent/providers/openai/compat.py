@@ -48,6 +48,7 @@ from sagent.lib import debug_log
 from sagent.lib.custom_json import (
     MutableJSON,
     MutableJSONValue,
+    ReadError,
     convert,
     json_unfreeze,
     parse,
@@ -64,6 +65,7 @@ from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import openai_usage
 from sagent.providers.openai import token_count
+from sagent.providers.openai.responses import OpenAIStreamError
 from sagent.types.cost import ServiceTier, TokenCount
 from sagent.types.model import (
     ModelRequest,
@@ -88,84 +90,6 @@ logger = logging.getLogger(__name__)
 _STREAM_IDLE_TIMEOUT = (
     600.0  # house-ignore[globals] -- Stream idle timeout, user-retunable.
 )
-
-
-class OpenAICompat:
-    """Base provider for OpenAI chat-completions compatible endpoints."""
-
-    ENV_VAR: ClassVar[str] = ""
-    BASE_URL: ClassVar[str] = ""
-    catalog = ModelCatalog(models=ModelTable(rows=()), transport=compatible())
-
-    MODEL_CLASS: ClassVar[type[OpenAICompatModel]]
-
-    def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
-        self.api_key = api_key
-        self.base_url = base_url or self.BASE_URL
-
-    @classmethod
-    def from_key(cls, api_key: str, *, base_url: str | None = None) -> Self:
-        """Build provider from an API key.
-
-        Args:
-          api_key: API key for the chat-completions endpoint.
-          base_url: Override for the provider's ``BASE_URL``.
-
-        Returns:
-          provider: Configured provider instance.
-
-        """
-        return cls(api_key=api_key, base_url=base_url)
-
-    @classmethod
-    def from_env(cls, *, base_url: str | None = None) -> Self:
-        """Build provider from the class's ``ENV_VAR``.
-
-        Args:
-          base_url: Override for the provider's ``BASE_URL``.
-
-        Returns:
-          provider: Configured provider instance.
-
-        Raises:
-          RuntimeError: If the API key is not configured.
-
-        """
-        if not cls.ENV_VAR:
-            raise RuntimeError(f"{cls.__name__} has no ENV_VAR set.")
-        key = os.environ.get(cls.ENV_VAR, "")
-        if not key:
-            raise RuntimeError(f"{cls.__name__} API key not configured.")
-        return cls(api_key=key, base_url=base_url)
-
-    def model(
-        self,
-        model_id: str | None = None,
-    ) -> OpenAICompatModel:
-        """Create a model backend.
-
-        Args:
-          model_id: Catalog id with optional tags, or a role name.
-
-        Returns:
-          model: Chat-completions model backend.
-
-        Raises:
-          ValueError: If ``model_id`` is not in the catalog or requests an
-              unsupported context.
-
-        """
-        mid = model_id if model_id is not None else "default"
-        capability, settings = self.catalog.resolve(mid)
-        model_class = cast(
-            type[OpenAICompatModel],
-            getattr(self, "MODEL_CLASS", OpenAICompatModel),
-        )
-        return model_class(
-            provider=self,
-            capability=capability,
-            settings=settings,
-        )
 
 
 class OpenAICompatModel(ModelDefaults):
@@ -279,16 +203,6 @@ class OpenAICompatModel(ModelDefaults):
         tier = self.settings.service_tier
         return tier if tier != "auto" else None
 
-    @property
-    def _client(self) -> httpx2.AsyncClient | None:
-        """The running loop's HTTP client, if one has been opened."""
-        return self._clients.peek()
-
-    @_client.setter
-    def _client(self, value: httpx2.AsyncClient) -> None:
-        """Install a client for this loop, replacing any existing one."""
-        self._clients.set(value)
-
     async def _get_client(self) -> httpx2.AsyncClient:
         """Return a reused ``AsyncClient`` (per-model). Lazy-created."""
         client = self._clients.get()
@@ -345,15 +259,16 @@ class OpenAICompatModel(ModelDefaults):
                     request,
                     self.limits.max_image_edge_px,
                     self.limits.max_image_bytes,
+                    reasoning_field=self._reasoning_field,
                 ),
             ],
             "temperature": request.temperature,
         }
         if request.max_response_tokens is not None:
-            # OpenAI reasoning models (gpt-5 / o-series) reject ``max_tokens``
-            # with a 400 and require ``max_completion_tokens``; a row offering an
-            # effort is one. A vendor whose ids differ rewrites the field in
-            # ``_transform_body``.
+            # Chat-completions reasoning rows (o-series and reasoning-capable
+            # vendors) reject ``max_tokens`` with a 400 and require
+            # ``max_completion_tokens``; a row offering an effort is one. A vendor
+            # whose ids differ rewrites the field in ``_transform_body``.
             field = (
                 "max_completion_tokens"
                 if self.capability.thinking.effort != frozenset({"none"})
@@ -458,10 +373,89 @@ class OpenAICompatModel(ModelDefaults):
         return self._last_usage
 
 
+class OpenAICompat:
+    """Base provider for OpenAI chat-completions compatible endpoints."""
+
+    ENV_VAR: ClassVar[str] = ""
+    BASE_URL: ClassVar[str] = ""
+    catalog = ModelCatalog(models=ModelTable(rows=()), transport=compatible())
+
+    MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = OpenAICompatModel
+
+    def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
+        self.api_key = api_key
+        self.base_url = base_url or self.BASE_URL
+
+    @classmethod
+    def from_key(cls, api_key: str, *, base_url: str | None = None) -> Self:
+        """Build provider from an API key.
+
+        Args:
+          api_key: API key for the chat-completions endpoint.
+          base_url: Override for the provider's ``BASE_URL``.
+
+        Returns:
+          provider: Configured provider instance.
+
+        """
+        return cls(api_key=api_key, base_url=base_url)
+
+    @classmethod
+    def from_env(cls, *, base_url: str | None = None) -> Self:
+        """Build provider from the class's ``ENV_VAR``.
+
+        Args:
+          base_url: Override for the provider's ``BASE_URL``.
+
+        Returns:
+          provider: Configured provider instance.
+
+        Raises:
+          RuntimeError: If the API key is not configured.
+
+        """
+        if not cls.ENV_VAR:
+            raise RuntimeError(f"{cls.__name__} has no ENV_VAR set.")
+        key = os.environ.get(cls.ENV_VAR, "")
+        if not key:
+            raise RuntimeError(f"{cls.__name__} API key not configured.")
+        return cls(api_key=key, base_url=base_url)
+
+    def model(
+        self,
+        model_id: str | None = None,
+    ) -> OpenAICompatModel:
+        """Create a model backend.
+
+        Args:
+          model_id: Catalog id with optional tags, or a role name.
+
+        Returns:
+          model: Chat-completions model backend.
+
+        Raises:
+          ValueError: If ``model_id`` is not in the catalog or requests an
+              unsupported context.
+
+        """
+        mid = model_id if model_id is not None else "default"
+        capability, settings = self.catalog.resolve(mid)
+        return self.MODEL_CLASS(
+            provider=self,
+            capability=capability,
+            settings=settings,
+        )
+
+    async def close_sdk(self) -> None:
+        """Do nothing: each model owns and closes its own client."""
+
+
 def build_messages(
     request: ModelRequest,
     max_image_dim: int = 0,
     max_image_bytes: int = 0,
+    *,
+    reasoning_field: str | None = None,
 ) -> list[MutableJSON]:
     """Convert history entries to OpenAI chat-completions format.
 
@@ -476,6 +470,8 @@ def build_messages(
       max_image_dim: Maximum image dimension (pixels); larger inputs are
           resized before encoding.
       max_image_bytes: Maximum image size in bytes after resize.
+      reasoning_field: Assistant-message field the vendor reads replayed
+          reasoning from; ``None`` drops reasoning from the replay.
 
     Returns:
       messages: Chat-completions wire-format messages.
@@ -507,6 +503,16 @@ def build_messages(
                 "role": "assistant",
                 "content": entry.text or None,
             }
+            reasoning = "".join(
+                str(block.get("text") or "")
+                for block in entry.thinking_blocks
+                if block.get("type") == "reasoning"
+            )
+            if reasoning_field and reasoning:
+                # Kimi/Qwen/MiniMax thinking models expect their own prior
+                # reasoning back on tool-call turns; omitting it degrades or
+                # rejects the continuation.
+                m[reasoning_field] = reasoning
             if tool_calls_wire:
                 m["tool_calls"] = cast(MutableJSONValue, tool_calls_wire)
             messages.append(m)
@@ -538,6 +544,8 @@ def build_messages(
                             "image_url": {"url": f"data:{mime_type};base64,{b64}"},
                         },
                     )
+                else:
+                    _warn_skipped_attachment(att.descriptor)
     _flush_images(messages, pending_images)
     return messages
 
@@ -560,10 +568,7 @@ def _build_user_message(
         att for att in entry.attachments if not _is_image_mime(att.descriptor)
     ]
     for att in non_image_atts:
-        logger.warning(
-            "OpenAI-compat: skipping non-image attachment (mime=%s)",
-            att.descriptor,
-        )
+        _warn_skipped_attachment(att.descriptor)
     if not image_atts:
         return {"role": "user", "content": entry.text}
     blocks: list[MutableJSON] = []
@@ -589,6 +594,10 @@ def _build_user_message(
 def _is_image_mime(descriptor: str) -> bool:
     """Check whether a type is an image content type (no descriptor registry needed)."""
     return descriptor.startswith("image/")
+
+
+def _warn_skipped_attachment(descriptor: str) -> None:
+    logger.warning("OpenAI-compat: skipping non-image attachment (mime=%s)", descriptor)
 
 
 def _extract_usage(usage: MutableJSON) -> tuple[int, int, int, int]:
@@ -628,6 +637,10 @@ async def consume_stream(
     Returns:
       response: Assembled ``ModelResponse`` with usage and cost filled in.
 
+    Raises:
+      OpenAIStreamError: The server sent an in-band error event.
+      StreamInterruptedError: The stream ended without ``[DONE]``.
+
     """
     text_parts: list[str] = []
     thinking_parts: list[str] = []
@@ -654,8 +667,10 @@ async def consume_stream(
                 break
             try:
                 event = parse(data_str, dict[str, object])
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, ReadError):
                 continue
+            if "error" in event or event.get("object") == "error":
+                raise _stream_error(event)
             if not message_id:
                 message_id = str(event.get("id") or "")
             event_usage = event.get("usage")
@@ -753,6 +768,26 @@ async def consume_stream(
     if not saw_done:
         raise StreamInterruptedError(response)
     return response
+
+
+def _stream_error(event: Mapping[str, object]) -> OpenAIStreamError:
+    """Classify an in-band SSE error event, flat or nested under ``error``."""
+    error = convert(event.get("error"), dict[str, object], default=None) or event
+    message = convert(error.get("message"), str, default=None) or "unknown error"
+    code = convert(error.get("code"), str, default=None) or convert(
+        error.get("type"),
+        str,
+        default=None,
+    )
+    details = ["OpenAI-compatible stream error"]
+    if code:
+        details.append(f"code={code}")
+    details.append(message)
+    return OpenAIStreamError(
+        ": ".join(details),
+        code=code,
+        param=convert(error.get("param"), str, default=None),
+    )
 
 
 def _parse_tool_arguments(

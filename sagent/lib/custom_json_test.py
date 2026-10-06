@@ -57,7 +57,6 @@ from sagent.lib.custom_json import (
     JSONValue,
     ReadError,
     convert,
-    convert_or_none,
     decode_graph,
     encode_graph,
     extract_unmodeled_fields,
@@ -1917,25 +1916,78 @@ class TestConvertDefault:
         assert convert("/a/b", Path, default=Path()) == Path("/a/b")
 
 
-class TestConvertOrNone:
-    """``convert_or_none``: missing, null, and malformed all read as ``None``."""
+class TestReadErrorPartial:
+    """A failed ``convert`` raises the value as far as it reads, and what did not."""
 
-    def test_a_present_value_is_converted(self) -> None:
-        assert convert_or_none(3, int) == 3
+    def test_a_clean_value_converts_and_raises_nothing(self) -> None:
+        tree = to_builtins(_Report(parts=(_Part(size=3),)))
+        assert convert(tree, _Report) == _Report(parts=(_Part(size=3),))
 
-    def test_null_is_none(self) -> None:
-        assert convert_or_none(None, int) is None
+    def test_a_bad_scalar_is_wholly_invalid(self) -> None:
+        caught = _caught("x", int)
+        assert caught.partial == Invalid(raw="x", reason=caught.bad[()].reason)
+        assert list(caught.bad) == [()]
+        assert "Expected `int`" in caught.bad[()].reason
 
-    @pytest.mark.parametrize("value", ["3", 3.5, True, [1], {"a": 1}])
-    def test_a_malformed_value_is_none_not_an_error(self, value: object) -> None:
-        assert convert_or_none(value, int) is None
+    def test_a_bad_field_is_invalid_in_place_and_the_rest_reads(self) -> None:
+        caught = _caught({"name": 3, "ratio": 0.25}, _Report)
+        partial = cast(_Report, caught.partial)
+        assert partial.ratio == 0.25
+        assert partial.name == caught.bad["name",]
+        assert caught.bad["name",].raw == 3
 
-    def test_a_container_is_all_or_nothing(self) -> None:
-        assert convert_or_none([1, "x"], list[int]) is None
+    def test_a_required_field_that_is_bad_is_invalid_in_place(self) -> None:
+        caught = _caught({"owner": 5, "history": []}, _Ledger)
+        partial = cast(_Ledger, caught.partial)
+        assert partial.owner == Invalid(raw=5, reason=caught.bad["owner",].reason)
+        assert partial.history == ()
 
-    def test_lax_is_opt_in(self) -> None:
-        assert convert_or_none("3", int) is None
-        assert convert_or_none("3", int, strict=False) == 3
+    def test_a_missing_required_field_is_invalid_in_place(self) -> None:
+        caught = _caught({"history": []}, _Ledger)
+        assert list(caught.bad) == [("owner",)]
+        assert cast(_Ledger, caught.partial).owner == caught.bad["owner",]
+
+    def test_a_bad_list_element_is_invalid_and_its_neighbours_read(self) -> None:
+        caught = _caught({"label": "l", "sizes": [1, "x", 3]}, _Holder)
+        sizes = cast(_Holder, caught.partial).sizes
+        assert sizes == (1, caught.bad["sizes", 1], 3)
+
+    def test_a_bad_mapping_value_is_invalid_and_its_neighbours_read(self) -> None:
+        caught = _caught({"a": 1, "b": "x"}, dict[str, int])
+        assert caught.partial == {"a": 1, "b": caught.bad[("b",)]}
+
+    def test_a_bad_part_deep_inside_is_named_by_its_full_path(self) -> None:
+        caught = _caught({"part": {"size": "x"}, "label": "l"}, _Holder)
+        assert list(caught.bad) == [("part", "size")]
+        assert cast(_Holder, caught.partial).label == "l"
+
+    def test_an_unknown_key_is_named_and_left_out(self) -> None:
+        caught = _caught({"size": 1, "bogus": 2}, _Part)
+        assert caught.partial == _Part(size=1)
+        assert list(caught.bad) == [("bogus",)]
+
+    def test_the_partial_writes_back_as_it_was_stated(self) -> None:
+        stated = {
+            "py/object": f"{_Holder.__module__}._Holder",
+            "label": "l",
+            "sizes": [1, "x"],
+        }
+        caught = _caught(stated, _Holder)
+        assert to_builtins(caught.partial) == {
+            **stated,
+            "part": {"py/object": _PART_TAG, "size": 2},
+        }
+
+    def test_a_plain_read_error_holds_nothing(self) -> None:
+        error = ReadError("x")
+        assert (error.partial, error.bad) == (None, {})
+
+
+def _caught(value: object, target: object) -> ReadError:
+    """Return the ``ReadError`` converting ``value`` raises."""
+    with pytest.raises(ReadError) as caught:
+        convert(value, target)
+    return caught.value
 
 
 class TestRead:
@@ -2301,6 +2353,13 @@ class _Ledger:
     owner: str
     latest: _Part | _Report | None = None
     history: tuple[_Part | _Report, ...] = ()
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class _Holder:
+    label: str
+    part: _Part = _Part()
+    sizes: tuple[int, ...] = ()
 
 
 if __name__ == "__main__":

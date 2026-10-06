@@ -166,7 +166,10 @@ async def test_compact_strips_analysis_and_extracts_summary_tag() -> None:
         stream_responses=[ModelResponse(message=AssistantMessage(text=text))],
     )
     compactor = SummaryCompactor()
-    history: list[ModelContextEvent] = [UserMessage(text="orig")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="orig"),
+        AssistantMessage(text="resp"),
+    ]
     result = await _apply_compact(compactor, history, model)
     assert len(result) == 1
     first = result[0]
@@ -175,7 +178,6 @@ async def test_compact_strips_analysis_and_extracts_summary_tag() -> None:
     assert "Summary:" in first.text
     assert body in first.text
     assert "<analysis>" not in first.text
-    assert "orig" in first.text
 
 
 @pytest.mark.asyncio
@@ -192,7 +194,10 @@ async def test_compact_no_summary_tag_routes_through_fallback() -> None:
         stream_responses=[ModelResponse(message=AssistantMessage(text=text))],
     )
     compactor = SummaryCompactor()
-    history: list[ModelContextEvent] = [UserMessage(text="orig")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="orig"),
+        AssistantMessage(text="resp"),
+    ]
     override = await _build_compact_override(compactor, history, model)
     assert override.strategy == "summary_fallback"
     assert override.fallback_reason == "missing <summary>"
@@ -401,7 +406,10 @@ async def test_compact_includes_custom_instructions_in_request() -> None:
     body = "summary"
     model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="x"),
+        AssistantMessage(text="y"),
+    ]
     _ = await _apply_compact(
         compactor,
         history,
@@ -422,7 +430,10 @@ async def test_compact_ignores_blank_custom_instructions() -> None:
     body = "summary"
     model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="x"),
+        AssistantMessage(text="y"),
+    ]
     _ = await _apply_compact(compactor, history, model, custom_instructions="   ")
     assert model.stream_calls == 1
     # Blank guidance must not inject an empty guidance fence.
@@ -438,7 +449,10 @@ async def test_compact_strips_image_attachments() -> None:
     model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor()
     img = BytesMessage(data=b"\x89PNG", descriptor="image/png")
-    history: list[ModelContextEvent] = [UserMessage(text="see", attachments=(img,))]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="see", attachments=(img,)),
+        AssistantMessage(text="seen"),
+    ]
     _ = await _apply_compact(compactor, history, model)
     # The compact call succeeded with an image present (no attachment-related
     # crash). The actual stripping contract is asserted directly against
@@ -738,33 +752,31 @@ async def test_compact_drops_groups_on_token_gap_unknown() -> None:
 
 @pytest.mark.asyncio
 async def test_compact_keep_recent_larger_than_history_keeps_all() -> None:
-    """``keep_recent >= len(history)`` after snap-left returns the prefix."""
-    body = "summary"
-    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
+    """``keep_recent >= len(history)`` keeps everything and summarizes nothing."""
+    model = _ScriptedModel(stream_responses=[_summary_resp("invented")])
     compactor = SummaryCompactor(keep_recent=10)
     history: list[ModelContextEvent] = [
         UserMessage(text="m1"),
         AssistantMessage(text="a1"),
     ]
-    result = await _apply_compact(compactor, history, model)
-    # Keep-recent saturates: user tail is coalesced with continuation.
-    assert isinstance(result[0], UserMessage)
-    assert body in result[0].text
-    assert "m1" in result[0].text
-    assert result[1:] == history[1:]
+    override = await _build_compact_override(compactor, history, model)
+    assert model.stream_calls == 0
+    assert override.strategy == "summary_fallback"
+    assert override.preserved_tail_count == 2
+    assert override.payload[1:] == tuple(history[1:])
 
 
 @pytest.mark.asyncio
 async def test_compact_preserves_single_current_user_turn() -> None:
-    body = "summary"
-    model = _ScriptedModel(stream_responses=[_summary_resp(body)])
+    model = _ScriptedModel(stream_responses=[_summary_resp("invented")])
     compactor = SummaryCompactor()
     current = UserMessage(text="continue the task")
 
     result = await _apply_compact(compactor, [current], model)
 
+    assert model.stream_calls == 0
     assert isinstance(result[0], UserMessage)
-    assert body in result[0].text
+    assert "invented" not in result[0].text
     assert "continue the task" in result[0].text
 
 
@@ -974,7 +986,7 @@ async def test_custom_instructions_are_fenced_in_compactor_prompt() -> None:
 
     _ = await _build_compact_override(
         compactor,
-        [UserMessage(text="orig")],
+        [UserMessage(text="orig"), AssistantMessage(text="resp")],
         model,
         custom_instructions=guidance,
     )
@@ -1010,7 +1022,10 @@ async def test_compact_retries_on_transient_transport_error(
         stream_responses=[err, _summary_resp("recovered after retry")],
     )
     compactor = SummaryCompactor()
-    history: list[ModelContextEvent] = [UserMessage(text="orig")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="orig"),
+        AssistantMessage(text="resp"),
+    ]
     result = await _apply_compact(compactor, history, model)
     first = result[0]
     assert isinstance(first, UserMessage)
@@ -1076,7 +1091,10 @@ async def test_compactor_uses_alternate_model_when_provided() -> None:
     override_model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     primary_model = _ScriptedModel(stream_responses=[])
     compactor = SummaryCompactor(model=override_model)
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="x"),
+        AssistantMessage(text="y"),
+    ]
     result = await _apply_compact(compactor, history, primary_model)
     assert override_model.stream_calls == 1
     assert primary_model.stream_calls == 0
@@ -1140,7 +1158,10 @@ async def test_verify_summary_false_skips_second_call() -> None:
     body = "first-pass summary"
     model = _ScriptedModel(stream_responses=[_summary_resp(body)])
     compactor = SummaryCompactor(verify_summary=False)
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="x"),
+        AssistantMessage(text="y"),
+    ]
     result = await _apply_compact(compactor, history, model)
     assert model.stream_calls == 1
     first = result[0]
@@ -1160,7 +1181,10 @@ async def test_verify_summary_true_uses_improved_summary() -> None:
         ],
     )
     compactor = SummaryCompactor(verify_summary=True)
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="x"),
+        AssistantMessage(text="y"),
+    ]
     result = await _apply_compact(compactor, history, model)
     assert model.stream_calls == 2
     first_entry = result[0]
@@ -1179,7 +1203,10 @@ async def test_verify_summary_identical_keeps_first_pass() -> None:
         ],
     )
     compactor = SummaryCompactor(verify_summary=True)
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="x"),
+        AssistantMessage(text="y"),
+    ]
     result = await _apply_compact(compactor, history, model)
     assert model.stream_calls == 2
     first = result[0]
@@ -1205,7 +1232,10 @@ async def test_verify_summary_unparseable_keeps_first_pass() -> None:
         ],
     )
     compactor = SummaryCompactor(verify_summary=True)
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="x"),
+        AssistantMessage(text="y"),
+    ]
     result = await _apply_compact(compactor, history, model)
     first = result[0]
     assert isinstance(first, UserMessage)
@@ -1221,7 +1251,10 @@ async def test_verify_summary_failure_keeps_first_pass() -> None:
         stream_responses=[_summary_resp(body), RuntimeError("verifier broke")],
     )
     compactor = SummaryCompactor(verify_summary=True)
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="x"),
+        AssistantMessage(text="y"),
+    ]
     result = await _apply_compact(compactor, history, model)
     assert model.stream_calls == 2
     first = result[0]
@@ -1241,9 +1274,11 @@ async def test_verify_summary_retries_with_shrunk_history_on_overflow() -> None:
     )
     compactor = SummaryCompactor(verify_summary=True, max_attempts=3)
     history: list[ModelContextEvent] = [
-        UserMessage(text="first round has enough bytes to drop"),
+        UserMessage(text="first round has enough bytes to drop " * 4),
         AssistantMessage(text="first response"),
         UserMessage(text="second round"),
+        AssistantMessage(text="second response"),
+        UserMessage(text="current turn"),
     ]
 
     result = await _apply_compact(compactor, history, model)
@@ -1359,7 +1394,10 @@ async def test_compact_empty_model_output_records_summary_fallback() -> None:
         stream_responses=[ModelResponse(message=AssistantMessage(text=""))],
     )
     compactor = SummaryCompactor()
-    history: list[ModelContextEvent] = [UserMessage(text="orig")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="orig"),
+        AssistantMessage(text="resp"),
+    ]
     override = await _build_compact_override(compactor, history, model)
     assert override.strategy == "summary_fallback"
     assert override.fallback_reason
@@ -1379,7 +1417,10 @@ async def test_compact_missing_summary_tag_records_summary_fallback() -> None:
         ],
     )
     compactor = SummaryCompactor()
-    history: list[ModelContextEvent] = [UserMessage(text="orig")]
+    history: list[ModelContextEvent] = [
+        UserMessage(text="orig"),
+        AssistantMessage(text="resp"),
+    ]
     override = await _build_compact_override(compactor, history, model)
     assert override.strategy == "summary_fallback"
     assert "missing <summary>" in override.fallback_reason
@@ -1656,6 +1697,101 @@ async def test_compact_fallback_token_before_uses_model_estimator() -> None:
     assert override.strategy == "summary_fallback"
     expected = _real_tokens(model, history)
     assert override.token_before == expected
+
+
+@pytest.mark.parametrize("raw", ["<summary> </summary>", "<summary>\n\t</summary>"])
+def test_format_summary_rejects_empty_payload(raw: str) -> None:
+    assert _format_summary(raw) is None
+
+
+def test_compactor_rejects_nan_utilization_trigger() -> None:
+    with pytest.raises(ValueError, match="utilization_trigger"):
+        _ = SummaryCompactor(utilization_trigger=float("nan"))
+
+
+def test_compactor_rejects_nan_compression() -> None:
+    with pytest.raises(ValueError, match="compression"):
+        _ = SummaryCompactor(compression=float("nan"))
+
+
+@pytest.mark.asyncio
+async def test_compact_empty_summary_block_falls_back() -> None:
+    model = _ScriptedModel(
+        stream_responses=[
+            ModelResponse(message=AssistantMessage(text="<summary> </summary>")),
+        ],
+    )
+    history: list[ModelContextEvent] = [
+        UserMessage(text="orig"),
+        AssistantMessage(text="resp"),
+    ]
+    override = await _build_compact_override(SummaryCompactor(), history, model)
+    assert override.strategy == "summary_fallback"
+
+
+@pytest.mark.asyncio
+async def test_verify_empty_summary_block_keeps_first_pass() -> None:
+    model = _ScriptedModel(
+        stream_responses=[
+            _summary_resp("valid first pass"),
+            ModelResponse(message=AssistantMessage(text="<summary>\n</summary>")),
+        ],
+    )
+    history: list[ModelContextEvent] = [
+        UserMessage(text="x"),
+        AssistantMessage(text="y"),
+    ]
+    result = await _apply_compact(SummaryCompactor(verify_summary=True), history, model)
+    first = result[0]
+    assert isinstance(first, UserMessage)
+    assert "valid first pass" in first.text
+
+
+def test_continuation_preserves_template_tokens_in_summary() -> None:
+    body = "literal {{resume}} and {{recent}}"
+    assert body in build_continuation(body, recent_preserved=True)
+
+
+@pytest.mark.asyncio
+async def test_empty_summarized_region_never_calls_model() -> None:
+    model = _ScriptedModel(stream_responses=[_summary_resp("invented")])
+    history: list[ModelContextEvent] = [UserMessage(text="a"), UserMessage(text="b")]
+    splice = await _build_compact_override(SummaryCompactor(), history, model)
+    assert model.stream_calls == 0
+    assert splice.strategy == "summary_fallback"
+    assert splice.preserved_tail_count == 2
+
+
+@pytest.mark.asyncio
+async def test_overflow_retry_changes_capped_tool_request() -> None:
+    call = ToolCall(id="c", name="Bash", args={})
+    history: list[ModelContextEvent] = [
+        UserMessage(text="work"),
+        AssistantMessage(tool_calls=(call,)),
+        ToolResult(call_id="c", content="x" * 100),
+    ]
+    model = _ScriptedModel(
+        stream_responses=[PromptTooLongError(), _summary_resp("recovered")],
+    )
+    await _build_compact_override(
+        SummaryCompactor(retry_tool_result_cap_chars=40),
+        history,
+        model,
+    )
+    assert model.stream_calls == 2
+    initial = next(
+        entry for entry in model.received[0].messages if isinstance(entry, ToolResult)
+    )
+    retried = next(
+        entry for entry in model.received[1].messages if isinstance(entry, ToolResult)
+    )
+    assert len(retried.content) < len(initial.content)
+
+
+def test_continuation_kept_prefix_is_above() -> None:
+    text = build_continuation("body", recent_preserved=True, direction="up_to")
+    assert "earlier messages appear above" in text
+    assert "appear below" not in text
 
 
 if __name__ == "__main__":

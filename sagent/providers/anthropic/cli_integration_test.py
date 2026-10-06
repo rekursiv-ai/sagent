@@ -218,7 +218,7 @@ async def test_session_resume_two_turns() -> None:
                 ],
             ),
         )
-        assert model._session_initialized is True, "turn 1 must establish the session"
+        assert model._session_on_disk is True, "turn 1 must establish the session"
 
         response = await model.stream(
             ModelRequest(

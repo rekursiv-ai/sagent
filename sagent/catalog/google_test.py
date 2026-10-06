@@ -8,6 +8,7 @@ import pytest
 
 from sagent.catalog import google
 from sagent.types.capability import (
+    ModelCapability,
     ModelSettings,
     ThinkingBudget,
     ThinkingEffort,
@@ -209,6 +210,16 @@ def test_effort_none_leaves_the_models_default_in_place(model_id: str) -> None:
 
 def test_budget_none_sends_no_thinking_config() -> None:
     assert _wire("gemini-flash-2.5", budget="none") is None
+
+
+@pytest.mark.parametrize(
+    "transport",
+    [google.api(), google.cli(), google.subscription()],
+    ids=["api", "cli", "subscription"],
+)
+def test_no_transport_offers_redacted_thinking(transport: ModelCapability) -> None:
+    """Gemini has no server-side redaction to select."""
+    assert "redacted" not in transport.thinking.output
 
 
 if __name__ == "__main__":

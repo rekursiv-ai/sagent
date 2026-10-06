@@ -23,6 +23,7 @@ from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import walk_commands
 from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import ToolResult
+from sagent.types.tools import DEFAULT_MAX_RESULT_CHARS
 
 
 if TYPE_CHECKING:
@@ -40,7 +41,7 @@ class WebFetch:
     name = "WebFetch"
     tool_id = "application/x-tool-webfetch"
     clearable_results = True
-    max_result_chars = 100_000
+    max_result_chars = DEFAULT_MAX_RESULT_CHARS
     description = load_tool_description("WebFetch")
     directive_schema = json_freeze(FetchBodyParamsSchema.json_schema())
 

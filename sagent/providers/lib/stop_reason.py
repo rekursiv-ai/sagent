@@ -52,9 +52,13 @@ TRUNCATED_STOP_REASONS: frozenset[str] = frozenset(
 # The model produced no usable answer.
 FAILED_STOP_REASONS: frozenset[str] = frozenset({"model_refusal", "model_cancelled"})
 
-# The model tried to call a tool and the vendor could not parse it. The turn
-# carries nothing to keep, but a resend usually succeeds.
-RETRYABLE_STOP_REASONS: frozenset[str] = frozenset({"model_malformed_tool_call"})
+# The vendor ended the turn without a usable verdict: it could not parse the
+# model's tool call, or it reported an unspecified/"other" stop (Gemini
+# ``OTHER`` / ``FINISH_REASON_UNSPECIFIED``). Consuming such a turn as success
+# keeps whatever fragment arrived; a resend usually succeeds.
+RETRYABLE_STOP_REASONS: frozenset[str] = frozenset(
+    {"model_malformed_tool_call", "model_unknown"},
+)
 
 _ANTHROPIC_MAP: Final[dict[str, str]] = {
     "end_turn": "model_finished",

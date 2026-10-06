@@ -2,8 +2,8 @@
 
 Decides whether an error is transient (retry) or fatal (propagate),
 extracts a server-advertised delay, and surfaces rate limits as
-``RateLimitError`` so interactive callers can pretty-print
-"resumes at HH:MM:SS".
+``RateLimitError`` (other long advertised waits as ``RetryDeferredError``)
+so interactive callers can pretty-print "resumes at HH:MM:SS".
 
 Constants:
 
@@ -74,9 +74,10 @@ SUSPENSION_NOTICE_SEC = (
     5.0  # house-ignore[globals] -- Suspension-banner notice threshold.
 )
 # A throttle without a long advertised reset clears in seconds-to-minutes
-# (every halt in a captured session recovered on an immediate manual retry), so rate-limit retries run on this wall-clock budget instead of the
-# attempt counter -- the generic ``max_attempts`` cap gives up after ~9s of
-# effective waiting, just before the limiter relents.
+# (every halt in a captured session recovered on an immediate manual retry),
+# so rate-limit retries run on this wall-clock budget instead of the attempt
+# counter -- the generic ``max_attempts`` cap gives up after ~9s of effective
+# waiting, just before the limiter relents.
 RATE_LIMIT_RETRY_BUDGET_SEC = (
     180.0  # house-ignore[globals] -- Rate-limit retry wall-clock budget.
 )
@@ -114,21 +115,22 @@ class RetriesExhaustedError(Exception):
     """All retry attempts failed."""
 
 
-class RateLimitError(Exception):
-    """Provider rate limit that interactive mode will not sleep through.
+class RetryDeferredError(Exception):
+    """A retryable error whose advertised wait interactive mode will not sleep.
 
-    Raised immediately when the server advertises a reset beyond
-    ``INTERACTIVE_MAX_SLEEP_SEC``, or once ``RATE_LIMIT_RETRY_BUDGET_SEC``
-    of capped-backoff retries fails to outlast the throttle. Carries the
-    reset timestamp (seconds since epoch) when the provider advertised
-    one via ``retry-after`` or ``anthropic-ratelimit-unified-reset``.
-    The message is pre-formatted for REPL display.
+    Raised when the server advertises a retry beyond
+    ``INTERACTIVE_MAX_SLEEP_SEC`` for an error that is not a rate limit (a
+    503 with ``Retry-After``, say). Carries the retry timestamp (seconds
+    since epoch). The message is pre-formatted for REPL display.
 
     Args:
-      reset_time: Unix timestamp when the limit lifts, or ``None``.
+      reset_time: Unix timestamp when a retry may succeed, or ``None``.
       original: The underlying provider exception, retained for context.
 
     """
+
+    headline: str = "Service unavailable"
+    """Leading phrase of the display message."""
 
     def __init__(self, reset_time: float | None, original: Exception) -> None:
         self.reset_time = reset_time
@@ -137,12 +139,25 @@ class RateLimitError(Exception):
         if reset_time is not None and reset_time > time.time():
             clock = time.strftime("%H:%M:%S", time.localtime(reset_time))
             delta = reset_time - time.time()
-            msg = f"Rate limited. Resumes at {clock} (~{humanize_duration(delta)})."
+            msg = f"{self.headline}. Resumes at {clock} (~{humanize_duration(delta)})."
         else:
-            msg = "Rate limited. Try again shortly."
+            msg = f"{self.headline}. Try again shortly."
         super().__init__(msg)
         if self.diagnostics:
-            logger.info("RateLimitError diagnostics: %s", self.diagnostics)
+            logger.info("%s diagnostics: %s", type(self).__name__, self.diagnostics)
+
+
+class RateLimitError(RetryDeferredError):
+    """Provider rate limit that interactive mode will not sleep through.
+
+    Raised immediately when the server advertises a reset beyond
+    ``INTERACTIVE_MAX_SLEEP_SEC``, or once ``RATE_LIMIT_RETRY_BUDGET_SEC``
+    of capped-backoff retries fails to outlast the throttle. Carries the
+    reset timestamp (seconds since epoch) when the provider advertised
+    one via ``retry-after`` or ``anthropic-ratelimit-unified-reset``.
+    """
+
+    headline: str = "Rate limited"
 
 
 def is_retryable(error: Exception, model: Model) -> bool:
@@ -227,10 +242,11 @@ def extract_retry_after(error: Exception) -> float | None:
     1. ``error.retry_after_ms`` attribute (a structured hint a CLI-transport
        provider parses out of a stream-json event; it has no HTTP response).
     2. ``retry-after`` header (RFC 7231, either delta-seconds or HTTP-date).
-    3. ``anthropic-ratelimit-unified-reset`` (Unix timestamp when rate
-       limit fully clears) - converted to delta-from-now.
-    4. Google ``google.rpc.RetryInfo.retryDelay`` (e.g. ``"16s"``),
+    3. Google ``google.rpc.RetryInfo.retryDelay`` (e.g. ``"16s"``),
        carried in the JSON error body rather than a header.
+    4. ``anthropic-ratelimit-unified-reset`` (Unix timestamp when rate
+       limit fully clears) - converted to delta-from-now, and only when the
+       request was actually throttled.
 
     All return paths are clamped to ``_MAX_SERVER_RETRY_AFTER_SEC`` (24h)
     to neutralize a misconfigured upstream advertising a far-future reset
@@ -408,7 +424,8 @@ async def send_with_retry(
           a failed first attempt so the prefix is skipped on retry;
           thinking only fires on the first attempt (on retry it is read
           from the final response so the renderer never repeats it).
-      max_attempts: Maximum number of retry attempts.
+      max_attempts: Total sends allowed for ordinary retryable errors, the
+          first included; rate-limit and persistent retries have their own caps.
       persistent_retry: Enable persistent backoff for 429/529 errors.
       publish_recoverable: Callback for transient errors that recovered;
           each retry attempt invokes it with a ``multipart/x-error`` Message
@@ -427,8 +444,11 @@ async def send_with_retry(
       response: Completed model response.
 
     Raises:
+      ValueError: If ``max_attempts`` is below 1.
       RetriesExhaustedError: If all attempts fail (including persistent
           mode hitting ``max_persistent_attempts``).
+      RetryDeferredError: On a non-rate-limit error whose advertised retry
+          lies beyond ``INTERACTIVE_MAX_SLEEP_SEC``, in non-persistent mode.
       RateLimitError: On a rate limit (429 or in-band) in non-persistent
           mode: immediately when the server advertises a reset beyond
           ``INTERACTIVE_MAX_SLEEP_SEC``, otherwise once
@@ -436,6 +456,8 @@ async def send_with_retry(
           fails to outlast the throttle.
 
     """
+    if max_attempts < 1:
+        raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
     if resume_retry_at is not None:
         delay = max(0.0, resume_retry_at - time.time())
         # A resume wait past the interactive ceiling is replayed (not advanced)
@@ -545,15 +567,21 @@ async def send_with_retry(
             # Interactive (non-persistent) mode: never silently sleep for a
             # long server-advertised backoff. A multi-minute+ wait blocks the
             # whole REPL on one uninterruptible ``asyncio.sleep`` (the user
-            # can't even ``/login`` out of it). Surface it as a
-            # ``RateLimitError`` halt carrying the reset time so the user
-            # can switch models or wait deliberately.
+            # can't even ``/login`` out of it). Surface it as a halt carrying
+            # the reset time so the user can switch models or wait
+            # deliberately -- named a rate limit only when it is one.
             if (
                 not persistent
                 and server_delay is not None
                 and server_delay > INTERACTIVE_MAX_SLEEP_SEC
             ):
-                raise RateLimitError(time.time() + server_delay, e) from e
+                throttled = rate_limited or _unified_limit_rejected(
+                    _lower_headers(
+                        getattr(getattr(e, "response", None), "headers", {}),
+                    ),
+                )
+                deferred = RateLimitError if throttled else RetryDeferredError
+                raise deferred(time.time() + server_delay, e) from e
             if persistent:
                 persistent_attempt += 1
                 if persistent_attempt >= max_persistent_attempts:
@@ -812,12 +840,7 @@ def _google_retry_delay(body: str) -> float | None:
     # JSON encoding is a decimal-seconds string with a trailing ``s`` (e.g.
     # ``"16s"`` or ``"7.5s"``).
     match = re.search(r'"retryDelay"\s*:\s*"(\d+(?:\.\d+)?)s"', body)
-    if match is None:
-        return None
-    try:
-        return float(match.group(1))
-    except ValueError:
-        return None
+    return None if match is None else float(match.group(1))
 
 
 # Uncapped: a provider error body is the whole forensic payload, and a character clamp
@@ -835,10 +858,7 @@ def _response_body_text(response: object) -> str:
     except httpx2.ResponseNotRead:
         return ""
     if isinstance(raw, (bytes, bytearray)):
-        try:
-            return raw.decode("utf-8", errors="replace")
-        except (AttributeError, ValueError):
-            return ""
+        return raw.decode("utf-8", errors="replace")
     return ""
 
 

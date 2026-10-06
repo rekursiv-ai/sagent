@@ -61,12 +61,6 @@ _NEWLINE_HINT: Final = (
     "or `.` spanning newlines)."
 )
 
-# Linux caps one argv near 2 MiB and each string at 128 KiB; a few thousand
-# named files stay well under both when split here.
-# The Python backend's stand-in for ripgrep's refusal of a newline on a line:
-# an unescaped ``\n`` outside a character class. ``[^\n]`` stays allowed.
-_LITERAL_NEWLINE: Final = re.compile(r"(?<!\\)(?:\\\\)*\\n(?![^\[]*\])")
-
 # Field separators ripgrep is told to print; no path or text line holds them.
 _MATCH: Final = "\x01"
 _CONTEXT: Final = "\x02"
@@ -74,8 +68,45 @@ _CONTEXT: Final = "\x02"
 # What ripgrep's own engine says when only PCRE2 can run the pattern.
 _NEEDS_PCRE2: Final = ("look-around", "backreferences are not supported")
 
+# Linux caps one argv near 2 MiB and each string at 128 KiB; a few thousand
+# named files stay well under both when split here.
 ARGV_CHARS: Final = 100_000
 """Most characters of named paths one ``rg`` run takes."""
+
+# Starting ``rg`` and walking costs ~5 ms. Python's ``re`` runs ~0.02 to ~50 ns a
+# character depending on the pattern, so the choice is measured, not guessed:
+# list up to ``SMALL_FILES`` files (a bigger tree goes to ``rg`` after ~2 ms),
+# time the compiled pattern over ``_SAMPLE`` characters of their text, and search
+# in-process only when the projected cost beats ``_RG_MS``.
+#
+# Raising ``SMALL_FILES`` is not the free win it looks like: the walk that
+# counts the files is discarded when ``rg`` then runs, so every larger tree
+# pays it twice, and ``_projected_ms`` already vetoes a tree past
+# ``_RG_MS / _PER_FILE_MS`` files -- so a higher cap buys no in-process search.
+SMALL_FILES: Final = 128
+"""Most files searched in-process when ``rg`` is installed; ``-1`` always uses it."""
+_SAMPLE: Final = 16 << 10
+_RG_MS: Final = 4.0
+_PER_FILE_MS: Final = 0.02
+
+_Found = list[list[tuple[str, Path, bool]]]
+"""Per target, each file to search: its printed name, path, and whether walked."""
+
+
+# Python ``re`` and ripgrep read most syntax alike but not all: ``&&`` in a class,
+# ``\A``/``\Z``, ``(?>``, ``{,n}``, ``\N{}``, ``\p{}``, ``\x{}``, POSIX classes. With
+# ``rg`` installed the answer must be ripgrep's, so only a pattern made of the
+# shared core -- literals, ``.``, classes without these, anchors, ``\w\d\s\b``,
+# groups, alternation, ``?*+{m,n}`` -- is searched in-process.
+_SHARED: Final = re.compile(
+    r"""(?x)
+    (?: [^\\\[\]{}()&]                       # a plain character or metachar
+      | \\[\\.^$|?*+()\[\]{}/\-dDwWsSbBnrt]   # an escape both read the same
+      | \{\d+(?:,\d*)?\}                      # a bounded repeat with a minimum
+      | \(\?[:imsx]*:? | \( | \)              # plain and non-capturing groups
+      | \[\^?\]?(?:[^\]\\\[&]|\\[\\\]\-dDwWsSnrt^])*\]  # a class with no set ops
+    )*""",
+)
 
 
 class GrepError(Exception):
@@ -159,42 +190,6 @@ def grep(
     return _grep_python(targets, query, found=found)
 
 
-# Starting ``rg`` and walking costs ~5 ms. Python's ``re`` runs ~0.02 to ~50 ns a
-# character depending on the pattern, so the choice is measured, not guessed:
-# list up to ``SMALL_FILES`` files (a bigger tree goes to ``rg`` after ~2 ms),
-# time the compiled pattern over ``_SAMPLE`` characters of their text, and search
-# in-process only when the projected cost beats ``_RG_MS``.
-#
-# Raising ``SMALL_FILES`` is not the free win it looks like: the walk that
-# counts the files is discarded when ``rg`` then runs, so every larger tree
-# pays it twice, and ``_projected_ms`` already vetoes a tree past
-# ``_RG_MS / _PER_FILE_MS`` files -- so a higher cap buys no in-process search.
-SMALL_FILES: Final = 128
-"""Most files searched in-process when ``rg`` is installed; ``-1`` always uses it."""
-_SAMPLE: Final = 16 << 10
-_RG_MS: Final = 4.0
-_PER_FILE_MS: Final = 0.02
-
-_Found = list[list[tuple[str, Path, bool]]]
-"""Per target, each file to search: its printed name, path, and whether walked."""
-
-
-# Python ``re`` and ripgrep read most syntax alike but not all: ``&&`` in a class,
-# ``\A``/``\Z``, ``(?>``, ``{,n}``, ``\N{}``, ``\p{}``, ``\x{}``, POSIX classes. With
-# ``rg`` installed the answer must be ripgrep's, so only a pattern made of the
-# shared core -- literals, ``.``, classes without these, anchors, ``\w\d\s\b``,
-# groups, alternation, ``?*+{m,n}`` -- is searched in-process.
-_SHARED: Final = re.compile(
-    r"""(?x)
-    (?: [^\\\[\]{}()&]                       # a plain character or metachar
-      | \\[\\.^$|?*+()\[\]{}/\-dDwWsSbBnrt]   # an escape both read the same
-      | \{\d+(?:,\d*)?\}                      # a bounded repeat with a minimum
-      | \(\?[:imsx]*:? | \( | \)              # plain and non-capturing groups
-      | \[\^?\]?(?:[^\]\\\[&]|\\[\\\]\-dDwWsSnrt^])*\]  # a class with no set ops
-    )*""",
-)
-
-
 def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
     """Return the ``rg`` argv answering ``query`` over ``paths``.
 
@@ -240,6 +235,9 @@ def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
     if query.context_after > 0:
         cmd.extend(["-A", str(query.context_after)])
     if query.file_type:
+        cmd.extend(["--type-clear", query.file_type])
+        for pattern in TYPE_GLOBS[query.file_type]:
+            cmd.extend(["--type-add", f"{query.file_type}:{pattern}"])
         cmd.extend(["--type", query.file_type])
     if query.text:
         cmd.append("--text")
@@ -258,19 +256,20 @@ def _grep_rg(
 ) -> list[str]:
     """Answer ``query`` with ripgrep, one run per argv-sized batch of paths."""
     batches = list(_batches(paths))
+    run = partial(_run_rg, query=query, timeout_sec=timeout_sec)
     try:
-        first = _run_rg(rg_command(rg, batches[0], query), timeout_sec=timeout_sec)
+        first = run(rg_command(rg, batches[0], query))
     except GrepError as error:
         # Not ``--engine auto``: it also sends a refused ``\n`` to PCRE2,
         # which then silently matches nothing on a line.
         if query.pcre or not any(why in str(error) for why in _NEEDS_PCRE2):
             raise
         query = dataclasses.replace(query, pcre=True)
-        first = _run_rg(rg_command(rg, batches[0], query), timeout_sec=timeout_sec)
+        first = run(rg_command(rg, batches[0], query))
     # Each run is its own process, so further batches overlap freely.
     commands = [rg_command(rg, batch, query) for batch in batches[1:]]
     with ThreadPoolExecutor(max_workers=min(len(batches), os.cpu_count() or 1)) as pool:
-        rest = pool.map(partial(_run_rg, timeout_sec=timeout_sec), commands)
+        rest = pool.map(run, commands)
         blocks = [*first, *(block for found in rest for block in found)]
     order = {str(path): i for i, path in enumerate(paths)}
     blocks.sort(key=lambda block: _sort_key(block[0], paths, order))
@@ -285,8 +284,8 @@ def _grep_rg(
 
 # ``-l`` prints one name per line. Content rows read ``name M [n M] text`` with
 # ``M`` the ``_MATCH``/``_CONTEXT`` byte, which no path holds, so the first one
-# ends the name. ``-c`` rows and the binary-file note keep ripgrep's ``:``; a
-# name containing ``:`` is then found among the searched files' own names.
+# ends the name. ``-c`` rows split at their last ``:``; a binary-file note
+# splits at its fixed suffix, so either preserves colons in the file name.
 # ``--`` lines separate context groups and are re-added after sorting.
 def _file_blocks(
     out: str,
@@ -355,7 +354,12 @@ def _sort_key(
     return len(paths), (name,)
 
 
-def _run_rg(cmd: list[str], *, timeout_sec: float) -> list[tuple[str, list[str]]]:
+def _run_rg(
+    cmd: list[str],
+    *,
+    query: Query,
+    timeout_sec: float,
+) -> list[tuple[str, list[str]]]:
     """Run one ``rg`` argv and return its output, grouped by file."""
     try:
         done = subprocess.run(  # noqa: S603 -- Fixed ripgrep argv, no shell.
@@ -385,8 +389,8 @@ def _run_rg(cmd: list[str], *, timeout_sec: float) -> list[tuple[str, list[str]]
     # it, and text-mode decoding would turn it into a line break.
     return _file_blocks(
         done.stdout.decode(errors="replace"),
-        names_only="-l" in cmd,
-        numbered="-n" in cmd,
+        names_only=query.output_mode == "files_with_matches",
+        numbered=query.line_numbers,
     )
 
 
@@ -424,7 +428,7 @@ def _compile(query: Query) -> re.Pattern[str]:
             "pcre=true requires ripgrep, which is not installed;"
             " the Python fallback cannot provide PCRE2 semantics.",
         )
-    if not query.multiline and _LITERAL_NEWLINE.search(query.pattern):
+    if not query.multiline and _references_newline(query.pattern):
         raise GrepError(_NEWLINE_HINT)
     # Ripgrep always matches ``^``/``$`` at line boundaries.
     flags = re.MULTILINE
@@ -438,6 +442,27 @@ def _compile(query: Query) -> re.Pattern[str]:
         raise GrepError(
             f"ripgrep error (Python fallback): invalid regex pattern: {error}",
         ) from error
+
+
+def _references_newline(pattern: str) -> bool:
+    """Detect newline escapes outside classes without confusing escaped brackets."""
+    class_start = -1
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "\\":
+            if class_start < 0 and pattern[index + 1 : index + 2] == "n":
+                return True
+            index += 2
+            continue
+        if char == "[" and class_start < 0:
+            class_start = index + 1 + (pattern[index + 1 : index + 2] == "^")
+        elif char == "]" and index > class_start:
+            class_start = -1
+        elif char == "\n" and class_start < 0:
+            return True
+        index += 1
+    return False
 
 
 def _grep_python(
@@ -618,7 +643,7 @@ def _multiline_hits(pattern: re.Pattern[str], text: str) -> tuple[int, list[int]
     matches = [
         match
         for match in pattern.finditer(text)
-        if match.start() != len(text) or not text.endswith("\n")
+        if match.start() != len(text) or (text and not text.endswith("\n"))
     ]
     lines: set[int] = set()
     for match in matches:

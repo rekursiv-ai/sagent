@@ -651,6 +651,36 @@ async def test_delay_value_is_schema_validated() -> None:
         await bridge.stop()
 
 
+class _DelayOwningTool(_StrictTool):
+    """Tool whose own schema declares ``delay`` (as ``AgentSend`` does)."""
+
+    name = "Owner"
+    directive_schema: JSON = cast(
+        JSON,
+        {"type": "object", "properties": {"delay": {"type": "integer"}}},
+    )
+
+    @override
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        self.seen_args = args
+        return ToolResult(call_id="", content="ran")
+
+
+@pytest.mark.asyncio
+async def test_a_tool_owned_delay_is_passed_through_not_detached() -> None:
+    """Augmenting ``AgentSend`` rebound its ``delay`` to the detach scheduler."""
+    tool = _DelayOwningTool()
+    bridge = ToolsBridge([cast(Tool, tool)])
+    await bridge.start()
+    try:
+        blocks = await bridge._call_tool("Owner", {"delay": 5})
+        assert isinstance(blocks[0], TextContent)
+        assert blocks[0].text == "ran"
+        assert tool.seen_args == {"delay": 5}
+    finally:
+        await bridge.stop()
+
+
 def test_tools_bridge_docstring_documents_provider_scoped_subset() -> None:
     assert ToolsBridge.__doc__ is not None
     text = ToolsBridge.__doc__.lower()

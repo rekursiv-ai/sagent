@@ -8,12 +8,13 @@ from typing import TYPE_CHECKING, Annotated, Final, cast, get_args
 
 import re
 
-from sagent.agent.state import approx_tokens, get_tool_state
+from sagent.agent.state import approx_tokens
 from sagent.lib.custom_json import convert, json_freeze
 from sagent.lib.files.grep import GrepError, OutputMode, Query, grep
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,
+    resolve_tool_path,
     result_token_budget,
     run_sync,
 )
@@ -293,7 +294,7 @@ class Grep:
         )
         return await run_sync(
             _search,
-            path=Path(get_tool_state().bash_cwd) / str(args.get("path", ".")),
+            path=Path(resolve_tool_path(str(args.get("path") or "."))),
             query=query,
             keep_first=keep_first,
             keep_last=keep_last,
@@ -677,8 +678,9 @@ def _clip(line: str, *, pattern: re.Pattern[str] | None) -> str:
     """Cut a row's text to :data:`_MAX_LINE_CHARS` around its first match."""
     # The ``path:line:`` prefix is kept whole: it is how the row is located, and
     # counting it made a long path clip a short line.
-    prefix = _ROW_PREFIX.match(line)
-    cut = prefix.end() if prefix is not None else 0
+    if len(line) <= _MAX_LINE_CHARS:
+        return line
+    cut = _row_prefix_end(line)
     text = line[cut:]
     if len(text) <= _MAX_LINE_CHARS:
         return line
@@ -691,8 +693,19 @@ def _clip(line: str, *, pattern: re.Pattern[str] | None) -> str:
     return f"{line[:cut]}{head}{text[start:end]}{tail}"
 
 
-_ROW_PREFIX: Final = re.compile(r"^.*?[:-]\d+[:-]")
-"""A content row's ``path:N:`` (match) or ``path-N-`` (context) prefix."""
+# A path may itself hold ``-1-`` (``a-1-b.py``) and the text may hold ``:5:``, so no
+# regex alone can say where the path ends. The row's file is the one that exists.
+def _row_prefix_end(line: str) -> int:
+    """Return where a row's ``path:N:`` or ``path-N-`` prefix ends, else 0."""
+    candidates = list(_ROW_SEPARATOR.finditer(line))
+    for found in candidates:
+        if Path(line[: found.start()]).is_file():
+            return found.end()
+    return candidates[0].end() if candidates else 0
+
+
+_ROW_SEPARATOR: Final = re.compile(r"([:-])\d+\1")
+"""A ``:N:`` (match) or ``-N-`` (context) separator after a row's path."""
 
 
 def _resume_note(*, withheld: int, resume: int) -> str:

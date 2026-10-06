@@ -7,6 +7,8 @@ from PIL import Image
 import pytest
 import tiktoken
 
+from sagent.catalog import openai
+from sagent.lib.image import resize
 from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.openai import token_count
 from sagent.providers.openai.compat import OpenAICompatModel
@@ -49,6 +51,48 @@ def test_image_estimation_needs_no_model_instance(
         )
         == expected
     )
+
+
+def test_image_estimate_is_zero_for_unmeasurable_bytes() -> None:
+    assert (
+        token_count.approx_image_tokens(b"garbage", model_id="gpt-5.6-sol", max_edge=0)
+        == 0
+    )
+
+
+def test_image_estimate_forwards_width_then_height(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image = BytesIO()
+    Image.new("RGB", (5, 8)).save(image, format="PNG")
+    calls: list[tuple[str, int, int]] = []
+
+    def count(model_id: str, width: int, height: int) -> int:
+        calls.append((model_id, width, height))
+        return 17
+
+    monkeypatch.setattr(openai, "image_tokens", count)
+    assert (
+        token_count.approx_image_tokens(
+            image.getvalue(),
+            model_id="gpt-5.6-sol",
+            max_edge=4,
+        )
+        == 17
+    )
+    assert calls == [("gpt-5.6-sol", 2, 4)]
+
+
+def test_image_estimate_counts_the_dimensions_resize_sends() -> None:
+    image = BytesIO()
+    Image.new("RGB", (1, 3)).save(image, format="PNG")
+    data = image.getvalue()
+    sent, _ = resize(data, max_dim=2)
+    assert token_count.approx_image_tokens(
+        data,
+        model_id="gpt-5.6-sol",
+        max_edge=2,
+    ) == token_count.approx_image_tokens(sent, model_id="gpt-5.6-sol", max_edge=0)
 
 
 if __name__ == "__main__":

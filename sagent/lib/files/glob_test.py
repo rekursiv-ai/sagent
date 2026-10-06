@@ -348,6 +348,46 @@ def test_fd_command_anchors_the_glob_at_the_root(
     ]
 
 
+@_BOTH
+def test_invalid_ranges_raise_the_public_error(tmp_path: Path) -> None:
+    (tmp_path / "a").touch()
+    with pytest.raises(GlobError):
+        glob(tmp_path, "**/[z-a]")
+
+
+@_BOTH
+@pytest.mark.parametrize("name", ["we[ir]d", "we{ir,d}", "we?ird", "we*ird"])
+def test_root_names_are_literal(tmp_path: Path, name: str) -> None:
+    root = tmp_path / name
+    root.mkdir()
+    (root / "a.py").touch()
+    assert glob(root, "**/*.py") == [root / "a.py"]
+
+
+@_BOTH
+def test_current_directory_segment_does_not_enable_hidden(tmp_path: Path) -> None:
+    (tmp_path / ".env").touch()
+    (tmp_path / "a").touch()
+    assert glob(tmp_path, "./*") == [tmp_path / "a"]
+    assert glob(tmp_path, "./**/*") == [tmp_path / "a"]
+
+
+@_BOTH
+@pytest.mark.filterwarnings("error::FutureWarning")
+@pytest.mark.parametrize(
+    ("pattern", "member"),
+    [("[[]", "["), ("[&&]", "&"), ("[~~]", "~")],
+)
+def test_class_members_are_not_regex_set_operations(
+    tmp_path: Path,
+    pattern: str,
+    member: str,
+) -> None:
+    (tmp_path / member).touch()
+    (tmp_path / "x").touch()
+    assert glob(tmp_path, f"**/{pattern}") == [tmp_path / member]
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.main import test_main
 

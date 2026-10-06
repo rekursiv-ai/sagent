@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Final, TypedDict, override
 from unittest.mock import MagicMock, patch
 
 import asyncio
@@ -25,6 +25,7 @@ from sagent.agent.state import (
     max_depth_var,
     tool_state_var,
 )
+from sagent.lib.tool_validation import validate_tool_input
 from sagent.providers import PROVIDER_NAMES
 from sagent.testing import MockModelCaps
 from sagent.tools import agent_spawn
@@ -39,6 +40,7 @@ from sagent.tools.agent_spawn import (
 )
 from sagent.tools.background_task import BackgroundTask
 from sagent.types.capability import ModelCapability, ThinkingEffort
+from sagent.types.cost import TokenCost
 from sagent.types.model import (
     Model,
     ModelRecipe,
@@ -68,10 +70,20 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping
     from pathlib import Path
 
+    from sagent.types.providers import Provider
     from sagent.types.tools import Tool
 
 
 _AGENT_SPAWN_LOGGER = agent_spawn.__name__
+
+
+class _SpawnScope(TypedDict):
+    child_path: str
+    eff_max_depth: int | None
+
+
+# Spawn-tree position of a root agent's first child, uncapped.
+_ROOT_SCOPE: Final[_SpawnScope] = {"child_path": "0", "eff_max_depth": None}
 
 
 @dataclass(slots=True, kw_only=True)
@@ -441,34 +453,22 @@ async def test_oneshot_spawn_writes_completed_lifecycle(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_serviced_forwarder_delivers_first_reply_exactly_once() -> None:
-    """T4: the serviced forwarder delivers a child's first reply once, not twice.
+    """T4: the serviced forwarder delivers a child's first reply exactly once.
 
-    The forwarder pushes exactly one ``AgentSendMessage`` for the child's
-    first post-work idle -- the boot idle (empty history) is suppressed
-    and the ``skip_first_work_idle`` latch (used when a caller consumes
-    the first idle via ``drive_until_first_idle``) prevents a duplicate.
+    The boot idle (empty history) is suppressed; the first post-work idle
+    is pushed once.
     """
     parent = _make_parent()
     child = Agent(
         model=StubProviderModel(responses=[AssistantMessage(text="first reply")]),
         tools=[],
     )
-    # Latched forwarder: the first work idle is consumed elsewhere, so the
-    # forwarder must NOT also push it.
-    latched = _ChildForwarder(
-        parent_agent=parent,
-        child=child,
-        forward_set=frozenset(),
-        stats=ChildStats(label="c", start=time.monotonic()),
-        label="c",
-        notify_on_asleep=True,
-        skip_first_work_idle=True,
-    )
+    forwarder = _make_forwarder(parent, "c", notify_on_asleep=True, child=child)
+    forwarder(AgentIdle())  # Boot idle, before any work.
+    assert parent.runtime.inbox.empty(), "boot idle must not be pushed"
     child.runtime.append_history(UserMessage(text="go"))
     child.runtime.append_history(AssistantMessage(text="first reply"))
-    latched(AgentIdle())  # `first` work idle -- latched out.
-    assert parent.runtime.inbox.empty(), "latched first work idle must not be pushed"
-    latched(AgentIdle())  # `second` work idle -- delivered.
+    forwarder(AgentIdle())
     queue = parent.runtime.inbox._queue
     assert queue.qsize() == 1, f"expected exactly one delivery, got {queue.qsize()}"
     msg = queue.get_nowait()
@@ -701,6 +701,7 @@ async def test_run_threads_hot_flag_into_build_child() -> None:
         system: str | None,
         child_model: Model,
         child_spec: ModelRecipe | None,
+        owned_provider: Provider | None = None,
         child_tools: list[Tool],
         max_rounds: int | None,
         model_options: Mapping[str, object],
@@ -713,6 +714,7 @@ async def test_run_threads_hot_flag_into_build_child() -> None:
             system=system,
             child_model=child_model,
             child_spec=child_spec,
+            owned_provider=owned_provider,
             child_tools=child_tools,
             max_rounds=max_rounds,
             model_options=model_options,
@@ -800,8 +802,8 @@ def test_build_child_model_rebuilds_fresh_transport_when_spec_matches() -> None:
             account=None,
             parent_agent=parent,
         )
-    assert isinstance(resolved, tuple)
-    model, returned_spec = resolved
+    assert isinstance(resolved, agent_spawn._ChildModel)
+    model, returned_spec = resolved.model, resolved.spec
     assert model is not parent.model  # Fresh transport, not the shared alias.
     assert returned_spec == spec
     build.assert_called_once_with("StubP", "env", account=None)
@@ -836,8 +838,8 @@ def test_build_child_model_each_child_gets_distinct_transport() -> None:
                 account=None,
                 parent_agent=parent,
             )
-            assert isinstance(resolved, tuple)
-            models.append(resolved[0])
+            assert isinstance(resolved, agent_spawn._ChildModel)
+            models.append(resolved.model)
     assert len({id(m) for m in models}) == 5
     assert all(m is not parent.model for m in models)
 
@@ -859,8 +861,8 @@ def test_build_child_model_no_spec_falls_back_to_parent_model() -> None:
         account=None,
         parent_agent=parent,
     )
-    assert isinstance(resolved, tuple)
-    model, _ = resolved
+    assert isinstance(resolved, agent_spawn._ChildModel)
+    model = resolved.model
     assert model is parent.model
 
 
@@ -1027,8 +1029,8 @@ def test_build_child_model_provider_change_without_auth_uses_target_default() ->
             account=None,
             parent_agent=parent,
         )
-    assert isinstance(resolved, tuple)
-    _, spec = resolved
+    assert isinstance(resolved, agent_spawn._ChildModel)
+    spec = resolved.spec
     assert spec == ModelRecipe(
         provider="Google",
         auth="env",
@@ -1065,8 +1067,8 @@ def test_build_child_model_missing_inherited_account_falls_back() -> None:
             account=None,
             parent_agent=parent,
         )
-    assert isinstance(resolved, tuple)
-    _, spec = resolved
+    assert isinstance(resolved, agent_spawn._ChildModel)
+    spec = resolved.spec
     assert spec is not None
     assert spec.account is None
     assert build.call_args_list == [
@@ -1131,8 +1133,8 @@ def test_build_child_model_infers_provider_from_bare_model_id() -> None:
             account=None,
             parent_agent=parent,
         )
-    assert isinstance(resolved, tuple)
-    _, spec = resolved
+    assert isinstance(resolved, agent_spawn._ChildModel)
+    spec = resolved.spec
     assert spec == ModelRecipe(
         provider="OpenAI",
         auth="env",
@@ -1163,28 +1165,25 @@ def test_build_child_model_inference_preserves_explicit_auth() -> None:
             account=None,
             parent_agent=parent,
         )
-    assert isinstance(resolved, tuple)
+    assert isinstance(resolved, agent_spawn._ChildModel)
     build.assert_called_once_with("OpenAI", "credentials", account=None)
 
 
-def test_build_child_model_rejects_empty_account() -> None:
-    parent = _make_parent()
-    parent.model_recipe = ModelRecipe(
-        provider="OpenAISubscription",
-        auth="credentials",
-        model_id="gpt-5.5",
-        account="work",
+def test_factory_rejects_empty_account() -> None:
+    """A factory ``account=""`` is a construction error, not a per-call one."""
+    with pytest.raises(ValueError, match="account cannot be empty"):
+        _ = AgentSpawn(account="")
+
+
+def test_schema_rejects_empty_account() -> None:
+    """The schema gate, which runs before ``run``, owns ``account=""``."""
+    t = AgentSpawn()
+    error = validate_tool_input(
+        t.name,
+        t.directive_schema,
+        {"prompt": "p", "account": ""},
     )
-    result = AgentSpawn()._build_child_model(
-        provider=None,
-        auth=None,
-        model_id="gpt-5",
-        account="",
-        parent_agent=parent,
-    )
-    assert isinstance(result, ToolResult)
-    assert result.is_error
-    assert "account cannot be empty" in result.content
+    assert error is not None
 
 
 @pytest.mark.asyncio
@@ -1226,7 +1225,7 @@ async def test_persistent_run_writes_failed_lifecycle_record(
 
     t = AgentSpawn()
     with _parent_context(parent):
-        result = t._spawn_serviced(child, "doomed", "p")
+        result = t._spawn_serviced(child, "doomed", "p", **_ROOT_SCOPE)
         assert not result.is_error
         task = _persistent_tasks.get("doomed")
         assert task is not None
@@ -1268,7 +1267,7 @@ async def test_persistent_run_logs_unhandled_exception(
         _parent_context(parent),
         caplog.at_level(logging.ERROR, logger=_AGENT_SPAWN_LOGGER),
     ):
-        result = t._spawn_serviced(child, "doomed", "p")
+        result = t._spawn_serviced(child, "doomed", "p", **_ROOT_SCOPE)
         assert not result.is_error
         task = _persistent_tasks.get("doomed")
         assert task is not None
@@ -1319,7 +1318,7 @@ async def test_persistent_child_does_not_overwrite_parent_registry_entry() -> No
         )
         t = AgentSpawn()
         try:
-            result = t._spawn_serviced(child, "child1", "p")
+            result = t._spawn_serviced(child, "child1", "p", **_ROOT_SCOPE)
             assert not result.is_error
             # Yield to scheduler so the child's task enters
             # serve_forever -> _install_contextvars (the bug site).
@@ -1358,7 +1357,7 @@ async def test_spawn_persistent_rejects_job_prefix_label() -> None:
 
     t = AgentSpawn()
     with _parent_context(parent):
-        result = t._spawn_serviced(child, "job-helper", "prompt")
+        result = t._spawn_serviced(child, "job-helper", "prompt", **_ROOT_SCOPE)
     assert result.is_error
     assert "reserved" in result.content
 
@@ -1389,9 +1388,9 @@ async def test_spawn_persistent_rejects_duplicate_label() -> None:
 
     t = AgentSpawn()
     with _parent_context(parent):
-        first = t._spawn_serviced(child1, "dup-label", "p1")
+        first = t._spawn_serviced(child1, "dup-label", "p1", **_ROOT_SCOPE)
         assert not first.is_error
-        second = t._spawn_serviced(child2, "dup-label", "p2")
+        second = t._spawn_serviced(child2, "dup-label", "p2", **_ROOT_SCOPE)
         assert second.is_error, f"second spawn must error, got {second.content!r}"
         assert "dup-label" in second.content
         # The first agent's task is still scheduled; let it run to
@@ -1719,7 +1718,7 @@ async def test_persistent_spawn_persists_base_system_without_ipc_rule(
     spawn = AgentSpawn()
 
     with _parent_context(parent, label="parent-label"):
-        result = spawn._spawn_serviced(child, "fix-tools", "do work")
+        result = spawn._spawn_serviced(child, "fix-tools", "do work", **_ROOT_SCOPE)
 
     task = _persistent_tasks.get("fix-tools")
     try:
@@ -1771,6 +1770,7 @@ async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -
             "fix-tools",
             "do work",
             notify_on_asleep=False,
+            **_ROOT_SCOPE,
         )
 
     task = _persistent_tasks.get("fix-tools")
@@ -1832,6 +1832,7 @@ async def test_persistent_spawn_model_error_reaches_parent_inbox() -> None:
             "doomed-child",
             "do work",
             notify_on_asleep=True,
+            **_ROOT_SCOPE,
         )
         assert not result.is_error
         task = _persistent_tasks.get("doomed-child")
@@ -1882,6 +1883,7 @@ async def test_spawn_serviced_hot_child_keeps_frozen_system_after_ipc_augment() 
             "hot-persist-1",
             "do work",
             notify_on_asleep=False,
+            **_ROOT_SCOPE,
         )
     assert not result.is_error
     assert child._frozen_system is True
@@ -1920,6 +1922,7 @@ async def test_persistent_spawn_with_notify_on_asleep_notifies_parent() -> None:
             "watcher-child",
             "do work",
             notify_on_asleep=True,
+            **_ROOT_SCOPE,
         )
         assert not result.is_error
         task = _persistent_tasks.get("watcher-child")
@@ -1971,6 +1974,7 @@ async def test_persistent_spawn_notify_on_asleep_false_stays_silent() -> None:
             "quiet-child",
             "do work",
             notify_on_asleep=False,
+            **_ROOT_SCOPE,
         )
         assert not result.is_error
         task = _persistent_tasks.get("quiet-child")
@@ -2015,7 +2019,7 @@ async def test_persistent_spawn_augments_child_system_prompt() -> None:
     t = AgentSpawn()
 
     with _parent_context(parent, label="parent-label"):
-        result = t._spawn_serviced(child, "augmented-child", "do work")
+        result = t._spawn_serviced(child, "augmented-child", "do work", **_ROOT_SCOPE)
         assert not result.is_error
         task = _persistent_tasks.get("augmented-child")
         assert task is not None
@@ -2047,7 +2051,7 @@ async def test_persistent_spawn_return_value_names_reply_channel() -> None:
     t = AgentSpawn()
 
     with _parent_context(parent):
-        result = t._spawn_serviced(child, "channel-child", "do work")
+        result = t._spawn_serviced(child, "channel-child", "do work", **_ROOT_SCOPE)
         assert not result.is_error
         assert "AgentSend" in result.content
         assert "channel-child" in result.content
@@ -2158,8 +2162,8 @@ def test_build_child_model_parent_provider_always_allowed() -> None:
             account=None,
             parent_agent=parent,
         )
-    assert isinstance(resolved, tuple)
-    model, returned_spec = resolved
+    assert isinstance(resolved, agent_spawn._ChildModel)
+    model, returned_spec = resolved.model, resolved.spec
     assert model is not parent_model  # Fresh transport, parent provider allowed.
     assert returned_spec == spec
     build.assert_called_once_with("StubP", "env", account=None)
@@ -2194,26 +2198,6 @@ async def test_spawned_child_writes_own_session_jsonl(tmp_path: Path) -> None:
     # The child's session.jsonl must carry real records, not be empty.
     content = child_files[0].read_text(encoding="utf-8")
     assert content.strip(), "child session.jsonl is empty"
-
-
-@pytest.mark.asyncio
-async def test_run_rejects_empty_account() -> None:
-    """``account=""`` must be a hard error, not silent inheritance.
-
-    Mirrors ``AgentSelf.run({"account": ""})`` which already errors at
-    ``agent_self.py:485-490``. Pre-fix the local ``account`` had
-    already been collapsed to ``None`` by ``opt_str`` before the
-    reject branch ran, so the branch was unreachable and the spawn
-    silently inherited the parent's account.
-    """
-    parent = _make_parent()
-    with _parent_context(parent):
-        t = AgentSpawn()
-        result = await t.run(
-            {"prompt": "p", "model_id": "gpt-5", "account": ""},
-        )
-    assert result.is_error
-    assert "account cannot be empty" in result.content
 
 
 @pytest.mark.asyncio
@@ -2256,6 +2240,281 @@ async def test_run_rejects_negative_max_depth() -> None:
         result = await t.run({"prompt": "p", "max_depth": -1})
     assert result.is_error
     assert "max_depth" in result.content
+
+
+@pytest.mark.asyncio
+async def test_resumed_serviced_child_shares_spawn_lifecycle(tmp_path: Path) -> None:
+    """Resume re-hosts on the spawn lifecycle: terminal record, IPC rule, cleanup."""
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[],
+        session_dir=tmp_path,
+        name="boss",
+    )
+    child = Agent(model=StubProviderModel(), tools=[], system="base")
+    agent_spawn.resume_serviced_child(
+        parent,
+        child,
+        label="resumed",
+        run_id="run-7",
+        notify_on_asleep=False,
+    )
+    assert agent_registry["resumed"] is child
+    assert child.is_serviced
+    assert child.is_subagent
+    assert "AgentSend(to='boss'" in child.system
+    job = parent.background["persistent:resumed"]
+    assert job.persistent_run_id == "run-7"
+    child.shutdown(force=True)
+    await job.task
+    records = [
+        json.loads(line)
+        for line in (tmp_path / "session.jsonl").read_text().splitlines()
+        if "persistent_agent" in line
+    ]
+    assert [(r["run_id"], r["state"]) for r in records] == [("run-7", "completed")]
+    assert records[0]["system"] == "base"
+    assert "resumed" not in agent_registry
+    assert "persistent:resumed" not in parent.background
+
+
+def test_resume_serviced_child_rejects_taken_label() -> None:
+    parent = _make_parent()
+    agent_registry["taken"] = parent
+    try:
+        with pytest.raises(ValueError, match="already running"):
+            agent_spawn.resume_serviced_child(
+                parent,
+                _make_parent(),
+                label="taken",
+                run_id="r",
+                notify_on_asleep=False,
+            )
+    finally:
+        agent_registry.pop("taken", None)
+
+
+@pytest.mark.parametrize(("depth", "cap"), [(0, 0), (2, 2), (3, 2)])
+@pytest.mark.asyncio
+async def test_prompt_and_run_agree_on_leaf(depth: int, cap: int) -> None:
+    """An agent ``prompt()`` calls a leaf is refused by ``run()``."""
+    parent = _make_parent()
+    parent.tool_state.depth = depth
+    token = max_depth_var.set(cap)
+    try:
+        with _parent_context(parent):
+            t = AgentSpawn()
+            text = t.prompt()
+            result = await t.run({"prompt": "task"})
+    finally:
+        max_depth_var.reset(token)
+    assert "leaf agent" in text
+    assert result.is_error
+    assert "max_depth" in result.content
+
+
+@dataclass(slots=True, kw_only=True)
+class _ScopeProbeModel(StubProviderModel):
+    """Record the spawn-tree position each model call runs under."""
+
+    seen: list[tuple[str, int | None]] = field(default_factory=list)
+    called: asyncio.Event = field(default_factory=asyncio.Event)
+
+    @override
+    async def stream(
+        self,
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
+        self.seen.append((agent_path_var.get(), max_depth_var.get()))
+        self.called.set()
+        return await StubProviderModel.stream(self, request, publish)
+
+
+@pytest.mark.asyncio
+async def test_oneshot_child_runs_under_its_own_path_and_cap() -> None:
+    """``max_depth`` counts generations below the child; it reaches the child."""
+    model = _ScopeProbeModel()
+    parent = _make_parent(model)
+    with _parent_context(parent):
+        result = await AgentSpawn().run({"prompt": "p", "max_depth": 0})
+    assert not result.is_error, result.content
+    assert model.seen == [("0", 1)]
+
+
+@pytest.mark.asyncio
+async def test_serviced_child_runs_under_its_own_path_and_cap() -> None:
+    """A persistent child's task sees its own path and the effective cap."""
+    model = _ScopeProbeModel()
+    parent = _make_parent(model)
+    with _parent_context(parent):
+        result = await AgentSpawn().run(
+            {"prompt": "p", "persistent": True, "max_depth": 0, "label": "svc"},
+        )
+    task = _persistent_tasks.get("svc")
+    try:
+        assert not result.is_error, result.content
+        _ = await asyncio.wait_for(model.called.wait(), timeout=2.0)
+    finally:
+        child = agent_registry.get("svc")
+        if child is not None:
+            child.shutdown(force=True)
+        if task is not None:
+            _ = task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+    assert model.seen == [("0", 1)]
+
+
+@dataclass(slots=True, kw_only=True)
+class _FailingStubModel(StubProviderModel):
+    @override
+    async def stream(
+        self,
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
+        del request, publish
+        raise RuntimeError("bad creds")
+
+
+@pytest.mark.asyncio
+async def test_oneshot_failure_writes_failed_lifecycle(tmp_path: Path) -> None:
+    """A oneshot child that errors records ``failed``, not ``completed``."""
+    parent = Agent(model=_FailingStubModel(), tools=[], session_dir=tmp_path)
+    with _parent_context(parent):
+        result = await AgentSpawn().run({"prompt": "p", "label": "fails"})
+    assert result.is_error
+    lines = (tmp_path / "session.jsonl").read_text(encoding="utf-8").splitlines()
+    lifecycle = [json.loads(line) for line in lines if "persistent_agent" in line]
+    assert lifecycle[-1]["state"] == "failed"
+
+
+@pytest.mark.parametrize("label", ["job-1", "taken"])
+@pytest.mark.asyncio
+async def test_oneshot_rejects_reserved_and_duplicate_labels(label: str) -> None:
+    parent = _make_parent()
+    agent_registry["taken"] = parent
+    try:
+        with _parent_context(parent):
+            result = await AgentSpawn().run({"prompt": "p", "label": label})
+    finally:
+        agent_registry.pop("taken", None)
+    assert result.is_error
+    assert label in result.content
+
+
+@pytest.mark.asyncio
+async def test_duplicate_tool_names_grant_one_tool() -> None:
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="ok")]),
+        tools=[BackgroundTask()],
+    )
+    with _parent_context(parent):
+        result = await AgentSpawn().run(
+            {"prompt": "p", "tools": ["BackgroundTask", "BackgroundTask"]},
+        )
+    assert not result.is_error, result.content
+
+
+def test_child_done_reports_child_own_spend() -> None:
+    parent = _make_parent()
+    child = _make_parent()
+    child.record_side_response(
+        ModelResponse(message=AssistantMessage(text=""), spend=TokenCost(request=0.5)),
+    )
+    seen: list[ChildDoneEvent] = []
+    parent.runtime.observers.append(
+        lambda e: seen.append(e) if isinstance(e, ChildDoneEvent) else None,
+    )
+    _make_forwarder(parent, "c", notify_on_asleep=False, child=child).emit_done()
+    assert [e.cost for e in seen] == [pytest.approx(0.5)]
+
+
+@pytest.mark.asyncio
+async def test_await_stopped_propagates_cancel_aimed_at_caller() -> None:
+    """Cancelling the parent while it reaps a child's loop must not be swallowed."""
+    child_loop = asyncio.create_task(_wait_forever())
+    reaper = asyncio.create_task(agent_spawn._await_stopped(child_loop))
+    await asyncio.sleep(0)
+    _ = reaper.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await reaper
+    with suppress(asyncio.CancelledError):
+        await child_loop
+
+
+@pytest.mark.asyncio
+async def test_await_stopped_absorbs_the_child_loops_own_cancel() -> None:
+    child_loop = asyncio.create_task(_wait_forever())
+    await asyncio.sleep(0)
+    _ = child_loop.cancel()
+    await agent_spawn._await_stopped(child_loop)
+
+
+@dataclass(slots=True, kw_only=True)
+class _CountingProvider:
+    """Provider that builds stub models and counts ``close_sdk`` calls."""
+
+    closes: int = 0
+
+    def model(self, model_id: str | None = None) -> StubProviderModel:
+        del model_id
+        return StubProviderModel(responses=[AssistantMessage(text="child")])
+
+    async def close_sdk(self) -> None:
+        self.closes += 1
+
+
+def _recipe_parent() -> Agent:
+    return Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[],
+        model_recipe=ModelRecipe(provider="StubP", auth="env", model_id="stub"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_child_provider_is_closed_when_the_child_exits() -> None:
+    """The provider AgentSpawn built belongs to the child and closes with it."""
+    built = _CountingProvider()
+    parent = _recipe_parent()
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            return_value=built,
+        ),
+        _parent_context(parent),
+    ):
+        result = await AgentSpawn().run({"prompt": "p"})
+    assert not result.is_error, result.content
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert built.closes == 1
+
+
+@pytest.mark.asyncio
+async def test_child_provider_is_closed_when_the_spawn_is_refused() -> None:
+    built = _CountingProvider()
+    parent = _recipe_parent()
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            return_value=built,
+        ),
+        _parent_context(parent),
+    ):
+        result = await AgentSpawn().run(
+            {"prompt": "p", "model_options": {"latency": "fast"}},
+        )
+    assert result.is_error
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert built.closes == 1
+
+
+async def _wait_forever() -> None:
+    _ = await asyncio.Event().wait()
 
 
 if __name__ == "__main__":

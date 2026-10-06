@@ -37,28 +37,40 @@ def validate_tool_input(
         schema_text = json.dumps(json_unfreeze(schema), sort_keys=True)
         _compile_schema(schema_text)(args)
     except fastjsonschema.JsonSchemaValueException as error:
-        issues = [error.message]
-    else:
-        return None
-    plural = "issues" if len(issues) > 1 else "issue"
+        return _render_error(tool_name, schema, error)
+    return None
+
+
+# Only a missing-key or unknown-key failure is about the call's SHAPE. A type or bound
+# failure names a value the caller did supply, so telling it the fields were "missing"
+# sends it to re-add a key it already sent.
+def _render_error(
+    tool_name: str,
+    schema: JSON,
+    error: fastjsonschema.JsonSchemaValueException,
+) -> str:
+    """Word a validation failure by what kind of rule it broke."""
     parts = [
-        f"InputValidationError: {tool_name} failed due to the following {plural}:",
-        *issues,
+        f"InputValidationError: {tool_name} failed due to the following issue:",
+        error.message,
     ]
-    required = _schema_strings(schema.get("required"))
-    props_raw = schema.get("properties")
-    accepted = [str(k) for k in props_raw] if isinstance(props_raw, Mapping) else []
-    if required:
-        keys = ", ".join(f"`{k}`" for k in required)
+    if error.rule == "required":
+        keys = ", ".join(f"`{k}`" for k in _schema_strings(schema.get("required")))
         parts.append(f"\n{tool_name} requires: {keys}.")
-    if "must not contain" in issues[0] and accepted:
+        reason = "was missing required fields"
+    elif error.rule == "additionalProperties":
+        props_raw = schema.get("properties")
+        accepted = list(props_raw) if isinstance(props_raw, Mapping) else []
         keys = ", ".join(f"`{k}`" for k in accepted)
-        parts.append(f"{tool_name} accepts: {keys}.")
+        parts.append(f"\n{tool_name} accepts: {keys}.")
+        reason = "named fields this tool does not accept"
+    else:
+        reason = "gave a field a value outside its schema"
     parts.append(
-        "\nThis tool call was not executed because its JSON directive was missing "
-        "or misstated required fields. Do not repeat the same empty or incomplete "
-        "call. Either retry this tool with the required fields, choose a different "
-        "tool that fits the task, or explain why the required value is unavailable.",
+        f"\nThis tool call was not executed because its JSON directive {reason}."
+        " Do not repeat the same call. Either retry this tool with a corrected"
+        " directive, choose a different tool that fits the task, or explain why"
+        " the required value is unavailable.",
     )
     return "\n".join(parts)
 

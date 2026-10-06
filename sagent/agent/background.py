@@ -21,12 +21,12 @@ primitive.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 import asyncio
 import dataclasses
 
-from sagent.lib.custom_json import convert, json_unfreeze
+from sagent.lib.custom_json import json_unfreeze
 
 
 if TYPE_CHECKING:
@@ -56,7 +56,7 @@ class BackgroundTaskEntry:
       daemons. Filtered out of the model-facing tool listing.
     """
 
-    task: asyncio.Task[Any]
+    task: asyncio.Task[object]
     """The asyncio task to track / cancel."""
 
     tool_name: str
@@ -110,6 +110,28 @@ class BackgroundTaskEntry:
             )
 
 
+_CONTROL_KEYS: Final = ("background", "delay")
+
+
+def backgroundable(tool: Tool) -> bool:
+    """Whether ``tool`` may be offered the ``background`` / ``delay`` control keys.
+
+    A tool whose own schema already declares one of them (``AgentSend`` owns
+    ``delay``) keeps it: injecting would rebind its argument to the
+    background scheduler, so the tool would never see its own value.
+
+    Args:
+      tool: The raw tool.
+
+    Returns:
+      backgroundable: True when neither control key is the tool's own.
+
+    """
+    return tool.name != "BackgroundTask" and not _declared_control_keys(
+        tool.directive_schema,
+    )
+
+
 def bg_augmented_schema(directive_schema: JSON) -> JSON:
     """Return ``directive_schema`` with ``background``/``delay`` advertised.
 
@@ -129,7 +151,8 @@ def bg_augmented_schema(directive_schema: JSON) -> JSON:
 
     Raises:
       ValueError: If the schema declares a non-object ``type``; injecting
-          ``properties`` there yields a schema strict validators reject.
+          ``properties`` there yields a schema strict validators reject. Also
+          if it already declares a control key (see :func:`backgroundable`).
 
     """
     schema = json_unfreeze(directive_schema)
@@ -138,6 +161,11 @@ def bg_augmented_schema(directive_schema: JSON) -> JSON:
         raise ValueError(
             "bg_augmented_schema requires an object-typed directive_schema"
             f" (or no ``type``); got type={schema_type!r}",
+        )
+    if owned := _declared_control_keys(directive_schema):
+        raise ValueError(
+            f"directive_schema already declares {', '.join(owned)}; injecting"
+            " the background control keys would overwrite the tool's own",
         )
     raw_props = schema.get("properties")
     # Inject even when the inner schema is schemaless (no ``properties``):
@@ -283,9 +311,19 @@ def split_bg_args(
       clean_args: ``args`` minus ``background`` / ``delay``.
 
     """
-    clean = {k: v for k, v in args.items() if k not in ("background", "delay")}
-    # Negative ``delay`` is meaningless; coerce to zero rather than
-    # waiting an unbounded duration backwards or raising mid-dispatch.
-    delay_sec = max(0.0, float(convert(args.get("delay"), int, default=0)))
-    background = convert(args.get("background"), bool, default=False) or delay_sec > 0
+    clean = {k: v for k, v in args.items() if k not in _CONTROL_KEYS}
+    # Callers validate ``args`` against :func:`bg_augmented_schema` first, so a
+    # mistyped key is an input error there; here it reads as absent. Negative
+    # ``delay`` is meaningless and coerces to zero rather than waiting backwards.
+    delay = args.get("delay")
+    delay_sec = max(0.0, float(delay)) if type(delay) is int else 0.0
+    background = args.get("background") is True or delay_sec > 0
     return background, delay_sec, clean
+
+
+def _declared_control_keys(directive_schema: JSON) -> tuple[str, ...]:
+    """Return the control keys ``directive_schema`` declares as its own."""
+    props = directive_schema.get("properties")
+    if not isinstance(props, Mapping):
+        return ()
+    return tuple(key for key in _CONTROL_KEYS if key in props)

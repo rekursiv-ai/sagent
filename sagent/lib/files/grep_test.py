@@ -851,7 +851,9 @@ def test_rg_command_with_every_knob_on(tmp_path: Path) -> None:
         *_RG_VCS,
         *("--glob", "*.py", "--glob", "!x_*"),
         *("-n", "-i", "-U", "--multiline-dotall", "-l"),
-        *("-B", "1", "-A", "2", "--type", "py", "--text", "-P"),
+        *("-B", "1", "-A", "2"),
+        *("--type-clear", "py", "--type-add", "py:*.py", "--type", "py"),
+        *("--text", "-P"),
         *("--", "pat", str(tmp_path)),
     ]
 
@@ -863,6 +865,63 @@ def test_rg_command_count_mode(tmp_path: Path) -> None:
         *_RG_VCS,
         *("-c", "--", "pat", str(tmp_path)),
     ]
+
+
+@_BOTH
+@pytest.mark.parametrize("file_type", ["py", "js", "cpp", "md", "sh"])
+def test_file_types_use_the_declared_globs(tmp_path: Path, file_type: str) -> None:
+    for name in (
+        "a.py",
+        "b.pyi",
+        "a.js",
+        "b.cjs",
+        "a.cpp",
+        "b.hh",
+        "a.md",
+        "b.markdown",
+        "a.sh",
+        "b.zsh",
+    ):
+        (tmp_path / name).write_text("hit\n")
+    assert grep(tmp_path, Query(pattern="hit", file_type=file_type)) == [
+        str(tmp_path / f"a.{file_type}"),
+    ]
+
+
+@_BOTH
+@pytest.mark.parametrize("pattern", [r"a\nb\]", r"a\nb[xy]", r"a\nb\[\]"])
+def test_newline_escapes_outside_classes_are_rejected(
+    tmp_path: Path,
+    pattern: str,
+) -> None:
+    file = tmp_path / "f"
+    file.write_text("a\nb]\n")
+    with pytest.raises(GrepError, match="multiline is off"):
+        grep(file, Query(pattern=pattern))
+
+
+@_BOTH
+@pytest.mark.parametrize("mode", ["content", "count", "files_with_matches"])
+def test_empty_multiline_matches_do_not_invent_a_line(
+    tmp_path: Path,
+    mode: OutputMode,
+) -> None:
+    file = tmp_path / "empty"
+    file.touch()
+    assert grep(file, Query(pattern="", multiline=True, output_mode=mode)) == []
+
+
+@_BOTH
+@pytest.mark.parametrize(("pattern", "numbered"), [("-l", True), ("-n", False)])
+def test_patterns_that_spell_flags_do_not_change_output(
+    tmp_path: Path,
+    pattern: str,
+    numbered: bool,
+) -> None:
+    file = tmp_path / "f"
+    file.write_text(f"a {pattern} b\n")
+    query = Query(pattern=pattern, output_mode="content", line_numbers=numbered)
+    assert grep(file, query) == [f"{file}:{'1:' if numbered else ''}a {pattern} b"]
 
 
 if __name__ == "__main__":

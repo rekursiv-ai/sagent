@@ -265,6 +265,49 @@ class TestCheckWheelErrors:
         with pytest.raises(SystemExit, match=r"sagent-slack"):
             _ = check_wheel.main()
 
+    def test_rejects_two_wheels_rather_than_guessing_the_fresh_one(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Text order put ``0.9.0`` after ``0.10.0``, so the stale wheel won."""
+        monkeypatch.chdir(tmp_path)
+        _write_sagent_wheel(tmp_path, _BASE_FILES | _RECIPE_FILES)
+        _write_wheel(tmp_path / "dist" / "sagent-0.9.0-py3-none-any.whl", {})
+        with pytest.raises(SystemExit, match="exactly one"):
+            _ = check_wheel.main()
+
+    def test_a_console_script_named_only_in_a_comment_is_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """A substring test passed on text that merely contained the entry."""
+        monkeypatch.chdir(tmp_path)
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent-0.1.0.dist-info/entry_points.txt"] = (
+            "[console_scripts]\nsagent = sagent.bin.cli:main\n"
+            "# sagent-slack = sagent.bin.slack:main\n"
+        )
+        _write_sagent_wheel(tmp_path, files)
+        with pytest.raises(SystemExit, match=r"sagent-slack"):
+            _ = check_wheel.main()
+
+    def test_a_console_script_outside_its_section_is_missing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.chdir(tmp_path)
+        files = dict(_BASE_FILES | _RECIPE_FILES)
+        files["sagent-0.1.0.dist-info/entry_points.txt"] = (
+            "[console_scripts]\nsagent = sagent.bin.cli:main\n"
+            "[gui_scripts]\nsagent-slack = sagent.bin.slack:main\n"
+        )
+        _write_sagent_wheel(tmp_path, files)
+        with pytest.raises(SystemExit, match=r"sagent-slack"):
+            _ = check_wheel.main()
+
     def test_rejects_recipe_not_a_mapping(
         self,
         monkeypatch: pytest.MonkeyPatch,

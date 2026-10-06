@@ -1287,6 +1287,49 @@ async def test_backgrounded_tool_calls_still_serialize_on_their_key() -> None:
     assert finished == ["one", "two"]
 
 
+@dataclass(kw_only=True, slots=True)
+class _KeyedTool:
+    """Tool whose serialization key is read from its ``key`` argument."""
+
+    _name: str
+
+    @property
+    def name(self) -> str:
+        return self._name
+
+    def serialize_key(self, args: Mapping[str, object]) -> str | None:
+        key = args.get("key")
+        return key if isinstance(key, str) else None
+
+    async def run(self, args: Mapping[str, object]) -> ToolResult:
+        del args
+        return ToolResult(call_id="", content="")
+
+
+def test_an_exclusive_writer_serializes_with_every_keyed_call_in_order() -> None:
+    """A Bash writer and ``Edit(f)`` keyed differently ran concurrently."""
+    agent, _ = make_agent([], tools=[_KeyedTool(_name="T")])
+    calls = [
+        ToolCall(id="r", name="T", args={}),
+        ToolCall(id="e1", name="T", args={"key": "/f"}),
+        ToolCall(id="bash", name="T", args={"key": runtime.EXCLUSIVE_KEY}),
+        ToolCall(id="e2", name="T", args={"key": "/g"}),
+    ]
+    groups = [[c.id for c in g] for g in agent._partition_cohort(calls)]
+    assert groups == [["r"], ["e1", "bash", "e2"]]
+
+
+def test_distinct_keys_without_an_exclusive_call_stay_parallel() -> None:
+    agent, _ = make_agent([], tools=[_KeyedTool(_name="T")])
+    calls = [
+        ToolCall(id="e1", name="T", args={"key": "/f"}),
+        ToolCall(id="e2", name="T", args={"key": "/g"}),
+        ToolCall(id="e3", name="T", args={"key": "/f"}),
+    ]
+    groups = [[c.id for c in g] for g in agent._partition_cohort(calls)]
+    assert groups == [["e1", "e3"], ["e2"]]
+
+
 @pytest.mark.asyncio
 async def test_killing_a_serialized_call_stops_the_rest_of_its_group() -> None:
     """Killing one call of a serialized group must not release the next.
@@ -2472,6 +2515,20 @@ async def test_model_waits_for_all_tools() -> None:
         t for t in agent.context().messages if isinstance(t, AssistantMessage)
     ]
     assert assistant_msgs[-1].text == "both in"
+
+
+@pytest.mark.asyncio
+async def test_two_switches_in_one_drain_both_apply_in_order() -> None:
+    """A second ``ModelSwitch`` in the same drain must not drop the first."""
+    agent, _ = make_agent([AssistantMessage(text="done")])
+    applied: list[str] = []
+    agent.inbox.push_back(ModelSwitch(apply=lambda: applied.append("first")))
+    agent.inbox.push_back(ModelSwitch(apply=lambda: applied.append("second")))
+    agent.inbox.push_back(UserMessage(text="go"))
+
+    await run_with_quit(agent, timeout_sec=3.0)
+
+    assert applied == ["first", "second"]
 
 
 @pytest.mark.asyncio

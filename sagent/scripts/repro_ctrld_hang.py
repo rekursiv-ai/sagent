@@ -22,12 +22,14 @@ from typing import TYPE_CHECKING, override
 
 import asyncio
 import time
+import uuid
 
 from sagent.agent import agent_test
 from sagent.agent.agent import Agent
-from sagent.agent.state import agent_registry, current_agent_var
+from sagent.agent.state import agent_registry
 from sagent.repl.run_repl import _background_tasks_for_repl_cancel
-from sagent.tools.agent_spawn import AgentSpawn
+from sagent.tools.agent_spawn import resume_serviced_child
+from sagent.types.runtime import UserMessage
 
 
 if TYPE_CHECKING:
@@ -37,9 +39,7 @@ if TYPE_CHECKING:
         ModelRequest,
         ModelResponse,
     )
-    from sagent.types.runtime import (
-        RuntimeEvent,
-    )
+    from sagent.types.runtime import RuntimeEvent
 
 
 class BlockingModel(agent_test.StubModel):
@@ -67,26 +67,21 @@ async def _main() -> None:
     parent = Agent(model=agent_test.StubModel(), tools=[], name="Agent")
     # The parent replies instantly and idles; the child blocks mid-stream.
     parent.model = parent.model  # Keep parent responsive.
-    spawn = AgentSpawn()
     parent_drive = asyncio.create_task(parent.serve_forever())
     await asyncio.sleep(0.05)
 
-    # Spawn a serviced child whose model blocks mid-stream.
-    token = current_agent_var.set(parent)
-    try:
-        # Build the child by hand with the blocking model, then hand it in.
-        child = Agent(model=BlockingModel(), tools=[], name="worker")
-        # Route through the serviced spawn path directly; the repro's whole
-        # point is to exercise this internal path with a mid-stream-blocked child.
-        res = spawn._spawn_serviced(  # noqa: SLF001 -- The reproducer inspects private state to expose the hang..
-            child,
-            "worker",
-            "do work",
-            notify_on_asleep=True,
-        )
-        print("SPAWN:", res.content.split(".")[0])
-    finally:
-        current_agent_var.reset(token)
+    # Host a serviced child whose model blocks mid-stream on the serviced
+    # lifecycle, seeded with its prompt as a spawn would.
+    child = Agent(model=BlockingModel(), tools=[], name="worker")
+    child.runtime.inbox.push_back(UserMessage(text="do work"))
+    resume_serviced_child(
+        parent,
+        child,
+        label="worker",
+        run_id=uuid.uuid4().hex,
+        notify_on_asleep=True,
+    )
+    print("SPAWN: worker")
     await asyncio.sleep(0.2)  # Let child enter the blocking stream.
     print("registry:", sorted(agent_registry))
     child_rt_busy = child.runtime.model_call is not None

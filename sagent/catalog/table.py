@@ -32,7 +32,7 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import Final, cast, get_args, override
+from typing import Final, TypeAliasType, cast, get_args, override
 
 from sagent.types.capability import (
     ContextTag,
@@ -48,20 +48,34 @@ __all__ = [
     "UnknownModelError",
     "UnsupportedTagError",
     "base_model_id",
+    "literal_members",
     "split_model_id",
 ]
+
+
+def literal_members(alias: TypeAliasType) -> tuple[object, ...]:
+    """Return the members of a PEP 695 ``Literal`` alias, in declaration order.
+
+    The one place the alias is unwrapped: ``get_args`` on the alias itself
+    returns ``()``, so a check built on it silently rejects every value. The
+    caller casts the result to ``tuple[Alias, ...]``: no checker can solve a
+    type variable from a ``TypeAliasType`` argument.
+
+    Args:
+      alias: A ``type X = Literal[...]`` alias.
+
+    Returns:
+      members: Every value the alias admits.
+
+    """
+    return get_args(cast(object, alias.__value__))
 
 
 # Derived from ``ContextTag``, not restated: a tag the type admits but a
 # hand-written tuple omitted would be unparseable while type-checking clean.
 # The default window's ``""`` is filtered out -- no id carries it.
 CONTEXT_TAGS: Final[tuple[ContextTag, ...]] = tuple(
-    t
-    for t in cast(
-        tuple[ContextTag, ...],
-        get_args(cast(object, ContextTag.__value__)),
-    )
-    if t
+    t for t in cast(tuple[ContextTag, ...], literal_members(ContextTag)) if t
 )
 """Window-size suffixes a model id may carry (e.g. ``...+1m``)."""
 
@@ -138,7 +152,7 @@ class ModelTable(Mapping[str, ModelCapability]):
 
     @override
     def __getitem__(self, key: str) -> ModelCapability:
-        row = self._named(self.roles.get(key, key))
+        row = self._resolved(key)
         if row is None:
             raise KeyError(key)
         return row
@@ -153,9 +167,7 @@ class ModelTable(Mapping[str, ModelCapability]):
 
     @override
     def __contains__(self, key: object) -> bool:
-        return (
-            isinstance(key, str) and self._named(self.roles.get(key, key)) is not None
-        )
+        return isinstance(key, str) and self._resolved(key) is not None
 
     def exact(self, name: str) -> ModelCapability | None:
         """Return the row whose exact name or wire id is ``name``, never a guess.
@@ -174,6 +186,11 @@ class ModelTable(Mapping[str, ModelCapability]):
         if row is not None:
             return row
         return next((row for row in self.rows if row.wire_model_id == name), None)
+
+    def _resolved(self, key: str) -> ModelCapability | None:
+        """Return the row ``key`` names, in the module's precedence order."""
+        row = self.exact(key)
+        return row if row is not None else self._named(self.roles.get(key, key))
 
     # A prefix names a whole family, optionally with a major: ``opus`` and
     # ``opus-5`` name ``opus-*``; ``opu`` names nothing, and ``gemini-flash``

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from io import BytesIO
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import json
 import os
@@ -19,10 +19,6 @@ from sagent.tools.lib.pdf import MAX_PDF_BYTES, extract_pdf_pages
 from sagent.tools.read import (
     Read,
 )
-
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 read = Read()
@@ -213,6 +209,56 @@ async def test_read_unchanged_dedup(tmp_path: Path) -> None:
         assert "hi" in first.content
         second = await read.run({"file_path": str(f)})
     assert "File unchanged" in second.content
+
+
+@pytest.mark.asyncio
+async def test_a_write_during_the_read_is_not_cached_as_seen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write landing mid-read must leave the cache stale, not 'unchanged'."""
+    f = tmp_path / "f.txt"
+    f.write_text("old\n")
+    os.utime(f, (1_000_000, 1_000_000))
+    original = Path.read_text
+    raced: list[bool] = []
+
+    def _racing_read(
+        self: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> str:
+        text = original(self, encoding=encoding, errors=errors)
+        if self == f and not raced:
+            raced.append(True)
+            f.write_text("new\n")
+            os.utime(f, (2_000_000, 2_000_000))
+        return text
+
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        monkeypatch.setattr(Path, "read_text", _racing_read)
+        first = await read.run({"file_path": str(f)})
+        monkeypatch.setattr(Path, "read_text", original)
+        second = await read.run({"file_path": str(f)})
+    # Whichever read the model sees last must show the post-write text; the
+    # bug cached "old" under the new mtime and then answered "unchanged".
+    assert "new" in first.content or "new" in second.content, (first, second)
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_image_is_refused_before_it_is_loaded(
+    tmp_path: Path,
+) -> None:
+    f = tmp_path / "huge.png"
+    with f.open("wb") as handle:
+        handle.truncate(100 * 1024 * 1024)
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        result = await read.run({"file_path": str(f)})
+    assert result.is_error
+    assert not result.attachments
+    assert "too large" in result.content
 
 
 @pytest.mark.asyncio

@@ -116,6 +116,39 @@ def test_validate_tool_input_rejects_scalar_enum() -> None:
     assert "write" in err
 
 
+def test_a_bound_violation_is_not_called_a_missing_field() -> None:
+    """``offset=0`` was supplied; only its value is wrong."""
+    schema = {
+        "type": "object",
+        "properties": {
+            "file_path": {"type": "string"},
+            "offset": {"type": "integer", "minimum": 1},
+        },
+        "required": ["file_path"],
+    }
+    err = validate_tool_input(
+        "Read",
+        json_freeze(schema),
+        {"file_path": "f", "offset": 0},
+    )
+    assert err is not None
+    assert "missing" not in err
+    assert "requires:" not in err
+    assert "outside its schema" in err
+
+
+def test_a_missing_field_names_the_required_keys() -> None:
+    schema = {
+        "type": "object",
+        "properties": {"file_path": {"type": "string"}},
+        "required": ["file_path"],
+    }
+    err = validate_tool_input("Read", json_freeze(schema), {})
+    assert err is not None
+    assert "Read requires: `file_path`." in err
+    assert "missing required fields" in err
+
+
 def test_validate_tool_input_rejects_numeric_range() -> None:
     schema = {
         "type": "object",

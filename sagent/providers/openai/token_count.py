@@ -17,12 +17,13 @@ from sagent.catalog.table import base_model_id
 if TYPE_CHECKING:
     import tiktoken
 
-    from sagent.lib.image import get_dimensions
+    from sagent.lib.image import get_dimensions, resized_dims
 else:
     from wrapt import lazy_import
 
     tiktoken = lazy_import("tiktoken")
     get_dimensions = lazy_import("sagent.lib.image", "get_dimensions")
+    resized_dims = lazy_import("sagent.lib.image", "resized_dims")
 
 
 def approx_text_tokens(
@@ -66,15 +67,6 @@ def approx_image_tokens(data: bytes, *, model_id: str, max_edge: int) -> int:
     dims = get_dimensions(data)
     if dims is None:
         return 0
-    width, height = _resized_dims(dims, max_edge)
+    height, width = dims
+    width, height = resized_dims((width, height), max_edge)
     return openai.image_tokens(base_model_id(model_id), width, height)
-
-
-def _resized_dims(dims: tuple[int, int], max_edge: int) -> tuple[int, int]:
-    """Count the dimensions that serialization will send, not source tiles."""
-    width, height = dims
-    longest = max(width, height)
-    if max_edge <= 0 or longest <= max_edge:
-        return width, height
-    scale = max_edge / longest
-    return max(1, int(width * scale)), max(1, int(height * scale))

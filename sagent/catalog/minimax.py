@@ -181,6 +181,8 @@ def _scaled(price: TokenPrice, factor: float) -> TokenPrice:
         price,
         request=price.request * factor,
         response=price.response * factor,
+        cache_write=price.cache_write * factor,
+        cache_write_1h=price.cache_write_1h * factor,
         cache_read=price.cache_read * factor,
     )
 

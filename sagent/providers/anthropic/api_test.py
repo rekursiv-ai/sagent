@@ -22,7 +22,6 @@ from sagent.providers.anthropic.api import (
     _AnthropicModel,
     _assistant_blocks,
     _build_messages,
-    _guard_stream_interrupt,
     _is_prompt_too_long_text,
     _parse_response,
     _raw_message_stream,
@@ -49,10 +48,8 @@ from sagent.types.cost import (
 )
 from sagent.types.model import (
     ModelRequest,
-    ModelResponse,
     PromptTooLongError,
     RequestTooLargeError,
-    StreamInterruptedError,
 )
 from sagent.types.runtime import (
     DETACHED_PLACEHOLDER,
@@ -352,7 +349,7 @@ def test_build_messages_empty_history_no_messages() -> None:
 def test_assistant_blocks_thinking_only_appends_placeholder() -> None:
     """Thinking-only assistant gets a trailing ``.`` text block."""
     asst = AssistantMessage(
-        thinking_blocks=({"type": "thinking", "thinking": "..."},),
+        thinking_blocks=({"type": "thinking", "thinking": "...", "signature": "s"},),
     )
     blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
     assert blocks[-1] == {"type": "text", "text": "."}
@@ -367,7 +364,7 @@ def test_assistant_blocks_text_only() -> None:
 def test_assistant_blocks_thinking_text_tool() -> None:
     asst = AssistantMessage(
         text="answer",
-        thinking_blocks=({"type": "thinking", "thinking": "..."},),
+        thinking_blocks=({"type": "thinking", "thinking": "...", "signature": "s"},),
         tool_calls=(ToolCall(id="x", name="N", args={"a": 1}),),
     )
     blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
@@ -461,6 +458,22 @@ def test_assistant_blocks_preserves_mixed_thinking_modes() -> None:
     assert blocks[3] == {"type": "text", "text": "ok"}
 
 
+def test_assistant_blocks_drops_unsigned_thinking() -> None:
+    """A thinking block without a signature (Gemini, ACP) cannot validate."""
+    asst = AssistantMessage(
+        text="ok",
+        thinking_blocks=(
+            {"type": "thinking", "thinking": "gemini thought"},
+            {"type": "thinking", "thinking": "kept", "signature": "sig"},
+        ),
+    )
+    blocks = _assistant_blocks(asst, IdRemapper("toolu_"))
+    assert [(b["type"], b.get("thinking")) for b in blocks] == [
+        ("thinking", "kept"),
+        ("text", None),
+    ]
+
+
 def test_tool_use_block_remaps_id_through_remapper() -> None:
     ids = IdRemapper("toolu_")
     out = _tool_use_block(ToolCall(id="ext", name="N", args={"k": "v"}), ids)
@@ -512,6 +525,21 @@ def test_tool_result_block_skips_svg_attachment() -> None:
         max_image_bytes=5 * 1024 * 1024,
     )
     assert out["content"] == "[image: qr.svg]"
+
+
+def test_tool_result_block_keeps_pdf_attachment() -> None:
+    out = _tool_result_block(
+        ToolResult(
+            call_id="x",
+            content="report",
+            attachments=(BytesMessage(data=b"%PDF-1.4", descriptor="application/pdf"),),
+        ),
+        IdRemapper("toolu_"),
+        max_image_dim=8000,
+        max_image_bytes=5 * 1024 * 1024,
+    )
+    content = cast(list[dict[str, object]], out["content"])
+    assert [block["type"] for block in content] == ["text", "document"]
 
 
 def _build_anthropic_message(
@@ -606,6 +634,27 @@ def test_parse_response_drops_placeholder_tool_name() -> None:
     assert [c.name for c in resp.message.tool_calls] == ["Bash"]
 
 
+def test_parse_response_accepts_hyphenated_tool_name() -> None:
+    raw = _build_anthropic_message(
+        tool_calls=(("toolu_1", "mcp-server_tool", {}),),
+        stop_reason="tool_use",
+    )
+    resp = _parse_response(raw, _free_model())
+    assert [c.name for c in resp.message.tool_calls] == ["mcp-server_tool"]
+
+
+def test_parse_response_all_placeholder_calls_is_finished() -> None:
+    """Filtering every tool_use leaves prose, not an interrupted stream."""
+    raw = _build_anthropic_message(
+        text="here is my context",
+        tool_calls=(("toolu_bad", "$FUNCTION_NAME", {}),),
+        stop_reason="tool_use",
+    )
+    resp = _parse_response(raw, _free_model())
+    assert resp.message.tool_calls == ()
+    assert resp.stop_reason == "model_finished"
+
+
 def test_parse_response_cache_tokens_split_correctly() -> None:
     raw = _build_anthropic_message(
         input_tokens=1000,
@@ -642,34 +691,6 @@ def test_parse_response_carries_message_and_request_ids() -> None:
     resp = _parse_response(raw, _free_model())
     assert resp.message_id == "msg_xyz"
     assert resp.request_id == "req_xyz"
-
-
-def test_guard_stream_interrupt_raises_when_tool_use_without_calls() -> None:
-    resp = ModelResponse(
-        message=AssistantMessage(text="partial"),
-        stop_reason="model_tool_use",
-    )
-    with pytest.raises(StreamInterruptedError):
-        _guard_stream_interrupt(resp, kind="stream", model_id="claude-x")
-
-
-def test_guard_stream_interrupt_silent_when_calls_present() -> None:
-    resp = ModelResponse(
-        message=AssistantMessage(
-            text="",
-            tool_calls=(ToolCall(id="x", name="N", args={}),),
-        ),
-        stop_reason="model_tool_use",
-    )
-    _guard_stream_interrupt(resp, kind="stream", model_id="claude-x")
-
-
-def test_guard_stream_interrupt_silent_when_not_tool_use() -> None:
-    resp = ModelResponse(
-        message=AssistantMessage(text="done"),
-        stop_reason="model_finished",
-    )
-    _guard_stream_interrupt(resp, kind="stream", model_id="claude-x")
 
 
 def test_anthropic_from_key() -> None:
@@ -921,6 +942,20 @@ def test_anthropic_build_kwargs_enabled_thinking_respects_max_tokens_cap() -> No
     assert budget < max_tokens
 
 
+def test_anthropic_build_kwargs_fixed_thinking_budget_meets_api_floor() -> None:
+    """Anthropic rejects ``budget_tokens < 1024``, however small the reply."""
+    m = Anthropic.from_key("k").model("claude-opus-4-6")
+    m._settings = replace(m.settings, thinking_budget="fixed")
+    kwargs = m._build_kwargs(
+        ModelRequest(messages=[UserMessage(text="x")], max_response_tokens=500),
+        [],
+    )
+    thinking = cast(dict[str, object], kwargs["thinking"])
+    budget = convert(thinking["budget_tokens"], int)
+    assert budget >= 1024
+    assert budget < convert(kwargs["max_tokens"], int)
+
+
 def test_anthropic_thinking_axes_opus_4_6() -> None:
     """opus-4-6 streams readable thinking and accepts a fixed budget."""
     m = Anthropic.from_key("k").model("claude-opus-4-6")
@@ -1086,7 +1121,7 @@ def test_anthropic_byte_413_without_structured_body_stays_byte() -> None:
 
     The structured-body path already handles ``request_too_large``, but a
     413 whose body is not a parsed mapping (stringified error, proxy-mangled
-    body) falls through to ``_matches_overflow_phrase`` on the raw text -- a
+    body) falls through to ``is_context_overflow_text`` on the raw text -- a
     text like "request too large: maximum exceeded by context window" would
     then mis-classify as token overflow. The shared ``is_request_too_large``
     guard keys on the 413 STATUS, closing that hole and matching every other
@@ -1497,17 +1532,6 @@ async def test_anthropic_provider_close_sdk_closes_shared_sdk() -> None:
     await p.close_sdk()
 
     fake_sdk.close.assert_awaited_once()
-    assert p._sdk is None
-
-
-@pytest.mark.asyncio
-async def test_anthropic_provider_close_sdk_accepts_client_without_close() -> None:
-    """A transport client without a close hook still clears provider state."""
-    p = Anthropic.from_key("k")
-    p._sdk = cast("anthropic_sdk.AsyncAnthropic", MagicMock(spec=[]))
-
-    await p.close_sdk()
-
     assert p._sdk is None
 
 

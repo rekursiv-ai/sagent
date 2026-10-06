@@ -22,9 +22,9 @@ Owns three wrappers and a small set of observers:
   status injection, tool restore).
 
 Observers track cost, activity (call timing, streamed chars), tool
-registry (cohort id → tool name), persistence (``SaveSession`` →
-session.jsonl append), and budget caps (max tool-call rounds, max
-budget USD).
+registry (cohort id → tool name), and persistence (``SaveSession`` →
+session.jsonl append). Budget caps are enforced at their own gates:
+``_before_tool_spawn`` for tool-call rounds, ``_bill`` for USD.
 """
 
 from __future__ import annotations
@@ -32,7 +32,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, NoReturn
 
 import asyncio
 import contextlib
@@ -48,6 +48,8 @@ from sagent import agents_md
 from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
+    backgroundable,
+    bg_augmented_schema,
     split_bg_args,
 )
 from sagent.agent.cache_waste import detect_cache_miss
@@ -114,7 +116,11 @@ from sagent.types.model import (
     StreamInterruptedError,
     UsageSnapshot,
 )
-from sagent.types.providers import AuthReloadable, ModelResolver
+from sagent.types.providers import (
+    AuthReloadable,
+    ModelResolver,
+    Provider,
+)
 from sagent.types.settings import (
     AgentSettings,
     default_buffer_tokens,
@@ -185,6 +191,36 @@ def _reject_budget_over_model(budget: AgentSettings, model: Model) -> None:
             raise ValueError(f"budget {name}={requested:,} exceeds model's {ceiling:,}")
 
 
+# ``budget`` and the three knobs are two spellings of the same choices, and taking one
+# silently dropped the other -- a cap the caller named went unenforced. ``AgentSettings``
+# owns the defaults and their validation, so ``None`` here means "not named".
+def _settings_from_knobs(
+    budget: AgentSettings | None,
+    *,
+    max_attempts: int | None,
+    max_tool_call_rounds: int | None,
+    max_budget_usd: float | None,
+) -> AgentSettings:
+    """Return ``budget``, or settings built from the knobs; never both."""
+    knobs = {
+        "max_attempts": max_attempts,
+        "max_tool_call_rounds": max_tool_call_rounds,
+        "max_budget_usd": max_budget_usd,
+    }
+    named = sorted(name for name, value in knobs.items() if value is not None)
+    if budget is None:
+        settings = AgentSettings(
+            max_tool_call_rounds=max_tool_call_rounds,
+            max_budget_usd=max_budget_usd,
+        )
+        if max_attempts is None:
+            return settings
+        return dataclasses.replace(settings, max_attempts=max_attempts)
+    if named:
+        raise ValueError(f"pass {', '.join(named)} inside budget, not beside it")
+    return budget
+
+
 def _reject_bad_system_arg(system: object) -> None:
     """Reject non-system-prompt constructor values before runtime setup."""
     if not isinstance(system, str) and not callable(system):
@@ -239,8 +275,11 @@ class Agent:
           on overflow recovery.
       session_dir: Directory for session persistence and pre-compact
           transcripts; ``None`` disables both.
-      budget: Explicit context and execution choices; omitted values derive live from the model.
-      max_attempts: Retry attempts inside ``send_with_retry``.
+      budget: Explicit context and execution choices; omitted values derive live
+          from the model. Excludes ``max_attempts``, ``max_tool_call_rounds``,
+          and ``max_budget_usd``, which it already carries.
+      max_attempts: Retry attempts inside ``send_with_retry``; ``None`` takes
+          the ``AgentSettings`` default.
       name: Human-readable agent label.
       description: Agent description for parent agents and the UI.
       max_tool_call_rounds: Cap on tool-call rounds before the agent
@@ -262,6 +301,8 @@ class Agent:
       tool_results: Per-result and aggregate tool-result limits; ``None`` derives
           them from the input window, which on a million-token window lets one
           result run to 250k tokens before it is moved to disk.
+      owned_provider: The provider ``model`` came from, when this agent built it
+          and so must ``close_sdk`` it on swap-away and teardown.
 
     Side effects:
       Constructing with a non-``None`` ``model_recipe`` (and
@@ -284,7 +325,7 @@ class Agent:
         compactor: Compactor | None = None,
         session_dir: str | Path | None = None,
         budget: AgentSettings | None = None,
-        max_attempts: int = 5,
+        max_attempts: int | None = None,
         name: str = "Agent",
         description: str = "An AI agent.",
         max_tool_call_rounds: int | None = None,
@@ -293,18 +334,19 @@ class Agent:
         frozen_system: bool = False,
         allow_background: bool = True,
         tool_results: ToolResultPolicy | None = None,
+        owned_provider: Provider | None = None,
     ) -> None:
-        if max_attempts < 1:
-            # ``send_with_retry``'s loop ``break``s on ``attempt >=
-            # max_attempts`` before the first send when ``max_attempts``
-            # is non-positive, raising ``RetriesExhaustedError`` with no
-            # ``last_error`` -- a confusing "Failed after 0 attempts:
-            # None". Reject up front instead.
-            raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
         _reject_bad_system_arg(system)
+        budget = _settings_from_knobs(
+            budget,
+            max_attempts=max_attempts,
+            max_tool_call_rounds=max_tool_call_rounds,
+            max_budget_usd=max_budget_usd,
+        )
         self.name = name
         self.description = description
         self.model = model
+        self._owned_provider = owned_provider
         self.model_recipe = model_recipe
         if model_recipe is not None:
             last_models.record(model_recipe.provider, model_recipe.model_id)
@@ -314,12 +356,6 @@ class Agent:
         self.allow_background = allow_background
         self._tools_list: list[Tool] = list(tools or [])
         self.compactor = compactor
-        if budget is None:
-            budget = AgentSettings(
-                max_attempts=max_attempts,
-                max_tool_call_rounds=max_tool_call_rounds,
-                max_budget_usd=max_budget_usd,
-            )
         # An explicit budget goes through the same ceiling check the
         # setters apply. Without it, construction was the one way past
         # them: ``AgentSettings`` validates only non-negativity, so a
@@ -378,7 +414,7 @@ class Agent:
         self._is_subagent: bool = False
         self._shutting_down: bool = False
         self._close_task: asyncio.Task[None] | None = None
-        self._run_active: bool = False
+        self._driver_claim: object | None = None
         # Live ``serve_forever`` task from ``drive_until_first_idle``, kept so
         # a one-shot caller can await the loop to completion after shutdown.
         self._drive_task: asyncio.Task[None] | None = None
@@ -428,7 +464,6 @@ class Agent:
             self._track_activity,
             self._track_tool_registry,
             self._track_compaction,
-            self._enforce_caps,
         ):
             self.runtime.observers.append(fn)
         # Persistence is an Agent-level concern, not a caller concern.
@@ -595,7 +630,7 @@ class Agent:
                     is_error=True,
                     attachments=(),
                 )
-            max_chars, persist_tokens = 0, host
+            max_chars, persist_tokens = 0, 0
         processed = post_process_result(
             result,
             tool.name,
@@ -763,9 +798,9 @@ class Agent:
             cached = (
                 self._tools_version,
                 [
-                    tool
-                    if tool.name == "BackgroundTask" or not self.allow_background
-                    else BackgroundAwareTool(tool)
+                    BackgroundAwareTool(tool)
+                    if self.allow_background and backgroundable(tool)
+                    else tool
                     for tool in self._tools_map.values()
                 ],
             )
@@ -822,6 +857,16 @@ class Agent:
         return self.cost_tracker.total
 
     @property
+    def results_may_be_cleared(self) -> bool:
+        """Whether the active model's server may drop old tool results."""
+        return self.model.settings.manage_context_server_side
+
+    @property
+    def own_spend(self) -> TokenCost:
+        """Cumulative spend of this agent alone; ``cost_tracker.spend`` is the tree's."""
+        return self._own_spend
+
+    @property
     def num_tool_call_rounds(self) -> int:
         """Cumulative count of responses that included tool calls."""
         return self.activity.num_tool_call_rounds
@@ -829,6 +874,7 @@ class Agent:
     @property
     def background(self) -> dict[str, BackgroundTaskEntry]:
         """Merged view: cohort-detached tools + explicit-bg + subagents + REPL pump."""
+        self._forget_finished_job_ids()
         merged: dict[str, BackgroundTaskEntry] = {}
         for call_id, task in self.runtime.detached.items():
             name, started = self._tool_registry.get(call_id, ("?", time.time()))
@@ -888,26 +934,39 @@ class Agent:
         )
         wrapper.set_inner(tool)
 
-    def swap_model(self, model: Model, *, spec: ModelRecipe | None = None) -> None:
+    def swap_model(
+        self,
+        model: Model,
+        *,
+        spec: ModelRecipe | None = None,
+        provider: Provider | None = None,
+    ) -> None:
         """Replace the active model.
 
         Carries the outgoing selections onto the new model's settings and
         drops the ones it does not offer. Schedules ``close()`` on the
         swapped-out model so CLI providers' subprocess pools (the
         ``claude`` / ``gemini`` process plus its warming-spare task)
-        don't leak past the swap.
+        don't leak past the swap, then ``close_sdk`` on the outgoing
+        provider when this agent owned it.
 
         Args:
           model: New rich provider model.
           spec: Optional spec recording how the model was built.
+          provider: The provider ``model`` came from, when this agent now owns
+              it; ``None`` when the caller keeps ownership.
 
         """
+        self.model_recipe = spec
+        if spec is not None:
+            last_models.record(spec.provider, spec.model_id)
         if model is self.model:
             return
         old = self.model
+        old_provider = self._owned_provider
+        self._owned_provider = provider
         carried = old.settings
         self.model = model
-        self.model_recipe = spec
         # An account or auth change keeps the tokenizer, so the provider's
         # count still measures this history; dropping it forced the cruder
         # first-request estimate and could fire a spurious compaction.
@@ -917,9 +976,7 @@ class Agent:
         self._agent_model.set_inner(model)
         self.runtime.model = self._agent_model
         model.settings.adopt(carried)
-        if spec is not None:
-            last_models.record(spec.provider, spec.model_id)
-        _schedule_close(old)
+        _ = _schedule_close(old, old_provider)
 
     def change_model(
         self,
@@ -930,6 +987,9 @@ class Agent:
         account: str | None = None,
     ) -> ModelRecipe:
         """Resolve, build, and queue a model swap. The high-level API.
+
+        ``commit_model_change(prepare_model_change(...))``; a caller that must
+        validate against the new model before committing uses the two halves.
 
         Kwarg semantics: each defaults to ``None`` meaning "inherit from
         the current ``model_recipe``." On a cross-provider change, a missing
@@ -967,6 +1027,44 @@ class Agent:
               provider's catalog.
 
         """
+        change = self.prepare_model_change(
+            provider=provider,
+            auth=auth,
+            model_id=model_id,
+            account=account,
+        )
+        self.commit_model_change(change)
+        return change.recipe
+
+    def prepare_model_change(
+        self,
+        *,
+        provider: str | None = None,
+        auth: str | None = None,
+        model_id: str | None = None,
+        account: str | None = None,
+    ) -> ModelChange:
+        """Resolve and build a model swap without queuing it.
+
+        Same resolution as :meth:`change_model`. The caller owns the result:
+        it either passes it to :meth:`commit_model_change` or, refusing it,
+        calls :meth:`ModelChange.discard`.
+
+        Args:
+          provider: New provider class name; ``None`` inherits.
+          auth: New auth-method suffix; ``None`` inherits.
+          model_id: New provider-specific model id; ``None`` inherits.
+          account: New credential account; ``None`` inherits.
+
+        Returns:
+          change: The built model, its recipe, its provider, and a label.
+
+        Raises:
+          ValueError: ``model_recipe`` is unset, the resolved provider is
+              unknown, or the resolved model id is rejected by the
+              provider's catalog.
+
+        """
         spec = self.model_recipe
         if spec is None:
             raise ValueError("agent has no model_recipe; cannot change_model")
@@ -984,7 +1082,11 @@ class Agent:
             fallback_to_default=(account is None and target.provider != spec.provider),
         )
         target = dataclasses.replace(target, account=resolved_account)
-        new_model = provider_obj.model(target.model_id)
+        try:
+            new_model = provider_obj.model(target.model_id)
+        except BaseException:
+            _ = _schedule_provider_close(provider_obj)
+            raise
         if target.provider != spec.provider:
             label = (
                 f"{spec.provider}/{spec.model_id} -> "
@@ -992,13 +1094,39 @@ class Agent:
             )
         else:
             label = f"{spec.model_id} -> {target.model_id}"
-        self.runtime.inbox.push_back(
-            runtime.ModelSwitch(
-                apply=lambda: self._apply_model_change(new_model, target),
-                label=label,
-            ),
+        return ModelChange(
+            model=new_model,
+            recipe=target,
+            provider=provider_obj,
+            label=label,
         )
-        return target
+
+    def commit_model_change(
+        self,
+        change: ModelChange,
+        *,
+        then: Callable[[], None] | None = None,
+    ) -> None:
+        """Queue ``change`` so it lands once no model call is in flight.
+
+        Queued through the runtime inbox so an in-flight call finishes on the
+        OLD model (cost attribution, retry state) before the new one goes live.
+
+        Args:
+          change: A change from :meth:`prepare_model_change`.
+          then: Runs right after the swap, in the same step: settings that
+              must apply to the NEW model (thinking, limits) go here.
+
+        """
+
+        def _apply() -> None:
+            self.swap_model(change.model, spec=change.recipe, provider=change.provider)
+            if then is not None:
+                then()
+
+        self.runtime.inbox.push_back(
+            runtime.ModelSwitch(apply=_apply, label=change.label),
+        )
 
     async def relogin(self) -> None:
         """Re-authenticate the current provider; hot-reload live creds.
@@ -1074,14 +1202,6 @@ class Agent:
         """
         return self._build_system()
 
-    def _apply_model_change(
-        self,
-        model: Model,
-        spec: ModelRecipe,
-    ) -> None:
-        """Apply a high-level model change."""
-        self.swap_model(model, spec=spec)
-
     def resume(
         self,
         meta: SessionMeta,
@@ -1114,24 +1234,33 @@ class Agent:
         if meta.status:
             self._status = meta.status
         self.cost_tracker.restore_totals(spend=meta.spend, total=meta.tokens)
+        self._own_spend = meta.own_spend
         self.activity.num_tool_call_rounds = meta.num_tool_call_rounds
         self.activity.elapsed_seconds = meta.total_active_elapsed_seconds
         self.compaction_state.compact_count = meta.compact_count
         self.runtime.resume_retry_at = _latest_service_retry_at(meta.runtime_events)
-        if (
-            meta.provider
-            and meta.model_id
-            and meta.model_id != self.model.tagged_model_id
-        ):
+        if meta.provider and meta.model_id and not self._runs_recipe_of(meta):
             restored = restore_model(meta)
             if restored is not None:
-                new_model, new_spec = restored
-                self.swap_model(new_model, spec=new_spec)
+                new_model, new_spec, provider = restored
+                self.swap_model(new_model, spec=new_spec, provider=provider)
         # The tape we just replayed came from session.jsonl. Without
         # rebaselining, the next ``SaveSession`` would write all those
         # same records back to the same file, duplicating them.
         if self._rebaseline_persistence is not None:
             self._rebaseline_persistence()
+
+    # The model id alone cannot tell two recipes apart: one id served under another
+    # provider, auth, or account is a different model, billed to a different account.
+    def _runs_recipe_of(self, meta: SessionMeta) -> bool:
+        """Whether the active model already is the one ``meta`` recorded."""
+        spec = self.model_recipe
+        return (
+            spec is not None
+            and meta.model_id == self.model.tagged_model_id
+            and (meta.provider, meta.auth, meta.account)
+            == (spec.provider, spec.auth, spec.account or "")
+        )
 
     # -- Foreground slot / cancel verbs --------------------------------
 
@@ -1147,7 +1276,9 @@ class Agent:
 
         """
         call_id = self._call_id_for_job(qid)
-        self._cancel_background(qid)
+        # ``_bg`` is keyed by job id, so a call id must be translated before the
+        # cancel; ``Kill`` alone never reaches a job running outside the cohort.
+        self.cancel_background(self._job_ids_by_call_id.get(call_id, qid))
         self.runtime.inbox.push_back(runtime.Kill(call_id=call_id))
 
     def kill_all_tools(self) -> None:
@@ -1209,15 +1340,17 @@ class Agent:
 
         """
         if not self._shutting_down:
-            self._close_task = _schedule_close(self.model)
+            self._close_task = _schedule_close(self.model, self._owned_provider)
         self._shutting_down = True
         self._stop_driver(force=force)
 
     async def aclose(self) -> None:
-        """Shut down the agent and await terminal model cleanup."""
+        """Shut down the agent and await terminal model and provider cleanup."""
         self.shutdown()
         if self._close_task is None:
-            self._close_task = asyncio.create_task(self.model.close())
+            self._close_task = asyncio.create_task(
+                _close_model(self.model, self._owned_provider),
+            )
         await asyncio.shield(self._close_task)
 
     def _stop_driver(self, *, force: bool = False) -> None:
@@ -1293,20 +1426,36 @@ class Agent:
         deregister -- the spawner's teardown path does. Otherwise (the
         root agent, direct ``serve_forever`` callers) this self-registers
         and self-deregisters.
+
+        Raises:
+          RuntimeError: When another driver already holds this agent.
+
         """
-        # ``run`` documents a single-driver contract and enforces it via
-        # ``_run_active``; a driver that never claims the flag is
-        # invisible to that check, so a concurrent ``run`` would push
-        # ``Quit`` into this loop's inbox and kill it. Claiming it here
-        # closes that hole -- unless the caller already claimed it to
-        # launch this very loop (``drive_until_first_idle``), which owns
-        # the flag for the whole span and clears it itself.
-        # The flag is released by whoever's LOOP this is, which is this method
-        # either way. ``drive_until_first_idle`` claims it before spawning us
-        # and then returns while we keep running, so if it also released it the
-        # guard would lapse while the loop it protects is still draining the
-        # inbox -- letting a second driver in. It leaves the release to us.
-        self._run_active = True
+        await self._serve(self._claim_driver("serve_forever"))
+
+    # One driver per agent: a second loop on the same inbox steals its events, and
+    # whichever exits first releases the guard the other still relies on. The claim
+    # is a token rather than a bool so only the loop that holds it can release it.
+    def _claim_driver(self, caller: str) -> object:
+        """Claim the single-driver slot, or raise when another driver holds it."""
+        if self._run_active:
+            raise RuntimeError(
+                f"Agent.{caller} is not reentrant; another caller already drives"
+                f" this agent (session_id={self._session_id}).",
+            )
+        claim = object()
+        self._driver_claim = claim
+        return claim
+
+    @property
+    def _run_active(self) -> bool:
+        return self._driver_claim is not None
+
+    # The loop releases the claim it was started under, so a caller that claims and
+    # returns while the loop keeps draining (``drive_until_first_idle``) never lapses
+    # the guard early.
+    async def _serve(self, claim: object) -> None:
+        """Run the loop under ``claim``, releasing it when the loop exits."""
         preexisting = self._registered_label()
         owns_registry = preexisting is None
         label = preexisting or self._dedup_label()
@@ -1316,7 +1465,8 @@ class Agent:
             with self._install_contextvars(label=label):
                 await self.runtime.run_forever()
         finally:
-            self._run_active = False
+            if self._driver_claim is claim:
+                self._driver_claim = None
             if owns_registry:
                 self.deregister(label)
 
@@ -1371,7 +1521,7 @@ class Agent:
         Call ``aclose`` for terminal cleanup. Calling ``run`` while another task is
         already driving this agent (concurrent ``run`` or ``serve_forever``)
         would push a ``Quit()`` into the foreign driver's inbox on exit,
-        killing it. The runtime guards via ``_run_active`` so the
+        killing it. The agent guards via a driver claim so the
         collision fails loudly rather than silently corrupting the
         in-flight driver.
 
@@ -1389,20 +1539,9 @@ class Agent:
               on the same agent.
 
         """
-        if self._run_active:
-            raise RuntimeError(
-                f"Agent.run is not reentrant; another caller already drives this agent"
-                f" (session_id={self._session_id}). Use serve_forever + observer for"
-                f" concurrent drivers, or await the existing run() to completion.",
-            )
-        # DO NOT add an ``await`` between the ``_run_active`` check above and
-        # the assignment below: the guard is a synchronous check-and-set that
-        # relies on asyncio's cooperative scheduling to be atomic. Any
-        # ``await`` here lets two concurrent ``run`` callers slip past the
-        # guard, double-drive ``serve_forever``, and silently corrupt the
-        # in-flight driver via the ``Quit()`` push in ``finally``. See
-        # ``test_agent_run_no_await_between_check_and_set``.
-        self._run_active = True
+        # The claim is taken synchronously, before any ``await``: two concurrent
+        # callers cannot both pass it under cooperative scheduling.
+        claim = self._claim_driver("run")
         events: asyncio.Queue[runtime.RuntimeEvent] = asyncio.Queue()
         terminal = asyncio.Event()
 
@@ -1417,7 +1556,7 @@ class Agent:
         self.runtime.observers.append(_watch)
         try:
             self.runtime.inbox.push_back(msg)
-            drive = asyncio.create_task(self.serve_forever())
+            drive = asyncio.create_task(self._serve(claim))
             drive.add_done_callback(
                 log_task_exception(logger, "Agent.run drive task crashed"),
             )
@@ -1462,7 +1601,8 @@ class Agent:
         finally:
             if _watch in self.runtime.observers:
                 self.runtime.observers.remove(_watch)
-            self._run_active = False
+            if self._driver_claim is claim:
+                self._driver_claim = None
 
     async def drive_until_first_idle(
         self,
@@ -1496,12 +1636,7 @@ class Agent:
           RuntimeError: When another driver is already in flight on this agent.
 
         """
-        if self._run_active:
-            raise RuntimeError(
-                "Agent.drive_until_first_idle is not reentrant; another caller"
-                f" already drives this agent (session_id={self._session_id}).",
-            )
-        self._run_active = True
+        claim = self._claim_driver("drive_until_first_idle")
         first_idle: asyncio.Event = asyncio.Event()
         terminal_errors: list[BaseException] = []
 
@@ -1518,7 +1653,7 @@ class Agent:
 
         self.runtime.observers.append(_watch)
         self.runtime.inbox.push_back(msg)
-        drive = asyncio.create_task(self.serve_forever())
+        drive = asyncio.create_task(self._serve(claim))
         # Expose the live loop task so a one-shot caller can await it to
         # completion after it pushes ``shutdown`` -- the loop keeps
         # running when this method returns.
@@ -1550,10 +1685,10 @@ class Agent:
         finally:
             if _watch in self.runtime.observers:
                 self.runtime.observers.remove(_watch)
-            # A live loop keeps the guard armed; only a finished drive releases
-            # it, since the loop outlives this method by design.
-            if drive.done():
-                self._run_active = False
+            # A live loop keeps the claim; ``_serve`` releases it when the loop
+            # exits, since the loop outlives this method by design.
+            if drive.done() and self._driver_claim is claim:
+                self._driver_claim = None
 
     # -- Internal helpers ---------------------------------------------
 
@@ -1648,7 +1783,10 @@ class Agent:
         if self._frozen_system:
             return base
         parts: list[str] = [base] if base else []
+        gate = self.tool_gate
         for tool in self._tools_map.values():
+            if gate is not None and tool.name not in gate:
+                continue
             contribution = tool.prompt()
             if contribution:
                 parts.append(contribution)
@@ -1993,18 +2131,6 @@ class Agent:
             self.compaction_state.compact_count += 1
             self.compaction_state.compact_failures = 0
 
-    def _enforce_caps(self, event: runtime.RuntimeEvent) -> None:
-        """Push ``types.runtime.ModelResponseError`` when caps are hit."""
-        if (
-            isinstance(event, runtime.ModelResponseComplete)
-            and self.max_tool_call_rounds is not None
-            and self.activity.num_tool_call_rounds > self.max_tool_call_rounds
-            and event.message.tool_calls
-        ):
-            self.runtime.inbox.push_back(
-                runtime.ModelResponseError(self._tool_round_limit_error()),
-            )
-
     # Runs pre-increment: ``num_tool_call_rounds`` reflects completed rounds, so this
     # response would be round ``num + 1``. Block when that next round would exceed
     # ``max_tool_call_rounds``.
@@ -2060,10 +2186,6 @@ class Agent:
         if job is not None:
             self._forget_job_id(job.call_id or job.queue_id)
 
-    def _cancel_background(self, job_id: str) -> None:
-        """Cancel and forget one explicit background job."""
-        self.cancel_background(job_id)
-
     def tool_name_for_call(self, call_id: str) -> tuple[str, float]:
         """Return ``(tool_name, started_at)`` for a dispatched call id.
 
@@ -2102,6 +2224,17 @@ class Agent:
         """Resolve a human job id to its provider call id when known."""
         return self._call_ids_by_job_id.get(job_or_call_id, job_or_call_id)
 
+    # A detached call leaves ``runtime.detached`` on completion without telling the
+    # agent, so the ids minted for the job listing are freed here, by liveness, rather
+    # than at a completion hook that does not exist.
+    def _forget_finished_job_ids(self) -> None:
+        """Drop job ids whose call is neither detached nor a registered job."""
+        live = set(self.runtime.detached) | {
+            job.call_id or job.queue_id for job in self._bg.values()
+        }
+        for call_id in [c for c in self._job_ids_by_call_id if c not in live]:
+            self._forget_job_id(call_id)
+
     def _forget_job_id(self, call_id: str) -> None:
         """Forget a completed or cancelled provider call's human job id."""
         job_id = self._job_ids_by_call_id.pop(call_id, None)
@@ -2112,7 +2245,7 @@ class Agent:
         """Cancel and forget every explicit background tool job."""
         for job_id, job in tuple(self._bg.items()):
             if _should_cancel_background(job, mode="tools_only"):
-                self._cancel_background(job_id)
+                self.cancel_background(job_id)
 
     def register_background(self, job_id: str, entry: BackgroundTaskEntry) -> None:
         """Add ``entry`` to the background-task registry under ``job_id``.
@@ -2558,6 +2691,27 @@ def _compact_failure_error(last_err: Exception, model: Model) -> Exception:
 
 # ``None`` kwargs inherit from ``spec``. The model-id branch implements the cross-
 # provider preservation rule documented on :meth:`Agent.change_model`.
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class ModelChange:
+    """A built, not yet committed model swap; whoever holds it owns its resources."""
+
+    model: Model
+    """The new model."""
+
+    recipe: ModelRecipe
+    """How ``model`` was built."""
+
+    provider: Provider
+    """The provider ``model`` came from; the agent owns it once committed."""
+
+    label: str
+    """Human-readable ``old -> new`` label."""
+
+    def discard(self) -> None:
+        """Close the model and its provider; for a change that is not committed."""
+        _ = _schedule_close(self.model, self.provider)
+
+
 def _resolve_target_spec(
     spec: ModelRecipe,
     *,
@@ -2609,16 +2763,42 @@ def _provider_knows_model(prov_name: str, model_id: str) -> bool:
 # running loop so the prior subprocess and its warming-spare task don't outlive the
 # swap. No-op when no event loop is running (e.g. ``Agent.resume`` before
 # ``serve_forever``): the model hasn't been used yet so there is nothing to close.
-def _schedule_close(model: Model) -> asyncio.Task[None] | None:
+def _schedule_close(
+    model: Model,
+    provider: Provider | None,
+) -> asyncio.Task[None] | None:
     """Schedule async teardown and return its task when a loop is running."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return None
-    task = loop.create_task(model.close())
+    task = loop.create_task(_close_model(model, provider))
     task.add_done_callback(
         log_task_exception(logger, "model close failed"),
     )
+    return task
+
+
+# The model first, then the provider: a model may still hold a request on the client
+# the provider owns, and ``Provider.close_sdk`` puts the client's teardown with whoever
+# built the provider.
+async def _close_model(model: Model, provider: Provider | None) -> None:
+    """Close ``model``, then the provider it came from when this agent owned it."""
+    try:
+        await model.close()
+    finally:
+        if provider is not None:
+            await provider.close_sdk()
+
+
+def _schedule_provider_close(provider: Provider) -> asyncio.Task[None] | None:
+    """Schedule ``close_sdk`` on a provider whose model was never adopted."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return None
+    task = loop.create_task(provider.close_sdk())
+    task.add_done_callback(log_task_exception(logger, "provider close failed"))
     return task
 
 
@@ -2811,10 +2991,7 @@ class _AgentModel:
         # for but never spent. ``compact_now`` appends a barrier override
         # to the runtime tape; we refetch the resolved view below.
         if not await self._agent.compact_if_needed(history, self._inner):
-            last_err = self._agent.last_compact_error
-            if last_err is None:  # compact_now sets this on every False return.
-                raise ValueError("Expected last_err is not None.")
-            raise _compact_failure_error(last_err, self._inner) from last_err
+            self._raise_compact_failure()
         # Compaction may have appended a barrier override; refetch the
         # resolved view so subsequent attempts in this call see it.
         history = self._agent.runtime.context().messages
@@ -2962,21 +3139,20 @@ class _AgentModel:
                 # BUGS34 regression: three identical "Compaction failed"
                 # lines followed by a cryptic RuntimeError).
                 if not await self._agent.compact_now():
-                    last_err = self._agent.last_compact_error
-                    if last_err is None:  # compact_now sets this on every False return.
-                        raise ValueError("Expected last_err is not None.") from None
-                    raise _compact_failure_error(last_err, self._inner) from last_err
+                    self._raise_compact_failure()
                 # Refetch resolved view: ``compact_now`` appended a
                 # barrier override.
                 history = self._agent.runtime.context().messages
                 continue
             return response.message
-        # Unreachable: the loop either ``return``s on success or raises
-        # on the final attempt. Kept as a typed safety net under -O
-        # where any ``assert`` would be elided.
-        raise RuntimeError(
-            "unreachable: overflow recovery loop must return or raise",
-        )
+        raise AssertionError("overflow recovery returns or raises on its last attempt")
+
+    def _raise_compact_failure(self) -> NoReturn:
+        """Raise the user-facing error for a compaction that returned False."""
+        last_err = self._agent.last_compact_error
+        if last_err is None:
+            raise ValueError("compact_now sets the error on every False return")
+        raise _compact_failure_error(last_err, self._inner) from last_err
 
 
 class _AgentTool:
@@ -3066,16 +3242,25 @@ class _AgentTool:
         # ``ToolLabel`` / ``ToolResult`` records correlate to the
         # originating assistant tool_use.
         call_id = current_call_id_var.get("")
-        bg_requested, delay_sec, clean_args = split_bg_args(args)
+        # The raw args are validated against the schema they were offered, control
+        # keys included, so a mistyped ``delay`` is an input error rather than a
+        # decode failure inside ``split_bg_args``. A tool that owns a control key
+        # gets every argument untouched.
+        controlled = backgroundable(self._inner)
+        validation_error = validate_tool_input(
+            self._inner.name,
+            bg_augmented_schema(self._inner.directive_schema)
+            if controlled
+            else self._inner.directive_schema,
+            args,
+        )
+        bg_requested, delay_sec, clean_args = (
+            split_bg_args(args) if controlled else (False, 0.0, dict(args))
+        )
         # A model can send the keys without being offered them; the host that forbade
         # them is counting on the call to end with the turn.
         if not self._agent.allow_background:
             bg_requested, delay_sec = False, 0.0
-        validation_error = validate_tool_input(
-            self._inner.name,
-            self._inner.directive_schema,
-            clean_args,
-        )
         if validation_error is not None:
             # Publish a label even on validation failure so scrollback stays
             # consistent with every other tool outcome (each is preceded by a
@@ -3176,9 +3361,9 @@ class _AgentTool:
         delay_sec: float,
     ) -> None:
         """Background-task body: optional sleep, run inner, post result."""
-        if delay_sec > 0:
-            await asyncio.sleep(delay_sec)
         try:
+            if delay_sec > 0:
+                await asyncio.sleep(delay_sec)
             result = await self._inner.run(args)
             if not result.call_id:
                 result = dataclasses.replace(result, call_id=call_id)

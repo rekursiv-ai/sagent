@@ -200,6 +200,27 @@ async def test_advisor_retries_transient_stream_interruption() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_consult_that_exhausts_its_retries_is_a_tool_error() -> None:
+    """``Tool.run`` returns a failed consult; it does not raise it."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _AlwaysInterrupted(StubProviderModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            del request, publish
+            raise StreamInterruptedError(
+                ModelResponse(message=AssistantMessage(text="")),
+            )
+
+    result = await Advisor(model=_AlwaysInterrupted()).run({"prompt": "p"})
+    assert result.is_error
+
+
+@pytest.mark.asyncio
 async def test_run_blank_system_is_none() -> None:
     inner = StubProviderModel(text="ok")
     _ = await Advisor(model=inner, system="").run({"prompt": "p"})

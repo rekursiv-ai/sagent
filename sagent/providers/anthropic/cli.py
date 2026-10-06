@@ -25,23 +25,34 @@ from typing import (
 
 import asyncio
 import base64
-import hashlib
 import json
 import logging
 import os
 import re
 import shutil
 import subprocess
-import tempfile
 
 import fastjsonschema
 
 from sagent.catalog.anthropic import cli, models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import JSON, MutableJSON, MutableJSONValue, convert
+from sagent.lib.custom_json import (
+    JSON,
+    MutableJSON,
+    MutableJSONValue,
+    ReadError,
+    convert,
+    parse,
+)
 from sagent.providers.anthropic.api import Anthropic
-from sagent.providers.lib.cli_respawn import respawn_for_cadence
+from sagent.providers.lib.cli_respawn import (
+    CLISubprocessModel,
+    empty_turn_response,
+    hash_system,
+    merge_user_input,
+    populated_tmpdir,
+)
 from sagent.providers.lib.errors import (
     error_status_code,
     is_context_overflow_text,
@@ -72,7 +83,6 @@ from sagent.types.runtime import (
     ModelResponseThinking,
     RuntimeEvent,
     ToolLabel,
-    ToolResult,
     UserMessage,
 )
 
@@ -80,7 +90,6 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from sagent.lib import image
     from sagent.types.capability import ModelCapability, ModelSettings
-    from sagent.types.tape import TapeEvent
     from sagent.types.tools import Tool
 else:
     from wrapt import lazy_import
@@ -91,7 +100,7 @@ else:
 logger = logging.getLogger(__name__)
 
 
-_CREDS_PATH = Path.home() / ".claude" / ".credentials.json"  # noqa: TID251 -- vendor fixed path, not ours (AGENTS.md rule 3)  # house-ignore[xdg-literal, module-side-effects] -- Vendor CLI's fixed home path, not ours (AGENTS.md rule 3).
+_CREDS_PATH = Path("~/.claude/.credentials.json")
 _AUTH_STATUS_TIMEOUT_SEC = (
     5.0  # house-ignore[globals] -- Retunable auth-status probe timeout.
 )
@@ -186,12 +195,9 @@ def _claude_auth_status(binary: str) -> bool | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     try:
-        decoded: object = json.loads(proc.stdout)
-    except json.JSONDecodeError:
+        status = parse(proc.stdout, dict[str, object])
+    except (json.JSONDecodeError, ReadError):
         return None
-    if not isinstance(decoded, dict):
-        return None
-    status = cast(MutableJSON, decoded)
     logged_in = status.get("loggedIn")
     if logged_in is False:
         return False
@@ -417,7 +423,7 @@ class AnthropicCLI:
                     "AnthropicCLI: Claude CLI has no active Claude.ai "
                     "subscription login; run `claude auth login --claudeai`.",
                 )
-        path = credentials_path(_CREDS_PATH, account)
+        path = credentials_path(_CREDS_PATH.expanduser(), account)
         if not path.exists():
             if not is_default_account:
                 raise FileNotFoundError(
@@ -548,13 +554,16 @@ class AnthropicCLI:
             mcp_connect_timeout_sec=mcp_connect_timeout_sec,
         )
 
+    async def close_sdk(self) -> None:
+        """Do nothing: each model owns and closes its own subprocess."""
+
     @property
     def account(self) -> str | None:
         """Per-account credentials slot, ``None`` for the legacy file."""
         return self._account
 
 
-class _AnthropicCLIModel(ModelDefaults):
+class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
     """``claude`` CLI subprocess wrapped as a sagent ``Model``.
 
     Args:
@@ -575,18 +584,14 @@ class _AnthropicCLIModel(ModelDefaults):
         subprocess_read_timeout_sec: float | None = None,
         mcp_connect_timeout_sec: float = 8.0,
     ) -> None:
+        super().__init__()
         self._provider = provider
         self._capability = capability
         self._settings = settings
         # Cap (seconds) on waiting for the CLI to fetch the MCP catalog
         # before feeding the first user line. See ``AnthropicCLI.model``.
         self._mcp_connect_timeout_sec = mcp_connect_timeout_sec
-        self._last_sent_index = 0
-        self._system_hash: str = ""
-        self._turn_count = 0
-        self._last_input_tokens = 0
         self._tools_bridge: ToolsBridge | None = None
-        self._warming_proc: Subproc | None = None
         # Stdout-idle timeout (seconds) for the ``claude`` subprocess
         # transport. ``None`` defers to the ``Subproc`` default (60s).
         # Set higher (~3-5min) for agents whose tools include
@@ -609,22 +614,18 @@ class _AnthropicCLIModel(ModelDefaults):
         #     ``/tmp/resume_probe/`` test A from 2026-06-02 evening:
         #     concurrent ``--resume`` branches the conversation tree).
         self._session_id: str | None = session_id
-        # ``_session_initialized = True`` means "this PROCESS has spawned
-        # at least one successful turn under this uuid, so the on-disk
-        # session is ours to ``--resume``". Always False at construction:
-        # implicit session mode never trusts a pre-existing on-disk file
-        # it didn't write this process. On the first call -- including
-        # the first call after a host restart, when ``Agent.resume`` has
-        # rehydrated the tape so ``request.messages`` carries the full
-        # history -- sagent re-feeds that history via stdin under
-        # ``--session-id``, which REBUILDS the on-disk session from
-        # sagent's canonical tape. Every later turn feeds only new
-        # entries and ``--resume``s. This makes the on-disk file a pure
-        # cache derived from the request, never a source of truth, so
-        # there is no session-file format to parse or keep in sync.
-        # The one cost is a single cold (full-history) turn after a
-        # restart; thereafter the prompt cache is warm.
-        self._session_initialized: bool = False
+        # Two independent facts about the on-disk session, each with its own
+        # field. ``_session_on_disk``: claude has written this uuid's JSONL, so
+        # the next spawn must ``--resume`` (``--session-id`` on an existing
+        # session fails). It flips as soon as a line reaches stdin, because
+        # claude persists input before answering it. ``_unanswered``: the
+        # merged input claude has stored but not yet answered. A retry with
+        # no new input resends it rather than reporting success with an
+        # empty reply. Never trusts a file a prior process left: the first
+        # turn rebuilds the session from sagent's tape as one merged input,
+        # so the on-disk file stays a cache derived from the request.
+        self._session_on_disk = False
+        self._unanswered: UserMessage | AgentSendMessage | None = None
         if session_id is None:
             self._hot_spare: HotSpare | None = HotSpare(
                 self._spawn_spare_initialized,
@@ -668,16 +669,15 @@ class _AnthropicCLIModel(ModelDefaults):
             # hardcoded to ``$HOME/.claude/.credentials.json`` --
             # there's no env var to redirect it. That case keeps the
             # stateless-mode HOME-override behaviour.
-            if self._provider.account is None:
-                self._persistent_tmpdir = None
-            else:
-                self._persistent_tmpdir = Path(
-                    tempfile.mkdtemp(prefix="sagent-anthropic-cli-resume-"),
+            account = self._provider.account
+            self._persistent_tmpdir = (
+                None
+                if account is None
+                else populated_tmpdir(
+                    "sagent-anthropic-cli-resume-",
+                    lambda tmpdir: _populate_anthropic_tmpdir(tmpdir, account),
                 )
-                _populate_anthropic_tmpdir(
-                    self._persistent_tmpdir,
-                    self._provider.account,
-                )
+            )
         self._active_proc: Subproc | None = None
         # Set by ``stream`` before ``_spawn_initialized`` reads them.
         self._pending_system: str = ""
@@ -699,7 +699,6 @@ class _AnthropicCLIModel(ModelDefaults):
         # a transport/retryable failure of that turn's final drain does not
         # lose the results. See ``_detached_delivery_entry``.
         self._pending_detached_text: str | None = None
-        self._sent_history_head: TapeEvent | None = None
         # External MCP servers (stdio or HTTP) merged into the CLI's
         # ``--mcp-config`` at subprocess spawn time. See
         # :func:`_build_anthropic_argv`.
@@ -786,16 +785,15 @@ class _AnthropicCLIModel(ModelDefaults):
 
         Session-persistent mode flags transient ``is_error`` results
         as retryable so ``send_with_retry`` performs an in-place retry
-        (sleep → spawn fresh ``claude --print --resume`` → process only
-        the entries the per-entry-advance ``_last_sent_index`` hasn't
-        delivered yet) instead of letting the error propagate up to
-        the runtime as a ``ModelResponseError`` (which appends a
-        synthetic ``[Error: …]`` UserMessage to history and costs a
-        full turn boundary).
+        (sleep → spawn fresh ``claude --print --resume`` → resend the
+        stored-but-unanswered input) instead of letting the error
+        propagate up to the runtime as a ``ModelResponseError`` (which
+        appends a synthetic ``[Error: …]`` UserMessage to history and
+        costs a full turn boundary).
 
         Stateless mode keeps the historical ``return False`` because
         its warm ``HotSpare`` subprocess has already consumed the
-        stdin lines we wrote; same-subprocess retry would either
+        stdin line we wrote; same-subprocess retry would either
         duplicate inbound messages or stall waiting on a CLI that no
         longer expects more input. The runtime's respawn path handles
         that case correctly by resetting ``_last_sent_index = 0`` and
@@ -859,16 +857,15 @@ class _AnthropicCLIModel(ModelDefaults):
             # registry for the already-warm subprocess.
             self._pending_tools = list(request.tools or [])
             if self._should_respawn(request):
-                if _hash_system(request.system) != self._system_hash:
+                if hash_system(request.system) != self._system_hash:
                     await self._hot_spare.discard_spare()
                 await self._hot_spare.respawn()
                 self._reset_active_state()
             proc = await self._hot_spare.acquire()
             self._sync_tools_bridge(request, publish)
-
             try:
                 response = await self._exchange_turn(proc, request, publish)
-                self._system_hash = _hash_system(self._pending_system)
+                self._system_hash = hash_system(self._pending_system)
                 self._last_sent_index = len(request.messages)
                 # Detached results (if any) were delivered + answered; drop
                 # the held buffer so they aren't redelivered next turn.
@@ -898,146 +895,58 @@ class _AnthropicCLIModel(ModelDefaults):
     # ``/tmp/resume_probe/`` test A from 2026-06-02: concurrent ``--resume`` produces a
     # branched conversation tree).
     #
-    # Only the newest user-like entries are written to stdin -- ``claude`` already has
-    # the rest in its session file. ``_last_sent_index`` is the cumulative count of
-    # messages we've delivered to ``claude`` across this session_id, NOT a per-
-    # subprocess counter -- so it's preserved across transport-error respawns. On the
-    # first turn we use ``--session-id``; on every subsequent turn (including respawns)
-    # we use ``--resume``.
+    # Every user-side entry claude has not seen is merged into ONE stdin line, so a turn
+    # (including the first turn after a restart, which rebuilds the session from the
+    # whole tape) costs one model turn. ``_last_sent_index`` counts tape entries claude
+    # has stored; it advances when the line is written, since claude persists input
+    # before answering it, and is preserved across transport-error respawns.
     async def _stream_session_persistent(
         self,
         request: ModelRequest,
         publish: Callable[[RuntimeEvent], None] | None,
     ) -> ModelResponse:
         """Drive one turn through a ``--session-id`` / ``--resume`` subprocess."""
-        # ``agent.clear()`` (driven by ``/api/restart``, ``Clear`` event,
-        # or context-overflow recovery) wipes ``runtime.context().messages``
-        # but doesn't reach into the provider's ``_last_sent_index`` /
-        # ``_session_initialized``. After clear, the runtime keeps calling
-        # ``stream()`` -- with an empty ``request.messages`` until new
-        # input arrives. The stateless path handles this in
-        # ``_should_respawn`` (history shrunk → respawn → reset
-        # counters); we have to do the equivalent here. Otherwise:
-        #
-        # * The defensive "no new user-like entries" guard fires and
-        #   crashes the runtime turn.
-        # * Even if we let an empty turn through, the next real
-        #   ``--session-id <uuid>`` call would fail with "Session ID
-        #   is already in use" because claude's prior session JSONL
-        #   is still on disk.
-        #
-        # Detect via ``self._last_sent_index > len(request.messages)``
-        # (cumulative-count > current-history-length is only possible
-        # after a clear). Reset state, delete the stale on-disk JSONL,
-        # then continue as if this is a fresh session.
+        # ``agent.clear()`` empties ``request.messages`` without reaching the
+        # provider; a cumulative count past the history length is only possible
+        # after a clear, so start a fresh session.
         if self._last_sent_index > len(request.messages):
             self._reset_for_clear()
-
-        new_entries = request.messages[self._last_sent_index :]
-        # user-like entries only: filter out AssistantMessage / ToolResult
-        # (sagent's own history bookkeeping, never written to stdin).
-        #
-        # ``_last_sent_index``-advancing entries from the tape come first;
-        # a synthetic detached-tool-result delivery (``rel_idx is None``)
-        # is appended LAST and never advances the cumulative counter (it
-        # is not part of ``request.messages``). The detached delivery is
-        # drained only from an already-running bridge -- if no bridge
-        # exists yet, no detached run can have completed.
-        new_entries_idx: list[tuple[int | None, TapeEvent]] = []
-        for i, entry in enumerate(new_entries):
-            if not isinstance(entry, (AssistantMessage, ToolResult)):
-                new_entries_idx.append((i, entry))
-        detached = self._detached_delivery_entry()
-        if detached is not None:
-            new_entries_idx.append((None, detached))
-
-        if not new_entries_idx:
-            # No new input to feed and no detached results to deliver.
-            # Return a no-op response: empty assistant message + zero
-            # usage. The runtime treats this as a finished turn with no
-            # output; the next real inbound will spawn the next
-            # subprocess. (Don't start the bridge for a no-op turn.)
-            return ModelResponse(
-                message=AssistantMessage(text="", tool_calls=()),
-                stop_reason="model_finished",
-            )
-        base = self._last_sent_index
-
-        # Bridge MUST be populated before the subprocess spawns: the
-        # CLI issues ``ListToolsRequest`` against the bridge soon
-        # after launch, and if our tool catalog isn't there at that
-        # moment, opus falls back to emitting tool calls as plain
-        # text inside the assistant message (Episode 2.7 pathology
-        # -- observed 2026-06-02 23:16 when TL produced
-        # "Bash {command: ls -la …}" as text instead of a tool_use
-        # block on the first turn after refactor).
+        new_input = merge_user_input(
+            [
+                *request.messages[self._last_sent_index :],
+                *filter(None, [self._detached_delivery_entry()]),
+            ],
+        )
+        # With nothing new, a stored-but-unanswered input (a failed prior
+        # attempt) is resent so the retry yields the answer it is owed.
+        outgoing = new_input or self._unanswered
+        if outgoing is None:
+            return empty_turn_response()
+        # Bridge MUST be populated before the subprocess spawns: the CLI issues
+        # ``ListToolsRequest`` soon after launch, and an empty catalog makes the
+        # model emit tool calls as plain text (Episode 2.7, 2026-06-02).
         await self._ensure_tools_bridge()
         self._sync_tools_bridge(request, publish)
         proc = await self._spawn_initialized()
         self._active_proc = proc
         try:
-            for rel_idx, entry in new_entries_idx[:-1]:
-                await self._send_entry(proc, entry)
-                # Advance per-entry BEFORE the drain: once a line is on
-                # claude's stdin, claude will consume it + persist it to
-                # the session JSONL even if the resulting model_call
-                # aborts. If the drain fails, the next ``--resume`` MUST
-                # NOT re-write this entry (that produced the "Great
-                # smoke 3×" duplication observed in SWE's session log
-                # on 2026-06-03 around 14:30, when each retry re-wrote
-                # the earliest pending entry AND failed to reach the
-                # later entries that contained TL's STOP directives).
-                if rel_idx is None:  # Only the trailing entry may be synthetic.
-                    raise ValueError("Expected rel_idx is not None.")
-                self._last_sent_index = base + rel_idx + 1
-                _ = await self._drain_until_result(
-                    proc,
-                    publish=None,
-                    update_input_tokens=False,
-                )
-            last_rel_idx, last_entry = new_entries_idx[-1]
-            await self._send_entry(proc, last_entry)
-            # ``rel_idx is None`` for a synthetic detached-result delivery:
-            # it is not part of ``request.messages``, so it must not
-            # advance the cumulative sent counter.
-            if last_rel_idx is not None:
-                self._last_sent_index = base + last_rel_idx + 1
+            await self._send_entry(proc, outgoing)
+            self._session_on_disk = True
+            self._unanswered = outgoing
+            self._last_sent_index = len(request.messages)
+            self._pending_detached_text = None
             response = await self._drain_until_result(proc, publish)
         except asyncio.CancelledError:
-            # Runtime cancelled the model-call task (preempt). SIGINT the
-            # subprocess so the opaque CLI tool loop stops, then re-raise
-            # so the runtime's cancellation path runs. ``_last_sent_index``
-            # already reflects every entry written to stdin, so the next
-            # ``--resume`` skips them.
+            # Preempt: SIGINT so the opaque CLI tool loop stops, then re-raise
+            # so the runtime's cancellation path runs.
             self._interrupt_active_proc()
-            await proc.close()
-            self._active_proc = None
             raise
-        except SubprocessTransportError:
-            # ``claude`` died mid-turn. ``_last_sent_index`` already
-            # reflects every entry we wrote to stdin; the next
-            # ``--resume`` will skip them and pick up from the first
-            # entry we hadn't reached yet. The session JSONL on disk
-            # was updated by claude as it processed each line, so the
-            # next turn's view is consistent.
+        finally:
             await proc.close()
             self._active_proc = None
-            raise
-        else:
-            # All entries delivered + final drain returned cleanly.
-            # Advance past any trailing AssistantMessage / ToolResult
-            # entries (sagent's own bookkeeping; we never write them).
-            self._last_sent_index = len(request.messages)
-            # First successful turn established the session on disk;
-            # all future spawns use ``--resume``.
-            self._session_initialized = True
-            # Detached results were delivered + answered this turn; drop
-            # the held buffer so they aren't redelivered next turn.
-            self._pending_detached_text = None
-            await proc.close()
-            self._active_proc = None
-            self._turn_count += 1
-            return response
+        self._unanswered = None
+        self._turn_count += 1
+        return response
 
     @override
     async def close(self) -> None:
@@ -1061,20 +970,9 @@ class _AnthropicCLIModel(ModelDefaults):
             raise ValueError("Expected self._hot_spare is not None.")
         if self._hot_spare.active is None:
             return False
-        history = request.messages
-        if not history:
-            return True
-        if self._last_sent_index > len(history):
-            return True
-        if self._sent_history_head is not None and history[0] is not (
-            self._sent_history_head
-        ):
-            return True
-        if _hash_system(request.system) != self._system_hash:
-            return True
-        return respawn_for_cadence(
-            turn_count=self._turn_count,
-            last_input_tokens=self._last_input_tokens,
+        return self._respawn_due(
+            request.messages,
+            system=request.system,
             max_request_tokens=self.limits.max_request_tokens,
         )
 
@@ -1132,49 +1030,41 @@ class _AnthropicCLIModel(ModelDefaults):
             self._tools_bridge = ToolsBridge(tools=[])
             await self._tools_bridge.start()
 
+    # Unseen user-side entries -- the whole history after a respawn -- plus any
+    # completed detached (background) tool results travel as ONE stdin line: the
+    # bridge advertises ``background``/``delay`` in both modes, so a stateless turn
+    # can stage a detached run whose result must be fed back here.
     async def _exchange_turn(
         self,
         proc: Subproc,
         request: ModelRequest,
         publish: Callable[[RuntimeEvent], None] | None,
     ) -> ModelResponse:
-        """Replay prior entries quietly, then return the current turn result."""
-        new_entries = request.messages[self._last_sent_index :]
-        if self._last_sent_index == 0 and request.messages:
-            self._sent_history_head = request.messages[0]
-        user_like_entries: list[TapeEvent] = [
-            entry for entry in new_entries if not isinstance(entry, AssistantMessage)
-        ]
-        # Deliver any completed detached (background) tool results as a
-        # trailing synthetic user entry, same as the session path -- the
-        # bridge advertises ``background``/``delay`` in BOTH modes, so a
-        # stateless turn can stage a detached run whose result must be fed
-        # back here. Without this the model is promised a later delivery
-        # that never arrives and ``_bg_done`` leaks unboundedly.
-        detached = self._detached_delivery_entry()
-        if detached is not None:
-            user_like_entries.append(detached)
-        for entry in user_like_entries[:-1]:
-            await self._send_entry(proc, entry)
-            _ = await self._drain_until_result(
-                proc,
-                publish=None,
-                update_input_tokens=False,
-            )
-        if not user_like_entries:
-            return await self._drain_until_result(proc, publish)
-        await self._send_entry(proc, user_like_entries[-1])
+        """Send the unseen input as one line and return the turn's result."""
+        entry = merge_user_input(
+            [
+                *filter(None, [self._unsent_input(request.messages)]),
+                *filter(None, [self._detached_delivery_entry()]),
+            ],
+        )
+        if entry is None:
+            return empty_turn_response()
+        await self._send_entry(proc, entry)
         return await self._drain_until_result(proc, publish)
 
     # Gated on ``proc`` having fetched the bridge catalog (instant after the first
     # fetch): a cold subprocess's first user line must not race ahead of claude's still-
     # connecting MCP client, or the model sees no tools and answers "no tools have been
     # provided".
-    async def _send_entry(self, proc: Subproc, entry: TapeEvent) -> None:
-        """Write one history entry to stdin."""
+    async def _send_entry(
+        self,
+        proc: Subproc,
+        entry: UserMessage | AgentSendMessage,
+    ) -> None:
+        """Write one user-side entry to stdin."""
         await self._await_mcp_listed(proc)
         line = json.dumps(
-            _serialize_for_stdin(
+            _user_line(
                 entry,
                 self.limits.max_image_edge_px,
                 self.limits.max_image_bytes,
@@ -1186,20 +1076,13 @@ class _AnthropicCLIModel(ModelDefaults):
         self,
         proc: Subproc,
         publish: Callable[[RuntimeEvent], None] | None,
-        *,
-        update_input_tokens: bool = True,
     ) -> ModelResponse:
         """Read stream events until ``result``; assemble a ``ModelResponse``."""
         text_parts: list[str] = []
-        thinking_parts: list[str] = []
-        # Aggregated thinking-block signature. Anthropic's stream
-        # emits a ``signature_delta`` event alongside ``thinking_delta``;
-        # the final signature is the concatenation of those deltas
-        # (typically a single delta). Required because the assistant
-        # message is re-sent on the wire when a session-mode turn
-        # rebuilds history, and Anthropic's API rejects a signature-less
-        # thinking block (HTTP 400 ``thinking.signature: Field required``).
-        signature_parts: list[str] = []
+        # One entry per thinking content block, across every internal round:
+        # each block carries the signature Anthropic issued for it alone, so
+        # an API replay of the turn validates block by block.
+        thinking_blocks: list[dict[str, str]] = []
         # Per-block-index state for tool_use accumulators. Each
         # ``content_block_start`` for a ``tool_use`` registers
         # ``{name, id, json_parts: list[str]}`` keyed by block index;
@@ -1269,14 +1152,13 @@ class _AnthropicCLIModel(ModelDefaults):
                 _dispatch_stream_event(
                     inner,
                     text_parts,
-                    thinking_parts,
-                    signature_parts=signature_parts,
+                    thinking_blocks,
                     tool_use_blocks=tool_use_blocks,
                     publish=publish,
                 )
             elif kind == "system" and event.get("subtype") == "init":
                 message_id = cast(str, event.get("session_id") or "")
-        if update_input_tokens and last_round_usage is not None:
+        if last_round_usage is not None:
             # Cache-inclusive context footprint of the last internal round;
             # feeds the context-fraction respawn heuristic. Only overwrite when
             # a round was actually observed: a zero-round drain (no
@@ -1288,8 +1170,7 @@ class _AnthropicCLIModel(ModelDefaults):
             usage_event=usage_event,
             last_round_usage=last_round_usage,
             text="".join(text_parts),
-            thinking_parts=thinking_parts,
-            signature_parts=signature_parts,
+            thinking_blocks=thinking_blocks,
             stop_reason=stop_reason,
             fallback_message_id=message_id,
         )
@@ -1332,8 +1213,11 @@ class _AnthropicCLIModel(ModelDefaults):
         else:
             # Named-account stateless mode: hermetic per-spawn HOME holding
             # the selected legacy file credential. Subproc deletes it on close.
-            tmpdir = Path(tempfile.mkdtemp(prefix="sagent-anthropic-cli-"))
-            _populate_anthropic_tmpdir(tmpdir, self._provider.account)
+            account = self._provider.account
+            tmpdir = populated_tmpdir(
+                "sagent-anthropic-cli-",
+                lambda path: _populate_anthropic_tmpdir(path, account),
+            )
             spawn_owned_tmpdir = tmpdir
         argv = _build_anthropic_argv(
             model_id=self.capability.wire_model_id or self.capability.model_id,
@@ -1342,11 +1226,7 @@ class _AnthropicCLIModel(ModelDefaults):
             bridge_server_name=self._tools_bridge.server_name,
             extra_mcp_servers=self._extra_mcp_servers,
             session_id=self._session_id,
-            # ``--resume`` once we've successfully spawned and ack'd
-            # at least one turn under this session_id; ``--session-id``
-            # otherwise. Updated in the session-persistence stream
-            # path on first successful drain.
-            resume_existing=self._session_initialized,
+            resume_existing=self._session_on_disk,
         )
         env = _anthropic_subprocess_env(
             tmpdir,
@@ -1438,15 +1318,14 @@ class _AnthropicCLIModel(ModelDefaults):
         # past it). New spawns re-snapshot under their own ``id(proc)``.
         self._mcp_baseline_by_proc.pop(id(proc), None)
 
+    @override
     def _reset_active_state(self) -> None:
         """Reset active subprocess counters after a respawn boundary."""
-        self._turn_count = 0
-        self._last_input_tokens = 0
+        super()._reset_active_state()
         # A buffered detached result is promised to the OUTGOING context; a
         # respawn starts fresh, so drop it rather than inject a phantom
         # ``[detached tool result]`` referencing calls the new process never saw.
         self._pending_detached_text = None
-        self._reset_delta_state()
 
     # Wipes the cumulative-sent counter, marks the session as uninitialised (next spawn
     # will use ``--session-id`` again), DELETES the on-disk session JSONL so the next
@@ -1464,7 +1343,8 @@ class _AnthropicCLIModel(ModelDefaults):
         if self._session_id is None:
             return
         self._last_sent_index = 0
-        self._session_initialized = False
+        self._session_on_disk = False
+        self._unanswered = None
         self._delete_session_jsonl(reason="agent.clear()")
 
     # The on-disk file is a pure cache the provider rebuilds from the request; a stale
@@ -1493,10 +1373,10 @@ class _AnthropicCLIModel(ModelDefaults):
                 exc,
             )
 
-    # ``None`` in stateless mode. Resolves HOME the way the spawn does (per-account
-    # tmpdir, else the operator's real HOME honoring ``CLAUDE_CONFIG_DIR``) and the cwd
-    # the way claude encodes it (canonicalized, non-alnum -> ``-``), so the path the
-    # provider computes is the path claude reads/writes.
+    # ``None`` in stateless mode. Resolves the config dir the way the spawn does
+    # (per-account tmpdir, else the operator's ``CLAUDE_CONFIG_DIR`` or ``~/.claude``)
+    # and the cwd the way claude encodes it (canonicalized, non-alnum -> ``-``), so the
+    # path the provider computes is the path claude reads/writes.
     def _session_jsonl_path(self) -> Path | None:
         """On-disk session-file path for this uuid under the spawn cwd."""
         if self._session_id is None:
@@ -1505,34 +1385,15 @@ class _AnthropicCLIModel(ModelDefaults):
             cwd = Path.cwd()
         except OSError:
             return None
-        return _session_jsonl_path(self._session_id, cwd=cwd, home=self._claude_home())
-
-    # Per-account mode pins a hermetic tmpdir; single-account mode inherits the
-    # operator's real HOME.
-    def _claude_home(self) -> Path:
-        """Resolve the HOME the ``claude`` subprocess uses."""
-        return self._persistent_tmpdir or _real_home()
-
-    def _reset_delta_state(self) -> None:
-        """Reset sent-history delta tracking."""
-        self._last_sent_index = 0
-        self._sent_history_head = None
-
-    async def _close_warming_proc(self) -> None:
-        """Close the subprocess currently being warmed, if any."""
-        if self._warming_proc is None:
-            return
-        proc = self._warming_proc
-        self._warming_proc = None
-        await proc.close()
+        config_dir = (
+            self._persistent_tmpdir / ".claude"
+            if self._persistent_tmpdir is not None
+            else _claude_config_dir()
+        )
+        return _session_jsonl_path(self._session_id, cwd=cwd, config_dir=config_dir)
 
 
-def _hash_system(system: str | None) -> str:
-    """Hash for cheap equality checks between system prompts."""
-    return hashlib.sha256((system or "").encode()).hexdigest()
-
-
-def _parse_cli_credentials(raw: MutableJSON) -> AnthropicCLICredentials:
+def _parse_cli_credentials(raw: Mapping[str, object]) -> AnthropicCLICredentials:
     """Extract access/refresh/expiry from Claude CLI credential JSON."""
     oauth = cast(MutableJSON, raw["claudeAiOauth"])
     creds = AnthropicCLICredentials(
@@ -1577,33 +1438,28 @@ def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    raw = cast(MutableJSON, data)
-    try:
+        raw = parse(path.read_text(encoding="utf-8"), dict[str, object])
         _CREDENTIALS_VALIDATOR(raw)
+    except (OSError, json.JSONDecodeError, ReadError):
+        return None
     except fastjsonschema.JsonSchemaValueException:
         return None
     return _parse_cli_credentials(raw)
 
 
-# Honors ``CLAUDE_CONFIG_DIR`` the way the CLI does: when set, claude stores
-# ``projects/`` under it rather than ``$HOME/.claude``. We return a path such that
-# ``<return>/.claude/projects`` equals claude's projects root in both cases.
-def _real_home() -> Path:
-    """Return HOME that claude uses when sagent doesn't override it."""
+# ``CLAUDE_CONFIG_DIR`` names claude's config dir itself (whatever it is called), and
+# claude keeps ``projects/`` directly under it; unset, the dir is ``~/.claude``.
+def _claude_config_dir() -> Path:
+    """Return the config dir claude uses when sagent doesn't override HOME."""
     config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
     if config_dir:
-        # Claude treats CLAUDE_CONFIG_DIR as the ``.claude`` dir itself;
-        # Return its parent so the shared ``/.claude/projects`` suffix
-        # in ``_session_jsonl_path`` resolves correctly.
-        return Path(config_dir).parent
-    return Path(
-        os.environ.get("HOME", "~"),
-    ).expanduser()  # house-ignore[xdg-literal] -- HOME as the claude CLI itself reads it, not our layout (AGENTS.md rule 3).
+        return Path(config_dir)
+    return (
+        Path(
+            os.environ.get("HOME", "~"),
+        ).expanduser()
+        / ".claude"
+    )  # house-ignore[xdg-literal] -- HOME as the claude CLI itself reads it, not our layout (AGENTS.md rule 3).
 
 
 # Mirrors the CLI's encoding so the path sagent computes is the path claude
@@ -1611,21 +1467,21 @@ def _real_home() -> Path:
 # ``/private/tmp``) and every non-``[A-Za-z0-9-]`` character becomes ``-``. Must stay
 # cwd-aware: claude indexes sessions per encoded-cwd project dir and ``--resume`` cannot
 # see a session recorded under a different cwd.
-def _session_jsonl_path(session_id: str, *, cwd: Path, home: Path) -> Path:
+def _session_jsonl_path(session_id: str, *, cwd: Path, config_dir: Path) -> Path:
     """On-disk session-file path claude uses for ``(session_id, cwd)``."""
     try:
         resolved = cwd.resolve()
     except OSError:
         resolved = cwd
     encoded = re.sub(r"[^A-Za-z0-9-]", "-", str(resolved))
-    return home / ".claude" / "projects" / encoded / f"{session_id}.jsonl"
+    return config_dir / "projects" / encoded / f"{session_id}.jsonl"
 
 
 def _populate_anthropic_tmpdir(tmpdir: Path, account: str | None) -> None:
     """Copy the user's credentials into a hermetic ``HOME`` for the CLI."""
     dot_claude = tmpdir / ".claude"
     dot_claude.mkdir(parents=True, exist_ok=True)
-    source = credentials_path(_CREDS_PATH, account)
+    source = credentials_path(_CREDS_PATH.expanduser(), account)
     if _load_cli_credentials_file(source) is None:
         raise ValueError(f"Invalid credentials file: {source}")
     target = dot_claude / _CREDS_PATH.name
@@ -1785,22 +1641,6 @@ def _build_anthropic_argv(
     return base
 
 
-def _serialize_for_stdin(
-    entry: TapeEvent,
-    max_image_dim: int,
-    max_image_bytes: int,
-) -> MutableJSON:
-    """Translate a non-assistant ``TapeEvent`` into the CLI's user-line shape."""
-    if isinstance(entry, (AgentSendMessage, UserMessage)):
-        return _user_line(entry, max_image_dim, max_image_bytes)
-    assert isinstance(entry, ToolResult)
-    # Tool results never traverse stdin: the CLI's MCP client handled
-    # the tool_use round-trip internally. Surface mistakes loudly.
-    raise RuntimeError(
-        "AnthropicCLI: ToolResult in history -- tools must go through the MCP bridge",
-    )
-
-
 def _user_line(
     entry: AgentSendMessage | UserMessage,
     max_image_dim: int,
@@ -1843,7 +1683,8 @@ def _user_line(
 
 
 # Text deltas publish ``ModelResponsePartial``; thinking deltas publish
-# ``ModelResponseThinking``. Also accumulates ``tool_use`` content blocks across their
+# ``ModelResponseThinking`` and accumulate into the current thinking block, which a
+# thinking ``content_block_start`` opens and ``signature_delta`` signs. Also accumulates ``tool_use`` content blocks across their
 # start / streamed ``input_json_delta`` chunks / stop events, and emits one
 # ``ToolLabel`` per tool call at block-stop with ``name`` plus a short rendering of the
 # JSON args (e.g. ``Bash ls -la`` or ``Read foo.py``) so the trace panel surfaces what
@@ -1854,9 +1695,8 @@ def _user_line(
 def _dispatch_stream_event(
     event: MutableJSON,
     text_parts: list[str],
-    thinking_parts: list[str],
+    thinking_blocks: list[dict[str, str]],
     *,
-    signature_parts: list[str],
     tool_use_blocks: dict[int, dict[str, object]],
     publish: Callable[[RuntimeEvent], None] | None,
 ) -> None:
@@ -1865,7 +1705,9 @@ def _dispatch_stream_event(
     if event_type == "content_block_start":
         idx = int(cast(int, event.get("index") or 0))
         block = cast(MutableJSON, event.get("content_block") or {})
-        if block.get("type") == "tool_use":
+        if block.get("type") == "thinking":
+            thinking_blocks.append(_new_thinking_block())
+        elif block.get("type") == "tool_use":
             tool_use_blocks[idx] = {
                 "name": cast(str, block.get("name") or "?"),
                 "id": cast(str, block.get("id") or ""),
@@ -1892,23 +1734,18 @@ def _dispatch_stream_event(
         if delta_type == "thinking_delta":
             text = cast(str, delta.get("thinking") or "")
             if text:
-                thinking_parts.append(text)
+                _current_thinking_block(thinking_blocks)["thinking"] += text
                 if publish is not None:
                     publish(ModelResponseThinking(text))
             return
         if delta_type == "signature_delta":
-            # Per Anthropic's stream-json spec, ``signature_delta``
-            # carries the opaque thought-signature in the ``signature``
-            # field (mirrors ``thinking_delta`` for body text). The
-            # final signature is the concatenation across deltas
-            # (typically a single delta in practice). Required so a
-            # downstream wire re-send (session-mode history rebuild)
-            # embeds the signature in the thinking block -- Anthropic's
-            # API rejects unsigned thinking with HTTP 400
-            # ``thinking.signature: Field required``.
+            # The opaque signature of the CURRENT thinking block. Anthropic
+            # rejects an unsigned block (HTTP 400 ``thinking.signature: Field
+            # required``) and a block signed for different content, so each
+            # block keeps its own.
             sig = cast(str, delta.get("signature") or "")
             if sig:
-                signature_parts.append(sig)
+                _current_thinking_block(thinking_blocks)["signature"] += sig
             return
         return
     if event_type == "content_block_stop":
@@ -1931,6 +1768,18 @@ def _dispatch_stream_event(
                     exc_info=True,
                 )
         return
+
+
+def _new_thinking_block() -> dict[str, str]:
+    """Return an empty signed-thinking accumulator."""
+    return {"type": "thinking", "thinking": "", "signature": ""}
+
+
+def _current_thinking_block(thinking_blocks: list[dict[str, str]]) -> dict[str, str]:
+    """Return the open thinking block, opening one for a start-less delta."""
+    if not thinking_blocks:
+        thinking_blocks.append(_new_thinking_block())
+    return thinking_blocks[-1]
 
 
 # Best-effort: if the JSON is incomplete (streaming aborted mid-flight) or unparseable,
@@ -2002,8 +1851,7 @@ def _build_model_response(
     usage_event: MutableJSON,
     last_round_usage: MutableJSON | None,
     text: str,
-    thinking_parts: list[str],
-    signature_parts: list[str],
+    thinking_blocks: list[dict[str, str]],
     stop_reason: str | None,
     fallback_message_id: str,
 ) -> ModelResponse:
@@ -2047,25 +1895,11 @@ def _build_model_response(
             int,
             default=0,
         )
-    # Build the single thinking block from the accumulated body + signature.
-    # The signature MUST be present whenever the body is -- otherwise a
-    # subsequent wire send rejects with ``thinking.signature: Field required``.
-    # We elide the block entirely if there's no body (no thinking happened).
-    if thinking_parts:
-        thinking_blocks: tuple[dict[str, object], ...] = (
-            {
-                "type": "thinking",
-                "thinking": "".join(thinking_parts),
-                "signature": "".join(signature_parts),
-            },
-        )
-    else:
-        thinking_blocks = ()
     message_id = cast(str, usage_event.get("session_id") or fallback_message_id)
     return ModelResponse(
         message=AssistantMessage(
             text=text,
-            thinking_blocks=thinking_blocks,
+            thinking_blocks=tuple(b for b in thinking_blocks if b["thinking"]),
             tool_calls=(),
         ),
         tokens=TokenCount(

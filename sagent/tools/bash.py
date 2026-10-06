@@ -22,6 +22,7 @@ import signal
 import subprocess
 import time
 
+from sagent.agent.runtime import EXCLUSIVE_KEY
 from sagent.agent.state import (
     ToolState,
     approx_tokens,
@@ -29,7 +30,6 @@ from sagent.agent.state import (
 )
 from sagent.lib import debug_log
 from sagent.lib.custom_json import convert, json_freeze
-from sagent.lib.userdirs import config_dir
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,
@@ -54,10 +54,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-# Shared by every write-capable Bash call, so the runtime coalesces them
-# into one sequential group. The value is arbitrary; only its sameness
-# matters -- ``_partition_cohort`` groups on key equality.
 
 BASH_DEFAULT_TIMEOUT_MS = 120_000  # house-ignore[globals] -- Default timeout dial.
 BASH_MAX_TIMEOUT_MS = 600_000  # house-ignore[globals] -- Max timeout dial.
@@ -222,13 +218,14 @@ class Bash:
         return ""
 
     def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Serialize writers against each other; run reads in parallel.
+        """Serialize writers against every keyed call; run reads in parallel.
 
         Bash has no static path to key on, so the key is the command's
-        EFFECT: anything that cannot mutate state runs concurrently,
-        and everything else queues behind the other writers in its
-        cohort. Two concurrent writers race and the loser's edit is
-        silently lost.
+        EFFECT: anything that cannot mutate state runs concurrently, and
+        everything else queues behind every keyed call in its cohort --
+        other writers and same-file Read/Edit/Write alike, since a ``sed
+        -i`` may touch any file. Two concurrent writers race and the
+        loser's edit is silently lost.
 
         Biased hard toward serializing. An unparseable command, an
         unrecognized utility, any redirect or control-flow construct all
@@ -239,8 +236,7 @@ class Bash:
           args: Parsed tool directive mapping.
 
         Returns:
-          key: ``None`` for a read-only command, else a shared constant
-              so every writer in the cohort runs one at a time.
+          key: ``None`` for a read-only command, else ``EXCLUSIVE_KEY``.
 
         """
         trees = cached_parse_bash(
@@ -249,7 +245,7 @@ class Bash:
         )
         if trees is not None and is_read_only(trees):
             return None
-        return "bash:writer"
+        return EXCLUSIVE_KEY
 
     async def run(self, args: Mapping[str, object]) -> ToolResult:
         """Execute the command and return the result.
@@ -271,7 +267,8 @@ class Bash:
         """
         _register_exit_reaper()
         command = str(args.get("command", ""))
-        timeout = convert(args.get("timeout"), int, default=BASH_DEFAULT_TIMEOUT_MS)
+        # ``float``: the schema says ``number``, so ``1.5`` is a valid timeout.
+        timeout = convert(args.get("timeout"), float, default=BASH_DEFAULT_TIMEOUT_MS)
         run_as_fully_detached = convert(
             args.get("run_as_fully_detached"),
             bool,
@@ -318,13 +315,9 @@ class Bash:
 
 
 def _ensure_valid_cwd(state: ToolState) -> None:
-    """Reset ``state.bash_cwd`` to ``start_cwd`` (or ``$HOME``) if it's gone."""
+    """Reset ``state.bash_cwd`` to ``start_cwd`` (or ``/``) if it's gone."""
     if not Path(state.bash_cwd).is_dir():
-        state.bash_cwd = (
-            state.start_cwd
-            if Path(state.start_cwd).is_dir()
-            else str(config_dir().parent)
-        )
+        state.bash_cwd = state.start_cwd if Path(state.start_cwd).is_dir() else "/"
 
 
 def _run_as_fully_detached(command: str, *, state: ToolState) -> str:
@@ -349,7 +342,7 @@ def _run_as_fully_detached(command: str, *, state: ToolState) -> str:
 # budget -- and anything under 1000ms to 0, which the old ``max(1, ...)`` then raised to
 # a full second, 1000x the request. The schema's ``minimum: 1`` makes a 1ms timeout
 # legal, so it must survive.
-def _timeout_seconds(timeout_ms: int) -> float:
+def _timeout_seconds(timeout_ms: float) -> float:
     """Convert the directive's millisecond timeout to wait_for seconds."""
     return min(max(timeout_ms, 1), BASH_MAX_TIMEOUT_MS) / 1000
 
@@ -407,7 +400,7 @@ async def _run_foreground(command: str, *, state: ToolState, timeout_s: float) -
         )
     except TimeoutError:
         await _kill_process_group(proc)
-        stdout_bytes, stderr_bytes = await comm
+        stdout_bytes, stderr_bytes = await _drain(proc, comm)
         reason = f"timeout after {time.monotonic() - start:.1f}s"
     except asyncio.CancelledError:
         _ = comm.cancel()
@@ -425,18 +418,37 @@ async def _run_foreground(command: str, *, state: ToolState, timeout_s: float) -
     )
 
 
+# Keyed on the GROUP, never the leader: ``start_new_session`` makes the group id the
+# leader's pid, and that group outlives the leader. Skipping the kill once the leader
+# exited, or asking ``getpgid`` of a reaped leader, left a backgrounded descendant
+# running with the pipe open, so the drain below never saw EOF.
 async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
-    """SIGTERM then SIGKILL the process group; await reaping each step."""
-    if proc.returncode is not None:
-        return
+    """SIGTERM then SIGKILL the process group; await the leader's reaping."""
     with _suppress_oserror():
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    with contextlib.suppress(TimeoutError):
         _ = await asyncio.wait_for(proc.wait(), timeout=0.5)
+    with _suppress_oserror():
+        os.killpg(proc.pid, signal.SIGKILL)
+    _ = await proc.wait()
+
+
+# A descendant that left the group (its own ``setsid``) survives the group kill and
+# can hold the pipe open forever, so the drain is bounded and then the pipes closed.
+async def _drain(
+    proc: asyncio.subprocess.Process,
+    comm: asyncio.Future[tuple[bytes, bytes]],
+    *,
+    grace_sec: float = 1.0,
+) -> tuple[bytes, bytes]:
+    """Collect what the killed command wrote, giving up after ``grace_sec``."""
+    try:
+        return await asyncio.wait_for(asyncio.shield(comm), timeout=grace_sec)
     except TimeoutError:
-        with _suppress_oserror():
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-        _ = await proc.wait()
+        for stream in (proc.stdout, proc.stderr):
+            if stream is not None:
+                stream.feed_eof()
+        return await comm
 
 
 # The single exit path for every outcome -- clean, failed, timed out -- so the sentinel

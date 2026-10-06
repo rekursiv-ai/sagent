@@ -3,7 +3,7 @@
 Session storage layout:
 
 - Root: ``data_dir() / "rekursiv-ai"/sagent/projects/<cwd-slug>/``
-- Per session: a ``<uuid4-hex>/`` directory holding ``session.jsonl``
+- Per session: a ``<12-hex-char id>/`` directory holding ``session.jsonl``
 - Slug: ``/`` maps to ``_``, alphanumerics pass through, every other
   byte escapes as ``-<hex>-`` (see :func:`cwd_slug`; superseded schemes
   in :func:`_prior_cwd_slugs`)
@@ -127,7 +127,10 @@ def migrate_legacy_home() -> None:
         )
         if _LEGACY_SAGENT_HOME.is_dir() and not squats_claude:
             _migrate_real_sagent_home()
-        elif _LEGACY_CLAUDE_HOME.is_dir():
+        # Only a squat put sagent data in the Claude tree. Every other
+        # ``~/.claude`` belongs to the Claude CLI alone, and bridging its
+        # skills or copying its papers would import data sagent never wrote.
+        elif squats_claude and _LEGACY_CLAUDE_HOME.is_dir():
             _migrate_legacy_projects()
             _migrate_legacy_papers()
             _bridge_shared_dirs()
@@ -258,7 +261,7 @@ def new_session_dir(cwd: str | Path, *, projects_dir: Path | None = None) -> Pat
       projects_dir: Override for the projects root directory.
 
     Returns:
-      path: ``<projects-root>/<slug>/<uuid4-hex>/``.
+      path: ``<projects-root>/<slug>/<12-hex-char id>/``.
 
     """
     # A NEW session always establishes the current ``_``-slug. ``project_dir``
@@ -314,19 +317,13 @@ def existing_scope_dir(scope: str, base: Path | None = None) -> Path | None:
     # ``latest_session``. A directory's own mtime changes when any child
     # is added or removed, so it can rank a scope above one whose
     # conversation is genuinely newer.
-    children = [
-        (c / "session.jsonl", c)
-        for c in scope_dir.iterdir()
-        if c.is_dir() and (c / "session.jsonl").exists()
-    ]
-    if not children:
-        return None
-    return max(children, key=lambda pair: pair[0].stat().st_mtime)[1]
+    candidates = _session_candidates(scope_dir)
+    return max(candidates)[1] if candidates else None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SessionInfo:
-    """Metadata about a persisted session (fast: mtime + head scan)."""
+    """Metadata about a persisted session, from one streamed parse of its transcript."""
 
     path: Path
     """Session directory containing ``session.jsonl``."""
@@ -347,7 +344,7 @@ class SessionInfo:
     """Last-seen model id from the ``meta`` record."""
 
     corrupt: bool = field(default=False)
-    """True when the head scan aborted mid-file; counts above are partial."""
+    """True when the parse hit an unreadable record; counts above are partial."""
 
 
 def list_sessions(
@@ -367,20 +364,11 @@ def list_sessions(
       sessions: Session metadata sorted by mtime descending.
 
     """
-    candidates: list[tuple[float, Path]] = []
-    for pdir in project_dirs(cwd, projects_dir=projects_dir):
-        if not pdir.exists():
-            continue
-        for child in pdir.iterdir():
-            if not child.is_dir():
-                continue
-            session_file = child / "session.jsonl"
-            if not session_file.exists():
-                continue
-            try:
-                candidates.append((session_file.stat().st_mtime, child))
-            except OSError:
-                continue
+    candidates = [
+        candidate
+        for pdir in project_dirs(cwd, projects_dir=projects_dir)
+        for candidate in _session_candidates(pdir)
+    ]
     return _peek_session_candidates(candidates, limit=limit)
 
 
@@ -458,6 +446,11 @@ def list_all_sessions(
     # ``--resume-all`` / ``--continue-all``.
     candidates: list[tuple[float, Path]] = []
     for session_file in root.glob("**/session.jsonl"):
+        # A spawned child's transcript lives inside its parent's session dir
+        # (``AgentSpawn._child_session_dir``); it is part of that session, and
+        # ``list_sessions`` never lists it either.
+        if (session_file.parent.parent / "session.jsonl").exists():
+            continue
         try:
             candidates.append((session_file.stat().st_mtime, session_file.parent))
         except OSError:
@@ -477,7 +470,7 @@ def latest_session(
     """Return the most recently modified session under ``cwd``.
 
     Cheaper than ``list_sessions(...)[0]``: only the mtime winner is
-    head-scanned. Falls back to the next candidate if peek fails.
+    parsed. Falls back to the next candidate if peek fails.
 
     Args:
       cwd: Current working directory.
@@ -487,20 +480,11 @@ def latest_session(
       session: Most recent session, or None if none exist.
 
     """
-    candidates: list[tuple[float, Path]] = []
-    for pdir in project_dirs(cwd, projects_dir=projects_dir):
-        if not pdir.exists():
-            continue
-        for child in pdir.iterdir():
-            if not child.is_dir():
-                continue
-            session_file = child / "session.jsonl"
-            if not session_file.exists():
-                continue
-            try:
-                candidates.append((session_file.stat().st_mtime, child))
-            except OSError:
-                continue
+    candidates = [
+        candidate
+        for pdir in project_dirs(cwd, projects_dir=projects_dir)
+        for candidate in _session_candidates(pdir)
+    ]
     candidates.sort(key=lambda t: t[0], reverse=True)
     for _, child in candidates:
         info = _peek_session(child)
@@ -597,7 +581,14 @@ def _copy_tree_merge(src: Path, dst: Path) -> None:
     """Recursively copy ``src`` into ``dst``, skipping existing files."""
     dst.mkdir(parents=True, exist_ok=True)
     restrict_path(dst, 0o700)
-    for child in src.iterdir():
+    # Per item here too: an unreadable directory skips its own subtree, never
+    # the siblings still waiting to be copied.
+    try:
+        children = list(src.iterdir())
+    except OSError as exc:
+        logger.warning("skipping unreadable %s: %s", src, exc)
+        return
+    for child in children:
         target = dst / child.name
         if child.is_symlink():
             if target.exists() or target.is_symlink():
@@ -798,7 +789,7 @@ def _iter_jsonl(lines: Iterable[str]) -> Iterator[dict[str, object]]:
 # Returns None if the session file is missing or corrupt. Scans the file to pull the
 # first user prompt and message count without loading everything into memory.
 def _peek_session(session_dir: Path) -> SessionInfo | None:
-    """Read minimal metadata from a session.jsonl (head-only)."""
+    """Read minimal metadata from a session.jsonl in one streamed pass."""
     session_file = session_dir / "session.jsonl"
     if not session_file.exists():
         return None
@@ -836,8 +827,8 @@ def _peek_session(session_dir: Path) -> SessionInfo | None:
                 kind = rec.get("kind")
                 if kind == "history":
                     message_count += 1
-                    if not first_user_msg and (
-                        rec.get("kind") == "history"
+                    if (
+                        not first_user_msg
                         and rec.get("type") == "user"
                         and isinstance(rec.get("text"), str)
                     ):
@@ -860,6 +851,20 @@ def _peek_session(session_dir: Path) -> SessionInfo | None:
         model_id=model_id,
         corrupt=corrupt,
     )
+
+
+def _session_candidates(directory: Path) -> list[tuple[float, Path]]:
+    """Return ``(transcript mtime, session dir)`` for each session in ``directory``."""
+    if not directory.is_dir():
+        return []
+    candidates: list[tuple[float, Path]] = []
+    for child in directory.iterdir():
+        # A session deleted between the listing and the ``stat`` is skipped.
+        try:
+            candidates.append(((child / "session.jsonl").stat().st_mtime, child))
+        except OSError:
+            continue
+    return candidates
 
 
 def _peek_session_candidates(

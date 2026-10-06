@@ -28,6 +28,19 @@ async def _run_list(args: Mapping[str, object], cwd: Path) -> ToolResult:
 
 
 @pytest.mark.asyncio
+async def test_a_tilde_path_lists_the_home_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``~`` is ``$HOME``, as Read and Bash read it, not ``<cwd>/~``."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "h.txt").write_text("")
+    result = await _run_list({"path": "~"}, tmp_path)
+    assert result.content == "h.txt", result.content
+
+
+@pytest.mark.asyncio
 async def test_list_basic(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("")
     (tmp_path / "b.txt").write_text("")

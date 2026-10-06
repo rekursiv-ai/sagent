@@ -13,6 +13,8 @@ import pytest
 from sagent.agent.background import (
     BackgroundAwareTool,
     BackgroundTaskEntry,
+    backgroundable,
+    bg_augmented_schema,
     split_bg_args,
 )
 from sagent.lib.custom_json import JSON
@@ -109,6 +111,18 @@ def test_split_bg_args_rejects_negative_delay_by_coercion() -> None:
     assert delay == 0.0
     assert bg is False
     assert clean == {"msg": "hi"}
+
+
+def test_a_tool_declaring_a_control_key_is_not_augmented() -> None:
+    """``AgentSend`` owns ``delay``; overwriting it rerouted its schedule."""
+    schema: JSON = {"type": "object", "properties": {"delay": {"type": "integer"}}}
+    assert not backgroundable(_StubTool(directive_schema=schema))
+    with pytest.raises(ValueError, match="delay"):
+        _ = bg_augmented_schema(schema)
+
+
+def test_a_tool_without_control_keys_is_backgroundable() -> None:
+    assert backgroundable(_StubTool())
 
 
 def test_background_task_entry_rejects_empty_persistent_run_id() -> None:

@@ -80,10 +80,10 @@ def test_infer_provider_preserves_same_family_variant() -> None:
     vendor family must keep its provider/auth: re-inferring to the bare
     ``Anthropic``/``OpenAI`` + ``env`` path would demand an API key the
     operator never set (they authenticate via the CLI/subscription). The
-    guard is base-family prefix, so it holds regardless of which override
-    entries the account table happens to carry -- the property the public
-    (exported) build relies on for ``OpenAISubscription``, which its
-    override table does not enumerate.
+    guard is a catalog check -- the current provider's catalog resolves the
+    id -- so it holds regardless of which override entries the account table
+    happens to carry. The public (exported) build relies on this for
+    ``OpenAISubscription``, which its override table does not enumerate.
     """
     assert infer_provider("claude-haiku-4-5", current_provider="AnthropicCLI") is None
     assert infer_provider("gpt-5.5", current_provider="OpenAISubscription") is None

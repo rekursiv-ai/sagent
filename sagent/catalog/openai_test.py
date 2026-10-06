@@ -69,7 +69,7 @@ def test_openai_tiers_bill_the_published_rate(
 @pytest.mark.parametrize(
     ("model_id", "offered"),
     [
-        ("astra-6.0", {"auto", "default", "flex", "priority"}),
+        ("astra-6.0", {"auto", "default", "flex", "priority", "ultrafast"}),
         ("gpt-5.5-pro", {"auto", "default", "flex"}),
         ("gpt-4.1", {"auto", "default", "priority"}),
         ("o1", {"auto", "default"}),
@@ -111,6 +111,9 @@ def test_openai_long_prompts_bill_the_published_long_context_rate() -> None:
         ("flex", "flex"),
         ("priority", "priority"),
         ("fast", "priority"),
+        ("ultrafast", "ultrafast"),
+        # Scale Tier is prepaid capacity billed at the standard card.
+        ("scale", "auto"),
     ],
 )
 def test_openai_bills_the_tier_it_reports_serving(
@@ -120,9 +123,29 @@ def test_openai_bills_the_tier_it_reports_serving(
     assert openai.served_tier(reported) == tier
 
 
-def test_openai_rejects_a_tier_it_cannot_price() -> None:
-    with pytest.raises(ValueError, match=r"^unpriced OpenAI service_tier 'scale'$"):
-        _ = openai.served_tier("scale")
+def test_an_unknown_reported_tier_is_unknown_not_an_error() -> None:
+    """The response is already paid for; the caller picks the fallback rate."""
+    assert openai.served_tier("hyperfast") is None
+
+
+def test_astra_bills_the_published_ultrafast_card() -> None:
+    """Ultrafast tab, 2026-10-05: $60 / $6 / $75 / $300; long $120 / $12 / $150 / $450."""
+    prices = openai.models()["astra-6.0"].prices
+    short = prices.rate(service_tier="ultrafast", prompt_tokens=1, at=_TODAY)
+    long = prices.rate(service_tier="ultrafast", prompt_tokens=300_000, at=_TODAY)
+    assert (short.request, short.cache_read, short.cache_write, short.response) == (
+        60.0,
+        6.0,
+        75.0,
+        300.0,
+    )
+    assert (long.request, long.cache_read, long.cache_write, long.response) == (
+        120.0,
+        12.0,
+        150.0,
+        450.0,
+    )
+    assert "ultrafast" not in openai.models()["sol-6.1"].prices.service_tiers
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
@@ -182,7 +205,7 @@ def test_cards_carry_every_published_column() -> None:
 def test_api_offers_every_tier_over_key_auth() -> None:
     assert openai.api() == ModelCapability(
         thinking=_TRANSPORT_THINKING,
-        service_tier=frozenset({"auto", "default", "flex", "priority"}),
+        service_tier=frozenset({"auto", "default", "flex", "priority", "ultrafast"}),
     )
 
 

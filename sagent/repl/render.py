@@ -41,9 +41,7 @@ from sagent.types.model import (
     RequestTooLargeError,
 )
 from sagent.types.runtime import (
-    AgentSendDeferredMessage,
     AgentSendMessage,
-    AgentSendQueuedMessage,
     AssistantMessage,
     ChildDoneEvent,
     ChildEvent,
@@ -80,9 +78,7 @@ logger = logging.getLogger(__name__)
 # ``_stream_buf`` until the next paragraph break. A 100K+-char in-progress
 # fenced block would let the buffer grow for the entire round; flush
 # unconditionally past this cap so memory stays bounded.
-_STREAM_BUF_FLUSH_CHARS = (
-    64 * 1024
-)  # house-ignore[globals] -- Stream-buf flush cap, display pref.
+_STREAM_BUF_FLUSH_CHARS: Final = 64 * 1024
 
 # Live-observer dispatch is wrapped in a broad ``except`` so a renderer
 # bug never tears down the agent loop. That same swallow hides real
@@ -535,11 +531,11 @@ def strip_reminders(content: str) -> str:
 
     """
     return re.sub(
-        r"<system-reminder>.*?</system-reminder>\s*",
+        r"<system-reminder>.*?</system-reminder>\n*",
         "",
         content,
         flags=re.DOTALL,
-    ).strip()
+    ).strip("\n")
 
 
 def make_render_observer(
@@ -662,12 +658,9 @@ class RenderObserver:
                 self._printer.write_dim_line(text)
             case ModelResponseError(exception=exc):
                 self._flush_stream()
-                # ``UserFacingError`` carries a polished, user-actionable
-                # message; the class-name prefix would just add Python-
-                # internals noise to text the user is supposed to read
-                # and act on. Some user-facing errors further tailor
-                # the halt banner: the generic "type to retry" misleads
-                # when retrying cannot change the failed request.
+                # Some user-facing errors tailor the halt banner: the generic
+                # "type to retry" misleads when retrying cannot change the
+                # failed request.
                 self._printer.write_tool_error(error_text(exc))
                 if isinstance(exc, AuthRefreshError):
                     self._printer.write_halt(HALT_MESSAGE_AUTH)
@@ -715,17 +708,12 @@ class RenderObserver:
                     )
             case CompactFailed(exception=exc):
                 self._flush_stream()
-                self._printer.write_dim_line(
-                    f"[compaction failed: {type(exc).__name__}: {exc}]",
-                )
-            case AgentSendQueuedMessage() | AgentSendDeferredMessage():
-                # Silent by design: the visible event is the
-                # ``AgentSendMessage`` that lands once the inbox gate
-                # drains. Rendering the queued/deferred placeholder
-                # would double-render the same payload from the user's
-                # point of view.
-                pass
+                self._printer.write_dim_line(f"[compaction failed: {error_text(exc)}]")
             case _:
+                # Silent by design, including ``AgentSendQueuedMessage`` and
+                # ``AgentSendDeferredMessage``: the visible event is the
+                # ``AgentSendMessage`` that lands once the inbox gate drains,
+                # so rendering the placeholder would show the payload twice.
                 pass
 
     def _feed_stream(self, chunk: str) -> None:
@@ -754,9 +742,9 @@ class RenderObserver:
             self._printer.write_markdown(remaining)
 
     # Whenever the active child label changes, every *other* label's pending text and
-    # items are flushed first. Cost is O(num-other- children) per event -- intentional,
-    # not a hot path: the cross- child flush keeps slow children from rendering
-    # interleaved into the wrong slot, and the typical cohort fanout is small.
+    # items are flushed first. Cost is O(other children) per event -- intentional, not
+    # a hot path: the cross-child flush keeps slow children from rendering interleaved
+    # into the wrong slot, and the typical cohort fanout is small.
     def _consume_child(self, label: str, inner: RuntimeEvent) -> None:
         """Buffer one child event; flush at stable boundaries or atomic events."""
         # ``ChildEvent`` may nest: a grandchild forwards through its

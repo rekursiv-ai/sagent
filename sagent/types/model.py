@@ -158,12 +158,12 @@ class PromptTooLongError(Exception):
 
     @property
     def token_gap(self) -> int | None:
-        """Tokens over the limit; ``None`` if unknown, ``0`` if exactly at cap.
+        """Tokens over the limit; ``None`` if unknown, ``0`` if not over.
 
         Contract:
           - ``None``: ``actual_tokens`` or ``limit_tokens`` is unknown.
-          - ``0``: prompt sits exactly at the limit (provider rejected
-            it but the gap was zero -- treat as at-cap, not "unknown").
+          - ``0``: the reported size is at or under the limit (the
+            provider rejected it anyway -- a known shape, not "unknown").
           - ``>0``: prompt overshoot, in tokens.
 
         Callers branching on "is this overflow recoverable?" should use
@@ -456,13 +456,13 @@ class Model(Protocol):
     async def close(self) -> None:
         """Release any resources the model holds.
 
-        Required, total, and idempotent. CLI-style providers tear down
-        their subprocess pool; API providers close their SDK/HTTP
-        client; a model that holds nothing returns immediately. Always
-        safe to call more than once and safe to call on a never-used
-        model. Callers (e.g. ``Agent.swap_model`` / shutdown) invoke it
-        unconditionally -- there is no "does this model define close?"
-        probe, because every model answers.
+        Required, total, and idempotent. Releases only what this model
+        owns: a CLI model tears down its subprocess pool, and a model with
+        its own HTTP client closes it. A client the provider shares across
+        its models is the provider's, closed by ``Provider.close_sdk``, never
+        here -- closing it strands sibling models. Always safe to call more
+        than once and on a never-used model. Callers (e.g.
+        ``Agent.swap_model`` / shutdown) invoke it unconditionally.
         """
         ...
 

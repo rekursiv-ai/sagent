@@ -11,6 +11,7 @@ import asyncio
 import base64
 import dataclasses
 import json
+import logging
 import os
 
 import httpx2
@@ -1033,6 +1034,48 @@ class TestStreamIdleTimeout:
             publish=None,
         )
         assert response.spend.request == pytest.approx(rate)
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize(
+        ("served", "warning"),
+        [
+            ("scale", None),
+            ("tier-from-the-future", "unknown service_tier"),
+            ("priority", "has no price"),
+        ],
+    )
+    async def test_a_completed_response_survives_a_tier_it_cannot_price(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        served: str,
+        warning: str | None,
+    ) -> None:
+        """Pricing may degrade; it may never discard a paid-for response."""
+        monkeypatch.setattr(
+            "sagent.providers.openai.responses.responses.ResponseCompletedEvent",
+            _CompletedEvent,
+        )
+        event = _CompletedEvent(
+            _CompletedResponse(
+                _Usage(input_tokens=1_000_000, output_tokens=0),
+                service_tier=served,
+            ),
+        )
+        model = _priced_model()
+        model.settings.service_tier = "flex"
+        with caplog.at_level(logging.WARNING):
+            response = await _consume_stream(
+                _DelayedStream([event], delay_sec=0.0),
+                model=model,
+                publish=None,
+            )
+        assert response.message_id == "resp_123"
+        assert response.spend.request == pytest.approx(
+            1.0 if served == "scale" else 0.5,
+        )
+        if warning is not None:
+            assert warning in caplog.text
 
     @pytest.mark.anyio
     async def test_stream_preserves_and_replays_encrypted_reasoning(

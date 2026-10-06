@@ -16,7 +16,6 @@ import dataclasses
 import inspect
 import json
 import logging
-import re
 import threading
 import time
 
@@ -52,7 +51,11 @@ from sagent.agent.background import (
 from sagent.agent.context import validate_context
 from sagent.agent.result_storage import PERSISTED_TAG
 from sagent.agent.retry import send_with_retry
-from sagent.agent.session_io import append_session, load_session
+from sagent.agent.session_io import (
+    SessionMeta,
+    append_session,
+    load_session,
+)
 from sagent.agent.state import (
     AgentLike,
     ToolState,
@@ -133,6 +136,7 @@ from sagent.types.runtime import (
     ToolCall,
     ToolLabel,
     ToolResult,
+    ToolResultKind,
     UserMessage,
 )
 from sagent.types.settings import (
@@ -443,6 +447,21 @@ def test_agent_init_sets_basics() -> None:
     assert a.cost_tracker.spend.total == 0.0
 
 
+def test_an_explicit_budget_rejects_a_conflicting_knob() -> None:
+    """``budget`` owns these choices; a second spelling of one was dropped."""
+    settings = AgentSettings()
+    with pytest.raises(ValueError, match="max_attempts"):
+        _ = Agent(model=StubModel(), budget=settings, max_attempts=2)
+    with pytest.raises(ValueError, match="max_tool_call_rounds"):
+        _ = Agent(model=StubModel(), budget=settings, max_tool_call_rounds=3)
+    with pytest.raises(ValueError, match="max_budget_usd"):
+        _ = Agent(model=StubModel(), budget=settings, max_budget_usd=1.0)
+
+
+def test_agent_max_attempts_defaults_from_agent_settings() -> None:
+    assert Agent(model=StubModel()).max_attempts == AgentSettings().max_attempts
+
+
 def test_agent_budget_defaults_from_model() -> None:
     a = _build_agent()
     assert isinstance(a.budget, AgentSettings)
@@ -634,6 +653,58 @@ async def test_agent_tool_injects_conditional_agents_md_rule(tmp_path: Path) -> 
     assert "<system-reminder>" in result.content
     assert "Use Python rule." in result.content
     assert "Use Python rule." not in repeated.content
+
+
+def test_a_self_bounding_tool_is_never_persisted_under_a_host_cap(
+    tmp_path: Path,
+) -> None:
+    """Persisting Read hands back a path only Read opens: it re-spills."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _SelfBounded(StubTool):
+        max_result_chars: int = 0
+
+    a = _build_agent(session_dir=tmp_path)
+    a.tool_results = ToolResultPolicy(persist_tokens=100)
+    body = "x" * 10_000
+    out = a.bound_result(ToolResult(call_id="r", content=body), tool=_SelfBounded())
+    assert out.content == body
+    assert not (tmp_path / "tool-results").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_reread_returns_content_when_the_server_may_clear_results(
+    tmp_path: Path,
+) -> None:
+    """The "unchanged" stub points at a result the server may have dropped."""
+    model = StubModel(supports_context_management=True)
+    model.settings.manage_context_server_side = True
+    target = tmp_path / "f.txt"
+    target.write_text("body\n")
+    agent = _build_agent(model=model, tools=[Read()])
+    wrapped = _AgentTool(Read(), agent)
+    with agent._install_contextvars():
+        _ = await wrapped.run({"file_path": str(target)})
+        again = await wrapped.run({"file_path": str(target)})
+    assert "body" in again.content
+
+
+@pytest.mark.asyncio
+async def test_a_swap_to_a_server_managed_model_stops_read_dedup(
+    tmp_path: Path,
+) -> None:
+    """The answer follows the live model, not the one the agent started with."""
+    managed = StubModel(model_id="m2", supports_context_management=True)
+    target = tmp_path / "f.txt"
+    target.write_text("body\n")
+    agent = _build_agent(tools=[Read()])
+    agent.swap_model(managed)
+    managed.settings.manage_context_server_side = True
+    wrapped = _AgentTool(Read(), agent)
+    with agent._install_contextvars():
+        _ = await wrapped.run({"file_path": str(target)})
+        again = await wrapped.run({"file_path": str(target)})
+    assert "body" in again.content
 
 
 @pytest.mark.asyncio
@@ -2677,6 +2748,82 @@ async def test_swap_model_logs_close_failure_via_log_task_exception(
     assert errs[0].exc_info is not None, "close ERROR must carry a traceback"
 
 
+@dataclass(slots=True, kw_only=True)
+class _ClosingProvider:
+    """Provider whose ``close_sdk`` calls are counted."""
+
+    closed: int = 0
+    fail_model: bool = False
+
+    def model(self, model_id: str | None = None) -> Model:
+        if self.fail_model:
+            raise ValueError(f"unknown model {model_id!r}")
+        return StubModel(model_id=model_id or "stub-p")
+
+    async def close_sdk(self) -> None:
+        self.closed += 1
+
+
+def test_swap_to_the_active_model_still_records_the_new_spec() -> None:
+    a = _build_agent_with_spec()
+    spec = ModelRecipe(provider="Anthropic", auth="sub", model_id="m", account="b")
+    a.swap_model(a.model, spec=spec)
+    assert a.model_recipe is spec
+
+
+@pytest.mark.asyncio
+async def test_aclose_closes_the_owned_provider_once() -> None:
+    provider = _ClosingProvider()
+    a = Agent(model=StubModel(), owned_provider=provider)
+    await a.aclose()
+    await a.aclose()
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_swap_closes_the_outgoing_owned_provider() -> None:
+    old, new = _ClosingProvider(), _ClosingProvider()
+    a = Agent(model=StubModel(), owned_provider=old)
+    a.swap_model(StubModel(model_id="next"), provider=new)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert (old.closed, new.closed) == (1, 0)
+    await a.aclose()
+    assert new.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_change_model_build_failure_closes_the_built_provider() -> None:
+    provider = _ClosingProvider(fail_model=True)
+    a = _build_agent_with_spec()
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            return_value=provider,
+        ),
+        pytest.raises(ValueError, match="unknown model"),
+    ):
+        _ = a.change_model(model_id="nope")
+    await asyncio.sleep(0)
+    assert provider.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_change_model_hands_its_provider_to_the_agent() -> None:
+    provider = _ClosingProvider()
+    a = _build_agent_with_spec()
+    with patch(
+        "sagent.providers.providers.build_provider",
+        return_value=provider,
+    ):
+        _ = a.change_model(model_id="claude-sonnet-4-6")
+    for switch in _drain_model_switches(a):
+        switch.apply()
+    assert provider.closed == 0
+    await a.aclose()
+    assert provider.closed == 1
+
+
 # --- Agent.change_model -----------------------------------------------------
 
 
@@ -3832,20 +3979,6 @@ def test_tool_registry_recorded_on_response_with_tool_calls() -> None:
     a.publish(ModelResponseComplete(message=msg))
     assert a._tool_registry["c1"][0] == "Echo"
     assert a.activity.num_tool_call_rounds == 1
-
-
-def test_enforce_caps_pushes_error_when_limit_reached() -> None:
-    """``_enforce_caps`` posts a types.runtime.ModelResponseError when rounds cap is hit."""
-    a = Agent(model=StubModel(), tools=[], max_tool_call_rounds=1)
-    tc = ToolCall(id="c1", name="Echo", args={})
-    msg = AssistantMessage(text="", tool_calls=(tc,))
-    a.publish(ModelResponseComplete(message=msg))
-
-    # Round count is now 1 == cap; the next observation triggers the
-    # error push.
-    a.publish(ModelResponseComplete(message=msg))
-    items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    assert any(isinstance(i, ModelResponseError) for i in items)
 
 
 @pytest.mark.asyncio
@@ -7646,6 +7779,74 @@ async def test_cancelled_background_tool_splices_placeholder() -> None:
 
 
 @pytest.mark.asyncio
+async def test_shutdown_during_a_delay_pairs_the_call_and_forgets_the_job() -> None:
+    """A cancel during the pre-run sleep skipped the ``[cancelled]`` pairing."""
+    a = _build_agent(tools=[StubTool()])
+    token = runtime.current_call_id_var.set("bg-1")
+    try:
+        _ = await a.runtime.tools_map["Echo"].run({"delay": 100})
+    finally:
+        runtime.current_call_id_var.reset(token)
+    task = a.background["job-1"].task
+    await asyncio.sleep(0)
+    a.shutdown()
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+    items = a.runtime.inbox.drain_nowait()
+    detached = [i for i in items if isinstance(i, DetachedResult)]
+    assert [d.result.content for d in detached] == [CANCELLED_PLACEHOLDER]
+    assert a.background == {}
+
+
+@pytest.mark.asyncio
+async def test_kill_tool_by_call_id_cancels_an_explicit_background_job() -> None:
+    """``Kill`` names call ids; ``_bg`` is keyed by job id."""
+    a = _build_agent(tools=[StubTool()])
+    token = runtime.current_call_id_var.set("c1")
+    try:
+        _ = await a.runtime.tools_map["Echo"].run({"delay": 100})
+    finally:
+        runtime.current_call_id_var.reset(token)
+    task = a.background["job-1"].task
+    a.kill_tool("c1")
+    with contextlib.suppress(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=1.0)
+    assert a.background == {}
+
+
+def test_a_gated_tool_contributes_no_system_prompt() -> None:
+    """A tool the request does not offer must not be described to the model."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _Prompting(StubTool):
+        @override
+        def prompt(self) -> str:
+            return f"use {self.name}"
+
+    a = _build_agent(tools=[_Prompting(name="Shown"), _Prompting(name="Hidden")])
+    a.tool_gate = frozenset({"Shown"})
+    assert "use Shown" in a.system
+    assert "use Hidden" not in a.system
+
+
+def test_a_finished_detached_call_frees_its_job_id() -> None:
+    """Ids minted for detached calls were never freed: one leak per call."""
+    a = _build_agent()
+    loop = asyncio.new_event_loop()
+    try:
+        fut = loop.create_future()
+        a.runtime.detached["c9"] = cast("asyncio.Task[None]", fut)
+        assert list(a.background) == ["job-1"]
+        del a.runtime.detached["c9"]
+        _ = fut.cancel()
+        assert a.background == {}
+    finally:
+        loop.close()
+    assert a._job_ids_by_call_id == {}
+    assert a._call_ids_by_job_id == {}
+
+
+@pytest.mark.asyncio
 async def test_kill_tool_cancels_explicit_background_job_by_id() -> None:
     started = asyncio.Event()
 
@@ -8395,7 +8596,7 @@ def test_child_cost_records_once_on_root_tokens_self_only() -> None:
     - ``root.cost_tracker.spend.total`` gains the child's cost exactly once.
     - ``root.cost_tracker.total`` (tokens) is unchanged -- token totals are
       self-only, so the child's tokens never leak into the root's count.
-    - ``child._own_spend`` equals the child's own cost (drives its cap).
+    - ``child.own_spend`` equals the child's own cost (drives its cap).
     """
     root = _build_agent()
     child = _build_agent()
@@ -8409,7 +8610,23 @@ def test_child_cost_records_once_on_root_tokens_self_only() -> None:
     assert root.cost_tracker.spend.total == pytest.approx(0.03)
     assert root.cost_tracker.total == TokenCount()
     assert child.cost_tracker.total == TokenCount(request=42, response=7)
-    assert child._own_spend.total == pytest.approx(0.03)
+    assert child.own_spend.total == pytest.approx(0.03)
+
+
+def test_own_spend_reports_child_spend_under_root_sink() -> None:
+    """A child's own spend is public even though its tracker's spend stays 0."""
+    root = _build_agent()
+    child = _build_agent()
+    response = ModelResponse(
+        message=AssistantMessage(text="ok"),
+        tokens=TokenCount(),
+        spend=TokenCost(request=0.5),
+    )
+    with root._install_contextvars(), child._install_contextvars():
+        child.record_response(response)
+    assert child.cost_tracker.spend.total == 0.0
+    assert child.own_spend == TokenCost(request=0.5)
+    assert root.own_spend == TokenCost()
 
 
 def test_subagent_tool_state_depth_increments() -> None:
@@ -9229,6 +9446,70 @@ def test_agent_resume_loads_service_suspended_retry_at(tmp_path: Path) -> None:
     assert a2.runtime.resume_retry_at == 2_000.0
 
 
+def test_a_resumed_agent_cannot_spend_its_cap_again(tmp_path: Path) -> None:
+    """The per-agent cap reads own spend, so own spend must survive a resume."""
+    a1 = _build_agent(session_dir=tmp_path, max_budget_usd=1.0)
+    with contextlib.suppress(BudgetExhaustedError):
+        a1.record_response(
+            ModelResponse(
+                message=AssistantMessage(text="a"),
+                spend=TokenCost(request=1),
+            ),
+        )
+    a1.runtime.publish(SaveSession())
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+
+    a2 = _build_agent(session_dir=tmp_path, max_budget_usd=1.0)
+    a2.resume(*loaded)
+    with pytest.raises(BudgetExhaustedError):
+        a2.record_response(
+            ModelResponse(
+                message=AssistantMessage(text="b"),
+                spend=TokenCost(request=0.01),
+            ),
+        )
+
+
+def test_a_childs_session_records_its_own_spend(tmp_path: Path) -> None:
+    """Under a root sink a child's tracker spend is 0; its meta must not be."""
+    root = _build_agent()
+    child = _build_agent(session_dir=tmp_path)
+    with root._install_contextvars(), child._install_contextvars():
+        child.record_response(
+            ModelResponse(
+                message=AssistantMessage(text="a"),
+                spend=TokenCost(request=0.5),
+            ),
+        )
+        child.runtime.publish(SaveSession())
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    assert loaded[0].own_spend == TokenCost(request=0.5)
+
+
+def test_resume_restores_a_recipe_that_differs_only_in_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Same model id under another provider/account is a different model."""
+    a = _build_agent_with_spec(model_id="stub-1")
+    restored = StubModel()
+    spec = ModelRecipe(provider="P2", auth="key", model_id="stub-1", account="b")
+    calls: list[SessionMeta] = []
+
+    def fake_restore(
+        meta: SessionMeta,
+    ) -> tuple[Model, ModelRecipe, None]:
+        calls.append(meta)
+        return restored, spec, None
+
+    monkeypatch.setattr(agent, "restore_model", fake_restore)
+    meta = SessionMeta(provider="P2", auth="key", account="b", model_id="stub-1")
+    a.resume(meta, [], ToolState())
+    assert len(calls) == 1
+    assert a.model_recipe == spec
+
+
 @pytest.mark.asyncio
 async def test_shutdown_force_false_cancels_detached_and_explicit_bg() -> None:
     """``shutdown(force=False)`` must cancel detached + explicit_bg tasks.
@@ -9465,58 +9746,40 @@ def test_repair_compact_payload_coalesces_adjacent_assistants() -> None:
 
 @pytest.mark.asyncio
 async def test_agent_run_rejects_concurrent_drivers() -> None:
-    """Two concurrent ``Agent.run`` calls on the same agent are forbidden.
+    """A second ``run`` while one drives would push ``Quit`` into it."""
+    started = asyncio.Event()
+    release = asyncio.Event()
 
-    The single-driver contract owns ``shutdown`` in ``finally``;
-    overlapping callers would push ``Quit()`` into the foreign driver
-    and silently corrupt it. Fail loudly instead.
-    """
-    a = _build_agent()
-    a._run_active = True
-    try:
-        with pytest.raises(RuntimeError, match="not reentrant"):
-            async for _event in a.run(UserMessage(text="second")):
-                pass
-    finally:
-        a._run_active = False
+    @dataclass(slots=True, kw_only=True)
+    class _HoldingModel(StubModel):
+        @override
+        async def stream(
+            self,
+            request: ModelRequest,
+            publish: Callable[[RuntimeEvent], None] | None = None,
+        ) -> ModelResponse:
+            started.set()
+            await release.wait()
+            return await StubModel.stream(self, request, publish)
+
+    a = _build_agent(model=_HoldingModel())
+
+    async def _drain(text: str) -> None:
+        async for _event in a.run(UserMessage(text=text)):
+            pass
+
+    first = asyncio.create_task(_drain("first"))
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    with pytest.raises(RuntimeError, match="not reentrant"):
+        await _drain("second")
+    release.set()
+    await asyncio.wait_for(first, timeout=1.0)
+    await _drain("third")
 
 
-# --- A18: lock-in the "no await between check and set" invariant -----------
-
-
-def test_agent_run_has_no_await_between_run_active_check_and_set() -> None:
-    """A18: source-level guard on ``Agent.run``'s check-and-set atomicity.
-
-    The ``if self._run_active`` / ``self._run_active = True`` pair runs
-    atomically only because no ``await`` interleaves them under asyncio's
-    cooperative scheduling. A future maintainer dropping an ``await`` (a
-    log flush, a metric push) between the two would silently let two
-    concurrent ``run`` callers slip past the guard. Scan the source so
-    the invariant fails CI rather than failing in production.
-    """
-    source = Path(inspect.getfile(Agent)).read_text(encoding="utf-8")
-    lines = source.splitlines()
-    check_line = next(
-        i for i, line in enumerate(lines) if "if self._run_active:" in line
-    )
-    set_line = next(
-        i
-        for i, line in enumerate(lines[check_line:], start=check_line)
-        if "self._run_active = True" in line
-    )
-    # Strip strings/comments before scanning for the await keyword so the
-    # lock-down comment + docstring that *describes* the no-await rule
-    # doesn't trip its own test.
-    between = lines[check_line + 1 : set_line]
-    code_only = [
-        re.sub(r"#.*$", "", re.sub(r"(\".*?\"|'.*?')", "", line)) for line in between
-    ]
-    blob = "\n".join(code_only)
-    assert not re.search(r"\bawait\b", blob), (
-        f"`await` snuck between ``Agent.run`` check and set (lines "
-        f"{check_line + 1}-{set_line}); see test docstring for why this is "
-        f"unsafe"
-    )
+def test_the_driver_claim_is_taken_without_an_await() -> None:
+    """``_claim_driver`` is synchronous, so no caller can interleave it."""
+    assert not inspect.iscoroutinefunction(Agent._claim_driver)
 
 
 # --- A31: unified background-cancel predicate ------------------------------
@@ -9805,15 +10068,7 @@ def test_agent_summary_failure_falls_back_to_tool_name(
 
 
 def test_tool_round_cap_pushes_single_error_when_before_spawn_blocks() -> None:
-    """REV7-044 verification: when ``_before_tool_spawn`` returns the
-    round-cap error, the runtime suppresses ``publish(item)`` for that
-    ``ModelResponseComplete``. ``_enforce_caps`` therefore does not see
-    that complete event, so no second ``ModelResponseError`` is pushed.
-
-    Documents the observed runtime behavior to guard against a future
-    refactor that re-orders publish vs before-spawn and accidentally
-    introduces the double-push the original review feared.
-    """
+    """``_before_tool_spawn`` is the one round-cap gate: exactly one error."""
 
     @dataclass(slots=True, kw_only=True)
     class CountingTool(StubTool):
@@ -9869,16 +10124,60 @@ async def test_serve_forever_rejects_a_concurrent_run() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_tool_owned_delay_reaches_the_tool() -> None:
+    """A tool declaring ``delay`` keeps it; it is not a background request."""
+    schema: JSON = {"type": "object", "properties": {"delay": {"type": "integer"}}}
+    tool = StubTool(directive_schema=schema)
+    a = _build_agent(tools=[tool])
+    assert "background" not in json.dumps(a.live_tools()[0].directive_schema)
+    wrapper = a.runtime.tools_map["Echo"]
+    result = await wrapper.run({"delay": 5})
+    assert tool.calls == [{"delay": 5}]
+    assert result.kind != ToolResultKind.PENDING
+    assert a.background == {}
+
+
+@pytest.mark.parametrize("args", [{"delay": 1.5}, {"background": "true"}])
+@pytest.mark.asyncio
+async def test_a_mistyped_control_key_is_an_input_validation_error(
+    args: dict[str, object],
+) -> None:
+    a = _build_agent(tools=[StubTool()])
+    result = await a.runtime.tools_map["Echo"].run(args)
+    assert result.is_error
+    assert "InputValidationError" in result.content
+
+
+@pytest.mark.asyncio
+async def test_a_second_serve_forever_is_rejected() -> None:
+    """Two loops on one inbox: whichever exits first unguarded the other."""
+    a = _build_agent()
+    serving = asyncio.create_task(a.serve_forever())
+    await asyncio.sleep(0)
+    second = asyncio.create_task(a.serve_forever())
+    try:
+        with pytest.raises(RuntimeError, match="not reentrant"):
+            await asyncio.wait_for(asyncio.shield(second), timeout=1.0)
+    finally:
+        a.shutdown(force=True)
+        for task in (serving, second):
+            _ = task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, RuntimeError):
+                await task
+
+
+@pytest.mark.asyncio
 async def test_drive_until_first_idle_propagates_a_driver_crash(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A crashed loop must not read as an empty successful result."""
     a = _build_agent()
 
-    async def _boom() -> None:
+    async def _boom(claim: object) -> None:
+        del claim
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(a, "serve_forever", _boom)
+    monkeypatch.setattr(a, "_serve", _boom)
     with pytest.raises(RuntimeError, match="boom"):
         _ = await a.drive_until_first_idle(UserMessage(text="hi"))
 

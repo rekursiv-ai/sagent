@@ -27,7 +27,14 @@ import os
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
-from sagent.lib.custom_json import JSON, MutableJSON, convert, json_freeze, parse
+from sagent.lib.custom_json import (
+    JSON,
+    MutableJSON,
+    ReadError,
+    convert,
+    json_freeze,
+    loads,
+)
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
@@ -466,7 +473,15 @@ async def _gql(
             content=(f"Linear API HTTP {e.status}: {e.body.decode(errors='replace')}"),
             is_error=True,
         )
-    body = parse(raw[0], dict[str, object])
+    document = loads(raw[0])
+    try:
+        body = convert(document, dict[str, object])
+    except ReadError:
+        return ToolResult(
+            call_id="",
+            content=f"Linear GraphQL returned a non-object body: {document}",
+            is_error=True,
+        )
     if errors := body.get("errors"):
         return ToolResult(
             call_id="",

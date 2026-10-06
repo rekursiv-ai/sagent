@@ -9,6 +9,7 @@ import asyncio
 import inspect
 import json
 import os
+import tempfile
 import time
 
 import pytest
@@ -21,12 +22,12 @@ from sagent.providers.google.cli import (
     _dispatch_session_update,
     _GoogleCLIModel,
     _GoogleCLIProcState,
-    _hash_system,
     _read_expiry,
-    _serialize_prompt_blocks,
     _user_prompt_blocks,
 )
+from sagent.providers.lib.cli_respawn import hash_system
 from sagent.providers.lib.hotspare import HotSpare
+from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
@@ -37,6 +38,7 @@ from sagent.types.runtime import (
     ModelResponsePartial,
     ModelResponseThinking,
     RuntimeEvent,
+    ToolCall,
     ToolResult,
     UserMessage,
 )
@@ -125,7 +127,6 @@ def test_from_cli_with_credentials(
     )
     provider = GoogleCLI.from_credentials()
     assert provider.account is None
-    assert provider.api_key == ""
 
 
 def test_from_cli_rejects_malformed_credentials(
@@ -262,16 +263,6 @@ def test_user_prompt_blocks_empty_user_emits_placeholder() -> None:
     assert blocks == [{"type": "text", "text": ""}]
 
 
-def test_serialize_prompt_blocks_rejects_tool_result() -> None:
-    """Tool results never traverse stdin -- the MCP bridge handles them."""
-    with pytest.raises(RuntimeError, match="ToolResult in history"):
-        _ = _serialize_prompt_blocks(
-            ToolResult(call_id="x", content="done"),
-            max_image_dim=3072,
-            max_image_bytes=20 * 1024 * 1024,
-        )
-
-
 def test_dispatch_session_update_routes_text_and_thinking() -> None:
     """``agent_message_chunk`` / ``agent_thought_chunk`` fan to the callbacks."""
     text_parts: list[str] = []
@@ -348,17 +339,6 @@ def test_approx_request_tokens_sums_user_and_assistant() -> None:
     assert estimate == 6
 
 
-def test_hash_system_stable_and_distinguishes() -> None:
-    """``_hash_system`` matches the AnthropicCLI helper's stability guarantees."""
-    a = _hash_system("be brief")
-    b = _hash_system("be brief")
-    c = _hash_system("be verbose")
-    d = _hash_system(None)
-    assert a == b
-    assert a != c
-    assert d == _hash_system("")
-
-
 def test_read_expiry_handles_missing_and_invalid(tmp_path: Path) -> None:
     """``_read_expiry`` returns ``0`` for missing, malformed, or non-numeric files."""
     target = tmp_path / "creds.json"
@@ -382,10 +362,10 @@ def test_should_respawn_triggers() -> None:
     user = UserMessage(text="hi")
     request = ModelRequest(messages=[user])
 
-    model._system_hash = _hash_system("different")
+    model._system_hash = hash_system("different")
     assert model._should_respawn(request) is True
 
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     model._sent_history_head = UserMessage(text="other")
     assert model._should_respawn(request) is True
 
@@ -428,7 +408,7 @@ async def test_stream_eof_respawns_and_resets_sent_index(
             respawn_count += 1
             return cast(Subproc, _DeadProc())
 
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     model._session_id = "session"
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
@@ -466,7 +446,7 @@ async def test_stream_read_timeout_respawns_and_resets_sent_index(
             respawn_count += 1
             return cast(Subproc, _StalledProc())
 
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     model._session_id = "session"
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
@@ -506,7 +486,7 @@ async def test_stream_repeated_transport_failures_trip_budget(
                 raise RuntimeError("transport failure budget exhausted")
             return cast(Subproc, _DeadProc())
 
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     model._session_id = "session"
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
@@ -553,7 +533,7 @@ async def test_stream_system_change_discards_warmed_old_system_spare(
             proc=proc,
             session_id=f"session-{model._pending_system}",
             tmpdir=Path.cwd(),
-            system_hash=_hash_system(model._pending_system),
+            system_hash=hash_system(model._pending_system),
         )
         _GoogleCLIModel._attach_proc_state(state)
         return proc
@@ -576,7 +556,7 @@ async def test_stream_system_change_discards_warmed_old_system_spare(
     await warmed.wait()
     _ = await model.stream(ModelRequest(messages=[UserMessage(text="b")], system="B"))
 
-    assert used_systems == [_hash_system("A"), _hash_system("B")]
+    assert used_systems == [hash_system("A"), hash_system("B")]
     assert spawned_systems == ["A", "A", "B"]
     await model.close()
 
@@ -611,7 +591,7 @@ async def test_hot_spare_warmup_does_not_overwrite_active_session_id(
             proc=proc,
             session_id=session_id,
             tmpdir=Path.cwd(),
-            system_hash=_hash_system(None),
+            system_hash=hash_system(None),
         )
         _GoogleCLIModel._attach_proc_state(state)
         return proc
@@ -671,8 +651,7 @@ async def test_exchange_turn_skips_assistant_replay(
     )
 
     assert [[block["text"] for block in prompt] for prompt in prompts] == [
-        ["first"],
-        ["second"],
+        ["first\n\nsecond"],
     ]
     assert response.stop_reason == "model_finished"
 
@@ -713,7 +692,7 @@ async def test_stream_writeback_failure_returns_response(
         raise OSError("credential writeback failed")
 
     user = UserMessage(text="hi")
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     model._session_id = "session"
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     monkeypatch.setattr(model, "_send_prompt", send_prompt)
@@ -761,7 +740,7 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
         del proc, prompt_blocks, text_parts, thinking_parts, publish
         return "end_turn"
 
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     model._session_id = "session"
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     monkeypatch.setattr(model, "_send_prompt", send_prompt)
@@ -808,8 +787,8 @@ async def test_exchange_turn_returns_current_output_only(
         publish=_sink,
     )
 
-    assert response.message.text == "current"
-    assert text_callbacks == ["current"]
+    assert response.message.text == "first\n\ncurrent"
+    assert text_callbacks == ["first\n\ncurrent"]
 
 
 @pytest.mark.asyncio
@@ -840,7 +819,7 @@ async def test_terminal_json_rpc_error_respawns_and_resets_state(
             return cast(Subproc, _ErrorProc())
 
     user = UserMessage(text="hi")
-    model._system_hash = _hash_system(None)
+    model._system_hash = hash_system(None)
     model._session_id = "session"
     model._last_sent_index = 0
     model._sent_history_head = user
@@ -856,6 +835,151 @@ async def test_terminal_json_rpc_error_respawns_and_resets_state(
     assert model._sent_history_head is None
     assert model._turn_count == 0
     assert model._last_input_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_exchange_turn_skips_tool_results_from_api_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """History recorded by an API provider carries tool results; skip them."""
+    model = GoogleCLI().model("gemini-2.5-flash")
+    prompts: list[list[MutableJSON]] = []
+
+    async def send_prompt(
+        proc: Subproc,
+        prompt_blocks: list[MutableJSON],
+        text_parts: list[str],
+        thinking_parts: list[str],
+        publish: Callable[[RuntimeEvent], None] | None,
+    ) -> str | None:
+        del proc, text_parts, thinking_parts, publish
+        prompts.append(prompt_blocks)
+        return "end_turn"
+
+    monkeypatch.setattr(model, "_send_prompt", send_prompt)
+    await model._exchange_turn(
+        cast(Subproc, object()),
+        ModelRequest(
+            messages=[
+                UserMessage(text="list files"),
+                AssistantMessage(
+                    text="",
+                    tool_calls=(ToolCall(id="c1", name="Bash", args={}),),
+                ),
+                ToolResult(call_id="c1", content="a.txt"),
+                UserMessage(text="thanks"),
+            ],
+        ),
+        publish=None,
+    )
+    assert [[block["text"] for block in prompt] for prompt in prompts] == [
+        ["list files\n\nthanks"],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exchange_turn_without_input_does_not_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = GoogleCLI().model("gemini-2.5-flash")
+    model._last_sent_index = 1
+
+    async def send_prompt(*args: object) -> str | None:
+        raise AssertionError(f"unexpected prompt {args!r}")
+
+    monkeypatch.setattr(model, "_send_prompt", send_prompt)
+    response = await model._exchange_turn(
+        cast(Subproc, object()),
+        ModelRequest(messages=[UserMessage(text="seen")]),
+        publish=None,
+    )
+    assert response.message.text == ""
+
+
+@pytest.mark.asyncio
+async def test_cancelled_prompt_respawns_before_next_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cancelled prompt keeps streaming in the CLI; that process is retired."""
+    model = GoogleCLI().model("gemini-2.5-flash")
+    respawns = 0
+
+    class _CancelProc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> object:
+            del skip_non_json
+            raise asyncio.CancelledError
+
+    class _HotSpare:
+        active = cast(Subproc | None, object())
+
+        async def acquire(self) -> Subproc:
+            return cast(Subproc, _CancelProc())
+
+        async def respawn_after_transport_failure(self) -> Subproc:
+            nonlocal respawns
+            respawns += 1
+            return cast(Subproc, _CancelProc())
+
+    user = UserMessage(text="hi")
+    model._system_hash = hash_system(None)
+    model._session_id = "session"
+    model._sent_history_head = user
+    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
+    with pytest.raises(asyncio.CancelledError):
+        await model.stream(ModelRequest(messages=[user]))
+    assert respawns == 1
+    assert model._last_sent_index == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reply",
+    [None, {"id": 1, "error": {"message": "auth failed"}}],
+)
+async def test_handshake_failure_is_a_transport_error(
+    reply: MutableJSON | None,
+) -> None:
+    """A dead or erroring handshake must take the respawn path."""
+
+    class _Proc:
+        async def write_line(self, line: str) -> None:
+            del line
+
+        async def read_json_line(self, *, skip_non_json: bool = False) -> object:
+            del skip_non_json
+            return reply
+
+    with pytest.raises(SubprocessTransportError):
+        await cli._rpc_call(cast(Subproc, _Proc()), 1, "initialize", {})
+
+
+@pytest.mark.asyncio
+async def test_spawn_removes_tmpdir_when_population_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        "sagent.providers.google.cli._CREDS_PATH",
+        tmp_path / "missing.json",
+    )
+    made: list[Path] = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def _tracking_mkdtemp(**kwargs: str) -> str:
+        path = real_mkdtemp(dir=tmp_path, **kwargs)
+        made.append(Path(path))
+        return path
+
+    monkeypatch.setattr(tempfile, "mkdtemp", _tracking_mkdtemp)
+    model = GoogleCLI().model("gemini-2.5-flash")
+    model._tools_bridge = cast(ToolsBridge, object())
+    with pytest.raises(ValueError, match="Invalid credentials"):
+        await model._spawn_initialized()
+    assert made
+    assert not any(path.exists() for path in made)
 
 
 def test_build_response_estimates_tokens_and_cost() -> None:

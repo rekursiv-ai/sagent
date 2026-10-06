@@ -19,7 +19,7 @@ from collections.abc import (
     Sequence,
     Set as AbstractSet,
 )
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import MISSING, Field, dataclass, fields, is_dataclass
 from datetime import datetime
 from pathlib import Path, PurePath
 from types import (
@@ -70,6 +70,7 @@ if TYPE_CHECKING:
 __all__ = [
     "JSON",
     "DecodeCapabilities",
+    "FieldPath",
     "FieldState",
     "GraphHooks",
     "Invalid",
@@ -79,7 +80,6 @@ __all__ = [
     "MutableJSONValue",
     "ReadError",
     "convert",
-    "convert_or_none",
     "decode_graph",
     "encode_graph",
     "extract_unmodeled_fields",
@@ -258,9 +258,10 @@ def resolve_import(path: str) -> object:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Invalid:
-    """A JSON object stated a field that did not match its target type."""
+    """A JSON value that did not match its target type, kept as it was stated."""
 
     raw: JSONValue
+    reason: str = ""
 
 
 type FieldState[T] = Absent | T | Invalid | None
@@ -731,8 +732,33 @@ _GRAPH_RESOLVE_TAGS: Final = frozenset(
 )
 
 
+type FieldPath = tuple[str | int, ...]
+"""Where a value sits: field names and indices leading to it; ``()`` is the value."""
+
+
 class ReadError(TypeError):
-    """A JSON value does not match the requested type."""
+    """A JSON value does not match the requested type.
+
+    Attributes:
+      partial: The value as far as it reads, an :class:`Invalid` in place of
+        each bad part; the whole value is one when nothing reads.
+      bad: Each bad part, by where it sits.
+
+    """
+
+    partial: object
+    bad: Mapping[FieldPath, Invalid]
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        partial: object = None,
+        bad: Mapping[FieldPath, Invalid] = MappingProxyType({}),
+    ) -> None:
+        super().__init__(message)
+        self.partial = partial
+        self.bad = bad
 
 
 @overload
@@ -776,7 +802,7 @@ def convert(
     default: object = ABSENT,
     strict: bool = True,
 ) -> object:
-    """Convert a parsed JSON value to ``target``.
+    """Convert a parsed JSON value to ``target``, or raise holding what did read.
 
     Read one field as ``convert(row.get("name"), str, default="")``.
 
@@ -793,82 +819,22 @@ def convert(
       result: ``value`` as a ``target``, or ``default``.
 
     Raises:
-      ReadError: ``value`` does not convert; the message names the location.
+      ReadError: ``value`` does not convert. The message names the first
+        failure; ``partial`` is the value with an :class:`Invalid` at each bad
+        part, and ``bad`` names every one.
 
     """
-    if value is None and not isinstance(default, Absent):
-        return default
-    union_members = _dataclass_union_members(target)
-    if union_members:
-        return _read_dataclass_union(value, target, union_members, strict=strict)
-    if _is_dataclass_type(target) and _is_str_mapping(value):
-        _reject_unknown_fields(value, target)
-        if _needs_field_by_field(target):
-            return _read_dataclass_fields(value, target, strict=strict)
-    target = _with_union_stand_ins(target)
     try:
-        return cast(
-            object,
-            msgspec.convert(value, target, strict=strict, dec_hook=_read_hook),
-        )
-    except msgspec.ValidationError as error:
-        failure = error
-    except TypeError as error:
-        # `msgspec` refuses a union of several custom types (``Path | str``);
-        # its members are tried in declared order instead.
-        for member in cast(tuple[object, ...], get_args(target)):
-            try:
-                return convert(value, member, strict=strict)
-            except ReadError:
-                continue
-        raise ReadError(f"cannot read {value!r} as {target!r}: {error}") from error
-    # Data written before ``to_builtins`` wraps tuples, sets, and special floats
-    # in ``py/tuple``, ``py/set``, ``py/float``, ... tags; unwrapped, it is the
-    # same shape. Only a value that failed pays for the second pass.
-    try:
-        return cast(
-            object,
-            msgspec.convert(
-                untagged(value),
-                target,
-                strict=strict,
-                dec_hook=_read_hook,
-            ),
-        )
-    except (msgspec.ValidationError, TypeError, ValueError):
-        raise ReadError(str(failure)) from failure
+        return _convert(value, target, default=default, strict=strict)
+    except ReadError as error:
+        bad: dict[FieldPath, Invalid] = {}
+        partial = _partial(value, target, strict=strict, at=(), bad=bad)
+        raise ReadError(str(error), partial=partial, bad=bad) from error
 
 
 _FIELD_BY_FIELD: Final[weakref.WeakKeyDictionary[type, bool]] = (
     weakref.WeakKeyDictionary()
 )
-
-
-def convert_or_none[T](
-    value: object,
-    target: type[T],
-    *,
-    strict: bool = True,
-) -> T | None:
-    """Convert ``value`` to ``target``, or ``None`` when it is not one.
-
-    The lenient sibling of :func:`convert`, for readers of third-party records
-    that must keep a malformed field as raw data rather than reject the
-    record: missing, null, and malformed all yield ``None``.
-
-    Args:
-      value: Parsed JSON, e.g. ``row.get("name")``.
-      target: The type to produce.
-      strict: See :func:`convert`.
-
-    Returns:
-      result: ``value`` as a ``target``, or ``None``.
-
-    """
-    try:
-        return convert(value, target, default=None, strict=strict)
-    except ReadError:
-        return None
 
 
 _FUNCTION_TYPES: Final = frozenset((FunctionType, BuiltinFunctionType))
@@ -963,6 +929,9 @@ def _builtins_hook(value: object) -> object:
 
 def _tagged(tree: object, value: object) -> object:
     """Tag each dataclass ``py/object`` and keep only the fields ``read`` takes back."""
+    if isinstance(value, Invalid):
+        # A part that did not read is written back as it was stated.
+        return value.raw
     if is_dataclass(value) and not isinstance(value, type) and _is_dict(tree):
         target = type(value)
         settable = {field.name for field in fields(target) if field.init}
@@ -1028,7 +997,7 @@ def _read_dataclass_union(
     tag = value.get(_OBJECT_TAG)
     for member in members:
         if tag == f"{member.__module__}.{member.__qualname__}":
-            return convert(value, member, strict=strict)
+            return _convert(value, member, strict=strict)
     raise ReadError(
         f"cannot read {target!r}: {_OBJECT_TAG} {tag!r} names none of its members",
     )
@@ -1099,7 +1068,7 @@ def _read_dataclass_fields(
     try:
         return target(
             **{
-                name: convert(member, hints[name], strict=strict)
+                name: _convert(member, hints[name], strict=strict)
                 for name, member in value.items()
                 if name != _OBJECT_TAG
             },
@@ -1123,12 +1092,120 @@ def _reject_unknown_fields(
         )
 
 
+# The slow path, run only once ``_convert`` has failed: it re-reads each part on its
+# own, so one bad leaf costs an ``Invalid`` in its place, not the whole value.
+def _partial(
+    value: object,
+    target: object,
+    *,
+    strict: bool,
+    at: FieldPath,
+    bad: dict[FieldPath, Invalid],
+) -> object:
+    """Return ``value`` read as ``target``, an ``Invalid`` at each part that is not."""
+    try:
+        return _convert(value, target, strict=strict)
+    except ReadError as error:
+        failure = error
+    target = _resolve_alias(target)
+    origin = get_origin(target)
+    args = cast(tuple[object, ...], get_args(target))
+    if _is_dataclass_type(target) and _is_str_mapping(value):
+        return _partial_dataclass(value, target, strict=strict, at=at, bad=bad)
+    if origin in _SEQUENCE_ORIGINS and _is_list(value) and _is_homogeneous(args):
+        items = [
+            _partial(item, args[0], strict=strict, at=(*at, index), bad=bad)
+            for index, item in enumerate(value)
+        ]
+        return tuple(items) if origin is tuple else items
+    if origin in _MAPPING_ORIGINS and _is_str_mapping(value) and len(args) == 2:
+        return {
+            key: _partial(item, args[1], strict=strict, at=(*at, key), bad=bad)
+            for key, item in value.items()
+        }
+    if origin is UnionType and value is not None:
+        present = [arg for arg in args if arg is not type(None)]
+        if len(present) == 1:
+            return _partial(value, present[0], strict=strict, at=at, bad=bad)
+    return _invalid(value, str(failure), at=at, bad=bad)
+
+
+def _partial_dataclass(
+    value: Mapping[str, object],
+    target: type[DataclassInstance],
+    *,
+    strict: bool,
+    at: FieldPath,
+    bad: dict[FieldPath, Invalid],
+) -> object:
+    """Build ``target`` field by field, an ``Invalid`` in each bad or missing one."""
+    hints = get_type_hints(target)
+    declared = {field.name: field for field in fields(target) if field.init}
+    stated: dict[str, object] = {}
+    for name, member in value.items():
+        if name == _OBJECT_TAG:
+            continue
+        if name in declared:
+            stated[name] = _partial(
+                member,
+                hints[name],
+                strict=strict,
+                at=(*at, name),
+                bad=bad,
+            )
+        else:
+            _ = _invalid(
+                member,
+                f"{target.__name__} has no field {name!r}",
+                at=(*at, name),
+                bad=bad,
+            )
+    for name, field in declared.items():
+        if name not in stated and not _has_default(field):
+            stated[name] = _invalid(
+                None,
+                f"{target.__name__} requires field {name!r}",
+                at=(*at, name),
+                bad=bad,
+            )
+    return target(**stated)
+
+
+_SEQUENCE_ORIGINS: Final = frozenset((list, tuple, Sequence, MutableSequence))
+
+
+_MAPPING_ORIGINS: Final = frozenset((dict, Mapping, MutableMapping))
+
+
+def _is_homogeneous(args: tuple[object, ...]) -> bool:
+    """Whether a sequence's type arguments name one element type for every item."""
+    return len(args) == 1 or (len(args) == 2 and args[1] is Ellipsis)
+
+
+def _invalid(
+    value: object,
+    reason: str,
+    *,
+    at: FieldPath,
+    bad: dict[FieldPath, Invalid],
+) -> Invalid:
+    """Record ``value`` as bad at ``at`` and return its placeholder."""
+    invalid = Invalid(raw=cast(JSONValue, value), reason=reason)
+    bad[at] = invalid
+    return invalid
+
+
+def _has_default(field: Field[object]) -> bool:
+    """Whether a dataclass field can be left out of its constructor."""
+    return field.default is not MISSING or field.default_factory is not MISSING
+
+
 def _read_hook(target: type, value: object) -> object:
     # `msgspec` also routes ``object``-typed leaves here, so the value passes
     # through; any other unhandled type is rejected as a ValidationError.
     # A value already of a non-JSON target (a checkpoint ``Tensor``) is kept.
     if isinstance(target, _UnionStandIn):
-        return convert(value, target.union)
+        return _convert(value, target.union)
     if target is object or isinstance(value, target):
         return value
     if target is Path and isinstance(value, str):
@@ -2187,3 +2264,55 @@ def _is_json_sequence(value: object) -> TypeGuard[Sequence[object]]:
         value,
         (str, bytes, bytearray),
     )
+
+
+# Read one field as ``convert(row.get("name"), str, default="")``.
+def _convert(
+    value: object,
+    target: object,
+    *,
+    default: object = ABSENT,
+    strict: bool = True,
+) -> object:
+    """Convert a parsed JSON value to ``target``."""
+    if value is None and not isinstance(default, Absent):
+        return default
+    union_members = _dataclass_union_members(target)
+    if union_members:
+        return _read_dataclass_union(value, target, union_members, strict=strict)
+    if _is_dataclass_type(target) and _is_str_mapping(value):
+        _reject_unknown_fields(value, target)
+        if _needs_field_by_field(target):
+            return _read_dataclass_fields(value, target, strict=strict)
+    target = _with_union_stand_ins(target)
+    try:
+        return cast(
+            object,
+            msgspec.convert(value, target, strict=strict, dec_hook=_read_hook),
+        )
+    except msgspec.ValidationError as error:
+        failure = error
+    except TypeError as error:
+        # `msgspec` refuses a union of several custom types (``Path | str``);
+        # its members are tried in declared order instead.
+        for member in cast(tuple[object, ...], get_args(target)):
+            try:
+                return _convert(value, member, strict=strict)
+            except ReadError:
+                continue
+        raise ReadError(f"cannot read {value!r} as {target!r}: {error}") from error
+    # Data written before ``to_builtins`` wraps tuples, sets, and special floats
+    # in ``py/tuple``, ``py/set``, ``py/float``, ... tags; unwrapped, it is the
+    # same shape. Only a value that failed pays for the second pass.
+    try:
+        return cast(
+            object,
+            msgspec.convert(
+                untagged(value),
+                target,
+                strict=strict,
+                dec_hook=_read_hook,
+            ),
+        )
+    except (msgspec.ValidationError, TypeError, ValueError):
+        raise ReadError(str(failure)) from failure

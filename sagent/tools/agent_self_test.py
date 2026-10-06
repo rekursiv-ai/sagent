@@ -8,6 +8,8 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, cast, override
 from unittest.mock import MagicMock, patch
 
+import asyncio
+
 import pytest
 
 from sagent import providers
@@ -31,6 +33,7 @@ from sagent.types.runtime import (
     AssistantMessage,
     Clear,
     Compact,
+    ModelSwitch,
     Recompact,
     RuntimeEvent,
 )
@@ -86,6 +89,13 @@ def _make_agent(*, spec: ModelRecipe | None = None) -> Agent:
         tools=[],
         model_recipe=spec,
     )
+
+
+def _land_switches(agent: Agent) -> None:
+    """Apply queued model switches, as the runtime does once no call is in flight."""
+    for item in agent.runtime.inbox.drain_nowait():
+        if isinstance(item, ModelSwitch):
+            item.apply()
 
 
 @contextmanager
@@ -459,6 +469,7 @@ async def test_model_change_auth_without_model_id_preserves_current_model() -> N
     ):
         bp.return_value = MagicMock(model=MagicMock(return_value=StubProviderModel()))
         result = await t.run({"auth": "new"})
+    _land_switches(agent)
     assert not result.is_error, result.content
     assert agent.model_recipe is not None
     assert agent.model_recipe.auth == "new"
@@ -752,7 +763,7 @@ async def test_provider_change_falls_back_when_inherited_account_is_missing() ->
             side_effect=build,
         ),
         patch(
-            "sagent.tools.agent_self.default_auth_for_provider",
+            "sagent.providers.providers.default_auth_for_provider",
             return_value="credentials",
         ),
         _active(agent),
@@ -760,6 +771,7 @@ async def test_provider_change_falls_back_when_inherited_account_is_missing() ->
         result = await AgentSelf(allow_providers=("StubTarget",)).run(
             {"provider": "StubTarget", "model_id": "gpt-5.5"},
         )
+    _land_switches(agent)
     assert not result.is_error, result.content
     assert calls == [
         ("StubTarget", "credentials", "work"),
@@ -785,7 +797,7 @@ async def test_explicit_missing_account_does_not_fall_back() -> None:
             side_effect=FileNotFoundError("No credentials for work"),
         ) as build,
         patch(
-            "sagent.tools.agent_self.default_auth_for_provider",
+            "sagent.providers.providers.default_auth_for_provider",
             return_value="credentials",
         ),
         _active(agent),
@@ -834,6 +846,184 @@ async def test_account_default_string_is_preserved() -> None:
 
 
 @pytest.mark.asyncio
+async def test_explicit_current_provider_is_not_overridden_by_inference() -> None:
+    """``provider=<current>`` is a choice; a model id must not reroute it."""
+    agent = _make_agent(
+        spec=ModelRecipe(provider="Anthropic", auth="env", model_id="opus-4.8"),
+    )
+    fake_provider = MagicMock()
+    fake_provider.model.return_value = StubProviderModel(model_id="gpt-5.5")
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            return_value=fake_provider,
+        ) as build,
+        _active(agent),
+    ):
+        _ = await AgentSelf().run({"provider": "Anthropic", "model_id": "gpt-5.5"})
+    build.assert_called_once_with("Anthropic", "env", account=None)
+
+
+@dataclass(slots=True, kw_only=True)
+class _CountingProvider:
+    closes: int = 0
+    model_id: str = "stub-2"
+
+    def model(self, model_id: str | None = None) -> StubProviderModel:
+        del model_id
+        return StubProviderModel(model_id=self.model_id)
+
+    async def close_sdk(self) -> None:
+        self.closes += 1
+
+
+@pytest.mark.asyncio
+async def test_swapped_in_provider_is_owned_and_closed_on_the_next_swap() -> None:
+    agent = _make_agent(
+        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1"),
+    )
+    first, second = _CountingProvider(), _CountingProvider(model_id="stub-3")
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            side_effect=[first, second],
+        ),
+        _active(agent),
+    ):
+        _ = await AgentSelf().run({"model_id": "stub-2"})
+        _land_switches(agent)
+        _ = await AgentSelf().run({"model_id": "stub-3"})
+        _land_switches(agent)
+        for _ in range(5):
+            await asyncio.sleep(0)
+    assert (first.closes, second.closes) == (1, 0)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_swap_closes_the_provider_it_built() -> None:
+    agent = _make_agent(
+        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1"),
+    )
+    built = _CountingProvider()
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            return_value=built,
+        ),
+        _active(agent),
+    ):
+        result = await AgentSelf().run(
+            {"model_id": "stub-2", "model_options": {"latency": "fast"}},
+        )
+        for _ in range(5):
+            await asyncio.sleep(0)
+    assert result.is_error
+    assert built.closes == 1
+
+
+@pytest.mark.asyncio
+async def test_a_switch_with_invalid_options_keeps_the_old_model() -> None:
+    """A refused patch queues nothing and closes what it built."""
+    agent = _make_agent(
+        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1"),
+    )
+    old_model = agent.model
+    built = _CountingProvider()
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            return_value=built,
+        ),
+        _active(agent),
+    ):
+        result = await AgentSelf().run(
+            {"model_id": "stub-2", "model_options": {"effort": "max"}},
+        )
+        queued = agent.runtime.inbox.drain_nowait()
+        for _ in range(5):
+            await asyncio.sleep(0)
+    assert result.is_error
+    assert not any(isinstance(item, ModelSwitch) for item in queued)
+    assert agent.model is old_model
+    assert built.closes == 1
+
+
+@pytest.mark.asyncio
+async def test_a_valid_switch_applies_its_options_to_the_new_model() -> None:
+    """Options ride the swap, landing on the NEW model, not the old one."""
+
+    @dataclass(slots=True, kw_only=True)
+    class _EffortModel(StubProviderModel):
+        valid_efforts: tuple[ThinkingEffort, ...] = ("low", "high")
+
+    agent = _make_agent(
+        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1"),
+    )
+    old_model = agent.model
+    new_model = _EffortModel(model_id="stub-2")
+    provider = MagicMock()
+    provider.model.return_value = new_model
+    with (
+        patch(
+            "sagent.providers.providers.build_provider",
+            return_value=provider,
+        ),
+        _active(agent),
+    ):
+        result = await AgentSelf().run(
+            {
+                "model_id": "stub-2",
+                "model_options": {"effort": "high"},
+                "max_response_tokens": 1_000,
+            },
+        )
+        assert agent.model is old_model, "the swap is queued, not immediate"
+        _land_switches(agent)
+    assert not result.is_error, result.content
+    assert "(queued)" in result.content
+    assert agent.model is new_model
+    assert new_model.settings.thinking_effort == "high"
+    assert agent.max_response_tokens == 1_000
+
+
+@pytest.mark.asyncio
+async def test_agent_self_lands_where_change_model_lands() -> None:
+    """The tool and the agent API resolve and record a swap identically."""
+    states: list[tuple[ModelRecipe | None, str]] = []
+    for via_tool in (True, False):
+        agent = _make_agent(
+            spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1"),
+        )
+        provider = MagicMock()
+        provider.model.return_value = StubProviderModel(model_id="stub-2")
+        with (
+            patch(
+                "sagent.providers.providers.build_provider",
+                return_value=provider,
+            ),
+            _active(agent),
+        ):
+            if via_tool:
+                _ = await AgentSelf().run({"model_id": "stub-2"})
+            else:
+                _ = agent.change_model(model_id="stub-2")
+            _land_switches(agent)
+        states.append((agent.model_recipe, agent.model.tagged_model_id))
+    assert states[0] == states[1]
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_model_ceiling_accepts_any_limit() -> None:
+    """A ceiling of 0 is unknown, not zero; every limit fits under it."""
+    model = StubProviderModel()
+    model.max_response_tokens = 0
+    agent = Agent(model=model, tools=[])
+    with _active(agent):
+        result = await AgentSelf().run({"max_response_tokens": 1000})
+    assert not result.is_error, result.content
+
+
+@pytest.mark.asyncio
 async def test_model_swap_shrinks_budget_to_new_model_window() -> None:
     """Swapping to a smaller-window model must narrow the budget to fit.
 
@@ -857,6 +1047,7 @@ async def test_model_swap_shrinks_budget_to_new_model_window() -> None:
         t = AgentSelf()
         with _active(agent):
             result = await t.run({"model_id": "small"})
+            _land_switches(agent)
     assert not result.is_error, result.content
     assert agent.model.tagged_model_id == "small"
     assert agent.budget.max_request_tokens <= 50_000
@@ -886,6 +1077,7 @@ async def test_model_swap_with_explicit_budget_lands_in_one_step() -> None:
         t = AgentSelf()
         with _active(agent):
             result = await t.run({"model_id": "small", "max_request_tokens": 20_000})
+            _land_switches(agent)
     assert not result.is_error, result.content
     assert agent.model.tagged_model_id == "small"
     assert agent.max_request_tokens == 20_000
@@ -929,6 +1121,7 @@ async def test_model_swap_clears_effort_and_reports_unset() -> None:
         t = AgentSelf()
         with _active(agent):
             result = await t.run({"model_id": "plain-stub"})
+            _land_switches(agent)
     assert not result.is_error, result.content
     assert agent.model.settings.thinking_effort == "none"
     assert "thinking_effort=none (unsupported)" in result.content
@@ -1049,6 +1242,7 @@ async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> No
         t = AgentSelf()
         with _active(agent):
             result = await t.run({"model_id": "plain-stub"})
+            _land_switches(agent)
     assert not result.is_error, result.content
     assert agent.model.settings.thinking_budget == "none"
     assert agent.model.settings.service_tier == "auto"

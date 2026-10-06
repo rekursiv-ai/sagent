@@ -6,8 +6,10 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import base64
+import contextlib
 import io
 import json
+import threading
 import time
 
 import httpx2
@@ -21,6 +23,7 @@ from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     find_response_not_read,
 )
+from sagent.providers.lib.oauth import credentials_path
 from sagent.providers.openai import sub
 from sagent.providers.openai.sub import (
     OpenAISubscription,
@@ -43,9 +46,20 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
     from pathlib import Path
 
     from sagent.types.tools import Tool
+
+
+@pytest.fixture(autouse=True)
+def isolate_codex_home(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    """Keep the default ``~/.codex/auth.json`` off the operator's real file."""
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
 
 
 def test_subscription_context_clamps_request_tokens() -> None:
@@ -183,6 +197,57 @@ def test_jwt_claim_namespace_missing_returns_empty() -> None:
     assert _jwt_claim(token, "ns", "key") == ""
 
 
+def _jwt_with_raw_payload(payload: object) -> str:
+    body = base64.urlsafe_b64encode(json.dumps(payload).encode()).rstrip(b"=")
+    return f"h.{body.decode()}.s"
+
+
+@pytest.mark.parametrize("payload", [[], None, 42, "text"])
+def test_jwt_helpers_tolerate_a_non_object_payload(payload: object) -> None:
+    token = _jwt_with_raw_payload(payload)
+    assert _jwt_payload(token) == {}
+    assert _jwt_exp(token) == 0.0
+    assert _jwt_claim(token, "ns", "key") == ""
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{"exp": "soon"}, {"exp": [1]}, {"ns": "flat"}, {"ns": {"key": 7}}],
+)
+def test_jwt_helpers_tolerate_mistyped_claims(payload: dict[str, object]) -> None:
+    token = _make_jwt(payload)
+    assert _jwt_exp(token) == 0.0
+    assert _jwt_claim(token, "ns", "key") == ""
+
+
+def test_load_with_a_non_object_jwt_payload_keeps_the_value_error_contract(
+    tmp_path: Path,
+) -> None:
+    """``load`` documents ``ValueError``/``FileNotFoundError`` only."""
+    target = tmp_path / "auth.json"
+    _write_creds_file(
+        target,
+        {
+            "tokens": {
+                "access_token": _jwt_with_raw_payload([]),
+                "refresh_token": _FAKE_REFRESH,
+                "account_id": _FAKE_ACCOUNT,
+            },
+        },
+    )
+    assert OpenAISubscription.load(path=target)["expires_at"] == 0.0
+
+
+def test_default_credentials_path_is_the_vendor_fixed_home_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Codex reads ``~/.codex``; an XDG config root must not relocate it."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg" / "cfg"))
+    assert sub._default_credentials_path() == tmp_path / "home" / ".codex" / "auth.json"
+
+
 def _write_creds_file(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
@@ -293,6 +358,7 @@ _FAKE_REFRESH = "rt-test"
 _FAKE_ACCOUNT = "acc"
 _FRESH_REFRESH = "rt-fresh"
 _STALE_REFRESH = "rt-stale"
+_DISK_ID_JWT = "id-disk"
 
 
 def _make_provider(*, expires_at: float = 9999.0) -> OpenAISubscription:
@@ -404,17 +470,15 @@ async def test_subscription_provider_close_releases_sdk() -> None:
     model = provider.model("gpt-5.5")
     sdk = MagicMock()
     sdk.close = AsyncMock()
-    provider._sdk = cast(openai.AsyncOpenAI, sdk)
-    provider._sdk_token = "dummy-token"  # noqa: S105 -- This test fixture token is synthetic and never a credential.
+    provider._authed.set((cast(openai.AsyncOpenAI, sdk), "dummy-token"))
 
     await model.close()
     sdk.close.assert_not_awaited()
-    assert provider._sdk is sdk
+    assert provider._authed.peek() == (sdk, "dummy-token")
 
     await provider.close_sdk()
     sdk.close.assert_awaited_once()
-    assert provider._sdk is None
-    assert provider._sdk_token is None
+    assert provider._authed.peek() is None
 
 
 def test_subscription_priority_tier_reaches_the_wire() -> None:
@@ -977,8 +1041,9 @@ class TestEnsureValidRace:
         closed: list[bool] = []
         stale_sdk = MagicMock()
         stale_sdk.close = AsyncMock(side_effect=lambda: closed.append(True))
-        provider._sdk = cast(openai.AsyncOpenAI, stale_sdk)
-        provider._sdk_token = _make_jwt({"exp": 0.0})
+        provider._authed.set(
+            (cast(openai.AsyncOpenAI, stale_sdk), _make_jwt({"exp": 0.0})),
+        )
 
         with patch(
             "sagent.providers.openai.sub.DEFAULT_CREDENTIALS_PATH",
@@ -988,6 +1053,216 @@ class TestEnsureValidRace:
 
         assert token == fresh_access
         assert closed == [True], "adopting a disk token must close the old SDK client"
+        assert provider._authed.peek() is None
+
+
+def _token_endpoint(access_token: str, *, expires_in: int = 3600) -> AsyncMock:
+    """Return a patched ``httpx2.AsyncClient`` whose POST issues ``access_token``."""
+    response = MagicMock()
+    response.status_code = 200
+    response.json = MagicMock(
+        return_value={
+            "access_token": access_token,
+            "refresh_token": _FRESH_REFRESH,
+            "expires_in": expires_in,
+        },
+    )
+    http = AsyncMock()
+    http.post = AsyncMock(return_value=response)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+    return http
+
+
+class TestRefreshLifecycle:
+    """Every refresh runs under the cross-process lock, off-loop, with an expiry."""
+
+    @pytest.mark.anyio
+    async def test_get_sdk_never_refreshes_outside_the_file_lock(self) -> None:
+        provider = _make_provider(expires_at=time.time() + 3600)
+        held: list[bool] = []
+        ensure_valid = provider._ensure_valid
+
+        @contextlib.asynccontextmanager
+        async def _recording_lock(path: Path) -> AsyncGenerator[None]:
+            del path
+            held.append(True)
+            try:
+                yield
+            finally:
+                held.pop()
+
+        async def _expire_after_validation() -> str:
+            token = await ensure_valid()
+            # The deadline crosses the buffer while ``get_sdk`` waits on its lock.
+            provider._expires_at = 0.0
+            return token
+
+        async def _refresh() -> None:
+            assert held, "_refresh ran without the cross-process credential lock"
+
+        with (
+            patch.object(sub, "credential_file_lock", _recording_lock),
+            patch.object(provider, "_ensure_valid", _expire_after_validation),
+            patch.object(provider, "_refresh", _refresh),
+        ):
+            sdk = await provider.get_sdk()
+        await sdk.close()
+
+    @pytest.mark.anyio
+    async def test_refresh_reads_and_writes_credentials_off_the_event_loop(
+        self,
+    ) -> None:
+        provider = _make_provider(expires_at=0.0)
+        loop_thread = threading.get_ident()
+        io_threads: list[int] = []
+        load = OpenAISubscription.load
+        save = OpenAISubscription.save
+
+        def _load(*, account: str | None) -> OpenAISubscription.Credentials:
+            io_threads.append(threading.get_ident())
+            return load(account=account)
+
+        def _save(
+            creds: OpenAISubscription.Credentials,
+            *,
+            account: str | None,
+        ) -> None:
+            io_threads.append(threading.get_ident())
+            save(creds, account=account)
+
+        with (
+            patch(
+                "sagent.providers.openai.sub.httpx2.AsyncClient",
+                return_value=_token_endpoint(_make_jwt({"exp": time.time() + 3600})),
+            ),
+            patch.object(OpenAISubscription, "load", _load),
+            patch.object(OpenAISubscription, "save", _save),
+        ):
+            await provider._refresh()
+
+        assert len(io_threads) == 2
+        assert loop_thread not in io_threads
+
+    @pytest.mark.anyio
+    async def test_refresh_posts_the_grant_and_persists_into_the_account_slot(
+        self,
+    ) -> None:
+        """The grant is the Codex wire contract; the write keeps disk-only fields."""
+        provider = OpenAISubscription(
+            access_token=_make_jwt({"exp": 0.0}),
+            refresh_token=_STALE_REFRESH,
+            account_id="acc-memory",
+            expires_at=0.0,
+            account="work",
+        )
+        slot = credentials_path(sub._default_credentials_path(), "work")
+        on_disk = _make_creds(_make_jwt({"exp": 0.0}))
+        on_disk["account_id"] = "acc-disk"
+        on_disk["id_token"] = _DISK_ID_JWT
+        OpenAISubscription.save(on_disk, path=slot)
+        fresh = _make_jwt({"exp": time.time() + 3600})
+        http = _token_endpoint(fresh)
+        with patch(
+            "sagent.providers.openai.sub.httpx2.AsyncClient",
+            return_value=http,
+        ):
+            await provider._refresh()
+
+        http.post.assert_awaited_once_with(
+            sub._TOKEN_URL,
+            json={
+                "grant_type": "refresh_token",
+                "refresh_token": _STALE_REFRESH,
+                "client_id": sub._CLIENT_ID,
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=15.0,
+        )
+        tokens = json.loads(slot.read_text(encoding="utf-8"))["tokens"]
+        assert tokens == {
+            "access_token": fresh,
+            "refresh_token": _FRESH_REFRESH,
+            "account_id": "acc-disk",
+            "id_token": _DISK_ID_JWT,
+        }
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("corrupt", [False, True])
+    @pytest.mark.parametrize("account", [None, "work"])
+    async def test_refresh_writes_a_fresh_record_when_disk_has_none(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        corrupt: bool,
+        account: str | None,
+    ) -> None:
+        provider = OpenAISubscription(
+            access_token=_make_jwt({"exp": 0.0}),
+            refresh_token=_FAKE_REFRESH,
+            account_id=_FAKE_ACCOUNT,
+            expires_at=0.0,
+            account=account,
+        )
+        slot = credentials_path(sub._default_credentials_path(), account)
+        if corrupt:
+            _write_creds_file(slot, {"tokens": {}})
+        fresh = _make_jwt({"exp": time.time() + 3600})
+        with (
+            patch(
+                "sagent.providers.openai.sub.httpx2.AsyncClient",
+                return_value=_token_endpoint(fresh),
+            ),
+            caplog.at_level("WARNING"),
+        ):
+            await provider._refresh()
+
+        assert json.loads(slot.read_text(encoding="utf-8"))["tokens"] == {
+            "access_token": fresh,
+            "refresh_token": _FRESH_REFRESH,
+            "account_id": _FAKE_ACCOUNT,
+        }
+        warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert warned == (
+            [
+                (
+                    f"OpenAI creds file at {slot} was unreadable; overwriting with "
+                    "refreshed tokens"
+                ),
+            ]
+            if corrupt
+            else []
+        )
+
+    @pytest.mark.anyio
+    async def test_a_token_without_exp_takes_its_expiry_from_expires_in(
+        self,
+    ) -> None:
+        provider = _make_provider(expires_at=0.0)
+        http = _token_endpoint(_make_jwt({}), expires_in=3600)
+        with patch(
+            "sagent.providers.openai.sub.httpx2.AsyncClient",
+            return_value=http,
+        ):
+            first = await provider.get_sdk()
+            second = await provider.get_sdk()
+        await first.close()
+
+        assert http.post.await_count == 1
+        assert first is second
+        assert not provider.expired
+
+    @pytest.mark.anyio
+    async def test_a_token_with_no_expiry_at_all_is_rejected(self) -> None:
+        provider = _make_provider(expires_at=0.0)
+        http = _token_endpoint(_make_jwt({}), expires_in=0)
+        with (
+            patch(
+                "sagent.providers.openai.sub.httpx2.AsyncClient",
+                return_value=http,
+            ),
+            pytest.raises(AuthRefreshError, match="expiry"),
+        ):
+            await provider._refresh()
 
 
 class TestStreamResponseNotRead:
@@ -1111,11 +1386,10 @@ class TestRefreshErrors:
         ):
             await provider._refresh()
 
-        msg = str(excinfo.value)
-        assert "/login" in msg, (
-            f"AuthRefreshError must guide the user to /login; got: {msg!r}"
+        assert str(excinfo.value) == (
+            "OpenAI Codex subscription session expired or revoked. Run /login to "
+            "re-authenticate, or /model to switch providers."
         )
-        assert "HTTPStatusError" not in msg
 
     @pytest.mark.anyio
     async def test_refresh_overwrites_missing_field_creds_file(

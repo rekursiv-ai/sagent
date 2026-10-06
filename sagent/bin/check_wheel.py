@@ -16,8 +16,9 @@ from __future__ import annotations
 
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
-from typing import Final, cast
+from typing import Final, cast, override
 
+import configparser
 import re
 import tomllib
 import zipfile
@@ -31,21 +32,29 @@ _RECIPE_PATH: Final = "sagent/assets/sagent.yaml"
 
 
 def main() -> int:
-    """Validate the freshest wheel under ``dist/`` and return a shell exit code.
+    """Validate the one wheel under ``dist/`` and return a shell exit code.
 
     Returns:
       exit_code: ``0`` on success; this function raises ``SystemExit`` on
         failure rather than returning non-zero.
 
     Raises:
-      SystemExit: If no wheel is found, source modules are missing from the
-        wheel, or the recipe references missing/invalid assets.
+      SystemExit: If ``dist/`` holds no wheel or several, source modules or
+        console scripts are missing from the wheel, or the recipe references
+        missing/invalid assets.
 
     """
+    # Exactly one: two builds side by side cannot be told apart by name order
+    # (``0.9.0`` sorts after ``0.10.0``), and the build writes into a fresh dist/.
     wheels = sorted(Path("dist").glob("sagent-*.whl"))
     if not wheels:
         raise SystemExit("uv build produced no Sagent wheel")
-    with zipfile.ZipFile(wheels[-1]) as archive:
+    if len(wheels) > 1:
+        raise SystemExit(
+            "dist/ must hold exactly one Sagent wheel; found "
+            + ", ".join(w.name for w in wheels),
+        )
+    with zipfile.ZipFile(wheels[0]) as archive:
         names = frozenset(archive.namelist())
         missing = sorted(expected_modules() - names)
         if missing:
@@ -55,12 +64,15 @@ def main() -> int:
             raise SystemExit("wheel is missing *.dist-info/entry_points.txt")
         entry_points = archive.read(entry_points_name).decode()
         _validate_recipe_assets(archive, names)
-    required_entry_points = (
-        "sagent = sagent.bin.cli:main",
-        "sagent-slack = sagent.bin.slack:main",
-    )
+    required_entry_points = {
+        "sagent": "sagent.bin.cli:main",
+        "sagent-slack": "sagent.bin.slack:main",
+    }
+    scripts = _console_scripts(entry_points)
     missing_entry_points = [
-        entry for entry in required_entry_points if entry not in entry_points
+        f"{name} = {target}"
+        for name, target in required_entry_points.items()
+        if scripts.get(name) != target
     ]
     if missing_entry_points:
         raise SystemExit(
@@ -101,6 +113,23 @@ def expected_modules() -> frozenset[str]:
             if not any(fnmatch(posix, pat) for pat in excludes):
                 expected.add(posix)
     return frozenset(expected)
+
+
+def _console_scripts(entry_points: str) -> dict[str, str]:
+    """Return ``[console_scripts]`` entries of an ``entry_points.txt``."""
+    parser = _CaseSensitiveParser(delimiters=("=",), interpolation=None)
+    parser.read_string(entry_points)
+    if not parser.has_section("console_scripts"):
+        return {}
+    return dict(parser.items("console_scripts"))
+
+
+class _CaseSensitiveParser(configparser.ConfigParser):
+    """``ConfigParser`` that keeps script names' case, as the wheel does."""
+
+    @override
+    def optionxform(self, optionstr: str) -> str:
+        return optionstr
 
 
 def _entry_points_name(names: frozenset[str]) -> str | None:

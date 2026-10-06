@@ -13,6 +13,7 @@ import warnings
 
 import pytest
 
+from sagent.agent.runtime import EXCLUSIVE_KEY
 from sagent.agent.state import ToolState
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.testing import with_fake_agent
@@ -281,12 +282,27 @@ def test_suppress_oserror_swallows_process_lookup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_kill_process_group_skips_completed() -> None:
-    """``_kill_process_group`` no-ops when the process already exited."""
+async def test_kill_process_group_signals_the_group_after_the_leader_exits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The group outlives its leader, so an exited leader still gets the kill."""
     proc = MagicMock()
     proc.returncode = 0
-    # ``wait`` should never be called since we short-circuit.
+    proc.pid = 4242
+
+    async def _wait() -> int:
+        return 0
+
+    proc.wait = _wait
+    killed: list[int] = []
+
+    def _killpg(pgid: int, sig: int) -> None:
+        del sig
+        killed.append(pgid)
+
+    monkeypatch.setattr("sagent.tools.bash.os.killpg", _killpg)
     await _kill_process_group(cast(asyncio.subprocess.Process, proc))
+    assert killed == [4242, 4242]
 
 
 @pytest.mark.asyncio
@@ -313,6 +329,8 @@ async def test_run_foreground_timeout(
     class _FakeProc:
         returncode: int | None = None
         pid: int = 99_999
+        stdout: None = None
+        stderr: None = None
 
         async def communicate(self) -> tuple[bytes, bytes]:
             return (b"partial\n", b"")
@@ -635,11 +653,72 @@ def test_a_writing_command_serializes_against_other_bash(command: str) -> None:
     assert Bash().serialize_key({"command": command}) is not None
 
 
+@pytest.mark.asyncio
+async def test_a_fractional_timeout_is_accepted(tmp_path: Path) -> None:
+    """The schema declares ``number``; ``1.5`` passes it and must run."""
+    with with_fake_agent() as agent:
+        agent.tool_state.bash_cwd = str(tmp_path)
+        assert (
+            validate_tool_input(
+                "Bash",
+                Bash.directive_schema,
+                {
+                    "command": "echo hi",
+                    "timeout": 1500.5,
+                },
+            )
+            is None
+        )
+        result = await Bash().run({"command": "echo hi", "timeout": 1500.5})
+    assert "hi" in result.content
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_reaps_a_descendant_after_the_leader_exits(
+    tmp_path: Path,
+) -> None:
+    """A backgrounded child holding the pipe must not outlive the timeout.
+
+    The leader exits at once; its ``sleep`` keeps stdout open. Skipping the
+    group kill because the leader had already exited left the drain waiting
+    on that pipe for the full ``sleep``.
+    """
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    state.start_cwd = str(tmp_path)
+    out = await asyncio.wait_for(
+        _run_foreground("sleep 10 & echo started", state=state, timeout_s=0.2),
+        timeout=3.0,
+    )
+    assert "started" in out, out
+    assert "timeout" in out, out
+
+
+@pytest.mark.asyncio
+async def test_a_descendant_that_leaves_the_group_cannot_hang_the_drain(
+    tmp_path: Path,
+) -> None:
+    """``setsid`` escapes the group kill; the drain is bounded anyway."""
+    state = ToolState()
+    state.bash_cwd = str(tmp_path)
+    state.start_cwd = str(tmp_path)
+    out = await asyncio.wait_for(
+        _run_foreground("setsid sleep 10 & echo started", state=state, timeout_s=0.2),
+        timeout=5.0,
+    )
+    assert "started" in out, out
+
+
 def test_writers_share_one_key_so_they_queue_behind_each_other() -> None:
     b = Bash()
     assert b.serialize_key({"command": "rm a"}) == b.serialize_key(
         {"command": "git checkout ."},
     )
+
+
+def test_a_writer_serializes_against_a_same_cohort_file_edit() -> None:
+    """``sed -i f`` and ``Edit f`` contend for ``f``; one key cannot see that."""
+    assert Bash().serialize_key({"command": "sed -i 's/a/b/' f"}) == EXCLUSIVE_KEY
 
 
 def test_an_unparseable_command_is_treated_as_a_writer() -> None:

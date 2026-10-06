@@ -30,7 +30,7 @@ __all__ = [
 ]
 
 
-type ServiceTier = Literal["auto", "default", "flex", "priority"]
+type ServiceTier = Literal["auto", "default", "flex", "priority", "ultrafast"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

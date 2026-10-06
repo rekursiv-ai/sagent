@@ -27,6 +27,7 @@ __all__ = [
     "MAX_ROUND_RESULT_CHARS",
     "ResultBounded",
     "Tool",
+    "ToolResultClearable",
     "ToolResultPolicy",
 ]
 

@@ -15,6 +15,7 @@ from sagent.tools.glob_tool import (
     _long_line,
 )
 from sagent.tools.lib.bash import parse_bash
+from sagent.types.tools import DEFAULT_MAX_RESULT_CHARS
 
 
 if TYPE_CHECKING:
@@ -126,6 +127,60 @@ async def test_glob_absolute_no_glob_chars(tmp_path: Path) -> None:
 async def test_glob_absolute_no_glob_chars_missing(tmp_path: Path) -> None:
     result = await _run_glob({"pattern": str(tmp_path / "missing")}, tmp_path)
     assert result.content == "(no matches)"
+
+
+@pytest.mark.asyncio
+async def test_absolute_and_relative_brace_patterns_agree(tmp_path: Path) -> None:
+    for sub in ("a", "b"):
+        (tmp_path / sub).mkdir()
+        (tmp_path / sub / "x.py").write_text("")
+    relative = await _run_glob({"pattern": "{a,b}/x.py"}, tmp_path)
+    absolute = await _run_glob({"pattern": f"{tmp_path}/{{a,b}}/x.py"}, tmp_path)
+    assert relative.content.count("x.py") == 2, relative.content
+    assert absolute.content == relative.content
+
+
+@pytest.mark.asyncio
+async def test_an_absolute_directory_is_not_a_file_match(tmp_path: Path) -> None:
+    """Glob lists only files, so naming a directory matches nothing."""
+    (tmp_path / "f.txt").write_text("")
+    result = await _run_glob({"pattern": str(tmp_path)}, tmp_path)
+    assert result.content == "(no matches)", result.content
+
+
+@pytest.mark.asyncio
+async def test_a_symlink_is_reported_under_its_own_path(tmp_path: Path) -> None:
+    (tmp_path / "target.py").write_text("")
+    (tmp_path / "link.py").symlink_to(tmp_path / "target.py")
+    result = await _run_glob({"pattern": "*.py"}, tmp_path)
+    assert result.content.splitlines() == [
+        str(tmp_path / "link.py"),
+        str(tmp_path / "target.py"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_pattern_is_a_tool_error(tmp_path: Path) -> None:
+    """``Tool.run`` must not raise; a ``GlobError`` becomes ``is_error``."""
+    result = await _run_glob({"pattern": "{a"}, tmp_path)
+    assert result.is_error
+    assert "unclosed" in result.content
+
+
+@pytest.mark.asyncio
+async def test_a_tilde_path_is_the_home_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / "h.py").write_text("")
+    result = await _run_glob({"pattern": "*.py", "path": "~"}, tmp_path)
+    assert result.content == str(tmp_path / "home" / "h.py"), result.content
+
+
+def test_declared_result_cap_is_the_cap_that_applies() -> None:
+    assert Glob.max_result_chars <= DEFAULT_MAX_RESULT_CHARS
 
 
 @pytest.mark.asyncio

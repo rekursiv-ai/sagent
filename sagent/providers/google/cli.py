@@ -29,12 +29,10 @@ import asyncio
 import base64
 import contextlib
 import dataclasses
-import hashlib
 import json
 import logging
 import os
 import shutil
-import tempfile
 
 import fastjsonschema
 
@@ -42,8 +40,13 @@ from sagent.catalog.google import cli, models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.custom_json import JSON, MutableJSON, convert
-from sagent.providers.google.api import Google
-from sagent.providers.lib.cli_respawn import respawn_for_cadence
+from sagent.providers.google.api import Google, gemini_image_tokens
+from sagent.providers.lib.cli_respawn import (
+    CLISubprocessModel,
+    empty_turn_response,
+    hash_system,
+    populated_tmpdir,
+)
 from sagent.providers.lib.errors import (
     error_status_code,
     is_context_overflow_text,
@@ -72,7 +75,6 @@ from sagent.types.runtime import (
     ModelResponsePartial,
     ModelResponseThinking,
     RuntimeEvent,
-    ToolResult,
     UserMessage,
 )
 
@@ -82,7 +84,6 @@ if TYPE_CHECKING:
 
     from sagent.lib import image
     from sagent.types.capability import ModelCapability, ModelSettings
-    from sagent.types.tape import TapeEvent
 else:
     from wrapt import lazy_import
 
@@ -130,11 +131,6 @@ class GoogleCLI:
 
     def __init__(self, *, account: str | None = None) -> None:
         self._account = account
-
-    @property
-    def api_key(self) -> str:
-        """Compatibility shim returning the empty string."""
-        return ""
 
     @classmethod
     def from_key(cls, api_key: str) -> Google:
@@ -204,6 +200,9 @@ class GoogleCLI:
             capability=capability,
             settings=settings,
         )
+
+    async def close_sdk(self) -> None:
+        """Do nothing: each model owns and closes its own subprocess."""
 
     @property
     def account(self) -> str | None:
@@ -373,10 +372,14 @@ async def _rpc_call(
     while True:
         msg = await proc.read_json_line(skip_non_json=True)
         if msg is None:
-            raise RuntimeError(f"GoogleCLI: stdout closed waiting for {method}")
+            raise SubprocessTransportError(
+                f"GoogleCLI: stdout closed waiting for {method}",
+            )
         if msg.get("id") == request_id:
             if "error" in msg:
-                raise RuntimeError(f"GoogleCLI: {method} error: {msg['error']}")
+                raise SubprocessTransportError(
+                    f"GoogleCLI: {method} error: {msg['error']}",
+                )
             return cast(MutableJSON, msg.get("result") or {})
 
 
@@ -394,20 +397,6 @@ async def _rpc_send(
         "params": params,
     }
     await proc.write_line(json.dumps(payload))
-
-
-def _serialize_prompt_blocks(
-    entry: TapeEvent,
-    max_image_dim: int,
-    max_image_bytes: int,
-) -> list[MutableJSON]:
-    """Translate one non-assistant ``TapeEvent`` into ACP prompt blocks."""
-    if isinstance(entry, (AgentSendMessage, UserMessage)):
-        return _user_prompt_blocks(entry, max_image_dim, max_image_bytes)
-    assert isinstance(entry, ToolResult)
-    raise RuntimeError(
-        "GoogleCLI: ToolResult in history -- tools must go through the MCP bridge",
-    )
 
 
 def _user_prompt_blocks(
@@ -468,7 +457,7 @@ def _dispatch_session_update(
                 publish(ModelResponseThinking(text))
 
 
-class _GoogleCLIModel(ModelDefaults):
+class _GoogleCLIModel(CLISubprocessModel, ModelDefaults):
     """``gemini --experimental-acp`` subprocess wrapped as a sagent ``Model``.
 
     Args:
@@ -485,25 +474,20 @@ class _GoogleCLIModel(ModelDefaults):
         capability: ModelCapability,
         settings: ModelSettings,
     ) -> None:
+        super().__init__()
         self._provider = provider
         self._capability = capability
         self._settings = settings
-        self._last_sent_index = 0
-        self._system_hash: str = ""
-        self._turn_count = 0
-        self._last_input_tokens = 0
         self._tools_bridge: ToolsBridge | None = None
         self._next_rpc_id = 1
         self._session_id: str = ""
         self._tmpdir: Path | None = None
-        self._warming_proc: _GoogleCLIProcState | None = None
         self._hot_spare = HotSpare(
             self._spawn_initialized_proc,
             close_partial=self._close_warming_proc,
         )
         self._writeback_lock = asyncio.Lock()
         self._pending_system: str = ""
-        self._sent_history_head: TapeEvent | None = None
 
     @property
     @override
@@ -525,11 +509,7 @@ class _GoogleCLIModel(ModelDefaults):
     @override
     def approx_image_tokens(self, data: bytes) -> int:
         """Local estimate via Gemini's tile heuristic."""
-        dims = image.get_dimensions(data)
-        if dims is None:
-            return 0
-        # 258 tokens per 512x512 tile (matches `Google._GeminiModel`).
-        return ((dims[0] + 511) // 512) * ((dims[1] + 511) // 512) * 258
+        return gemini_image_tokens(data)
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify whether an error means the prompt exceeded the token window.
@@ -575,7 +555,7 @@ class _GoogleCLIModel(ModelDefaults):
         if self._hot_spare.active is not None:
             self._promote_proc_state(self._hot_spare.active)
         if self._should_respawn(request):
-            if _hash_system(request.system) != self._system_hash:
+            if hash_system(request.system) != self._system_hash:
                 await self._hot_spare.discard_spare()
             await self._hot_spare.respawn()
             self._reset_active_state()
@@ -586,7 +566,10 @@ class _GoogleCLIModel(ModelDefaults):
         try:
             response = await self._exchange_turn(proc, request, publish)
             self._last_sent_index = len(request.messages)
-        except SubprocessTransportError:
+        except (SubprocessTransportError, asyncio.CancelledError):
+            # A cancelled ``session/prompt`` keeps running in the CLI and its
+            # ``session/update`` chunks would leak into the next turn's read,
+            # so the subprocess is replaced exactly as after a transport error.
             self._reset_active_state()
             await self._hot_spare.respawn_after_transport_failure()
             raise
@@ -610,20 +593,9 @@ class _GoogleCLIModel(ModelDefaults):
         """Inspect the trigger list (§1.4) for this request."""
         if self._hot_spare.active is None:
             return False
-        history = request.messages
-        if not history:
-            return True
-        if self._last_sent_index > len(history):
-            return True
-        if self._sent_history_head is not None and history[0] is not (
-            self._sent_history_head
-        ):
-            return True
-        if _hash_system(request.system) != self._system_hash:
-            return True
-        return respawn_for_cadence(
-            turn_count=self._turn_count,
-            last_input_tokens=self._last_input_tokens,
+        return self._respawn_due(
+            request.messages,
+            system=request.system,
             max_request_tokens=self.limits.max_request_tokens,
         )
 
@@ -660,42 +632,23 @@ class _GoogleCLIModel(ModelDefaults):
         request: ModelRequest,
         publish: Callable[[RuntimeEvent], None] | None,
     ) -> ModelResponse:
-        """Send each new entry as ``session/prompt`` and assemble the reply."""
-        new_entries = request.messages[self._last_sent_index :]
-        if self._last_sent_index == 0 and request.messages:
-            self._sent_history_head = request.messages[0]
-        user_like_entries = [
-            entry for entry in new_entries if not isinstance(entry, AssistantMessage)
-        ]
-        for entry in user_like_entries[:-1]:
-            blocks = _serialize_prompt_blocks(
+        """Send the unseen input as one ``session/prompt`` and build the reply."""
+        entry = self._unsent_input(request.messages)
+        if entry is None:
+            return empty_turn_response()
+        text_parts: list[str] = []
+        thinking_parts: list[str] = []
+        stop_reason = await self._send_prompt(
+            proc,
+            _user_prompt_blocks(
                 entry,
                 self.limits.max_image_edge_px,
                 self.limits.max_image_bytes,
-            )
-            _ = await self._send_prompt(
-                proc,
-                blocks,
-                [],
-                [],
-                None,
-            )
-        text_parts: list[str] = []
-        thinking_parts: list[str] = []
-        stop_reason: str | None = None
-        if user_like_entries:
-            blocks = _serialize_prompt_blocks(
-                user_like_entries[-1],
-                self.limits.max_image_edge_px,
-                self.limits.max_image_bytes,
-            )
-            stop_reason = await self._send_prompt(
-                proc,
-                blocks,
-                text_parts,
-                thinking_parts,
-                publish,
-            )
+            ),
+            text_parts,
+            thinking_parts,
+            publish,
+        )
         return self._build_response(text_parts, thinking_parts, stop_reason, request)
 
     async def _send_prompt(
@@ -776,25 +729,18 @@ class _GoogleCLIModel(ModelDefaults):
         self._attach_proc_state(state)
         return state.proc
 
-    def _reset_active_state(self) -> None:
-        """Reset active subprocess counters after a respawn boundary."""
-        self._turn_count = 0
-        self._last_input_tokens = 0
-        self._reset_delta_state()
-
-    def _reset_delta_state(self) -> None:
-        """Reset sent-history delta tracking."""
-        self._last_sent_index = 0
-        self._sent_history_head = None
-
     async def _spawn_initialized(self) -> _GoogleCLIProcState:
         """Spawn ``gemini`` and run the ACP handshake to a live ``sessionId``."""
         if self._tools_bridge is None:
             self._tools_bridge = ToolsBridge(tools=[])
             await self._tools_bridge.start()
-        tmpdir = Path(tempfile.mkdtemp(prefix="sagent-google-cli-"))
-        system_hash = _hash_system(self._pending_system)
-        _populate_google_tmpdir(tmpdir, self._provider.account, self._pending_system)
+        system = self._pending_system
+        account = self._provider.account
+        tmpdir = populated_tmpdir(
+            "sagent-google-cli-",
+            lambda path: _populate_google_tmpdir(path, account, system),
+        )
+        system_hash = hash_system(system)
         workdir = tmpdir / "workdir"
         model_id = self.capability.wire_model_id or self.capability.model_id
         proc = Subproc(
@@ -803,13 +749,7 @@ class _GoogleCLIModel(ModelDefaults):
             tmpdir=tmpdir,
             cwd=workdir,
         )
-        state = _GoogleCLIProcState(
-            proc=proc,
-            session_id="",
-            tmpdir=tmpdir,
-            system_hash=system_hash,
-        )
-        self._warming_proc = state
+        self._warming_proc = proc
         try:
             await proc.start()
             session_id = await self._acp_handshake(proc, workdir)
@@ -825,14 +765,6 @@ class _GoogleCLIModel(ModelDefaults):
         )
         self._warming_proc = None
         return state
-
-    async def _close_warming_proc(self) -> None:
-        """Close the subprocess currently being warmed, if any."""
-        if self._warming_proc is None:
-            return
-        state = self._warming_proc
-        self._warming_proc = None
-        await state.proc.close()
 
     async def _acp_handshake(self, proc: Subproc, workdir: Path) -> str:
         """Run ``initialize`` → ``authenticate`` → ``session/new`` (§3.2)."""
@@ -901,11 +833,6 @@ class _GoogleCLIModel(ModelDefaults):
                 if tmpdir_expiry <= user_expiry:
                     return
                 atomic_write_bytes(target, src.read_bytes(), file_mode=0o600)
-
-
-def _hash_system(system: str | None) -> str:
-    """Hash for cheap equality checks between system prompts."""
-    return hashlib.sha256((system or "").encode()).hexdigest()
 
 
 def _parse_cli_credentials(raw: MutableJSON) -> GoogleCLICredentials:

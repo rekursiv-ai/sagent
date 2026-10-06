@@ -14,6 +14,7 @@ from sagent.catalog.table import (
     UnknownModelError,
     UnsupportedTagError,
     base_model_id,
+    literal_members,
     split_model_id,
 )
 from sagent.types.capability import (
@@ -115,6 +116,18 @@ def test_a_key_names_an_exact_name_a_wire_id_a_role_or_a_prefix(
     model_id: str,
 ) -> None:
     assert _table()[key].model_id == model_id
+
+
+def test_an_exact_name_outranks_a_role_of_the_same_spelling() -> None:
+    """The module's stated precedence: exact name, wire id, role, prefix."""
+    table = ModelTable(rows=(_opus("a-1.0"), _opus("b-1.0")), roles={"a-1.0": "b-1.0"})
+    assert table["a-1.0"].model_id == "a-1.0"
+    assert table.get("a-1.0") is table.rows[0]
+
+
+def test_literal_members_unwraps_the_alias_in_declaration_order() -> None:
+    assert literal_members(ContextTag) == ("", "+200k", "+272k", "+1m")
+    assert CONTEXT_TAGS == ("+200k", "+272k", "+1m")
 
 
 def test_a_prefix_stops_at_a_separator() -> None:

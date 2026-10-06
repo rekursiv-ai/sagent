@@ -3,8 +3,8 @@
 Source: n/a -- self-hosted
 
 A row carries only what the MODEL can do; caching, retry, and auth mode
-are transport facts declared by ``openai.compatible()``. These vendors
-publish no image pixel or byte ceiling and preprocess images server-side,
+are transport facts declared by ``openai.compatible()``. A llama.cpp server
+publishes no image pixel or byte ceiling and preprocesses images itself,
 so ``ModelLimits`` carries only the two token windows.
 """
 

@@ -473,7 +473,7 @@ def provider_not_allowed_result(
 
 
 def opt_int(directive: Mapping[str, object], key: str) -> int | None:
-    """Coerce ``directive[key]`` to int, or None if absent.
+    """Convert ``directive[key]`` to int, or None if absent.
 
     Collapses the recurring 2-line ``_raw`` boilerplate at tool
     entrypoints where an arg is optional.
@@ -484,6 +484,10 @@ def opt_int(directive: Mapping[str, object], key: str) -> int | None:
 
     Returns:
       value: Integer value, or None if the key is absent.
+
+    Raises:
+      ReadError: The value is not an integer or an integral string or float;
+        the directive schema rejects that before a tool runs.
 
     """
     v = directive.get(key)

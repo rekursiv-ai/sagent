@@ -21,6 +21,7 @@ from sagent.tools.web_fetch import (
     _match_http_fetch,
     _request_bodies,
 )
+from sagent.types.tools import DEFAULT_MAX_RESULT_CHARS
 
 
 # socket.getaddrinfo returns the canonical 5-tuple
@@ -28,6 +29,10 @@ from sagent.tools.web_fetch import (
 # sockaddr matters here. ``AddrInfo`` names the shape once so the
 # tests can stop repeating it.
 type AddrInfo = tuple[int, int, int, str, tuple[str, int]]
+
+
+def test_declared_result_cap_is_the_cap_that_applies() -> None:
+    assert WebFetch.max_result_chars <= DEFAULT_MAX_RESULT_CHARS
 
 
 def _addrinfo(ip: str) -> list[AddrInfo]:

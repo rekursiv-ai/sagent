@@ -13,12 +13,13 @@ stay local:
   cost on ``Agent._own_spend`` for its ``max_budget_usd`` cap; the cap is
   per-agent, the rollup is tree-wide.
 
-Four methods, each named for what it does:
+Five methods, each named for what it does:
 
 - :meth:`record_tokens` -- token totals + per-call provenance, self-only.
 - :meth:`record_side_tokens` -- token totals only, for calls outside the
   conversation (compaction, advisor) that must not become the turn baseline.
 - :meth:`record_cost` -- cumulative USD cost; root sink only.
+- :meth:`record_cache_miss` -- bounded log of avoidable prompt-cache misses.
 - :meth:`restore_totals` -- session-resume hook; overwrites cumulative
   totals (``spend`` + ``total``) from persisted metadata.
   Per-call provenance (``calls_by_model``, ``last_request``,
@@ -43,7 +44,7 @@ if TYPE_CHECKING:
 
 @dataclasses.dataclass(kw_only=True, slots=True)
 class CostTracker:
-    """Per-agent cumulative cost; the only cost store."""
+    """Per-agent token totals; on the root sink, the whole tree's cost."""
 
     last_request: TokenCount = dataclasses.field(default_factory=TokenCount)
     """Token counts from the most recent response."""

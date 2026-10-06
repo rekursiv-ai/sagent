@@ -43,6 +43,7 @@ from sagent.lib.image import (
     get_dimensions,
     get_mime,
     resize,
+    resized_dims,
 )
 
 
@@ -106,6 +107,16 @@ class TestParseCrop:
 
     def test_center_crop_skipped_when_both_axes_larger(self) -> None:
         assert _parse_crop((200, 201), 100, 101) is None
+
+    @pytest.mark.parametrize(
+        "crop",
+        [(0, 5, 4, 8), (2, 0, 3, 8), (0, -1, 2, 3), (-1, 0, 2, 3)],
+    )
+    def test_direct_crop_reaching_past_an_edge_is_skipped(
+        self,
+        crop: tuple[int, int, int, int],
+    ) -> None:
+        assert _parse_crop(crop, 4, 8) is None
 
     def test_crop_is_skipped_when_either_direct_axis_exceeds_source(self) -> None:
         assert _parse_crop((0, 0, 101, 20), 100, 100) is None
@@ -710,11 +721,42 @@ class TestDecodeJpegTurbojpeg:
         )
 
         assert actual is not None
-        assert actual.shape == (2, 2, 3)
+        # Source rows [1, 5) at 1/2 cover reduced rows [0, 3); columns [2, 6) -> [1, 3).
+        assert actual.shape == (3, 2, 3)
         scale = lib.tj3SetScalingFactor.call_args.args[1]
         assert isinstance(scale, _TjScalingFactor)
         assert (scale.num, scale.denom) == (1, 2)
         assert all(call.args == (1,) for call in lib.tj3GetErrorCode.call_args_list)
+
+    @pytest.mark.parametrize(
+        ("x", "w", "expected_width"),
+        [(1, 8, 5), (0, 8, 4), (3, 6, 4), (1, 7, 4)],
+    )
+    def test_scaled_region_edges_snap_outward_from_source_pixels(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        x: int,
+        w: int,
+        expected_width: int,
+    ) -> None:
+        # Source columns [x, x + w) at 1/2 scale cover [x // 2, ceil((x + w) / 2)).
+        lib = MagicMock()
+        lib.tj3Init.return_value = 1
+        lib.tj3DecompressHeader.return_value = 0
+
+        def read_header_parameter(handle: int, param: int) -> int:
+            del handle
+            return {4: 0, 5: 16, 6: 18}[param]
+
+        lib.tj3Get.side_effect = read_header_parameter
+        lib.tj3SetScalingFactor.return_value = 0
+        lib.tj3SetCroppingRegion.return_value = 0
+        lib.tj3Decompress8.return_value = 0
+        monkeypatch.setattr("sagent.lib.image._libturbojpeg", lambda: lib)
+
+        actual = _decode_jpeg_region(b"jpeg", x, 1, w, 8, min_width=3, min_height=2)
+
+        assert actual.shape == (5, expected_width, 3)
 
     def test_one_row_region_is_valid(self, monkeypatch: pytest.MonkeyPatch) -> None:
         lib = MagicMock()
@@ -911,8 +953,54 @@ class TestDecodeWebpLibwebp:
                 mock_webp.ffi.addressof.return_value,
             )
 
+    def test_webp_buffer_is_freed_when_the_caller_dimensions_are_wrong(self) -> None:
+        pixels = bytes(5 * 4 * 3)
+        with patch("sagent.lib.image.webp") as mock_webp:
+            config = MagicMock()
+            pointer = MagicMock()
+            mock_webp.ffi.new.return_value = pointer
+            pointer.__getitem__.return_value = config
+            mock_webp.lib.WebPInitDecoderConfig.return_value = True
+            mock_webp.lib.VP8_STATUS_OK = 0
+            mock_webp.lib.WebPDecode.return_value = 0
+            config.output.u.RGBA.size = len(pixels)
+            mock_webp.ffi.buffer.return_value = pixels
+
+            assert decode_webp_libwebp(b"webp", 3, 7) is None
+
+            mock_webp.lib.WebPFreeDecBuffer.assert_called_once_with(
+                mock_webp.ffi.addressof.return_value,
+            )
+
 
 class TestDecodeImagePil:
+    @pytest.mark.parametrize("mode", ["LA", "RGBA"])
+    def test_transparent_pixel_composites_over_white_in_every_alpha_mode(
+        self,
+        mode: str,
+    ) -> None:
+        buffer = BytesIO()
+        Image.new(mode, (3, 2)).save(buffer, format="PNG")
+
+        actual = decode_image_pil(buffer.getvalue(), 2, 3)
+
+        assert actual is not None
+        np.testing.assert_array_equal(actual, np.full((2, 3, 3), 255, np.uint8))
+
+    def test_palette_transparency_composites_over_white(self) -> None:
+        image = Image.new("P", (3, 2), 0)
+        image.putpalette([0, 0, 0, 10, 20, 30])
+        image.putpixel((1, 0), 1)
+        buffer = BytesIO()
+        image.save(buffer, format="PNG", transparency=0)
+
+        actual = decode_image_pil(buffer.getvalue(), 2, 3)
+
+        assert actual is not None
+        expected = np.full((2, 3, 3), 255, np.uint8)
+        expected[0, 1] = (10, 20, 30)
+        np.testing.assert_array_equal(actual, expected)
+
     def test_jpg(self) -> None:
         data = _jpeg_bytes(size=(24, 20), color=(255, 0, 0))
         arr = decode_image_pil(data, 20, 24)
@@ -1278,10 +1366,6 @@ class TestResizeImage:
         out, mime = resize(data, max_dim=6)
         assert (out, mime) == (data, "image/png")
 
-    def test_single_pixel_dimension_cap_raises_instead_of_being_ignored(self) -> None:
-        with pytest.raises(ValueError, match="height and width must be > 0"):
-            resize(_png_bytes(size=(4, 3)), max_dim=1)
-
     def test_encoded_size_equal_to_byte_cap_is_not_quality_ramped(self) -> None:
         pixels = np.random.default_rng(24).integers(
             0,
@@ -1398,14 +1482,51 @@ class TestResizeImage:
         data = _png_bytes(size=(10, 11))
         assert resize(data, max_bytes=len(data)) == (data, "image/png")
 
-    @pytest.mark.parametrize("size", [(1, 4), (4, 1)])
-    def test_subunit_resize_of_one_pixel_axis_raises(
+    @pytest.mark.parametrize(
+        ("size", "expected"),
+        [((1, 3), (1, 2)), ((3, 1), (2, 1)), ((4, 3), (1, 1))],
+    )
+    def test_a_scaled_axis_never_floors_to_zero_pixels(
         self,
         size: tuple[int, int],
+        expected: tuple[int, int],
     ) -> None:
-        # `resize` floors the scaled one-pixel axis to zero.
-        with pytest.raises(ValueError, match="height and width must be > 0"):
-            resize(_png_bytes(size=size), max_dim=2)
+        max_dim = max(expected)
+        out, _ = resize(_png_bytes(size=size), max_dim=max_dim)
+        assert Image.open(BytesIO(out)).size == expected
+        assert resized_dims(size, max_dim) == expected
+
+    @pytest.mark.parametrize(
+        ("size", "max_dim", "expected"),
+        [
+            ((2000, 1000), 1000, (1000, 500)),
+            ((33, 65), 32, (16, 32)),
+            ((4, 3), 6, (4, 3)),
+            ((4, 3), 0, (4, 3)),
+            ((1, 6001), 6000, (1, 6000)),
+        ],
+    )
+    def test_resized_dims_is_the_size_resize_produces(
+        self,
+        size: tuple[int, int],
+        max_dim: int,
+        expected: tuple[int, int],
+    ) -> None:
+        assert resized_dims(size, max_dim) == expected
+        out, _ = resize(_png_bytes(size=size), max_dim=max_dim)
+        assert Image.open(BytesIO(out)).size == expected
+
+    @pytest.mark.parametrize("mode", ["LA", "PA", "I;16", "1", "L", "CMYK"])
+    def test_every_mode_reaches_the_jpeg_quality_ramp(self, mode: str) -> None:
+        pixels = np.random.default_rng(3).integers(0, 256, (6, 5, 3), dtype=np.uint8)
+        image = Image.fromarray(pixels).convert(mode)
+        buffer = BytesIO()
+        image.save(buffer, format="TIFF")
+
+        out, mime = resize(buffer.getvalue(), max_bytes=1)
+
+        assert mime == "image/jpeg"
+        assert Image.open(BytesIO(out)).size == (5, 6)
 
     def test_palette_image_can_be_encoded_as_jpeg(self) -> None:
         image = Image.new("P", (48, 32))

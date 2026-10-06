@@ -23,6 +23,7 @@ from sagent.agent.retry import (
     RETRYABLE_STATUS_CODES,
     RateLimitError,
     RetriesExhaustedError,
+    RetryDeferredError,
     _backoff_delay,
     error_diagnostics,
     error_status,
@@ -149,7 +150,7 @@ def test_validate_model_response_accepts_configured_stop_sequence() -> None:
     validate_model_response(response)
 
 
-@pytest.mark.parametrize("stop_reason", ["model_unknown", "eos", "tool_call"])
+@pytest.mark.parametrize("stop_reason", ["vendor_extension", "eos", "tool_call"])
 def test_validate_model_response_accepts_unrecognized_stop_reason(
     stop_reason: str,
     caplog: pytest.LogCaptureFixture,
@@ -1058,6 +1059,45 @@ async def test_send_with_retry_interactive_halts_on_long_server_delay(
             publish_recoverable=_silent,
         )
     assert slept == [], "interactive mode must not sleep on a long server delay"
+
+
+@pytest.mark.asyncio
+async def test_a_long_retry_after_on_a_503_is_not_a_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An outage with a long ``Retry-After`` was reported as "Rate limited"."""
+
+    async def _no_wait(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", _no_wait)
+    err = _HTTPError(_FakeResponse(503, {"retry-after": "120"}))
+    model = _ScriptedModel(stream_responses=[err])
+    with pytest.raises(RetryDeferredError) as caught:
+        _ = await send_with_retry(
+            model,
+            _request(),
+            publish=_silent,
+            max_attempts=3,
+            persistent_retry=False,
+            publish_recoverable=_silent,
+        )
+    assert not isinstance(caught.value, RateLimitError)
+    assert caught.value.reset_time is not None
+    assert "Rate limited" not in str(caught.value)
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_rejects_a_nonpositive_max_attempts() -> None:
+    """``max_attempts=0`` broke before the first send: "Failed after 0: None"."""
+    with pytest.raises(ValueError, match="max_attempts"):
+        _ = await send_with_retry(
+            _ScriptedModel(stream_responses=[_resp()]),
+            _request(),
+            max_attempts=0,
+            persistent_retry=False,
+            publish_recoverable=_silent,
+        )
 
 
 @pytest.mark.asyncio

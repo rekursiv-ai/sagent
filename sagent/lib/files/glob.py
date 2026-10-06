@@ -22,6 +22,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
+# Raising this is not the free win it looks like: the walk that reaches the cap
+# is discarded whenever fd then runs, so every larger tree pays it twice. Past
+# roughly 900 entries the in-process walk loses to fd outright, so a cap up
+# there wagers the longest walk on a race it cannot win.
+_FD_ENTRIES: Final = 256
+
+
 class GlobError(Exception):
     """A pattern no backend can answer; the message is written for the caller."""
 
@@ -42,8 +49,8 @@ def glob(root: Path, pattern: str, /) -> list[Path]:
     """
     if not root.is_dir():
         return []
-    parts = pattern.split("/")
-    hidden = any(part.startswith(".") for part in parts)
+    parts = [part for part in pattern.split("/") if part != "."]
+    hidden = any(part.startswith(".") and part != ".." for part in parts)
     fixed = next(
         (i for i, part in enumerate(parts[:-1]) if re.search(r"[*?\[{]", part)),
         len(parts) - 1,
@@ -68,13 +75,6 @@ def glob(root: Path, pattern: str, /) -> list[Path]:
     if found is None and fd:
         return _glob_fd(fd, start, "/".join(rest), hidden=hidden)
     return found or []
-
-
-# Raising this is not the free win it looks like: the walk that reaches the cap
-# is discarded whenever fd then runs, so every larger tree pays it twice. Past
-# roughly 900 entries the in-process walk loses to fd outright, so a cap up
-# there wagers the longest walk on a race it cannot win.
-_FD_ENTRIES: Final = 256
 
 
 def fd_command(fd: str, root: Path, pattern: str, *, hidden: bool) -> list[str]:
@@ -110,7 +110,7 @@ def fd_command(fd: str, root: Path, pattern: str, *, hidden: bool) -> list[str]:
         "--",
         # `fd` matches the full path of the resolved root, so a root reached
         # through a symlink must be spelled resolved or nothing matches.
-        f"{root.resolve()}/{pattern}",
+        re.sub(r"([\\*?\[\]{}])", r"\\\1", str(root.resolve())) + f"/{pattern}",
         str(root),
     ]
 
@@ -147,7 +147,10 @@ def _glob_rignore(
     limit: int | None = None,
 ) -> list[Path] | None:
     """List ``pattern``'s files with rignore, descending at most ``depth`` levels."""
-    matcher = re.compile(_translate(pattern))
+    try:
+        matcher = re.compile(_translate(pattern))
+    except re.error as error:
+        raise GlobError(f"invalid glob {pattern!r}: {error}") from error
     prefix = len(str(root)) + 1
     found: list[Path] = []
     walk = rignore.walk(
@@ -205,6 +208,7 @@ def _translate(pattern: str) -> str:
             # No escaping for a leading ``]``: Python ``re`` reads it as a
             # member exactly as globset does, so ``[]]`` carries through whole.
             members = body[1:] if negated else body
+            members = re.sub(r"([\[&~|])", r"\\\1", members)
             out.append(f"[^{members}]" if negated else f"[{members}]")
             i = end + 1
         elif c == "{":

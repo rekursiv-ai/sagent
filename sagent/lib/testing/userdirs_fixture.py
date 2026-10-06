@@ -132,6 +132,7 @@ def isolate_user_dirs(
     root = Path(tempfile.mkdtemp(prefix="isolate-", dir=parent))
     # This IS the fixture that repoints userdirs, so it spells the variables.
     for leaf in ("config", "data", "cache", "state"):
+        (root / leaf).mkdir(mode=0o700)
         variable = f"XDG_{leaf.upper()}_HOME"  # house-ignore[xdg-literal] -- This IS the fixture that repoints userdirs, so it spells the variables.
         monkeypatch.setenv(variable, str(root / leaf))
     return root

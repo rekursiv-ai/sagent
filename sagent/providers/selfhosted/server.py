@@ -466,6 +466,9 @@ class SelfHosted:
             )
         return SelfHostedModel(provider=self)
 
+    async def close_sdk(self) -> None:
+        """Do nothing: the loaded weights live as long as this provider."""
+
 
 class _ProviderLike(Protocol):
     """Provider surface ``SelfHostedModel`` reads from."""
@@ -1072,8 +1075,8 @@ def _parse_deepseek_tool_call(raw: str) -> ToolCall | None:
         parsed: object = json.loads(json_match.group(1))
     except json.JSONDecodeError:
         return None
-    # The regex already required a ``{...}`` body, and ``coerce`` takes
-    # ``object`` and validates, so no separate shape check is needed.
+    # The regex requires a ``{...}`` body, so ``parsed`` is an object and
+    # ``convert`` cannot raise here.
     return ToolCall(
         id=str(uuid.uuid4())[:12],
         name=name_match.group(1),

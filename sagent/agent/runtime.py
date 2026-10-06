@@ -226,7 +226,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Final, Literal, Protocol
 
 import asyncio
 import contextlib
@@ -330,6 +330,12 @@ current_call_id_var: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 
 logger = logging.getLogger(__name__)
+
+EXCLUSIVE_KEY: Final = "\x00exclusive"
+"""``serialize_key`` for a call that may touch any resource (a Bash writer).
+
+It serializes against every keyed call in its cohort, so a same-file Edit
+cannot race it; unkeyed calls still run in parallel."""
 
 
 def widen_barrier_mask(
@@ -803,10 +809,12 @@ class AgentRuntime:
         # a Halt cancels a compactor that is between its model await and
         # the synchronous CompactComplete push.
         self._compact_generation: int = 0
-        # Buffered ModelSwitch awaiting a safe moment (no in-flight
-        # model call, no compaction). Applied at the end of each
-        # iteration once that condition holds.
-        self._pending_switch: ModelSwitch | None = None
+        # Buffered ModelSwitches awaiting a safe moment (no in-flight
+        # model call, no compaction), applied in arrival order at the end
+        # of each iteration once that condition holds. A list, not a slot:
+        # a second switch in one drain overwrote the first, so a swap the
+        # caller was told about silently never happened.
+        self._pending_switches: list[ModelSwitch] = []
         # Mid-stream UserMessages: buffered while ``model_call`` is in
         # flight. On ``ModelResponseComplete`` the buffer is coalesced
         # into one ``UserMessage`` appended after the assistant response;
@@ -2144,19 +2152,19 @@ class AgentRuntime:
                             # in-flight model call / compaction (if any)
                             # completes. The OLD model finishes recording
                             # its cost before the swap lands.
-                            self._pending_switch = item
+                            self._pending_switches.append(item)
 
                         case _:
                             pass
 
                 if (
-                    self._pending_switch is not None
+                    self._pending_switches
                     and self.model_call is None
                     and self.compact_task is None
                 ):
-                    pending = self._pending_switch
-                    self._pending_switch = None
-                    self._apply_pending_switch(pending)
+                    pending, self._pending_switches = self._pending_switches, []
+                    for switch in pending:
+                        self._apply_pending_switch(switch)
 
                 if not self.cohort and self._cohort_seen:
                     logger.debug(
@@ -2907,25 +2915,35 @@ class AgentRuntime:
 
     # Calls sharing a non-``None`` ``serialize_key`` (e.g. same-file Read/Edit/Write)
     # collapse into one group run sequentially in submission order; every other call
-    # becomes a singleton group run in parallel. Iterating ``calls`` once and appending
-    # keeps each group in original order, which is what "sequential in submission order"
-    # requires.
+    # becomes a singleton group run in parallel.
+    #
+    # ``EXCLUSIVE_KEY`` names a call whose resources are unknown (a Bash writer): it
+    # contends with EVERY keyed call, so once one appears all keyed calls of the cohort
+    # -- before and after it -- form one group, ordered by submission and placed where
+    # the first of them was. Unkeyed calls stay parallel; a path key alone could not
+    # say "conflicts with all paths" without also serializing Edit(f) against Edit(g).
     def _partition_cohort(self, calls: Sequence[ToolCall]) -> list[list[ToolCall]]:
         """Split a cohort into serialized groups, preserving submission order."""
+        keys = [self._serialize_key(call) for call in calls]
+        exclusive = EXCLUSIVE_KEY in keys
         groups: list[list[ToolCall]] = []
         by_key: dict[str, list[ToolCall]] = {}
-        for call in calls:
-            tool = self.tools_map.get(call.name)
-            key = tool.serialize_key(call.args) if tool is not None else None
+        for call, key in zip(calls, keys, strict=True):
             if key is None:
                 groups.append([call])
                 continue
-            group = by_key.get(key)
+            slot = EXCLUSIVE_KEY if exclusive else key
+            group = by_key.get(slot)
             if group is None:
-                group = by_key[key] = []
+                group = by_key[slot] = []
                 groups.append(group)
             group.append(call)
         return groups
+
+    def _serialize_key(self, call: ToolCall) -> str | None:
+        """Return the tool's serialization key for ``call``; unknown tools have none."""
+        tool = self.tools_map.get(call.name)
+        return tool.serialize_key(call.args) if tool is not None else None
 
     # Each call's ``ToolResult`` is posted as it completes (via ``_run_tool_and_post``),
     # so the cohort gate and tool_use/ tool_result pairing still see one result per

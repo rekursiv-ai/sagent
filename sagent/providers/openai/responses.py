@@ -32,7 +32,7 @@ from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.stop_reason import normalize_stop_reason
 from sagent.providers.lib.usage import openai_usage
 from sagent.providers.openai import token_count
-from sagent.types.cost import ServiceTier, TokenCount
+from sagent.types.cost import ServiceTier, TokenCost, TokenCount
 from sagent.types.exceptions import UserFacingError
 from sagent.types.model import (
     ModelRequest,
@@ -93,7 +93,11 @@ class ResponsesProvider(Protocol):
 
 
 class _OpenAIResponsesModel(ModelDefaults):
-    """Responses transport with local history and provider-owned clients."""
+    """Responses transport with local history and provider-owned clients.
+
+    ``close`` stays the inherited no-op: sibling models share the provider's SDK,
+    so a model swap closing it would break every other model of that provider.
+    """
 
     def __init__(
         self,
@@ -185,7 +189,6 @@ class _OpenAIResponsesModel(ModelDefaults):
         tier = self.settings.service_tier
         return tier if tier != "auto" else None
 
-    # Model swaps must not close the provider's SDK shared by sibling models.
     @override
     def usage_snapshot(self) -> UsageSnapshot | None:
         """Return quota telemetry from the latest response headers.
@@ -295,7 +298,6 @@ class _OpenAIResponsesModel(ModelDefaults):
 _FINISH_MAP: Final[dict[str, str]] = {
     "completed": "stop",
     "incomplete": "length",
-    "failed": "stop",
 }
 
 _STREAM_ERROR_STATUS: Final[dict[str, int]] = {
@@ -503,8 +505,12 @@ def _terminal_metadata(response: object) -> tuple[str, str, int, int, int, int]:
     )
 
 
-class _OpenAIStreamError(UserFacingError):
-    """In-band Responses error retaining retry/rate-limit classification data."""
+class OpenAIStreamError(UserFacingError):
+    """In-band OpenAI stream error retaining retry/rate-limit classification data.
+
+    Both OpenAI wires raise it: an error event mid-stream carries no HTTP status,
+    so ``status_code`` and ``body`` are rebuilt from the event's ``code``.
+    """
 
     def __init__(
         self,
@@ -549,7 +555,7 @@ async def _consume_stream(
     output_tokens = 0
     cache_read = 0
     cache_write = 0
-    served: ServiceTier = "auto"
+    reported_tier: str | None = None
     message_id = ""
     finish_reason: str | None = None
     completed = False
@@ -654,11 +660,10 @@ async def _consume_stream(
                         incomplete = getattr(resp, "incomplete_details", None)
                         if getattr(incomplete, "reason", None) == "content_filter":
                             finish_reason = "content_filter"
-                    served = served_tier(getattr(resp, "service_tier", None))
-                    debug_log.trace(
-                        "api_response",
-                        kind="openai_responses",
-                        service_tier=served,
+                    reported_tier = convert(
+                        getattr(resp, "service_tier", None),
+                        str,
+                        default=None,
                     )
                     # Set last: if a usage/attr read above raises on an SDK shape
                     # change, ``completed`` stays False so the ``finally`` still
@@ -679,7 +684,7 @@ async def _consume_stream(
         output_tokens=output_tokens,
         cache_write=cache_write,
         cache_read=cache_read,
-        served=served,
+        reported_tier=reported_tier,
         finish_reason=finish_reason,
         message_id=message_id,
         model=model,
@@ -699,7 +704,7 @@ def _openai_stream_event_error(event: object) -> UserFacingError:
     if isinstance(param, str) and param:
         details.append(f"param={param}")
     details.append(str(message))
-    return _OpenAIStreamError(
+    return OpenAIStreamError(
         ": ".join(details),
         code=code if isinstance(code, str) else None,
         param=param if isinstance(param, str) else None,
@@ -725,7 +730,7 @@ def _openai_stream_response_error(response: object) -> UserFacingError:
         details.append(f"reason={reason}")
     if isinstance(message, str) and message:
         details.append(message)
-    return _OpenAIStreamError(
+    return OpenAIStreamError(
         ": ".join(details),
         code=code if isinstance(code, str) else None,
     )
@@ -741,7 +746,7 @@ def _build_stream_response(
     output_tokens: int,
     cache_write: int,
     cache_read: int,
-    served: ServiceTier,
+    reported_tier: str | None,
     finish_reason: str | None,
     message_id: str,
     model: _OpenAIResponsesModel,
@@ -774,12 +779,43 @@ def _build_stream_response(
         ),
         message_id=message_id,
         request_id=message_id,
-        spend=model.capability.prices.cost(
+        spend=_spend_at_served_tier(model, tokens, reported_tier=reported_tier),
+    )
+
+
+# The server's tier vocabulary grows without notice, and the response is already
+# paid for, so pricing degrades to the requested tier rather than raising.
+def _spend_at_served_tier(
+    model: _OpenAIResponsesModel,
+    tokens: TokenCount,
+    *,
+    reported_tier: str | None,
+) -> TokenCost:
+    """Price ``tokens`` at the tier the server reports, else the requested tier."""
+    served = served_tier(reported_tier)
+    debug_log.trace("api_response", kind="openai_responses", service_tier=served)
+    if served is None:
+        logger.warning(
+            "OpenAI reported unknown service_tier %r; billing the requested tier %r.",
+            reported_tier,
+            model.settings.service_tier,
+        )
+        return model.spend(tokens)
+    try:
+        return model.capability.prices.cost(
             tokens,
             service_tier=served,
             at=datetime.now(UTC).date(),
-        ),
-    )
+        )
+    except KeyError:
+        logger.warning(
+            "%s has no price for served service_tier %r; billing the requested "
+            "tier %r.",
+            model.capability.model_id,
+            served,
+            model.settings.service_tier,
+        )
+        return model.spend(tokens)
 
 
 # Runs in a ``finally`` / cleanup context, so a failure HERE must never replace the

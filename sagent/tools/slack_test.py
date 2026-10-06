@@ -6,9 +6,12 @@ from unittest.mock import patch
 
 import asyncio
 import json
+import logging
 
 from wesearch.fetch import FetchSession
 from wesearch.types.errors import FetchError
+
+import pytest
 
 from sagent.tools.slack import Slack
 
@@ -79,6 +82,44 @@ def test_send_success() -> None:
     assert payload_json["thread_ts"] == "thr1"
     assert payload_json["username"] == "bot"
     assert payload_json["icon_url"] == "https://i"
+
+
+@pytest.mark.parametrize("raw", [b"<html>502</html>", b"[1, 2]"])
+def test_a_non_object_body_is_a_tool_error(raw: bytes) -> None:
+    """``Tool.run`` must not raise on a proxy error page or a non-object body."""
+    with patch(
+        "sagent.tools.slack.fetch",
+        return_value=(raw, FetchSession()),
+    ):
+        result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_users"}))
+    assert result.is_error
+    assert "users.list" in result.content
+
+
+def test_list_users_all_deleted_says_so() -> None:
+    payload = _ok({"members": [{"id": "U1", "name": "gone", "deleted": True}]})
+    with patch(
+        "sagent.tools.slack.fetch",
+        return_value=(payload, FetchSession()),
+    ):
+        result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_users"}))
+    assert result.content == "(no users)"
+
+
+def test_send_does_not_log_the_message_body(caplog: pytest.LogCaptureFixture) -> None:
+    with (
+        patch(
+            "sagent.tools.slack.fetch",
+            return_value=(_ok({"ts": "1.0", "channel": "C1"}), FetchSession()),
+        ),
+        caplog.at_level(logging.DEBUG),
+    ):
+        _ = asyncio.run(
+            Slack(token=_TOKEN).run(
+                {"operation": "send", "channel": "C1", "text": "secret-body"},
+            ),
+        )
+    assert "secret-body" not in caplog.text
 
 
 def test_send_api_error() -> None:

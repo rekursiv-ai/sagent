@@ -4,7 +4,8 @@ Typical pattern across the codebase: write a full payload to a sibling
 ``.tmp`` file, then atomically ``rename`` it over the destination so
 readers never observe a half-written file.
 
-``atomic_write_bytes(path, data)`` is the sole entry point: one-shot
+``write_all(fd, data)`` is the short-write loop every raw-descriptor writer
+shares. ``atomic_write_bytes(path, data)`` is the atomic entry point: one-shot
 write of a complete ``bytes`` payload, with optional ``file_mode``
 (e.g. ``0o600`` for credentials). It creates parent directories as
 needed and unlinks the tmp file if the caller raises before
@@ -50,7 +51,7 @@ def atomic_write_bytes(
         try:
             if file_mode is not None:
                 os.fchmod(fd, file_mode)
-            _write_all(fd, data)
+            write_all(fd, data)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -60,12 +61,22 @@ def atomic_write_bytes(
         raise
 
 
-def _write_all(fd: int, data: bytes) -> None:
+def write_all(fd: int, data: bytes) -> None:
+    """Write every byte of ``data`` to ``fd``, looping over short writes.
+
+    Args:
+      fd: Open file descriptor.
+      data: Bytes to write.
+
+    Raises:
+      OSError: If ``os.write`` makes no progress; looping on it would spin.
+
+    """
     view = memoryview(data)
     while view:
         written = os.write(fd, view)
         if written == 0:
-            raise OSError("Failed to write bytes to temporary file.")
+            raise OSError(f"os.write made no progress on fd {fd}")
         view = view[written:]
 
 

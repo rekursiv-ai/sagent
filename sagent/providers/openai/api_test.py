@@ -162,7 +162,7 @@ def test_openai_gpt_6_astra_profile() -> None:
     assert m.capability.prices[PriceKey("auto")].cache_write == 12.5
     assert m.capability.prices[PriceKey("auto")].cache_read == 1.0
     assert m.capability.service_tier == frozenset(
-        {"auto", "default", "flex", "priority"},
+        {"auto", "default", "flex", "priority", "ultrafast"},
     )
 
 

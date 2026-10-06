@@ -40,8 +40,9 @@ import argparse
 import base64
 import json
 import logging
+import tempfile
 
-from sagent.lib.custom_json import convert
+from sagent.lib.custom_json import ReadError, convert
 
 
 logger = logging.getLogger(__name__)
@@ -95,10 +96,25 @@ def migrate_file(src: Path, dst: Path) -> int:
     """
     count = 0
     dst.parent.mkdir(parents=True, exist_ok=True)
-    with src.open(encoding="utf-8") as fin, dst.open("w", encoding="utf-8") as fout:
-        for v4 in iter_v4_records(fin):
-            _ = fout.write(json.dumps(v4) + "\n")
-            count += 1
+    # Written aside and renamed: ``main`` skips an existing ``dst``, so a
+    # partial one left by a failed run would never be redone.
+    with tempfile.NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=dst.parent,
+        prefix=f".{dst.name}.",
+        delete=False,
+    ) as fout:
+        partial = Path(fout.name)
+        try:
+            with src.open(encoding="utf-8") as fin:
+                for v4 in iter_v4_records(fin):
+                    _ = fout.write(json.dumps(v4) + "\n")
+                    count += 1
+        except BaseException:
+            partial.unlink()
+            raise
+    partial.replace(dst)
     return count
 
 
@@ -161,14 +177,22 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+# Lax and lenient: v3 writers emitted ``"7"`` and ``7.0`` ids, and one odd
+# record must not abort a whole-tree migration.
 def _id(rec: Mapping[str, object]) -> int:
     """Return the v3 record ``_id`` as an int, defaulting to ``0``."""
-    return convert(rec.get("_id"), int, default=0)
+    try:
+        return convert(rec.get("_id"), int, strict=False, default=0)
+    except ReadError:
+        return 0
 
 
 def _parent_id(rec: Mapping[str, object]) -> int:
     """Return the v3 record ``_parent_id`` as an int, defaulting to ``-1``."""
-    return convert(rec.get("_parent_id"), int, default=-1)
+    try:
+        return convert(rec.get("_parent_id"), int, strict=False, default=-1)
+    except ReadError:
+        return -1
 
 
 def _decode_bytes_content(content: object) -> bytes | None:

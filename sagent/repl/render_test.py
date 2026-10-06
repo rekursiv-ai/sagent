@@ -20,6 +20,7 @@ from sagent.repl.render import (
     render_tool_result,
     service_suspended_text,
     strict_observer,
+    strip_reminders,
 )
 from sagent.tools.display import OutputSpec
 from sagent.types.exceptions import (
@@ -1035,6 +1036,18 @@ def test_service_suspended_truncates_a_long_provider_message() -> None:
     assert len(text) < 200
     assert "resumes in 7s" in text
     assert text.endswith("]")
+
+
+def test_strip_reminders_keeps_first_line_indentation() -> None:
+    assert strip_reminders("  a\n  b") == "  a\n  b"
+    assert strip_reminders("\n<system-reminder>x</system-reminder>\n  a\n") == "  a"
+
+
+def test_compact_failed_user_facing_error_has_no_class_prefix() -> None:
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(CompactFailed(exception=ContextOverflowError("run /clear"), tape_len=1))
+    assert p.dim_lines == ["[compaction failed: run /clear]"]
 
 
 if __name__ == "__main__":

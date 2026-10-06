@@ -10,7 +10,7 @@ import logging
 import httpx2
 import pytest
 
-from sagent.lib.custom_json import JSON, MutableJSON, MutableJSONValue
+from sagent.lib.custom_json import JSON, MutableJSON, MutableJSONValue, convert, parse
 from sagent.providers.google.api import (
     Google,
     _build_request,
@@ -731,37 +731,57 @@ async def test_google_stream_500_with_overflow_keyword_is_http_error_not_overflo
 
 
 @pytest.mark.asyncio
-async def test_google_actual_request_tokens_hits_count_tokens_endpoint() -> None:
-    """``actual_request_tokens`` POSTs to ``:countTokens`` and reads ``totalTokens``."""
-    seen_paths: list[str] = []
+async def test_google_actual_request_tokens_wraps_generate_request() -> None:
+    """``:countTokens`` takes the generate body under ``generateContentRequest``."""
+    seen: list[httpx2.Request] = []
 
     def handle(request: httpx2.Request) -> httpx2.Response:
-        seen_paths.append(request.url.path)
+        seen.append(request)
         return httpx2.Response(200, json={"totalTokens": 314})
 
-    transport = httpx2.MockTransport(handle)
-    p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
-    m._client = httpx2.AsyncClient(transport=transport)
+    m = Google.from_key("k").model("gemini-2.5-flash")
+    m._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
     n = await m.actual_request_tokens(
-        ModelRequest(messages=[UserMessage(text="ping")]),
+        ModelRequest(messages=[UserMessage(text="ping")], system="sys"),
     )
     assert n == 314
-    assert any(path.endswith(":countTokens") for path in seen_paths)
+    assert seen[0].url.path.endswith(":countTokens")
+    body = parse(seen[0].content, dict[str, object])
+    assert set(body) == {"generateContentRequest"}
+    inner = convert(body["generateContentRequest"], dict[str, object])
+    model_id = m.capability.wire_model_id or m.capability.model_id
+    assert inner["model"] == f"models/{model_id}"
+    assert "systemInstruction" in inner
 
 
 @pytest.mark.asyncio
-async def test_google_stream_400_other_raises_value_error() -> None:
+async def test_google_stream_400_other_raises_http_status_error() -> None:
     def handle(request: httpx2.Request) -> httpx2.Response:
         del request
         return httpx2.Response(400, text="malformed request body")
 
-    transport = httpx2.MockTransport(handle)
-    p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
-    m._client = httpx2.AsyncClient(transport=transport)
-    with pytest.raises(ValueError, match="Google API 400"):
+    m = Google.from_key("k").model("gemini-2.5-flash")
+    m._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
+    with pytest.raises(httpx2.HTTPStatusError) as raised:
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
+    assert raised.value.response.status_code == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["stream", "count"])
+async def test_google_tool_schema_too_long_is_not_overflow(path: str) -> None:
+    """A schema validation 400 mentioning "too long" is not a context overflow."""
+
+    def handle(request: httpx2.Request) -> httpx2.Response:
+        del request
+        return httpx2.Response(400, text="Function name is too long.")
+
+    m = Google.from_key("k").model("gemini-2.5-flash")
+    m._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
+    request = ModelRequest(messages=[UserMessage(text="x")])
+    call = m.stream if path == "stream" else m.actual_request_tokens
+    with pytest.raises(httpx2.HTTPStatusError):
+        await call(request)
 
 
 class _StubTool:

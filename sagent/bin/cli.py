@@ -55,11 +55,11 @@ import contextlib
 import dataclasses
 import json
 import logging
+import math
 import os
 import shlex
 import signal
 import sys
-import time
 
 from sagent import (
     providers,
@@ -67,7 +67,6 @@ from sagent import (
     tools,
 )
 from sagent.agent import Agent
-from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import (
     PersistentAgentRecord,
     SessionMeta,
@@ -88,6 +87,7 @@ from sagent.providers import (
 from sagent.providers.providers import (
     build_provider_with_account_fallback,
 )
+from sagent.repl.render import error_text
 from sagent.repl.run_repl import run_repl
 from sagent.thinking import (
     THINKING_COMMANDS,
@@ -95,10 +95,7 @@ from sagent.thinking import (
     thinking_offered,
 )
 from sagent.tools.advisor import Advisor
-from sagent.tools.agent_spawn import (
-    _augment_system_for_persistent,
-    _build_forwarder,
-)
+from sagent.tools.agent_spawn import resume_serviced_child
 from sagent.tools.core import set_recipe
 from sagent.tools.tool_spec import (
     ToolSpecError,
@@ -113,7 +110,6 @@ from sagent.types.model import (
 from sagent.types.providers import (
     ModelResolver,
     Provider,
-    ProviderCloseable,
 )
 from sagent.types.runtime import (
     AssistantMessage,
@@ -139,8 +135,8 @@ if TYPE_CHECKING:
     )
 
 
-_DEFAULT_PROVIDER = "Anthropic"
-_DEFAULT_AUTH = "env"
+_DEFAULT_PROVIDER: Final[str] = "Anthropic"
+_DEFAULT_AUTH: Final[str] = "env"
 _PROVIDER_STARTUP_ERRORS = (FileNotFoundError, RuntimeError, ValueError)
 
 
@@ -148,7 +144,6 @@ DEFAULT_TOOLS: Final = [
     "AgentSpawn",
     "AgentSend",
     "AgentSelf",
-    # "BackgroundTask".
     "Bash",
     "Read",
     "Write",
@@ -250,10 +245,11 @@ def parse_agent_args(
       parsed: Tuple of ``(namespace, remaining_args)`` from ``parse_known_args``.
 
     """
-    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    # Explicit-vs-default flags default to ``None`` so explicitness is read off the
+    # parsed value: scanning argv missed argparse's prefix matching (``--prov``).
     parser.add_argument(
         "--provider",
-        default=_DEFAULT_PROVIDER,
+        default=None,
         help=(
             "Provider class name from ``sagent.providers``. Default: the"
             " first entry of ``--allow-providers``"
@@ -262,10 +258,10 @@ def parse_agent_args(
     )
     parser.add_argument(
         "--auth",
-        default=_DEFAULT_AUTH,
+        default=None,
         help=(
             "Auth method suffix - dispatches to ``<Provider>.from_<auth>()``. "
-            f"Default: {_DEFAULT_AUTH}."
+            "Default: the provider's conventional auth."
         ),
     )
     parser.add_argument(
@@ -383,7 +379,7 @@ def parse_agent_args(
     parser.add_argument(
         "--max-budget-usd",
         dest="max_budget_usd",
-        type=float,
+        type=_positive_float,
         default=None,
         metavar="USD",
         help="Maximum dollar amount to spend on API calls.",
@@ -391,7 +387,7 @@ def parse_agent_args(
     parser.add_argument(
         "--max-tool-call-rounds",
         dest="max_tool_call_rounds",
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="N",
         help=(
@@ -403,7 +399,7 @@ def parse_agent_args(
     parser.add_argument(
         "--max-request-tokens",
         dest="max_request_tokens",
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="N",
         help="Maximum request tokens for one model call. Default: model limit.",
@@ -411,16 +407,20 @@ def parse_agent_args(
     parser.add_argument(
         "--max-response-tokens",
         dest="max_response_tokens",
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="N",
         help="Maximum response tokens for one model call. Default: model limit.",
     )
-    args, remaining = parser.parse_known_args(raw_argv)
-    args.provider_explicit = _flag_present(raw_argv, "--provider")
-    args.auth_explicit = _flag_present(raw_argv, "--auth")
-    args.account_explicit = _flag_present(raw_argv, "--account")
-    args.model_explicit = _flag_present(raw_argv, "--model")
+    args, remaining = parser.parse_known_args(argv)
+    args.provider_explicit = args.provider is not None
+    args.auth_explicit = args.auth is not None
+    args.account_explicit = args.account is not None
+    args.model_explicit = args.model is not None
+    if args.provider is None:
+        args.provider = _DEFAULT_PROVIDER
+    if args.auth is None:
+        args.auth = _DEFAULT_AUTH
     return args, remaining
 
 
@@ -432,7 +432,7 @@ def main() -> int:
 
     """
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         epilog=(
             "modes:\n"
             "  tty stdin       interactive REPL\n"
@@ -473,12 +473,11 @@ def main() -> int:
     # allowed provider (``primary=None``).
     resumed_provider = loaded_session is not None and bool(loaded_session[0].provider)
     args.provider_from_resume = resumed_provider
-    user_explicit = bool(getattr(args, "provider_explicit", False))
-    explicit = user_explicit or resumed_provider
+    explicit = args.provider_explicit or resumed_provider
     args.provider, allow_providers = _resolve_provider_and_allow(
         args.allow_providers,
         primary=args.provider if explicit else None,
-        from_resume=resumed_provider and not user_explicit,
+        from_resume=resumed_provider and not args.provider_explicit,
     )
     try:
         provider, model, resolved_auth = _build_provider_model(
@@ -677,6 +676,17 @@ def _positive_int(raw: str) -> int:
     return value
 
 
+def _positive_float(raw: str) -> float:
+    """Parse a finite amount that must be greater than zero."""
+    try:
+        value = float(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a number, got {raw!r}") from None
+    if math.isnan(value) or value <= 0.0 or math.isinf(value):
+        raise argparse.ArgumentTypeError(f"must be finite and > 0, got {raw}")
+    return value
+
+
 def _resolve_session_dir(args: argparse.Namespace) -> str | None:
     """Pick the session directory per --session / --resume / --continue."""
     if args.session is not None:
@@ -749,10 +759,9 @@ def _resolve_resume_hash(session_hash: str, cwd: Path) -> str:
         if matches:
             sys.stderr.write(f"[resume] {matches[0]} (matched in {label})\n")
             return str(matches[0])
-    sys.stderr.write(
-        f"[resume] no session matching {session_hash!r}; starting fresh.\n",
-    )
-    return str(sessions.new_session_dir(cwd))
+    # A named session that does not exist is a typo, not a request for a new one.
+    sys.stderr.write(f"[resume] no session matching {session_hash!r}.\n")
+    raise SystemExit(1)
 
 
 def _resolve_resume(cwd: Path, pick_cap: int) -> str:
@@ -795,17 +804,15 @@ def _resolve_resume_all(pick_cap: int) -> str:
     return str(sessions.new_session_dir(Path.cwd()))
 
 
-def _flag_present(argv: list[str], flag: str) -> bool:
-    """Return True when ``flag`` appears as ``--flag`` or ``--flag=value``."""
-    return any(tok == flag or tok.startswith(flag + "=") for tok in argv)
-
-
 def _parse_cli_args(
     parser: argparse.ArgumentParser,
     argv: list[str] | None = None,
 ) -> tuple[argparse.Namespace, list[str]]:
     """Add CLI-specific flags and delegate to ``parse_agent_args``."""
-    parser.add_argument(
+    # One session source per run: ``_resolve_session_dir`` honors only the first
+    # it checks, and ``--ephemeral`` drops all of them.
+    session_source = parser.add_mutually_exclusive_group()
+    session_source.add_argument(
         "--session",
         default=None,
         help="Session directory for persistence. Overrides --resume/--continue.",
@@ -822,7 +829,7 @@ def _parse_cli_args(
             " several. An unknown tool or key aborts."
         ),
     )
-    parser.add_argument(
+    session_source.add_argument(
         "--ephemeral",
         action="store_true",
         help="Disable session persistence. Sessions are not saved to disk.",
@@ -844,8 +851,7 @@ def _parse_cli_args(
             ' (NDJSON of {"prompt": ...} objects, joined with blank lines).'
         ),
     )
-
-    parser.add_argument(
+    session_source.add_argument(
         "--resume",
         nargs="?",
         const=True,
@@ -853,19 +859,19 @@ def _parse_cli_args(
         metavar="HASH",
         help="Resume a session. No arg: interactive picker. With HASH: resume that session.",
     )
-    parser.add_argument(
+    session_source.add_argument(
         "--continue",
         dest="continue_",
         action="store_true",
         help="Resume the most recent session for this cwd.",
     )
-    parser.add_argument(
+    session_source.add_argument(
         "--resume-all",
         dest="resume_all",
         action="store_true",
         help="Interactive picker over past sessions across all projects.",
     )
-    parser.add_argument(
+    session_source.add_argument(
         "--continue-all",
         dest="continue_all",
         action="store_true",
@@ -886,15 +892,9 @@ def _parse_cli_args(
     parser.add_argument(
         "--resume-persistent",
         dest="resume_persistent",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Resume live persistent subagents recorded in the session (default).",
-    )
-    parser.add_argument(
-        "--no-resume-persistent",
-        dest="resume_persistent",
-        action="store_false",
-        help="Do not restart persistent subagents when resuming a session.",
+        help="Restart live persistent subagents recorded in the session (default).",
     )
     parser.add_argument(
         "--name",
@@ -924,7 +924,7 @@ def _parse_cli_args(
     parser.add_argument(
         "--advisor-max-uses",
         dest="advisor_max_uses",
-        type=int,
+        type=_positive_int,
         default=None,
         metavar="N",
         help=(
@@ -941,7 +941,11 @@ def _parse_cli_args(
             " headless mode writes to stderr. Overrides SAGENT_LOG_LEVEL."
         ),
     )
-    return parse_agent_args(parser, argv)
+    args, remaining = parse_agent_args(parser, argv)
+    # Set by ``main`` once a session is loaded; a fresh run pins nothing.
+    args.provider_from_resume = False
+    args.auth_from_resume = False
+    return args, remaining
 
 
 # Exits with a clear error on empty input or unknown provider names.
@@ -1005,6 +1009,10 @@ def _build_provider_model(
     """Build the provider/model pair requested by CLI flags."""
     try:
         return _build_provider_model_once(args)
+    except (UnknownModelError, UnsupportedTagError):
+        # A catalog miss is a ``ValueError`` too, but no credential or
+        # fallback provider can fix a misspelled model id.
+        raise
     except _PROVIDER_STARTUP_ERRORS as error:
         return _build_provider_model_fallback(
             args,
@@ -1019,7 +1027,7 @@ def _build_provider_model_once(
     """Build one provider/model pair without fallback."""
     provider_name = str(args.provider)
     auth = str(args.auth)
-    if not bool(getattr(args, "auth_explicit", False)):
+    if not (args.auth_explicit or args.auth_from_resume):
         auth = default_auth_for_provider(provider_name)
     model_id = cast(str | None, args.model)
     # SelfHosted encodes the auth (a local snapshot path) in ``--model`` and has
@@ -1031,10 +1039,7 @@ def _build_provider_model_once(
         provider_name,
         auth,
         account=args.account,
-        fallback_to_default=(
-            bool(getattr(args, "provider_from_resume", False))
-            and not bool(getattr(args, "account_explicit", False))
-        ),
+        fallback_to_default=args.provider_from_resume and not args.account_explicit,
     )
     args.account = account
     model = provider.model(None if model_id == "default" else model_id)
@@ -1048,15 +1053,12 @@ def _build_provider_model_fallback(
     allow_providers: tuple[str, ...],
 ) -> tuple[Provider, Model, str]:
     """Try another subscription provider for implicit startup auth failures."""
-    if any(
-        bool(getattr(args, name, False))
-        for name in (
-            "provider_explicit",
-            "provider_from_resume",
-            "auth_explicit",
-            "account_explicit",
-            "model_explicit",
-        )
+    if (
+        args.provider_explicit
+        or args.provider_from_resume
+        or args.auth_explicit
+        or args.account_explicit
+        or args.model_explicit
     ):
         raise RuntimeError(
             _credential_error_message(
@@ -1195,16 +1197,19 @@ def _apply_cli_thinking(args: argparse.Namespace, model: Model) -> bool:
 
 def _apply_resume_model_defaults(args: argparse.Namespace, meta: SessionMeta) -> None:
     """Layer persisted model metadata under explicit CLI model flags."""
-    if meta.provider and not bool(getattr(args, "provider_explicit", False)):
+    if meta.provider and not args.provider_explicit:
         args.provider = meta.provider
-    if meta.auth and not bool(getattr(args, "auth_explicit", False)):
+    # An auth is a ``from_<auth>`` suffix of ONE provider class; the persisted
+    # one only means something when the session's provider is still in use.
+    if meta.auth and not args.auth_explicit and args.provider == meta.provider:
         args.auth = meta.auth
-    if meta.account and not bool(getattr(args, "account_explicit", False)):
+        args.auth_from_resume = True
+    if meta.account and not args.account_explicit:
         args.account = meta.account
-    if not bool(getattr(args, "model_explicit", False)):
+    if not args.model_explicit:
         args.model = meta.model_id or args.model
         if (
-            bool(getattr(args, "provider_explicit", False))
+            args.provider_explicit
             and args.model is not None
             and not _provider_knows_model(str(args.provider), str(args.model))
         ):
@@ -1229,11 +1234,11 @@ async def _resume_persistent_agents(
     session_dir: Path,
     *,
     allow_providers: tuple[str, ...],
-    parent_label: str,
 ) -> None:
     """Restart persistent subagents recorded as running in ``session_dir``."""
-    records = load_persistent_agents(session_dir)
-    for record in records:
+    # ``load_persistent_agents`` returns only ``running`` records that carry a
+    # ``session_dir``, so every record here names a child transcript.
+    for record in load_persistent_agents(session_dir):
         if record.provider not in allow_providers:
             sys.stderr.write(
                 f"[resume-persistent] skipping {record.label!r}:"
@@ -1241,18 +1246,9 @@ async def _resume_persistent_agents(
             )
             continue
         try:
-            child = _build_persistent_child(
-                record,
-                allow_providers=allow_providers,
-                parent_label=parent_label,
-            )
+            child = _build_persistent_child(record, allow_providers=allow_providers)
         except (RuntimeError, ValueError) as e:
             sys.stderr.write(f"[resume-persistent] skipping {record.label!r}: {e}\n")
-            continue
-        if not record.session_dir:
-            sys.stderr.write(
-                f"[resume-persistent] skipping {record.label!r}: missing session_dir.\n",
-            )
             continue
         loaded_child = load_session(Path(record.session_dir))
         if loaded_child is not None:
@@ -1263,14 +1259,21 @@ async def _resume_persistent_agents(
                 f"[resume-persistent] label {record.label!r} already active;"
                 f" restored as {label!r}.\n",
             )
-        _start_resumed_persistent(parent, child, record, label)
+        resume_serviced_child(
+            parent,
+            child,
+            label=label,
+            run_id=record.run_id,
+            notify_on_asleep=record.notify_on_asleep,
+        )
 
 
+# ``system`` is the record's base prompt; ``resume_serviced_child`` adds the
+# persistent-agent IPC rule, so the next lifecycle record persists the base again.
 def _build_persistent_child(
     record: PersistentAgentRecord,
     *,
     allow_providers: tuple[str, ...],
-    parent_label: str,
 ) -> Agent:
     """Construct a persistent child from its lifecycle record."""
     provider, account = build_provider_with_account_fallback(
@@ -1298,7 +1301,7 @@ def _build_persistent_child(
             model_id=model.tagged_model_id,
             account=account,
         ),
-        system=_augment_system_for_persistent(record.system, parent_label=parent_label),
+        system=record.system,
         tools=resolve_tools(list(record.tools), allow_providers=allow_providers),
         session_dir=record.session_dir,
         max_tool_call_rounds=record.max_tool_call_rounds,
@@ -1316,67 +1319,6 @@ def _build_persistent_child(
 def _resume_label(label: str) -> str:
     """Return a live registry label for a resumed persistent subagent."""
     return label if label not in agent_registry else unique_registry_label(label)
-
-
-def _start_resumed_persistent(
-    parent: Agent,
-    child: Agent,
-    record: PersistentAgentRecord,
-    label: str,
-) -> None:
-    """Register and launch a resumed persistent subagent."""
-    child._lifecycle = "serviced"  # noqa: SLF001 -- Resume must restore the private lifecycle state that the runtime uses for serviced children.
-    child._is_subagent = True  # noqa: SLF001 -- Resume must restore the private subagent marker used by the runtime scheduler.
-    child.name = label
-    agent_registry[label] = child
-    forwarder = _build_forwarder(
-        label,
-        1,
-        parent,
-        child=child,
-        notify_on_asleep=record.notify_on_asleep,
-    )
-    if forwarder is not None:
-        child.runtime.observers.append(forwarder)
-    task = asyncio.create_task(
-        _serve_resumed_persistent(parent, child, label, forwarder),
-    )
-    parent.register_background(
-        f"persistent:{label}",
-        BackgroundTaskEntry(
-            task=task,
-            tool_name="persistent-agent",
-            queue_id=label,
-            started=time.time(),
-            hidden=False,
-            kind="subagent",
-            lifecycle="serviced",
-            persistent_run_id=record.run_id,
-            notify_on_asleep=record.notify_on_asleep,
-        ),
-    )
-
-
-async def _serve_resumed_persistent(
-    parent: Agent,
-    child: Agent,
-    label: str,
-    forwarder: Callable[[RuntimeEvent], None] | None,
-) -> None:
-    """Run a resumed persistent child and clean parent indexes on exit."""
-    bg_key = f"persistent:{label}"
-    try:
-        await child.serve_forever()
-    except Exception:
-        logging.getLogger(__name__).exception(
-            "persistent agent %r crashed after resume",
-            label,
-        )
-    finally:
-        if forwarder is not None and forwarder in child.runtime.observers:
-            child.runtime.observers.remove(forwarder)
-        agent_registry.pop(label, None)
-        parent.forget_background(bg_key)
 
 
 def _configure_logging(level: str | None) -> None:
@@ -1465,7 +1407,6 @@ async def _with_resumed_persistent(
             agent,
             Path(session_dir),
             allow_providers=allow_providers,
-            parent_label=agent.name,
         )
     await coro
 
@@ -1493,7 +1434,7 @@ async def _with_signals(
         # Awaited here, inside the loop: the provider owns the client its
         # models share, and ``asyncio.run`` cancels stray tasks at their
         # first suspension, so a fire-and-forget close never finishes.
-        if isinstance(provider, ProviderCloseable):
+        if provider is not None:
             await provider.close_sdk()
 
 
@@ -1538,10 +1479,9 @@ def _event_to_json_record(event: RuntimeEvent) -> MutableJSON | None:
             "is_error": event.is_error,
         }
     if isinstance(event, ModelResponseError):
-        exc = event.exception
         return {
             "descriptor": "application/x-error",
-            "content": f"{type(exc).__name__}: {exc}",
+            "content": error_text(event.exception),
         }
     if isinstance(event, ModelServiceSuspended):
         return {
@@ -1622,7 +1562,7 @@ async def _run_headless(
             if isinstance(event, ModelResponseError):
                 model_error = event.exception
     if model_error is not None:
-        message = f"{type(model_error).__name__}: {model_error}"
+        message = error_text(model_error)
         if output_format == "json":
             json.dump({"error": message}, sys.stdout)
             sys.stdout.write("\n")

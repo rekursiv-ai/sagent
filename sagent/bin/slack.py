@@ -82,7 +82,7 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.custom_json import MutableJSON, convert
+from sagent.lib.custom_json import MutableJSON, ReadError, convert
 from sagent.lib.userdirs import data_dir
 from sagent.providers import build_provider
 from sagent.tools.slack import Slack, SlackSender
@@ -651,11 +651,12 @@ class SlackAdapter:
             r = await client.get(url, headers=headers, params=params)
             if not r.is_success:
                 return []
-            body = convert(r.json(), dict[str, object])
-        if not body.get("ok"):
-            return []
-        members = cast(list[object], body.get("members") or [])
-        return [str(m) for m in members]
+            try:
+                body = convert(r.json(), dict[str, object], default={})
+                members = convert(body.get("members"), list[str], default=[])
+            except ReadError:
+                return []
+        return members if body.get("ok") else []
 
     async def _invite(self, channel: str, user: str) -> None:
         """Invite ``user`` to ``channel`` via the Slack web API."""
@@ -802,7 +803,7 @@ def parse_slack_args(
         "--session-dir",
         dest="session_dir",
         default=str(data_dir() / "rekursiv-ai" / "sagent" / "slack"),
-        help="Directory for session persistence (default: ~/.sagent/slack).",
+        help="Directory for session persistence (default: %(default)s).",
     )
     _ = parser.add_argument(
         "--continue",
@@ -826,7 +827,7 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     args, remaining = parse_slack_args(parser)

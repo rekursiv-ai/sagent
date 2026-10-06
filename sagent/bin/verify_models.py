@@ -15,9 +15,14 @@ Usage::
     uv --quiet --project . run python -m sagent.bin.verify_models --provider google
     uv --quiet --project . run python -m sagent.bin.verify_models --provider openai
 
+Every model is looked up and reported by its vendor wire id
+(``claude-opus-5-5``), not the catalog name (``opus-5.5``). A run that
+verifies no row of a requested provider fails: a missing key or an
+unreachable API is not a pass.
+
 Sources:
 - Google: GET /v1beta/models (returns inputTokenLimit, outputTokenLimit)
-- OpenAI: scrapes https://developers.openai.com/api/docs/models/<id>
+- OpenAI: scrapes https://developers.openai.com/api/docs/models/<id>.md
 - Anthropic: GET /v1/models/<id> (returns max_tokens, max_input_tokens)
 
 Cross-reference: https://github.com/taylorwilsdon/llm-context-limits
@@ -71,32 +76,46 @@ async def fetch_google(api_key: str) -> dict[str, LiveLimits]:
       api_key: Google API key.
 
     Returns:
-      limits: Map of model ID to its token limits.
+      limits: Map of model ID to its token limits; partial when a page fails.
 
     """
     api = "https://generativelanguage.googleapis.com/v1beta/models"
+    out: dict[str, LiveLimits] = {}
+    page_token = ""
+    # The key rides a header: in the query string it would be echoed by every
+    # HTTPStatusError message, which this tool prints.
+    headers = {"x-goog-api-key": api_key}
     async with httpx2.AsyncClient(timeout=30) as client:
-        r = await client.get(f"{api}?key={api_key}")
-        r.raise_for_status()
-        out: dict[str, LiveLimits] = {}
-        body = convert(r.json(), dict[str, object])
-        for raw_model in convert(body.get("models"), list[object], default=[]):
-            model = convert(raw_model, dict[str, object])
-            short = convert(model.get("name"), str, default="").removeprefix(
-                "models/",
-            )
-            inp = convert(model.get("inputTokenLimit"), int, default=0)
-            outp = convert(model.get("outputTokenLimit"), int, default=0)
-            if inp and outp:
-                out[short] = LiveLimits(
-                    max_request_tokens=inp,
-                    max_response_tokens=outp,
+        while True:
+            params = {"pageToken": page_token} if page_token else {}
+            try:
+                r = await client.get(api, headers=headers, params=params)
+                r.raise_for_status()
+            except httpx2.HTTPError as e:
+                _out(f"  [warn] models list: {_describe(e)}")
+                return out
+            body = convert(r.json(), dict[str, object])
+            for raw_model in convert(body.get("models"), list[object], default=[]):
+                model = convert(raw_model, dict[str, object])
+                short = convert(model.get("name"), str, default="").removeprefix(
+                    "models/",
                 )
-        return out
+                inp = convert(model.get("inputTokenLimit"), int, default=0)
+                outp = convert(model.get("outputTokenLimit"), int, default=0)
+                if inp and outp:
+                    out[short] = LiveLimits(
+                        max_request_tokens=inp,
+                        max_response_tokens=outp,
+                    )
+            page_token = convert(body.get("nextPageToken"), str, default="")
+            if not page_token:
+                return out
 
 
-# Source: https://developers.openai.com/api/docs/models/<model>
-# Each page SSR-renders "N context window" and "N max output tokens".
+# Source: https://developers.openai.com/api/docs/models/<model>.md
+# The markdown rendering states "N context window", "Maximum input tokens: N"
+# where the model has one, and "N max output tokens". The HTML page omits the
+# input cap, and the catalog stores that cap, not the window.
 
 
 async def fetch_openai(model_ids: list[str]) -> dict[str, LiveLimits]:
@@ -113,17 +132,18 @@ async def fetch_openai(model_ids: list[str]) -> dict[str, LiveLimits]:
     doc = "https://developers.openai.com/api/docs/models"
     async with httpx2.AsyncClient(timeout=30, follow_redirects=True) as client:
         for mid in model_ids:
-            url = f"{doc}/{mid}"
+            url = f"{doc}/{mid}.md"
             try:
                 r = await client.get(url)
                 r.raise_for_status()
-                limits = _parse_openai_page(r.text)
-                if limits:
-                    out[mid] = limits
-                else:
-                    _out(f"  [warn] {mid}: could not parse limits from {url}")
-            except httpx2.HTTPStatusError as e:
-                _out(f"  [warn] {mid}: HTTP {e.response.status_code}")
+            except httpx2.HTTPError as e:
+                _out(f"  [warn] {mid}: {_describe(e)}")
+                continue
+            limits = _parse_openai_page(r.text)
+            if limits:
+                out[mid] = limits
+            else:
+                _out(f"  [warn] {mid}: could not parse limits from {url}")
     return out
 
 
@@ -156,21 +176,25 @@ async def fetch_anthropic(
             try:
                 r = await client.get(f"{api}/{mid}", headers=headers)
                 r.raise_for_status()
-                data = convert(r.json(), dict[str, object])
-                max_input = convert(data.get("max_input_tokens"), int, default=0)
-                max_output = convert(data.get("max_tokens"), int, default=0)
-                if max_input and max_output:
-                    out[mid] = LiveLimits(
-                        max_request_tokens=max_input,
-                        max_response_tokens=max_output,
-                    )
-                else:
-                    _out(f"  [warn] {mid}: missing limits in API response")
             except httpx2.HTTPStatusError as e:
                 if e.response.status_code == 404:
                     _out(f"  [warn] {mid}: not found in API")
                 else:
-                    _out(f"  [warn] {mid}: HTTP {e.response.status_code}")
+                    _out(f"  [warn] {mid}: {_describe(e)}")
+                continue
+            except httpx2.HTTPError as e:
+                _out(f"  [warn] {mid}: {_describe(e)}")
+                continue
+            data = convert(r.json(), dict[str, object])
+            max_input = convert(data.get("max_input_tokens"), int, default=0)
+            max_output = convert(data.get("max_tokens"), int, default=0)
+            if max_input and max_output:
+                out[mid] = LiveLimits(
+                    max_request_tokens=max_input,
+                    max_response_tokens=max_output,
+                )
+            else:
+                _out(f"  [warn] {mid}: missing limits in API response")
     return out
 
 
@@ -181,16 +205,20 @@ def compare(
 ) -> int:
     """Compare catalog entries against live API limits.
 
+    A catalog row the live source did not report is listed as unverified;
+    if no row at all was verified, that is itself an error.
+
     Args:
       provider_name: Display name for log output.
-      known: Resolved model catalog.
-      live: LiveLimits fetched from the live API.
+      known: Resolved model catalog, keyed by vendor wire id.
+      live: LiveLimits fetched from the live API, keyed by vendor wire id.
 
     Returns:
-      error_count: Number of mismatches found.
+      error_count: Number of problems found.
 
     """
     errors = 0
+    verified = 0
     all_ids = sorted(set(known) | set(live))
     for mid in all_ids:
         k = known.get(mid)
@@ -205,7 +233,9 @@ def compare(
             errors += 1
             continue
         if lv is None:
+            _out(f"  {provider_name}.{mid}: not verified")
             continue
+        verified += 1
         # The untagged context is the one the vendor API reports; ``+1m``
         # is an opt-in the model list does not enumerate.
         base = k.context[""]
@@ -223,7 +253,11 @@ def compare(
                 f" code={k_resp:,} api={lv.max_response_tokens:,}",
             )
             errors += 1
-    if not errors:
+    if known and not verified:
+        errors += 1
+    if errors or verified < len(known):
+        _out(f"  {provider_name}: {verified}/{len(known)} models verified")
+    else:
         _out(f"  {provider_name}: all {len(known)} models OK")
     return errors
 
@@ -231,10 +265,9 @@ def compare(
 def audit_catalogs() -> int:
     """Check every provider catalog for self-consistency, offline.
 
-    Catches the drift a live query cannot: a row whose ``model_id`` does
-    not match its key ships the wrong id on the wire; an empty price
-    catalog raises at first bill rather than at import; a zero window
-    silently disables the compaction trigger.
+    Catches the drift a live query cannot: an empty price catalog raises at
+    first bill rather than at import; a zero window silently disables the
+    compaction trigger.
 
     Returns:
       error_count: Number of problems found.
@@ -275,15 +308,26 @@ def _out(msg: str) -> None:
     sys.stdout.write(msg + "\n")
 
 
-def _parse_openai_page(html: str) -> LiveLimits | None:
-    """Extract context window and max output tokens from an OpenAI doc page."""
-    cleaned = re.sub(r"<!--.*?-->", " ", html, flags=re.DOTALL)
+def _describe(e: httpx2.HTTPError) -> str:
+    """Name a request failure without echoing its URL."""
+    if isinstance(e, httpx2.HTTPStatusError):
+        return f"HTTP {e.response.status_code}"
+    return type(e).__name__
+
+
+# The input cap is "Maximum input tokens" where the page states one, else the context
+# window.
+def _parse_openai_page(page: str) -> LiveLimits | None:
+    """Extract the input cap and max output tokens from an OpenAI doc page."""
+    cleaned = re.sub(r"<!--.*?-->", " ", page, flags=re.DOTALL)
     cleaned = re.sub(r"<[^>]+>", " ", cleaned)
-    ctx = re.search(r"([\d,]+)\s+context\s+window", cleaned)
+    request = re.search(r"Maximum\s+input\s+tokens:?\s+([\d,]+)", cleaned) or (
+        re.search(r"([\d,]+)\s+context\s+window", cleaned)
+    )
     out = re.search(r"([\d,]+)\s+max\s+output\s+tokens", cleaned)
-    if ctx and out:
+    if request and out:
         return LiveLimits(
-            max_request_tokens=_num(ctx.group(1)),
+            max_request_tokens=_num(request.group(1)),
             max_response_tokens=_num(out.group(1)),
         )
     return None
@@ -297,7 +341,7 @@ def _num(s: str) -> int:
 async def _run() -> int:
     """Verify all providers' model catalogs against live APIs."""
     parser = argparse.ArgumentParser(
-        description=(__doc__ or "").split("\n", 2)[2],
+        description=__doc__.split("\n", 2)[2] if __doc__ else None,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -321,9 +365,10 @@ async def _run() -> int:
 
     if target in ("all", "google"):
         _out("Google (API query):")
-        key = os.environ.get("GOOGLE_API_KEY", "")
+        key = os.environ.get("GOOGLE_API_KEY")
         if not key:
-            _out("  [skip] GOOGLE_API_KEY not set")
+            _out("  [error] GOOGLE_API_KEY not set")
+            total_errors += 1
         else:
             live = await fetch_google(key)
             total_errors += compare("Google", _canonical_models(Google.catalog), live)
@@ -336,24 +381,26 @@ async def _run() -> int:
 
     if target in ("all", "anthropic"):
         _out("Anthropic (API query):")
-        key = os.environ.get("ANTHROPIC_API_KEY", "")
+        key = os.environ.get("ANTHROPIC_API_KEY")
         if not key:
-            _out("  [skip] ANTHROPIC_API_KEY not set")
+            _out("  [error] ANTHROPIC_API_KEY not set")
+            total_errors += 1
         else:
             known = _canonical_models(Anthropic.catalog)
             live = await fetch_anthropic(key, list(known))
             total_errors += compare("Anthropic", known, live)
 
     if total_errors:
-        _out(f"\n{total_errors} mismatch(es) found.")
+        _out(f"\n{total_errors} problem(s) found.")
     else:
         _out("\nAll limits verified.")
     return 1 if total_errors else 0
 
 
 def _canonical_models(catalog: ModelCatalog) -> dict[str, ModelCapability]:
-    """Return one resolved row per canonical model ID."""
-    return {model_id: catalog.resolve(model_id)[0] for model_id in catalog.models}
+    """Return one resolved row per model, keyed by the id its vendor serves it as."""
+    rows = (catalog.resolve(model_id)[0] for model_id in catalog.models)
+    return {row.wire_model_id or row.model_id: row for row in rows}
 
 
 if __name__ == "__main__":

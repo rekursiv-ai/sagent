@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Generator, Mapping, Sequence
 from pathlib import Path
-from typing import Literal, cast, get_args
+from typing import TYPE_CHECKING, Literal, cast, get_args
 
 import base64
 import contextlib
@@ -45,12 +45,12 @@ from sagent.agent.context import (
     resolve_context,
 )
 from sagent.agent.state import (
-    AgentLike,
     PersistableAgent,
     ReadCacheEntry,
     ToolState,
 )
-from sagent.lib.custom_json import convert
+from sagent.lib.atomic_file import write_all
+from sagent.lib.custom_json import ReadError, convert
 from sagent.providers.providers import (
     build_provider_with_account_fallback,
 )
@@ -95,6 +95,10 @@ from sagent.types.tape import (
     merge_mask_ranges,
     pair_and_dedup_tool_calls,
 )
+
+
+if TYPE_CHECKING:
+    from sagent.types.providers import Provider
 
 
 logger = logging.getLogger(__name__)
@@ -206,9 +210,7 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
         state.additional_dirs = [
             str(x) for x in cast(list[object], raw_dirs) if isinstance(x, str)
         ]
-    state.read_cache.clear()
-    state._read_order.clear()  # noqa: SLF001 -- Session persistence owns these private ToolState collections.
-    state._content_cache.clear()  # noqa: SLF001 -- Session persistence owns these private ToolState collections.
+    state.reset_tool_recall()
     raw_rc = snapshot.get("read_cache")
     if isinstance(raw_rc, list):
         for entry in cast(list[object], raw_rc):
@@ -219,10 +221,10 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
             if not isinstance(path, str) or not path:
                 continue
             state.read_cache[path] = ReadCacheEntry(
-                offset=convert(e.get("offset"), int, default=0),
-                limit=convert(e.get("limit"), int, default=0),
-                last_lines=convert(e.get("last_lines"), int, default=0),
-                mtime=convert(e.get("mtime"), float, default=0.0),
+                offset=_read(e.get("offset"), int, 0),
+                limit=_read(e.get("limit"), int, 0),
+                last_lines=_read(e.get("last_lines"), int, 0),
+                mtime=_read(e.get("mtime"), float, 0.0),
             )
     raw_recent = snapshot.get("recent_files")
     if isinstance(raw_recent, list):
@@ -231,7 +233,6 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
                 continue
             resolved = str(Path(orig).resolve())
             state._read_order[resolved] = orig  # noqa: SLF001 -- Session persistence owns the private recent-file ordering map.
-    state.invoked_skills.clear()
     raw_skills = snapshot.get("invoked_skills")
     if isinstance(raw_skills, list):
         state.invoked_skills.update(
@@ -239,7 +240,6 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
             for name in cast(list[object], raw_skills)
             if isinstance(name, str) and name
         )
-    state.invoked_rules.clear()
     raw_rules = snapshot.get("invoked_rules")
     if isinstance(raw_rules, list):
         state.invoked_rules.update(
@@ -249,17 +249,28 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
         )
 
 
+def _spend_to_json(spend: TokenCost) -> dict[str, object]:
+    """Encode the per-bucket spend block."""
+    return {
+        "request": spend.request,
+        "response": spend.response,
+        "cache_write": spend.cache_write,
+        "cache_write_1h": spend.cache_write_1h,
+        "cache_read": spend.cache_read,
+    }
+
+
 def _spend_from_json(raw: object) -> TokenCost:
     """Decode the per-bucket spend block."""
     if not isinstance(raw, Mapping):
         return TokenCost()
     buckets = cast(Mapping[str, object], raw)
     return TokenCost(
-        request=convert(buckets.get("request"), float, default=0.0),
-        response=convert(buckets.get("response"), float, default=0.0),
-        cache_write=convert(buckets.get("cache_write"), float, default=0.0),
-        cache_write_1h=convert(buckets.get("cache_write_1h"), float, default=0.0),
-        cache_read=convert(buckets.get("cache_read"), float, default=0.0),
+        request=_read(buckets.get("request"), float, 0.0),
+        response=_read(buckets.get("response"), float, 0.0),
+        cache_write=_read(buckets.get("cache_write"), float, 0.0),
+        cache_write_1h=_read(buckets.get("cache_write_1h"), float, 0.0),
+        cache_read=_read(buckets.get("cache_read"), float, 0.0),
     )
 
 
@@ -292,7 +303,10 @@ class SessionMeta:
     """Aggregate token counts across the session."""
 
     spend: TokenCost = dataclasses.field(default_factory=TokenCost)
-    """Running cost in USD, per token bucket."""
+    """Running cost in USD, per token bucket: the tree's at a root, else 0."""
+
+    own_spend: TokenCost = dataclasses.field(default_factory=TokenCost)
+    """This agent's own spend, the figure its ``max_budget_usd`` cap reads."""
 
     num_tool_call_rounds: int = 0
     """Count of completed tool-call rounds."""
@@ -331,13 +345,8 @@ class SessionMeta:
                 "cache_creation_1h_tokens": self.tokens.cache_write_1h,
                 "cache_read_tokens": self.tokens.cache_read,
             },
-            "spend": {
-                "request": self.spend.request,
-                "response": self.spend.response,
-                "cache_write": self.spend.cache_write,
-                "cache_write_1h": self.spend.cache_write_1h,
-                "cache_read": self.spend.cache_read,
-            },
+            "spend": _spend_to_json(self.spend),
+            "own_spend": _spend_to_json(self.own_spend),
             "num_tool_call_rounds": self.num_tool_call_rounds,
             "compact_count": self.compact_count,
             "bash_cwd": self.bash_cwd,
@@ -370,28 +379,23 @@ class SessionMeta:
             name=str(d.get("name") or ""),
             status=str(d.get("status") or ""),
             tokens=TokenCount(
-                request=convert(tokens_d.get("input_tokens"), int, default=0),
-                response=convert(tokens_d.get("output_tokens"), int, default=0),
-                cache_write=convert(
-                    tokens_d.get("cache_creation_tokens"),
-                    int,
-                    default=0,
-                ),
-                cache_write_1h=convert(
-                    tokens_d.get("cache_creation_1h_tokens"),
-                    int,
-                    default=0,
-                ),
-                cache_read=convert(tokens_d.get("cache_read_tokens"), int, default=0),
+                request=_read(tokens_d.get("input_tokens"), int, 0),
+                response=_read(tokens_d.get("output_tokens"), int, 0),
+                cache_write=_read(tokens_d.get("cache_creation_tokens"), int, 0),
+                cache_write_1h=_read(tokens_d.get("cache_creation_1h_tokens"), int, 0),
+                cache_read=_read(tokens_d.get("cache_read_tokens"), int, 0),
             ),
             spend=_spend_from_json(d.get("spend")),
-            num_tool_call_rounds=convert(d.get("num_tool_call_rounds"), int, default=0),
-            compact_count=convert(d.get("compact_count"), int, default=0),
+            # A record from before ``own_spend`` existed carries only ``spend``,
+            # which is never below this agent's own share, so the cap stays safe.
+            own_spend=_spend_from_json(d.get("own_spend", d.get("spend"))),
+            num_tool_call_rounds=_read(d.get("num_tool_call_rounds"), int, 0),
+            compact_count=_read(d.get("compact_count"), int, 0),
             bash_cwd=str(d.get("bash_cwd") or ""),
-            total_active_elapsed_seconds=convert(
+            total_active_elapsed_seconds=_read(
                 d.get("total_active_elapsed_seconds"),
                 float,
-                default=0.0,
+                0.0,
             ),
         )
 
@@ -432,8 +436,8 @@ def append_context_repair(
 
 
 def append_persistent_agent_lifecycle(
-    parent_agent: PersistableAgent | AgentLike,
-    child: PersistableAgent | AgentLike,
+    parent_agent: PersistableAgent,
+    child: PersistableAgent,
     label: str,
     run_id: str,
     *,
@@ -455,8 +459,6 @@ def append_persistent_agent_lifecycle(
           rather than read off them.
 
     """
-    parent_agent = cast(PersistableAgent, parent_agent)
-    child = cast(PersistableAgent, child)
     if parent_agent.session_dir is None:
         return
     spec = child.model_recipe
@@ -609,7 +611,7 @@ def session_file_lock(path: Path) -> Generator[None]:
 
 
 def install_session_persistence(
-    agent: PersistableAgent | AgentLike,
+    agent: PersistableAgent,
     session_dir: Path,
 ) -> Callable[[], None]:
     """Attach a ``SaveSession`` observer that appends tape deltas to disk.
@@ -639,7 +641,6 @@ def install_session_persistence(
           to the same file, duplicating them.
 
     """
-    agent = cast(PersistableAgent, agent)
     persisted_refs = _persisted_refs(session_dir / "session.jsonl")
     meta_written = False
     last_status = agent.status
@@ -670,6 +671,7 @@ def install_session_persistence(
             status=agent.status,
             tokens=agent.total_tokens,
             spend=agent.cost_tracker.spend,
+            own_spend=agent.own_spend,
             num_tool_call_rounds=agent.num_tool_call_rounds,
             compact_count=agent.compaction_state.compact_count,
             bash_cwd=agent.tool_state.bash_cwd,
@@ -698,7 +700,7 @@ def install_session_persistence(
     return _rebaseline
 
 
-def unpersisted_session_error(agent: PersistableAgent | AgentLike) -> str | None:
+def unpersisted_session_error(agent: PersistableAgent) -> str | None:
     """Return an error message if a non-empty session was never persisted.
 
     Args:
@@ -722,7 +724,6 @@ def unpersisted_session_error(agent: PersistableAgent | AgentLike) -> str | None
     the REPL's stderr-and-exit error convention.
 
     """
-    agent = cast(PersistableAgent, agent)
     session_dir = agent.session_dir
     if session_dir is None or not agent.runtime.tape:
         return None
@@ -944,15 +945,16 @@ def repair_dangling_tool_calls(
 
 def restore_model(
     meta: SessionMeta,
-) -> tuple[Model, ModelRecipe] | None:
+) -> tuple[Model, ModelRecipe, Provider] | None:
     """Rebuild model + spec from persisted ``provider``/``auth``/``model_id``.
 
     Args:
       meta: Session metadata.
 
     Returns:
-      result: ``(model, spec)`` on success, ``None`` if construction
-          fails for any reason (the caller keeps its default model).
+      result: ``(model, spec, provider)`` on success, where ``provider`` is the
+          built provider the caller now owns, or ``None`` if construction fails
+          for any reason (the caller keeps its default model).
 
     """
     if not meta.provider or not meta.model_id:
@@ -971,7 +973,7 @@ def restore_model(
             model_id=model.tagged_model_id,
             account=account,
         )
-        return model, spec
+        return model, spec, provider
     except Exception:
         logger.exception(
             "Failed to restore model %s/%s; keeping default",
@@ -1244,7 +1246,7 @@ def _splice_to_json(splice: ContextSplice) -> dict[str, object]:
 def _splice_from_json(
     rec: Mapping[str, object],
     ref: TapeRef,
-) -> ContextSplice | None:
+) -> ContextSplice:
     """Decode a ``kind=context_splice`` record into a ``ContextSplice``."""
     mask = _mask_from_json(rec.get("mask"))
     raw_insert = rec.get("insert_after")
@@ -1277,10 +1279,10 @@ def _splice_from_json(
         insert_after=insert_after,
         payload=tuple(payload),
         strategy=str(rec.get("strategy") or ""),
-        token_before=convert(rec.get("token_before"), int, default=0),
-        token_after=convert(rec.get("token_after"), int, default=0),
+        token_before=_read(rec.get("token_before"), int, 0),
+        token_after=_read(rec.get("token_after"), int, 0),
         fallback_reason=str(rec.get("fallback_reason") or ""),
-        preserved_tail_count=convert(rec.get("preserved_tail_count"), int, default=0),
+        preserved_tail_count=_read(rec.get("preserved_tail_count"), int, 0),
         paired_externally=paired,
     )
 
@@ -1292,7 +1294,7 @@ def _splice_from_json(
 def _legacy_override_to_splice(
     rec: Mapping[str, object],
     ref: TapeRef,
-) -> ContextSplice | None:
+) -> ContextSplice:
     """Convert legacy ``kind=context_override`` to ``ContextSplice``."""
     raw_suppresses = rec.get("suppresses")
     suppresses: list[TapeRef] = []
@@ -1344,10 +1346,10 @@ def _legacy_override_to_splice(
         insert_after=inject_after,
         payload=tuple(payload),
         strategy=str(rec.get("strategy") or ""),
-        token_before=convert(rec.get("token_before"), int, default=0),
-        token_after=convert(rec.get("token_after"), int, default=0),
+        token_before=_read(rec.get("token_before"), int, 0),
+        token_after=_read(rec.get("token_after"), int, 0),
         fallback_reason=str(rec.get("fallback_reason") or ""),
-        preserved_tail_count=convert(rec.get("preserved_tail_count"), int, default=0),
+        preserved_tail_count=_read(rec.get("preserved_tail_count"), int, 0),
         paired_externally=paired,
     )
 
@@ -1401,20 +1403,20 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
         return CompactStarted()
     if t == "compact_complete":
         return CompactComplete(
-            token_before=convert(d.get("token_before"), int, default=0),
-            token_after=convert(d.get("token_after"), int, default=0),
-            payload_entries=convert(d.get("payload_entries"), int, default=0),
+            token_before=_read(d.get("token_before"), int, 0),
+            token_after=_read(d.get("token_after"), int, 0),
+            payload_entries=_read(d.get("payload_entries"), int, 0),
             fallback_reason=str(d.get("fallback_reason") or ""),
-            preserved_tail_count=convert(d.get("preserved_tail_count"), int, default=0),
+            preserved_tail_count=_read(d.get("preserved_tail_count"), int, 0),
         )
     if t == "compact_failed":
         return CompactFailed(
             exception=RuntimeError(str(d.get("message") or "")),
-            tape_len=convert(d.get("tape_len"), int, default=0),
+            tape_len=_read(d.get("tape_len"), int, 0),
         )
-    entry_id = convert(d.get("id"), int, default=0)
-    parent_id = convert(d.get("parent_id"), int, default=-1)
-    timestamp = convert(d.get("timestamp"), float, default=0.0)
+    entry_id = _read(d.get("id"), int, 0)
+    parent_id = _read(d.get("parent_id"), int, -1)
+    timestamp = _read(d.get("timestamp"), float, 0.0)
     hidden = _json_bool(d.get("hidden"))
     if t == "user":
         return UserMessage(
@@ -1568,8 +1570,8 @@ def _runtime_event_from_json(record: Mapping[str, object]) -> RuntimeEvent | Non
             auth=str(record.get("auth") or ""),
             account=_optional_str(record.get("account")),
             model_id=str(record.get("model_id") or ""),
-            retry_at=convert(record.get("retry_at"), float, default=0.0),
-            delay_sec=convert(record.get("delay_sec"), float, default=0.0),
+            retry_at=_read(record.get("retry_at"), float, 0.0),
+            delay_sec=_read(record.get("delay_sec"), float, 0.0),
             server_supplied=_json_bool(record.get("server_supplied")),
             error=error,
         )
@@ -1723,6 +1725,18 @@ def _persistent_state(raw: object) -> PersistentAgentState | None:
 # string is True, so a writer that stringified a flag turned ``"false"`` into True. On
 # the legacy ``barrier`` field that read a non-barrier as a barrier and masked the
 # conversation ahead of it.
+# ``convert(..., default=)`` substitutes the default only for a missing field and
+# RAISES on a wrong type, so one stringified number in a meta or tool_state record
+# aborted the whole resume. A typed-wrong scalar takes its default instead, the way a
+# non-bool already does in ``_json_bool``.
+def _read[T](raw: object, target: type[T], default: T) -> T:
+    """Decode a persisted scalar; a missing or wrongly typed value takes ``default``."""
+    try:
+        return convert(raw, target, default=default)
+    except ReadError:
+        return default
+
+
 def _json_bool(raw: object, *, default: bool = False) -> bool:
     """Decode a persisted boolean; anything non-boolean takes ``default``."""
     return raw if isinstance(raw, bool) else default
@@ -1803,9 +1817,7 @@ def _append_lines(path: Path, lines: Sequence[str]) -> None:
         payload = prefix + "".join(line + "\n" for line in lines).encode("utf-8")
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
         try:
-            view = memoryview(payload)
-            while view:
-                view = view[os.write(fd, view) :]
+            write_all(fd, payload)
             os.fsync(fd)
         finally:
             os.close(fd)
@@ -1899,9 +1911,8 @@ def _absorb_record(
     elif kind == "context_splice":
         ref = _ref_from_json(rec.get("ref")) or next_synthetic_ref()
         splice = _splice_from_json(rec, ref)
-        if splice is not None:
-            tape.append(splice)
-            barrier_candidates.append((splice, line_num))
+        tape.append(splice)
+        barrier_candidates.append((splice, line_num))
     elif kind == "runtime_event":
         event = _runtime_event_from_json(rec)
         if event is not None:
@@ -1910,9 +1921,8 @@ def _absorb_record(
         # Legacy: convert to ContextSplice on read.
         ref = _ref_from_json(rec.get("ref")) or next_synthetic_ref()
         splice = _legacy_override_to_splice(rec, ref)
-        if splice is not None:
-            tape.append(splice)
-            barrier_candidates.append((splice, line_num))
+        tape.append(splice)
+        barrier_candidates.append((splice, line_num))
     elif kind == "update":
         # Legacy splice patch: apply to the latest matching
         # ``ReferrableTapeEvent.event`` in place; dropped silently
@@ -1949,7 +1959,6 @@ def _absorb_record(
 def _renumber_duplicate_refs(tape: list[TapeRecord]) -> list[TapeRecord]:
     """Give every record its own ref, relocating later claimants of one."""
     seen: set[TapeRef] = set()
-    kept: list[TapeRecord] = []
     moved: list[tuple[TapeRef, TapeRef, int]] = []
     # Above every mask, not just every record: a splice can claim ordinals
     # past the tape's end (a barrier from when the tape was longer, or a
@@ -1973,10 +1982,13 @@ def _renumber_duplicate_refs(tape: list[TapeRecord]) -> list[TapeRecord]:
     # Aliveness is read once, from the tape as loaded. Recomputing it per
     # relocation would let a decision depend on relocations already made.
     masked_positions = masked_refs_by_alive(tape, alive_splices(tape))
+    # Each kept record travels with its tape index: a relocated record is a new
+    # object, so looking its position up by identity found nothing.
+    kept_at: list[tuple[int, TapeRecord]] = []
     for index, record in enumerate(tape):
         if record.ref not in seen:
             seen.add(record.ref)
-            kept.append(record)
+            kept_at.append((index, record))
             continue
         if isinstance(record, ContextSplice) and record.ref in masked_positions:
             logger.warning("Dropping re-appended splice at %s.", record.ref)
@@ -1986,10 +1998,7 @@ def _renumber_duplicate_refs(tape: list[TapeRecord]) -> list[TapeRecord]:
         logger.warning("Duplicate tape ref %s relocated to %s.", record.ref, fresh)
         seen.add(fresh)
         moved.append((record.ref, fresh, index))
-        kept.append(dataclasses.replace(record, ref=fresh))
-    if not moved:
-        return kept
-    index_of = {id(record): index for index, record in enumerate(tape)}
+        kept_at.append((index, dataclasses.replace(record, ref=fresh)))
     return [
         # ``merge_mask_ranges``, not concatenation: the carried singleton can
         # fall inside a range the splice already holds, and ``ContextSplice``
@@ -1998,19 +2007,18 @@ def _renumber_duplicate_refs(tape: list[TapeRecord]) -> list[TapeRecord]:
         # made the whole session unloadable.
         dataclasses.replace(record, mask=merge_mask_ranges(record.mask + extra))
         if isinstance(record, ContextSplice)
-        and (extra := _mask_for_moved(record, moved, index_of))
+        and (extra := _mask_for_moved(record, index, moved))
         else record
-        for record in kept
+        for index, record in kept_at
     ]
 
 
 def _mask_for_moved(
     splice: ContextSplice,
+    splice_index: int,
     moved: Sequence[tuple[TapeRef, TapeRef, int]],
-    index_of: Mapping[int, int],
 ) -> tuple[MaskRange, ...]:
-    """Ranges extending ``splice``'s mask onto records it predates."""
-    splice_index = index_of.get(id(splice), -1)
+    """Ranges extending ``splice``'s mask onto records it was written after."""
     return tuple(
         MaskRange(session_id=fresh.session_id, lo=fresh.ordinal, hi=fresh.ordinal)
         for original, fresh, record_index in moved
@@ -2084,7 +2092,7 @@ def _apply_update_in_place(
     rec: Mapping[str, object],
 ) -> None:
     """Apply a legacy ``kind=update`` patch to the matching ``ReferrableTapeEvent``."""
-    target_id = convert(rec.get("id"), int, default=-1)
+    target_id = _read(rec.get("id"), int, -1)
     if target_id < 0:
         return
     for i, record in enumerate(tape):
@@ -2155,19 +2163,22 @@ def _repair_dangling_tape(tape: list[TapeRecord]) -> tuple[list[TapeRecord], boo
     ], True
 
 
-# The copy holds the same prompts, tool output, and secrets as the original, so it takes
-# the same owner-only mode. ``write_bytes`` creates under the umask, which on a default
-# ``022`` host published a full transcript at ``0644`` -- the forensic artifact leaking
-# what the live file protects.
+# The copy holds the same prompts, tool output, and secrets as the original, so it is
+# CREATED owner-only. ``write_bytes`` creates under the umask, which on a default ``022``
+# host published a full transcript at ``0644`` until a later chmod -- the forensic
+# artifact leaking what the live file protects.
 def _preserve_corrupt_session(session_file: Path) -> None:
     """Copy corrupt session bytes to a timestamped sibling for forensics."""
     backup = session_file.with_name(f"{session_file.name}.corrupt-{time.time_ns()}")
     try:
-        backup.write_bytes(session_file.read_bytes())
+        data = session_file.read_bytes()
+        fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            write_all(fd, data)
+        finally:
+            os.close(fd)
     except OSError:
         logger.exception("Could not preserve corrupt session file %s.", session_file)
-        return
-    restrict_path(backup, 0o600)
 
 
 def _decode_json_line(raw_line: str) -> tuple[object, bool]:

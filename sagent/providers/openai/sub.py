@@ -99,8 +99,7 @@ else:
 from sagent.catalog.openai import subscription, subscription_models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import MutableJSON, convert, parse
-from sagent.lib.userdirs import config_dir
+from sagent.lib.custom_json import MutableJSON, ReadError, convert, parse
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
     credential_file_lock,
@@ -145,7 +144,7 @@ def _default_credentials_path() -> Path:
     codex_home = os.environ.get("CODEX_HOME")
     if codex_home:
         return Path(codex_home).expanduser() / "auth.json"
-    return config_dir().parent / DEFAULT_CREDENTIALS_PATH
+    return Path.home() / DEFAULT_CREDENTIALS_PATH  # noqa: TID251 -- The Codex CLI reads this fixed vendor path (AGENTS.md rule 3); an XDG root must not relocate it.  # house-ignore[xdg-literal] -- The Codex CLI reads this fixed vendor path (AGENTS.md rule 3).
 
 
 class _CredentialFileError(ValueError):
@@ -199,36 +198,6 @@ class OpenAISubscription:
             lambda: None,
         )
         self._lock: PerLoop[asyncio.Lock] = PerLoop(asyncio.Lock)
-
-    @property
-    def _sdk(self) -> openai.AsyncOpenAI | None:
-        """The running loop's SDK client, if one has been opened."""
-        cached = self._authed.peek()
-        return cached[0] if cached else None
-
-    @_sdk.setter
-    def _sdk(self, value: openai.AsyncOpenAI | None) -> None:
-        """Install or clear this loop's SDK client, keeping its token paired."""
-        cached = self._authed.peek()
-        if value is None:
-            self._authed.clear()
-        else:
-            self._authed.set((value, cached[1] if cached else ""))
-
-    @property
-    def _sdk_token(self) -> str | None:
-        """The token this loop's cached client authenticates with."""
-        cached = self._authed.peek()
-        return cached[1] if cached else None
-
-    @_sdk_token.setter
-    def _sdk_token(self, value: str | None) -> None:
-        """Repoint the cached token, forcing a rotation on next use."""
-        cached = self._authed.peek()
-        if cached is not None and value is not None:
-            self._authed.set((cached[0], value))
-        else:
-            self._authed.clear()
 
     @classmethod
     def from_key(
@@ -308,6 +277,7 @@ class OpenAISubscription:
 
         Raises:
           RuntimeError: If the callback listener fails to start or token exchange fails.
+          AuthRefreshError: The issued access token carries no expiry.
 
         """
         out = output or sys.stdout
@@ -394,12 +364,7 @@ class OpenAISubscription:
             access_token=access_token,
             refresh_token=str(data["refresh_token"]),
             account_id=account_id,
-            # Anchor on the JWT ``exp`` claim, matching ``load`` and ``_refresh``.
-            # A local-clock ``time.time() + expires_in`` value would disagree with
-            # what a later ``load`` reads back from the same token, forcing a
-            # spurious disk-adopt/refresh cycle under clock skew. The issuer's
-            # ``exp`` is the single authoritative expiry source.
-            expires_at=_jwt_exp(access_token),
+            expires_at=_token_expiry(access_token, data),
         )
         id_token = data.get("id_token")
         if isinstance(id_token, str):
@@ -448,7 +413,7 @@ class OpenAISubscription:
 
     @property
     def expired(self) -> bool:
-        """True if the access token is within 5 min of expiry."""
+        """True if the access token is within ``refresh_buffer_sec`` of expiry."""
         return time.time() > self._expires_at - self._refresh_buffer_sec
 
     async def get_sdk(self) -> openai.AsyncOpenAI:
@@ -462,9 +427,10 @@ class OpenAISubscription:
         cached = self._authed.peek()
         if cached is not None and cached[1] == token:
             return cached[0]
+        # No refresh here: ``_ensure_valid`` is the one path that holds the
+        # cross-process credential lock, and a refresh outside it lets two
+        # processes spend one rotating refresh token.
         async with self._lock.get():
-            if self.expired:
-                await self._refresh()
             token = self._access_token
             cached = self._authed.peek()
             if cached is not None and cached[1] == token:
@@ -511,8 +477,8 @@ class OpenAISubscription:
     # already expired (its own refresh aged out, or clock skew): adopting it would 401
     # again next call.
     #
-    # ``load`` raises ``KeyError`` on a missing-field file and ``ValueError`` on
-    # malformed JSON; both mean "no usable disk creds", so both return False.
+    # ``load`` raises ``ValueError`` on malformed JSON or an incomplete record; it
+    # means "no usable disk creds", so it returns False.
     #
     # Disk I/O runs in a worker thread so the event loop is not blocked on a slow/NFS
     # read while the credential lock is held. Adopting a new token invalidates the
@@ -526,7 +492,7 @@ class OpenAISubscription:
                 account=self._account,
             )
             disk_at = creds["access_token"]
-        except (FileNotFoundError, ValueError, KeyError):
+        except (FileNotFoundError, ValueError):
             return False
         if disk_at == self._access_token:
             return False
@@ -540,11 +506,10 @@ class OpenAISubscription:
     # Idempotent. The caller must already hold ``self._lock``.
     async def _discard_sdk(self) -> None:
         """Drop and close the cached SDK so its pooled connections release."""
-        old = self._sdk
-        self._sdk = None
-        self._sdk_token = None
-        if old is not None:
-            await old.close()
+        cached = self._authed.peek()
+        self._authed.clear()
+        if cached is not None:
+            await cached[0].close()
 
     # Holds a cross-process file lock around the read-disk → maybe- POST → write-disk
     # sequence so concurrent processes can't both consume the same refresh_token and
@@ -580,7 +545,6 @@ class OpenAISubscription:
 
     async def _refresh(self) -> None:
         """Exchange the refresh token for a new access token."""
-        logger.debug("Refreshing OpenAI OAuth token.")
         async with httpx2.AsyncClient() as http:
             r = await http.post(
                 _TOKEN_URL,
@@ -604,28 +568,26 @@ class OpenAISubscription:
                 )
             r.raise_for_status()
             data: MutableJSON = cast(MutableJSON, r.json())
-        self._access_token = str(data["access_token"])
-        self._refresh_token = str(data["refresh_token"])
-        # Anchor expiry on the JWT ``exp`` claim, matching ``load``. Deriving it
-        # from ``time.time() + expires_in`` (the local clock) would disagree
-        # with the value a later ``load`` reads back, so under clock skew the
-        # in-memory and on-disk deadlines drift. The JWT issuer's ``exp`` is the
-        # single authoritative source.
-        self._expires_at = _jwt_exp(self._access_token)
+        access_token = str(data["access_token"])
+        creds = OpenAISubscription.Credentials(
+            access_token=access_token,
+            refresh_token=str(data["refresh_token"]),
+            account_id=self._account_id,
+            expires_at=_token_expiry(access_token, data),
+        )
+        self._access_token = creds["access_token"]
+        self._refresh_token = creds["refresh_token"]
+        self._expires_at = creds["expires_at"]
         try:
-            creds = OpenAISubscription.load(account=self._account)
+            creds["account_id"] = (
+                await asyncio.to_thread(OpenAISubscription.load, account=self._account)
+            )["account_id"]
         except FileNotFoundError:
-            creds = OpenAISubscription.Credentials(
-                access_token="",
-                refresh_token="",
-                account_id=self._account_id,
-                expires_at=0.0,
-            )
-        except (ValueError, KeyError):
-            # Unusable creds file: malformed JSON (``ValueError``) or valid JSON
-            # missing required fields like ``{"tokens": {}}`` (``KeyError`` from
-            # ``load``'s indexing). ``save`` below overwrites it with the
-            # freshly-refreshed tokens; log first so the corruption is not
+            pass
+        except ValueError:
+            # Unusable creds file: malformed JSON or a record missing required
+            # fields like ``{"tokens": {}}``. ``save`` below overwrites it with
+            # the freshly-refreshed tokens; log first so the corruption is not
             # silently erased. Matches the swallow set in
             # ``_adopt_fresher_disk_creds``.
             logger.warning(
@@ -633,16 +595,9 @@ class OpenAISubscription:
                 "refreshed tokens",
                 credentials_path(_default_credentials_path(), self._account),
             )
-            creds = OpenAISubscription.Credentials(
-                access_token="",
-                refresh_token="",
-                account_id=self._account_id,
-                expires_at=0.0,
-            )
-        creds["access_token"] = self._access_token
-        creds["refresh_token"] = self._refresh_token
-        creds["expires_at"] = self._expires_at
-        OpenAISubscription.save(creds, account=self._account)
+        # ``save`` merges into the file's existing ``tokens``, so fields this
+        # record omits (``id_token``) survive the rewrite.
+        await asyncio.to_thread(OpenAISubscription.save, creds, account=self._account)
 
     # -- Credential I/O ------------------------------------------------
 
@@ -784,29 +739,57 @@ class _OpenAISubModel(_OpenAIResponsesModel):
         return await super().stream(request, publish)
 
 
+def _token_expiry(access_token: str, grant: MutableJSON) -> float:
+    """Return the token's JWT ``exp``, else the grant's ``expires_in`` from now."""
+    # ``exp`` wins because ``load`` re-derives expiry from the token alone; a
+    # local-clock deadline would disagree with it under clock skew.
+    expires_at = _jwt_exp(access_token)
+    if expires_at > 0:
+        return expires_at
+    expires_in = convert(grant.get("expires_in"), float, default=0.0)
+    if expires_in <= 0:
+        # A zero deadline reads as always expired: every request would refresh
+        # and rotate the refresh token.
+        raise AuthRefreshError(
+            "OpenAI issued an access token with no expiry. Run /login to "
+            "re-authenticate.",
+        )
+    return time.time() + expires_in
+
+
+# Every JWT read below is lenient: a token the issuer shaped unexpectedly reads as
+# "no claim", never as an exception, so ``load`` keeps its ``ValueError`` contract
+# and the refresh paths stay reachable.
 def _jwt_payload(token: str) -> dict[str, object]:
     """Decode JWT payload without verification."""
     parts = token.split(".")
     if len(parts) < 2:
         return {}
     raw = parts[1]
-    raw += "=" * (4 - len(raw) % 4)
+    raw += "=" * (-len(raw) % 4)
     try:
         return parse(base64.urlsafe_b64decode(raw), dict[str, object])
-    except (json.JSONDecodeError, ValueError, UnicodeDecodeError):
+    except (ValueError, ReadError):
         return {}
 
 
 def _jwt_exp(token: str) -> float:
     """Extract ``exp`` claim from a JWT without verification."""
-    return convert(_jwt_payload(token).get("exp"), float, default=0.0)
+    try:
+        return convert(_jwt_payload(token).get("exp"), float, default=0.0)
+    except ReadError:
+        return 0.0
 
 
 def _jwt_claim(token: str, namespace: str, key: str) -> str:
-    """Extract a nested claim from a JWT namespace object."""
-    return str(
-        convert(_jwt_payload(token).get(namespace), dict[str, object], default={}).get(
-            key,
-            "",
-        ),
-    )
+    """Extract a nested string claim from a JWT namespace object."""
+    try:
+        claims = convert(
+            _jwt_payload(token).get(namespace),
+            dict[str, object],
+            default={},
+        )
+    except ReadError:
+        return ""
+    claim = claims.get(key)
+    return claim if isinstance(claim, str) else ""

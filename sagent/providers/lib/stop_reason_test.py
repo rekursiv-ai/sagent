@@ -24,7 +24,7 @@ def test_benign_stop_reasons_membership() -> None:
 def test_truncated_and_failed_sets_are_disjoint_from_benign() -> None:
     assert {"max_tokens", "model_context_window_exceeded"} == TRUNCATED_STOP_REASONS
     assert "model_refusal" in FAILED_STOP_REASONS
-    assert {"model_malformed_tool_call"} == RETRYABLE_STOP_REASONS
+    assert {"model_malformed_tool_call", "model_unknown"} == RETRYABLE_STOP_REASONS
     others = TRUNCATED_STOP_REASONS | FAILED_STOP_REASONS | RETRYABLE_STOP_REASONS
     assert not others & BENIGN_STOP_REASONS
 

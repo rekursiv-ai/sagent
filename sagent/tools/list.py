@@ -9,9 +9,8 @@ from typing import TYPE_CHECKING, Annotated, Final
 import asyncio
 import time
 
-from sagent.agent.state import get_tool_state
 from sagent.lib.custom_json import convert, json_freeze
-from sagent.tools.core import load_tool_description
+from sagent.tools.core import load_tool_description, resolve_tool_path
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
     bounding_sink,
@@ -201,8 +200,7 @@ class List:
                 content=f"max_results must be >= 1; got {max_results}.",
                 is_error=True,
             )
-        if not Path(path).is_absolute():
-            path = str(Path(get_tool_state().bash_cwd) / path)
+        path = resolve_tool_path(path)
         p = Path(path)
         if not p.exists():
             return ToolResult(call_id="", content=f"Not found: {path}", is_error=True)

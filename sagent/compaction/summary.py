@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import dataclasses
 import logging
+import math
 import re
 
 from sagent.agent.retry import send_with_retry
@@ -108,13 +109,16 @@ class SummaryCompactor:
           asking the same model to critique the summary and fill gaps;
           use the improved output. Doubles compaction token cost and
           wall-clock; opt in when summary fidelity matters more.
-      retry_tool_result_cap_chars: On ``PromptTooLongError`` retry, oversized
-          ``ToolResult`` bodies are truncated to this many characters before
-          whole rounds are dropped. Default ``8000``.
+      retry_tool_result_cap_chars: Every ``ToolResult`` body sent to the
+          summarizer is truncated to this many characters. Each
+          ``PromptTooLongError`` retry halves the cap while that still
+          shortens some result, then drops whole rounds. ``0`` disables
+          the cap. Default ``8000``.
       model: Optional model override; otherwise uses the caller's model.
 
     Raises:
-      ValueError: ``max_attempts`` is less than 1.
+      ValueError: ``max_attempts`` is less than 1, or ``utilization_trigger``
+          or ``compression`` is NaN or out of range.
 
     """
 
@@ -136,18 +140,22 @@ class SummaryCompactor:
     ) -> None:
         if max_attempts < 1:
             raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
-        if utilization_trigger <= 0.0 or utilization_trigger > 1.0:
+        if (
+            math.isnan(utilization_trigger)
+            or utilization_trigger <= 0.0
+            or utilization_trigger > 1.0
+        ):
             raise ValueError(
                 f"utilization_trigger must be in (0.0, 1.0], got {utilization_trigger}",
             )
-        if compression < 0.0:
+        if math.isnan(compression) or compression < 0.0:
             raise ValueError(f"compression must be >= 0.0, got {compression}")
         # Static type is ``Literal["from", "up_to"]`` but callers can pass
         # an arbitrary string at runtime (untyped CLI/config plumbing);
         # the explicit check turns silent ``up_to`` fall-through into a
         # diagnosable failure.
         if direction not in ("from", "up_to"):
-            raise ValueError(  # pyright: ignore[reportUnreachable] -- The compatibility branch remains reachable for provider-specific response types.
+            raise ValueError(  # pyright: ignore[reportUnreachable] -- pyright trusts the Literal annotation, but untyped config plumbing can pass any string at runtime.
                 f"direction must be 'from' or 'up_to', got {direction!r}",
             )
         self._prompt = prompt
@@ -301,8 +309,7 @@ class SummaryCompactor:
         plus the preserved tail (or prefix); the runtime appends it.
 
         Args:
-          tape: Append-only session tape (unused; reserved for future
-              fine-grained suppression strategies).
+          tape: Append-only session tape; the barrier mask covers all of it.
           context: Resolved provider-facing context to summarize.
           model: Fallback model when the compactor has none of its own.
           mint_ref: Factory minting fresh ``TapeRef`` values.
@@ -391,74 +398,11 @@ class SummaryCompactor:
         )
 
         groups = _group_history_by_round(to_summarize)
-        summary_text: str | None = None
-        entries: list[ModelContextEvent] = []
-        for attempt in range(self._max_attempts):
-            entries = _request_entries(
-                groups,
-                tool_result_cap_chars=self._retry_tool_result_cap_chars,
-            )
-            request = ModelRequest(
-                messages=[*entries, UserMessage(text=prompt)],
-                system=read_asset(recipe_dict("compactor")["system"]).strip(),
-                tools=None,
-            )
-            try:
-                response = await send_with_retry(
-                    compact_model,
-                    request,
-                    max_attempts=self._max_attempts,
-                    persistent_retry=True,
-                    publish_recoverable=lambda text: logger.info(
-                        "compactor recoverable: %s",
-                        text,
-                    ),
-                )
-                summary_text = response.message.text
-                break
-            except ModelTerminationError as exc:
-                return _build_fallback_splice(
-                    f"summary stopped: {exc.stop_reason}",
-                    direction=direction,
-                    to_keep=to_keep,
-                    mint_ref=mint_ref,
-                    mask=mask,
-                    token_before=token_before,
-                    model=compact_model,
-                )
-            except PromptTooLongError as exc:
-                if _shrink_groups_for_compaction(
-                    groups,
-                    cap_chars=self._retry_tool_result_cap_chars,
-                ):
-                    logger.warning(
-                        "Prompt too long (attempt %d/%d), shrinking tool results.",
-                        attempt + 1,
-                        self._max_attempts,
-                    )
-                    continue
-                drop = _groups_to_drop(groups, exc, compact_model)
-                logger.warning(
-                    "Prompt too long (attempt %d/%d), dropping %d groups.",
-                    attempt + 1,
-                    self._max_attempts,
-                    drop,
-                )
-                groups = groups[drop:]
-                if not groups:
-                    return _build_fallback_splice(
-                        "all groups dropped on overflow retry",
-                        direction=direction,
-                        to_keep=to_keep,
-                        mint_ref=mint_ref,
-                        mask=mask,
-                        token_before=token_before,
-                        model=compact_model,
-                    )
-
-        if summary_text is None:
+        if not groups:
+            # Summarizing nothing would ask the model to invent a history
+            # and label it ``summary``.
             return _build_fallback_splice(
-                f"summary failed after {self._max_attempts} attempts",
+                "nothing to summarize",
                 direction=direction,
                 to_keep=to_keep,
                 mint_ref=mint_ref,
@@ -466,6 +410,28 @@ class SummaryCompactor:
                 token_before=token_before,
                 model=compact_model,
             )
+        try:
+            response, groups, failure = await self._send_shrinking(
+                compact_model,
+                groups,
+                instruction=prompt,
+                persistent_retry=True,
+                label="Compactor prompt",
+            )
+        except ModelTerminationError as exc:
+            failure = f"summary stopped: {exc.stop_reason}"
+            response = None
+        if response is None:
+            return _build_fallback_splice(
+                failure,
+                direction=direction,
+                to_keep=to_keep,
+                mint_ref=mint_ref,
+                mask=mask,
+                token_before=token_before,
+                model=compact_model,
+            )
+        summary_text = response.message.text
         if not summary_text.strip():
             return _build_fallback_splice(
                 "compactor returned an empty body",
@@ -480,11 +446,7 @@ class SummaryCompactor:
         raw = summary_text
         if self._verify_summary:
             try:
-                raw = await self._verify(
-                    compact_model,
-                    entries,
-                    raw,
-                )
+                raw = await self._verify(compact_model, groups, raw)
             except Exception as exc:  # noqa: BLE001 -- Summary verification is best-effort because provider output may be malformed.
                 logger.warning("summary verification failed; using original: %s", exc)
         summary = _format_summary(raw)
@@ -509,6 +471,7 @@ class SummaryCompactor:
                 summary,
                 recent_preserved=bool(to_keep),
                 proactive=self._proactive,
+                direction=direction,
             ),
         )
         if direction == "from":
@@ -526,6 +489,69 @@ class SummaryCompactor:
             token_after=token_after,
         )
 
+    # The single owner of tool-result truncation: every request caps results at
+    # ``cap``, and each overflow retry either halves ``cap`` (when that changes the
+    # request) or drops leading groups. ``groups`` is never mutated, so a halved cap
+    # always re-truncates from the original bodies.
+    async def _send_shrinking(
+        self,
+        model: Model,
+        groups: list[list[ModelContextEvent]],
+        *,
+        instruction: str,
+        persistent_retry: bool,
+        label: str,
+    ) -> tuple[ModelResponse | None, list[list[ModelContextEvent]], str]:
+        """Send ``groups`` plus ``instruction``, shrinking on prompt overflow."""
+        cap = self._retry_tool_result_cap_chars
+        for attempt in range(self._max_attempts):
+            entries = _request_entries(groups, tool_result_cap_chars=cap)
+            request = ModelRequest(
+                messages=[*entries, UserMessage(text=instruction)],
+                system=read_asset(recipe_dict("compactor")["system"]).strip(),
+                tools=None,
+            )
+            try:
+                response = await send_with_retry(
+                    model,
+                    request,
+                    max_attempts=self._max_attempts,
+                    persistent_retry=persistent_retry,
+                    publish_recoverable=lambda text: logger.info(
+                        "%s recoverable: %s",
+                        label,
+                        text,
+                    ),
+                )
+            except PromptTooLongError as exc:
+                if any(
+                    isinstance(entry, ToolResult) and _exceeds_cap(entry, cap // 2)
+                    for entry in _request_entries(groups)
+                ):
+                    cap //= 2
+                    logger.warning(
+                        "%s too long (attempt %d/%d), capping tool results at %d.",
+                        label,
+                        attempt + 1,
+                        self._max_attempts,
+                        cap,
+                    )
+                    continue
+                drop = _groups_to_drop(groups, exc, model)
+                logger.warning(
+                    "%s too long (attempt %d/%d), dropping %d groups.",
+                    label,
+                    attempt + 1,
+                    self._max_attempts,
+                    drop,
+                )
+                groups = groups[drop:]
+                if not groups:
+                    return None, groups, "all groups dropped on overflow retry"
+            else:
+                return response, groups, ""
+        return None, groups, f"summary failed after {self._max_attempts} attempts"
+
     # Re-runs the model with the original entries plus the produced summary, asking it
     # to identify any missing technical details, file paths, tool results, or user
     # constraints and emit an improved summary. Returns the improved text when non-
@@ -533,7 +559,7 @@ class SummaryCompactor:
     async def _verify(
         self,
         compact_model: Model,
-        original_entries: list[ModelContextEvent],
+        groups: list[list[ModelContextEvent]],
         raw_summary: str,
     ) -> str:
         """Self-verification probe: ask the model to critique its own summary."""
@@ -548,57 +574,19 @@ class SummaryCompactor:
             " accurate, emit exactly the token IDENTICAL on a single"
             " line and nothing else."
         )
-        groups = _group_history_by_round(original_entries)
-        response: ModelResponse | None = None
-        for attempt in range(self._max_attempts):
-            request = ModelRequest(
-                messages=[
-                    *_request_entries(
-                        groups,
-                        tool_result_cap_chars=self._retry_tool_result_cap_chars,
-                    ),
-                    UserMessage(text=probe),
-                ],
-                system=read_asset(recipe_dict("compactor")["system"]).strip(),
-                tools=None,
-            )
-            try:
-                # ``persistent_retry=False`` (unlike the main summarization
-                # pass, which uses True): verification is an optional refinement
-                # that degrades to the unverified-but-valid summary on failure,
-                # so it should not block for minutes waiting out a 429.
-                response = await send_with_retry(
-                    compact_model,
-                    request,
-                    max_attempts=self._max_attempts,
-                    persistent_retry=False,
-                    publish_recoverable=lambda text: logger.info(
-                        "verifier recoverable: %s",
-                        text,
-                    ),
-                )
-                break
-            except PromptTooLongError as exc:
-                if _shrink_groups_for_compaction(
-                    groups,
-                    cap_chars=self._retry_tool_result_cap_chars,
-                ):
-                    logger.warning(
-                        "Verifier prompt too long (attempt %d/%d), shrinking tool results.",
-                        attempt + 1,
-                        self._max_attempts,
-                    )
-                    continue
-                drop = _groups_to_drop(groups, exc, compact_model)
-                logger.warning(
-                    "Verifier prompt too long (attempt %d/%d), dropping %d groups.",
-                    attempt + 1,
-                    self._max_attempts,
-                    drop,
-                )
-                groups = groups[drop:]
+        # ``persistent_retry=False`` (unlike the main summarization pass):
+        # verification is an optional refinement that degrades to the
+        # unverified-but-valid summary on failure, so it should not block
+        # for minutes waiting out a 429.
+        response, _, failure = await self._send_shrinking(
+            compact_model,
+            groups,
+            instruction=probe,
+            persistent_retry=False,
+            label="Verifier prompt",
+        )
         if response is None:
-            raise PromptTooLongError("summary verification prompt too long")
+            raise PromptTooLongError(f"summary verification: {failure}")
         improved = response.message.text.strip()
         if not improved or improved.upper() == "IDENTICAL":
             return raw_summary
@@ -618,6 +606,8 @@ def build_continuation(
     summary: str,
     recent_preserved: bool = False,
     proactive: bool = False,
+    *,
+    direction: Literal["from", "up_to"] = "from",
 ) -> str:
     """Build the post-compaction continuation message from asset templates.
 
@@ -625,16 +615,19 @@ def build_continuation(
       summary: Compacted summary text to embed.
       recent_preserved: True when a recent tail was kept verbatim.
       proactive: When True, the resume directive runs autonomously.
+      direction: ``"from"`` keeps the recent tail after this message;
+          ``"up_to"`` keeps the earlier prefix before it.
 
     Returns:
       message: Continuation user-message text ready to splice into history.
 
     """
-    recent = (
-        "\n\nThe most recent messages appear below in their original form."
-        if recent_preserved
-        else ""
-    )
+    if not recent_preserved:
+        recent = ""
+    elif direction == "from":
+        recent = "\n\nThe most recent messages appear below in their original form."
+    else:
+        recent = "\n\nThe earlier messages appear above in their original form."
     if proactive:
         resume = (
             "\n\nContinue working autonomously. Do not ask the user"
@@ -649,13 +642,13 @@ def build_continuation(
             ' ("I\'ll continue", "picking up where we left off",'
             " etc.). Proceed as though no interruption occurred."
         )
-    return (
-        read_asset(recipe_dict("compactor")["continuation"])
-        .replace("{{summary}}", summary)
-        .replace("{{recent}}", recent)
-        .replace("{{resume}}", resume)
-        .strip()
-    )
+    # One pass: a summary that quotes ``{{resume}}`` must stay literal.
+    slots = {"summary": summary, "recent": recent, "resume": resume}
+    return re.sub(
+        r"\{\{(summary|recent|resume)\}\}",
+        lambda m: slots[m.group(1)],
+        read_asset(recipe_dict("compactor")["continuation"]),
+    ).strip()
 
 
 # A new round starts at each ``UserMessage`` (and at the first entry if it isn't a
@@ -860,23 +853,27 @@ def _request_entries(
     entries = [entry for group in groups for entry in group]
     entries = _elide_skill_results(entries)
     entries = _drop_orphan_tool_results(entries)
-    if tool_result_cap_chars > 0:
-        entries = [
-            dataclasses.replace(
-                entry,
-                content=f"{_COMPACTOR_TOOL_RESULT_NOTICE}\n{entry.content[:tool_result_cap_chars]}",
-            )
-            if (
-                isinstance(entry, ToolResult)
-                and len(entry.content) > tool_result_cap_chars
-                and not entry.content.startswith(_COMPACTOR_TOOL_RESULT_NOTICE)
-            )
-            else entry
-            for entry in entries
-        ]
+    entries = [
+        dataclasses.replace(
+            entry,
+            content=f"{_COMPACTOR_TOOL_RESULT_NOTICE}\n{entry.content[:tool_result_cap_chars]}",
+        )
+        if isinstance(entry, ToolResult) and _exceeds_cap(entry, tool_result_cap_chars)
+        else entry
+        for entry in entries
+    ]
     if entries and not isinstance(entries[0], (AgentSendMessage, UserMessage)):
         return [UserMessage(text="[earlier messages elided]"), *entries]
     return entries
+
+
+def _exceeds_cap(entry: ToolResult, cap_chars: int) -> bool:
+    """Whether ``entry`` is not yet capped and longer than ``cap_chars``."""
+    return (
+        cap_chars > 0
+        and len(entry.content) > cap_chars
+        and not entry.content.startswith(_COMPACTOR_TOOL_RESULT_NOTICE)
+    )
 
 
 # Skill bodies are derived from ``(name, cwd)`` via the live catalog; summarizing them
@@ -909,37 +906,6 @@ def _elide_skill_results(
         else:
             out.append(entry)
     return out
-
-
-def _shrink_groups_for_compaction(
-    groups: list[list[ModelContextEvent]],
-    *,
-    cap_chars: int = 8_000,
-) -> bool:
-    """Shrink oversized tool results in-place before dropping whole groups."""
-    changed = False
-    for group_idx, group in enumerate(groups):
-        shrunk: list[ModelContextEvent] = []
-        for entry in group:
-            if (
-                isinstance(entry, ToolResult)
-                and len(entry.content) > cap_chars
-                and not entry.content.startswith(_COMPACTOR_TOOL_RESULT_NOTICE)
-            ):
-                shrunk.append(
-                    dataclasses.replace(
-                        entry,
-                        content=(
-                            f"{_COMPACTOR_TOOL_RESULT_NOTICE}\n"
-                            f"{entry.content[:cap_chars]}"
-                        ),
-                    ),
-                )
-                changed = True
-            else:
-                shrunk.append(entry)
-        groups[group_idx] = shrunk
-    return changed
 
 
 # A pending ``AssistantMessage`` with ``tool_calls`` waits for every matching
@@ -1042,6 +1008,9 @@ def _format_summary(raw: str) -> str | None:
             "compactor output missing <summary> tag (%d chars); falling back",
             len(text),
         )
+        return None
+    if not m.group(1).strip():
+        logger.warning("compactor output has an empty <summary> block; falling back")
         return None
     text = f"Summary:\n{m.group(1).strip()}"
     text = re.sub(r"\n\n+", "\n\n", text)

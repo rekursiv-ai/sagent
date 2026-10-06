@@ -9,7 +9,7 @@ channels, ``im:history`` for DMs), and install to your workspace.
 Supported operations:
 
 - ``send`` -- post a message to a channel or DM (threads supported)
-- ``list_channels`` -- enumerate channels the bot is in
+- ``list_channels`` -- enumerate the workspace's public channels
 - ``list_messages`` -- recent messages from a channel
 - ``read_thread`` -- all replies under a parent message ts
 - ``list_users`` -- enumerate workspace users
@@ -21,12 +21,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final, Protocol
 
 import asyncio
+import json
 import logging
 
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
-from sagent.lib.custom_json import JSON, convert, json_freeze, parse
+from sagent.lib.custom_json import JSON, ReadError, convert, json_freeze, parse
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
@@ -220,8 +221,13 @@ class Slack:
         )
         if isinstance(body, ToolResult):
             return body
-        sender = self._username or "bot"
-        logger.info("[%s->%s] %s", sender, channel, text)
+        # The body stays out of INFO logs: it can carry anything the agent read.
+        logger.info(
+            "[%s->%s] sent %d chars",
+            self._username or "bot",
+            channel,
+            len(text),
+        )
         return f"Sent. ts={body.get('ts')} channel={body.get('channel')}"
 
     async def _list_channels(self, limit: int) -> str | ToolResult:
@@ -306,12 +312,13 @@ class Slack:
         if isinstance(body, ToolResult):
             return body
         members = convert(body.get("members"), list[dict[str, object]], default=[])
-        if not members:
-            return "(no users)"
-        return "\n".join(
-            f"{m.get('id')}  @{m.get('name')}  ({m.get('real_name', '')})"
-            for m in members
-            if not m.get("deleted")
+        return (
+            "\n".join(
+                f"{m.get('id')}  @{m.get('name')}  ({m.get('real_name', '')})"
+                for m in members
+                if not m.get("deleted")
+            )
+            or "(no users)"
         )
 
     async def create_channel(self, channel_name: str) -> str | ToolResult:
@@ -422,7 +429,14 @@ async def _slack_call(
             content=(f"Slack HTTP {e.status}: {e.body.decode(errors='replace')}"),
             is_error=True,
         )
-    body = parse(raw[0], dict[str, object])
+    try:
+        body = parse(raw[0], dict[str, object])
+    except (json.JSONDecodeError, ReadError) as error:
+        return ToolResult(
+            call_id="",
+            content=f"Slack API {method} returned a non-JSON-object body: {error}",
+            is_error=True,
+        )
     if not body.get("ok"):
         return ToolResult(
             call_id="",

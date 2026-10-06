@@ -22,11 +22,10 @@ import dataclasses
 import hashlib
 import logging
 import os
-import re
 import tempfile
-import uuid
 
 from sagent.agent.state import approx_tokens
+from sagent.lib.atomic_file import write_all
 
 
 if TYPE_CHECKING:
@@ -36,10 +35,6 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 PERSISTED_TAG: Final = "<persisted-output>"
-
-_FALLBACK_STORAGE_DIR = (
-    Path(tempfile.gettempdir()) / "sagent_results" / f"{os.getpid()}-{uuid.uuid4().hex}"
-)
 
 
 def post_process_result(
@@ -63,7 +58,7 @@ def post_process_result(
       result: Tool result to post-process.
       tool_name: Originating tool name (gates exempt-from-persist).
       session_dir: Directory where ``tool-results/<id>.txt`` lives;
-          ``None`` falls back to the OS temp dir.
+          ``None`` falls back to a private per-process temp dir.
       persist_tokens: Per-result token threshold. ``0`` disables
           persistence; results above it are off-loaded to disk and
           replaced with a preview.
@@ -117,7 +112,8 @@ def stub_cost_tokens(content: str, *, preview_chars: int = 2_000) -> int:
     return approx_tokens(
         f"{PERSISTED_TAG}\nOutput too large "
         f"({_format_size(len(content.encode('utf-8')))}). "
-        f"Full output saved to: {_FALLBACK_STORAGE_DIR}/{'x' * 40}.txt\n\n"
+        f"Full output saved to: {tempfile.gettempdir()}/sagent_results-{'x' * 8}/"
+        f"{'x' * 40}.txt\n\n"
         f"Preview (first {preview_chars:,} chars):\n"
         f"{content[:preview_chars]}\n...\n</persisted-output>",
     )
@@ -131,14 +127,13 @@ def _persist_oversized(
     preview_chars: int = 2_000,
 ) -> str | None:
     """Write ``content`` to disk and return a preview replacement."""
-    base = (session_dir / "tool-results") if session_dir else _FALLBACK_STORAGE_DIR
     try:
-        base.mkdir(parents=True, exist_ok=True)
+        base = _storage_dir(session_dir)
     except OSError:
-        logger.exception("could not create tool-results dir at %s", base)
+        logger.exception("could not create a tool-results dir for %s", session_dir)
         return None
     filepath = base / f"{_safe_stem(call_id)}.txt"
-    encoded = _strip_line_numbers(content).encode("utf-8")
+    encoded = content.encode("utf-8")
     try:
         filepath = _write_unique(filepath, encoded)
     except OSError:
@@ -161,6 +156,26 @@ def _persist_oversized(
     )
 
 
+# A predictable shared parent (``/tmp/sagent_results``) is created under the umask and
+# can be pre-created or symlinked by another user; when another user owns it, ``mkdir``
+# fails and off-load silently stays inline. ``mkdtemp`` makes a private, unguessable
+# directory, created only when a session-less result first needs it.
+def _storage_dir(session_dir: Path | None) -> Path:
+    """Return the directory persisted results go to, creating it if needed."""
+    if session_dir is not None:
+        base = session_dir / "tool-results"
+        base.mkdir(parents=True, exist_ok=True)
+        return base
+    global _fallback_dir  # noqa: PLW0603 -- One private fallback per process, made lazily.
+    # Re-made when gone: a tmp cleaner may remove it mid-process.
+    if _fallback_dir is None or not _fallback_dir.is_dir():
+        _fallback_dir = Path(tempfile.mkdtemp(prefix="sagent_results-"))
+    return _fallback_dir
+
+
+_fallback_dir: Path | None = None
+
+
 _MAX_STEM: Final = 96
 """Longest call-id-derived filename stem kept verbatim.
 
@@ -176,47 +191,17 @@ disabled by the id's length. Well under the limit, leaving room for the
 # a readable head AND a hash of the whole value.
 def _safe_stem(call_id: str) -> str:
     """Return a filesystem-safe, length-bounded stem for ``call_id``."""
-    safe = "".join(c for c in call_id if c.isalnum() or c in {"_", "-"})
+    # ASCII only: ``isalnum`` admits ``界``, three bytes each, so a 96-character
+    # stem could be 288 bytes and still hit the byte-counted name limit.
+    safe = "".join(
+        c for c in call_id if (c.isascii() and c.isalnum()) or c in {"_", "-"}
+    )
     digest = hashlib.sha256(call_id.encode()).hexdigest()[:16]
     if not safe:
         return f"id_{digest}"
     if len(safe) <= _MAX_STEM:
         return safe
     return f"{safe[: _MAX_STEM - len(digest) - 1]}-{digest}"
-
-
-_NUMBERED_LINE = re.compile(r"^ *(\d+)\t")
-
-
-# The stub tells the model to re-read the persisted path, so that read must be a fixed
-# point. ``Read`` renders a gutter, so the content arriving here is already numbered;
-# writing it verbatim means the next read numbers the numbers, growing the file ~2,555
-# chars per round on a 12,545-char source and re-spilling forever. The promised recovery
-# could never complete.
-#
-# Applied only when EVERY non-empty line carries a gutter whose numbers run
-# consecutively. A Bash dump or TSV payload with a stray ``1\\t`` prefix fails that test
-# and is written byte-for-byte, since stripping it would corrupt the data the file
-# exists to preserve.
-def _strip_line_numbers(content: str) -> str:
-    r"""Return ``content`` without a ``Read``-style ``<n>\t`` line-number gutter."""
-    lines = content.splitlines(keepends=True)
-    prev: int | None = None
-    for line in lines:
-        if not line.strip():
-            continue
-        match = _NUMBERED_LINE.match(line)
-        if match is None:
-            return content
-        current = int(match.group(1))
-        if prev is not None and current != prev + 1:
-            return content
-        prev = current
-    if prev is None:
-        return content
-    return "".join(
-        _NUMBERED_LINE.sub("", line) if line.strip() else line for line in lines
-    )
 
 
 def _write_unique(filepath: Path, content: bytes) -> Path:
@@ -232,20 +217,10 @@ def _write_unique(filepath: Path, content: bytes) -> Path:
             content,
         )
     try:
-        _write_all(fd, content)
+        write_all(fd, content)
     finally:
         os.close(fd)
     return filepath
-
-
-def _write_all(fd: int, data: bytes) -> None:
-    """Write every byte of ``data`` to ``fd``, looping over short writes."""
-    view = memoryview(data)
-    while view:
-        written = os.write(fd, view)
-        if written == 0:
-            raise OSError("Failed to write bytes to tool-result file.")
-        view = view[written:]
 
 
 def _format_size(n: int) -> str:

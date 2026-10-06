@@ -147,6 +147,9 @@ class Google:
             settings=settings,
         )
 
+    async def close_sdk(self) -> None:
+        """Do nothing: each model owns and closes its own client."""
+
 
 class GeminiProvider(Protocol):
     """What ``_GeminiModel`` reads off the provider that built it."""
@@ -231,12 +234,7 @@ class _GeminiModel(ModelDefaults):
     @override
     def approx_image_tokens(self, data: bytes) -> int:
         """Local estimate via Gemini's tile formula (``tiles * 258``)."""
-        # Tile size undocumented; using OpenAI's 512x512 as proxy.
-        dims = image.get_dimensions(data)
-        if dims is None:
-            return 0
-        tiles = math.ceil(dims[0] / 512) * math.ceil(dims[1] / 512)
-        return tiles * 258
+        return gemini_image_tokens(data)
 
     @override
     async def actual_request_tokens(self, request: ModelRequest) -> int:
@@ -247,21 +245,14 @@ class _GeminiModel(ModelDefaults):
         client = await self._get_client()
         r = await client.post(
             url,
-            json=body,
+            json={"generateContentRequest": {"model": f"models/{model_id}", **body}},
             headers={
                 "Content-Type": "application/json",
                 "x-goog-api-key": self._provider.api_key,
             },
             timeout=60.0,
         )
-        if 400 <= r.status_code < 500:
-            # Byte limit first, uniform with the streaming path: a 413 must
-            # route to byte-overflow recovery, not be mis-read as token
-            # overflow because its body happens to say "too large".
-            raise_if_request_too_large(r.status_code, r.text)
-            msg = r.text.lower()
-            if "too large" in msg or "too long" in msg or "exceeds the maximum" in msg:
-                raise PromptTooLongError(r.text)
+        raise_for_gemini_status(r.status_code, r.text)
         r.raise_for_status()
         return convert(cast(MutableJSON, r.json()).get("totalTokens"), int, default=0)
 
@@ -300,7 +291,8 @@ class _GeminiModel(ModelDefaults):
 
         Raises:
           PromptTooLongError: Server reports context overflow.
-          ValueError: Server returns ``400`` for non-overflow reasons.
+          RequestTooLargeError: Server reports the request-byte ceiling.
+          httpx2.HTTPStatusError: Any other error status.
 
         """
         model_id = self.capability.wire_model_id or self.capability.model_id
@@ -318,19 +310,56 @@ class _GeminiModel(ModelDefaults):
             timeout=httpx2.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
         ) as r:
             if 400 <= r.status_code < 500:
-                err_body = (await r.aread()).decode(errors="replace")
-                raise_if_request_too_large(r.status_code, err_body)
-                msg = err_body.lower()
-                if (
-                    "too large" in msg
-                    or "too long" in msg
-                    or "exceeds the maximum" in msg
-                ):
-                    raise PromptTooLongError(err_body)
-                if r.status_code == 400:
-                    raise ValueError(f"Google API 400: {err_body}")
+                raise_for_gemini_status(
+                    r.status_code,
+                    (await r.aread()).decode(errors="replace"),
+                )
             r.raise_for_status()
             return await _consume_gemini_stream(r, publish=publish, model=self)
+
+
+def gemini_image_tokens(data: bytes) -> int:
+    """Estimate Gemini image tokens: 258 per 768x768 tile.
+
+    Args:
+      data: Encoded image bytes.
+
+    Returns:
+      tokens: Estimated input tokens; 0 when the dimensions are unreadable.
+
+    References:
+      https://ai.google.dev/gemini-api/docs/tokens
+        Images <=384px count as one tile; larger ones tile at 768x768.
+
+    """
+    dims = image.get_dimensions(data)
+    if dims is None:
+        return 0
+    return math.ceil(dims[0] / 768) * math.ceil(dims[1] / 768) * 258
+
+
+def raise_for_gemini_status(status: int, body: str) -> None:
+    """Classify a Gemini 4xx body: byte ceiling first, then token overflow.
+
+    Shared by every Gemini HTTP transport so the classification lives once,
+    on the cross-vendor phrase set rather than a bare "too long" match that
+    also fires on tool-schema validation errors. Non-overflow statuses fall
+    through to the caller's ``raise_for_status``.
+
+    Args:
+      status: HTTP status of the failing response.
+      body: Decoded response body.
+
+    Raises:
+      RequestTooLargeError: The body or status names the request-byte ceiling.
+      PromptTooLongError: The body names a token context overflow.
+
+    """
+    if status < 400 or status >= 500:
+        return
+    raise_if_request_too_large(status, body)
+    if is_context_overflow_text(body):
+        raise PromptTooLongError(body)
 
 
 def _strip_additional_properties(schema: MutableJSONValue) -> MutableJSONValue:

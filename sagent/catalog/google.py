@@ -255,7 +255,7 @@ def api() -> ModelCapability:
         thinking=ThinkingCapability(
             effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
             budget=frozenset({"none", "auto", "fixed"}),
-            output=frozenset({"none", "text", "redacted"}),
+            output=frozenset({"none", "text"}),
         ),
     )
 
@@ -277,7 +277,7 @@ def cli() -> ModelCapability:
         thinking=ThinkingCapability(
             effort=frozenset({"none"}),
             budget=frozenset({"none", "auto", "fixed"}),
-            output=frozenset({"none", "text", "redacted"}),
+            output=frozenset({"none", "text"}),
         ),
         manage_context_server_side=frozenset({True}),
         account_auth=True,
@@ -301,7 +301,7 @@ def subscription() -> ModelCapability:
         thinking=ThinkingCapability(
             effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
             budget=frozenset({"none", "auto", "fixed"}),
-            output=frozenset({"none", "text", "redacted"}),
+            output=frozenset({"none", "text"}),
         ),
         account_auth=True,
     )

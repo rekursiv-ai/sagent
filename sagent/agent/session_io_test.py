@@ -1577,6 +1577,35 @@ def test_a_duplicate_written_after_a_barrier_survives_it(tmp_path: Path) -> None
     assert texts == ["barrier", "later-real"], f"post-barrier record lost; {texts}"
 
 
+def test_a_relocated_splice_still_masks_a_relocated_record_it_followed(
+    tmp_path: Path,
+) -> None:
+    """The relocated splice's position was looked up by ``id()`` of a copy: -1."""
+    sid = "s"
+    a0 = TapeRef(session_id=sid, ordinal=0)
+    a1 = TapeRef(session_id=sid, ordinal=1)
+    append_session(
+        tmp_path / "session.jsonl",
+        meta=SessionMeta(session_id=sid).serialize(),
+        tape_delta=[
+            ReferrableTapeEvent(ref=a0, event=UserMessage(text="a")),
+            ReferrableTapeEvent(ref=a0, event=UserMessage(text="dup")),
+            ReferrableTapeEvent(ref=a1, event=UserMessage(text="b")),
+            ContextSplice.replay(
+                ref=a1,
+                mask=(MaskRange(session_id=sid, lo=0, hi=0),),
+                insert_after=None,
+                payload=(UserMessage(text="summary"),),
+                strategy="barrier",
+            ),
+        ],
+    )
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert "dup" not in texts, f"relocated splice lost its mask; got {texts}"
+
+
 def test_a_corrupt_session_backup_is_not_world_readable(tmp_path: Path) -> None:
     """REV6 PS2-005: the forensic copy holds everything the original does.
 
@@ -1598,6 +1627,43 @@ def test_a_corrupt_session_backup_is_not_world_readable(tmp_path: Path) -> None:
         _ = os.umask(original)
 
     assert not mode & 0o077, f"corrupt-session backup is 0o{mode:o}"
+
+
+def _no_restrict(path: Path, mode: int) -> None:
+    del path, mode
+
+
+def _no_progress(fd: int, data: bytes) -> int:
+    del fd, data
+    return 0
+
+
+def test_a_corrupt_session_backup_is_created_private(tmp_path: Path) -> None:
+    """Born ``0o600``, not narrowed after: the window was the leak."""
+    original = os.umask(0o022)
+    try:
+        session_file = tmp_path / "session.jsonl"
+        _ = session_file.write_text("{not json\n", encoding="utf-8")
+        with patch.object(session_io, "restrict_path", _no_restrict):
+            session_io._preserve_corrupt_session(session_file)
+        backup = next(tmp_path.glob("session.jsonl.corrupt-*"))
+        mode = stat.S_IMODE(backup.stat().st_mode)
+    finally:
+        _ = os.umask(original)
+    assert mode == 0o600, f"corrupt-session backup was created 0o{mode:o}"
+
+
+def test_an_append_that_cannot_progress_raises_instead_of_spinning(
+    tmp_path: Path,
+) -> None:
+    with (
+        patch.object(os, "write", _no_progress),
+        pytest.raises(OSError, match="no progress"),
+    ):
+        append_session(
+            tmp_path / "session.jsonl",
+            meta=SessionMeta(session_id="s").serialize(),
+        )
 
 
 def test_a_caller_cannot_retype_a_record_via_its_payload(tmp_path: Path) -> None:
@@ -2432,6 +2498,62 @@ def test_session_meta_round_trip() -> None:
     assert back.status == "busy"
 
 
+def test_a_mistyped_meta_field_takes_its_default() -> None:
+    meta = SessionMeta.deserialize(
+        {"compact_count": "3", "spend": {"request": "x"}, "own_spend": [1]},
+    )
+    assert meta.compact_count == 0
+    assert meta.spend.request == 0.0
+
+
+def test_a_mistyped_tool_state_field_does_not_abort_the_load(tmp_path: Path) -> None:
+    _write_jsonl(
+        tmp_path / "session.jsonl",
+        {"kind": "meta", "session_id": "s", "compact_count": "3"},
+        {
+            "kind": "tool_state",
+            "read_cache": [{"path": "/p", "offset": "a", "mtime": "b"}],
+        },
+    )
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    assert loaded[2].read_cache["/p"].offset == 0
+
+
+def test_a_mistyped_splice_field_keeps_the_splice(tmp_path: Path) -> None:
+    sid = "s"
+    _write_jsonl(
+        tmp_path / "session.jsonl",
+        {"kind": "meta", "session_id": sid},
+        {
+            "kind": "history",
+            "ref": {"session_id": sid, "ordinal": 0},
+            "type": "user",
+            "text": "old",
+            "timestamp": "noon",
+        },
+        {
+            "kind": "context_splice",
+            "ref": {"session_id": sid, "ordinal": 1},
+            "mask": [
+                [{"session_id": sid, "ordinal": 0}, {"session_id": sid, "ordinal": 0}],
+            ],
+            "insert_after": None,
+            "payload": [{"type": "user", "text": "new"}],
+            "token_before": "many",
+        },
+    )
+    loaded = load_session(tmp_path)
+    assert loaded is not None
+    texts = [getattr(m, "text", "") for m in resolve_context(loaded[1]).messages]
+    assert texts == ["new"]
+
+
+def test_meta_legacy_record_restores_own_spend_from_spend() -> None:
+    meta = SessionMeta.deserialize({"spend": {"request": 0.25}})
+    assert meta.own_spend.request == 0.25
+
+
 _NO_ARGS: Mapping[str, object] = {}
 """A tool call with no arguments; named so its value type is not re-stated."""
 
@@ -2775,11 +2897,11 @@ def test_preserve_corrupt_session_swallows_oserror(
     session_file = tmp_path / "session.jsonl"
     session_file.write_text("garbage", encoding="utf-8")
 
-    def _boom(self: Path, data: object) -> int:
-        del self, data
+    def _boom(fd: int, data: object) -> int:
+        del fd, data
         raise OSError("disk full")
 
-    with caplog.at_level("ERROR"), patch.object(Path, "write_bytes", _boom):
+    with caplog.at_level("ERROR"), patch.object(os, "write", _boom):
         session_io._preserve_corrupt_session(session_file)
 
     assert "Could not preserve corrupt session file" in caplog.text
@@ -2862,10 +2984,36 @@ def test_restore_model_success_path() -> None:
     ):
         result = restore_model(meta)
     assert result is not None
-    _, spec = result
+    _, spec, _ = result
     assert spec.provider == "Fake"
     assert spec.model_id == "fake-m"
     assert spec.account == "me"
+
+
+def test_restore_model_hands_back_a_closeable_provider() -> None:
+    """The caller owns what ``restore_model`` built, so it must receive it."""
+
+    class _FakeModel:
+        tagged_model_id: str = "fake-m"
+
+    class _ClosingProvider:
+        def model(self, model_id: str) -> _FakeModel:
+            del model_id
+            return _FakeModel()
+
+        async def close_sdk(self) -> None:
+            return
+
+    built = _ClosingProvider()
+    with patch(
+        "sagent.providers.providers.build_provider",
+        return_value=built,
+    ):
+        result = restore_model(
+            SessionMeta(provider="Fake", auth="env", model_id="fake-m"),
+        )
+    assert result is not None
+    assert result[2] is built
 
 
 def test_restore_model_missing_named_account_falls_back_to_default() -> None:
@@ -2893,7 +3041,7 @@ def test_restore_model_missing_named_account_falls_back_to_default() -> None:
         )
 
     assert result is not None
-    _, spec = result
+    _, spec, _ = result
     assert spec.account is None
     assert build.call_args_list == [
         call("OpenAISubscription", "credentials", account="work"),

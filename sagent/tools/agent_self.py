@@ -13,11 +13,14 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextvars import ContextVar
+from functools import partial
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol, cast
 
+import asyncio
 import dataclasses
 
+from sagent.agent.agent import ModelChange
 from sagent.agent.state import (
     AgentLike,
     current_agent_var,
@@ -31,8 +34,6 @@ from sagent.catalog.table import (
 from sagent.lib.custom_json import JSON, json_freeze
 from sagent.providers.providers import (
     PROVIDER_NAMES,
-    build_provider_with_account_fallback,
-    default_auth_for_provider,
     infer_provider,
     provider_class,
 )
@@ -41,10 +42,9 @@ from sagent.tools.core import (
     load_tool_description,
     provider_not_allowed_result,
 )
-from sagent.types.capability import ThinkingEffort
+from sagent.types.capability import ModelSettings, ThinkingEffort
 from sagent.types.cost import ServiceTier
-from sagent.types.model import Model, ModelRecipe
-from sagent.types.providers import ModelResolver
+from sagent.types.providers import ModelResolver, Provider
 from sagent.types.runtime import (
     Clear,
     Compact,
@@ -54,10 +54,12 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from sagent.agent.cost_tracker import CostTracker
     from sagent.agent.state import ToolState
+    from sagent.types.model import Model, ModelRecipe
 
 
 class AgentSelfAgent(AgentLike, Protocol):
@@ -74,23 +76,36 @@ class AgentSelfAgent(AgentLike, Protocol):
     session_id: str
     tool_state: ToolState
 
-    def swap_model(self, model: Model, *, spec: ModelRecipe | None = None) -> None: ...  # noqa: D102 -- Protocol member declaration.
+    def prepare_model_change(  # noqa: D102 -- Protocol member declaration.
+        self,
+        *,
+        provider: str | None = None,
+        auth: str | None = None,
+        model_id: str | None = None,
+        account: str | None = None,
+    ) -> ModelChange: ...
+
+    def commit_model_change(  # noqa: D102 -- Protocol member declaration.
+        self,
+        change: ModelChange,
+        *,
+        then: Callable[[], None] | None = None,
+    ) -> None: ...
 
 
 CACHE_TTL_SEC: Mapping[str, float] = MappingProxyType({"5m": 300.0, "1h": 3600.0})
 """The two prompt-cache lifetimes the wire spells, in seconds."""
 
+_discard_tasks: set[asyncio.Task[None]] = set()
 
+
+# Per-call provider allow-list, set by ``AgentSelf.run`` so the module-level catalog
+# helpers (``_allowed_providers``, ``_model_catalog_lines``) can filter without
+# threading the list through every call.
 _allow_providers_var: ContextVar[tuple[str, ...]] = ContextVar(
     "_allow_providers",
     default=(),
 )
-
-
-"""Per-call provider allow-list. Set by :meth:`AgentSelf.run` so that
-module-level catalog helpers (``_provider_catalog_lines``,
-``_model_catalog_lines``) can filter their output without threading the
-list through every helper."""
 
 
 class AgentSelf:
@@ -254,28 +269,14 @@ class AgentSelf:
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _ModelPlan:
-    """Pending model swap (model + spec + display label)."""
-
-    model: Model
-    """New rich provider model to install."""
-
-    spec: ModelRecipe
-    """Recipe describing how the model was built (for re-resume)."""
-
-    label: str
-    """Human-readable change label (``old → new``)."""
-
-
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class _PatchPlan:
     """Validated AgentSelf patch ready to commit."""
 
     status: str | None = None
     """New status string (rendered in the status pane), or ``None`` to keep."""
 
-    model: _ModelPlan | None = None
-    """Pending model swap, or ``None`` to keep."""
+    model: ModelChange | None = None
+    """Prepared model swap, or ``None`` to keep."""
 
     model_options: Mapping[str, object] = dataclasses.field(
         default_factory=dict[str, object],
@@ -434,6 +435,30 @@ def plan_model_options(
     return planned
 
 
+# A tool builds a provider before it knows the request will be honored; when it is
+# refused, the model and provider belong to no agent and nothing else would close them.
+# The task is held until done so it is not garbage-collected mid-close.
+def discard_unadopted(model: Model | None, provider: Provider) -> None:
+    """Schedule teardown of a model and provider no agent adopted.
+
+    Shared with :class:`AgentSpawn`, which builds a child's provider before
+    validating the rest of the spawn.
+
+    Args:
+      model: The model built from ``provider``, or ``None`` if building failed.
+      provider: The provider to ``close_sdk``.
+
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # Outside a loop no client has been opened yet, so nothing leaks.
+        return
+    task = loop.create_task(_close_built(model, provider))
+    _discard_tasks.add(task)
+    task.add_done_callback(_discard_tasks.discard)
+
+
 # Every axis is total, so a non-empty set proves nothing: an axis is selectable only
 # when it offers something BESIDES its unset value.
 def _supported_model_options(model: Model) -> dict[str, str]:
@@ -476,8 +501,10 @@ def _plan_limits(
     )
     if isinstance(max_response_tokens, ToolResult):
         return max_response_tokens
+    # A ceiling of ``0`` is "unknown", as ``Agent.max_request_tokens``'s setter reads
+    # it: there is no cap to exceed.
     if max_request_tokens is not None:
-        if max_request_tokens > model.limits.max_request_tokens:
+        if 0 < model.limits.max_request_tokens < max_request_tokens:
             return ToolResult(
                 call_id="",
                 content=(
@@ -490,7 +517,7 @@ def _plan_limits(
             )
         limits["max_request_tokens"] = max_request_tokens
     if max_response_tokens is not None:
-        if max_response_tokens > model.limits.max_response_tokens:
+        if 0 < model.limits.max_response_tokens < max_response_tokens:
             return ToolResult(
                 call_id="",
                 content=(
@@ -790,24 +817,27 @@ def _build_patch_plan(
     err = _validate_patch(d)
     if err is not None:
         return err
+    status = _plan_status(d)
+    if isinstance(status, ToolResult):
+        return status
     model_plan = _plan_model(agent, d)
     if isinstance(model_plan, ToolResult):
         return model_plan
     target_model = model_plan.model if model_plan is not None else agent.model
-    status = _plan_status(d)
-    if isinstance(status, ToolResult):
-        return status
-    options_or_err = plan_model_options(target_model, d)
-    if isinstance(options_or_err, ToolResult):
-        return options_or_err
-    options = options_or_err
-    has_explicit_limits = "max_request_tokens" in d or "max_response_tokens" in d
-    if has_explicit_limits:
+    options = plan_model_options(target_model, d)
+    limits: dict[str, int] | ToolResult = {}
+    if not isinstance(options, ToolResult) and (
+        "max_request_tokens" in d or "max_response_tokens" in d
+    ):
         limits = _plan_limits(agent, target_model, d)
-        if isinstance(limits, ToolResult):
-            return limits
-    else:
-        limits = {}
+    refused = isinstance(options, ToolResult) or isinstance(limits, ToolResult)
+    if refused and model_plan is not None:
+        # The built model was never adopted, so nothing else would close it.
+        model_plan.discard()
+    if isinstance(options, ToolResult):
+        return options
+    if isinstance(limits, ToolResult):
+        return limits
     context = cast(str | None, d.get("context"))
     return _PatchPlan(
         status=status,
@@ -820,57 +850,83 @@ def _build_patch_plan(
     )
 
 
+# Without a model change everything applies now. With one, the swap is queued like
+# ``/model`` and the settings ride it, applying to the NEW model once the swap lands;
+# the returned parts describe that queued state.
 def _commit_patch_plan(agent: AgentSelfAgent, plan: _PatchPlan) -> list[str]:
     """Apply a fully validated AgentSelf patch plan."""
     parts: list[str] = []
     if plan.status is not None:
         agent.status = plan.status
         parts.append(f"status={plan.status}")
-    if plan.model is not None:
+    if plan.model is None:
+        _apply_settings(agent, plan)
+        parts.extend(_describe_settings(plan))
+    else:
+        parts.append(f"model={plan.model.label} (queued)")
         # ``swap_model`` carries the selections across and drops the ones the
-        # new model rejects, so report what it DID rather than re-deriving
-        # the rule here: two copies of it disagreed, and this one answered
-        # "supported" for every model because each axis is total and so is
-        # never empty.
-        names = ("thinking_effort", "thinking_budget", "service_tier")
-        before = [getattr(agent.model.settings, name) for name in names]
-        agent.swap_model(plan.model.model, spec=plan.model.spec)
-        parts.append(f"model={plan.model.label}")
-        for name, was in zip(names, before, strict=True):
-            now = getattr(agent.model.settings, name)
+        # new model rejects. Report that drop from the same ``adopt`` rule,
+        # previewed on the model in hand: each axis is total, so a capability
+        # check would call every knob supported.
+        incoming = plan.model.model.settings
+        preview = ModelSettings.narrowest(
+            incoming.capability,
+            context=incoming.context,
+        )
+        preview.adopt(agent.model.settings)
+        for name in ("thinking_effort", "thinking_budget", "service_tier"):
+            was, now = getattr(agent.model.settings, name), getattr(preview, name)
             if was != now:
                 parts.append(f"{name}={now} (unsupported)")
-    settings = agent.model.settings
-    options = plan.model_options
-    if "thinking" in options:
-        thinking = cast(bool, options["thinking"])
-        _ = apply_thinking_command(
-            "adaptive" if thinking else "off",
-            settings,
-            show=False,
+        parts.extend(_describe_settings(plan))
+        agent.commit_model_change(
+            plan.model,
+            then=partial(_apply_settings, agent, plan),
         )
-        parts.append(f"thinking={'on' if thinking else 'off'}")
-    if "effort" in options:
-        effort = cast(ThinkingEffort, options["effort"])
-        settings.thinking_effort = effort
-        parts.append(f"effort={effort}")
-    if "cache_ttl_sec" in options:
-        cache_ttl_sec = cast(float, options["cache_ttl_sec"])
-        settings.cache_ttl_sec = cache_ttl_sec
-        parts.append(f"cache_ttl={cache_ttl_sec:g}s")
-    if "service_tier" in options:
-        service_tier = cast(ServiceTier, options["service_tier"])
-        settings.service_tier = service_tier
-        parts.append(f"service_tier={service_tier}")
-    if plan.max_request_tokens is not None:
-        agent.max_request_tokens = plan.max_request_tokens
-        parts.append(f"max_request_tokens={agent.max_request_tokens:,}")
-    if plan.max_response_tokens is not None:
-        agent.max_response_tokens = plan.max_response_tokens
-        parts.append(f"max_response_tokens={agent.max_response_tokens:,}")
     if plan.context is not None:
         _commit_context(agent, plan.context, plan.context_prompt)
         parts.append(f"context={plan.context}")
+    return parts
+
+
+def _apply_settings(agent: AgentSelfAgent, plan: _PatchPlan) -> None:
+    """Apply the plan's options and limits to the agent's current model."""
+    settings = agent.model.settings
+    options = plan.model_options
+    if "thinking" in options:
+        _ = apply_thinking_command(
+            "adaptive" if options["thinking"] else "off",
+            settings,
+            show=False,
+        )
+    if "effort" in options:
+        settings.thinking_effort = cast(ThinkingEffort, options["effort"])
+    if "cache_ttl_sec" in options:
+        settings.cache_ttl_sec = cast(float, options["cache_ttl_sec"])
+    if "service_tier" in options:
+        settings.service_tier = cast(ServiceTier, options["service_tier"])
+    if plan.max_request_tokens is not None:
+        agent.max_request_tokens = plan.max_request_tokens
+    if plan.max_response_tokens is not None:
+        agent.max_response_tokens = plan.max_response_tokens
+
+
+def _describe_settings(plan: _PatchPlan) -> list[str]:
+    """Render the plan's options and limits as ``name=value`` parts."""
+    options = plan.model_options
+    parts: list[str] = []
+    if "thinking" in options:
+        parts.append(f"thinking={'on' if options['thinking'] else 'off'}")
+    if "effort" in options:
+        parts.append(f"effort={options['effort']}")
+    if "cache_ttl_sec" in options:
+        parts.append(f"cache_ttl={cast(float, options['cache_ttl_sec']):g}s")
+    if "service_tier" in options:
+        parts.append(f"service_tier={options['service_tier']}")
+    if plan.max_request_tokens is not None:
+        parts.append(f"max_request_tokens={plan.max_request_tokens:,}")
+    if plan.max_response_tokens is not None:
+        parts.append(f"max_response_tokens={plan.max_response_tokens:,}")
     return parts
 
 
@@ -939,10 +995,13 @@ def _plan_status(d: Mapping[str, object]) -> str | ToolResult | None:
     return status
 
 
+# Resolution and building are ``Agent.prepare_model_change``'s; this adds only what
+# the tool surface owns: the provider allow-list, inferring a provider from a bare
+# model id, and the empty-account error.
 def _plan_model(
     agent: AgentSelfAgent,
     d: Mapping[str, object],
-) -> _ModelPlan | ToolResult | None:
+) -> ModelChange | ToolResult | None:
     """Build an optional model/provider/account update without applying it."""
     if not any(k in d for k in ("model_id", "provider", "auth", "account")):
         return None
@@ -954,66 +1013,42 @@ def _plan_model(
             is_error=True,
         )
     model_id = str(d.get("model_id", "")).strip() or None
-    prov_name = str(d.get("provider", "")).strip() or spec.provider
-    if "auth" in d:
-        auth = str(d["auth"]).strip()
-    elif prov_name == spec.provider:
-        auth = spec.auth
-    else:
-        auth = default_auth_for_provider(prov_name)
-    if "account" in d:
-        account = str(d["account"]).strip()
-        if not account:
-            return ToolResult(
-                call_id="",
-                content="account cannot be empty.",
-                is_error=True,
-            )
-    else:
-        account = spec.account
-    # An auth/account-only swap (no model_id, same provider) keeps the
-    # current model -- matches REPL ``/model --auth sub`` semantics so
-    # the tool surface and slash command behave the same way.
-    if not model_id and prov_name == spec.provider:
-        model_id = spec.model_id
-    if model_id and prov_name == spec.provider:
-        inferred = infer_provider(model_id, prov_name)
+    provider = str(d.get("provider", "")).strip() or None
+    auth = str(d["auth"]).strip() if "auth" in d else None
+    account = str(d["account"]).strip() if "account" in d else None
+    if account == "":
+        return ToolResult(call_id="", content="account cannot be empty.", is_error=True)
+    # Infer only when the caller named no provider: an explicit provider, even
+    # the current one, is a choice inference must not override.
+    if model_id and provider is None:
+        inferred = infer_provider(model_id, spec.provider)
         if inferred is not None:
-            prov_name, inferred_auth = inferred
-            if "auth" not in d:
-                auth = inferred_auth
+            provider, inferred_auth = inferred
+            auth = auth if auth is not None else inferred_auth
     allow = _allowed_providers()
-    if prov_name != spec.provider and prov_name not in allow:
-        return provider_not_allowed_result(prov_name, allow, spec.provider)
+    if provider not in (None, spec.provider) and provider not in allow:
+        return provider_not_allowed_result(provider, allow, spec.provider)
     try:
-        prov, account = build_provider_with_account_fallback(
-            prov_name,
-            auth,
+        return agent.prepare_model_change(
+            provider=provider,
+            auth=auth,
+            model_id=model_id,
             account=account,
-            fallback_to_default="account" not in d and prov_name != spec.provider,
         )
-        new_model = prov.model(model_id)
     except (AttributeError, FileNotFoundError, RuntimeError, ValueError) as exc:
         return ToolResult(
             call_id="",
-            content=f"Failed to build model {model_id!r}: {exc}",
+            content=f"Failed to build model {model_id or spec.model_id!r}: {exc}",
             is_error=True,
         )
-    old_id = agent.model.tagged_model_id
-    label = f"{old_id} → {new_model.tagged_model_id}"
-    if prov_name != spec.provider:
-        label = f"{spec.provider}/{old_id} → {prov_name}/{new_model.tagged_model_id}"
-    return _ModelPlan(
-        model=new_model,
-        spec=dataclasses.replace(
-            spec,
-            provider=prov_name,
-            auth=auth,
-            model_id=new_model.tagged_model_id,
-            account=account,
-        ),
-        label=label,
-    )
+
+
+async def _close_built(model: Model | None, provider: Provider) -> None:
+    try:
+        if model is not None:
+            await model.close()
+    finally:
+        await provider.close_sdk()
 
 
 def _allowed_providers() -> tuple[str, ...]:

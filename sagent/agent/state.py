@@ -23,11 +23,12 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Final, NamedTuple, Protocol, runtime_checkable
 
 import contextvars
 import dataclasses
 import difflib
+import hashlib
 import itertools
 import logging
 
@@ -41,13 +42,21 @@ if TYPE_CHECKING:
     from sagent.tools.lib.bash import (
         BashParseCache,  # noqa: TC004 -- Eager import cycles through ``tools/__init__``; the field is never resolved via ``get_type_hints``.
     )
-    from sagent.types.capability import ThinkingEffort
-    from sagent.types.cost import ServiceTier, TokenCount
+    from sagent.types.cost import TokenCost, TokenCount
     from sagent.types.model import Model, ModelRecipe
     from sagent.types.settings import AgentSettings
     from sagent.types.tools import Tool
 
 logger = logging.getLogger(__name__)
+
+
+MAX_CACHED_TEXT_CHARS: Final = 1_000_000
+"""Largest read whose text ``ToolState`` keeps for change diffs."""
+
+
+def _digest(content: str) -> str:
+    """Return a content digest for change detection."""
+    return hashlib.sha256(content.encode("utf-8", "surrogatepass")).hexdigest()
 
 
 class ReadCacheEntry(NamedTuple):
@@ -106,6 +115,12 @@ class ToolState:
     _content_cache: dict[str, str] = dataclasses.field(default_factory=dict, repr=False)
     """Resolved-path → content captured at last read; powers change diffs."""
 
+    _content_digest: dict[str, str] = dataclasses.field(
+        default_factory=dict,
+        repr=False,
+    )
+    """Resolved-path → digest of content too large to keep as text."""
+
     def __post_init__(self) -> None:
         """Set bash_cwd if not provided."""
         if not self.bash_cwd:
@@ -130,6 +145,7 @@ class ToolState:
         self.read_cache.clear()
         self._read_order.clear()
         self._content_cache.clear()
+        self._content_digest.clear()
         self.invoked_skills.clear()
         self.invoked_rules.clear()
 
@@ -171,14 +187,10 @@ class ToolState:
             except OSError:
                 mtime = 0.0
         self.read_cache[resolved] = ReadCacheEntry(offset, limit, last_lines, mtime)
-        if content is not None:
-            self._content_cache[resolved] = content
-        else:
-            # No content to cache (binary/image read, or a fallback re-read after
-            # an OSError). Drop any prior text belief so ``check_stale`` falls back
-            # to mtime-only rather than comparing disk against a now-stale snapshot
-            # from an earlier text read of the same path.
-            self._content_cache.pop(resolved, None)
+        # ``None`` (binary/image read, or a fallback re-read after an OSError)
+        # drops any prior belief so ``check_stale`` falls back to mtime-only
+        # rather than comparing disk against a snapshot from an earlier read.
+        self._remember_content(resolved, content)
 
     def mark_written(self, path: str) -> None:
         """Re-stamp after a successful write.
@@ -202,9 +214,10 @@ class ToolState:
             mtime = 0.0
         self.read_cache[resolved] = ReadCacheEntry(0, 0, 0, mtime)
         try:
-            self._content_cache[resolved] = Path(path).read_text(encoding="utf-8")
+            content = Path(path).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
-            self._content_cache.pop(resolved, None)
+            content = None
+        self._remember_content(resolved, content)
 
     def check_unchanged(
         self,
@@ -213,7 +226,12 @@ class ToolState:
         limit: int,
         last_lines: int = 0,
     ) -> bool:
-        """Return True if file unchanged since last read.
+        """Return True if an identical earlier read is still the model's to reuse.
+
+        The answer licenses an "unchanged since last read" stub, which is
+        only as good as the earlier result it points at. A server that may
+        clear old tool results (Anthropic's ``clear_tool_uses``) can drop
+        that result, so under one this is always False.
 
         Args:
           path: File path to check.
@@ -222,9 +240,13 @@ class ToolState:
           last_lines: EOF-anchored line count to compare.
 
         Returns:
-          unchanged: True if mtime and read parameters match the cache.
+          unchanged: True if mtime and read parameters match the cache and
+              no server may have cleared the earlier result.
 
         """
+        agent = current_agent_var.get(None)
+        if isinstance(agent, ResultClearing) and agent.results_may_be_cleared:
+            return False
         resolved = str(Path(path).resolve())
         cached = self.read_cache.get(resolved)
         if cached is None:
@@ -268,14 +290,13 @@ class ToolState:
             return False
         if current_mtime == prev_mtime:
             return False
-        cached_content = self._content_cache.get(resolved)
-        if cached_content is None:
+        if resolved not in self._content_cache and resolved not in self._content_digest:
             return True
         try:
             current_content = Path(path).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return True
-        if current_content != cached_content:
+        if not self._matches_content(resolved, current_content):
             return True
         prev_offset, prev_limit, prev_last_lines, _ = cached
         self.read_cache[resolved] = ReadCacheEntry(
@@ -312,30 +333,58 @@ class ToolState:
                 continue
             if current_mtime == prev_mtime:
                 continue
-            old = self._content_cache.get(resolved, "")
             try:
                 new = Path(orig_path).read_text(encoding="utf-8")
             except (OSError, UnicodeDecodeError):
                 continue
-            diff = "".join(
-                difflib.unified_diff(
-                    old.splitlines(keepends=True),
-                    new.splitlines(keepends=True),
-                    fromfile=orig_path,
-                    tofile=orig_path,
-                    n=3,
-                ),
-            )
-            if diff:
-                changes[orig_path] = diff
+            if resolved in self._content_digest:
+                # Too large to keep the old text, so no diff: say only that it
+                # changed, which is what the reader needs to reread it.
+                if not self._matches_content(resolved, new):
+                    changes[orig_path] = f"{orig_path} changed on disk; Read it again."
+            else:
+                diff = "".join(
+                    difflib.unified_diff(
+                        self._content_cache.get(resolved, "").splitlines(
+                            keepends=True,
+                        ),
+                        new.splitlines(keepends=True),
+                        fromfile=orig_path,
+                        tofile=orig_path,
+                        n=3,
+                    ),
+                )
+                if diff:
+                    changes[orig_path] = diff
             self.read_cache[resolved] = ReadCacheEntry(
                 prev_offset,
                 prev_limit,
                 prev_last_lines,
                 current_mtime,
             )
-            self._content_cache[resolved] = new
+            self._remember_content(resolved, new)
         return changes
+
+    # A text copy of every read file was held for the whole session; past
+    # ``MAX_CACHED_TEXT_CHARS`` only a digest is kept, enough to tell a real
+    # change from an mtime-only bump.
+    def _remember_content(self, resolved: str, content: str | None) -> None:
+        """Record ``content`` as the latest belief about ``resolved``."""
+        self._content_cache.pop(resolved, None)
+        self._content_digest.pop(resolved, None)
+        if content is None:
+            return
+        if len(content) > MAX_CACHED_TEXT_CHARS:
+            self._content_digest[resolved] = _digest(content)
+        else:
+            self._content_cache[resolved] = content
+
+    def _matches_content(self, resolved: str, content: str) -> bool:
+        """Whether ``content`` equals the remembered belief about ``resolved``."""
+        digest = self._content_digest.get(resolved)
+        if digest is not None:
+            return digest == _digest(content)
+        return self._content_cache.get(resolved) == content
 
     def has_been_read(self, path: str) -> bool:
         """Check if a file has been read in this session.
@@ -604,6 +653,16 @@ class AgentLike(Protocol):
         ...
 
 
+@runtime_checkable
+class ResultClearing(Protocol):
+    """An agent whose provider may drop old tool results from its context."""
+
+    @property
+    def results_may_be_cleared(self) -> bool:
+        """Whether the server may clear tool results the model already saw."""
+        ...
+
+
 class _ActivityLike(Protocol):
     elapsed_seconds: float
 
@@ -616,19 +675,10 @@ class PersistableAgent(Protocol):
     """Read-only agent surface required by session persistence."""
 
     @property
-    def account(self) -> str | None: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
     def activity(self) -> _ActivityLike: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
-    def auth(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
     def base_system_spec(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
-    def cache_ttl_sec(self) -> float: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
     def compaction_state(self) -> _CompactionStateLike: ...  # noqa: D102 -- Protocol member declaration.
@@ -637,22 +687,10 @@ class PersistableAgent(Protocol):
     def cost_tracker(self) -> CostTracker: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
-    def effort(self) -> ThinkingEffort: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
     def frozen_system(self) -> bool: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
-    def label(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
     def max_budget_usd(self) -> float | None: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
-    def max_request_tokens(self) -> int: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
-    def max_response_tokens(self) -> int: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
     def max_tool_call_rounds(self) -> int | None: ...  # noqa: D102 -- Protocol member declaration.
@@ -661,34 +699,22 @@ class PersistableAgent(Protocol):
     def model(self) -> Model: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
-    def model_id(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
     def model_recipe(self) -> ModelRecipe | None: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
     def name(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
-    def notify_on_asleep(self) -> bool: ...  # noqa: D102 -- Protocol member declaration.
+    def num_tool_call_rounds(self) -> int: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
-    def num_tool_call_rounds(self) -> int: ...  # noqa: D102 -- Protocol member declaration.
+    def own_spend(self) -> TokenCost: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
     def persistent_retry(self) -> bool: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
-    def provider(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
-    def run_id(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
     def runtime(self) -> AgentRuntime: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
-    def service_tier(self) -> ServiceTier: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
     def settings(self) -> AgentSettings: ...  # noqa: D102 -- Protocol member declaration.
@@ -700,22 +726,7 @@ class PersistableAgent(Protocol):
     def session_id(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
-    def show_thinking(self) -> bool: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
-    def state(self) -> ToolState: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
     def status(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
-    def system(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
-    def thinking_budget(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
-    def thinking_output(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
     def tool_state(self) -> ToolState: ...  # noqa: D102 -- Protocol member declaration.

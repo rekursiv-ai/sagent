@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, ClassVar, Final, cast
 
 import argparse
 import asyncio
@@ -24,6 +24,7 @@ from sagent.agent.session_io import (
     PersistentAgentRecord,
     SessionMeta,
     append_session,
+    load_persistent_agents,
     unpersisted_session_error,
 )
 from sagent.agent.state import agent_registry
@@ -56,10 +57,12 @@ from sagent.bin.cli import (
     parse_agent_args,
     resolve_tools,
 )
+from sagent.catalog.table import UnknownModelError
 from sagent.lib.custom_json import ReadError
 from sagent.providers import PROVIDER_NAMES
 from sagent.sessions import SessionInfo, project_dir
 from sagent.testing import FakeAgent, MockModelCaps
+from sagent.types.exceptions import AuthRefreshError
 from sagent.types.model import Model
 from sagent.types.runtime import (
     AssistantMessage,
@@ -214,10 +217,35 @@ async def test_resume_does_not_resurrect_completed_oneshot(tmp_path: Path) -> No
         parent,
         tmp_path,
         allow_providers=("Anthropic",),
-        parent_label="parent",
     )
     assert set(agent_registry) == before, "completed oneshot must not be resurrected"
     assert "oneshot-child" not in agent_registry
+
+
+@pytest.mark.asyncio
+async def test_resumed_child_exit_persists_terminal_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A resumed child that stops must not be resurrected by the next resume."""
+    _stub_build_provider(monkeypatch)
+    parent = Agent(model=cast(Model, _ChildStubModel()), tools=[], session_dir=tmp_path)
+    append_session(
+        tmp_path / "session.jsonl",
+        persistent_agents=[
+            _child_record(label="resumed-child", session_dir=str(tmp_path / "c")),
+        ],
+    )
+    await _resume_persistent_agents(
+        parent,
+        tmp_path,
+        allow_providers=("Anthropic",),
+    )
+    job = parent.background["persistent:resumed-child"]
+    agent_registry["resumed-child"].shutdown(force=True)
+    await job.task
+    assert load_persistent_agents(tmp_path) == []
+    assert "resumed-child" not in agent_registry
 
 
 def test_build_persistent_child_restores_thinking_state(
@@ -230,7 +258,7 @@ def test_build_persistent_child_restores_thinking_state(
         thinking_output="text",
         show_thinking=False,
     )
-    child = _build_persistent_child(record, allow_providers=(), parent_label="parent")
+    child = _build_persistent_child(record, allow_providers=())
     assert child.model.settings.thinking_budget == "auto"
     assert child.model.settings.thinking_output == "text"
 
@@ -245,7 +273,7 @@ def test_build_persistent_child_restores_frozen_system(
     """
     _stub_build_provider(monkeypatch)
     record = _child_record(frozen_system=True)
-    child = _build_persistent_child(record, allow_providers=(), parent_label="parent")
+    child = _build_persistent_child(record, allow_providers=())
     assert child.frozen_system is True
 
 
@@ -281,7 +309,6 @@ def test_resumed_persistent_child_missing_account_falls_back_to_default(
     child = _build_persistent_child(
         _child_record(account="work"),
         allow_providers=(),
-        parent_label="parent",
     )
 
     assert accounts == ["work", None]
@@ -319,7 +346,6 @@ def test_resumed_persistent_child_preserves_available_named_account(
     child = _build_persistent_child(
         _child_record(account="work"),
         allow_providers=(),
-        parent_label="parent",
     )
 
     assert accounts == ["work"]
@@ -334,7 +360,6 @@ def test_resumed_persistent_child_default_limits_follow_model_switch(
     child = _build_persistent_child(
         _child_record(),
         allow_providers=(),
-        parent_label="parent",
     )
 
     child.swap_model(
@@ -361,7 +386,6 @@ def test_resumed_persistent_child_explicit_limits_survive_model_switch(
     child = _build_persistent_child(
         _child_record(max_request_tokens=50_000, max_response_tokens=512),
         allow_providers=(),
-        parent_label="parent",
     )
 
     child.swap_model(
@@ -917,7 +941,9 @@ def test_resume_model_defaults_explicit_provider_uses_provider_default_model() -
     )
     _apply_resume_model_defaults(ns, meta)
     assert ns.provider == "OpenAISubscription"
-    assert ns.auth == "subprocess"
+    # ``subprocess`` was AnthropicCLI's auth; it means nothing to another provider.
+    assert ns.auth_explicit is False
+    assert ns.auth != "subprocess"
     assert ns.model is None
     assert ns.account == "work"
 
@@ -1055,15 +1081,16 @@ def test_event_to_json_record_model_error() -> None:
 
 
 class _HeadlessErrorAgent:
-    def __init__(self) -> None:
+    def __init__(self, error: Exception | None = None) -> None:
         self.history: list[ModelContextEvent] = []
+        self._error = error or RuntimeError("boom")
 
     async def run(
         self,
         message: UserMessage,
     ) -> AsyncIterator[ModelResponseError]:
         del message
-        yield ModelResponseError(exception=RuntimeError("boom"))
+        yield ModelResponseError(exception=self._error)
 
 
 @pytest.mark.parametrize(
@@ -1503,6 +1530,151 @@ async def test_headless_reports_total_persistence_failure(tmp_path: Path) -> Non
     assert source.index("unpersisted_session_error") < source.index(
         "result_text = _last_assistant_text",
     ), "the check must run BEFORE the result is emitted"
+
+
+def test_abbreviated_provider_flag_counts_as_explicit() -> None:
+    ns = _parse(["--prov", "OpenAI"])
+    assert ns.provider == "OpenAI"
+    assert ns.provider_explicit is True
+
+
+@pytest.mark.parametrize("flag", ["--provider", "--auth", "--account", "--model"])
+def test_flag_explicitness_ignores_unrelated_values(flag: str) -> None:
+    ns = _parse(["--system", f"{flag} appears in prose"])
+    assert getattr(ns, f"{flag.removeprefix('--')}_explicit") is False
+
+
+def test_unknown_model_is_not_reported_as_missing_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Provider:
+        def model(self, model_id: str | None = None) -> object:
+            raise UnknownModelError(f"Unknown model {model_id!r}. Known models: a")
+
+    def fake_build_provider(
+        provider_name: str,
+        auth: str,
+        **_kwargs: object,
+    ) -> object:
+        del provider_name, auth
+        return _Provider()
+
+    monkeypatch.setattr(
+        "sagent.providers.providers.build_provider",
+        fake_build_provider,
+    )
+    ns = _parse(["--provider", "Anthropic", "--model", "nosuch"])
+    with pytest.raises(UnknownModelError, match="Unknown model 'nosuch'"):
+        _build_provider_model(ns, allow_providers=("Anthropic",))
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--max-tool-call-rounds",
+        "--max-request-tokens",
+        "--max-response-tokens",
+        "--advisor-max-uses",
+        "--max-budget-usd",
+    ],
+)
+@pytest.mark.parametrize("bad", ["0", "-1", "nan"])
+def test_caps_reject_non_positive_values(flag: str, bad: str) -> None:
+    with pytest.raises(SystemExit):
+        _ = _parse([flag, bad])
+
+
+@pytest.mark.parametrize(
+    "pair",
+    [
+        ["--session", "/x", "--continue"],
+        ["--ephemeral", "--resume", "abc"],
+        ["--continue", "--continue-all"],
+        ["--resume-all", "--session", "/x"],
+    ],
+)
+def test_session_selectors_are_mutually_exclusive(pair: list[str]) -> None:
+    with pytest.raises(SystemExit):
+        _ = _parse(pair)
+
+
+def test_resume_persistent_is_one_boolean_flag() -> None:
+    assert _parse(["--no-resume-persistent"]).resume_persistent is False
+    assert (
+        _parse(["--no-resume-persistent", "--resume-persistent"]).resume_persistent
+        is True
+    )
+
+
+def test_resolve_resume_hash_unmatched_exits(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as exc:
+        _ = _resolve_resume_hash("zz9999", tmp_path)
+    assert exc.value.code == 1
+    assert "no session matching" in capsys.readouterr().err
+
+
+class _CustomAuthProvider:
+    """Provider offering a non-default ``custom`` auth alongside ``env``."""
+
+    calls: ClassVar[list[str]] = []
+
+    @classmethod
+    def from_custom(cls) -> _CustomAuthProvider:
+        cls.calls.append("custom")
+        return cls()
+
+    @classmethod
+    def from_env(cls) -> _CustomAuthProvider:
+        cls.calls.append("env")
+        return cls()
+
+    def model(self, model_id: str | None = None) -> object:
+        return argparse.Namespace(tagged_model_id=model_id or "m")
+
+
+def test_resumed_auth_is_not_replaced_by_provider_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "sagent.providers.CustomAuthFake",
+        _CustomAuthProvider,
+        raising=False,
+    )
+    _CustomAuthProvider.calls.clear()
+    ns = _parse(["--resume", "abc123"])
+    _apply_resume_model_defaults(
+        ns,
+        SessionMeta(provider="CustomAuthFake", auth="custom", model_id="m"),
+    )
+    _, _, auth = _build_provider_model_once(ns)
+    assert _CustomAuthProvider.calls == ["custom"]
+    assert auth == "custom"
+
+
+def test_user_facing_error_json_record_has_no_class_prefix() -> None:
+    rec = _event_to_json_record(
+        ModelResponseError(exception=AuthRefreshError("run /login")),
+    )
+    assert rec == {"descriptor": "application/x-error", "content": "run /login"}
+
+
+def test_headless_user_facing_error_has_no_class_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO("hello"))
+    with pytest.raises(SystemExit):
+        asyncio.run(
+            _run_headless(
+                cast(Agent, _HeadlessErrorAgent(AuthRefreshError("run /login"))),
+                input_format="text",
+                output_format="text",
+            ),
+        )
+    assert capsys.readouterr().err == "Error: run /login\n"
 
 
 if __name__ == "__main__":

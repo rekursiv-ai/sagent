@@ -19,7 +19,6 @@ __all__ = [
     "AuthReloadable",
     "ModelResolver",
     "Provider",
-    "ProviderCloseable",
 ]
 
 
@@ -32,7 +31,12 @@ class ModelResolver(Protocol):
 
 @runtime_checkable
 class Provider(Protocol):
-    """Factory for model backends. ``None`` selects catalog key ``default``."""
+    """Factory for model backends. ``None`` selects catalog key ``default``.
+
+    Whoever builds a provider owns it and calls :meth:`close_sdk` once. One
+    provider can back several models (``sagent --advisor`` builds two), so a
+    client the provider shares is closed here, never by ``Model.close``.
+    """
 
     def model(
         self,
@@ -49,22 +53,12 @@ class Provider(Protocol):
         """
         ...
 
-
-@runtime_checkable
-class ProviderCloseable(Protocol):
-    """Provider that owns a client its models share.
-
-    Teardown belongs here, not on ``Model.close``: one provider can back
-    several models (``sagent --advisor`` builds two), so a model closing
-    the shared client strands its siblings. Whoever built the provider
-    closes it, once.
-
-    API-family providers holding an SDK or HTTP client satisfy this;
-    CLI-family providers own their resources per model and don't.
-    """
-
     async def close_sdk(self) -> None:
-        """Close the client this provider opened on the running loop."""
+        """Close any client this provider shares across its models.
+
+        Total and idempotent: a provider whose models own their resources
+        (CLI subprocesses, per-model HTTP clients) returns immediately.
+        """
         ...
 
 
