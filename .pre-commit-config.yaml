@@ -192,6 +192,15 @@ repos:
 
   - repo: local
     hooks:
+      # Spooled hooks. pre-commit splits a hook's filenames into 128 KiB argv
+      # chunks and calls it once per chunk, serially: `--all-files` called each
+      # whole-repo hook 3-5 times, one exporting all 8 packages 5 times (161s
+      # for a 5.5s job) and the pytest chunks racing on one `.coverage`. Each
+      # heavy hook is therefore a pair. `<id>-pre`, with the SAME file
+      # selectors, appends pre-commit's chunks to a NUL-delimited file keyed by
+      # the pre-commit process; `<id>` follows with `pass_filenames: false`,
+      # loads that file as "$@", deletes it, and runs once.
+      #
       # Single definition of `&worker-entry` anchor.
       #
       # It sizes $WORKERS, then runs the hook's command line from the single
@@ -326,6 +335,21 @@ repos:
       # processes and ~96 Node workers on a 16-core box. Serial partitioning is
       # what makes $WORKERS a cap.
       #
+        # `basedpyright` takes no filenames, so pre-commit cannot split its work
+        # into argv chunks; this twin collects them into a spool file.
+      - id: basedpyright-pre
+        name: basedpyright-pre
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        types_or: [python, pyi]
+        exclude: |
+          (?x)^(
+            typings/
+            |(.*/)?third_party/
+          )
+        entry: >-
+          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' basedpyright
       - id: basedpyright
         name: basedpyright
         language: system
@@ -334,6 +358,7 @@ repos:
         # note on `verbose`); this keeps basedpyright's summary line visible.
         verbose: true
         require_serial: true
+        pass_filenames: false
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types_or: [python, pyi]
@@ -354,6 +379,7 @@ repos:
         args:
           - WORKERS_BASEDPYRIGHT
           - |
+            p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/basedpyright.$p; files=(); [ -f "$spool" ] && mapfile -d "" -t files < "$spool"; rm -f "$spool"; set -- "${files[@]}";
             files=("$@")
             check=(basedpyright --threads="$WORKERS")
             exec env NODE_OPTIONS=--max-old-space-size=2048 \
@@ -416,11 +442,22 @@ repos:
             uv --quiet run --frozen --group pre-commit coverage erase
           ' bash
 
+        # `pytest` takes no filenames, so pre-commit cannot split its work
+        # into argv chunks; this twin collects them into a spool file.
+      - id: pytest-pre
+        name: pytest-pre
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        types: [python]
+        entry: >-
+          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' pytest
       - id: pytest
         name: pytest
         language: system
         stages: [pre-commit]
         require_serial: true
+        pass_filenames: false
         # See `basedpyright` above: a passing hook's output is discarded, which
         # made "did any test run at all?" unanswerable from a green line.
         verbose: true
@@ -445,6 +482,7 @@ repos:
         args:
           - WORKERS_PYTEST
           - |
+            p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/pytest.$p; files=(); [ -f "$spool" ] && mapfile -d "" -t files < "$spool"; rm -f "$spool"; set -- "${files[@]}";
             tests=();
             if [ ${#tests[@]} -eq 0 ]; then
               for f in "$@"; do
@@ -503,16 +541,28 @@ repos:
       # omitted) leaves `--include` matching nothing, and coverage exits 1 with
       # "No data to report." That is an empty summary, not a failure; every
       # other coverage error still fails the hook.
+        # `coverage-summary` takes no filenames, so pre-commit cannot split its work
+        # into argv chunks; this twin collects them into a spool file.
+      - id: coverage-summary-pre
+        name: coverage-summary-pre
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        types: [python]
+        entry: >-
+          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' coverage-summary
       - id: coverage-summary
         name: coverage-summary
         language: system
         stages: [pre-commit]
         types: [python]
         require_serial: true
+        pass_filenames: false
         # Pre-commit otherwise hides the report when this hook passes.
         verbose: true
         entry: >-
           bash -c '
+            p=$PPID; while [ "$p" -gt 1 ]; do case "$(tr "\0" " " < /proc/$p/cmdline)" in *pre[-_]commit\ *) break;; esac; p=$(cut -d" " -f4 /proc/$p/stat); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/coverage-summary.$p; files=(); [ -f "$spool" ] && mapfile -d "" -t files < "$spool"; rm -f "$spool"; set -- "${files[@]}";
             uv --quiet run --frozen --group pre-commit python -c "import coverage" 2>/dev/null || exit 0;
             [ -f .coverage ] || exit 0;
             sources=();
