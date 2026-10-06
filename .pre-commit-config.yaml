@@ -625,8 +625,8 @@ repos:
         # testmon selects. The workflow sets that variable per matrix job (from
         # `matrix_entries` in ops/github/precommit_matrix.py) and nothing sets it
         # locally, so a local pre-push selects and a sharded CI job does not,
-        # with no second switch to keep in step. ops/github/testmon_gate_test.py
-        # runs this shell both ways to prove it.
+        # with no second switch to keep in step. `testmon_gate_test.py` runs
+        # this shell both ways to prove it.
         #
         # Unquoted on purpose: it must word-split into flags.
         #
@@ -672,8 +672,6 @@ repos:
             fi;
             select=(); cov=(); sel=();
             has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
-            has "import ops.github.selected_nodeids_plugin" &&
-            sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && has "import testmon"; then
             select=(--testmon-forceselect);
             elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
@@ -708,8 +706,8 @@ repos:
         #
         # Tolerate exit 5 (nothing collected): a tree may ship no tests for this
         # marker. Not fail-open -- `pytest-global` above still fails on an empty
-        # collection, and ops/github/marker_tiers_test.py fails any tier that
-        # goes empty without being declared empty.
+        # collection, and `marker_tiers_test.py` fails any tier that goes empty
+        # without being declared empty.
         #
         # $PYTEST_SPLIT_ARGS is what makes this tier's four CI jobs distinct.
         # Omitting it was silent for four runs: the workflow set the variable,
@@ -728,8 +726,6 @@ repos:
             fi;
             select=(); cov=(); sel=();
             has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
-            has "import ops.github.selected_nodeids_plugin" &&
-            sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
             select=(--testmon-forceselect);
             elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
@@ -773,8 +769,6 @@ repos:
             fi;
             select=(); cov=(); sel=();
             has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
-            has "import ops.github.selected_nodeids_plugin" &&
-            sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
             select=(--testmon-forceselect);
             elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
@@ -828,8 +822,6 @@ repos:
             fi;
             select=(); cov=(); sel=();
             has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
-            has "import ops.github.selected_nodeids_plugin" &&
-            sel=(-p ops.github.selected_nodeids_plugin);
             if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
             select=(--testmon-forceselect);
             elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
