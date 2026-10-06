@@ -573,10 +573,9 @@ repos:
               esac;
             done;
             ((${#sources[@]})) || exit 0;
-            include=$(IFS=,; printf "%s" "${sources[*]}");
-            report=$(uv --quiet run --frozen --group pre-commit coverage report --skip-covered --precision=1 --sort=cover --include="$include");
+            report=$(printf "%s\n" "${sources[@]}" | uv --quiet run --frozen --group pre-commit python -c "import sys, coverage; c = coverage.Coverage(); c.load(); sys.exit(c.report(include=sys.stdin.read().split(), skip_covered=True, precision=1, sort=\"cover\") < 0)" 2>&1);
             status=$?;
-            [ "$report" = "No data to report." ] && exit 0;
+            case "$report" in *"No data to report."*) exit 0;; esac;
             printf "%s\n" "$report";
             exit "$status"
           ' bash
