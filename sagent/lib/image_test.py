@@ -980,24 +980,24 @@ class TestDecodeImagePil:
         mode: str,
     ) -> None:
         buffer = BytesIO()
-        Image.new(mode, (3, 2)).save(buffer, format="PNG")
+        Image.new(mode, (4, 2)).save(buffer, format="PNG")
 
-        actual = decode_image_pil(buffer.getvalue(), 2, 3)
+        actual = decode_image_pil(buffer.getvalue(), 2, 4)
 
         assert actual is not None
-        np.testing.assert_array_equal(actual, np.full((2, 3, 3), 255, np.uint8))
+        np.testing.assert_array_equal(actual, np.full((2, 4, 3), 255, np.uint8))
 
     def test_palette_transparency_composites_over_white(self) -> None:
-        image = Image.new("P", (3, 2), 0)
+        image = Image.new("P", (4, 2), 0)
         image.putpalette([0, 0, 0, 10, 20, 30])
         image.putpixel((1, 0), 1)
         buffer = BytesIO()
         image.save(buffer, format="PNG", transparency=0)
 
-        actual = decode_image_pil(buffer.getvalue(), 2, 3)
+        actual = decode_image_pil(buffer.getvalue(), 2, 4)
 
         assert actual is not None
-        expected = np.full((2, 3, 3), 255, np.uint8)
+        expected = np.full((2, 4, 3), 255, np.uint8)
         expected[0, 1] = (10, 20, 30)
         np.testing.assert_array_equal(actual, expected)
 
