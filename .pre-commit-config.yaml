@@ -482,11 +482,13 @@ repos:
               fi;
             fi;
             # An @argfile, not argv: a deep harvest names thousands of nodeids,
-            # which overflowed ARG_MAX ("Argument list too long").
+            # and a wide diff one `--cov` per file; either overflowed ARG_MAX
+            # ("Argument list too long").
             argfile=$(mktemp);
             trap 'rm -f "$argfile"' EXIT;
-            printf "%s\n" "${tests[@]}" > "$argfile";
-            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" "${cov[@]}" -q --tb=short "@$argfile" ||
+            { ((${#cov[@]})) && printf "%s\n" "${cov[@]}" | sort -u;
+              printf "%s\n" "${tests[@]}"; } > "$argfile";
+            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" -q --tb=short "@$argfile" ||
               test "$?" = 5
 
       # Keep after pytest: pre-commit runs hooks in declaration order.
