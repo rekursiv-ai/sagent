@@ -12,6 +12,7 @@ the same id return the cached path.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import asyncio
@@ -23,7 +24,7 @@ from wesearch.paper.ids import id_slug, s2_wire_id
 
 from sagent.lib import userdirs
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import JSON, json_freeze
+from sagent.lib.codec import PlainTree, immutable
 from sagent.tools.core import load_tool_description
 from sagent.tools.paper_common import (
     normalize_id_arg,
@@ -50,7 +51,7 @@ class PaperFetch:
     tool_id: str = "application/x-tool-paperfetch"
     clearable_results: bool = True
     description: str = load_tool_description("PaperFetch")
-    directive_schema: JSON = json_freeze(
+    directive_schema: Mapping[str, PlainTree] = immutable(
         {
             "type": "object",
             "properties": {

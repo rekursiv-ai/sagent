@@ -17,7 +17,7 @@ from sagent.types.runtime import UserMessage
 
 
 if TYPE_CHECKING:
-    from sagent.lib.custom_json import MutableJSON
+    from sagent.lib.codec import MutablePlainTree
 
 
 def test_moonshot_from_key() -> None:
@@ -74,7 +74,7 @@ def _body(
     *,
     budget: ThinkingBudget | None = None,
     effort: ThinkingEffort | None = None,
-) -> MutableJSON:
+) -> dict[str, MutablePlainTree]:
     m = cast(_MoonshotModel, Moonshot.from_key("k").model(model_id))
     settings = ModelSettings.narrowest(m.capability)
     if budget is not None:

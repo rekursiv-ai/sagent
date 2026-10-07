@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,7 +25,7 @@ import logging
 import re
 
 from sagent.agent.state import ToolState, get_tool_state
-from sagent.lib.custom_json import JSON, json_freeze
+from sagent.lib.codec import PlainTree, immutable
 from sagent.lib.dotsagent import parse_frontmatter, walk_up
 from sagent.lib.userdirs import data_dir
 from sagent.tools.core import load_tool_description
@@ -168,7 +169,7 @@ class Skill:
         """
         self.restore_after_compact = restore_after_compact
 
-    directive_schema: JSON = json_freeze(
+    directive_schema: Mapping[str, PlainTree] = immutable(
         {
             "type": "object",
             "properties": {

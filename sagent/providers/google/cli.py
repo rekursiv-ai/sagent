@@ -39,7 +39,7 @@ import fastjsonschema
 from sagent.catalog.google import cli, models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import JSON, MutableJSON, convert
+from sagent.lib.codec import MutablePlainTree, PlainTree, from_plain
 from sagent.providers.google.api import Google, gemini_image_tokens
 from sagent.providers.lib.cli_respawn import (
     CLISubprocessModel,
@@ -80,7 +80,7 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
 
     from sagent.lib import image
     from sagent.types.capability import ModelCapability, ModelSettings
@@ -95,7 +95,7 @@ logger = logging.getLogger(__name__)
 
 _GEMINI_DIR = Path("~/.gemini")
 _CREDS_PATH = _GEMINI_DIR / "oauth_creds.json"
-_CREDENTIALS_SCHEMA: Final[JSON] = {
+_CREDENTIALS_SCHEMA: Final[Mapping[str, PlainTree]] = {
     "type": "object",
     "required": ["access_token", "refresh_token", "expiry_date"],
     "properties": {
@@ -228,12 +228,12 @@ def save_cli_credentials_file(path: Path, creds: GoogleCLICredentials) -> None:
       creds: OAuth credentials to persist.
 
     """
-    existing: MutableJSON = {}
+    existing: dict[str, MutablePlainTree] = {}
     if path.exists():
         with contextlib.suppress(json.JSONDecodeError, OSError):
             raw = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(raw, dict):
-                existing = cast(MutableJSON, raw)
+                existing = cast(dict[str, MutablePlainTree], raw)
     existing["access_token"] = creds["access_token"]
     existing["refresh_token"] = creds["refresh_token"]
     existing["expiry_date"] = creds["expiry_date"]
@@ -308,7 +308,7 @@ def _google_subprocess_env(tmpdir: Path) -> dict[str, str]:
     return env
 
 
-_GEMINI_SETTINGS: MutableJSON = {
+_GEMINI_SETTINGS: dict[str, MutablePlainTree] = {
     "security": {"auth": {"selectedType": "oauth-personal"}},
     "privacy": {"usageStatisticsEnabled": False},
     "telemetry": {
@@ -366,7 +366,7 @@ async def _rpc_call(
     request_id: int,
     method: str,
     params: dict[str, object],
-) -> MutableJSON:
+) -> dict[str, MutablePlainTree]:
     """Send one JSON-RPC request and return the matching ``result`` payload."""
     await _rpc_send(proc, request_id, method, params)
     while True:
@@ -380,7 +380,7 @@ async def _rpc_call(
                 raise SubprocessTransportError(
                     f"GoogleCLI: {method} error: {msg['error']}",
                 )
-            return cast(MutableJSON, msg.get("result") or {})
+            return cast(dict[str, MutablePlainTree], msg.get("result") or {})
 
 
 async def _rpc_send(
@@ -403,9 +403,9 @@ def _user_prompt_blocks(
     entry: AgentSendMessage | UserMessage,
     max_image_dim: int,
     max_image_bytes: int,
-) -> list[MutableJSON]:
+) -> list[dict[str, MutablePlainTree]]:
     """Build ACP ``[{type:text}|{type:image}]`` blocks for a ``UserMessage``."""
-    blocks: list[MutableJSON] = []
+    blocks: list[dict[str, MutablePlainTree]] = []
     if entry.text:
         blocks.append({"type": "text", "text": entry.text})
     for att in entry.attachments:
@@ -429,18 +429,19 @@ def _user_prompt_blocks(
 
 
 def _dispatch_session_update(
-    params: MutableJSON,
+    params: dict[str, MutablePlainTree],
     text_parts: list[str],
     thinking_parts: list[str],
     publish: Callable[[RuntimeEvent], None] | None,
 ) -> None:
     """Route one ``session/update`` notification payload."""
-    update = cast(MutableJSON, params.get("update") or {})
+    update = cast(dict[str, MutablePlainTree], params.get("update") or {})
     kind = update.get("sessionUpdate")
     if kind == "agent_message_chunk":
         text = cast(
             str,
-            cast(MutableJSON, update.get("content") or {}).get("text") or "",
+            cast(dict[str, MutablePlainTree], update.get("content") or {}).get("text")
+            or "",
         )
         if text:
             text_parts.append(text)
@@ -449,7 +450,8 @@ def _dispatch_session_update(
     elif kind == "agent_thought_chunk":
         text = cast(
             str,
-            cast(MutableJSON, update.get("content") or {}).get("text") or "",
+            cast(dict[str, MutablePlainTree], update.get("content") or {}).get("text")
+            or "",
         )
         if text:
             thinking_parts.append(text)
@@ -654,7 +656,7 @@ class _GoogleCLIModel(CLISubprocessModel, ModelDefaults):
     async def _send_prompt(
         self,
         proc: Subproc,
-        prompt_blocks: list[MutableJSON],
+        prompt_blocks: list[dict[str, MutablePlainTree]],
         text_parts: list[str],
         thinking_parts: list[str],
         publish: Callable[[RuntimeEvent], None] | None,
@@ -678,11 +680,11 @@ class _GoogleCLIModel(CLISubprocessModel, ModelDefaults):
                     raise SubprocessTransportError(
                         f"GoogleCLI: JSON-RPC error: {msg['error']}",
                     )
-                result = cast(MutableJSON, msg.get("result") or {})
+                result = cast(dict[str, MutablePlainTree], msg.get("result") or {})
                 return cast(str | None, result.get("stopReason"))
             if msg.get("method") == "session/update":
                 _dispatch_session_update(
-                    cast(MutableJSON, msg.get("params") or {}),
+                    cast(dict[str, MutablePlainTree], msg.get("params") or {}),
                     text_parts,
                     thinking_parts,
                     publish,
@@ -835,12 +837,12 @@ class _GoogleCLIModel(CLISubprocessModel, ModelDefaults):
                 atomic_write_bytes(target, src.read_bytes(), file_mode=0o600)
 
 
-def _parse_cli_credentials(raw: MutableJSON) -> GoogleCLICredentials:
+def _parse_cli_credentials(raw: dict[str, MutablePlainTree]) -> GoogleCLICredentials:
     """Extract access/refresh/expiry from Gemini CLI credential JSON."""
     creds = GoogleCLICredentials(
         access_token=str(raw["access_token"]),
         refresh_token=str(raw["refresh_token"]),
-        expiry_date=convert(raw["expiry_date"], float),
+        expiry_date=from_plain(raw["expiry_date"], float),
     )
     for opt_key in ("project_id", "scope", "token_type"):
         value = raw.get(opt_key)
@@ -859,7 +861,7 @@ def _load_cli_credentials_file(path: Path) -> GoogleCLICredentials | None:
         return None
     if not isinstance(data, dict):
         return None
-    raw = cast(MutableJSON, data)
+    raw = cast(dict[str, MutablePlainTree], data)
     try:
         _CREDENTIALS_VALIDATOR(raw)
     except fastjsonschema.JsonSchemaValueException:

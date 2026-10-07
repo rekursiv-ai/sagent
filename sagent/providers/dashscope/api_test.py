@@ -18,7 +18,7 @@ from sagent.types.runtime import UserMessage
 
 
 if TYPE_CHECKING:
-    from sagent.lib.custom_json import MutableJSON
+    from sagent.lib.codec import MutablePlainTree
 
 
 def test_dashscope_from_key() -> None:
@@ -63,7 +63,10 @@ def _model(
     return m
 
 
-def _body(m: _DashScopeModel, body: MutableJSON | None = None) -> MutableJSON:
+def _body(
+    m: _DashScopeModel,
+    body: dict[str, MutablePlainTree] | None = None,
+) -> dict[str, MutablePlainTree]:
     return m._transform_body(
         body if body is not None else {},
         ModelRequest(messages=[]),

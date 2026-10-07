@@ -41,7 +41,7 @@ else:
 
 from sagent.catalog.google import api, models, thinking_config
 from sagent.catalog.table import ModelCatalog
-from sagent.lib.custom_json import MutableJSON, MutableJSONValue, convert, json_unfreeze
+from sagent.lib.codec import MutablePlainTree, from_plain, mutable
 from sagent.providers.lib.errors import (
     error_status_code,
     is_context_overflow_text,
@@ -254,7 +254,11 @@ class _GeminiModel(ModelDefaults):
         )
         raise_for_gemini_status(r.status_code, r.text)
         r.raise_for_status()
-        return convert(cast(MutableJSON, r.json()).get("totalTokens"), int, default=0)
+        return from_plain(
+            cast(dict[str, MutablePlainTree], r.json()).get("totalTokens"),
+            int,
+            default=0,
+        )
 
     def is_context_overflow(self, error: Exception) -> bool:
         """Classify an error as a token context-window overflow.
@@ -362,21 +366,17 @@ def raise_for_gemini_status(status: int, body: str) -> None:
         raise PromptTooLongError(body)
 
 
-def _strip_additional_properties(schema: MutableJSONValue) -> MutableJSONValue:
+def _strip_additional_properties(schema: MutablePlainTree) -> MutablePlainTree:
     """Remove ``additionalProperties`` recursively for Gemini tool schemas."""
     if isinstance(schema, dict):
-        schema_map = cast(MutableJSON, schema)
-        return cast(
-            MutableJSONValue,
-            {
-                k: _strip_additional_properties(v)
-                for k, v in schema_map.items()
-                if k != "additionalProperties"
-            },
-        )
+        return {
+            k: _strip_additional_properties(v)
+            for k, v in schema.items()
+            if k != "additionalProperties"
+        }
     if isinstance(schema, list):
         return cast(
-            MutableJSONValue,
+            MutablePlainTree,
             [_strip_additional_properties(item) for item in schema],
         )
     return schema
@@ -390,7 +390,7 @@ def _build_request(
     capability: ModelCapability,
     settings: ModelSettings,
     limits: ModelLimits,
-) -> MutableJSON:
+) -> dict[str, MutablePlainTree]:
     """Convert history entries to the Gemini API request body."""
     # Build tool_use_id → function name mapping from prior model responses
     # so we can echo the right name when emitting functionResponse parts.
@@ -401,11 +401,11 @@ def _build_request(
         for tc in entry.tool_calls
     }
 
-    contents: list[MutableJSON] = []
-    pending_tool_parts: list[MutableJSON] = []
+    contents: list[dict[str, MutablePlainTree]] = []
+    pending_tool_parts: list[dict[str, MutablePlainTree]] = []
     for entry in request.messages:
         if isinstance(entry, (AgentSendMessage, UserMessage)):
-            parts: list[MutableJSON] = []
+            parts: list[dict[str, MutablePlainTree]] = []
             if entry.text:
                 parts.append({"text": entry.text})
             for att in entry.attachments:
@@ -430,9 +430,9 @@ def _build_request(
                 contents.append({"role": "user", "parts": [*parts]})
         elif isinstance(entry, AssistantMessage):
             _flush_tool_parts(contents, pending_tool_parts)
-            model_parts: list[MutableJSON] = []
+            model_parts: list[dict[str, MutablePlainTree]] = []
             if entry.text:
-                text_part: MutableJSON = {"text": entry.text}
+                text_part: dict[str, MutablePlainTree] = {"text": entry.text}
                 # Gemini 3.x requires the model's thought signature echoed back
                 # on its parts in subsequent requests, else the API rejects the
                 # continuation. Omitted when empty (older models / no thinking).
@@ -440,8 +440,8 @@ def _build_request(
                     text_part["thoughtSignature"] = entry.thought_signature
                 model_parts.append(text_part)
             for tc in entry.tool_calls:
-                fc_args: MutableJSON = json_unfreeze(tc.args)
-                fc_part: MutableJSON = {
+                fc_args: dict[str, MutablePlainTree] = mutable(tc.args)
+                fc_part: dict[str, MutablePlainTree] = {
                     "functionCall": {
                         "name": tc.name,
                         "args": fc_args,
@@ -479,43 +479,37 @@ def _build_request(
     _flush_tool_parts(contents, pending_tool_parts)
 
     thinking = thinking_config(capability, settings)
-    gen_config: MutableJSON = {}
+    gen_config: dict[str, MutablePlainTree] = {}
     if thinking is None:
         gen_config["temperature"] = request.temperature
     if request.max_response_tokens is not None:
         gen_config["maxOutputTokens"] = request.max_response_tokens
     if thinking is not None:
-        gen_config["thinkingConfig"] = cast(MutableJSONValue, thinking)
-    body: MutableJSON = {
+        gen_config["thinkingConfig"] = cast(MutablePlainTree, thinking)
+    body: dict[str, MutablePlainTree] = {
         "contents": [*contents],
         "generationConfig": gen_config,
     }
     if request.system:
-        body["systemInstruction"] = cast(
-            MutableJSONValue,
-            {"parts": [{"text": request.system}]},
-        )
+        body["systemInstruction"] = {"parts": [{"text": request.system}]}
     if request.tools:
-        body["tools"] = cast(
-            MutableJSONValue,
-            [
-                {
-                    "functionDeclarations": [
-                        {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": _strip_additional_properties(
-                                cast(
-                                    MutableJSONValue,
-                                    json_unfreeze(t.directive_schema),
-                                ),
+        body["tools"] = [
+            {
+                "functionDeclarations": [
+                    {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": _strip_additional_properties(
+                            cast(
+                                MutablePlainTree,
+                                mutable(t.directive_schema),
                             ),
-                        }
-                        for t in request.tools
-                    ],
-                },
-            ],
-        )
+                        ),
+                    }
+                    for t in request.tools
+                ],
+            },
+        ]
     return body
 
 
@@ -523,7 +517,7 @@ def _attachment_part(
     att: object,
     max_image_dim: int,
     max_image_bytes: int,
-) -> MutableJSON | None:
+) -> dict[str, MutablePlainTree] | None:
     """Translate a ``BytesMessage`` attachment to a Gemini ``inlineData`` part."""
     data = getattr(att, "data", None)
     descriptor = getattr(att, "descriptor", "")
@@ -544,7 +538,10 @@ def _attachment_part(
     return {"inlineData": {"mimeType": mime, "data": b64}}
 
 
-def _flush_tool_parts(contents: list[MutableJSON], pending: list[MutableJSON]) -> None:
+def _flush_tool_parts(
+    contents: list[dict[str, MutablePlainTree]],
+    pending: list[dict[str, MutablePlainTree]],
+) -> None:
     """Emit buffered tool-response parts as a user message, then clear."""
     if pending:
         contents.append({"role": "user", "parts": list(pending)})
@@ -559,14 +556,15 @@ async def _consume_gemini_stream(
     *,
     publish: Callable[[RuntimeEvent], None] | None = None,
     model: _GeminiModel,
-    chunk_unwrap: Callable[[MutableJSON], MutableJSON] | None = None,
+    chunk_unwrap: Callable[[dict[str, MutablePlainTree]], dict[str, MutablePlainTree]]
+    | None = None,
 ) -> ModelResponse:
     """Parse SSE stream from :streamGenerateContent?alt=sse."""
     text_chunks: list[str] = []
     text_signature: str = ""
     thinking_chunks: list[str] = []
     tool_calls: list[ToolCall] = []
-    usage: MutableJSON = {}
+    usage: dict[str, MutablePlainTree] = {}
     finish_reason: str | None = None
     malformed_chunks = 0
     parsed_chunks = 0
@@ -583,7 +581,7 @@ async def _consume_gemini_stream(
             if not data_str:
                 continue
             try:
-                event = cast(MutableJSON, json.loads(data_str))
+                event = cast(dict[str, MutablePlainTree], json.loads(data_str))
             except json.JSONDecodeError as exc:
                 malformed_chunks += 1
                 logger.warning("Google stream malformed JSON chunk: %s", exc)
@@ -593,16 +591,19 @@ async def _consume_gemini_stream(
                 event = chunk_unwrap(event)
             event_usage = event.get("usageMetadata")
             if isinstance(event_usage, dict):
-                usage = cast(MutableJSON, event_usage)
-            candidates = cast(list[MutableJSON], event.get("candidates") or [])
+                usage = event_usage
+            candidates = cast(
+                list[dict[str, MutablePlainTree]],
+                event.get("candidates") or [],
+            )
             if not candidates:
                 continue
             first = candidates[0]
             fr = first.get("finishReason")
             if isinstance(fr, str) and fr:
                 finish_reason = fr
-            content = cast(MutableJSON, first.get("content") or {})
-            parts = cast(list[MutableJSON], content.get("parts") or [])
+            content = cast(dict[str, MutablePlainTree], first.get("content") or {})
+            parts = cast(list[dict[str, MutablePlainTree]], content.get("parts") or [])
             for part in parts:
                 if "text" in part:
                     # Gemini 3.x attaches the model's thought signature to its
@@ -619,9 +620,9 @@ async def _consume_gemini_stream(
                         if publish is not None:
                             publish(ModelResponsePartial(chunk))
                 elif "functionCall" in part:
-                    fc = cast(MutableJSON, part["functionCall"])
+                    fc = cast(dict[str, MutablePlainTree], part["functionCall"])
                     fc_name = fc.get("name") or ""
-                    fc_args = cast(MutableJSON, fc.get("args") or {})
+                    fc_args = cast(dict[str, MutablePlainTree], fc.get("args") or {})
                     if isinstance(fc_name, str):
                         tc_id = f"call_{uuid.uuid4().hex[:24]}"
                         tool_calls.append(
@@ -659,18 +660,18 @@ def _build_response(
     text_signature: str = "",
     thinking: str = "",
     tool_calls: list[ToolCall],
-    usage: MutableJSON,
+    usage: dict[str, MutablePlainTree],
     finish_reason: str | None,
     model: _GeminiModel,
 ) -> ModelResponse:
     """Build a ``ModelResponse`` from Gemini's parsed stream fields."""
-    output_tokens = convert(usage.get("candidatesTokenCount"), int, default=0)
-    cache_read = convert(usage.get("cachedContentTokenCount"), int, default=0)
+    output_tokens = from_plain(usage.get("candidatesTokenCount"), int, default=0)
+    cache_read = from_plain(usage.get("cachedContentTokenCount"), int, default=0)
     # ``promptTokenCount`` is cache-inclusive; store the non-cached remainder so
     # ``TokenCount.input_tokens`` is disjoint from ``cache_read_tokens``.
     input_tokens = max(
         0,
-        convert(usage.get("promptTokenCount"), int, default=0) - cache_read,
+        from_plain(usage.get("promptTokenCount"), int, default=0) - cache_read,
     )
     tokens = TokenCount(
         request=input_tokens,

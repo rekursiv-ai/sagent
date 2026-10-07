@@ -45,14 +45,7 @@ else:
 from sagent.catalog.openai import compatible
 from sagent.catalog.table import ModelCatalog, ModelTable, base_model_id
 from sagent.lib import debug_log
-from sagent.lib.custom_json import (
-    MutableJSON,
-    MutableJSONValue,
-    ReadError,
-    convert,
-    json_unfreeze,
-    parse,
-)
+from sagent.lib.codec import MutablePlainTree, ReadError, from_plain, loads, mutable
 from sagent.providers.lib.errors import (
     error_status_code,
     is_context_overflow_text,
@@ -230,9 +223,9 @@ class OpenAICompatModel(ModelDefaults):
 
     def _transform_body(
         self,
-        body: MutableJSON,
+        body: dict[str, MutablePlainTree],
         request: ModelRequest,
-    ) -> MutableJSON:
+    ) -> dict[str, MutablePlainTree]:
         """Override: apply provider-specific request-body tweaks."""
         del request
         return body
@@ -250,9 +243,14 @@ class OpenAICompatModel(ModelDefaults):
             "Content-Type": "application/json",
         }
 
-    def _build_body(self, request: ModelRequest, *, stream: bool) -> MutableJSON:
+    def _build_body(
+        self,
+        request: ModelRequest,
+        *,
+        stream: bool,
+    ) -> dict[str, MutablePlainTree]:
         """Build the chat-completions request body."""
-        body: MutableJSON = {
+        body: dict[str, MutablePlainTree] = {
             "model": self._wire_model_id,
             "messages": [
                 *build_messages(
@@ -277,7 +275,7 @@ class OpenAICompatModel(ModelDefaults):
             body[field] = request.max_response_tokens
         if stream:
             body["stream"] = True
-            body["stream_options"] = cast(MutableJSONValue, {"include_usage": True})
+            body["stream_options"] = {"include_usage": True}
         if self.settings.thinking_effort != "none":
             effort = self.settings.thinking_effort
             body["reasoning_effort"] = (
@@ -297,20 +295,17 @@ class OpenAICompatModel(ModelDefaults):
             service_tier=tier,
         )
         if request.tools:
-            body["tools"] = cast(
-                MutableJSONValue,
-                [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": json_unfreeze(t.directive_schema),
-                        },
-                    }
-                    for t in request.tools
-                ],
-            )
+            body["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": t.name,
+                        "description": t.description,
+                        "parameters": mutable(t.directive_schema),
+                    },
+                }
+                for t in request.tools
+            ]
         return self._transform_body(body, request)
 
     @override
@@ -456,7 +451,7 @@ def build_messages(
     max_image_bytes: int = 0,
     *,
     reasoning_field: str | None = None,
-) -> list[MutableJSON]:
+) -> list[dict[str, MutablePlainTree]]:
     """Convert history entries to OpenAI chat-completions format.
 
     Tool-result images can't ride inside a ``role=tool`` message under
@@ -478,8 +473,8 @@ def build_messages(
 
     """
     ids = IdRemapper("call_")
-    messages: list[MutableJSON] = []
-    pending_images: list[MutableJSON] = []
+    messages: list[dict[str, MutablePlainTree]] = []
+    pending_images: list[dict[str, MutablePlainTree]] = []
     if request.system:
         messages.append({"role": "system", "content": request.system})
     for entry in request.messages:
@@ -488,7 +483,7 @@ def build_messages(
             messages.append(_build_user_message(entry, max_image_dim, max_image_bytes))
         elif isinstance(entry, AssistantMessage):
             _flush_images(messages, pending_images)
-            tool_calls_wire: list[MutableJSON] = [
+            tool_calls_wire: list[dict[str, MutablePlainTree]] = [
                 {
                     "id": ids.map(tc.id),
                     "type": "function",
@@ -499,7 +494,7 @@ def build_messages(
                 }
                 for tc in entry.tool_calls
             ]
-            m: MutableJSON = {
+            m: dict[str, MutablePlainTree] = {
                 "role": "assistant",
                 "content": entry.text or None,
             }
@@ -514,7 +509,7 @@ def build_messages(
                 # rejects the continuation.
                 m[reasoning_field] = reasoning
             if tool_calls_wire:
-                m["tool_calls"] = cast(MutableJSONValue, tool_calls_wire)
+                m["tool_calls"] = mutable(tool_calls_wire)
             messages.append(m)
         else:
             # ToolResult: role=tool with text content; image attachments
@@ -550,7 +545,10 @@ def build_messages(
     return messages
 
 
-def _flush_images(messages: list[MutableJSON], pending: list[MutableJSON]) -> None:
+def _flush_images(
+    messages: list[dict[str, MutablePlainTree]],
+    pending: list[dict[str, MutablePlainTree]],
+) -> None:
     """Emit buffered image blocks as a synthetic user message, then clear."""
     if pending:
         messages.append({"role": "user", "content": list(pending)})
@@ -561,7 +559,7 @@ def _build_user_message(
     entry: AgentSendMessage | UserMessage,
     max_image_dim: int,
     max_image_bytes: int,
-) -> MutableJSON:
+) -> dict[str, MutablePlainTree]:
     """Build a chat-completions user message from a UserMessage."""
     image_atts = [att for att in entry.attachments if _is_image_mime(att.descriptor)]
     non_image_atts = [
@@ -571,7 +569,7 @@ def _build_user_message(
         _warn_skipped_attachment(att.descriptor)
     if not image_atts:
         return {"role": "user", "content": entry.text}
-    blocks: list[MutableJSON] = []
+    blocks: list[dict[str, MutablePlainTree]] = []
     for att in image_atts:
         raw, mime = image.resize(
             att.data,
@@ -587,7 +585,7 @@ def _build_user_message(
         )
     if entry.text:
         blocks.append({"type": "text", "text": entry.text})
-    image_message: MutableJSON = {"role": "user", "content": [*blocks]}
+    image_message: dict[str, MutablePlainTree] = {"role": "user", "content": [*blocks]}
     return image_message
 
 
@@ -600,16 +598,14 @@ def _warn_skipped_attachment(descriptor: str) -> None:
     logger.warning("OpenAI-compat: skipping non-image attachment (mime=%s)", descriptor)
 
 
-def _extract_usage(usage: MutableJSON) -> tuple[int, int, int, int]:
+def _extract_usage(usage: dict[str, MutablePlainTree]) -> tuple[int, int, int, int]:
     """Return total input, output, cache-read, and cache-write token counts."""
-    input_tokens = convert(usage.get("prompt_tokens"), int, default=0)
-    output_tokens = convert(usage.get("completion_tokens"), int, default=0)
+    input_tokens = from_plain(usage.get("prompt_tokens"), int, default=0)
+    output_tokens = from_plain(usage.get("completion_tokens"), int, default=0)
     raw_details = usage.get("prompt_tokens_details")
-    details: MutableJSON = (
-        cast(MutableJSON, raw_details) if isinstance(raw_details, dict) else {}
-    )
-    cache_read = convert(details.get("cached_tokens"), int, default=0)
-    cache_write = convert(details.get("cache_write_tokens"), int, default=0)
+    details = raw_details if isinstance(raw_details, dict) else {}
+    cache_read = from_plain(details.get("cached_tokens"), int, default=0)
+    cache_write = from_plain(details.get("cache_write_tokens"), int, default=0)
     return input_tokens, output_tokens, cache_read, cache_write
 
 
@@ -650,7 +646,7 @@ async def consume_stream(
     finish_reason: str | None = None
     saw_refusal = False
     message_id = ""
-    usage: MutableJSON = {}
+    usage: dict[str, MutablePlainTree] = {}
 
     loop = asyncio.get_running_loop()
     deadline = loop.time() + _STREAM_IDLE_TIMEOUT
@@ -666,7 +662,7 @@ async def consume_stream(
                 saw_done = True
                 break
             try:
-                event = parse(data_str, dict[str, object])
+                event = from_plain(loads(data_str), dict[str, object])
             except (json.JSONDecodeError, ReadError):
                 continue
             if "error" in event or event.get("object") == "error":
@@ -675,15 +671,18 @@ async def consume_stream(
                 message_id = str(event.get("id") or "")
             event_usage = event.get("usage")
             if isinstance(event_usage, dict):
-                usage = cast(MutableJSON, event_usage)
-            raw_choices = cast(list[MutableJSON], event.get("choices") or [])
+                usage = cast(dict[str, MutablePlainTree], event_usage)
+            raw_choices = cast(
+                list[dict[str, MutablePlainTree]],
+                event.get("choices") or [],
+            )
             if not raw_choices:
                 continue
             choice = raw_choices[0]
             fr = choice.get("finish_reason")
             if isinstance(fr, str) and fr:
                 finish_reason = fr
-            delta = cast(MutableJSON, choice.get("delta") or {})
+            delta = cast(dict[str, MutablePlainTree], choice.get("delta") or {})
             content_chunk = delta.get("content")
             if isinstance(content_chunk, str) and content_chunk:
                 text_parts.append(content_chunk)
@@ -701,13 +700,16 @@ async def consume_stream(
                     thinking_parts.append(think_chunk)
                     if publish is not None:
                         publish(ModelResponseThinking(think_chunk))
-            for tc in cast(list[MutableJSON], delta.get("tool_calls") or []):
+            for tc in cast(
+                list[dict[str, MutablePlainTree]],
+                delta.get("tool_calls") or [],
+            ):
                 idx_raw = tc.get("index")
                 idx = idx_raw if isinstance(idx_raw, int) else 0
                 tc_id = tc.get("id")
                 if isinstance(tc_id, str) and tc_id:
                     tool_id[idx] = tc_id
-                func = cast(MutableJSON, tc.get("function") or {})
+                func = cast(dict[str, MutablePlainTree], tc.get("function") or {})
                 name = func.get("name")
                 if isinstance(name, str) and name:
                     tool_name[idx] = name
@@ -772,9 +774,9 @@ async def consume_stream(
 
 def _stream_error(event: Mapping[str, object]) -> OpenAIStreamError:
     """Classify an in-band SSE error event, flat or nested under ``error``."""
-    error = convert(event.get("error"), dict[str, object], default=None) or event
-    message = convert(error.get("message"), str, default=None) or "unknown error"
-    code = convert(error.get("code"), str, default=None) or convert(
+    error = from_plain(event.get("error"), dict[str, object], default=None) or event
+    message = from_plain(error.get("message"), str, default=None) or "unknown error"
+    code = from_plain(error.get("code"), str, default=None) or from_plain(
         error.get("type"),
         str,
         default=None,
@@ -786,7 +788,7 @@ def _stream_error(event: Mapping[str, object]) -> OpenAIStreamError:
     return OpenAIStreamError(
         ": ".join(details),
         code=code,
-        param=convert(error.get("param"), str, default=None),
+        param=from_plain(error.get("param"), str, default=None),
     )
 
 
@@ -796,7 +798,7 @@ def _parse_tool_arguments(
     source: str,
     tool_name: str,
     call_id: str,
-) -> MutableJSON:
+) -> dict[str, MutablePlainTree]:
     """Parse OpenAI-compatible tool arguments, preserving existing fallback."""
     if not args_str:
         logger.warning(
@@ -819,7 +821,7 @@ def _parse_tool_arguments(
         )
         return {}
     if isinstance(parsed, dict):
-        return cast(MutableJSON, parsed)
+        return cast(dict[str, MutablePlainTree], parsed)
     logger.warning(
         "OpenAI-compatible tool arguments were not a JSON object: "
         "source=%s tool=%s call_id=%s",

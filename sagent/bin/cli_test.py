@@ -58,7 +58,7 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.catalog.table import UnknownModelError
-from sagent.lib.custom_json import ReadError
+from sagent.lib.codec import ReadError
 from sagent.providers import PROVIDER_NAMES
 from sagent.sessions import SessionInfo, project_dir
 from sagent.testing import FakeAgent, MockModelCaps

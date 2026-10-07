@@ -37,14 +37,7 @@ import fastjsonschema
 from sagent.catalog.anthropic import cli, models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import (
-    JSON,
-    MutableJSON,
-    MutableJSONValue,
-    ReadError,
-    convert,
-    parse,
-)
+from sagent.lib.codec import MutablePlainTree, PlainTree, ReadError, from_plain, loads
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.lib.cli_respawn import (
     CLISubprocessModel,
@@ -152,7 +145,7 @@ _NON_SUBSCRIPTION_AUTH_ENV = frozenset(
         "CLAUDE_CODE_USE_VERTEX",
     },
 )
-_CREDENTIALS_SCHEMA: Final[JSON] = {
+_CREDENTIALS_SCHEMA: Final[Mapping[str, PlainTree]] = {
     "type": "object",
     "required": ["claudeAiOauth"],
     "properties": {
@@ -195,7 +188,7 @@ def _claude_auth_status(binary: str) -> bool | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     try:
-        status = parse(proc.stdout, dict[str, object])
+        status = from_plain(loads(proc.stdout), dict[str, object])
     except (json.JSONDecodeError, ReadError):
         return None
     logged_in = status.get("loggedIn")
@@ -1090,7 +1083,7 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
         # ``content_block_stop`` finalises and emits a ToolLabel with
         # the parsed args.
         tool_use_blocks: dict[int, dict[str, object]] = {}
-        usage_event: MutableJSON | None = None
+        usage_event: dict[str, MutablePlainTree] | None = None
         # Usage of the LAST internal round's request (raw Anthropic API
         # shape, snake_case). One ``claude --print`` turn runs the whole
         # tool loop inside the subprocess -- N internal API rounds -- and
@@ -1106,7 +1099,7 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
         # output side stays cumulative (output genuinely accumulates
         # across rounds), and billing is unaffected either way
         # (``total_cost`` comes from ``modelUsage.costUSD``, summed).
-        last_round_usage: MutableJSON | None = None
+        last_round_usage: dict[str, MutablePlainTree] | None = None
         message_id = ""
         stop_reason: str | None = None
         while True:
@@ -1143,12 +1136,12 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
                     )
                 break
             if kind == "stream_event":
-                inner = cast(MutableJSON, event.get("event") or {})
+                inner = cast(dict[str, MutablePlainTree], event.get("event") or {})
                 if inner.get("type") == "message_start":
-                    msg = cast(MutableJSON, inner.get("message") or {})
+                    msg = cast(dict[str, MutablePlainTree], inner.get("message") or {})
                     usage = msg.get("usage")
                     if isinstance(usage, dict):
-                        last_round_usage = cast(MutableJSON, usage)
+                        last_round_usage = usage
                 _dispatch_stream_event(
                     inner,
                     text_parts,
@@ -1395,21 +1388,21 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
 
 def _parse_cli_credentials(raw: Mapping[str, object]) -> AnthropicCLICredentials:
     """Extract access/refresh/expiry from Claude CLI credential JSON."""
-    oauth = cast(MutableJSON, raw["claudeAiOauth"])
+    oauth = cast(dict[str, MutablePlainTree], raw["claudeAiOauth"])
     creds = AnthropicCLICredentials(
         access_token=str(oauth["accessToken"]),
         refresh_token=str(oauth["refreshToken"]),
-        expires_at=convert(oauth["expiresAt"], float) / 1000.0,
+        expires_at=from_plain(oauth["expiresAt"], float) / 1000.0,
     )
     if "scopes" in oauth:
-        creds["scopes"] = cast(list[str], oauth["scopes"])
+        creds["scopes"] = from_plain(oauth["scopes"], list[str])
     if "subscriptionType" in oauth:
         creds["subscription_type"] = cast(str | None, oauth["subscriptionType"])
     if "rateLimitTier" in oauth:
         creds["rate_limit_tier"] = cast(str | None, oauth["rateLimitTier"])
     token_account_raw = oauth.get("tokenAccount")
     if isinstance(token_account_raw, dict):
-        token_account = cast(MutableJSON, token_account_raw)
+        token_account = token_account_raw
         if token_account.get("uuid"):
             creds["account_uuid"] = str(token_account["uuid"])
         if token_account.get("emailAddress"):
@@ -1438,7 +1431,10 @@ def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
     if not path.exists():
         return None
     try:
-        raw = parse(path.read_text(encoding="utf-8"), dict[str, object])
+        raw = from_plain(
+            loads(path.read_text(encoding="utf-8")),
+            dict[str, object],
+        )
         _CREDENTIALS_VALIDATOR(raw)
     except (OSError, json.JSONDecodeError, ReadError):
         return None
@@ -1645,18 +1641,18 @@ def _user_line(
     entry: AgentSendMessage | UserMessage,
     max_image_dim: int,
     max_image_bytes: int,
-) -> MutableJSON:
+) -> dict[str, MutablePlainTree]:
     """Build a ``{"type":"user", ...}`` stdin line, attaching images inline."""
     image_attachments = [
         att for att in entry.attachments if att.descriptor.startswith("image/")
     ]
     if not image_attachments:
-        text_line: MutableJSON = {
+        text_line: dict[str, MutablePlainTree] = {
             "type": "user",
             "message": {"role": "user", "content": entry.text},
         }
         return text_line
-    content: list[MutableJSONValue] = []
+    content: list[MutablePlainTree] = []
     for att in image_attachments:
         raw, mime = image.resize(
             att.data,
@@ -1675,7 +1671,7 @@ def _user_line(
         )
     if entry.text:
         content.append({"type": "text", "text": entry.text})
-    image_line: MutableJSON = {
+    image_line: dict[str, MutablePlainTree] = {
         "type": "user",
         "message": {"role": "user", "content": content},
     }
@@ -1693,7 +1689,7 @@ def _user_line(
 # mode the bridge ALSO publishes labels for its own tools, so bridge-mounted tools get
 # logged twice; the trace renderer treats each ToolLabel as a separate event.
 def _dispatch_stream_event(
-    event: MutableJSON,
+    event: dict[str, MutablePlainTree],
     text_parts: list[str],
     thinking_blocks: list[dict[str, str]],
     *,
@@ -1704,7 +1700,7 @@ def _dispatch_stream_event(
     event_type = event.get("type")
     if event_type == "content_block_start":
         idx = int(cast(int, event.get("index") or 0))
-        block = cast(MutableJSON, event.get("content_block") or {})
+        block = cast(dict[str, MutablePlainTree], event.get("content_block") or {})
         if block.get("type") == "thinking":
             thinking_blocks.append(_new_thinking_block())
         elif block.get("type") == "tool_use":
@@ -1715,7 +1711,7 @@ def _dispatch_stream_event(
             }
         return
     if event_type == "content_block_delta":
-        delta = cast(MutableJSON, event.get("delta") or {})
+        delta = cast(dict[str, MutablePlainTree], event.get("delta") or {})
         delta_type = delta.get("type")
         if delta_type == "input_json_delta":
             idx = int(cast(int, event.get("index") or 0))
@@ -1820,14 +1816,14 @@ def _render_tool_args(raw_json: str) -> str:
 # provider's per-request usage reports. Returns 0 when no round was observed (defensive;
 # a successful drain always sees at least one ``message_start``), which downstream
 # consumers treat as "unknown -- estimate instead".
-def _round_context_tokens(round_usage: MutableJSON | None) -> int:
+def _round_context_tokens(round_usage: dict[str, MutablePlainTree] | None) -> int:
     """Cache-inclusive input footprint of one internal round's request."""
     if round_usage is None:
         return 0
     return (
-        convert(round_usage.get("input_tokens"), int, default=0)
-        + convert(round_usage.get("cache_creation_input_tokens"), int, default=0)
-        + convert(round_usage.get("cache_read_input_tokens"), int, default=0)
+        from_plain(round_usage.get("input_tokens"), int, default=0)
+        + from_plain(round_usage.get("cache_creation_input_tokens"), int, default=0)
+        + from_plain(round_usage.get("cache_read_input_tokens"), int, default=0)
     )
 
 
@@ -1848,22 +1844,22 @@ def _round_context_tokens(round_usage: MutableJSON | None) -> int:
 # here loses no cost fidelity.
 def _build_model_response(
     *,
-    usage_event: MutableJSON,
-    last_round_usage: MutableJSON | None,
+    usage_event: dict[str, MutablePlainTree],
+    last_round_usage: dict[str, MutablePlainTree] | None,
     text: str,
     thinking_blocks: list[dict[str, str]],
     stop_reason: str | None,
     fallback_message_id: str,
 ) -> ModelResponse:
     """Assemble a ``ModelResponse`` with normalized token semantics."""
-    model_usage = cast(MutableJSON, usage_event.get("modelUsage") or {})
+    model_usage = cast(dict[str, MutablePlainTree], usage_event.get("modelUsage") or {})
     output_tokens = 0
     total_cost = 0.0
     for row in model_usage.values():
         if not isinstance(row, dict):
             continue
-        row_map = cast(MutableJSON, row)
-        output_tokens += convert(row_map.get("outputTokens"), int, default=0)
+        row_map = row
+        output_tokens += from_plain(row_map.get("outputTokens"), int, default=0)
         cost = row_map.get("costUSD")
         if isinstance(cost, (int, float)):
             total_cost += float(cost)
@@ -1884,13 +1880,13 @@ def _build_model_response(
     cache_creation = 0
     cache_read = 0
     if last_round_usage is not None:
-        input_tokens = convert(last_round_usage.get("input_tokens"), int, default=0)
-        cache_creation = convert(
+        input_tokens = from_plain(last_round_usage.get("input_tokens"), int, default=0)
+        cache_creation = from_plain(
             last_round_usage.get("cache_creation_input_tokens"),
             int,
             default=0,
         )
-        cache_read = convert(
+        cache_read = from_plain(
             last_round_usage.get("cache_read_input_tokens"),
             int,
             default=0,

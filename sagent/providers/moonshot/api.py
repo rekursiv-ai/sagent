@@ -30,7 +30,7 @@ from sagent.providers.openai.compat import (
 
 
 if TYPE_CHECKING:
-    from sagent.lib.custom_json import MutableJSON
+    from sagent.lib.codec import MutablePlainTree
     from sagent.types.model import ModelRequest
 
 
@@ -42,9 +42,9 @@ class _MoonshotModel(OpenAICompatModel):
     @override
     def _transform_body(
         self,
-        body: MutableJSON,
+        body: dict[str, MutablePlainTree],
         request: ModelRequest,
-    ) -> MutableJSON:
+    ) -> dict[str, MutablePlainTree]:
         """Drop the fixed sampler and map thinking onto Kimi's knobs."""
         del request
         # K3: "temperature=1.0 ... are fixed; omit them from requests"; K2.x:

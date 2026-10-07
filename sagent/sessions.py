@@ -38,7 +38,7 @@ import sys
 import time
 import uuid
 
-from sagent.lib.custom_json import convert
+from sagent.lib.codec import from_plain
 from sagent.lib.userdirs import data_dir
 
 
@@ -782,7 +782,7 @@ def _iter_jsonl(lines: Iterable[str]) -> Iterator[dict[str, object]]:
         if not isinstance(parsed, dict):
             logger.warning("Skipping non-dict JSONL record: %r", line[:120])
             continue
-        record = convert(cast(object, parsed), dict[str, object])
+        record = from_plain(cast(object, parsed), dict[str, object])
         yield record
 
 

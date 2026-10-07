@@ -55,12 +55,7 @@ import time
 import uuid
 
 from sagent.lib import token_count
-from sagent.lib.custom_json import (
-    MutableJSON,
-    MutableJSONValue,
-    convert,
-    json_unfreeze,
-)
+from sagent.lib.codec import MutablePlainTree, from_plain, mutable
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.stop_reason import normalize_stop_reason
@@ -216,14 +211,16 @@ def _parse_model_option(option: str) -> tuple[_ModelOption, object]:
     )
 
 
-def _context_window(config: MutableJSON, default: int) -> int:
+def _context_window(config: dict[str, MutablePlainTree], default: int) -> int:
     """Extract the configured context window from an HF config dict."""
     max_pos = config.get("max_position_embeddings")
     if isinstance(max_pos, int):
         return max_pos
     text_config = config.get("text_config")
     if isinstance(text_config, dict):
-        text_max_pos = cast(MutableJSON, text_config).get("max_position_embeddings")
+        text_max_pos = text_config.get(
+            "max_position_embeddings",
+        )
         if isinstance(text_max_pos, int):
             return text_max_pos
     return default
@@ -370,7 +367,7 @@ class SelfHosted:
         if dtype is not None:
             load_kwargs["dtype"] = dtype
         config = cast(
-            MutableJSON,
+            dict[str, MutablePlainTree],
             transformers_lib.AutoConfig.from_pretrained(
                 model_id,
                 trust_remote_code=trust_remote_code,
@@ -768,7 +765,7 @@ class SelfHostedModel(ModelDefaults):
         """Render a ``ModelRequest`` and preserve tokenizer masks."""
         tokenizer = self._provider.tokenizer
         messages = _build_chat_messages(request)
-        kwargs: MutableJSON = {
+        kwargs: dict[str, MutablePlainTree] = {
             "tokenize": True,
             "add_generation_prompt": True,
             "return_tensors": "pt",
@@ -793,8 +790,8 @@ class SelfHostedModel(ModelDefaults):
 
 def _apply_chat_template(
     tokenizer: _Tokenizer,
-    messages: list[MutableJSON],
-    kwargs: MutableJSON,
+    messages: list[dict[str, MutablePlainTree]],
+    kwargs: dict[str, MutablePlainTree],
     tools: list[Tool],
 ) -> object:
     """Apply a chat template with graceful HF feature fallback."""
@@ -813,7 +810,7 @@ def _apply_chat_template(
             return tokenizer.apply_chat_template(messages, **retry_kwargs)
         except (TypeError, ValueError) as e:
             last_error = e
-            kwargs = cast(MutableJSON, retry_kwargs)
+            kwargs = retry_kwargs
 
     if "tools" in kwargs:
         logger.debug(
@@ -854,7 +851,10 @@ def _module_device(model: nn.Module) -> str:
     return str(param.device) if param is not None else "unknown"
 
 
-def _inline_tool_preamble(messages: list[MutableJSON], tools: list[Tool]) -> None:
+def _inline_tool_preamble(
+    messages: list[dict[str, MutablePlainTree]],
+    tools: list[Tool],
+) -> None:
     """Inline tool schemas for templates without native tool support."""
     if not tools:
         return
@@ -889,17 +889,17 @@ def _attention_mask(rendered: object) -> object | None:
     return getattr(rendered, "attention_mask", None)
 
 
-def _build_chat_messages(request: ModelRequest) -> list[MutableJSON]:
+def _build_chat_messages(request: ModelRequest) -> list[dict[str, MutablePlainTree]]:
     """Translate history entries to HF chat-template format."""
     ids = IdRemapper("call_")
-    messages: list[MutableJSON] = []
+    messages: list[dict[str, MutablePlainTree]] = []
     if request.system:
         messages.append({"role": "system", "content": request.system})
     for entry in request.messages:
         if isinstance(entry, (AgentSendMessage, UserMessage)):
             messages.append({"role": "user", "content": entry.text})
         elif isinstance(entry, AssistantMessage):
-            tool_calls_hf: list[MutableJSON] = [
+            tool_calls_hf: list[dict[str, MutablePlainTree]] = [
                 {
                     "id": ids.map(tc.id),
                     "type": "function",
@@ -910,12 +910,12 @@ def _build_chat_messages(request: ModelRequest) -> list[MutableJSON]:
                 }
                 for tc in entry.tool_calls
             ]
-            asst_entry: MutableJSON = {
+            asst_entry: dict[str, MutablePlainTree] = {
                 "role": "assistant",
                 "content": entry.text,
             }
             if tool_calls_hf:
-                asst_entry["tool_calls"] = cast(MutableJSONValue, tool_calls_hf)
+                asst_entry["tool_calls"] = mutable(tool_calls_hf)
             messages.append(asst_entry)
         else:
             content = entry.content
@@ -931,14 +931,14 @@ def _build_chat_messages(request: ModelRequest) -> list[MutableJSON]:
     return messages
 
 
-def _tool_schema(tool: Tool) -> MutableJSON:
+def _tool_schema(tool: Tool) -> dict[str, MutablePlainTree]:
     """Wire-shape a ``Tool`` as the HF chat-template ``tools`` schema entry."""
-    schema: MutableJSON = {
+    schema: dict[str, MutablePlainTree] = {
         "type": "function",
         "function": {
             "name": tool.name,
             "description": tool.description,
-            "parameters": json_unfreeze(tool.directive_schema),
+            "parameters": mutable(tool.directive_schema),
         },
     }
     return schema
@@ -1052,7 +1052,7 @@ def _parse_qwen_tool_call(raw: str) -> ToolCall | None:
         return None
     if not isinstance(payload, dict):
         return None
-    payload_d = cast(MutableJSON, payload)
+    payload_d = cast(dict[str, MutablePlainTree], payload)
     name = cast(str | None, payload_d.get("name"))
     raw_args = payload_d.get("arguments") or {}
     if not isinstance(name, str) or not name or not isinstance(raw_args, dict):
@@ -1080,7 +1080,7 @@ def _parse_deepseek_tool_call(raw: str) -> ToolCall | None:
     return ToolCall(
         id=str(uuid.uuid4())[:12],
         name=name_match.group(1),
-        args=convert(parsed, dict[str, object]),
+        args=from_plain(parsed, dict[str, object]),
     )
 
 

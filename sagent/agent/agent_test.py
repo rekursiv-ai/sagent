@@ -65,7 +65,7 @@ from sagent.agent.state import (
 )
 from sagent.compaction.summary import SummaryCompactor
 from sagent.lib import last_models, token_count
-from sagent.lib.custom_json import JSON
+from sagent.lib.codec import PlainTree
 from sagent.providers.lib.errors import PolicyBlockedError
 from sagent.tools.read import Read
 from sagent.types.capability import (
@@ -381,7 +381,7 @@ async def test_observed_model_delegates_exact_token_measurement() -> None:
     assert await observed.actual_request_tokens(request) > 0
 
 
-_STUB_SCHEMA: JSON = {"type": "object"}
+_STUB_SCHEMA: Mapping[str, PlainTree] = {"type": "object"}
 
 
 @dataclass(slots=True, kw_only=True)
@@ -391,7 +391,9 @@ class StubTool:
     name: str = "Echo"
     tool_id: str = "application/x-tool-echo"
     description: str = "Echo tool."
-    directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
+    directive_schema: Mapping[str, PlainTree] = field(
+        default_factory=lambda: {"type": "object"},
+    )
     clearable_results: bool = False
     response: str | None = None
     calls: list[Mapping[str, object]] = field(default_factory=list)
@@ -1226,7 +1228,9 @@ async def test_agent_run_waits_for_background_tool_result() -> None:
         name: str = "slow_echo"
         tool_id: str = "application/x-tool-slow-echo"
         description: str = "echoes after a brief async pause"
-        directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
+        directive_schema: Mapping[str, PlainTree] = field(
+            default_factory=lambda: {"type": "object"},
+        )
         clearable_results: bool = False
 
         def summary(self, args: Mapping[str, object]) -> str:
@@ -1527,7 +1531,9 @@ async def test_background_result_lands_before_single_agent_idle() -> None:
         name: str = "slow_echo"
         tool_id: str = "application/x-tool-slow-echo"
         description: str = "echoes after a brief async pause"
-        directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
+        directive_schema: Mapping[str, PlainTree] = field(
+            default_factory=lambda: {"type": "object"},
+        )
         clearable_results: bool = False
 
         def summary(self, args: Mapping[str, object]) -> str:
@@ -3837,7 +3843,9 @@ async def test_run_bg_propagates_external_cancellation() -> None:
         name: str = "blocker"
         tool_id: str = "application/x-tool-blocker"
         description: str = ""
-        directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
+        directive_schema: Mapping[str, PlainTree] = field(
+            default_factory=lambda: {"type": "object"},
+        )
         clearable_results: bool = False
 
         def summary(self, args: Mapping[str, object]) -> str:
@@ -9954,7 +9962,9 @@ def test_background_aware_tool_rejects_non_object_schema() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class StringSchemaTool(StubTool):
-        directive_schema: JSON = field(default_factory=lambda: {"type": "string"})
+        directive_schema: Mapping[str, PlainTree] = field(
+            default_factory=lambda: {"type": "string"},
+        )
 
     with pytest.raises(ValueError, match="object-typed"):
         _ = BackgroundAwareTool(StringSchemaTool())
@@ -9965,7 +9975,9 @@ def test_background_aware_tool_accepts_typeless_schema() -> None:
 
     @dataclass(slots=True, kw_only=True)
     class TypelessTool(StubTool):
-        directive_schema: JSON = field(default_factory=lambda: cast(JSON, {}))
+        directive_schema: Mapping[str, PlainTree] = field(
+            default_factory=lambda: cast(Mapping[str, PlainTree], {}),
+        )
 
     wrap = BackgroundAwareTool(TypelessTool())
     # Injection still happens; the wrapper's whole job depends on it.
@@ -10126,7 +10138,10 @@ async def test_serve_forever_rejects_a_concurrent_run() -> None:
 @pytest.mark.asyncio
 async def test_a_tool_owned_delay_reaches_the_tool() -> None:
     """A tool declaring ``delay`` keeps it; it is not a background request."""
-    schema: JSON = {"type": "object", "properties": {"delay": {"type": "integer"}}}
+    schema: Mapping[str, PlainTree] = {
+        "type": "object",
+        "properties": {"delay": {"type": "integer"}},
+    }
     tool = StubTool(directive_schema=schema)
     a = _build_agent(tools=[tool])
     assert "background" not in json.dumps(a.live_tools()[0].directive_schema)

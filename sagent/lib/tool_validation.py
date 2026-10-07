@@ -10,16 +10,16 @@ import json
 
 import fastjsonschema
 
-from sagent.lib.custom_json import json_unfreeze
+from sagent.lib.codec import mutable
 
 
 if TYPE_CHECKING:
-    from sagent.lib.custom_json import JSON
+    from sagent.lib.codec import PlainTree
 
 
 def validate_tool_input(
     tool_name: str,
-    schema: JSON,
+    schema: Mapping[str, PlainTree],
     args: Mapping[str, object],
 ) -> str | None:
     """Pre-check tool args against a directive schema.
@@ -34,7 +34,7 @@ def validate_tool_input(
 
     """
     try:
-        schema_text = json.dumps(json_unfreeze(schema), sort_keys=True)
+        schema_text = json.dumps(mutable(schema), sort_keys=True)
         _compile_schema(schema_text)(args)
     except fastjsonschema.JsonSchemaValueException as error:
         return _render_error(tool_name, schema, error)
@@ -46,7 +46,7 @@ def validate_tool_input(
 # sends it to re-add a key it already sent.
 def _render_error(
     tool_name: str,
-    schema: JSON,
+    schema: Mapping[str, PlainTree],
     error: fastjsonschema.JsonSchemaValueException,
 ) -> str:
     """Word a validation failure by what kind of rule it broke."""

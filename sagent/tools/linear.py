@@ -19,21 +19,22 @@ Supported operations:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, cast
 
 import asyncio
+import json
 import os
 
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
-from sagent.lib.custom_json import (
-    JSON,
-    MutableJSON,
+from sagent.lib.codec import (
+    MutablePlainTree,
+    PlainTree,
     ReadError,
-    convert,
-    json_freeze,
-    loads,
+    from_plain,
+    immutable,
 )
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
@@ -62,7 +63,7 @@ class Linear:
     tool_id: str = "application/x-tool-linear"
     clearable_results: bool = False
     description: str = load_tool_description("Linear")
-    directive_schema: JSON = json_freeze(
+    directive_schema: Mapping[str, PlainTree] = immutable(
         {
             "type": "object",
             "properties": {
@@ -140,7 +141,7 @@ class Linear:
             description=str(args.get("description", "")),
             body=str(args.get("body", "")),
             state_id=str(args.get("state_id", "")),
-            limit=convert(args.get("limit"), int, default=25),
+            limit=from_plain(args.get("limit"), int, default=25),
         )
         if isinstance(result, ToolResult):
             return result
@@ -206,7 +207,7 @@ class Linear:
         limit: int,
     ) -> str | ToolResult:
         """Run ``ListIssues`` with optional team / assignee filters."""
-        issue_filter: MutableJSON = {}
+        issue_filter: dict[str, MutablePlainTree] = {}
         if team:
             issue_filter["team"] = {"key": {"eq": team}}
         if assignee_email:
@@ -236,8 +237,9 @@ query ListIssues($filter: IssueFilter, $first: Int!) {
         if isinstance(data, ToolResult):
             return data
         issues = cast(
-            list[MutableJSON],
-            cast(MutableJSON, data.get("issues") or {}).get("nodes") or [],
+            list[dict[str, MutablePlainTree]],
+            cast(dict[str, MutablePlainTree], data.get("issues") or {}).get("nodes")
+            or [],
         )
         if not issues:
             return "(no issues)"
@@ -270,7 +272,7 @@ query GetIssue($id: String!) {
         )
         if isinstance(data, ToolResult):
             return data
-        issue = cast(MutableJSON | None, data.get("issue"))
+        issue = cast(dict[str, MutablePlainTree] | None, data.get("issue"))
         if not issue:
             return f"No such issue: {issue_id}"
         return _render_issue(issue)
@@ -311,10 +313,10 @@ mutation CreateIssue($teamId: String!, $title: String!, $description: String) {
         )
         if isinstance(data, ToolResult):
             return data
-        res = cast(MutableJSON, data.get("issueCreate") or {})
+        res = cast(dict[str, MutablePlainTree], data.get("issueCreate") or {})
         if not res.get("success"):
             return f"Create failed: {res}"
-        issue = cast(MutableJSON, res.get("issue") or {})
+        issue = cast(dict[str, MutablePlainTree], res.get("issue") or {})
         return (
             f"Created {issue.get('identifier')}: {issue.get('title')}"
             f" - {issue.get('url')}"
@@ -332,7 +334,7 @@ mutation CreateIssue($teamId: String!, $title: String!, $description: String) {
         """Run ``UpdateIssue`` for the fields the caller supplied."""
         if not issue_id:
             return ToolResult(call_id="", content="'id' required.", is_error=True)
-        update_input: MutableJSON = {}
+        update_input: dict[str, MutablePlainTree] = {}
         if title:
             update_input["title"] = title
         if description:
@@ -359,14 +361,14 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
         )
         if isinstance(data, ToolResult):
             return data
-        res = cast(MutableJSON, data.get("issueUpdate") or {})
+        res = cast(dict[str, MutablePlainTree], data.get("issueUpdate") or {})
         if not res.get("success"):
             return ToolResult(
                 call_id="",
                 content=f"Update failed: {res}",
                 is_error=True,
             )
-        issue = cast(MutableJSON, res.get("issue") or {})
+        issue = cast(dict[str, MutablePlainTree], res.get("issue") or {})
         return f"Updated {issue.get('identifier')}: {issue.get('title')}"
 
     async def _comment(
@@ -397,7 +399,7 @@ mutation AddComment($issueId: String!, $body: String!) {
         )
         if isinstance(data, ToolResult):
             return data
-        res = cast(MutableJSON, data.get("commentCreate") or {})
+        res = cast(dict[str, MutablePlainTree], data.get("commentCreate") or {})
         if not res.get("success"):
             return ToolResult(
                 call_id="",
@@ -407,23 +409,25 @@ mutation AddComment($issueId: String!, $body: String!) {
         return "Comment added."
 
 
-def _summarize(issue: MutableJSON) -> str:
+def _summarize(issue: dict[str, MutablePlainTree]) -> str:
     """One-line summary of an issue: ``[ident] [state] title``."""
     ident = issue.get("identifier") or "?"
-    state = cast(MutableJSON, issue.get("state") or {}).get("name") or "?"
+    state = (
+        cast(dict[str, MutablePlainTree], issue.get("state") or {}).get("name") or "?"
+    )
     title = issue.get("title") or ""
     return f"[{ident}] [{state}] {title}"
 
 
-def _render_issue(issue: MutableJSON) -> str:
+def _render_issue(issue: dict[str, MutablePlainTree]) -> str:
     """Multi-line markdown rendering for a single ``GetIssue`` payload."""
     parts = [
         f"# [{issue.get('identifier')}] {issue.get('title')}",
-        f"State: {cast('MutableJSON', issue.get('state') or {}).get('name') or '?'}",
+        f"State: {cast('dict[str, MutablePlainTree]', issue.get('state') or {}).get('name') or '?'}",
         f"URL: {issue.get('url')}",
         f"Priority: {issue.get('priority')}",
     ]
-    assignee = cast(MutableJSON | None, issue.get("assignee"))
+    assignee = cast(dict[str, MutablePlainTree] | None, issue.get("assignee"))
     if assignee:
         parts.append(f"Assignee: {assignee.get('name')} ({assignee.get('email')})")
     desc = issue.get("description")
@@ -431,24 +435,28 @@ def _render_issue(issue: MutableJSON) -> str:
         parts.append("")
         parts.append(str(desc))
     comments = cast(
-        list[MutableJSON],
-        cast(MutableJSON, issue.get("comments") or {}).get("nodes") or [],
+        list[dict[str, MutablePlainTree]],
+        cast(dict[str, MutablePlainTree], issue.get("comments") or {}).get("nodes")
+        or [],
     )
     if comments:
         parts.append("\n## Comments")
         for c in comments:
-            user = cast(MutableJSON, c.get("user") or {}).get("name") or "?"
+            user = (
+                cast(dict[str, MutablePlainTree], c.get("user") or {}).get("name")
+                or "?"
+            )
             parts.append(f"- {user} @ {c.get('createdAt')}: {c.get('body')}")
     return "\n".join(parts)
 
 
 async def _gql(
     query: str,
-    variables: MutableJSON,
+    variables: dict[str, MutablePlainTree],
     api_key: str,
     *,
     timeout_sec: float = 30.0,
-) -> MutableJSON | ToolResult:
+) -> dict[str, MutablePlainTree] | ToolResult:
     """Execute a GraphQL request against Linear's API."""
     headers = {
         "Content-Type": "application/json",
@@ -473,9 +481,9 @@ async def _gql(
             content=(f"Linear API HTTP {e.status}: {e.body.decode(errors='replace')}"),
             is_error=True,
         )
-    document = loads(raw[0])
+    document = json.loads(raw[0])
     try:
-        body = convert(document, dict[str, object])
+        body = from_plain(document, dict[str, object])
     except ReadError:
         return ToolResult(
             call_id="",
@@ -495,7 +503,7 @@ async def _gql(
             content="Linear GraphQL returned no data",
             is_error=True,
         )
-    return cast(MutableJSON, data)
+    return cast(dict[str, MutablePlainTree], data)
 
 
 async def _team_id(team_key: str, api_key: str) -> str | ToolResult:
@@ -510,8 +518,8 @@ query TeamByKey($key: String!) { teams(filter: { key: { eq: $key } }) { nodes { 
     if isinstance(data, ToolResult):
         return data
     teams = cast(
-        list[MutableJSON],
-        cast(MutableJSON, data.get("teams") or {}).get("nodes") or [],
+        list[dict[str, MutablePlainTree]],
+        cast(dict[str, MutablePlainTree], data.get("teams") or {}).get("nodes") or [],
     )
     if not teams:
         return ToolResult(

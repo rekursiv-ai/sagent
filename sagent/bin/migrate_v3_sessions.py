@@ -42,7 +42,7 @@ import json
 import logging
 import tempfile
 
-from sagent.lib.custom_json import ReadError, convert
+from sagent.lib.codec import ReadError, from_plain
 
 
 logger = logging.getLogger(__name__)
@@ -182,7 +182,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
 def _id(rec: Mapping[str, object]) -> int:
     """Return the v3 record ``_id`` as an int, defaulting to ``0``."""
     try:
-        return convert(rec.get("_id"), int, strict=False, default=0)
+        return from_plain(rec.get("_id"), int, strict=False, default=0)
     except ReadError:
         return 0
 
@@ -190,7 +190,7 @@ def _id(rec: Mapping[str, object]) -> int:
 def _parent_id(rec: Mapping[str, object]) -> int:
     """Return the v3 record ``_parent_id`` as an int, defaulting to ``-1``."""
     try:
-        return convert(rec.get("_parent_id"), int, strict=False, default=-1)
+        return from_plain(rec.get("_parent_id"), int, strict=False, default=-1)
     except ReadError:
         return -1
 

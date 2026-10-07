@@ -36,7 +36,7 @@ from sagent.agent.state import (
     current_agent_var,
     get_tool_state,
 )
-from sagent.lib.custom_json import JSON, convert, json_freeze
+from sagent.lib.codec import PlainTree, from_plain, immutable
 from sagent.types.runtime import ToolResult
 
 
@@ -491,7 +491,7 @@ def opt_int(directive: Mapping[str, object], key: str) -> int | None:
 
     """
     v = directive.get(key)
-    return None if v is None else convert(v, int, strict=False)
+    return None if v is None else from_plain(v, int, strict=False)
 
 
 def opt_str(directive: Mapping[str, object], key: str) -> str | None:
@@ -588,7 +588,7 @@ class _ToolImpl:
         *,
         name: str | None = None,
         description: str | None = None,
-        schema: JSON | None = None,
+        schema: Mapping[str, PlainTree] | None = None,
         clearable_results: bool = False,
     ) -> None:
         self._fn = fn
@@ -601,7 +601,7 @@ class _ToolImpl:
         # ``is None``, not truthiness: an explicit empty schema is a
         # legitimate override (a no-argument tool) and must survive.
         self.directive_schema = (
-            json_freeze(_build_schema(fn, hints)) if schema is None else schema
+            immutable(_build_schema(fn, hints)) if schema is None else schema
         )
         self.clearable_results = clearable_results
 
@@ -660,7 +660,7 @@ def tool(
     *,
     name: str | None = ...,
     description: str | None = ...,
-    schema: JSON | None = ...,
+    schema: Mapping[str, PlainTree] | None = ...,
     clearable_results: bool = ...,
 ) -> _ToolImpl: ...
 
@@ -670,7 +670,7 @@ def tool(
     *,
     name: str | None = ...,
     description: str | None = ...,
-    schema: JSON | None = ...,
+    schema: Mapping[str, PlainTree] | None = ...,
     clearable_results: bool = ...,
 ) -> Callable[[Callable[..., object]], _ToolImpl]: ...
 
@@ -680,7 +680,7 @@ def tool(
     *,
     name: str | None = None,
     description: str | None = None,
-    schema: JSON | None = None,
+    schema: Mapping[str, PlainTree] | None = None,
     clearable_results: bool = False,
 ) -> _ToolImpl | Callable[[Callable[..., object]], _ToolImpl]:
     """Create a Tool from a function.

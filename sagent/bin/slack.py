@@ -82,7 +82,7 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.custom_json import MutableJSON, ReadError, convert
+from sagent.lib.codec import MutablePlainTree, ReadError, from_plain
 from sagent.lib.userdirs import data_dir
 from sagent.providers import build_provider
 from sagent.tools.slack import Slack, SlackSender
@@ -209,8 +209,8 @@ class SlackAdapter:
             return self._user_names[user_id]
         try:
             resp = await self._web.users_info(user=user_id)
-            user_obj = cast(MutableJSON, resp.get("user") or {})
-            profile = cast(MutableJSON, user_obj.get("profile") or {})
+            user_obj = cast(dict[str, MutablePlainTree], resp.get("user") or {})
+            profile = cast(dict[str, MutablePlainTree], user_obj.get("profile") or {})
             name = str(
                 profile.get("display_name")
                 or user_obj.get("real_name")
@@ -235,7 +235,7 @@ class SlackAdapter:
     async def start(self) -> None:
         """Connect to Socket Mode and listen for events until cancelled."""
         auth_test = cast(Callable[[], Awaitable[object]], self._web.auth_test)
-        auth = cast(MutableJSON, await auth_test())
+        auth = cast(dict[str, MutablePlainTree], await auth_test())
         self._self_user_id = str(auth.get("user_id", ""))
         logger.info("Bot user_id=%s", self._self_user_id)
         if self._router_log_channel:
@@ -291,7 +291,7 @@ class SlackAdapter:
         except Exception:
             logger.exception("Error routing event: %s", event.get("type"))
 
-    async def _route(self, event: MutableJSON) -> None:
+    async def _route(self, event: dict[str, MutablePlainTree]) -> None:
         """Route one Slack event to its target agent or to a command handler."""
         if event.get("user") == self._self_user_id:
             return
@@ -410,14 +410,14 @@ class SlackAdapter:
                 f"\nPersonas: {personas}",
             )
 
-    async def _route_reaction(self, event: MutableJSON) -> None:
+    async def _route_reaction(self, event: dict[str, MutablePlainTree]) -> None:
         """Route a reaction_added event to the agent whose message was reacted to."""
         user_id = str(event.get("user") or "")
         reaction = str(event.get("reaction") or "")
         raw_item = event.get("item")
         if not isinstance(raw_item, dict) or not reaction or not user_id:
             return
-        item = cast(MutableJSON, raw_item)
+        item = raw_item
 
         if item.get("type") != "message":
             return
@@ -652,8 +652,8 @@ class SlackAdapter:
             if not r.is_success:
                 return []
             try:
-                body = convert(r.json(), dict[str, object], default={})
-                members = convert(body.get("members"), list[str], default=[])
+                body = from_plain(r.json(), dict[str, object], default={})
+                members = from_plain(body.get("members"), list[str], default=[])
             except ReadError:
                 return []
         return members if body.get("ok") else []
@@ -840,14 +840,16 @@ def main() -> int:
     return 0
 
 
-def _extract_event(payload: Mapping[str, object] | None) -> MutableJSON | None:
+def _extract_event(
+    payload: Mapping[str, object] | None,
+) -> dict[str, MutablePlainTree] | None:
     """Pull the inner ``event`` dict from a Socket Mode envelope."""
     if payload is None:
         return None
     ev = payload.get("event")
     if not isinstance(ev, dict):
         return None
-    return cast(MutableJSON, ev)
+    return cast(dict[str, MutablePlainTree], ev)
 
 
 def _strip_mention(text: str, self_user_id: str) -> str:

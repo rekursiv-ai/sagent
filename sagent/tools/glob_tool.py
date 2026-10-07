@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Final
 import time
 
 from sagent.agent.state import approx_tokens
-from sagent.lib.custom_json import convert, json_freeze
+from sagent.lib.codec import from_plain, immutable
 from sagent.lib.files.glob import GlobError, glob
 from sagent.tools.core import (
     bound_by_tokens,
@@ -79,7 +79,7 @@ class Glob:
     clearable_results = True
     max_result_chars = DEFAULT_MAX_RESULT_CHARS
     description = load_tool_description("Glob")
-    directive_schema = json_freeze(
+    directive_schema = immutable(
         {
             "type": "object",
             "properties": {
@@ -190,9 +190,9 @@ class Glob:
             pattern=str(args.get("pattern", "")),
             path=str(args.get("path", ".") or "."),
             sort=str(args.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT),
-            long=convert(args.get("long"), bool, default=False),
-            max_results=convert(args.get("max_results"), int, default=0),
-            offset=convert(args.get("offset"), int, default=0),
+            long=from_plain(args.get("long"), bool, default=False),
+            max_results=from_plain(args.get("max_results"), int, default=0),
+            offset=from_plain(args.get("offset"), int, default=0),
         )
 
     def _run(

@@ -18,7 +18,7 @@ from sagent.catalog.openai import (
 )
 from sagent.catalog.table import base_model_id
 from sagent.lib import debug_log
-from sagent.lib.custom_json import convert, json_unfreeze, parse
+from sagent.lib.codec import from_plain, loads, mutable
 from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
     error_status_code,
@@ -323,7 +323,7 @@ def _build_tool(tool: Tool) -> responses.FunctionToolParam:
         "type": "function",
         "name": tool.name,
         "description": tool.description,
-        "parameters": dict(json_unfreeze(tool.directive_schema)),
+        "parameters": dict(mutable(tool.directive_schema)),
         "strict": None,
     }
 
@@ -482,8 +482,8 @@ def _terminal_metadata(response: object) -> tuple[str, str, int, int, int, int]:
     usage = getattr(response, "usage", None)
     if usage is None:
         return message_id, status, 0, 0, 0, 0
-    input_tokens = convert(getattr(usage, "input_tokens", None), int)
-    output_tokens = convert(getattr(usage, "output_tokens", None), int)
+    input_tokens = from_plain(getattr(usage, "input_tokens", None), int)
+    output_tokens = from_plain(getattr(usage, "output_tokens", None), int)
     cache_read = 0
     cache_write = 0
     details = getattr(usage, "input_tokens_details", None)
@@ -493,8 +493,8 @@ def _terminal_metadata(response: object) -> tuple[str, str, int, int, int, int]:
         # through ``to_dict``. Reading the mapping keeps new usage data without
         # an Any cast or waiting for an SDK schema release.
         raw_details = cast(_UsageDetails, details).to_dict()
-        cache_read = convert(raw_details.get("cached_tokens"), int, default=0)
-        cache_write = convert(raw_details.get("cache_write_tokens"), int, default=0)
+        cache_read = from_plain(raw_details.get("cached_tokens"), int, default=0)
+        cache_write = from_plain(raw_details.get("cache_write_tokens"), int, default=0)
     return (
         message_id,
         status,
@@ -660,7 +660,7 @@ async def _consume_stream(
                         incomplete = getattr(resp, "incomplete_details", None)
                         if getattr(incomplete, "reason", None) == "content_filter":
                             finish_reason = "content_filter"
-                    reported_tier = convert(
+                    reported_tier = from_plain(
                         getattr(resp, "service_tier", None),
                         str,
                         default=None,
@@ -852,7 +852,7 @@ def _parse_tool_arguments(
             continue
         saw_args = True
         try:
-            parsed = parse(args_str, dict[str, object])
+            parsed = from_plain(loads(args_str), dict[str, object])
         except json.JSONDecodeError:
             logger.warning(
                 "OpenAI Responses tool arguments were invalid JSON: "

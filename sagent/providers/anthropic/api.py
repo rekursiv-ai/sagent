@@ -59,7 +59,7 @@ else:
 from sagent.catalog.anthropic import api, models, usage_tokens
 from sagent.catalog.table import ModelCatalog
 from sagent.lib import debug_log
-from sagent.lib.custom_json import MutableJSON, MutableJSONValue, json_unfreeze
+from sagent.lib.codec import MutablePlainTree, from_plain, mutable
 from sagent.providers.lib.errors import (
     PolicyBlockedError,
     StreamingResponseNotReadError,
@@ -144,7 +144,7 @@ def build_context_management(
     trigger_tokens: int = 0,
     target_input_tokens: int = _DEFAULT_API_TARGET_INPUT_TOKENS,
     tools: Sequence[ToolResultClearable] = (),
-) -> dict[str, list[MutableJSON]] | None:
+) -> dict[str, list[dict[str, MutablePlainTree]]] | None:
     """Build ``context_management`` body for the Anthropic API.
 
     Args:
@@ -162,17 +162,17 @@ def build_context_management(
           apply.
 
     """
-    edits: list[MutableJSON] = []
+    edits: list[dict[str, MutablePlainTree]] = []
     if has_thinking:
-        keep: MutableJSON | str = (
+        keep: dict[str, MutablePlainTree] | str = (
             {"type": "thinking_turns", "value": 1} if cache_cold else "all"
         )
         edits.append({"type": "clear_thinking_20251015", "keep": keep})
     if server_side_context_management and trigger_tokens > 0:
-        clearable: list[MutableJSONValue] = [
+        clearable: list[MutablePlainTree] = [
             t.name for t in tools if t.clearable_results
         ]
-        unclearable: list[MutableJSONValue] = [
+        unclearable: list[MutablePlainTree] = [
             t.name for t in tools if not t.clearable_results
         ]
         clear_at_least = max(trigger_tokens - target_input_tokens, 1_000)
@@ -404,7 +404,7 @@ class Anthropic:
         cache_cold: bool,
         trigger_tokens: int,
         tools: Sequence[Tool],
-    ) -> MutableJSON | None:
+    ) -> dict[str, MutablePlainTree] | None:
         """Return per-request extra body fields.
 
         Args:
@@ -426,7 +426,10 @@ class Anthropic:
         )
         if cm is None:
             return None
-        return {"context_management": cast(MutableJSONValue, cm)}
+        return from_plain(
+            {"context_management": cm},
+            dict[str, MutablePlainTree],
+        )
 
     async def handle_auth_error(
         self,
@@ -787,7 +790,7 @@ class _AnthropicModel(ModelDefaults):
                 {
                     "name": t.name,
                     "description": t.description,
-                    "input_schema": json_unfreeze(t.directive_schema),
+                    "input_schema": mutable(t.directive_schema),
                 }
                 for t in request.tools
             ]

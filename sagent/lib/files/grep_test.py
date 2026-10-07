@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from sagent.lib.custom_json import convert
+from sagent.lib.codec import from_plain
 from sagent.lib.files.grep import (
     ARGV_CHARS,
     GrepError,
@@ -418,7 +418,7 @@ def test_named_files_split_where_the_next_would_pass_the_argv_limit(
     batches = [
         [
             arg
-            for arg in convert(call.args[0], list[str])
+            for arg in from_plain(call.args[0], list[str])
             if arg.startswith(str(tmp_path))
         ]
         for call in run.call_args_list
@@ -446,7 +446,7 @@ def test_each_rg_run_gets_the_timeout(tmp_path: Path) -> None:
     assert [call.kwargs for call in run.call_args_list] == [
         {"capture_output": True, "timeout": 7, "check": False},
     ] * 2
-    assert "-P" in convert(run.call_args_list[1].args[0], list[str])
+    assert "-P" in from_plain(run.call_args_list[1].args[0], list[str])
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
@@ -578,7 +578,7 @@ def test_the_default_rg_timeout_is_thirty_seconds(tmp_path: Path) -> None:
     ):
         assert grep(f, Query(pattern="x")) == []
     which.assert_called_once_with("rg")
-    assert convert(run.call_args.args[0], list[str])[0] == "/rg"
+    assert from_plain(run.call_args.args[0], list[str])[0] == "/rg"
     assert run.call_args.kwargs["timeout"] == 30
 
 
@@ -772,7 +772,7 @@ def test_a_batch_may_fill_the_argv_limit_exactly(tmp_path: Path) -> None:
         assert grep(names, Query(pattern="hit")) == list(map(str, names))
     first = [
         arg
-        for arg in convert(run.call_args_list[0].args[0], list[str])
+        for arg in from_plain(run.call_args_list[0].args[0], list[str])
         if arg.startswith(str(tmp_path))
     ]
     assert len(first) == fit

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Final, cast, get_args
 import re
 
 from sagent.agent.state import approx_tokens
-from sagent.lib.custom_json import convert, json_freeze
+from sagent.lib.codec import from_plain, immutable
 from sagent.lib.files.grep import GrepError, OutputMode, Query, grep
 from sagent.tools.core import (
     bound_by_tokens,
@@ -105,7 +105,7 @@ class Grep:
     clearable_results = True
     max_result_chars = 20_000
     description = load_tool_description("Grep")
-    directive_schema = json_freeze(
+    directive_schema = immutable(
         {
             "type": "object",
             "properties": {
@@ -251,9 +251,9 @@ class Grep:
             per ``output_mode``.
 
         """
-        keep_first = convert(args.get("keep_first"), int, default=0)
-        keep_last = convert(args.get("keep_last"), int, default=0)
-        offset = convert(args.get("offset"), int, default=0)
+        keep_first = from_plain(args.get("keep_first"), int, default=0)
+        keep_last = from_plain(args.get("keep_last"), int, default=0)
+        offset = from_plain(args.get("offset"), int, default=0)
         context = _int_arg(args, "-C", "context")
         context_before = max(_int_arg(args, "-B"), context)
         context_after = max(_int_arg(args, "-A"), context)
@@ -287,10 +287,10 @@ class Grep:
             output_mode=cast("OutputMode", output_mode),
             context_before=context_before,
             context_after=context_after,
-            case_insensitive=convert(args.get("-i"), bool, default=False),
-            line_numbers=convert(args.get("-n"), bool, default=True),
-            multiline=convert(args.get("multiline"), bool, default=False),
-            pcre=convert(args.get("pcre"), bool, default=False),
+            case_insensitive=from_plain(args.get("-i"), bool, default=False),
+            line_numbers=from_plain(args.get("-n"), bool, default=True),
+            multiline=from_plain(args.get("multiline"), bool, default=False),
+            pcre=from_plain(args.get("pcre"), bool, default=False),
         )
         return await run_sync(
             _search,

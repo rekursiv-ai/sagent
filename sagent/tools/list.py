@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Final
 import asyncio
 import time
 
-from sagent.lib.custom_json import convert, json_freeze
+from sagent.lib.codec import from_plain, immutable
 from sagent.tools.core import load_tool_description, resolve_tool_path
 from sagent.tools.display import Toggle, Wrap
 from sagent.tools.lib.bash import (
@@ -53,7 +53,7 @@ class List:
     tool_id = "application/x-tool-list"
     clearable_results = True
     description = load_tool_description("List")
-    directive_schema = json_freeze(
+    directive_schema = immutable(
         {
             "type": "object",
             "properties": {
@@ -154,13 +154,13 @@ class List:
 
         """
         path = str(args.get("path", ".") or ".")
-        show_hidden = convert(args.get("show_hidden"), bool, default=False)
-        long = convert(args.get("long"), bool, default=False)
+        show_hidden = from_plain(args.get("show_hidden"), bool, default=False)
+        long = from_plain(args.get("long"), bool, default=False)
         sort = str(args.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT)
-        max_results = convert(args.get("max_results"), int, default=500)
+        max_results = from_plain(args.get("max_results"), int, default=500)
         # ``0`` is not "disabled": the schema floor is 1, so a supplied
         # zero is a malformed directive. Distinguish absent from zero.
-        keep_last = convert(args.get("keep_last"), int, default=0)
+        keep_last = from_plain(args.get("keep_last"), int, default=0)
         if args.get("keep_last") is not None and keep_last < 1:
             return ToolResult(
                 call_id="",

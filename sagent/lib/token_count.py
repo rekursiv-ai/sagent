@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Protocol
 import json
 import logging
 
-from sagent.lib.custom_json import json_unfreeze
+from sagent.lib.codec import mutable
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
@@ -75,7 +75,7 @@ def approx_request_tokens(request: ModelRequest, model: TokenEstimator) -> int:
     for tool in request.tools or ():
         total += model.approx_text_tokens(tool.description or "")
         total += model.approx_text_tokens(
-            json.dumps(json_unfreeze(tool.directive_schema)),
+            json.dumps(mutable(tool.directive_schema)),
         )
     return total
 

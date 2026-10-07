@@ -57,7 +57,7 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from sagent.lib.custom_json import MutableJSON
+    from sagent.lib.codec import MutablePlainTree
 
 
 def _noop_sync_tools_bridge(
@@ -936,7 +936,7 @@ def test_build_model_response_normalizes_input_to_last_round() -> None:
     cumulative (it genuinely accumulates) and billing rides ``costUSD``
     (computed by the CLI from full cumulative usage) untouched.
     """
-    usage_event: MutableJSON = {
+    usage_event: dict[str, MutablePlainTree] = {
         "type": "result",
         "modelUsage": {
             "claude-opus-4-6": {
@@ -950,7 +950,7 @@ def test_build_model_response_normalizes_input_to_last_round() -> None:
     }
     # Raw Anthropic API shape off the last ``message_start`` --
     # snake_case, unlike the camelCase ``modelUsage`` rows above.
-    last_round_usage: MutableJSON = {
+    last_round_usage: dict[str, MutablePlainTree] = {
         "input_tokens": 3,
         "cache_creation_input_tokens": 1_200,
         "cache_read_input_tokens": 96_000,
@@ -973,7 +973,7 @@ def test_build_model_response_normalizes_input_to_last_round() -> None:
 def test_round_context_tokens_sums_cache_pools() -> None:
     """Context footprint = non-cached input + both cache pools; None → 0."""
     assert _round_context_tokens(None) == 0
-    round_usage: MutableJSON = {
+    round_usage: dict[str, MutablePlainTree] = {
         "input_tokens": 3,
         "cache_creation_input_tokens": 7,
         "cache_read_input_tokens": 90,
@@ -989,7 +989,7 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
     while the cumulative ``result`` totals do not.
     """
 
-    def _msg_start(input_tokens: int, cache_read: int) -> MutableJSON:
+    def _msg_start(input_tokens: int, cache_read: int) -> dict[str, MutablePlainTree]:
         return {
             "type": "stream_event",
             "event": {
@@ -1004,7 +1004,7 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
             },
         }
 
-    result_event: MutableJSON = {
+    result_event: dict[str, MutablePlainTree] = {
         "type": "result",
         "stop_reason": "end_turn",
         "is_error": False,
@@ -1028,7 +1028,7 @@ async def test_drain_captures_last_round_usage_for_context_anchor() -> None:
             self,
             *,
             skip_non_json: bool = False,
-        ) -> MutableJSON | None:
+        ) -> dict[str, MutablePlainTree] | None:
             del skip_non_json
             return events.pop(0) if events else None
 
@@ -1052,7 +1052,7 @@ async def test_drain_zero_round_preserves_prior_input_token_anchor() -> None:
     empty" and suppress a respawn the still-full context needs. The prior
     anchor must survive.
     """
-    result_event: MutableJSON = {
+    result_event: dict[str, MutablePlainTree] = {
         "type": "result",
         "stop_reason": "end_turn",
         "is_error": False,
@@ -1071,7 +1071,7 @@ async def test_drain_zero_round_preserves_prior_input_token_anchor() -> None:
             self,
             *,
             skip_non_json: bool = False,
-        ) -> MutableJSON | None:
+        ) -> dict[str, MutablePlainTree] | None:
             del skip_non_json
             return events.pop(0) if events else None
 
@@ -1191,7 +1191,7 @@ class _ScriptedClaude:
     def __init__(self, log: list[str], *, fail_turns: frozenset[int]) -> None:
         self._log = log
         self._fail_turns = fail_turns
-        self._pending: list[MutableJSON] = []
+        self._pending: list[dict[str, MutablePlainTree]] = []
         self.closed = False
 
     async def write_line(self, line: str) -> None:
@@ -1220,7 +1220,11 @@ class _ScriptedClaude:
             ],
         )
 
-    async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
+    async def read_json_line(
+        self,
+        *,
+        skip_non_json: bool = False,
+    ) -> dict[str, MutablePlainTree]:
         del skip_non_json
         return self._pending.pop(0)
 
@@ -1815,11 +1819,11 @@ def test_dispatch_stream_event_routes_text_and_thinking() -> None:
         elif isinstance(ev, ModelResponseThinking):
             thinking_chunks.append(ev.text)
 
-    text_event: MutableJSON = {
+    text_event: dict[str, MutablePlainTree] = {
         "type": "content_block_delta",
         "delta": {"type": "text_delta", "text": "hello"},
     }
-    thinking_event: MutableJSON = {
+    thinking_event: dict[str, MutablePlainTree] = {
         "type": "content_block_delta",
         "delta": {"type": "thinking_delta", "thinking": "reflecting"},
     }
@@ -1861,7 +1865,7 @@ def test_dispatch_stream_event_captures_signature_delta() -> None:
     text_parts: list[str] = []
     thinking_blocks: list[dict[str, str]] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
-    sig_event: MutableJSON = {
+    sig_event: dict[str, MutablePlainTree] = {
         "type": "content_block_delta",
         "delta": {"type": "signature_delta", "signature": "abc123"},
     }
@@ -1886,7 +1890,7 @@ async def test_drain_keeps_one_signed_block_per_thinking_round() -> None:
     signature that matches neither, and an API replay rejects it.
     """
 
-    def _round(body: str, signature: str) -> list[MutableJSON]:
+    def _round(body: str, signature: str) -> list[dict[str, MutablePlainTree]]:
         return [
             {
                 "type": "stream_event",
@@ -1914,14 +1918,18 @@ async def test_drain_keeps_one_signed_block_per_thinking_round() -> None:
             },
         ]
 
-    events: list[MutableJSON] = [
+    events: list[dict[str, MutablePlainTree]] = [
         *_round("first", "sig1"),
         *_round("second", "sig2"),
         {"type": "result", "stop_reason": "end_turn", "modelUsage": {}},
     ]
 
     class _Proc:
-        async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
+        async def read_json_line(
+            self,
+            *,
+            skip_non_json: bool = False,
+        ) -> dict[str, MutablePlainTree]:
             del skip_non_json
             return events.pop(0)
 
@@ -1942,7 +1950,7 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
     thinking_blocks: list[dict[str, str]] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
     # 1) start: registers tool_use at index 0 -- NO label published yet.
-    start_event: MutableJSON = {
+    start_event: dict[str, MutablePlainTree] = {
         "type": "content_block_start",
         "index": 0,
         "content_block": {
@@ -1962,7 +1970,7 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
     assert published == []  # Nothing yet -- we wait for args.
     # 2) deltas: stream the JSON in two chunks.
     for partial in ('{"command":"ls', ' -la"}'):
-        delta_event: MutableJSON = {
+        delta_event: dict[str, MutablePlainTree] = {
             "type": "content_block_delta",
             "index": 0,
             "delta": {"type": "input_json_delta", "partial_json": partial},
@@ -1976,7 +1984,7 @@ def test_dispatch_stream_event_publishes_rich_tool_label_at_stop() -> None:
         )
     assert published == []  # Still nothing.
     # 3) stop: now we publish the rich label.
-    stop_event: MutableJSON = {"type": "content_block_stop", "index": 0}
+    stop_event: dict[str, MutablePlainTree] = {"type": "content_block_stop", "index": 0}
     _dispatch_stream_event(
         stop_event,
         text_parts,
@@ -1996,7 +2004,7 @@ def test_dispatch_stream_event_no_label_for_text_block_start() -> None:
     """``content_block_start`` for ``text`` does NOT publish a ToolLabel."""
     published: list[RuntimeEvent] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
-    start_event: MutableJSON = {
+    start_event: dict[str, MutablePlainTree] = {
         "type": "content_block_start",
         "index": 1,
         "content_block": {"type": "text", "text": ""},
@@ -2009,7 +2017,7 @@ def test_dispatch_stream_event_no_label_for_text_block_start() -> None:
         publish=published.append,
     )
     # And a content_block_stop on the text block: no label.
-    stop_event: MutableJSON = {"type": "content_block_stop", "index": 1}
+    stop_event: dict[str, MutablePlainTree] = {"type": "content_block_stop", "index": 1}
     _dispatch_stream_event(
         stop_event,
         [],
@@ -2034,7 +2042,7 @@ def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
     text_parts: list[str] = []
     thinking_blocks: list[dict[str, str]] = []
     tool_use_blocks: dict[int, dict[str, object]] = {}
-    unknown_event: MutableJSON = {
+    unknown_event: dict[str, MutablePlainTree] = {
         "type": "content_block_delta",
         "delta": {"type": "fake_future_delta", "payload": "x"},
     }
@@ -2051,7 +2059,7 @@ def test_dispatch_stream_event_ignores_unknown_delta_types() -> None:
 
 def test_build_model_response_sums_model_usage_rows() -> None:
     """Costs sum across all ``modelUsage`` rows (Sonnet + Haiku classifier)."""
-    usage_event: MutableJSON = {
+    usage_event: dict[str, MutablePlainTree] = {
         "type": "result",
         "stop_reason": "end_turn",
         "is_error": False,
@@ -2100,7 +2108,7 @@ def test_build_model_response_sums_model_usage_rows() -> None:
 
 def test_build_model_response_falls_back_to_total_cost_usd() -> None:
     """``total_cost_usd`` is used when ``modelUsage`` is empty (older CLIs)."""
-    usage_event: MutableJSON = {
+    usage_event: dict[str, MutablePlainTree] = {
         "type": "result",
         "stop_reason": "end_turn",
         "modelUsage": {},
@@ -2482,7 +2490,11 @@ async def test_exchange_turn_skips_assistant_replay() -> None:
         async def write_line(self, line: str) -> None:
             lines.append(line)
 
-        async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
+        async def read_json_line(
+            self,
+            *,
+            skip_non_json: bool = False,
+        ) -> dict[str, MutablePlainTree]:
             del skip_non_json
             return {"type": "result", "usage": {}}
 
@@ -2586,7 +2598,11 @@ async def test_terminal_is_error_respawns_and_resets_state(
         async def write_line(self, line: str) -> None:
             del line
 
-        async def read_json_line(self, *, skip_non_json: bool = False) -> MutableJSON:
+        async def read_json_line(
+            self,
+            *,
+            skip_non_json: bool = False,
+        ) -> dict[str, MutablePlainTree]:
             del skip_non_json
             return {"type": "result", "is_error": True}
 

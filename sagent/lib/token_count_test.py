@@ -14,7 +14,9 @@ if TYPE_CHECKING:
     import pytest
 
     from sagent.types.tools import Tool
-from sagent.lib.custom_json import JSON
+from collections.abc import Mapping
+
+from sagent.lib.codec import PlainTree
 from sagent.testing import MockModelCaps
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
@@ -47,7 +49,9 @@ class _StubTool:
     name: str = "Stub"
     tool_id: str = "application/x-tool-stub"
     description: str = ""
-    directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
+    directive_schema: Mapping[str, PlainTree] = field(
+        default_factory=lambda: {"type": "object"},
+    )
     clearable_results: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:

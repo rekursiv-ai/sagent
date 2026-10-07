@@ -26,11 +26,11 @@ from typing import TYPE_CHECKING, Final, Literal
 import asyncio
 import dataclasses
 
-from sagent.lib.custom_json import json_unfreeze
+from sagent.lib.codec import mutable
 
 
 if TYPE_CHECKING:
-    from sagent.lib.custom_json import JSON
+    from sagent.lib.codec import PlainTree
     from sagent.types.runtime import ToolResult
     from sagent.types.tools import Tool
 
@@ -132,7 +132,9 @@ def backgroundable(tool: Tool) -> bool:
     )
 
 
-def bg_augmented_schema(directive_schema: JSON) -> JSON:
+def bg_augmented_schema(
+    directive_schema: Mapping[str, PlainTree],
+) -> Mapping[str, PlainTree]:
     """Return ``directive_schema`` with ``background``/``delay`` advertised.
 
     The single source of truth for background-field injection, shared by
@@ -155,7 +157,7 @@ def bg_augmented_schema(directive_schema: JSON) -> JSON:
           if it already declares a control key (see :func:`backgroundable`).
 
     """
-    schema = json_unfreeze(directive_schema)
+    schema = mutable(directive_schema)
     schema_type = schema.get("type")
     if schema_type is not None and schema_type != "object":
         raise ValueError(
@@ -210,7 +212,7 @@ class BackgroundAwareTool:
     description: str
     """Forwarded from the wrapped tool."""
 
-    directive_schema: JSON
+    directive_schema: Mapping[str, PlainTree]
     """Wrapped tool's schema with ``background`` / ``delay`` properties
     merged into ``properties``."""
 
@@ -321,7 +323,9 @@ def split_bg_args(
     return background, delay_sec, clean
 
 
-def _declared_control_keys(directive_schema: JSON) -> tuple[str, ...]:
+def _declared_control_keys(
+    directive_schema: Mapping[str, PlainTree],
+) -> tuple[str, ...]:
     """Return the control keys ``directive_schema`` declares as its own."""
     props = directive_schema.get("properties")
     if not isinstance(props, Mapping):

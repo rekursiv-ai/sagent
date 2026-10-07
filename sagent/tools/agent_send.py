@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import asyncio
 import logging
 
 from sagent.agent.state import agent_label_var, agent_registry
-from sagent.lib.custom_json import JSON, json_freeze
+from sagent.lib.codec import PlainTree, immutable
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -30,7 +31,7 @@ class AgentSend:
     tool_id: str = "application/x-tool-agentsend"
     clearable_results: bool = False
     description: str = load_tool_description("agentsend")
-    directive_schema: JSON = json_freeze(
+    directive_schema: Mapping[str, PlainTree] = immutable(
         {
             "type": "object",
             "properties": {

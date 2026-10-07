@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
@@ -10,7 +11,7 @@ import logging
 import httpx2
 import pytest
 
-from sagent.lib.custom_json import JSON, MutableJSON, MutableJSONValue, convert, parse
+from sagent.lib.codec import MutablePlainTree, PlainTree, from_plain, loads
 from sagent.providers.google.api import (
     Google,
     _build_request,
@@ -52,38 +53,39 @@ if TYPE_CHECKING:
 
 
 def test_strip_additional_properties_removes_top_level_key() -> None:
-    schema = cast(
-        MutableJSONValue,
-        {"type": "object", "additionalProperties": False, "properties": {"a": 1}},
-    )
-    out = cast(MutableJSON, _strip_additional_properties(schema))
+    schema: MutablePlainTree = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {"a": 1},
+    }
+    out = cast(dict[str, MutablePlainTree], _strip_additional_properties(schema))
     assert "additionalProperties" not in out
     assert out["type"] == "object"
 
 
 def test_strip_additional_properties_recurses_into_lists_and_dicts() -> None:
-    schema = cast(
-        MutableJSONValue,
-        {
-            "type": "object",
-            "properties": {
-                "nested": {
-                    "additionalProperties": False,
-                    "type": "object",
-                },
+    schema: MutablePlainTree = {
+        "type": "object",
+        "properties": {
+            "nested": {
+                "additionalProperties": False,
+                "type": "object",
             },
-            "items": [{"additionalProperties": False}],
         },
+        "items": [{"additionalProperties": False}],
+    }
+    out = cast(dict[str, MutablePlainTree], _strip_additional_properties(schema))
+    nested = cast(
+        dict[str, MutablePlainTree],
+        cast(dict[str, MutablePlainTree], out["properties"])["nested"],
     )
-    out = cast(MutableJSON, _strip_additional_properties(schema))
-    nested = cast(MutableJSON, cast(MutableJSON, out["properties"])["nested"])
     assert "additionalProperties" not in nested
-    items_list = cast(list[MutableJSON], out["items"])
+    items_list = from_plain(out["items"], list[dict[str, MutablePlainTree]])
     assert "additionalProperties" not in items_list[0]
 
 
 def test_strip_additional_properties_scalar_passthrough() -> None:
-    assert _strip_additional_properties(cast(MutableJSONValue, "x")) == "x"
+    assert _strip_additional_properties(cast(MutablePlainTree, "x")) == "x"
 
 
 def _make_request(messages: list[ModelContextEvent], **kw: object) -> ModelRequest:
@@ -115,16 +117,19 @@ def _settings(
     )
 
 
-def _wire(request: ModelRequest, settings: ModelSettings | None = None) -> MutableJSON:
+def _wire(
+    request: ModelRequest,
+    settings: ModelSettings | None = None,
+) -> dict[str, object]:
     """Build the wire body against a thinking-capable catalog row."""
     capability = _thinking_capability()
     chosen = settings or ModelSettings.narrowest(capability)
-    return _build_request(request, capability, chosen, chosen.limits)
+    return dict(_build_request(request, capability, chosen, chosen.limits))
 
 
 def test_build_request_user_message_text_part() -> None:
     body = _wire(_make_request([UserMessage(text="hi")]))
-    contents = cast(list[MutableJSON], body["contents"])
+    contents = from_plain(body["contents"], list[dict[str, MutablePlainTree]])
     assert contents == [{"role": "user", "parts": [{"text": "hi"}]}]
 
 
@@ -134,13 +139,13 @@ def test_build_request_assistant_emits_function_call() -> None:
         tool_calls=(ToolCall(id="ext-1", name="Bash", args={"cmd": "ls"}),),
     )
     body = _wire(_make_request([asst]))
-    contents = cast(list[MutableJSON], body["contents"])
+    contents = from_plain(body["contents"], list[dict[str, MutablePlainTree]])
     assert contents[0]["role"] == "model"
-    parts = cast(list[MutableJSON], contents[0]["parts"])
+    parts = from_plain(contents[0]["parts"], list[dict[str, MutablePlainTree]])
     assert parts[0] == {"text": "thinking"}
     fc_part = parts[1]
     assert "functionCall" in fc_part
-    fc = cast(MutableJSON, fc_part["functionCall"])
+    fc = cast(dict[str, MutablePlainTree], fc_part["functionCall"])
     assert fc["name"] == "Bash"
     assert fc["args"] == {"cmd": "ls"}
 
@@ -151,16 +156,16 @@ def test_build_request_tool_result_emits_function_response_with_name() -> None:
     )
     res = ToolResult(call_id="ext-1", content="done")
     body = _wire(_make_request([asst, res]))
-    contents = cast(list[MutableJSON], body["contents"])
+    contents = from_plain(body["contents"], list[dict[str, MutablePlainTree]])
     # Last content is the user message holding the functionResponse.
     user_msg = contents[-1]
     assert user_msg["role"] == "user"
-    parts = cast(list[MutableJSON], user_msg["parts"])
+    parts = from_plain(user_msg["parts"], list[dict[str, MutablePlainTree]])
     fr_part = parts[0]
-    fr = cast(MutableJSON, fr_part["functionResponse"])
+    fr = cast(dict[str, MutablePlainTree], fr_part["functionResponse"])
     # Name comes from the prior tool_call binding, not the call_id.
     assert fr["name"] == "MyTool"
-    response = cast(MutableJSON, fr["response"])
+    response = cast(dict[str, MutablePlainTree], fr["response"])
     assert response["content"] == "done"
 
 
@@ -178,12 +183,12 @@ def test_user_after_tool_results_coalesces_into_same_wire_content() -> None:
     tool_result = ToolResult(call_id="c1", content=DETACHED_PLACEHOLDER)
     user_redirect = UserMessage(text="actually do something else")
     body = _wire(_make_request([asst, tool_result, user_redirect]))
-    contents = cast(list[MutableJSON], body["contents"])
+    contents = from_plain(body["contents"], list[dict[str, MutablePlainTree]])
     # 2 contents: model(functionCall) + user(functionResponse + text).
     assert len(contents) == 2, [c["role"] for c in contents]
     assert contents[0]["role"] == "model"
     assert contents[1]["role"] == "user"
-    parts = cast(list[MutableJSON], contents[1]["parts"])
+    parts = from_plain(contents[1]["parts"], list[dict[str, MutablePlainTree]])
     keys = {k for p in parts for k in p}
     assert "functionResponse" in keys
     assert "text" in keys
@@ -193,23 +198,25 @@ def test_build_request_tool_result_error_prefix() -> None:
     asst = AssistantMessage(tool_calls=(ToolCall(id="x", name="N", args={}),))
     res = ToolResult(call_id="x", content="boom", is_error=True)
     body = _wire(_make_request([asst, res]))
-    contents = cast(list[MutableJSON], body["contents"])
-    parts = cast(list[MutableJSON], contents[-1]["parts"])
-    fr = cast(MutableJSON, parts[0]["functionResponse"])
-    assert cast(MutableJSON, fr["response"])["content"] == "[Error] boom"
+    contents = from_plain(body["contents"], list[dict[str, MutablePlainTree]])
+    parts = from_plain(contents[-1]["parts"], list[dict[str, MutablePlainTree]])
+    fr = cast(dict[str, MutablePlainTree], parts[0]["functionResponse"])
+    assert (
+        cast(dict[str, MutablePlainTree], fr["response"])["content"] == "[Error] boom"
+    )
 
 
 def test_build_request_system_instruction() -> None:
     body = _wire(_make_request([UserMessage(text="hi")], system="be terse"))
-    sys_inst = cast(MutableJSON, body["systemInstruction"])
-    parts = cast(list[MutableJSON], sys_inst["parts"])
+    sys_inst = cast(dict[str, MutablePlainTree], body["systemInstruction"])
+    parts = from_plain(sys_inst["parts"], list[dict[str, MutablePlainTree]])
     assert parts == [{"text": "be terse"}]
 
 
 def test_build_request_empty_user_emits_placeholder() -> None:
     body = _wire(_make_request([UserMessage(text="")]))
-    contents = cast(list[MutableJSON], body["contents"])
-    parts = cast(list[MutableJSON], contents[0]["parts"])
+    contents = from_plain(body["contents"], list[dict[str, MutablePlainTree]])
+    parts = from_plain(contents[0]["parts"], list[dict[str, MutablePlainTree]])
     assert parts == [{"text": ""}]
 
 
@@ -400,7 +407,7 @@ def test_google_build_response_cache_tokens_split_input_cost() -> None:
             },
         ),
     )
-    usage: MutableJSON = {
+    usage: dict[str, MutablePlainTree] = {
         "promptTokenCount": 1000,
         "candidatesTokenCount": 100,
         "cachedContentTokenCount": 300,
@@ -487,7 +494,9 @@ def _level_wire(model_id: str, effort: ThinkingEffort) -> object:
         settings,
         settings.limits,
     )
-    return cast(MutableJSON, body["generationConfig"]).get("thinkingConfig")
+    return cast(dict[str, MutablePlainTree], body["generationConfig"]).get(
+        "thinkingConfig",
+    )
 
 
 @pytest.mark.parametrize(
@@ -526,7 +535,7 @@ def test_build_request_adaptive_thinking_uses_dynamic_budget() -> None:
         ModelRequest(messages=[UserMessage(text="x")]),
         _settings(thinking_budget="auto", thinking_output="text"),
     )
-    gen_config = cast(MutableJSON, body["generationConfig"])
+    gen_config = cast(dict[str, MutablePlainTree], body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
         "thinkingBudget": -1,
@@ -542,7 +551,7 @@ def test_build_request_fixed_thinking_uses_the_effort_budget() -> None:
             thinking_output="text",
         ),
     )
-    gen_config = cast(MutableJSON, body["generationConfig"])
+    gen_config = cast(dict[str, MutablePlainTree], body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
         "thinkingBudget": 24_576,
@@ -558,7 +567,7 @@ def test_build_request_effort_min_sets_small_budget() -> None:
             thinking_output="text",
         ),
     )
-    gen_config = cast(MutableJSON, body["generationConfig"])
+    gen_config = cast(dict[str, MutablePlainTree], body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
         "thinkingBudget": 1_024,
@@ -574,7 +583,7 @@ def test_build_request_effort_max_sets_largest_budget() -> None:
             thinking_output="text",
         ),
     )
-    gen_config = cast(MutableJSON, body["generationConfig"])
+    gen_config = cast(dict[str, MutablePlainTree], body["generationConfig"])
     assert gen_config["thinkingConfig"] == {
         "includeThoughts": True,
         "thinkingBudget": 24_576,
@@ -584,7 +593,10 @@ def test_build_request_effort_max_sets_largest_budget() -> None:
 def test_build_request_thinking_off_sends_no_config() -> None:
     """Gemini rejects ``thinkingConfig`` outright when thinking is off."""
     body = _wire(ModelRequest(messages=[UserMessage(text="x")]))
-    assert "thinkingConfig" not in cast(MutableJSON, body["generationConfig"])
+    assert "thinkingConfig" not in cast(
+        dict[str, MutablePlainTree],
+        body["generationConfig"],
+    )
 
 
 def test_build_request_thinking_omits_temperature() -> None:
@@ -592,14 +604,14 @@ def test_build_request_thinking_omits_temperature() -> None:
         ModelRequest(messages=[UserMessage(text="x")]),
         _settings(thinking_budget="auto", thinking_output="text"),
     )
-    gen_config = cast(MutableJSON, body["generationConfig"])
+    gen_config = cast(dict[str, MutablePlainTree], body["generationConfig"])
     assert "thinkingConfig" in gen_config
     assert "temperature" not in gen_config
 
 
 def test_build_request_without_thinking_keeps_temperature() -> None:
     body = _wire(ModelRequest(messages=[UserMessage(text="x")], temperature=0.3))
-    gen_config = cast(MutableJSON, body["generationConfig"])
+    gen_config = cast(dict[str, MutablePlainTree], body["generationConfig"])
     assert gen_config["temperature"] == 0.3
 
 
@@ -746,9 +758,9 @@ async def test_google_actual_request_tokens_wraps_generate_request() -> None:
     )
     assert n == 314
     assert seen[0].url.path.endswith(":countTokens")
-    body = parse(seen[0].content, dict[str, object])
+    body = from_plain(loads(seen[0].content), dict[str, object])
     assert set(body) == {"generateContentRequest"}
-    inner = convert(body["generateContentRequest"], dict[str, object])
+    inner = from_plain(body["generateContentRequest"], dict[str, object])
     model_id = m.capability.wire_model_id or m.capability.model_id
     assert inner["model"] == f"models/{model_id}"
     assert "systemInstruction" in inner
@@ -788,7 +800,7 @@ class _StubTool:
     name: str = "Echo"
     tool_id: str = "application/x-tool-echo"
     description: str = "Echo"
-    directive_schema: JSON = {  # noqa: RUF012 -- The test fixture models an immutable provider capability table.
+    directive_schema: Mapping[str, PlainTree] = {
         "type": "object",
         "additionalProperties": False,
     }
@@ -818,9 +830,12 @@ def test_build_request_tools_strip_additional_properties() -> None:
         tools=[tool],
     )
     body = _wire(req)
-    tools_section = cast(list[MutableJSON], body["tools"])
-    fns = cast(list[MutableJSON], tools_section[0]["functionDeclarations"])
-    schema = cast(MutableJSON, fns[0]["parameters"])
+    tools_section = from_plain(body["tools"], list[dict[str, MutablePlainTree]])
+    fns = from_plain(
+        tools_section[0]["functionDeclarations"],
+        list[dict[str, MutablePlainTree]],
+    )
+    schema = from_plain(fns[0]["parameters"], dict[str, MutablePlainTree])
     assert "additionalProperties" not in schema
 
 
@@ -841,9 +856,9 @@ def test_build_request_echoes_thought_signature() -> None:
         ),
     )
     body = _wire(_make_request([asst]))
-    parts = cast(
-        list[MutableJSON],
-        cast(list[MutableJSON], body["contents"])[0]["parts"],
+    parts = from_plain(
+        from_plain(body["contents"], list[dict[str, MutablePlainTree]])[0]["parts"],
+        list[dict[str, MutablePlainTree]],
     )
     assert parts[0] == {"text": "answer", "thoughtSignature": "sig-text"}
     assert parts[1]["thoughtSignature"] == "sig-fc"
@@ -856,9 +871,9 @@ def test_build_request_omits_empty_thought_signature() -> None:
         tool_calls=(ToolCall(id="e", name="Bash", args={}),),
     )
     body = _wire(_make_request([asst]))
-    parts = cast(
-        list[MutableJSON],
-        cast(list[MutableJSON], body["contents"])[0]["parts"],
+    parts = from_plain(
+        from_plain(body["contents"], list[dict[str, MutablePlainTree]])[0]["parts"],
+        list[dict[str, MutablePlainTree]],
     )
     assert parts[0] == {"text": "hi"}
     assert "thoughtSignature" not in parts[1]
@@ -877,13 +892,17 @@ def test_build_request_preserves_per_call_signature_order() -> None:
         ),
     )
     body = _wire(_make_request([asst]))
-    parts = cast(
-        list[MutableJSON],
-        cast(list[MutableJSON], body["contents"])[0]["parts"],
+    parts = from_plain(
+        from_plain(body["contents"], list[dict[str, MutablePlainTree]])[0]["parts"],
+        list[dict[str, MutablePlainTree]],
     )
-    assert cast(MutableJSON, parts[1]["functionCall"])["args"] == {"i": 1}
+    assert cast(dict[str, MutablePlainTree], parts[1]["functionCall"])["args"] == {
+        "i": 1,
+    }
     assert parts[1]["thoughtSignature"] == "sig-a"
-    assert cast(MutableJSON, parts[2]["functionCall"])["args"] == {"i": 2}
+    assert cast(dict[str, MutablePlainTree], parts[2]["functionCall"])["args"] == {
+        "i": 2,
+    }
     assert parts[2]["thoughtSignature"] == "sig-b"
 
 
@@ -900,8 +919,8 @@ def test_build_request_tool_result_carries_no_signature() -> None:
     )
     res = ToolResult(call_id="c1", content="done")
     body = _wire(_make_request([asst, res]))
-    contents = cast(list[MutableJSON], body["contents"])
-    user_parts = cast(list[MutableJSON], contents[1]["parts"])
+    contents = from_plain(body["contents"], list[dict[str, MutablePlainTree]])
+    user_parts = from_plain(contents[1]["parts"], list[dict[str, MutablePlainTree]])
     assert "functionResponse" in user_parts[0]
     assert "thoughtSignature" not in user_parts[0]
 

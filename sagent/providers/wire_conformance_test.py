@@ -50,7 +50,7 @@ from sagent.types.runtime import UserMessage
 
 
 if TYPE_CHECKING:
-    from sagent.lib.custom_json import MutableJSON
+    from sagent.lib.codec import MutablePlainTree
     from sagent.types.model import Model
 
 
@@ -74,7 +74,7 @@ def _anthropic_thinking(model: Model, settings: ModelSettings) -> object:
 
 def _google_thinking(model: Model, settings: ModelSettings) -> object:
     """Gemini's ``thinkingConfig``, or ``None`` when it sends none."""
-    body: MutableJSON = _build_request(
+    body: dict[str, MutablePlainTree] = _build_request(
         _request(),
         model.capability,
         settings,

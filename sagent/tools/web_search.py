@@ -19,7 +19,7 @@ from wesearch.search.render import format_result
 from wesearch.search.search import SearchParamsSchema, search
 from wesearch.types.errors import BotDetectionError
 
-from sagent.lib.custom_json import json_freeze
+from sagent.lib.codec import immutable
 from sagent.tools.core import (
     load_tool_description,
     truncate_to_budget,
@@ -48,7 +48,7 @@ class WebSearch:
 
     # Domain filters stay local: they are a sagent query-building convenience
     # (spliced into the query string), not a wesearch search parameter.
-    directive_schema = json_freeze(
+    directive_schema = immutable(
         {
             **SearchParamsSchema.json_schema(),
             "properties": {

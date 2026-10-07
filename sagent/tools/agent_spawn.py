@@ -17,6 +17,7 @@ itself *is* the registry for those objects.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -41,7 +42,7 @@ from sagent.agent.state import (
     get_tool_state,
     max_depth_var,
 )
-from sagent.lib.custom_json import JSON, convert, json_freeze
+from sagent.lib.codec import PlainTree, from_plain, immutable
 from sagent.providers import PROVIDER_NAMES
 from sagent.providers.providers import (
     build_provider_with_account_fallback,
@@ -166,7 +167,7 @@ class AgentSpawn:
             if allow_providers is not None
             else tuple(PROVIDER_NAMES)
         )
-        self.directive_schema: JSON = json_freeze(
+        self.directive_schema: Mapping[str, PlainTree] = immutable(
             {
                 "type": "object",
                 "properties": {
@@ -402,9 +403,9 @@ class AgentSpawn:
                 content=f"'max_depth' must be ≥ 0, got {max_depth}.",
                 is_error=True,
             )
-        persistent = convert(args.get("persistent"), bool, default=False)
-        notify_on_asleep = convert(args.get("notify_on_asleep"), bool, default=True)
-        hot = convert(args.get("hot"), bool, default=False)
+        persistent = from_plain(args.get("persistent"), bool, default=False)
+        notify_on_asleep = from_plain(args.get("notify_on_asleep"), bool, default=True)
+        hot = from_plain(args.get("hot"), bool, default=False)
         custom_label = opt_str(args, "label")
         parent_agent = _current_agent()
         if parent_agent is None:

@@ -90,7 +90,7 @@ Use it as a library:
 ```python
 from sagent import tools
 from sagent.agent import Agent
-from sagent.lib.custom_json import json_freeze
+from sagent.lib.codec import immutable
 from sagent.providers import Google
 
 agent = Agent(
@@ -98,7 +98,7 @@ agent = Agent(
     system="You are a scientist.",
     tools=[tools.Read(), tools.Glob(), tools.Grep()],
 )
-result = await agent.run(json_freeze({"prompt": "analyze the CSV in ./data/"}))
+result = await agent.run(immutable({"prompt": "analyze the CSV in ./data/"}))
 print(result.content)
 ```
 
@@ -167,7 +167,7 @@ import asyncio
 
 from sagent import tools
 from sagent.agent import Agent
-from sagent.lib.custom_json import json_freeze
+from sagent.lib.codec import immutable
 from sagent.providers import Anthropic
 
 
@@ -177,7 +177,7 @@ async def main() -> None:
         system="You are a concise coding assistant.",
         tools=[tools.Read(), tools.Grep(), tools.Glob()],
     )
-    result = await agent.run(json_freeze({"prompt": "Summarize README.md"}))
+    result = await agent.run(immutable({"prompt": "Summarize README.md"}))
     print(result.content)
 
 

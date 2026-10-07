@@ -18,6 +18,7 @@ Supported operations:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, Protocol
 
 import asyncio
@@ -27,7 +28,7 @@ import logging
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
-from sagent.lib.custom_json import JSON, ReadError, convert, json_freeze, parse
+from sagent.lib.codec import PlainTree, ReadError, from_plain, immutable, loads
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 
@@ -86,7 +87,7 @@ class Slack:
     tool_id: str = "application/x-tool-slack"
     clearable_results: bool = False
     description: str = load_tool_description("Slack")
-    directive_schema: JSON = json_freeze(
+    directive_schema: Mapping[str, PlainTree] = immutable(
         {
             "type": "object",
             "properties": {
@@ -158,7 +159,7 @@ class Slack:
             channel_name=str(args.get("channel_name", "")),
             text=str(args.get("text", "")),
             thread_ts=str(args.get("thread_ts", "")),
-            limit=convert(args.get("limit"), int, default=25),
+            limit=from_plain(args.get("limit"), int, default=25),
         )
         if isinstance(result, ToolResult):
             return result
@@ -239,7 +240,7 @@ class Slack:
         body = await _slack_call("conversations.list", params=params, token=self._token)
         if isinstance(body, ToolResult):
             return body
-        channels = convert(body.get("channels"), list[dict[str, object]], default=[])
+        channels = from_plain(body.get("channels"), list[dict[str, object]], default=[])
         if not channels:
             return "(no channels)"
         return "\n".join(
@@ -267,7 +268,7 @@ class Slack:
         )
         if isinstance(body, ToolResult):
             return body
-        messages = convert(body.get("messages"), list[dict[str, object]], default=[])
+        messages = from_plain(body.get("messages"), list[dict[str, object]], default=[])
         logger.info("[list_messages] channel=%s count=%d", channel, len(messages))
         return _render_messages(messages)
 
@@ -296,7 +297,7 @@ class Slack:
         )
         if isinstance(body, ToolResult):
             return body
-        messages = convert(body.get("messages"), list[dict[str, object]], default=[])
+        messages = from_plain(body.get("messages"), list[dict[str, object]], default=[])
         logger.info(
             "[read_thread] channel=%s thread=%s count=%d",
             channel,
@@ -311,7 +312,7 @@ class Slack:
         body = await _slack_call("users.list", params=params, token=self._token)
         if isinstance(body, ToolResult):
             return body
-        members = convert(body.get("members"), list[dict[str, object]], default=[])
+        members = from_plain(body.get("members"), list[dict[str, object]], default=[])
         return (
             "\n".join(
                 f"{m.get('id')}  @{m.get('name')}  ({m.get('real_name', '')})"
@@ -345,7 +346,7 @@ class Slack:
         )
         if isinstance(body, ToolResult):
             return body
-        ch = convert(body.get("channel"), dict[str, object])
+        ch = from_plain(body.get("channel"), dict[str, object])
         return f"id={ch.get('id')}"
 
     async def send(
@@ -378,7 +379,7 @@ def _render_messages(messages: list[dict[str, object]]) -> str:
         ts = m.get("ts", "?")
         text = m.get("text", "")
         lines.append(f"[{ts}] <{user}> {text}")
-        reactions = convert(m.get("reactions"), list[dict[str, object]], default=[])
+        reactions = from_plain(m.get("reactions"), list[dict[str, object]], default=[])
         if reactions:
             parts = [f":{r.get('name', '?')}:x{r.get('count', 0)}" for r in reactions]
             lines.append(f"  reactions: {' '.join(parts)}")
@@ -430,7 +431,7 @@ async def _slack_call(
             is_error=True,
         )
     try:
-        body = parse(raw[0], dict[str, object])
+        body = from_plain(loads(raw[0]), dict[str, object])
     except (json.JSONDecodeError, ReadError) as error:
         return ToolResult(
             call_id="",

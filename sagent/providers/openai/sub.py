@@ -99,7 +99,7 @@ else:
 from sagent.catalog.openai import subscription, subscription_models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import MutableJSON, ReadError, convert, parse
+from sagent.lib.codec import MutablePlainTree, ReadError, from_plain, loads
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
     credential_file_lock,
@@ -352,7 +352,10 @@ class OpenAISubscription:
             if r.status_code >= 400:
                 body = r.text[:500]
                 raise RuntimeError(f"Token exchange failed ({r.status_code}): {body}")
-            data: MutableJSON = cast(MutableJSON, r.json())
+            data: dict[str, MutablePlainTree] = cast(
+                dict[str, MutablePlainTree],
+                r.json(),
+            )
 
         access_token = str(data["access_token"])
         account_id = _jwt_claim(
@@ -567,7 +570,10 @@ class OpenAISubscription:
                     "providers.",
                 )
             r.raise_for_status()
-            data: MutableJSON = cast(MutableJSON, r.json())
+            data: dict[str, MutablePlainTree] = cast(
+                dict[str, MutablePlainTree],
+                r.json(),
+            )
         access_token = str(data["access_token"])
         creds = OpenAISubscription.Credentials(
             access_token=access_token,
@@ -632,7 +638,7 @@ class OpenAISubscription:
                 f"{p} must contain a JSON object with OpenAI subscription "
                 "OAuth credentials.",
             )
-        raw = cast(MutableJSON, decoded)
+        raw = cast(dict[str, MutablePlainTree], decoded)
         raw_tokens = raw.get("tokens")
         if not isinstance(raw_tokens, dict):
             auth_mode = raw.get("auth_mode")
@@ -647,7 +653,7 @@ class OpenAISubscription:
                 f"{p} does not contain OpenAI subscription OAuth tokens. Run "
                 "`sagent --provider OpenAISubscription login`.",
             )
-        tokens = cast(MutableJSON, raw_tokens)
+        tokens = raw_tokens
         required = ("access_token", "refresh_token", "account_id")
         missing = [
             name
@@ -690,7 +696,7 @@ class OpenAISubscription:
 
         """
         p = path or credentials_path(_default_credentials_path(), account)
-        existing: MutableJSON = {}
+        existing: dict[str, MutablePlainTree] = {}
         if p.exists():
             with contextlib.suppress(json.JSONDecodeError, OSError):
                 decoded: object = json.loads(p.read_text(encoding="utf-8"))
@@ -698,11 +704,9 @@ class OpenAISubscription:
                 # wrong shape (a list, or ``tokens`` as a list) would raise
                 # below and leave the caller unable to persist a re-login.
                 if isinstance(decoded, dict):
-                    existing = cast(MutableJSON, decoded)
+                    existing = cast(dict[str, MutablePlainTree], decoded)
         raw_tokens = existing.get("tokens")
-        tokens: MutableJSON = (
-            cast(MutableJSON, raw_tokens) if isinstance(raw_tokens, dict) else {}
-        )
+        tokens = raw_tokens if isinstance(raw_tokens, dict) else {}
         tokens["access_token"] = creds["access_token"]
         tokens["refresh_token"] = creds["refresh_token"]
         tokens["account_id"] = creds["account_id"]
@@ -739,14 +743,14 @@ class _OpenAISubModel(_OpenAIResponsesModel):
         return await super().stream(request, publish)
 
 
-def _token_expiry(access_token: str, grant: MutableJSON) -> float:
+def _token_expiry(access_token: str, grant: dict[str, MutablePlainTree]) -> float:
     """Return the token's JWT ``exp``, else the grant's ``expires_in`` from now."""
     # ``exp`` wins because ``load`` re-derives expiry from the token alone; a
     # local-clock deadline would disagree with it under clock skew.
     expires_at = _jwt_exp(access_token)
     if expires_at > 0:
         return expires_at
-    expires_in = convert(grant.get("expires_in"), float, default=0.0)
+    expires_in = from_plain(grant.get("expires_in"), float, default=0.0)
     if expires_in <= 0:
         # A zero deadline reads as always expired: every request would refresh
         # and rotate the refresh token.
@@ -768,7 +772,7 @@ def _jwt_payload(token: str) -> dict[str, object]:
     raw = parts[1]
     raw += "=" * (-len(raw) % 4)
     try:
-        return parse(base64.urlsafe_b64decode(raw), dict[str, object])
+        return from_plain(loads(base64.urlsafe_b64decode(raw)), dict[str, object])
     except (ValueError, ReadError):
         return {}
 
@@ -776,7 +780,7 @@ def _jwt_payload(token: str) -> dict[str, object]:
 def _jwt_exp(token: str) -> float:
     """Extract ``exp`` claim from a JWT without verification."""
     try:
-        return convert(_jwt_payload(token).get("exp"), float, default=0.0)
+        return from_plain(_jwt_payload(token).get("exp"), float, default=0.0)
     except ReadError:
         return 0.0
 
@@ -784,7 +788,7 @@ def _jwt_exp(token: str) -> float:
 def _jwt_claim(token: str, namespace: str, key: str) -> str:
     """Extract a nested string claim from a JWT namespace object."""
     try:
-        claims = convert(
+        claims = from_plain(
             _jwt_payload(token).get(namespace),
             dict[str, object],
             default={},

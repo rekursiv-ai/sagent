@@ -68,7 +68,7 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from sagent.lib.custom_json import MutableJSON
+    from sagent.lib.codec import MutablePlainTree
 
 
 @pytest.fixture(autouse=True)
@@ -165,8 +165,8 @@ def _msg_event(
     bot_id: str = "",
     username: str = "",
     subtype: str | None = None,
-) -> MutableJSON:
-    ev: MutableJSON = {
+) -> dict[str, MutablePlainTree]:
+    ev: dict[str, MutablePlainTree] = {
         "type": "message",
         "text": text,
         "channel": channel,
@@ -192,8 +192,8 @@ def _reaction_event(
     user: str = "UHUMAN",
     item_type: str = "message",
     item_user: str = "",
-) -> MutableJSON:
-    ev: MutableJSON = {
+) -> dict[str, MutablePlainTree]:
+    ev: dict[str, MutablePlainTree] = {
         "type": "reaction_added",
         "user": user,
         "reaction": reaction,
@@ -210,7 +210,9 @@ def _reaction_event(
 
 class TestExtractEvent:
     def test_valid_envelope(self) -> None:
-        payload: MutableJSON = {"event": {"type": "app_mention", "text": "hi"}}
+        payload: dict[str, MutablePlainTree] = {
+            "event": {"type": "app_mention", "text": "hi"},
+        }
         ev = _extract_event(payload)
         assert ev is not None
         assert ev["type"] == "app_mention"
@@ -891,7 +893,7 @@ class TestReactionRouting:
     async def test_reaction_missing_channel_in_item(self) -> None:
         adapter, _ = _make_adapter()
         _ = _register("Sara")
-        ev: MutableJSON = {
+        ev: dict[str, MutablePlainTree] = {
             "type": "reaction_added",
             "user": "UHUMAN",
             "reaction": "heart",

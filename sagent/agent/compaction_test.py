@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -17,7 +18,7 @@ from sagent.agent.compaction import (
 )
 from sagent.agent.state import ToolState
 from sagent.compaction.history import append_to_first_user
-from sagent.lib.custom_json import JSON
+from sagent.lib.codec import PlainTree
 from sagent.types.compactor import ReattachPolicy
 from sagent.types.runtime import (
     AssistantMessage,
@@ -28,7 +29,7 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from sagent.types.tools import Tool
 
@@ -40,7 +41,9 @@ class _StubTool:
     name: str = "Stub"
     tool_id: str = "application/x-tool-stub"
     description: str = "Stub tool."
-    directive_schema: JSON = field(default_factory=lambda: {"type": "object"})
+    directive_schema: Mapping[str, PlainTree] = field(
+        default_factory=lambda: {"type": "object"},
+    )
     clearable_results: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:

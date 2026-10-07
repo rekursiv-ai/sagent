@@ -14,7 +14,7 @@ from wesearch.web import FetchResult
 
 import pytest
 
-from sagent.lib.custom_json import json_freeze
+from sagent.lib.codec import immutable
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.web_fetch import (
     WebFetch,
@@ -433,7 +433,7 @@ def test_run_post_form_passes_through() -> None:
 
 def test_post_form_accepts_frozen_arguments() -> None:
     # The runtime hands tools frozen arguments; a frozen form is still an object.
-    _, form = _request_bodies("POST", json_freeze({"form": {"a": "b"}}))
+    _, form = _request_bodies("POST", immutable({"form": {"a": "b"}}))
     assert form == {"a": "b"}
 
 

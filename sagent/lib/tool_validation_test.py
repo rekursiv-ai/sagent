@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sagent.lib.custom_json import json_freeze
+from sagent.lib.codec import immutable
 from sagent.lib.tool_validation import validate_tool_input
 
 
@@ -14,7 +14,7 @@ def test_validate_tool_input_missing_required() -> None:
         "required": ["file_path"],
         "additionalProperties": False,
     }
-    err = validate_tool_input("Read", json_freeze(schema), {})
+    err = validate_tool_input("Read", immutable(schema), {})
     assert err is not None
     assert "file_path" in err
     assert "InputValidationError" in err
@@ -27,7 +27,7 @@ def test_validate_tool_input_unexpected_field() -> None:
         "properties": {"msg": {"type": "string"}},
         "additionalProperties": False,
     }
-    err = validate_tool_input("Echo", json_freeze(schema), {"bogus": 1})
+    err = validate_tool_input("Echo", immutable(schema), {"bogus": 1})
     assert err is not None
     assert "data must not contain {'bogus'} properties" in err
 
@@ -43,7 +43,7 @@ def test_validate_tool_input_nested_required() -> None:
             },
         },
     }
-    err = validate_tool_input("Nested", json_freeze(schema), {"payload": {}})
+    err = validate_tool_input("Nested", immutable(schema), {"payload": {}})
     assert err is not None
     assert "data.payload must contain ['file_path'] properties" in err
 
@@ -61,7 +61,7 @@ def test_validate_tool_input_nested_unexpected_field() -> None:
     }
     err = validate_tool_input(
         "Nested",
-        json_freeze(schema),
+        immutable(schema),
         {"payload": {"file_path": "x", "extra": True}},
     )
     assert err is not None
@@ -84,7 +84,7 @@ def test_validate_tool_input_array_items_nested_required() -> None:
     }
     err = validate_tool_input(
         "Nested",
-        json_freeze(schema),
+        immutable(schema),
         {"items": [dict[str, object]()]},
     )
     assert err is not None
@@ -97,7 +97,7 @@ def test_validate_tool_input_rejects_wrong_scalar_type() -> None:
         "properties": {"n": {"type": "integer"}},
         "required": ["n"],
     }
-    err = validate_tool_input("Scalar", json_freeze(schema), {"n": "abc"})
+    err = validate_tool_input("Scalar", immutable(schema), {"n": "abc"})
     assert err is not None
     assert "InputValidationError" in err
     assert "n" in err
@@ -109,7 +109,7 @@ def test_validate_tool_input_rejects_scalar_enum() -> None:
         "type": "object",
         "properties": {"mode": {"type": "string", "enum": ["read", "write"]}},
     }
-    err = validate_tool_input("Scalar", json_freeze(schema), {"mode": "delete"})
+    err = validate_tool_input("Scalar", immutable(schema), {"mode": "delete"})
     assert err is not None
     assert "mode" in err
     assert "read" in err
@@ -128,7 +128,7 @@ def test_a_bound_violation_is_not_called_a_missing_field() -> None:
     }
     err = validate_tool_input(
         "Read",
-        json_freeze(schema),
+        immutable(schema),
         {"file_path": "f", "offset": 0},
     )
     assert err is not None
@@ -143,7 +143,7 @@ def test_a_missing_field_names_the_required_keys() -> None:
         "properties": {"file_path": {"type": "string"}},
         "required": ["file_path"],
     }
-    err = validate_tool_input("Read", json_freeze(schema), {})
+    err = validate_tool_input("Read", immutable(schema), {})
     assert err is not None
     assert "Read requires: `file_path`." in err
     assert "missing required fields" in err
@@ -154,7 +154,7 @@ def test_validate_tool_input_rejects_numeric_range() -> None:
         "type": "object",
         "properties": {"count": {"type": "integer", "minimum": 1, "maximum": 3}},
     }
-    err = validate_tool_input("Scalar", json_freeze(schema), {"count": 4})
+    err = validate_tool_input("Scalar", immutable(schema), {"count": 4})
     assert err is not None
     assert "count" in err
     assert "smaller than or equal to 3" in err
@@ -167,7 +167,7 @@ def test_validate_tool_input_rejects_additional_property_schema_type() -> None:
     }
     err = validate_tool_input(
         "Dynamic",
-        json_freeze(schema),
+        immutable(schema),
         {"ok": "x", "bad": {"nested": 1}},
     )
     assert err is not None
@@ -183,10 +183,8 @@ def test_validate_tool_input_union_type_accepts_either() -> None:
             "ids": {"type": ["array", "string"], "items": {"type": "string"}},
         },
     }
-    assert validate_tool_input("Paper", json_freeze(schema), {"ids": "10.1/x"}) is None
-    assert (
-        validate_tool_input("Paper", json_freeze(schema), {"ids": ["10.1/x"]}) is None
-    )
+    assert validate_tool_input("Paper", immutable(schema), {"ids": "10.1/x"}) is None
+    assert validate_tool_input("Paper", immutable(schema), {"ids": ["10.1/x"]}) is None
 
 
 def test_validate_tool_input_union_type_rejects_other() -> None:
@@ -195,7 +193,7 @@ def test_validate_tool_input_union_type_rejects_other() -> None:
         "type": "object",
         "properties": {"ids": {"type": ["array", "string"]}},
     }
-    err = validate_tool_input("Paper", json_freeze(schema), {"ids": 7})
+    err = validate_tool_input("Paper", immutable(schema), {"ids": 7})
     assert err is not None
     assert "array or string" in err
 
@@ -208,7 +206,7 @@ def test_validate_tool_input_union_type_validates_array_items() -> None:
             "ids": {"type": ["array", "string"], "items": {"type": "string"}},
         },
     }
-    err = validate_tool_input("Paper", json_freeze(schema), {"ids": [1]})
+    err = validate_tool_input("Paper", immutable(schema), {"ids": [1]})
     assert err is not None
     assert "ids[0]" in err
     assert "string" in err
@@ -222,7 +220,7 @@ def test_validate_tool_input_valid_passes() -> None:
         "required": ["msg"],
         "additionalProperties": False,
     }
-    assert validate_tool_input("Echo", json_freeze(schema), {"msg": "hi"}) is None
+    assert validate_tool_input("Echo", immutable(schema), {"msg": "hi"}) is None
 
 
 def test_validate_tool_input_lists_every_accepted_key() -> None:
@@ -237,7 +235,7 @@ def test_validate_tool_input_lists_every_accepted_key() -> None:
         "properties": props,
         "additionalProperties": False,
     }
-    err = validate_tool_input("Big", json_freeze(schema), {"bogus": 1})
+    err = validate_tool_input("Big", immutable(schema), {"bogus": 1})
     assert err is not None
     accepts_line = next(
         (line for line in err.splitlines() if line.startswith("Big accepts:")),

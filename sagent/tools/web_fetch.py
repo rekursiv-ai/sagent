@@ -14,7 +14,7 @@ from wesearch.web import fetch_web
 
 import cachetools
 
-from sagent.lib.custom_json import JSONValue, json_freeze, json_unfreeze
+from sagent.lib.codec import PlainTree, immutable, mutable
 from sagent.tools.core import (
     load_tool_description,
     truncate_to_budget,
@@ -43,7 +43,7 @@ class WebFetch:
     clearable_results = True
     max_result_chars = DEFAULT_MAX_RESULT_CHARS
     description = load_tool_description("WebFetch")
-    directive_schema = json_freeze(FetchBodyParamsSchema.json_schema())
+    directive_schema = immutable(FetchBodyParamsSchema.json_schema())
 
     output: Annotated[Toggle, CLI_SETTABLE] = "off"
     """Whether the result body renders in the pane."""
@@ -223,7 +223,7 @@ class WebFetch:
 def _request_bodies(
     method: HttpMethod,
     args: Mapping[str, object],
-) -> tuple[JSONValue, dict[str, str] | None]:
+) -> tuple[PlainTree, dict[str, str] | None]:
     """Return POST request bodies from a tool directive."""
     raw_json = args.get("json")
     raw_form = args.get("form")
@@ -234,10 +234,10 @@ def _request_bodies(
     if raw_json is not None and raw_form is not None:
         raise ValueError("'json' and 'form' are mutually exclusive.")
     if raw_json is not None:
-        return json_unfreeze(raw_json), None
+        return mutable(raw_json), None
     if raw_form is None:
         return None, None
-    unfrozen_form = json_unfreeze(raw_form)
+    unfrozen_form = mutable(raw_form)
     # Schema declares ``form`` as an object, but LLM-supplied
     # directives can violate the schema (``form=[]`` slipped through
     # historically). Reject anything not a mapping so the downstream
@@ -254,7 +254,7 @@ def _request_bodies(
     # strings. cast() to a value-typed dict so the check narrows rather than
     # asserting.
     form: dict[str, str] = {}
-    for key, value in cast(dict[str, object], unfrozen_form).items():
+    for key, value in unfrozen_form.items():
         if not isinstance(value, str):
             raise ValueError(  # noqa: TRY004 -- caller catches ValueError uniformly.
                 f"'form' field {key!r} must be a string, got {type(value).__name__}.",

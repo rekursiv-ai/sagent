@@ -34,7 +34,7 @@ from sagent.types.cost import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from sagent.lib.custom_json import MutableJSON
+    from sagent.lib.codec import MutablePlainTree
     from sagent.types.capability import ModelSettings
 
 
@@ -82,7 +82,7 @@ def thinking_budget(effort: ThinkingEffort) -> str:
 def thinking_config(
     capability: ModelCapability,
     settings: ModelSettings,
-) -> MutableJSON | None:
+) -> dict[str, MutablePlainTree] | None:
     """Return the ``generationConfig.thinkingConfig`` a selection sends.
 
     Budget ``none`` omits the config and effort ``none`` omits the level or
@@ -101,7 +101,9 @@ def thinking_config(
     """
     if settings.thinking_budget == "none":
         return None
-    config: MutableJSON = {"includeThoughts": settings.thinking_output == "text"}
+    config: dict[str, MutablePlainTree] = {
+        "includeThoughts": settings.thinking_output == "text",
+    }
     effort = settings.thinking_effort
     if capability.effort_as_level:
         # Gemini 3 accepts ``thinkingBudget`` only for backwards compatibility.

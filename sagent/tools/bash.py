@@ -29,7 +29,7 @@ from sagent.agent.state import (
     get_tool_state,
 )
 from sagent.lib import debug_log
-from sagent.lib.custom_json import convert, json_freeze
+from sagent.lib.codec import from_plain, immutable
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,
@@ -132,7 +132,7 @@ class Bash:
     description = _render_bash_description(load_tool_description("Bash"))
     clearable_results = True
     max_result_chars = 30_000
-    directive_schema = json_freeze(
+    directive_schema = immutable(
         {
             "type": "object",
             "properties": {
@@ -268,8 +268,12 @@ class Bash:
         _register_exit_reaper()
         command = str(args.get("command", ""))
         # ``float``: the schema says ``number``, so ``1.5`` is a valid timeout.
-        timeout = convert(args.get("timeout"), float, default=BASH_DEFAULT_TIMEOUT_MS)
-        run_as_fully_detached = convert(
+        timeout = from_plain(
+            args.get("timeout"),
+            float,
+            default=BASH_DEFAULT_TIMEOUT_MS,
+        )
+        run_as_fully_detached = from_plain(
             args.get("run_as_fully_detached"),
             bool,
             default=False,

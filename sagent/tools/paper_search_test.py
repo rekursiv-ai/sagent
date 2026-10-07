@@ -23,7 +23,7 @@ from sagent.tools.paper_search import PaperSearch, _empty_hint
 
 
 if TYPE_CHECKING:
-    from sagent.lib.custom_json import MutableJSON
+    from sagent.lib.codec import MutablePlainTree
 
 
 def _result(
@@ -282,7 +282,10 @@ def test_run_caches_complete_results() -> None:
         "sagent.tools.paper_search.search",
         return_value=_result([rec]),
     ) as mock_search:
-        args: MutableJSON = {"query": "uniquecachetestkey1", "source": "s2"}
+        args: dict[str, MutablePlainTree] = {
+            "query": "uniquecachetestkey1",
+            "source": "s2",
+        }
         first = asyncio.run(PaperSearch().run(args))
         second = asyncio.run(PaperSearch().run(args))
     assert mock_search.call_count == 1  # `second` served from cache.
@@ -297,7 +300,10 @@ def test_run_does_not_cache_partial_results() -> None:
         "sagent.tools.paper_search.search",
         return_value=partial,
     ) as mock_search:
-        args: MutableJSON = {"query": "partialcacheprobe", "source": "fused"}
+        args: dict[str, MutablePlainTree] = {
+            "query": "partialcacheprobe",
+            "source": "fused",
+        }
         _ = asyncio.run(PaperSearch().run(args))
         _ = asyncio.run(PaperSearch().run(args))
     assert mock_search.call_count == 2  # `partial` result re-queried, not cached.
@@ -325,7 +331,10 @@ def test_run_paper_error_not_cached() -> None:
         "sagent.tools.paper_search.search",
         side_effect=PaperError("boom"),
     ) as mock_search:
-        args: MutableJSON = {"query": "errornotcachedprobe", "source": "fused"}
+        args: dict[str, MutablePlainTree] = {
+            "query": "errornotcachedprobe",
+            "source": "fused",
+        }
         _ = asyncio.run(PaperSearch().run(args))
         _ = asyncio.run(PaperSearch().run(args))
     assert mock_search.call_count == 2  # Errors never cached.

@@ -32,7 +32,7 @@ from sagent.providers.openai.compat import (
 
 
 if TYPE_CHECKING:
-    from sagent.lib.custom_json import MutableJSON
+    from sagent.lib.codec import MutablePlainTree
     from sagent.types.model import (
         ModelRequest,
     )
@@ -49,9 +49,9 @@ class _DashScopeModel(OpenAICompatModel):
     @override
     def _transform_body(
         self,
-        body: MutableJSON,
+        body: dict[str, MutablePlainTree],
         request: ModelRequest,
-    ) -> MutableJSON:
+    ) -> dict[str, MutablePlainTree]:
         """Map sagent's thinking axes onto DashScope's knobs."""
         del request
         body.pop("reasoning_effort", None)

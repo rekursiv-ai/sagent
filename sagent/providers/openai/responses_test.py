@@ -21,7 +21,7 @@ import pytest
 from sagent.agent.retry import is_rate_limited, is_retryable
 from sagent.agent.session_io import _entry_from_json, _entry_to_json
 from sagent.catalog.openai import reasoning_effort
-from sagent.lib.custom_json import convert, parse
+from sagent.lib.codec import from_plain, loads
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.responses import (
@@ -63,7 +63,7 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from sagent.lib.custom_json import JSONValue, MutableJSON
+    from sagent.lib.codec import MutablePlainTree, PlainTree
 
 
 @dataclass(slots=True, kw_only=True)
@@ -73,7 +73,7 @@ class _Wire:
 
     async def send(self, request: httpx2.Request) -> httpx2.Response:
         self.paths.append(request.url.path)
-        self.requests.append(parse(request.content, dict[str, object]))
+        self.requests.append(from_plain(loads(request.content), dict[str, object]))
         if request.url.path != "/v1/responses":
             return httpx2.Response(
                 404,
@@ -94,7 +94,7 @@ class _Wire:
 
 
 def _response_stream() -> bytes:
-    events: list[MutableJSON] = [
+    events: list[dict[str, MutablePlainTree]] = [
         {
             "type": "response.output_text.delta",
             "delta": "OK",
@@ -202,7 +202,8 @@ async def test_api_stream_uses_responses_with_supported_knobs(
     assert response.tokens.cache_read == 4
     assert wire.paths == ["/v1/responses"]
     records = [
-        parse(line, dict[str, object]) for line in log_path.read_text().splitlines()
+        from_plain(loads(line), dict[str, object])
+        for line in log_path.read_text().splitlines()
     ]
     assert any(
         record.get("event") == "api_call"
@@ -218,7 +219,7 @@ async def test_api_stream_uses_responses_with_supported_knobs(
         assert "reasoning" not in body
     else:
         assert "temperature" not in body
-        assert convert(body["reasoning"], dict[str, object])["effort"] == "high"
+        assert from_plain(body["reasoning"], dict[str, object])["effort"] == "high"
         assert body["include"] == ["reasoning.encrypted_content"]
 
 
@@ -252,12 +253,12 @@ def test_responses_preserves_image_bearing_tool_results() -> None:
         ],
     )
     items = _build_input(request)
-    output = convert(items[-1], dict[str, object])["output"]
+    output = from_plain(items[-1], dict[str, object])["output"]
     assert isinstance(output, list)
     assert "data:image/" in json.dumps(output)
     assert (
-        convert(items[0], dict[str, object])["call_id"]
-        == convert(items[-1], dict[str, object])["call_id"]
+        from_plain(items[0], dict[str, object])["call_id"]
+        == from_plain(items[-1], dict[str, object])["call_id"]
     )
 
 
@@ -339,7 +340,7 @@ class _StubTool:
     name: str = "Bash"
     tool_id: str = "application/x-tool-bash"
     description: str = "Run shell commands"
-    directive_schema: Mapping[str, JSONValue] = MappingProxyType({"type": "object"})
+    directive_schema: Mapping[str, PlainTree] = MappingProxyType({"type": "object"})
     clearable_results: bool = False
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -1254,8 +1255,8 @@ async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
         assert isinstance(number, int)
         assert (number % 17, number % 19, number % 23) == (12, 7, 5)
         restored = _entry_from_json(
-            parse(
-                json.dumps(_entry_to_json(first.message)),
+            from_plain(
+                loads(json.dumps(_entry_to_json(first.message))),
                 dict[str, object],
             ),
         )

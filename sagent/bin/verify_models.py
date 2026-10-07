@@ -43,7 +43,7 @@ import sys
 import httpx2
 
 from sagent import providers
-from sagent.lib.custom_json import convert
+from sagent.lib.codec import from_plain
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.google.api import Google
 from sagent.providers.openai.api import OpenAI
@@ -94,20 +94,20 @@ async def fetch_google(api_key: str) -> dict[str, LiveLimits]:
             except httpx2.HTTPError as e:
                 _out(f"  [warn] models list: {_describe(e)}")
                 return out
-            body = convert(r.json(), dict[str, object])
-            for raw_model in convert(body.get("models"), list[object], default=[]):
-                model = convert(raw_model, dict[str, object])
-                short = convert(model.get("name"), str, default="").removeprefix(
+            body = from_plain(r.json(), dict[str, object])
+            for raw_model in from_plain(body.get("models"), list[object], default=[]):
+                model = from_plain(raw_model, dict[str, object])
+                short = from_plain(model.get("name"), str, default="").removeprefix(
                     "models/",
                 )
-                inp = convert(model.get("inputTokenLimit"), int, default=0)
-                outp = convert(model.get("outputTokenLimit"), int, default=0)
+                inp = from_plain(model.get("inputTokenLimit"), int, default=0)
+                outp = from_plain(model.get("outputTokenLimit"), int, default=0)
                 if inp and outp:
                     out[short] = LiveLimits(
                         max_request_tokens=inp,
                         max_response_tokens=outp,
                     )
-            page_token = convert(body.get("nextPageToken"), str, default="")
+            page_token = from_plain(body.get("nextPageToken"), str, default="")
             if not page_token:
                 return out
 
@@ -185,9 +185,9 @@ async def fetch_anthropic(
             except httpx2.HTTPError as e:
                 _out(f"  [warn] {mid}: {_describe(e)}")
                 continue
-            data = convert(r.json(), dict[str, object])
-            max_input = convert(data.get("max_input_tokens"), int, default=0)
-            max_output = convert(data.get("max_tokens"), int, default=0)
+            data = from_plain(r.json(), dict[str, object])
+            max_input = from_plain(data.get("max_input_tokens"), int, default=0)
+            max_output = from_plain(data.get("max_tokens"), int, default=0)
             if max_input and max_output:
                 out[mid] = LiveLimits(
                     max_request_tokens=max_input,

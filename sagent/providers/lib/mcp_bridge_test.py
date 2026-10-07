@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, cast, override
 from urllib import error, request
 
@@ -11,7 +12,7 @@ import json
 
 import pytest
 
-from sagent.lib.custom_json import JSON
+from sagent.lib.codec import PlainTree
 from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.types.runtime import (
     BytesMessage,
@@ -23,8 +24,6 @@ from sagent.types.tools import Tool
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from mcp import ClientSession
     from mcp.client.streamable_http import streamable_http_client
     from mcp.types import ImageContent, TextContent
@@ -48,8 +47,8 @@ class _EchoTool:
     name: str = "Echo"
     tool_id: str = "application/x-tool-echo"
     description: str = "Echo the supplied text"
-    directive_schema: JSON = cast(
-        JSON,
+    directive_schema: Mapping[str, PlainTree] = cast(
+        Mapping[str, PlainTree],
         {
             "type": "object",
             "properties": {"text": {"type": "string"}},
@@ -78,8 +77,8 @@ class _StrictTool(_EchoTool):
     """Tool stub that records the exact args passed to ``run``."""
 
     name = "Strict"
-    directive_schema: JSON = cast(
-        JSON,
+    directive_schema: Mapping[str, PlainTree] = cast(
+        Mapping[str, PlainTree],
         {
             "type": "object",
             "properties": {"text": {"type": "string"}},
@@ -655,8 +654,8 @@ class _DelayOwningTool(_StrictTool):
     """Tool whose own schema declares ``delay`` (as ``AgentSend`` does)."""
 
     name = "Owner"
-    directive_schema: JSON = cast(
-        JSON,
+    directive_schema: Mapping[str, PlainTree] = cast(
+        Mapping[str, PlainTree],
         {"type": "object", "properties": {"delay": {"type": "integer"}}},
     )
 

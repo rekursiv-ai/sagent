@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from sagent.catalog.table import ModelTable
-from sagent.lib.custom_json import convert
+from sagent.lib.codec import from_plain
 from sagent.types.capability import (
     ContextTag,
     ModelCapability,
@@ -438,18 +438,18 @@ def usage_tokens(usage: Mapping[str, object], *, cache_ttl_sec: float) -> TokenC
       tokens: The request's usage.
 
     """
-    written = convert(usage.get("cache_creation_input_tokens"), int, default=0)
-    split = convert(usage.get("cache_creation"), dict[str, object], default={})
+    written = from_plain(usage.get("cache_creation_input_tokens"), int, default=0)
+    split = from_plain(usage.get("cache_creation"), dict[str, object], default={})
     if split:
-        written_1h = convert(split.get("ephemeral_1h_input_tokens"), int, default=0)
+        written_1h = from_plain(split.get("ephemeral_1h_input_tokens"), int, default=0)
     else:
         written_1h = written if cache_ttl_sec >= 3600.0 else 0
     return TokenCount(
-        request=convert(usage.get("input_tokens"), int, default=0),
-        response=convert(usage.get("output_tokens"), int, default=0),
+        request=from_plain(usage.get("input_tokens"), int, default=0),
+        response=from_plain(usage.get("output_tokens"), int, default=0),
         cache_write=written - written_1h,
         cache_write_1h=written_1h,
-        cache_read=convert(usage.get("cache_read_input_tokens"), int, default=0),
+        cache_read=from_plain(usage.get("cache_read_input_tokens"), int, default=0),
     )
 
 

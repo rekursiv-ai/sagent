@@ -15,6 +15,7 @@ Not included: ingest/update/query - those are LLM-driven via skills.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
@@ -22,7 +23,7 @@ import logging
 import re
 
 from sagent.agent.state import get_tool_state
-from sagent.lib.custom_json import JSON, json_freeze
+from sagent.lib.codec import PlainTree, immutable
 from sagent.tools.core import load_tool_description, run_sync
 from sagent.tools.prompt_text import escape_prompt_text
 from sagent.types.runtime import ToolResult
@@ -164,7 +165,7 @@ class Wiki:
     tool_id: str = "application/x-tool-wiki"
     clearable_results: bool = False
     description: str = load_tool_description("Wiki")
-    directive_schema: JSON = json_freeze(
+    directive_schema: Mapping[str, PlainTree] = immutable(
         {
             "type": "object",
             "properties": {

@@ -17,7 +17,7 @@ from sagent.agent.background import (
     bg_augmented_schema,
     split_bg_args,
 )
-from sagent.lib.custom_json import JSON
+from sagent.lib.codec import PlainTree
 from sagent.types.runtime import ToolResult
 
 
@@ -28,7 +28,7 @@ class _StubTool:
     name: str = "Stub"
     tool_id: str = "application/x-tool-stub"
     description: str = "stub tool"
-    directive_schema: JSON = field(
+    directive_schema: Mapping[str, PlainTree] = field(
         default_factory=lambda: {"type": "object"},
     )
     clearable_results: bool = False
@@ -54,7 +54,7 @@ class _StubTool:
         return ToolResult(call_id="", content="ok")
 
 
-def _props(schema: JSON) -> Mapping[str, object]:
+def _props(schema: Mapping[str, PlainTree]) -> Mapping[str, object]:
     return cast(Mapping[str, object], schema["properties"])
 
 
@@ -115,7 +115,10 @@ def test_split_bg_args_rejects_negative_delay_by_coercion() -> None:
 
 def test_a_tool_declaring_a_control_key_is_not_augmented() -> None:
     """``AgentSend`` owns ``delay``; overwriting it rerouted its schedule."""
-    schema: JSON = {"type": "object", "properties": {"delay": {"type": "integer"}}}
+    schema: Mapping[str, PlainTree] = {
+        "type": "object",
+        "properties": {"delay": {"type": "integer"}},
+    }
     assert not backgroundable(_StubTool(directive_schema=schema))
     with pytest.raises(ValueError, match="delay"):
         _ = bg_augmented_schema(schema)

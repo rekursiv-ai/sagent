@@ -31,7 +31,7 @@ from sagent.catalog.table import (
     UnsupportedTagError,
     base_model_id,
 )
-from sagent.lib.custom_json import JSON, json_freeze
+from sagent.lib.codec import PlainTree, immutable
 from sagent.providers.providers import (
     PROVIDER_NAMES,
     infer_provider,
@@ -115,7 +115,7 @@ class AgentSelf:
     tool_id: str = "application/x-tool-agentself"
     clearable_results: bool = False
     description: str = load_tool_description("agentself")
-    directive_schema: JSON = json_freeze(
+    directive_schema: Mapping[str, PlainTree] = immutable(
         {
             "type": "object",
             "properties": {

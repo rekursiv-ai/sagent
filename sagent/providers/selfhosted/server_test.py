@@ -5,12 +5,13 @@ Avoids loading torch/transformers by exercising only the pure helpers.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 import json
 
-from sagent.lib.custom_json import JSON, MutableJSON
+from sagent.lib.codec import MutablePlainTree, PlainTree, from_plain
 from sagent.providers.selfhosted.server import (
     SelfHosted,
     SelfHostedModel,
@@ -44,22 +45,24 @@ if TYPE_CHECKING:
 
 
 def test_context_window_top_level_max_position() -> None:
-    config: MutableJSON = {"max_position_embeddings": 8192}
+    config: dict[str, MutablePlainTree] = {"max_position_embeddings": 8192}
     assert _context_window(config, default=1024) == 8192
 
 
 def test_context_window_nested_text_config() -> None:
-    config: MutableJSON = {"text_config": {"max_position_embeddings": 4096}}
+    config: dict[str, MutablePlainTree] = {
+        "text_config": {"max_position_embeddings": 4096},
+    }
     assert _context_window(config, default=1024) == 4096
 
 
 def test_context_window_falls_back_to_default() -> None:
-    empty: MutableJSON = {}
+    empty: dict[str, MutablePlainTree] = {}
     assert _context_window(empty, default=2048) == 2048
 
 
 def test_context_window_non_integer_top_level_falls_back() -> None:
-    config: MutableJSON = {"max_position_embeddings": "weird"}
+    config: dict[str, MutablePlainTree] = {"max_position_embeddings": "weird"}
     assert _context_window(config, default=512) == 512
 
 
@@ -180,10 +183,12 @@ def test_build_chat_messages_assistant_with_tool_call_remaps_id() -> None:
     msgs = _build_chat_messages(ModelRequest(messages=[asst]))
     asst_msg = msgs[0]
     assert asst_msg["role"] == "assistant"
-    tcs = cast(list[MutableJSON], asst_msg["tool_calls"])
+    tcs = from_plain(asst_msg["tool_calls"], list[dict[str, MutablePlainTree]])
     assert tcs[0]["id"] == "call_0"
-    assert cast(MutableJSON, tcs[0]["function"])["name"] == "Bash"
-    assert cast(MutableJSON, tcs[0]["function"])["arguments"] == json.dumps(
+    assert cast(dict[str, MutablePlainTree], tcs[0]["function"])["name"] == "Bash"
+    assert cast(dict[str, MutablePlainTree], tcs[0]["function"])[
+        "arguments"
+    ] == json.dumps(
         {"cmd": "ls"},
     )
 
@@ -205,7 +210,7 @@ def test_build_chat_messages_tool_result_error_prefixed() -> None:
 
 
 def test_inline_tool_preamble_no_tools_noop() -> None:
-    msgs: list[MutableJSON] = [{"role": "user", "content": "hi"}]
+    msgs: list[dict[str, MutablePlainTree]] = [{"role": "user", "content": "hi"}]
     _inline_tool_preamble(msgs, [])
     assert msgs == [{"role": "user", "content": "hi"}]
 
@@ -216,7 +221,7 @@ class _StubBash:
     name: str = "Bash"
     tool_id: str = "application/x-tool-bash"
     description: str = "Run shell"
-    directive_schema: JSON = MappingProxyType({"type": "object"})
+    directive_schema: Mapping[str, PlainTree] = MappingProxyType({"type": "object"})
     clearable_results: bool = True
 
     def summary(self, args: Mapping[str, object]) -> str:
@@ -235,7 +240,7 @@ class _StubBash:
 
 
 def test_inline_tool_preamble_no_system_prepends_one() -> None:
-    msgs: list[MutableJSON] = [{"role": "user", "content": "hi"}]
+    msgs: list[dict[str, MutablePlainTree]] = [{"role": "user", "content": "hi"}]
     tools: list[Tool] = [_StubBash()]
     _inline_tool_preamble(msgs, tools)
     assert msgs[0]["role"] == "system"
@@ -243,7 +248,7 @@ def test_inline_tool_preamble_no_system_prepends_one() -> None:
 
 
 def test_inline_tool_preamble_extends_existing_system_message() -> None:
-    msgs: list[MutableJSON] = [
+    msgs: list[dict[str, MutablePlainTree]] = [
         {"role": "system", "content": "existing system"},
         {"role": "user", "content": "hi"},
     ]
@@ -256,7 +261,7 @@ def test_inline_tool_preamble_extends_existing_system_message() -> None:
 def test_tool_schema_wraps_as_function() -> None:
     schema = _tool_schema(_StubBash())
     assert schema["type"] == "function"
-    func = cast(MutableJSON, schema["function"])
+    func = cast(dict[str, MutablePlainTree], schema["function"])
     assert func["name"] == "Bash"
     assert func["description"] == "Run shell"
 

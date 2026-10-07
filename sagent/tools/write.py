@@ -10,7 +10,7 @@ import re
 
 from sagent.agent.state import get_tool_state
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.custom_json import json_freeze
+from sagent.lib.codec import immutable
 from sagent.tools.core import (
     file_lock_key,
     load_tool_description,
@@ -38,7 +38,7 @@ class Write:
     tool_id = "application/x-tool-write"
     clearable_results = False
     description = load_tool_description("Write")
-    directive_schema = json_freeze(
+    directive_schema = immutable(
         {
             "type": "object",
             "properties": {

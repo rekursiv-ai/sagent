@@ -29,7 +29,7 @@ from sagent.providers.openai.compat import (
 
 
 if TYPE_CHECKING:
-    from sagent.lib.custom_json import MutableJSON
+    from sagent.lib.codec import MutablePlainTree
     from sagent.types.model import ModelRequest
 
 
@@ -41,9 +41,9 @@ class _MiniMaxModel(OpenAICompatModel):
     @override
     def _transform_body(
         self,
-        body: MutableJSON,
+        body: dict[str, MutablePlainTree],
         request: ModelRequest,
-    ) -> MutableJSON:
+    ) -> dict[str, MutablePlainTree]:
         """Split reasoning out of ``content`` and send the thinking switch."""
         del request
         # Without it, thinking stays "inside ``content`` wrapped in

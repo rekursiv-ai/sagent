@@ -33,7 +33,7 @@ import subprocess
 import tempfile
 
 from sagent.agent.agent import Agent
-from sagent.lib.custom_json import JSON, json_freeze
+from sagent.lib.codec import PlainTree, immutable
 from sagent.tools import AgentSelf
 from sagent.types.runtime import (
     AssistantMessage,
@@ -168,7 +168,7 @@ class RunPython:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
 
-    directive_schema: JSON = json_freeze(
+    directive_schema: Mapping[str, PlainTree] = immutable(
         {
             "type": "object",
             "properties": {

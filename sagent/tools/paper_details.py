@@ -7,6 +7,7 @@ schema, arg validation, the process cache, and text rendering.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import asyncio
@@ -28,7 +29,7 @@ from wesearch.paper.render import (
 
 import cachetools
 
-from sagent.lib.custom_json import JSON, convert, json_freeze
+from sagent.lib.codec import PlainTree, from_plain, immutable
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     normalize_id_arg,
@@ -59,7 +60,7 @@ class PaperDetails:
     tool_id: str = "application/x-tool-paperdetails"
     clearable_results: bool = True
     description: str = load_tool_description("PaperDetails")
-    directive_schema: JSON = json_freeze(
+    directive_schema: Mapping[str, PlainTree] = immutable(
         {
             "type": "object",
             "properties": {
@@ -177,7 +178,7 @@ class PaperDetails:
 
         """
         operation = str(args.get("operation", ""))
-        influential_only = convert(args.get("influential_only"), bool, default=False)
+        influential_only = from_plain(args.get("influential_only"), bool, default=False)
         year_from = opt_int(args, "year_from")
         limit = validate_limit(opt_int(args, "limit"))
         if isinstance(limit, ToolResult):

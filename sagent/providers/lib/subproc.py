@@ -23,7 +23,7 @@ import logging
 import shutil
 import signal
 
-from sagent.lib.custom_json import MutableJSON
+from sagent.lib.codec import MutablePlainTree
 from sagent.types.exceptions import log_task_exception
 
 
@@ -161,7 +161,7 @@ class Subproc:
         self,
         *,
         skip_non_json: bool = False,
-    ) -> MutableJSON | None:
+    ) -> dict[str, MutablePlainTree] | None:
         """Read until a valid JSON object line appears.
 
         Args:
@@ -196,7 +196,7 @@ class Subproc:
                     f"non-JSON line on stdout: {line[:200]!r}: {self._diagnostic()}",
                 ) from exc
             if isinstance(obj, dict):
-                return cast(MutableJSON, obj)
+                return cast(dict[str, MutablePlainTree], obj)
             logger.debug("skipping non-object JSON: %s", line[:120])
 
     async def close(self) -> None:

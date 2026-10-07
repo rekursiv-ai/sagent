@@ -77,7 +77,7 @@ from sagent.agent.session_io import (
 from sagent.agent.state import agent_registry, unique_registry_label
 from sagent.catalog.table import UnknownModelError, UnsupportedTagError
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.custom_json import convert
+from sagent.lib.codec import from_plain
 from sagent.lib.userdirs import data_dir
 from sagent.prompt import build_system
 from sagent.providers import (
@@ -129,7 +129,7 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
 
-    from sagent.lib.custom_json import MutableJSON
+    from sagent.lib.codec import MutablePlainTree
     from sagent.types.tools import (
         Tool,
     )
@@ -1452,14 +1452,14 @@ def _parse_stream_json(raw: str) -> str:
         # ``read`` raises on a non-object, which is fatal. A bare ``{}`` is a
         # valid prompt-less line and must be skipped, exactly like the
         # prompt-less ``{"other": "data"}``.
-        record = convert(obj, dict[str, object])
-        p = convert(record.get("prompt"), str, default="")
+        record = from_plain(obj, dict[str, object])
+        p = from_plain(record.get("prompt"), str, default="")
         if p:
             prompts.append(p)
     return "\n\n".join(prompts)
 
 
-def _event_to_json_record(event: RuntimeEvent) -> MutableJSON | None:
+def _event_to_json_record(event: RuntimeEvent) -> dict[str, MutablePlainTree] | None:
     """Serialize a ``RuntimeEvent`` for stream-json output, or skip."""
     if isinstance(event, ModelResponsePartial):
         return {"descriptor": "text/plain", "content": event.text}
