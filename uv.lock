@@ -3485,7 +3485,6 @@ dependencies = [
     { name = "imagesize" },
     { name = "markdown-it-py" },
     { name = "mcp" },
-    { name = "msgspec" },
     { name = "numpy" },
     { name = "openai" },
     { name = "pillow" },
@@ -3593,7 +3592,6 @@ requires-dist = [
     { name = "kernels", marker = "extra == 'selfhosted'", specifier = ">=0.13.0" },
     { name = "markdown-it-py", specifier = ">=4.2" },
     { name = "mcp", specifier = ">=2.0.0" },
-    { name = "msgspec", specifier = ">=0.22.0" },
     { name = "numpy", specifier = ">=2.1" },
     { name = "nvidia-cudnn-cu13", marker = "sys_platform == 'linux' and extra == 'selfhosted'" },
     { name = "nvidia-cudnn-frontend", marker = "sys_platform == 'linux' and extra == 'selfhosted'" },
@@ -4383,7 +4381,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.12"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#f8ba4148b77aff044f7b18b2ff644249ea4a8d9f" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#0c5a48a31a4ef9846bd5ef1f4bf4a22ef3396376" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

@@ -53,7 +53,6 @@ dependencies = [
     "openai>=2.20",
     # serialization
     "fastjsonschema>=2.22.2",
-    "msgspec>=0.22.0",
     # config
     "pyyaml>=6.0",
     # text / docs
