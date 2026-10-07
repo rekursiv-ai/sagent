@@ -67,6 +67,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
+from functools import partial
 from numbers import Real
 from pathlib import Path, PurePath
 from types import (
@@ -999,7 +1000,7 @@ def _decode_complex(
 
 def _encode_bytes(value: object, state: _Encoding) -> PlainTree:
     """Encode bytes as ``py/b64``."""
-    text = base64.b64encode(cast("bytes", value)).decode("ascii")
+    text = base64.b64encode(cast("bytes", value)).decode()
     return state.make_dict({"py/b64": text})
 
 
@@ -1861,6 +1862,12 @@ def _canonical_reduce(
         else part
         for index, part in enumerate(parts[2:])
     ]
+    # A partial's state ends with its instance ``__dict__``, which CPython creates,
+    # empty, the first time anything reads the attribute; empty rebuilds as none.
+    if isinstance(value, partial) and rest and isinstance(rest[0], tuple):
+        *fields, instance_dict = cast("tuple[object, ...]", rest[0])
+        if instance_dict == {}:
+            rest[0] = (*fields, None)
     return (func, arguments, *rest)
 
 

@@ -6,6 +6,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field, make_dataclass
 from decimal import Decimal
 from enum import Enum
+from functools import partial
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import (
@@ -257,6 +258,14 @@ class TestToPlain:
         assert to_plain(Color.RED) == {
             "py/reduce": [{"py/type": f"{__name__}.Color"}, {"py/tuple": ["red"]}],
         }
+
+    def test_a_partial_encodes_the_same_once_its_dict_was_read(self) -> None:
+        # CPython creates a partial's ``__dict__``, empty, the first time it is read.
+        bound = partial(max, 0)
+        before = to_plain(bound)
+        _ = bound.__dict__
+
+        assert to_plain(bound) == before
 
     def test_set_order_is_deterministic(self) -> None:
         assert to_plain({"b", "a", "c"}) == {"py/set": ["a", "b", "c"]}

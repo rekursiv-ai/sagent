@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import contextlib
 import itertools
 import pathlib
 import shutil
@@ -451,11 +452,11 @@ def test_each_rg_run_gets_the_timeout(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
 @pytest.mark.parametrize(
-    ("files", "pattern", "runs_rg"),
+    ("files", "pattern", "sample_scan_sec", "runs_rg"),
     [
-        (3, "value", False),
-        (65, "value", True),
-        (40, r"\w+\s*=\s*\d+$", True),
+        (3, "value", 0.000_5, False),
+        (65, "value", None, True),
+        (40, r"\w+\s*=\s*\d+$", None, True),
     ],
     ids=["few-files", "many-files", "slow-pattern-on-big-text"],
 )
@@ -463,12 +464,27 @@ def test_rg_starts_only_when_it_would_finish_first(
     tmp_path: Path,
     files: int,
     pattern: str,
+    sample_scan_sec: float | None,
     runs_rg: bool,
 ) -> None:
-    """Python answers small searches before ``rg`` could start; big ones go to it."""
+    """Python answers small searches before ``rg`` could start; big ones go to it.
+
+    The small search's sample scan is timed by a fixed clock: on a loaded runner
+    the real one projected past ``_RG_MS`` and started ``rg``. A slower host only
+    makes the slow pattern slower, so that case keeps the real clock.
+    """
     for i in range(files):
         (tmp_path / f"{i:03}.py").write_text("value = 1\n" * 2_000)
+    clock = (
+        contextlib.nullcontext()
+        if sample_scan_sec is None
+        else patch(
+            "sagent.lib.files.grep.time.perf_counter",
+            side_effect=[0.0, sample_scan_sec],
+        )
+    )
     with (
+        clock,
         patch("sagent.lib.files.grep.SMALL_FILES", 64),
         patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
     ):
