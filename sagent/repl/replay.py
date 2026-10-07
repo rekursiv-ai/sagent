@@ -129,8 +129,8 @@ def _mode_parts(agent: Agent) -> list[str]:
     if spec is not None:
         parts.append(f"{spec.provider}/{spec.model_id}")
         parts.append(f"auth={spec.auth}")
-        if spec.account:
-            parts.append(f"account={spec.account}")
+        if account := spec.account or "":
+            parts.append(f"account={account}")
     # Each axis is total, so the footer lists what DIFFERS from its unset
     # value rather than what is non-``None``.
     settings = agent.model.settings

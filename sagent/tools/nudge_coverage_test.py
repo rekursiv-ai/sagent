@@ -111,7 +111,9 @@ def _nudging_tools(command: str) -> set[str]:
     trees = parse_bash(command)
     assert trees is not None, f"failed to parse: {command!r}"
     return {
-        t.name for t in _MATCHERS if isinstance(t, BashMatcher) and t.bash_match(trees)
+        t.name
+        for t in _MATCHERS
+        if isinstance(t, BashMatcher) and t.bash_match(trees) is not None
     }
 
 

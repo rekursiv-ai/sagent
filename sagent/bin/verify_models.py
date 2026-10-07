@@ -365,7 +365,7 @@ async def _run() -> int:
 
     if target in ("all", "google"):
         _out("Google (API query):")
-        key = os.environ.get("GOOGLE_API_KEY")
+        key = os.environ.get("GOOGLE_API_KEY", "")
         if not key:
             _out("  [error] GOOGLE_API_KEY not set")
             total_errors += 1
@@ -381,7 +381,7 @@ async def _run() -> int:
 
     if target in ("all", "anthropic"):
         _out("Anthropic (API query):")
-        key = os.environ.get("ANTHROPIC_API_KEY")
+        key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
             _out("  [error] ANTHROPIC_API_KEY not set")
             total_errors += 1

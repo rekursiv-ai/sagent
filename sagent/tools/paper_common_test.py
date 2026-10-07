@@ -71,13 +71,13 @@ def _make_record(
     title: str = "Attention Is All You Need",
     authors: tuple[str, ...] = ("Ashish", "Noam", "Niki", "Jakob"),
     year: int | None = 2017,
-    venue: str | None = "NeurIPS",
-    doi: str | None = "10.0/abc",
-    arxiv_id: str | None = "1706.03762",
-    abstract: str | None = "We propose a new architecture.",
+    venue: str = "NeurIPS",
+    doi: str = "10.0/abc",
+    arxiv_id: str = "1706.03762",
+    abstract: str = "We propose a new architecture.",
     citation_count: int | None = 100_000,
     reference_count: int | None = 50,
-    open_access_pdf: str | None = "https://x/pdf",
+    open_access_pdf: str = "https://x/pdf",
     sources: tuple[str, ...] = ("s2",),
     is_influential: bool | None = None,
 ) -> PaperRecord:
@@ -119,7 +119,7 @@ def test_format_record_no_authors() -> None:
 
 
 def test_format_record_no_ids() -> None:
-    assert "[no-id]" in format_record(_make_record(doi=None, arxiv_id=None))
+    assert "[no-id]" in format_record(_make_record(doi="", arxiv_id=""))
 
 
 def test_format_record_influential_marker() -> None:
@@ -131,7 +131,7 @@ def test_format_record_no_meta() -> None:
         _make_record(
             citation_count=None,
             reference_count=None,
-            open_access_pdf=None,
+            open_access_pdf="",
             sources=(),
         ),
     )

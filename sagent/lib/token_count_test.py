@@ -9,7 +9,7 @@ from sagent.lib.token_count import approx_request_tokens
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
 
     import pytest
 
@@ -77,8 +77,8 @@ class _StubTool:
 def _req(
     messages: list[ModelContextEvent],
     *,
-    system: str | None = None,
-    tools: list[Tool] | None = None,
+    system: str = "",
+    tools: Sequence[Tool] = (),
 ) -> ModelRequest:
     return ModelRequest(messages=messages, system=system, tools=tools)
 

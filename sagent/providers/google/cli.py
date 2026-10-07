@@ -553,7 +553,7 @@ class _GoogleCLIModel(CLISubprocessModel, ModelDefaults):
               server returned a JSON-RPC ``error`` field.
 
         """
-        self._pending_system = request.system or ""
+        self._pending_system = request.system
         if self._hot_spare.active is not None:
             self._promote_proc_state(self._hot_spare.active)
         if self._should_respawn(request):
@@ -604,7 +604,7 @@ class _GoogleCLIModel(CLISubprocessModel, ModelDefaults):
     def _sync_tools_bridge(self, request: ModelRequest) -> None:
         """Refresh the MCP bridge's tool registry to match the request."""
         if self._tools_bridge is not None:
-            self._tools_bridge.update_tools(list(request.tools or []))
+            self._tools_bridge.update_tools(list(request.tools))
 
     def _promote_proc_state(self, proc: Subproc) -> None:
         """Copy state from the active subprocess wrapper onto model fields."""
@@ -800,7 +800,7 @@ class _GoogleCLIModel(CLISubprocessModel, ModelDefaults):
                 ],
             },
         )
-        session_id = cast(str | None, result.get("sessionId"))
+        session_id = from_plain(result.get("sessionId"), str, default="")
         if not session_id:
             raise RuntimeError(
                 f"GoogleCLI: session/new returned no sessionId: {result}",

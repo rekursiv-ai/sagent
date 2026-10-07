@@ -169,7 +169,7 @@ class Advisor:
         )
         request = ModelRequest(
             messages=[UserMessage(text=prompt)],
-            system=self._system or None,
+            system=self._system,
         )
         try:
             response = await send_with_retry(

@@ -94,8 +94,8 @@ class OpenAICompatModel(ModelDefaults):
 
     # Message field carrying reasoning/thinking text on responses.
     # Kimi/Qwen/DeepSeek use ``reasoning_content``; OpenAI surfaces
-    # reasoning separately via the Responses API only (leave as None).
-    _reasoning_field: ClassVar[str | None] = None
+    # reasoning separately via the Responses API only (leave empty).
+    _reasoning_field: ClassVar[str] = ""
 
     def __init__(
         self,
@@ -450,7 +450,7 @@ def build_messages(
     max_image_dim: int = 0,
     max_image_bytes: int = 0,
     *,
-    reasoning_field: str | None = None,
+    reasoning_field: str = "",
 ) -> list[dict[str, MutablePlainTree]]:
     """Convert history entries to OpenAI chat-completions format.
 
@@ -466,7 +466,7 @@ def build_messages(
           resized before encoding.
       max_image_bytes: Maximum image size in bytes after resize.
       reasoning_field: Assistant-message field the vendor reads replayed
-          reasoning from; ``None`` drops reasoning from the replay.
+          reasoning from; empty drops reasoning from the replay.
 
     Returns:
       messages: Chat-completions wire-format messages.
@@ -614,7 +614,7 @@ async def consume_stream(
     *,
     publish: Callable[[RuntimeEvent], None] | None,
     model: OpenAICompatModel,
-    reasoning_field: str | None,
+    reasoning_field: str,
 ) -> ModelResponse:
     """Parse an SSE stream into an assembled ``ModelResponse``.
 
@@ -628,7 +628,7 @@ async def consume_stream(
           live streaming.
       model: Active model, used to price the reported usage.
       reasoning_field: Provider-specific reasoning-text field name,
-          or ``None`` when the provider does not surface reasoning.
+          or empty when the provider does not surface reasoning.
 
     Returns:
       response: Assembled ``ModelResponse`` with usage and cost filled in.
@@ -776,10 +776,10 @@ def _stream_error(event: Mapping[str, object]) -> OpenAIStreamError:
     """Classify an in-band SSE error event, flat or nested under ``error``."""
     error = from_plain(event.get("error"), dict[str, object], default=None) or event
     message = from_plain(error.get("message"), str, default=None) or "unknown error"
-    code = from_plain(error.get("code"), str, default=None) or from_plain(
+    code = from_plain(error.get("code"), str, default="") or from_plain(
         error.get("type"),
         str,
-        default=None,
+        default="",
     )
     details = ["OpenAI-compatible stream error"]
     if code:

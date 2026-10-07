@@ -55,7 +55,7 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterable, Callable, Mapping
+    from collections.abc import AsyncIterable, Callable, Mapping, Sequence
 
     from openai.types import responses
     from openai.types.responses.response_create_params import (
@@ -225,7 +225,7 @@ class _OpenAIResponsesModel(ModelDefaults):
                 max_image_dim=self.limits.max_image_edge_px,
                 max_image_bytes=self.limits.max_image_bytes,
             ),
-            "instructions": request.system or "",
+            "instructions": request.system,
             "stream": True,
             "store": False,
         }
@@ -311,7 +311,7 @@ _STREAM_ERROR_STATUS: Final[dict[str, int]] = {
 
 
 def _build_tools(
-    tools: list[Tool],
+    tools: Sequence[Tool],
 ) -> list[responses.FunctionToolParam]:
     """Translate each ``Tool`` into a Responses API function-tool param."""
     return [_build_tool(t) for t in tools]
@@ -888,9 +888,9 @@ def _parse_tool_arguments(
             tool_name,
             call_id,
         )
-    delta = parsed_by_source.get("delta")
-    done = parsed_by_source.get("done")
-    if delta is not None and done is not None and delta != done:
+    delta = parsed_by_source.get("delta", {})
+    done = parsed_by_source.get("done", {})
+    if len(parsed_by_source) == 2 and delta != done:
         logger.warning(
             "OpenAI Responses tool arguments differed between delta and done: "
             "tool=%s call_id=%s delta_chars=%d done_chars=%d "
@@ -911,7 +911,7 @@ def _parse_tool_arguments(
             call_id,
             len(delta_args),
             len(done_args),
-            len(delta) if delta is not None else -1,
+            len(delta) if "delta" in parsed_by_source else -1,
             len(done),
         )
         return done
@@ -925,9 +925,5 @@ def _parse_tool_arguments(
             len(done_args),
             len(delta),
         )
-        return delta
-    if done is not None:
-        return done
-    if delta is not None:
         return delta
     return {}

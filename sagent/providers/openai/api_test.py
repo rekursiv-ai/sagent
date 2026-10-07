@@ -22,7 +22,7 @@ from sagent.types.cost import PriceKey
 @pytest.mark.asyncio
 async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
     """Every catalog row must complete a successful Responses request."""
-    key = os.environ.get("OPENAI_API_KEY")
+    key = os.environ.get("OPENAI_API_KEY", "")
     if not key:
         pytest.skip("OPENAI_API_KEY not set")
 

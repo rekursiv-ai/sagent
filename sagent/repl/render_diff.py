@@ -193,7 +193,7 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
                 new_ln,
                 " ",
                 content_text=content_text,
-                bg_style=None,
+                bg_style="",
                 width=width,
             )
             old_ln += 1
@@ -374,7 +374,7 @@ def _render_diff_line(
     sigil: str,
     *,
     content_text: Text,
-    bg_style: str | None,
+    bg_style: str,
     width: int,
 ) -> None:
     """Render one diff line with gutter, content, and full-width bg."""

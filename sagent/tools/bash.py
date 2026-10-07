@@ -313,7 +313,9 @@ class Bash:
         trees = cached_parse_bash(command, get_tool_state().bash_parse_cache)
         if trees is None:
             return []
-        nudges = [n for matcher in self._peer_matchers if (n := matcher(trees))]
+        nudges = [
+            n for matcher in self._peer_matchers if (n := matcher(trees)) is not None
+        ]
         debug_log.trace("bash_nudge", nudged=bool(nudges), count=len(nudges))
         return nudges
 

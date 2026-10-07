@@ -272,7 +272,7 @@ query GetIssue($id: String!) {
         )
         if isinstance(data, ToolResult):
             return data
-        issue = cast(dict[str, MutablePlainTree] | None, data.get("issue"))
+        issue = from_plain(data.get("issue"), dict[str, MutablePlainTree], default={})
         if not issue:
             return f"No such issue: {issue_id}"
         return _render_issue(issue)
@@ -314,7 +314,7 @@ mutation CreateIssue($teamId: String!, $title: String!, $description: String) {
         if isinstance(data, ToolResult):
             return data
         res = cast(dict[str, MutablePlainTree], data.get("issueCreate") or {})
-        if not res.get("success"):
+        if res.get("success") is not True:
             return f"Create failed: {res}"
         issue = cast(dict[str, MutablePlainTree], res.get("issue") or {})
         return (
@@ -362,7 +362,7 @@ mutation UpdateIssue($id: String!, $input: IssueUpdateInput!) {
         if isinstance(data, ToolResult):
             return data
         res = cast(dict[str, MutablePlainTree], data.get("issueUpdate") or {})
-        if not res.get("success"):
+        if res.get("success") is not True:
             return ToolResult(
                 call_id="",
                 content=f"Update failed: {res}",
@@ -400,7 +400,7 @@ mutation AddComment($issueId: String!, $body: String!) {
         if isinstance(data, ToolResult):
             return data
         res = cast(dict[str, MutablePlainTree], data.get("commentCreate") or {})
-        if not res.get("success"):
+        if res.get("success") is not True:
             return ToolResult(
                 call_id="",
                 content=f"Comment failed: {res}",
@@ -427,13 +427,17 @@ def _render_issue(issue: dict[str, MutablePlainTree]) -> str:
         f"URL: {issue.get('url')}",
         f"Priority: {issue.get('priority')}",
     ]
-    assignee = cast(dict[str, MutablePlainTree] | None, issue.get("assignee"))
+    assignee = from_plain(
+        issue.get("assignee"),
+        dict[str, MutablePlainTree],
+        default={},
+    )
     if assignee:
         parts.append(f"Assignee: {assignee.get('name')} ({assignee.get('email')})")
-    desc = issue.get("description")
+    desc = from_plain(issue.get("description"), str, default="")
     if desc:
         parts.append("")
-        parts.append(str(desc))
+        parts.append(desc)
     comments = cast(
         list[dict[str, MutablePlainTree]],
         cast(dict[str, MutablePlainTree], issue.get("comments") or {}).get("nodes")

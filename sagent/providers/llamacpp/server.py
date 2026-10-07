@@ -161,7 +161,7 @@ class LlamaCpp(OpenAICompat):
             if proc is None or proc.poll() is None:
                 return
             self.close()
-        if self.base_url != self.BASE_URL or os.environ.get("LLAMA_CPP_BASE_URL"):
+        if self.base_url != self.BASE_URL or os.environ.get("LLAMA_CPP_BASE_URL", ""):
             self._wait_ready()
             self._started = True
             return

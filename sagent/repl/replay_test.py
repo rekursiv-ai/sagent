@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import cast
 
@@ -112,7 +112,7 @@ class _StubAgent:
 
 def _agent(
     *,
-    history: list[TapeEvent] | None = None,
+    history: Sequence[TapeEvent] = (),
     tape: list[TapeRecord] | None = None,
     tools_map: Mapping[str, _StubTool] | None = None,
     total_cost_usd: float = 0.0,
@@ -125,7 +125,7 @@ def _agent(
     """Build a ``_StubAgent`` typed as ``Agent`` for replay_messages."""
     history_records: list[TapeRecord] = [
         ReferrableTapeEvent(ref=TapeRef(session_id="t", ordinal=i), event=entry)
-        for i, entry in enumerate(history or [])
+        for i, entry in enumerate(history)
     ]
     settings = ModelSettings(capability=_WIDE, thinking_budget=thinking_budget)
     settings.thinking_output = "text" if thinking_budget != "none" else "none"
@@ -133,7 +133,7 @@ def _agent(
     settings.cache_ttl_sec = cache_ttl_sec
     settings.service_tier = service_tier
     stub = _StubAgent(
-        history=list(history) if history else [],
+        history=list(history),
         tape=list(tape) if tape is not None else history_records,
         tools_map=tools_map or {},
         cost_tracker=_StubCostTracker(spend=TokenCost(request=total_cost_usd)),

@@ -85,7 +85,7 @@ def environment(
         model_id=model_id,
         knowledge_cutoff_line=(
             f"\nKnowledge cutoff: {model_spec.knowledge_cutoff}."
-            if model_spec.knowledge_cutoff
+            if model_spec.knowledge_cutoff is not None
             else ""
         ),
     )

@@ -47,19 +47,19 @@ def test_cached_parse_bash_caches_none() -> None:
 
 
 def test_resolve_cwd_path_neither() -> None:
-    assert resolve_cwd_path(None, None) == ""
+    assert resolve_cwd_path("", "") == ""
 
 
 def test_resolve_cwd_path_dot_only() -> None:
-    assert resolve_cwd_path(None, ".") == ""
+    assert resolve_cwd_path("", ".") == ""
 
 
 def test_resolve_cwd_path_path_only() -> None:
-    assert resolve_cwd_path(None, "src") == "src"
+    assert resolve_cwd_path("", "src") == "src"
 
 
 def test_resolve_cwd_path_cwd_only() -> None:
-    assert resolve_cwd_path("src", None) == "src"
+    assert resolve_cwd_path("src", "") == "src"
 
 
 def test_resolve_cwd_path_join_relative() -> None:

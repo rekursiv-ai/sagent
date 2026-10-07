@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import cast
 from unittest.mock import MagicMock
@@ -139,7 +139,7 @@ def _handler(kb: KeyBindings, keys: tuple[str, ...]) -> Callable[[KeyPressEvent]
 def _fake_buf(
     text: str = "",
     cursor: int | None = None,
-    history: list[str] | None = None,
+    history: Sequence[str] = (),
 ) -> MagicMock:
     cursor_position = cursor if cursor is not None else len(text)
     buf = MagicMock()
@@ -148,8 +148,7 @@ def _fake_buf(
     buf.working_index = 0
     buf.document.text_before_cursor = text[:cursor_position]
     buf.document.text = text
-    hist = list(history) if history else []
-    buf.history.get_strings.return_value = hist
+    buf.history.get_strings.return_value = list(history)
     return buf
 
 

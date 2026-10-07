@@ -2145,7 +2145,7 @@ def test_should_respawn_triggers() -> None:
     assert model._should_respawn(request) is True
 
     # Sync hash; head mismatch -> respawn.
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     model._sent_history_head = UserMessage(text="something else")
     assert model._should_respawn(request) is True
 
@@ -2191,7 +2191,7 @@ async def test_stream_eof_respawns_and_resets_sent_index(
             respawn_count += 1
             return cast(Subproc, _DeadProc())
 
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
     with pytest.raises(Exception, match="stdout closed"):
@@ -2228,7 +2228,7 @@ async def test_stream_read_timeout_respawns_and_resets_sent_index(
             respawn_count += 1
             return cast(Subproc, _StalledProc())
 
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
     with pytest.raises(Exception, match="stdout idle timeout"):
@@ -2267,7 +2267,7 @@ async def test_stream_repeated_transport_failures_trip_budget(
                 raise RuntimeError("transport failure budget exhausted")
             return cast(Subproc, _DeadProc())
 
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
 
@@ -2312,7 +2312,7 @@ async def test_stream_application_error_does_not_respawn(
         del proc, publish
         raise AssertionError("unreachable")
 
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     monkeypatch.setattr(model, "_send_entry", _send_entry)
     monkeypatch.setattr(model, "_drain_until_result", _drain_until_result)
@@ -2553,7 +2553,7 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
         del proc, publish
         return response
 
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     monkeypatch.setattr(model, "_send_entry", _send_entry)
     monkeypatch.setattr(model, "_drain_until_result", _drain_until_result)
@@ -2618,7 +2618,7 @@ async def test_terminal_is_error_respawns_and_resets_state(
             return cast(Subproc, _ErrorProc())
 
     user = UserMessage(text="hi")
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     model._last_sent_index = 0
     model._sent_history_head = user
     model._turn_count = 9
@@ -2783,7 +2783,7 @@ async def test_stateless_stream_cancelled_interrupts_and_reraises(
             respawn_count += 1
             return cast(Subproc, proc)
 
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
 

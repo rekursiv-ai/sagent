@@ -195,7 +195,7 @@ def _mutates(command: str) -> bool:
 def _skip_if_missing(command: str) -> None:
     """Skip when the utility under test is not installed."""
     exe = command.split(maxsplit=1)[0]
-    if exe in ("for", "while", "echo", "cat") or shutil.which(exe):
+    if exe in ("for", "while", "echo", "cat") or shutil.which(exe) is not None:
         return
     pytest.skip(f"{exe} not available")
 

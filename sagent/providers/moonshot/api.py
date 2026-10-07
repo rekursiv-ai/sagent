@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 class _MoonshotModel(OpenAICompatModel):
     """Moonshot backend - surfaces ``reasoning_content`` as thinking."""
 
-    _reasoning_field: ClassVar[str | None] = "reasoning_content"
+    _reasoning_field: ClassVar[str] = "reasoning_content"
 
     @override
     def _transform_body(

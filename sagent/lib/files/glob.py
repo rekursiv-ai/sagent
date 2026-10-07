@@ -70,9 +70,9 @@ def glob(root: Path, pattern: str, /) -> list[Path]:
         "/".join(rest),
         hidden=hidden,
         depth=depth,
-        limit=_FD_ENTRIES if fd else None,
+        limit=_FD_ENTRIES if fd is not None else None,
     )
-    if found is None and fd:
+    if found is None and fd is not None:
         return _glob_fd(fd, start, "/".join(rest), hidden=hidden)
     return found or []
 

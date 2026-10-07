@@ -38,7 +38,7 @@ def log_path() -> Path:
       path: Resolved log file path.
 
     """
-    override = os.environ.get("SAGENT_DEBUG_LOG")
+    override = os.environ.get("SAGENT_DEBUG_LOG", "")
     return (
         Path(override)
         if override

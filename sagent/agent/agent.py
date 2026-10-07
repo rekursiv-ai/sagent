@@ -1787,7 +1787,7 @@ class Agent:
         for tool in self._tools_map.values():
             if gate is not None and tool.name not in gate:
                 continue
-            contribution = tool.prompt()
+            contribution = tool.prompt() or ""
             if contribution:
                 parts.append(contribution)
         # Teach the model that ``DetachedArrived`` history turns are runtime
@@ -2404,8 +2404,8 @@ class Agent:
             materialize_request(
                 ModelRequest(
                     messages=list(history),
-                    system=self.system_prompt() or None,
-                    tools=self.live_tools() or None,
+                    system=self.system_prompt(),
+                    tools=self.live_tools(),
                 ),
                 tool_result_budget_tokens=budget,
             ),
@@ -3064,8 +3064,8 @@ class _AgentModel:
             request = materialize_request(
                 ModelRequest(
                     messages=list(history),
-                    system=cached_system or None,
-                    tools=rich_tools or None,
+                    system=cached_system,
+                    tools=rich_tools,
                     max_response_tokens=self._agent.max_response_tokens,
                 ),
                 tool_result_budget_tokens=self._agent.tool_results.message_budget_tokens,
@@ -3546,8 +3546,8 @@ class _AgentCompactor:
                 materialize_request(
                     ModelRequest(
                         messages=payload,
-                        system=cached_system or None,
-                        tools=cached_tools or None,
+                        system=cached_system,
+                        tools=cached_tools,
                     ),
                     tool_result_budget_tokens=self._agent.tool_results.message_budget_tokens,
                 ),
@@ -3607,8 +3607,8 @@ class _AgentCompactor:
                     materialize_request(
                         ModelRequest(
                             messages=payload,
-                            system=cached_system or None,
-                            tools=cached_tools or None,
+                            system=cached_system,
+                            tools=cached_tools,
                         ),
                         tool_result_budget_tokens=(
                             self._agent.tool_results.message_budget_tokens
@@ -3670,8 +3670,8 @@ class _AgentCompactor:
                 materialize_request(
                     ModelRequest(
                         messages=payload,
-                        system=cached_system or None,
-                        tools=cached_tools or None,
+                        system=cached_system,
+                        tools=cached_tools,
                     ),
                     tool_result_budget_tokens=self._agent.tool_results.message_budget_tokens,
                 ),

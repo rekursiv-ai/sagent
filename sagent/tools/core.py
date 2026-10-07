@@ -355,7 +355,7 @@ def _build_schema(
         if name == "self":
             continue
         t = hints.get(name, str)
-        description = None
+        description = ""
         origin = typing.get_origin(t)
         if origin is typing.Annotated:
             args = typing.get_args(t)

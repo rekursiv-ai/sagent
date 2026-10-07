@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 class _DashScopeModel(OpenAICompatModel):
     """DashScope backend - reasoning_content, enable_thinking routing."""
 
-    _reasoning_field: ClassVar[str | None] = "reasoning_content"
+    _reasoning_field: ClassVar[str] = "reasoning_content"
 
     # The base spells effort in OpenAI's vocabulary (``xhigh`` -> ``high``),
     # which DashScope either rejects or folds differently, so it is dropped

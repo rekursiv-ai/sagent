@@ -320,9 +320,9 @@ class AnthropicCLICredentials(TypedDict):
     scopes: NotRequired[list[str]]
     subscription_type: NotRequired[str | None]
     rate_limit_tier: NotRequired[str | None]
-    account_uuid: NotRequired[str | None]
-    email: NotRequired[str | None]
-    organization_uuid: NotRequired[str | None]
+    account_uuid: NotRequired[str]
+    email: NotRequired[str]
+    organization_uuid: NotRequired[str]
     billing_type: NotRequired[str | None]
     account_created_at: NotRequired[str | None]
     subscription_created_at: NotRequired[str | None]
@@ -829,7 +829,7 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
               ``result`` event, or the CLI surfaced an error result.
 
         """
-        self._pending_system = request.system or ""
+        self._pending_system = request.system
         # Clear the bridge sink when the turn ends (any exit) so a
         # stale runtime publisher never lingers on the long-lived bridge
         # -- e.g. a detached background ``call_tool`` firing between
@@ -848,7 +848,7 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
             # ``test_bridge_tool_round_trips``). The post-acquire
             # ``_sync_tools_bridge`` below still refreshes the live
             # registry for the already-warm subprocess.
-            self._pending_tools = list(request.tools or [])
+            self._pending_tools = list(request.tools)
             if self._should_respawn(request):
                 if hash_system(request.system) != self._system_hash:
                     await self._hot_spare.discard_spare()
@@ -979,7 +979,7 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
     ) -> None:
         """Refresh the MCP bridge's tool registry and runtime event sink."""
         if self._tools_bridge is not None:
-            self._tools_bridge.update_tools(list(request.tools or []))
+            self._tools_bridge.update_tools(list(request.tools))
             self._tools_bridge.set_publish(publish)
 
     # The bridge runs background tool calls (those the model requested with
@@ -1112,7 +1112,7 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
             if kind == "result":
                 usage_event = event
                 stop_reason = cast(str | None, event.get("stop_reason"))
-                if event.get("is_error"):
+                if event.get("is_error") is True:
                     # Classify transient shapes for in-place retry vs
                     # fatal shapes for runtime escalation. The
                     # dominant transient shape in practice is the
@@ -1403,12 +1403,12 @@ def _parse_cli_credentials(raw: Mapping[str, object]) -> AnthropicCLICredentials
     token_account_raw = oauth.get("tokenAccount")
     if isinstance(token_account_raw, dict):
         token_account = token_account_raw
-        if token_account.get("uuid"):
-            creds["account_uuid"] = str(token_account["uuid"])
-        if token_account.get("emailAddress"):
-            creds["email"] = str(token_account["emailAddress"])
-        if token_account.get("organizationUuid"):
-            creds["organization_uuid"] = str(token_account["organizationUuid"])
+        if uuid := str(token_account.get("uuid") or ""):
+            creds["account_uuid"] = uuid
+        if email := str(token_account.get("emailAddress") or ""):
+            creds["email"] = email
+        if organization_uuid := str(token_account.get("organizationUuid") or ""):
+            creds["organization_uuid"] = organization_uuid
     if "billingType" in oauth:
         creds["billing_type"] = cast(str | None, oauth["billingType"])
     if "accountCreatedAt" in oauth:
@@ -1447,7 +1447,7 @@ def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
 # claude keeps ``projects/`` directly under it; unset, the dir is ``~/.claude``.
 def _claude_config_dir() -> Path:
     """Return the config dir claude uses when sagent doesn't override HOME."""
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "")
     if config_dir:
         return Path(config_dir)
     return (
@@ -1560,13 +1560,12 @@ def _build_anthropic_argv(
     servers: dict[str, dict[str, object]] = {
         bridge_server_name: {"type": "http", "url": bridge_url},
     }
-    if extra_mcp_servers:
-        for name, entry in extra_mcp_servers.items():
-            if name == bridge_server_name:
-                # Don't let an external entry stomp on the bridge that
-                # exposes sagent-native tools (Read/Bash/etc.).
-                continue
-            servers[name] = entry
+    for name, entry in (extra_mcp_servers or {}).items():
+        if name == bridge_server_name:
+            # Don't let an external entry stomp on the bridge that
+            # exposes sagent-native tools (Read/Bash/etc.).
+            continue
+        servers[name] = entry
     mcp_config = json.dumps({"mcpServers": servers})
     base = [
         "claude",

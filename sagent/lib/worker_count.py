@@ -152,7 +152,7 @@ def _core_key(cpu: Path) -> tuple[int | None, int | None]:
 # memory figure drives the cap on macOS and on a Linux test host.
 def _available_mib(meminfo: Path) -> int | None:
     """Return memory available without paging, in MiB, or None if unknown."""
-    if shutil.which("vm_stat"):
+    if shutil.which("vm_stat") is not None:
         return _vm_stat_mib()
     if meminfo.is_file():
         for line in meminfo.read_text().splitlines():

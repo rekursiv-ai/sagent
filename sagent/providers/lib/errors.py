@@ -253,7 +253,7 @@ class PolicyBlockedError(UserFacingError):
         *,
         provider_name: str,
         provider_message: str,
-        request_id: str | None = None,
+        request_id: str = "",
     ) -> None:
         self.provider_name = provider_name
         self.provider_message = provider_message

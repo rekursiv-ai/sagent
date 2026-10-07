@@ -388,8 +388,8 @@ class SummaryCompactor:
                 )
         else:
             body = self._prompt or read_asset(recipe_dict("compactor")["full"])
-        if custom_instructions and custom_instructions.strip():
-            body = _append_user_guidance(body, custom_instructions)
+        if guidance := (custom_instructions or "").strip():
+            body = _append_user_guidance(body, guidance)
         compactor_recipe = recipe_dict("compactor")
         prompt = (
             read_asset(compactor_recipe["no_tools_preamble"])
@@ -509,7 +509,6 @@ class SummaryCompactor:
             request = ModelRequest(
                 messages=[*entries, UserMessage(text=instruction)],
                 system=read_asset(recipe_dict("compactor")["system"]).strip(),
-                tools=None,
             )
             try:
                 response = await send_with_retry(

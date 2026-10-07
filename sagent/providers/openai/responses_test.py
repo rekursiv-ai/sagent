@@ -1226,7 +1226,7 @@ class _VerifyTool(_StubTool):
 @pytest.mark.network_openai
 @pytest.mark.anyio
 async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
-    if not os.environ.get("OPENAI_API_KEY"):
+    if not os.environ.get("OPENAI_API_KEY", ""):
         pytest.skip("OPENAI_API_KEY not set")
     provider = OpenAI.from_env()
     model = provider.model("gpt-6-astra")

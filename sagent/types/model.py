@@ -6,6 +6,7 @@ The ``Model`` Protocol, the request and response shapes, and the
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -93,11 +94,11 @@ class ModelRequest:
     messages: list[ModelContextEvent]
     """Conversation history sent to the model."""
 
-    system: str | None = None
-    """System prompt; ``None`` omits it from the request."""
+    system: str = ""
+    """System prompt; empty omits it from the request."""
 
-    tools: list[Tool] | None = None
-    """Tools advertised to the model; ``None`` sends no tool schema."""
+    tools: Sequence[Tool] = ()
+    """Tools advertised to the model; empty sends no tool schema."""
 
     max_response_tokens: int | None = None
     """Max output tokens; ``None`` uses the model default."""

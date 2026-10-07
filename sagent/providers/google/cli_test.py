@@ -365,7 +365,7 @@ def test_should_respawn_triggers() -> None:
     model._system_hash = hash_system("different")
     assert model._should_respawn(request) is True
 
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     model._sent_history_head = UserMessage(text="other")
     assert model._should_respawn(request) is True
 
@@ -408,7 +408,7 @@ async def test_stream_eof_respawns_and_resets_sent_index(
             respawn_count += 1
             return cast(Subproc, _DeadProc())
 
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     model._session_id = "session"
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
@@ -446,7 +446,7 @@ async def test_stream_read_timeout_respawns_and_resets_sent_index(
             respawn_count += 1
             return cast(Subproc, _StalledProc())
 
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     model._session_id = "session"
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
@@ -486,7 +486,7 @@ async def test_stream_repeated_transport_failures_trip_budget(
                 raise RuntimeError("transport failure budget exhausted")
             return cast(Subproc, _DeadProc())
 
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     model._session_id = "session"
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     request = ModelRequest(messages=[UserMessage(text="hi")])
@@ -591,7 +591,7 @@ async def test_hot_spare_warmup_does_not_overwrite_active_session_id(
             proc=proc,
             session_id=session_id,
             tmpdir=Path.cwd(),
-            system_hash=hash_system(None),
+            system_hash=hash_system(""),
         )
         _GoogleCLIModel._attach_proc_state(state)
         return proc
@@ -692,7 +692,7 @@ async def test_stream_writeback_failure_returns_response(
         raise OSError("credential writeback failed")
 
     user = UserMessage(text="hi")
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     model._session_id = "session"
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     monkeypatch.setattr(model, "_send_prompt", send_prompt)
@@ -740,7 +740,7 @@ async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -
         del proc, prompt_blocks, text_parts, thinking_parts, publish
         return "end_turn"
 
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     model._session_id = "session"
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())
     monkeypatch.setattr(model, "_send_prompt", send_prompt)
@@ -823,7 +823,7 @@ async def test_terminal_json_rpc_error_respawns_and_resets_state(
             return cast(Subproc, _ErrorProc())
 
     user = UserMessage(text="hi")
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     model._session_id = "session"
     model._last_sent_index = 0
     model._sent_history_head = user
@@ -928,7 +928,7 @@ async def test_cancelled_prompt_respawns_before_next_turn(
             return cast(Subproc, _CancelProc())
 
     user = UserMessage(text="hi")
-    model._system_hash = hash_system(None)
+    model._system_hash = hash_system("")
     model._session_id = "session"
     model._sent_history_head = user
     monkeypatch.setattr(model, "_hot_spare", _HotSpare())

@@ -442,7 +442,7 @@ def _apply_skip_policy(
 ) -> None:
     """Skip an item whose resource is unavailable in this environment."""
     for mark in live_llm_marks:
-        if mark in names and not os.environ.get(live_llm_env_var):
+        if mark in names and not os.environ.get(live_llm_env_var, ""):
             item.add_marker(
                 pytest.mark.skip(
                     reason=(
@@ -452,7 +452,7 @@ def _apply_skip_policy(
                 ),
             )
             return
-    if os.environ.get("CI") and not os.environ.get("RUN_INTEGRATION"):
+    if os.environ.get("CI", "") and not os.environ.get("RUN_INTEGRATION", ""):
         for mark in ci_skipped_marks:
             if mark in names:
                 item.add_marker(

@@ -109,18 +109,17 @@ def test_populated_tmpdir_removed_on_failure(
 def test_hash_system_stable_and_distinguishes() -> None:
     assert hash_system("be brief") == hash_system("be brief")
     assert hash_system("be brief") != hash_system("be verbose")
-    assert hash_system(None) == hash_system("")
 
 
 def test_respawn_due_triggers() -> None:
     state = CLISubprocessModel()
     user = UserMessage(text="hi")
-    state._system_hash = hash_system(None)
-    assert not state._respawn_due([user], system=None, max_request_tokens=100)
-    assert state._respawn_due([], system=None, max_request_tokens=100)
+    state._system_hash = hash_system("")
+    assert not state._respawn_due([user], system="", max_request_tokens=100)
+    assert state._respawn_due([], system="", max_request_tokens=100)
     assert state._respawn_due([user], system="new", max_request_tokens=100)
     state._sent_history_head = UserMessage(text="other")
-    assert state._respawn_due([user], system=None, max_request_tokens=100)
+    assert state._respawn_due([user], system="", max_request_tokens=100)
 
 
 if __name__ == "__main__":

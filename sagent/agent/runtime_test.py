@@ -97,7 +97,7 @@ def _summary_override(
     summary: list[ModelContextEvent],
     mint_ref: Callable[[], TapeRef],
     *,
-    tape: Sequence[TapeRecord] | None = None,
+    tape: Sequence[TapeRecord] = (),
     strategy: str = "summary",
     fallback_reason: str = "",
     preserved_tail_count: int = 0,
@@ -2429,7 +2429,10 @@ async def test_run_cancellation_removes_observer_and_stops_driver() -> None:
     run_forever_tasks: list[asyncio.Task[object]] = []
     for task in asyncio.all_tasks():
         coro = task.get_coro()
-        if coro is not None and coro.__qualname__ == "AgentRuntime.run_forever":
+        if (
+            inspect.iscoroutine(coro)
+            and coro.cr_code.co_qualname == "AgentRuntime.run_forever"
+        ):
             run_forever_tasks.append(task)
     assert all(task.cancelled() or task.done() for task in run_forever_tasks)
     release_model.set()

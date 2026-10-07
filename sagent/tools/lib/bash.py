@@ -442,20 +442,19 @@ def cwd_is_known(cwd: str) -> bool:
     return cwd != _UNKNOWN_CWD
 
 
-def resolve_cwd_path(cwd: str | None, path: str | None) -> str:
+def resolve_cwd_path(cwd: str, path: str) -> str:
     """Combine a ``cd`` prefix with a tool's positional path arg.
 
     Returns ``""`` when the effective path is just ``"."`` so callers
     can omit ``path=`` from the suggestion entirely.
 
-    ``Invocation.cwd`` spells "no ``cd``" as ``""``, so an empty string is
-    treated exactly like ``None``. Without that, every un-prefixed
-    invocation rendered ``/f`` for ``cat f`` -- an absolute path at the
-    filesystem root.
+    ``Invocation.cwd`` spells "no ``cd``" as ``""``. Joining it anyway
+    rendered ``/f`` for ``cat f`` -- an absolute path at the filesystem
+    root.
 
     Args:
-      cwd: Directory from a ``cd`` prefix, or None/"" for none.
-      path: Positional path argument, or None.
+      cwd: Directory from a ``cd`` prefix, or ``""`` for none.
+      path: Positional path argument, or ``""`` for none.
 
     Returns:
       resolved: Combined path string, or empty string.
@@ -465,10 +464,10 @@ def resolve_cwd_path(cwd: str | None, path: str | None) -> str:
         # ``cd``/``cd -`` moved somewhere the command text does not name.
         # A relative operand cannot be resolved against it, and guessing
         # names the wrong file; an absolute one is unaffected.
-        return str(path) if path and Path(path).is_absolute() else ""
+        return path if path and Path(path).is_absolute() else ""
     if not cwd:
-        return "" if path in (None, "", ".") else str(path)
-    if path in (None, "", "."):
+        return "" if path in ("", ".") else path
+    if path in ("", "."):
         return cwd
     if Path(path).is_absolute():
         return path

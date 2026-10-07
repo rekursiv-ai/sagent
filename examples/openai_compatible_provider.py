@@ -69,7 +69,7 @@ async def main() -> int:
       status: Process exit code.
 
     """
-    if not os.environ.get(LocalOpenAI.ENV_VAR):
+    if not os.environ.get(LocalOpenAI.ENV_VAR, ""):
         sys.stderr.write(f"Set {LocalOpenAI.ENV_VAR} before running this example.\n")
         return 1
     agent = Agent(

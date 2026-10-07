@@ -1323,7 +1323,7 @@ def _resume_label(label: str) -> str:
 
 def _configure_logging(level: str | None) -> None:
     """Configure CLI logging from flag or environment (headless / pre-mode)."""
-    raw = level or os.environ.get("SAGENT_LOG_LEVEL")
+    raw = level or os.environ.get("SAGENT_LOG_LEVEL", "")
     if not raw:
         return
     name = raw.upper()

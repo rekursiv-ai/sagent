@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 class _MiniMaxModel(OpenAICompatModel):
     """MiniMax backend - reasoning surfaces via ``reasoning_content``."""
 
-    _reasoning_field: ClassVar[str | None] = "reasoning_content"
+    _reasoning_field: ClassVar[str] = "reasoning_content"
 
     @override
     def _transform_body(

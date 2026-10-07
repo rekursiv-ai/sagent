@@ -128,7 +128,7 @@ def _tiktoken_model() -> OpenAICompatModel:
 def _make_request(
     *,
     messages: list[ModelContextEvent],
-    system: str | None = None,
+    system: str = "",
 ) -> ModelRequest:
     return ModelRequest(messages=messages, system=system)
 
@@ -297,7 +297,7 @@ async def test_consume_stream_input_tokens_exclude_cache_read() -> None:
         _sse_response(events),
         publish=None,
         model=_free_model(),
-        reasoning_field=None,
+        reasoning_field="",
     )
     assert resp.tokens.request == 600
     assert resp.tokens.cache_read == 400
@@ -323,7 +323,7 @@ async def test_consume_stream_tracks_and_bills_cache_write_tokens() -> None:
         _sse_response(events),
         publish=None,
         model=_billed_model(),
-        reasoning_field=None,
+        reasoning_field="",
     )
     assert resp.tokens.request == 3
     assert resp.tokens.cache_write == 1306
@@ -373,7 +373,7 @@ async def test_consume_stream_text_and_usage() -> None:
         r,
         publish=_sink,
         model=_free_model(),
-        reasoning_field=None,
+        reasoning_field="",
     )
     assert resp.message.text == "hello"
     assert "".join(text_acc) == "hello"
@@ -401,7 +401,7 @@ async def test_consume_stream_preserves_chat_refusal_text() -> None:
         _sse_response(events),
         publish=None,
         model=_free_model(),
-        reasoning_field=None,
+        reasoning_field="",
     )
     assert resp.message.text == "I can’t help with that."
     assert resp.stop_reason == "model_refusal"
@@ -455,7 +455,7 @@ async def test_consume_stream_tool_call_accumulates() -> None:
         _sse_response(events),
         publish=None,
         model=_free_model(),
-        reasoning_field=None,
+        reasoning_field="",
     )
     assert len(resp.message.tool_calls) == 1
     tc = resp.message.tool_calls[0]
@@ -514,7 +514,7 @@ async def test_consume_stream_skips_malformed_data() -> None:
         _sse_response_body(body),
         publish=None,
         model=_free_model(),
-        reasoning_field=None,
+        reasoning_field="",
     )
     assert resp.message.text == "ok"
 
@@ -531,7 +531,7 @@ async def test_consume_stream_skips_well_formed_non_object_data(payload: bytes) 
         _sse_response_body(body),
         publish=None,
         model=_free_model(),
-        reasoning_field=None,
+        reasoning_field="",
     )
     assert resp.message.text == "ok"
 
@@ -554,7 +554,7 @@ async def test_consume_stream_raises_an_in_band_error_event(
             _sse_response([event]),
             publish=None,
             model=_free_model(),
-            reasoning_field=None,
+            reasoning_field="",
         )
     assert error_status_code(raised.value) == status
 
@@ -571,7 +571,7 @@ async def test_consume_stream_eof_without_done_raises_interrupted() -> None:
             _sse_response_body(body),
             publish=None,
             model=_billed_model(),
-            reasoning_field=None,
+            reasoning_field="",
         )
     response = exc_info.value.response
     assert response.message.text == "partial"

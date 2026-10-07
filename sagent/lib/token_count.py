@@ -69,10 +69,10 @@ def approx_request_tokens(request: ModelRequest, model: TokenEstimator) -> int:
       tokens: Approximate total input token count.
 
     """
-    total = model.approx_text_tokens(request.system or "")
+    total = model.approx_text_tokens(request.system)
     for entry in request.messages:
         total += entry_tokens(entry, model)
-    for tool in request.tools or ():
+    for tool in request.tools:
         total += model.approx_text_tokens(tool.description or "")
         total += model.approx_text_tokens(
             json.dumps(mutable(tool.directive_schema)),

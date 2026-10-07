@@ -141,7 +141,7 @@ _CALLBACK_PORT: Final = 1455
 
 def _default_credentials_path() -> Path:
     """Return the active Codex auth file, honoring ``CODEX_HOME``."""
-    codex_home = os.environ.get("CODEX_HOME")
+    codex_home = os.environ.get("CODEX_HOME", "")
     if codex_home:
         return Path(codex_home).expanduser() / "auth.json"
     return Path.home() / DEFAULT_CREDENTIALS_PATH  # noqa: TID251 -- The Codex CLI reads this fixed vendor path (AGENTS.md rule 3); an XDG root must not relocate it.  # house-ignore[xdg-literal] -- The Codex CLI reads this fixed vendor path (AGENTS.md rule 3).
@@ -658,7 +658,7 @@ class OpenAISubscription:
         missing = [
             name
             for name in required
-            if not isinstance(tokens.get(name), str) or not tokens.get(name)
+            if not from_plain(tokens.get(name), str, default="")
         ]
         if missing:
             raise _CredentialFileError(
@@ -710,7 +710,7 @@ class OpenAISubscription:
         tokens["access_token"] = creds["access_token"]
         tokens["refresh_token"] = creds["refresh_token"]
         tokens["account_id"] = creds["account_id"]
-        id_token = creds.get("id_token")
+        id_token = creds.get("id_token", "")
         if id_token:
             tokens["id_token"] = id_token
         existing["auth_mode"] = "chatgpt"

@@ -354,7 +354,7 @@ class Anthropic:
 
     def build_system(
         self,
-        system: str | None,
+        system: str,
         messages: list[anthropic.types.MessageParam] | None = None,
         *,
         cache_ttl: str = "5m",
@@ -362,7 +362,7 @@ class Anthropic:
         """Build the system prompt for an API call.
 
         Args:
-          system: System prompt text, or ``None`` to omit.
+          system: System prompt text, or empty to omit.
           messages: Conversation messages (used by subscription subclass).
           cache_ttl: Prompt-cache TTL (``5m`` or ``1h``) for providers using blocks.
 
@@ -371,9 +371,7 @@ class Anthropic:
 
         """
         del messages, cache_ttl  # Unused in plain API mode.
-        if system is not None:
-            return system
-        return anthropic.NOT_GIVEN
+        return system or anthropic.NOT_GIVEN
 
     def extra_headers(
         self,
@@ -569,22 +567,22 @@ def _tool_names_from_kwargs(kwargs: dict[str, object]) -> list[str | None]:
     return out
 
 
-def _request_id(e: BaseException) -> str | None:
-    """Best-effort request-id extractor for an anthropic error."""
+def _request_id(e: BaseException) -> str:
+    """Best-effort request-id extractor for an anthropic error; ``""`` if absent."""
     rid = getattr(e, "request_id", None)
     if rid:
-        return cast(str | None, rid)
+        return cast(str, rid)
     resp = getattr(e, "response", None)
     headers = getattr(resp, "headers", None)
     if headers is not None:
         try:
             return cast(
-                str | None,
-                headers.get("request-id") or headers.get("x-request-id"),
+                str,
+                headers.get("request-id") or headers.get("x-request-id") or "",
             )
         except Exception:  # noqa: BLE001 -- best-effort extraction must not mask the original error.
-            return None
-    return None
+            return ""
+    return ""
 
 
 class _AnthropicModel(ModelDefaults):
@@ -811,7 +809,7 @@ class _AnthropicModel(ModelDefaults):
                 if True in self.capability.manage_context_server_side
                 else 0
             ),
-            tools=request.tools or (),
+            tools=request.tools,
         )
         if body is not None:
             kwargs["extra_body"] = body

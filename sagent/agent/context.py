@@ -290,9 +290,7 @@ class _MaskIndex:
             self._add_interval(intervals, r.lo, r.hi)
 
     def contains(self, ref: TapeRef) -> bool:
-        intervals = self.intervals_by_session.get(ref.session_id)
-        if not intervals:
-            return False
+        intervals = self.intervals_by_session.get(ref.session_id, [])
         idx = bisect.bisect_right(intervals, (ref.ordinal, float("inf"))) - 1
         return idx >= 0 and intervals[idx][0] <= ref.ordinal <= intervals[idx][1]
 

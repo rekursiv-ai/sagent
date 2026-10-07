@@ -130,7 +130,7 @@ class Write:
         file_mode: int | None = None
         if p.exists():
             error = state.enforce_read(file_path)
-            if error:
+            if error is not None:
                 return ToolResult(call_id="", content=error, is_error=True)
             if state.check_stale(file_path):
                 return ToolResult(

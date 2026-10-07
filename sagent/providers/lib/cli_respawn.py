@@ -70,9 +70,9 @@ def respawn_for_cadence(
     return last_input_tokens > max_request_tokens * CONTEXT_FRACTION_RESPAWN_THRESHOLD
 
 
-def hash_system(system: str | None) -> str:
+def hash_system(system: str) -> str:
     """Hash a system prompt for cheap equality checks across turns."""
-    return hashlib.sha256((system or "").encode()).hexdigest()
+    return hashlib.sha256(system.encode()).hexdigest()
 
 
 def merge_user_input(
@@ -166,7 +166,7 @@ class CLISubprocessModel:
         self,
         history: Sequence[ModelContextEvent],
         *,
-        system: str | None,
+        system: str,
         max_request_tokens: int,
     ) -> bool:
         """Whether the active subprocess can no longer serve ``history``."""

@@ -252,7 +252,7 @@ class SlackAdapter:
             return
         # Look up by name.
         cid = await self._find_channel(name)
-        if cid:
+        if cid is not None:
             self._router_log_channel = cid
             logger.info("Router log channel: #%s (%s)", name, cid)
             return
@@ -313,8 +313,8 @@ class SlackAdapter:
         subtype = event.get("subtype")
 
         # Identify agent-originated messages by username.
-        sender_agent: str | None = None
-        if event.get("bot_id"):
+        sender_agent = ""
+        if from_plain(event.get("bot_id"), str, default=""):
             if subtype not in (None, "bot_message"):
                 return
             username = str(event.get("username") or "")
@@ -351,7 +351,7 @@ class SlackAdapter:
 
         # 2. Explicit agent name at start of message.
         target = _extract_agent_mention(clean)
-        if target and target in agent_registry and target != sender_agent:
+        if target is not None and target in agent_registry and target != sender_agent:
             thread_key = (channel, thread_ts)
             if thread_key not in self._thread_owners:
                 self._thread_owners[thread_key] = target
@@ -611,7 +611,7 @@ class SlackAdapter:
         result = await slack.create_channel(ch_name)
         if isinstance(result, ToolResult):
             cid = await self._find_channel(ch_name)
-            if cid:
+            if cid is not None:
                 self._log_channels[ch_name] = cid
                 self._log_channel_owners[cid] = agent_name
                 return cid
@@ -724,7 +724,7 @@ async def log_tap(
             # Terminal sentinel: the producer has ended, so flush what is
             # left and RETURN. Continuing left one tap task alive per
             # agent for the life of the process.
-            if buffer and channel_id and slack:
+            if buffer and channel_id is not None and slack is not None:
                 await _flush_log(buffer, channel_id, slack)
             buffer.clear()
             return

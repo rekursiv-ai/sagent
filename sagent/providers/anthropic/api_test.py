@@ -1652,10 +1652,7 @@ def test_build_kwargs_no_context_management_by_default() -> None:
     model = p.model("claude-opus-4-7")
     req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
     msgs: list[MessageParam] = [
-        cast(
-            MessageParam,
-            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
-        ),
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
     ]
     kwargs = model._build_kwargs(req, msgs)
     body = kwargs.get("extra_body")
@@ -1669,14 +1666,10 @@ def test_build_kwargs_includes_context_management_when_opted_in() -> None:
     req = ModelRequest(
         messages=[UserMessage(text="hi")],
         system="s",
-        tools=None,
         max_response_tokens=128_000,
     )
     msgs: list[MessageParam] = [
-        cast(
-            MessageParam,
-            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
-        ),
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
     ]
     kwargs = model._build_kwargs(req, msgs)
     body = cast(dict[str, object], kwargs["extra_body"])
@@ -1706,10 +1699,7 @@ def test_build_kwargs_context_management_trigger_scales_with_context_window() ->
     p = Anthropic.from_key("k", server_side_context_management=True)
     req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
     msgs: list[MessageParam] = [
-        cast(
-            MessageParam,
-            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
-        ),
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
     ]
 
     m200 = p.model("claude-opus-4-7+200k")
@@ -1774,10 +1764,7 @@ def test_build_kwargs_preserves_provider_context_management() -> None:
     model = p.model("claude-opus-4-7")
     req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
     msgs: list[MessageParam] = [
-        cast(
-            MessageParam,
-            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
-        ),
+        {"role": "user", "content": [{"type": "text", "text": "hi"}]},
     ]
     kwargs = model._build_kwargs(req, msgs)
     body = cast(dict[str, object], kwargs["extra_body"])
@@ -1798,9 +1785,9 @@ def test_anthropic_provider_build_system_passthrough() -> None:
     assert p.build_system("hello") == "hello"
 
 
-def test_anthropic_provider_build_system_none_returns_not_given() -> None:
+def test_anthropic_provider_build_system_empty_returns_not_given() -> None:
     p = Anthropic.from_key("k")
-    out = p.build_system(None)
+    out = p.build_system("")
     # ``anthropic.NOT_GIVEN`` is a sentinel; type is anthropic.NotGiven.
     assert out is anthropic_sdk.NOT_GIVEN
 

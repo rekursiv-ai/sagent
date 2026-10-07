@@ -33,7 +33,7 @@ avoid -- and ``from_key`` takes the repo id, so nothing needs the path.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -696,7 +696,7 @@ class SelfHostedModel(ModelDefaults):
             device,
             int(input_ids.shape[-1]),
             max_new,
-            len(request.tools or []),
+            len(request.tools),
             rendered.attention_mask is not None,
         )
         out = await asyncio.to_thread(_generate, model, input_ids, generate_kwargs)
@@ -709,7 +709,7 @@ class SelfHostedModel(ModelDefaults):
         )
         tool_calls, cleaned_text = _extract_tool_calls(
             text,
-            allowed_tools={t.name for t in request.tools or []},
+            allowed_tools={t.name for t in request.tools},
         )
         # HF ``generate`` doesn't return a finish_reason; infer from
         # whether we exhausted the budget.
@@ -777,7 +777,7 @@ class SelfHostedModel(ModelDefaults):
             tokenizer,
             messages,
             kwargs,
-            request.tools or [],
+            request.tools,
         )
         ids_tensor = cast("Tensor", _input_ids(rendered))
         if ids_tensor.ndim == 1:
@@ -792,7 +792,7 @@ def _apply_chat_template(
     tokenizer: _Tokenizer,
     messages: list[dict[str, MutablePlainTree]],
     kwargs: dict[str, MutablePlainTree],
-    tools: list[Tool],
+    tools: Sequence[Tool],
 ) -> object:
     """Apply a chat template with graceful HF feature fallback."""
     try:
@@ -853,7 +853,7 @@ def _module_device(model: nn.Module) -> str:
 
 def _inline_tool_preamble(
     messages: list[dict[str, MutablePlainTree]],
-    tools: list[Tool],
+    tools: Sequence[Tool],
 ) -> None:
     """Inline tool schemas for templates without native tool support."""
     if not tools:
@@ -944,7 +944,7 @@ def _tool_schema(tool: Tool) -> dict[str, MutablePlainTree]:
     return schema
 
 
-def _tool_preamble(tools: list[Tool]) -> str:
+def _tool_preamble(tools: Sequence[Tool]) -> str:
     """Format tool schemas as a system-preamble for templates lacking ``tools``."""
     schemas = [_tool_schema(t) for t in tools]
     return (

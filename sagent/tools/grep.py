@@ -486,7 +486,7 @@ def _translate_grep_args(args: tuple[str, ...], *, cwd: str = "") -> str:
     if len(paths) > 1:
         return ""
     head = f"pattern={pattern!r}"
-    target = resolve_cwd_path(cwd, paths[0] if paths else None)
+    target = resolve_cwd_path(cwd, paths[0] if paths else "")
     if paths and not cwd_is_known(cwd):
         # ``cd``/``cd -`` moved somewhere the text does not name, so the
         # operand cannot be resolved and a pattern-only call would search

@@ -71,8 +71,8 @@ def do_switch_model(
     # (e.g. ``/model gemini-3-pro`` while on Anthropic). Infer.
     prov_override = parsed.provider
     auth_override = parsed.auth
-    if parsed.model_id and parsed.provider is None:
-        inferred = infer_provider(parsed.model_id, spec.provider)
+    if (model_id := parsed.model_id or "") and parsed.provider is None:
+        inferred = infer_provider(model_id, spec.provider)
         if inferred is not None:
             prov_override, inferred_auth = inferred
             if parsed.auth is None:

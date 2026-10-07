@@ -506,7 +506,6 @@ def _walk_tokens(
                 if residue.strip():
                     _scan_includes(residue, base_dir=base_dir, paths=paths, seen=seen)
             continue
-        if tok.children:
-            _walk_tokens(tok.children, base_dir=base_dir, paths=paths, seen=seen)
+        _walk_tokens(tok.children or (), base_dir=base_dir, paths=paths, seen=seen)
         if tok.type == "text":
             _scan_includes(tok.content, base_dir=base_dir, paths=paths, seen=seen)

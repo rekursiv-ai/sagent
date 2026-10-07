@@ -437,7 +437,7 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
-def _read_key(provider_name: str) -> str | None:
+def _read_key(provider_name: str) -> str:
     # Prefer a file (so the key never has to be exported into the CLI's env);
     # fall back to env if already set for this process.
     env_names = {
@@ -446,10 +446,11 @@ def _read_key(provider_name: str) -> str | None:
     }
     key_files = {"Google": "google_api_key", "Anthropic": "anthropic_api_key"}
     for e in env_names[provider_name]:
-        if os.environ.get(e):
-            return os.environ[e]
+        value = os.environ.get(e, "")
+        if value:
+            return value
     kf = config_dir() / "rekursiv-ai" / "sagent" / key_files[provider_name]
-    return kf.read_text().strip() if kf.exists() else None
+    return kf.read_text().strip() if kf.exists() else ""
 
 
 def _provider(provider_name: str) -> Google | Anthropic:
