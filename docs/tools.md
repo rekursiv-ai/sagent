@@ -41,8 +41,10 @@ Sagent infers the JSON Schema from type hints. Decorated functions get `tool_id 
 Use a class when the tool needs state, custom schema, a prompt section, custom summaries, or direct `Message` control.
 
 ```python
+from collections.abc import Mapping
+
 from sagent.custom_types import Message, TextMessage
-from sagent.lib.custom_json import JSON, json_freeze
+from sagent.lib.codec import PlainTree, immutable
 from sagent.lib.message import get_directive
 
 
@@ -51,7 +53,7 @@ class EchoTool:
     tool_id = "application/x-tool-echo"
     description = "Echo text back to the caller."
     supports_microcompaction = True
-    directive_schema: JSON = json_freeze(
+    directive_schema: Mapping[str, PlainTree] = immutable(
         {
             "type": "object",
             "properties": {"text": {"type": "string"}},

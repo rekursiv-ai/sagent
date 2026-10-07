@@ -9,7 +9,7 @@ import asyncio
 
 from sagent import tools
 from sagent.agent import Agent
-from sagent.lib.custom_json import json_freeze
+from sagent.lib.codec import immutable
 from sagent.providers import Google
 
 
@@ -19,7 +19,7 @@ async def main() -> None:
         system="You summarize files concisely.",
         tools=[tools.Read(), tools.Glob(), tools.Grep()],
     )
-    result = await agent.run(json_freeze({"prompt": "Summarize README.md"}))
+    result = await agent.run(immutable({"prompt": "Summarize README.md"}))
     print(result.content)
 
 
@@ -76,7 +76,7 @@ agent = Agent(
 
 ```python
 events: asyncio.Queue[Message | None] = asyncio.Queue()
-result = await agent.run(json_freeze({"prompt": "Do the task"}), events=events)
+result = await agent.run(immutable({"prompt": "Do the task"}), events=events)
 ```
 
 `run_forever(events=None)` drains `agent.inbox`, joins queued strings into prompts, calls `run()`, survives cancellation, and exits when it receives Sagent's quit sentinel. The REPL and Slack service use this shape for long-lived agents.

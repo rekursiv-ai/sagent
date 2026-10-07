@@ -12,11 +12,11 @@ The CLI exposes agent events through `--output-format stream-json`.
 ```python
 import asyncio
 
-from sagent.lib.custom_json import json_freeze
+from sagent.lib.codec import immutable
 
 
 events: asyncio.Queue = asyncio.Queue()
-result = await agent.run(json_freeze({"prompt": "Explain this repo"}), events=events)
+result = await agent.run(immutable({"prompt": "Explain this repo"}), events=events)
 ```
 
 The queue receives `Message` objects during the run and a `None` sentinel at the request boundary.

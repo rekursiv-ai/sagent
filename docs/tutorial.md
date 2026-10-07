@@ -59,7 +59,7 @@ import asyncio
 
 from sagent import tools
 from sagent.agent import Agent
-from sagent.lib.custom_json import json_freeze
+from sagent.lib.codec import immutable
 from sagent.providers import Google
 
 
@@ -70,7 +70,7 @@ async def main() -> None:
         tools=[tools.Read(), tools.Glob(), tools.Grep()],
     )
     result = await agent.run(
-        json_freeze({"prompt": "Read /tmp/sagent-demo/notes.md and summarize it."})
+        immutable({"prompt": "Read /tmp/sagent-demo/notes.md and summarize it."})
     )
     print(result.content)
 

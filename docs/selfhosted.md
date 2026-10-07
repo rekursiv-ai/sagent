@@ -31,7 +31,7 @@ Run it from Python:
 
 ```python
 from sagent.agent import Agent
-from sagent.lib.custom_json import json_freeze
+from sagent.lib.codec import immutable
 from sagent.providers import SelfHosted, SelfHostedModel
 
 provider = SelfHosted.from_key("Qwen/Qwen3.6-27B+bfloat16+cuda")
@@ -41,7 +41,7 @@ agent = Agent(
     system="Answer concisely.",
     tools=[],
 )
-result = await agent.run(json_freeze({"prompt": "Say hi."}))
+result = await agent.run(immutable({"prompt": "Say hi."}))
 print(result.content)
 ```
 
