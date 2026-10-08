@@ -3,6 +3,167 @@
 All notable sagent changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.1.19 - 2026-10-07
+
+### Added
+
+- `Agent.aclose()` shuts down the agent and awaits model and owned-provider
+  cleanup. It is safe to call repeatedly; cancelling a waiter does not
+  cancel the cleanup. `shutdown()` remains the synchronous entrypoint.
+- Custom tools can declare `max_result_chars` through the optional
+  `ResultBounded` protocol. `sagent.types.tools.DEFAULT_MAX_RESULT_CHARS`
+  is 50,000, and declarations are capped at that ceiling. Tools that omit
+  the property get the default; `0` exempts a self-bounding tool such as
+  `Read` from disk off-loading.
+- `Agent.prepare_model_change()` builds a model without applying it, and
+  `commit_model_change()` queues the swap after the current call finishes.
+  A prepared `ModelChange` can be discarded to release its resources.
+  This lets callers validate settings against the destination model
+  before committing a change.
+- Models: Gemini Flash 3.5 through 3.8 (`gemini-flash-3.5` through
+  `gemini-flash-3.8`), Flash-Lite 3.1 and 3.5
+  (`gemini-flash-lite-3.1`, `gemini-flash-lite-3.5`); Qwen 3.8 Max and
+  Flash (`qwen-max-3.8`, `qwen-flash-3.8`), and MiniMax M3
+  (`minimax-3.0`). Catalogs include their prices, limits and reasoning
+  capabilities.
+- `sagent.agent.retry.RetryDeferredError` carries the retry time for a
+  service failure with a long advertised wait, such as a 503 with
+  `Retry-After`. `RateLimitError` is its subclass for actual throttling;
+  service outages no longer appear as rate limits.
+- `Agent.own_spend` exposes the agent's own cumulative cost separately
+  from the root's aggregate cost for its subagent tree.
+
+### Changed
+
+- `Agent.run()` keeps the model open when a run finishes or is interrupted,
+  so the same agent can handle subsequent requests. It stops and awaits
+  the run's outstanding model and compaction calls without performing
+  terminal cleanup; call `await agent.aclose()` when finished with it.
+- Tool results use fixed bounds instead of a per-result threshold derived
+  from the context window. The agent off-loads results above their tool's
+  character cap, the 200,000-character round budget, or the space left in
+  context, preserving a preview and the full output on disk. An explicit
+  `ToolResultPolicy.persist_tokens` can impose a tighter token cap; `0`
+  leaves the fixed limits in place instead of disabling off-loading.
+- `Bash` results have a 30,000-character cap and `Grep` results a
+  20,000-character cap. `Read` pages its own output rather than repeatedly
+  off-loading a read of an off-loaded file. A page that cannot fit the
+  remaining context returns an error asking for `offset` and `limit`.
+- After a model refusal or `PolicyBlockedError`, the agent withholds the
+  input since the last assistant turn from subsequent requests. Refused
+  tool results become error stubs with their call IDs intact, and earlier
+  conversation remains available. The blocked request still raises its
+  typed error; do not retry the blocked context unchanged.
+- **Breaking:** major-only model names now select the newest release in
+  that family, not a pinned `.0` model: `sol-6` resolves to `sol-6.1` and
+  `opus-5` to `opus-5.5`. Use `sol-6.0` or `opus-5.0` to pin the former
+  selections. Family names such as `sol`, `opus` and `gemini-flash` also
+  resolve to their newest row, as do roles that name a family.
+- Catalog IDs consistently use family/version names, including
+  `astra-6.0`, `luna-6.0`, `gemini-pro-3.1`, `qwen-plus-3.7`,
+  `kimi-2.6` and `minimax-2.7`. Vendor wire IDs remain accepted:
+  `gemini-3.1-pro-preview`, for example, still resolves to
+  `gemini-pro-3.1`. Saved sessions and displays use the canonical name.
+- Utility models follow the refreshed catalogs: Anthropic uses
+  `sonnet-5.5`, Google `gemini-flash-lite-3.5`, and DashScope
+  `qwen-flash-3.8`. DashScope defaults to `qwen-plus-3.7`; MiniMax's
+  default and utility roles both select `minimax-3.0`.
+- Length-truncated responses retain usable prose instead of always raising
+  `ModelTerminationError`; a truncated response containing tool calls
+  still fails rather than executing incomplete arguments. Malformed tool
+  calls are retried, and an unknown vendor stop reason warns instead of
+  rejecting the entire response.
+- Tool argument validation uses cached, compiled JSON Schema validators
+  and requires `fastjsonschema>=2.22.2`. Validation errors distinguish
+  missing fields, unexpected fields and invalid values, and do not execute
+  the rejected call.
+- **Breaking:** custom-tool `directive_schema` and `tool(schema=...)` use
+  `Mapping[str, PlainTree]` instead of the former `JSON` alias. Import
+  `PlainTree` and `immutable` from `sagent.lib.codec`; examples now use
+  `immutable(...)` in place of `json_freeze(...)`.
+- **Breaking:** `ModelCatalog`, `UnknownModelError` and
+  `UnsupportedTagError` moved from `sagent.types.providers` to
+  `sagent.catalog.table`. Construct a catalog with `models=ModelTable(...)`
+  instead of `rows=...`. `CONTEXT_TAGS`, `base_model_id` and
+  `split_model_id` moved there from `sagent.types.model`.
+- **Breaking:** providers must implement `close_sdk()` as part of the
+  `Provider` contract; the optional `ProviderCloseable` protocol is gone.
+  A model closes only resources it owns; shared SDK clients belong to the
+  provider, so closing one model does not strand its siblings.
+- **Breaking:** CLI session-source flags are mutually exclusive:
+  `--session`, `--ephemeral`, `--resume`, `--continue`, `--resume-all`
+  and `--continue-all` can no longer silently override each other. A
+  missing `--resume HASH` exits 1 instead of creating a fresh session.
+  Token and tool-round limits must be positive, and `--max-budget-usd`
+  must be finite and greater than zero.
+
+### Fixed
+
+- Anthropic safeguard classification no longer treats a rejection that
+  merely mentions a caching, retention or versioning "policy" as a
+  `PolicyBlockedError`. Actual safeguard blocks retain the actionable
+  error path rather than being retried as transient failures.
+- Model switches and `AgentSelf` settings changes validate against the
+  destination model before applying anything, then apply settings after
+  the queued swap. Request and response caps above the destination's
+  limits are rejected instead of leaving a partially changed agent.
+- Cross-provider switches can fall back to the destination's default
+  credentials when an inherited named account is missing. Session resume
+  can do the same for a saved account. Explicit account selections and
+  same-provider model changes remain strict.
+- Resuming a model compares provider, authentication mode and account as
+  well as model ID, so an identical ID no longer hides a different saved
+  credential selection. The resolved fallback account is recorded.
+- Only one driver can claim an agent across `run()`, `serve_forever()` and
+  `drive_until_first_idle()`. A competing driver fails before stealing
+  inbox events or releasing another driver's claim.
+- Per-agent budget spend persists across session resume, separately from
+  tree-wide spend. Compaction, scrunch and advisor side calls contribute
+  tokens and cost without replacing the conversation's prompt-size or
+  cache-miss baseline; discarded responses remain accounted for.
+- Rewritten history after a failed turn no longer counts the conversation
+  twice and triggers premature compaction. Changing only the account or
+  authentication mode preserves the same model's measured prompt size.
+- Compaction bounds tool-result bodies on the first summary request, not
+  just after an overflow. Overflow recovery reduces the cap when that
+  changes the request, otherwise drops an old group, so retries make
+  progress instead of resending the same oversized prompt.
+- Tools that declare their own `background` or `delay` parameter keep it;
+  scheduler injection no longer steals `AgentSend`'s delay. Background
+  cancellation translates call IDs to job IDs, and finished detached jobs
+  are removed from the job-ID mappings.
+- Gated-out tools no longer contribute instructions to the system prompt.
+- Write-capable `Bash` calls serialize against keyed `Read`, `Edit` and
+  `Write` calls, not only other Bash writers. Timeouts kill the process
+  group even after its leader exits and bound output draining when a
+  surviving descendant keeps a pipe open.
+- `Read` rejects oversized image files before loading and sending them,
+  with advice to downscale first. Anthropic tool results retain PDF
+  attachments, and hyphenated tool names accepted by its API are no
+  longer discarded as placeholders.
+- Switching to Anthropic drops thinking blocks without a signature or
+  body instead of replaying invalid provider-specific history. Thinking
+  requests honor show/hide output explicitly and keep fixed budgets at or
+  above Anthropic's 1,024-token minimum.
+- OpenAI subscription token refresh stays under the cross-process
+  credential lock, preventing competing refreshes of one rotating token.
+  Tokens without a JWT expiry use the grant's `expires_in`; a grant with
+  neither returns an actionable authentication error.
+- Wrongly typed scalar metadata in a saved session takes its default
+  instead of aborting resume. Off-loaded results without a session use a
+  private temporary directory rather than a shared, pre-creatable path.
+
+### Removed
+
+- The `msgspec` runtime dependency; the released package does not require
+  it.
+- **Breaking:** `sagent.lib.custom_json` was replaced by
+  `sagent.lib.codec`. Direct imports of the old module must migrate to the
+  shared codec's `from_plain`, `to_plain`, `immutable` and `mutable` APIs.
+- **Breaking:** Google's `gemini-1.5-flash`, `gemini-1.5-pro` and
+  `gemini-2.0-flash` catalog entries. Selecting these IDs now raises
+  an unknown-model error.
+
 ## 0.1.18 - 2026-10-03
 
 ### Added

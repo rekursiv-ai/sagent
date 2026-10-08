@@ -3462,7 +3462,7 @@ wheels = [
 
 [[package]]
 name = "sagent"
-version = "0.1.18"
+version = "0.1.19"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
@@ -4387,8 +4387,8 @@ wheels = [
 
 [[package]]
 name = "wesearch"
-version = "0.1.12"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#288275f3a89f7a2ff4e80a3d04846b524cb55388" }
+version = "0.1.13"
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#266ca6934434aee495cb2aaba38925c7b8347ce1" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

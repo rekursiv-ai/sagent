@@ -3,7 +3,7 @@
 
 [project]
 name = "sagent"
-version = "0.1.18"
+version = "0.1.19"
 description = "Python-first Coding Agent API and CLI."
 readme = "README.md"
 requires-python = ">=3.12"
