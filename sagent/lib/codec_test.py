@@ -55,6 +55,10 @@ def _round_trip(value: object) -> object:
     return from_plain(to_plain(value), object, allow_imports=True)
 
 
+def _decoding() -> codec._Decoding:
+    return codec._Decoding(hooks={}, allow_imports=False)
+
+
 class Color(Enum):
     RED = "red"
     BLUE = "blue"
@@ -120,28 +124,17 @@ class Holder:
     shape: Shape
 
 
-class Deferred:
-    """Owns the ``py/inline`` protocol."""
+@dataclass(kw_only=True, slots=True)
+class Flagged:
+    """A dataclass with a slot that is state but not an ``__init__`` field."""
 
-    def __init__(self, func: object, *args: object, **kwargs: object) -> None:
-        self.func = func
-        self.args = list(args)
-        self.kwargs = dict(kwargs)
+    name: str
+    _done: bool = field(default=False, init=False)
 
-    def __custom_json_inline__(
-        self,
-    ) -> tuple[object, list[object], dict[str, object]]:
-        return self.func, self.args, self.kwargs
 
-    def __custom_json_inline_init__(
-        self,
-        func: object,
-        args: list[object],
-        kwargs: dict[str, object],
-    ) -> None:
-        self.func = func
-        self.args = list(args)
-        self.kwargs = dict(kwargs)
+@dataclass(frozen=True, kw_only=True, slots=True)
+class Boxed:
+    color: Color
 
 
 class Tensor:
@@ -370,15 +363,16 @@ class TestRoundTrip:
         assert isinstance(restored, Node)
         assert restored.children[0] is restored
 
-    def test_inline_values_round_trip(self) -> None:
-        restored = _round_trip(Deferred(max, 1, key=abs))
+    def test_a_non_init_slot_is_state_too(self) -> None:
+        value = Flagged(name="n")
+        value._done = True
 
-        assert isinstance(restored, Deferred)
-        assert (restored.func, restored.args, restored.kwargs) == (
-            max,
-            [1],
-            {"key": abs},
-        )
+        tree = to_plain(value)
+        restored = _round_trip(value)
+
+        assert tree == {"py/object": f"{__name__}.Flagged", "name": "n", "_done": True}
+        assert isinstance(restored, Flagged)
+        assert restored._done is True
 
     def test_hooks_encode_and_decode_leaves(self) -> None:
         tree = to_plain([Tensor([1.0, math.inf])], hooks=_HOOKS)
@@ -411,6 +405,16 @@ class TestTypedDecode:
     def test_a_dataclass_reads_untagged_fields(self) -> None:
         assert from_plain({"x": 1, "y": 2}, Point) == Point(x=1, y=2.0)
 
+    def test_a_dataclass_reads_its_non_init_slot(self) -> None:
+        value = from_plain({"name": "n", "_done": True}, Flagged)
+
+        assert value.name == "n"
+        assert value._done is True
+
+    def test_a_dataclass_rejects_an_attribute_it_lacks(self) -> None:
+        with pytest.raises(ReadError, match=r"unknown field\(s\) \['_nope'\]"):
+            from_plain({"name": "n", "_nope": True}, Flagged)
+
     def test_nested_generics_read(self) -> None:
         target = dict[str, list[tuple[int, str]]]
 
@@ -432,6 +436,12 @@ class TestTypedDecode:
     def test_an_optional_reads_null_and_its_member(self) -> None:
         assert from_plain(None, int | None) is None
         assert from_plain(3, int | None) == 3
+
+    def test_a_none_target_reads_only_null(self) -> None:
+        # A hint spells ``NoneType`` as ``None``.
+        assert from_plain(None, None) is None
+        with pytest.raises(ReadError):
+            from_plain(1, None)
 
     def test_a_typing_union_checks_its_members(self) -> None:
         # Before 3.14, ``Optional``/``Union`` have origin ``typing.Union``, not
@@ -723,6 +733,7 @@ class TestDecodeEdges:
             from_plain({"name": "n", "children": [{"py/id": 0}]}, Node)
 
         assert list(raised.value.bad) == [("children", 0)]
+        assert "still being built" in raised.value.bad["children", 0].reason
 
     @pytest.mark.parametrize(
         ("data", "target"),
@@ -747,23 +758,6 @@ class TestDecodeEdges:
             ({"py/function": "math.pi"}, object),
             ({"py/object": 1}, object),
             ({"py/object": "builtins.max"}, object),
-            (
-                {"py/inline": ["builtins.int", {"func": 1, "args": 1, "kwargs": 1}]},
-                object,
-            ),
-            (
-                {
-                    "py/inline": [
-                        "builtins.int",
-                        {
-                            "func": 1,
-                            "args": list[codec.MutablePlainTree](),
-                            "kwargs": dict[str, codec.MutablePlainTree](),
-                        },
-                    ],
-                },
-                object,
-            ),
             ({"py/reduce": 1}, object),
             (_reduce(1, {"py/tuple": []}), object),
             (
@@ -795,6 +789,52 @@ class TestDecodeEdges:
     ) -> None:
         with pytest.raises(ReadError):
             from_plain(data, target, allow_imports=True)
+
+    @pytest.mark.parametrize(
+        ("data", "target", "allow_imports", "match"),
+        [
+            ([1], Point, False, r"^expected object for Point, got \[1\]$"),
+            ({"x": 1}, Plain, False, r"^cannot read \{'x': 1\} as Plain$"),
+            ({"n": 0}, Positive, False, "^cannot build Positive: n must be positive$"),
+            ({"py/object": 1}, object, True, "^invalid py/object path: 1$"),
+            (
+                {"py/object": "builtins.max"},
+                object,
+                True,
+                "^'builtins.max' does not name a class$",
+            ),
+        ],
+        ids=repr,
+    )
+    def test_an_object_that_does_not_read_names_why(
+        self,
+        data: codec.MutablePlainTree,
+        target: object,
+        allow_imports: bool,
+        match: str,
+    ) -> None:
+        with pytest.raises(ReadError, match=match):
+            from_plain(data, target, allow_imports=allow_imports)
+
+    def test_a_non_class_target_is_named_in_the_error(self) -> None:
+        # Through ``from_plain`` the union decoder raises its own message first.
+        with pytest.raises(ReadError, match=r"^expected object for .*Shape \| int"):
+            codec._decode_object([1], Shape | int, (), _decoding())
+
+    def test_a_tagged_member_decodes_by_its_tag(self) -> None:
+        tree = {"py/object": f"{__name__}.Plain", "x": {"py/tuple": [1]}}
+
+        restored = from_plain(tree, object, allow_imports=True)
+
+        assert isinstance(restored, Plain)
+        assert restored.x == (1,)
+
+    def test_a_dataclass_is_numbered_for_later_references(self) -> None:
+        state = _decoding()
+
+        value = codec._decode_object({"x": 1}, Point, (), state)
+
+        assert state.built == [value]
 
     def test_an_unresolvable_annotation_raises(self) -> None:
         broken = make_dataclass("Broken", [("x", "NoSuchName")])
@@ -1178,6 +1218,19 @@ class TestObjectTagForTarget:
         inner = {"py/object": f"{__name__}.Tagged", "pair": [1, 2]}
         read = from_plain({"spine": inner}, dict[str, object], allow_imports=True)
         assert isinstance(read["spine"], Tagged)
+
+    def test_an_enum_field_named_by_its_target_needs_no_imports(self) -> None:
+        assert from_plain(to_plain(Boxed(color=Color.RED)), Boxed) == Boxed(
+            color=Color.RED,
+        )
+        assert from_plain(to_plain(Color.BLUE), Color) is Color.BLUE
+        assert from_plain(to_plain(Color.BLUE), Color | None) is Color.BLUE
+
+    def test_a_reduce_naming_another_class_still_needs_imports(self) -> None:
+        tree = {"py/reduce": [{"py/type": f"{__name__}.Level"}, {"py/tuple": [1]}]}
+
+        with pytest.raises(ReadError, match="allow_imports"):
+            from_plain(tree, Color)
 
     def test_without_imports_a_dataclass_target_reads_any_tag(self) -> None:
         # Data written before a class moved names its old path; the declared

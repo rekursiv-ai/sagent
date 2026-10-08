@@ -16,8 +16,7 @@ jsonpickle's spelling where one exists:
   dialect flattens to lists or dicts.
 - ``py/float``, ``py/complex``, ``py/b64``, ``py/path``, ``py/uuid``,
   ``py/datetime``: values a dialect lacks.
-- ``py/reduce``, ``py/inline``, ``py/hook``: a pickle reduce recipe, a deferred
-  call, and a caller-supplied codec.
+- ``py/reduce``, ``py/hook``: a pickle reduce recipe and a caller-supplied codec.
 - ``py/id``: a back-reference, so a shared object or a cycle survives.
 - ``json://``: a dict key that is not a string, or that reads like a tag.
 
@@ -32,7 +31,8 @@ value alike, mutable or not.
 ``from_plain(data, T)`` lets a tag decide where one is present and ``T``
 everywhere else, so a Protocol-typed field reads back as the class its tag
 names. A value that fits neither raises :class:`ReadError`; there are no silent
-defaults. ``allow_imports`` gates every tag that imports or calls code.
+defaults. ``allow_imports`` gates every tag that imports or calls code, except
+a tag naming the very class ``T`` asks for: the caller already holds it.
 
 Each tagged type has an encoder and a decoder, paired by name. A tag only
 selects which decoder runs; the decoder is the same one untagged data reaches
@@ -82,7 +82,6 @@ from typing import (
     Final,
     Literal,
     NotRequired,
-    Protocol,
     Required,
     TypeGuard,
     cast,
@@ -127,27 +126,15 @@ __all__ = [
 
 
 # A leaf of a plain tree. ``float`` includes IEEE-754 NaN and signed infinities.
-type Plain = str | int | float | bool | None
+# This is not Python PODs but rather types supported by JSON, TOML, YAML, msgpack etc.
+type Plain = bool | int | float | str | None
 
 
-# The leaf union is inlined rather than naming ``Plain``: ty 0.0.52 panics on a
-# self-recursive alias that names a union alias.
-# https://github.com/astral-sh/ty/issues/3835
-type PlainTree = (
-    str | int | float | bool | Sequence[PlainTree] | Mapping[str, PlainTree] | None
-)
+type PlainTree = Plain | Sequence[PlainTree] | Mapping[str, PlainTree]
 """Any plain tree, read-only: dicts and lists, or ``MappingProxyType`` and tuples."""
 
 
-type MutablePlainTree = (
-    str
-    | int
-    | float
-    | bool
-    | list[MutablePlainTree]
-    | dict[str, MutablePlainTree]
-    | None
-)
+type MutablePlainTree = Plain | list[MutablePlainTree] | dict[str, MutablePlainTree]
 """A plain tree of dicts and lists, which may be edited."""
 
 
@@ -561,25 +548,6 @@ class _Decoding:
     bad: dict[FieldPath, Invalid] = field(default_factory=dict[FieldPath, Invalid])
 
 
-class _Inline(Protocol):
-    """A value owning both halves of the ``py/inline`` deferred-call protocol.
-
-    Decoding allocates the class without ``__init__``, so a cycle can reference
-    it before its children exist, then hands the recipe back to populate it.
-    """
-
-    def __custom_json_inline__(
-        self,
-    ) -> tuple[object, Sequence[object], Mapping[str, object]]: ...
-
-    def __custom_json_inline_init__(
-        self,
-        func: object,
-        args: Sequence[object],
-        kwargs: Mapping[str, object],
-    ) -> None: ...
-
-
 type _Encoder = Callable[[object, _Encoding], PlainTree]
 """Encode one value into whichever kind of tree ``state`` builds."""
 
@@ -732,8 +700,6 @@ def _encoder_for(kind: type) -> _Encoder:
         encoder = _encode_uuid
     elif kind is datetime:
         encoder = _encode_datetime
-    elif _owns_inline(kind):
-        encoder = _encode_inline
     elif is_dataclass(kind):
         encoder = _encode_object
     else:
@@ -1492,19 +1458,24 @@ def _decode_object(
     index = len(state.built)
     state.built.append(_PENDING)
     before = len(state.bad)
-    kwargs = {
+    members = {
         key: _decode_part(raw, types[key], (*at, key), state)
         for key, raw in data.items()
     }
+    # A part that did not read leaves ``__init__`` unrunnable, so every member is
+    # set directly; otherwise ``__init__`` takes its fields and the rest of the
+    # state, such as a non-init slot, is set after it.
+    init = {item.name for item in fields(target) if item.init}
     if len(state.bad) > before:
-        value = _allocate(target)
-        for key, member in kwargs.items():
-            object.__setattr__(value, key, member)
+        value, rest = _allocate(target), members
     else:
         try:
-            value = target(**kwargs)
+            value = target(**{k: v for k, v in members.items() if k in init})
         except (TypeError, ValueError) as error:
             raise ReadError(f"cannot build {name}: {error}") from error
+        rest = {k: v for k, v in members.items() if k not in init}
+    for key, member in rest.items():
+        object.__setattr__(value, key, member)
     state.built[index] = value
     return value
 
@@ -1525,64 +1496,6 @@ def _names_dataclass(
             or data.get("py/object") == f"{target.__module__}.{target.__qualname__}"
         )
     )
-
-
-def _encode_inline(value: object, state: _Encoding) -> PlainTree:
-    """Encode a value owning the ``py/inline`` deferred-call protocol."""
-    func, args, kwargs = cast("_Inline", value).__custom_json_inline__()
-    _register(value, state)
-    recipe = state.make_dict(
-        {
-            "func": _encode(func, state),
-            "args": state.make_list([_encode(item, state) for item in args]),
-            "kwargs": state.make_dict(
-                {key: _encode(item, state) for key, item in kwargs.items()},
-            ),
-        },
-    )
-    path = _import_path(type(value))
-    return state.make_dict({"py/inline": state.make_list([path, recipe])})
-
-
-def _decode_inline(
-    data: PlainTree,
-    target: object,
-    at: FieldPath,
-    state: _Decoding,
-) -> object:
-    """Allocate a ``py/inline`` value, then hand its recipe back to it."""
-    del target
-    path, recipe = _pair(data, "py/inline")
-    if (
-        not isinstance(path, str)
-        or not isinstance(recipe, Mapping)
-        or set(recipe) != {"func", "args", "kwargs"}
-    ):
-        raise ReadError(f"invalid py/inline payload: {data!r}")
-    args, kwargs = recipe["args"], recipe["kwargs"]
-    if (
-        not isinstance(args, Sequence)
-        or isinstance(args, str)
-        or not isinstance(kwargs, Mapping)
-    ):
-        raise ReadError(f"invalid py/inline payload: {data!r}")
-    kind = _resolve(path, state)
-    if not isinstance(kind, type) or not _owns_inline(kind):
-        raise ReadError(f"{path!r} does not own the py/inline protocol")
-    value = cast("_Inline", _allocate(kind))
-    state.built.append(value)
-    value.__custom_json_inline_init__(
-        _decode_part(recipe["func"], object, (*at, "func"), state),
-        [
-            _decode_part(raw, object, (*at, "args", index), state)
-            for index, raw in enumerate(args)
-        ],
-        {
-            key: _decode_part(raw, object, (*at, "kwargs", key), state)
-            for key, raw in kwargs.items()
-        },
-    )
-    return value
 
 
 def _encode_hooked(value: object, state: _Encoding) -> PlainTree:
@@ -1675,8 +1588,7 @@ def _decode_reduce(
     at: FieldPath,
     state: _Decoding,
 ) -> object:
-    """Replay a ``py/reduce`` recipe."""
-    del target
+    """Replay a ``py/reduce`` recipe; one naming ``target`` itself needs no import."""
     if not isinstance(data, Sequence) or isinstance(data, str):
         raise ReadError(f"invalid py/reduce payload: {data!r}")
     if len(data) < 2 or len(data) > 5:
@@ -1685,7 +1597,11 @@ def _decode_reduce(
     index = len(state.built)
     if stateful:
         state.built.append(_PENDING)
-    func = _decode(data[0], object, (*at, 0), state)
+    func = (
+        target
+        if isinstance(target, type) and data[0] == {"py/type": _import_name(target)}
+        else _decode(data[0], object, (*at, 0), state)
+    )
     args = _decode(data[1], object, (*at, 1), state)
     if not callable(func) or not isinstance(args, tuple):
         raise ReadError("py/reduce needs a callable and an argument tuple")
@@ -1871,17 +1787,6 @@ def _canonical_reduce(
     return (func, arguments, *rest)
 
 
-def _owns_inline(kind: type) -> bool:
-    """Return whether ``kind`` implements both halves of ``py/inline``, cached."""
-    cached = _OWNS_INLINE.get(kind)
-    if cached is None:
-        cached = callable(getattr(kind, "__custom_json_inline__", None)) and callable(
-            getattr(kind, "__custom_json_inline_init__", None),
-        )
-        _OWNS_INLINE[kind] = cached
-    return cached
-
-
 def _import_path(value: type | Callable[..., object]) -> str:
     """Return the verified dotted import path of a class or function, cached."""
     cached = _IMPORT_PATHS.get(id(value))
@@ -2004,7 +1909,7 @@ def _attribute_names(value: object) -> Iterator[str]:
 # A cached value naming its own class would keep the weak key alive forever, so
 # only module-level classes whose hints do not name themselves are cached.
 def _field_types(kind: type) -> Mapping[str, object]:
-    """Return a dataclass's init-field or a TypedDict's key types, cached."""
+    """Return a dataclass's state types (fields, then slots) or a TypedDict's, cached."""
     cached = _FIELD_TYPES.get(kind)
     if cached is not None:
         return cached
@@ -2014,14 +1919,13 @@ def _field_types(kind: type) -> Mapping[str, object]:
         hints: dict[str, object] = get_type_hints(kind)
     except (AttributeError, NameError, TypeError) as error:
         raise ReadError(f"cannot resolve field types of {kind}: {error}") from error
+    names = (
+        dict.fromkeys([item.name for item in fields(kind)] + list(_slot_names(kind)))
+        if is_dataclass(kind)
+        else hints
+    )
     result = MappingProxyType(
-        {key: _resolve_alias(hint) for key, hint in hints.items()}
-        if is_typeddict(kind)
-        else {
-            item.name: hints.get(item.name, object)
-            for item in (fields(kind) if is_dataclass(kind) else ())
-            if item.init
-        },
+        {name: _resolve_alias(hints.get(name, object)) for name in names},
     )
     module = sys.modules.get(module_name)
     if (
@@ -2051,7 +1955,6 @@ _TAGS: Final = (
     "py/datetime",
     "py/reduce",
     "py/hook",
-    "py/inline",
     "py/object",
 )
 """Every tag, in the precedence a node carrying several resolves by."""
@@ -2069,7 +1972,7 @@ _LAX_BOOLS: Final[Mapping[str, int]] = MappingProxyType(
 _CONCRETE_PATH: Final = type(Path())
 
 
-_SKIPPED_ATTRIBUTES: Final = frozenset(("__weakref__", "__dict__", "_finalized"))
+_SKIPPED_ATTRIBUTES: Final = frozenset(("__weakref__", "__dict__"))
 
 
 _PENDING: Final = object()
@@ -2111,6 +2014,7 @@ _ENCODERS: Final[Mapping[type, _Encoder]] = MappingProxyType(
 _DECODERS: Final[Mapping[object, _Decoder]] = MappingProxyType(
     {
         object: _decode_any,
+        None: _decode_none,
         type(None): _decode_none,
         bool: _decode_bool,
         int: _decode_int,
@@ -2158,7 +2062,6 @@ _TAG_DECODERS: Final[Mapping[str, _Decoder]] = MappingProxyType(
         "py/type": _decode_type,
         "py/function": _decode_function,
         "py/object": _decode_object,
-        "py/inline": _decode_inline,
         "py/hook": _decode_hooked,
         "py/reduce": _decode_reduce,
     },
@@ -2188,6 +2091,3 @@ _SLOT_NAMES: Final[weakref.WeakKeyDictionary[type, tuple[str, ...]]] = (
 _FIELD_TYPES: Final[weakref.WeakKeyDictionary[type, Mapping[str, object]]] = (
     weakref.WeakKeyDictionary()
 )
-
-
-_OWNS_INLINE: Final[weakref.WeakKeyDictionary[type, bool]] = weakref.WeakKeyDictionary()
