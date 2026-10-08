@@ -294,6 +294,11 @@ exclude_lines = [
     # tracer cannot see lines a GPU test executed; the kernel is tested by
     # its ``gpu_triton`` caller, not by line coverage.
     "^def \\w+_triton\\(",
+    # Convention: a ``_numba``-suffixed def is a body Numba compiles from
+    # its bytecode to machine code. The Python bytecode never runs, so the
+    # tracer cannot see lines a test executed; the kernel is tested by its
+    # callers' results, not by line coverage.
+    "^def \\w+_numba\\(",
 ]
 # fail_under = 90
 show_missing = true
