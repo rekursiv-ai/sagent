@@ -8,6 +8,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import signal
 
 import pytest
 
@@ -90,22 +91,35 @@ def test_interrupt_returns_false_before_start() -> None:
 
 
 @pytest.mark.asyncio
-async def test_interrupt_signals_running_subprocess(tmp_path: Path) -> None:
-    """SIGINT to a python child running ``signal.pause()`` makes it exit on KeyboardInterrupt."""
-    proc = Subproc(["python3", "-c", "import signal, sys; signal.pause(); sys.exit(0)"])
+async def test_interrupt_signals_running_subprocess() -> None:
+    """SIGINT reaches a live child: one waiting for it exits with its number."""
+    # Blocked, then announced, then awaited: a SIGINT sent after "ready" stays
+    # pending until ``sigwait`` takes it, whatever the child inherited. The
+    # child this replaced slept 0.1 s and called ``signal.pause()``, and hung
+    # in every run of a suite started as ``nohup ... &``: a background job
+    # inherits SIGINT ignored, so Python installs no KeyboardInterrupt handler
+    # and ``pause()`` never returns. A signal sent between the last check and
+    # ``pause()`` is lost the same way.
+    proc = Subproc(
+        [
+            "python3",
+            "-c",
+            (
+                "import signal, sys; "
+                "signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT}); "
+                "print('ready', flush=True); "
+                "sys.exit(signal.sigwait({signal.SIGINT}))"
+            ),
+        ],
+    )
     await proc.start()
-    # Tiny grace so the child reaches signal.pause() before we interrupt.
-    await asyncio.sleep(0.1)
-    assert proc.is_alive
+    assert await proc.read_line() == "ready"
     assert proc.interrupt() is True
-    # signal.pause() returns on SIGINT and Python translates the signal to
-    # KeyboardInterrupt, exit code 1 in default handlers.
     assert proc._proc is not None
     rc = await asyncio.wait_for(proc._proc.wait(), 5.0)
-    assert rc != 0
+    assert rc == signal.SIGINT
     assert proc.interrupt() is False  # Already exited.
     await proc.close()
-    del tmp_path
 
 
 @pytest.mark.asyncio

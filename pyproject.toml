@@ -274,6 +274,12 @@ do_not_mutate_patterns = [
 ]
 
 [tool.coverage.run]
+# sys.monitoring, the default from Python 3.14 on. 3.12's default, ctrace,
+# traces every line a test runs, Numba's pure-Python compiler included: a cold
+# compile of priml's Craftax kernels took 68 s under it, 49 s under sysmon and
+# 43 s untraced, past the 60 s test timeout. COVERAGE_CORE still overrides it,
+# as the testmon hooks' ctrace does.
+core = "sysmon"
 omit = [
     "*_test.py",
     "test_*.py",
