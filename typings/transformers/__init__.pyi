@@ -222,7 +222,12 @@ from .modeling_utils import (
     AttentionInterface as AttentionInterface,
     PreTrainedModel as PreTrainedModel,
 )
-from .models import *
+
+# Only the `Auto*` classes at top level. Re-exporting `from .models import *`, as
+# transformers itself does, makes every `from transformers import X` bind all
+# ~2,000 per-model stubs: ~1 s and ~475 MB per basedpyright worker. Import any
+# other model class from its own module, e.g. `transformers.models.llama`.
+from .models.auto import *
 from .models.mamba.modeling_mamba import MambaCache as MambaCache
 from .models.timm_wrapper import TimmWrapperImageProcessor as TimmWrapperImageProcessor
 from .optimization import (
