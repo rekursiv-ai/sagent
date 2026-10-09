@@ -56,3 +56,7 @@ class MkldnnModule(PropModule):
 enabled: ContextProp
 deterministic: ContextProp
 allow_tf32: ContextProp
+matmul: _FP32Precision
+conv: _FP32Precision
+rnn: _FP32Precision
+fp32_precision: str

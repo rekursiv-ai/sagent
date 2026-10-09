@@ -14,6 +14,7 @@ from torch.backends import (
     _get_fp32_precision_getter as _get_fp32_precision_getter,
     _set_fp32_precision_setter as _set_fp32_precision_setter,
 )
+from torch.backends.cudnn import rnn as rnn
 
 __cudnn_version: int | None = ...
 if _cudnn is not None: ...
@@ -62,3 +63,5 @@ deterministic: bool
 benchmark: bool
 allow_tf32: bool
 benchmark_limit: int
+conv: _FP32Precision
+fp32_precision: str

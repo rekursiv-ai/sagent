@@ -1,5 +1,7 @@
 from typing import Literal
 
+fp32_precision: str
+
 def get_cudnn_mode(mode) -> int: ...
 
 class Unserializable:
