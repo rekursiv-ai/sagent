@@ -397,6 +397,11 @@ class Agent:
             else uuid.uuid4().hex[:8]
         )
         self._status: str = ""
+        self._checkpoint: runtime.Checkpoint | None = None
+        self.checkpoint_updated_at: float = 0.0
+        self.checkpoint_restored: bool = False
+        self.child_checkpoints: dict[str, runtime.CheckpointChanged] = {}
+        self.restored_child_checkpoints: set[str] = set()
         # Lifecycle policy set once at spawn. ``"oneshot"`` stops after the
         # first post-work idle (the drive-until-first-idle usage); ``"serviced"``
         # keeps its ``serve_forever`` loop alive, servicing its inbox until an
@@ -464,6 +469,7 @@ class Agent:
             self._track_activity,
             self._track_tool_registry,
             self._track_compaction,
+            self._track_child_checkpoint,
         ):
             self.runtime.observers.append(fn)
         # Persistence is an Agent-level concern, not a caller concern.
@@ -746,6 +752,38 @@ class Agent:
             return
         self._status = value
         self.runtime.publish(runtime.StatusChanged(text=value))
+
+    @property
+    def checkpoint(self) -> runtime.Checkpoint | None:
+        """Latest explicit report, independent of agent or external-job lifecycle."""
+        return self._checkpoint
+
+    def _track_child_checkpoint(self, event: runtime.RuntimeEvent) -> None:
+        """Retain latest forwarded reports even after a child stops serving."""
+        report = runtime.forwarded_checkpoint(event)
+        if report is None:
+            return
+        label, change = report
+        self.restored_child_checkpoints.discard(label)
+        if change.checkpoint is None:
+            self.child_checkpoints.pop(label, None)
+        else:
+            self.child_checkpoints[label] = change
+
+    @checkpoint.setter
+    def checkpoint(self, value: runtime.Checkpoint | None) -> None:
+        """Publish changed state; a fresh report also confirms a restored snapshot."""
+        if value == self._checkpoint and not self.checkpoint_restored:
+            return
+        self._checkpoint = value
+        self.checkpoint_updated_at = time.time()
+        self.checkpoint_restored = False
+        self.runtime.publish(
+            runtime.CheckpointChanged(
+                checkpoint=value,
+                observed_at=self.checkpoint_updated_at,
+            ),
+        )
 
     @property
     def history(self) -> list[runtime.ModelContextEvent]:
@@ -1233,6 +1271,13 @@ class Agent:
         self.tool_state = tool_state
         if meta.status:
             self._status = meta.status
+        self._checkpoint = meta.checkpoint
+        self.checkpoint_updated_at = meta.checkpoint_updated_at
+        self.checkpoint_restored = meta.checkpoint is not None
+        self.child_checkpoints.clear()
+        for event in meta.runtime_events:
+            self._track_child_checkpoint(event)
+        self.restored_child_checkpoints = set(self.child_checkpoints)
         self.cost_tracker.restore_totals(spend=meta.spend, total=meta.tokens)
         self._own_spend = meta.own_spend
         self.activity.num_tool_call_rounds = meta.num_tool_call_rounds

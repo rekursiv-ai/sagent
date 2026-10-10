@@ -25,6 +25,7 @@ import time
 
 from sagent.lib.durations import humanize_duration
 from sagent.providers.lib.errors import PolicyBlockedError
+from sagent.repl.checkpoints import checkpoint_text
 from sagent.repl.render_diff import find_stable_boundary
 from sagent.tools.display import (
     OutputSpec,
@@ -43,6 +44,7 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    CheckpointChanged,
     ChildDoneEvent,
     ChildEvent,
     CompactComplete,
@@ -65,6 +67,7 @@ from sagent.types.runtime import (
     ToolResultKind,
     ToolResultPartial,
     UserMessage,
+    forwarded_checkpoint,
 )
 
 
@@ -679,11 +682,18 @@ class RenderObserver:
                 self._flush_stream()
                 self._printer.write_tool_error(error_text(exc))
             case ChildEvent(label=label, inner=inner):
-                self._consume_child(label, inner)
+                report = forwarded_checkpoint(event)
+                if report is not None:
+                    self._consume_child(*report)
+                else:
+                    self._consume_child(label, inner)
             case ChildDoneEvent(label=label):
                 self._flush_child(label)
             case StatusChanged(text=text):
                 self._printer.set_terminal_title(text)
+            case CheckpointChanged(checkpoint=checkpoint):
+                self._flush_stream()
+                self._printer.write_slash_block(checkpoint_text(checkpoint))
             case CompactStarted():
                 self._flush_stream()
                 self._printer.write_dim_line("[compacting history…]")
@@ -784,6 +794,14 @@ class RenderObserver:
                 )
                 self._emit_child(label)
             return
+        if isinstance(inner, CheckpointChanged):
+            self._flush_child(label)
+            self._printer.write_child_block(
+                label,
+                [NoticeMessage(text=checkpoint_text(inner.checkpoint))],
+                output_policy=self._output_policy,
+            )
+            return
         atomic = _child_atomic_item(inner)
         if atomic is None:
             return
@@ -858,6 +876,7 @@ sagent commands
   /login                      re-auth current provider
 
   /tasks                      list running work (agents + fg + bg)
+  /pending                    inspect latest reported checkpoints (no model call)
   /send     <target> <text>   send to subagent target: label, glob, {a,b}, /re/
   /halt     [<target>]        halt self or matching subagents (Ctrl+C)
   /kill     <qid|all|target>  cancel tool task(s) or matching subagents

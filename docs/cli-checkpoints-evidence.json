@@ -1,0 +1,190 @@
+{
+  "scope": "Live source-checkout CLI in an isolated PTY, real subscription calls and two native workers. Harmless local receipts, not solver evaluation. No runtime events or model responses injected.",
+  "provider": "OpenAISubscription",
+  "model": "sol-6.1",
+  "live_event_count": 334,
+  "final_source_resume_event_count": 14,
+  "live_exit_status": 0,
+  "resume_exit_status": 0,
+  "final_source_hashes": {
+    "types/runtime.py": "4871e0af6944d203370a210408e2fbb19235928fabbecaeb67d04afea9a7d851",
+    "agent/agent.py": "04f5c1cbaf10df239517bede0e080f1df064a838629dd4011ec7b6e6c2cceed2",
+    "agent/session_io.py": "bdb72911ae0ccc37bd31d96e3d0b7a2d13a9cf4108b5db5020b73b196b2b46bc",
+    "tools/agent_self.py": "c5c365fb62016c808812e479d0dddda59579fac6964b77c6ae1076125ee42638",
+    "tools/agent_spawn.py": "5440f196623ec7a5f91a9f463bed38c12aa46e21ecc1ebd875bc41a3c06d49e8",
+    "repl/checkpoints.py": "3239f2b04bfbc76ef0a9c33788b9d7880c4fadeba33084bf93125334b5ed7f98",
+    "repl/render.py": "0729fbb9b2287ddd851cc98bc73d07f69723aa5f98b0b50674e60959f897bfa4",
+    "repl/run_repl.py": "1a67425bc5bed1e16b7ec73d9b727401ef691e4869c85bf83ebec5b9bbc717cb"
+  },
+  "verified": {
+    "pending_report_coexists_with_real_background_job": true,
+    "real_result_changes_report_and_requests_fixture_input": true,
+    "independent_identical_receipts": [
+      {
+        "sequence": 133,
+        "type": "AgentSendMessage",
+        "text": "Independent fixture receipt.",
+        "source": "checkpoint-b"
+      },
+      {
+        "sequence": 161,
+        "type": "AgentSendMessage",
+        "text": "Independent fixture receipt.",
+        "source": "checkpoint-a"
+      }
+    ],
+    "both_workers_keep_separate_checkpoint_transitions": true,
+    "root_clear_preserves_worker_reports": true,
+    "resume_marks_saved_reports_as_unchecked": true,
+    "two_identical_live_checkpoint_calls_one_transition": true,
+    "final_source_hashes_match_live_resume": true,
+    "terminal_resized_to_columns": [
+      80,
+      40,
+      120
+    ]
+  },
+  "tests": {
+    "focused": "1153 passed",
+    "pre_commit": "passed, including 942 selected tests",
+    "global_ty": "passed",
+    "global_basedpyright": "passed",
+    "default_suite": "15 failed, 7365 passed, 132 skipped, 121 deselected in 21.66s",
+    "upstream_default_suite": "15 failed, 7345 passed, 132 skipped, 121 deselected in 29.14s",
+    "identical_failure_set": [
+      "sagent/lib/files/grep_test.py::test_a_named_binary_file_matches_text_that_looks_like_a_marker[rg]",
+      "sagent/lib/files/grep_test.py::test_a_nul_is_no_line_break_and_matches_only_a_dot[rg]",
+      "sagent/lib/worker_count_test.py::test_available_memory_is_whole_mebibytes",
+      "sagent/lib/worker_count_test.py::test_cores_without_frequencies_are_all_performance_cores",
+      "sagent/lib/worker_count_test.py::test_default_workers_are_capped_by_available_memory",
+      "sagent/lib/worker_count_test.py::test_default_workers_leave_a_performance_core_free",
+      "sagent/lib/worker_count_test.py::test_default_workers_take_three_eighths_of_the_physical_cores[12-5]",
+      "sagent/lib/worker_count_test.py::test_default_workers_take_three_eighths_of_the_physical_cores[16-6]",
+      "sagent/lib/worker_count_test.py::test_default_workers_take_three_eighths_of_the_physical_cores[2-2]",
+      "sagent/lib/worker_count_test.py::test_default_workers_take_three_eighths_of_the_physical_cores[24-9]",
+      "sagent/lib/worker_count_test.py::test_default_workers_take_three_eighths_of_the_physical_cores[32-12]",
+      "sagent/lib/worker_count_test.py::test_default_workers_take_three_eighths_of_the_physical_cores[4-2]",
+      "sagent/lib/worker_count_test.py::test_default_workers_take_three_eighths_of_the_physical_cores[8-3]",
+      "sagent/lib/worker_count_test.py::test_macos_cores_come_from_sysctl_skipping_efficiency_cores",
+      "sagent/lib/worker_count_test.py::test_without_sysctl_or_sysfs_the_cpu_count_stands_in"
+    ]
+  },
+  "checkpoint_event_excerpt": [
+    {
+      "sequence": 29,
+      "event": {
+        "type": "CheckpointChanged",
+        "checkpoint": {
+          "progress": "Initial fixture receipt verified",
+          "pending": "Delayed local fixture receipt",
+          "user_action": ""
+        },
+        "observed_at": 1791657707.428834
+      }
+    },
+    {
+      "sequence": 50,
+      "event": {
+        "type": "CheckpointChanged",
+        "checkpoint": {
+          "progress": "Both fixture receipts verified",
+          "pending": "Fixture approval",
+          "user_action": "Type fixture-approved."
+        },
+        "observed_at": 1791657797.8785322
+      }
+    },
+    {
+      "sequence": 165,
+      "event": {
+        "type": "CheckpointChanged",
+        "checkpoint": {
+          "progress": "Fixture receipts and approval verified",
+          "pending": "",
+          "user_action": ""
+        },
+        "observed_at": 1791657819.9510012
+      }
+    },
+    {
+      "sequence": 332,
+      "event": {
+        "type": "CheckpointChanged",
+        "checkpoint": null,
+        "observed_at": 1791657830.3228369
+      }
+    },
+    {
+      "sequence": 122,
+      "event": {
+        "type": "ChildEvent",
+        "label": "checkpoint-a",
+        "inner": {
+          "type": "CheckpointChanged",
+          "checkpoint": {
+            "progress": "Worker fixture ready",
+            "pending": "Fixture review",
+            "user_action": ""
+          },
+          "observed_at": 1791657813.531633
+        }
+      }
+    },
+    {
+      "sequence": 129,
+      "event": {
+        "type": "ChildEvent",
+        "label": "checkpoint-b",
+        "inner": {
+          "type": "CheckpointChanged",
+          "checkpoint": {
+            "progress": "Worker fixture ready",
+            "pending": "Fixture review",
+            "user_action": ""
+          },
+          "observed_at": 1791657813.775311
+        }
+      }
+    },
+    {
+      "sequence": 292,
+      "event": {
+        "type": "ChildEvent",
+        "label": "checkpoint-a",
+        "inner": {
+          "type": "CheckpointChanged",
+          "checkpoint": {
+            "progress": "Worker fixture review acknowledged",
+            "pending": "",
+            "user_action": ""
+          },
+          "observed_at": 1791657823.465513
+        }
+      }
+    },
+    {
+      "sequence": 295,
+      "event": {
+        "type": "ChildEvent",
+        "label": "checkpoint-b",
+        "inner": {
+          "type": "CheckpointChanged",
+          "checkpoint": {
+            "progress": "Worker fixture review acknowledged",
+            "pending": "",
+            "user_action": ""
+          },
+          "observed_at": 1791657823.6614258
+        }
+      }
+    }
+  ],
+  "limits": [
+    "PTY capture, not a native macOS Terminal screenshot.",
+    "Agents must adopt the checkpoint channel; existing prose is not filtered.",
+    "Checkpoint content is an agent report, not an independently verified external-job lifecycle.",
+    "The full initial fixture preceded formatting and saved-label edits; the resumed real CLI matched all final source hashes.",
+    "Thinking and individual partial-text payloads are omitted from event traces; final responses and raw PTY output are retained.",
+    "Live provider coverage is OpenAISubscription only; no cross-platform UI claim."
+  ]
+}

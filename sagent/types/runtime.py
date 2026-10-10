@@ -83,6 +83,8 @@ __all__ = [
     "AgentSendQueuedMessage",
     "AssistantMessage",
     "BytesMessage",
+    "Checkpoint",
+    "CheckpointChanged",
     "ChildDoneEvent",
     "ChildEvent",
     "Clear",
@@ -127,6 +129,7 @@ __all__ = [
     "UserDeferredMessage",
     "UserMessage",
     "UserQueuedMessage",
+    "forwarded_checkpoint",
     "labeled_agent_send_text",
     "reset_id_counter",
     "wire_role",
@@ -918,6 +921,31 @@ class StatusChanged:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class Checkpoint:
+    """Agent-reported progress and handoff, separate from assistant messages."""
+
+    progress: str
+    """What has been established; report evidence rather than inferred completion."""
+
+    pending: str
+    """What remains pending; empty means none reported."""
+
+    user_action: str
+    """Required human action; empty means none reported."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CheckpointChanged:
+    """An explicit checkpoint transition, not a deduplicated message."""
+
+    checkpoint: Checkpoint | None
+    """New checkpoint, or ``None`` to clear it."""
+
+    observed_at: float
+    """Wall-clock time of the report, not evidence of a running job."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class ToolLabel:
     """Pre-execution label for a tool call."""
 
@@ -937,6 +965,17 @@ class ChildEvent:
 
     inner: RuntimeEvent
     """The forwarded child event."""
+
+
+def forwarded_checkpoint(event: RuntimeEvent) -> tuple[str, CheckpointChanged] | None:
+    """Unwrap checkpoint provenance without parsing human message text."""
+    labels: list[str] = []
+    while isinstance(event, ChildEvent):
+        labels.append(event.label)
+        event = event.inner
+    if labels and isinstance(event, CheckpointChanged):
+        return "/".join(labels), event
+    return None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1024,6 +1063,7 @@ type RuntimeEvent = (
     | CompactFailed
     | SaveSession
     | StatusChanged
+    | CheckpointChanged
     | ToolLabel
     | ChildEvent
     | ChildDoneEvent

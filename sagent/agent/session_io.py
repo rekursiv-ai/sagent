@@ -64,6 +64,9 @@ from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
     BytesMessage,
+    Checkpoint,
+    CheckpointChanged,
+    ChildEvent,
     CompactComplete,
     CompactFailed,
     CompactStarted,
@@ -79,6 +82,7 @@ from sagent.types.runtime import (
     ToolResult,
     ToolResultKind,
     UserMessage,
+    forwarded_checkpoint,
     reset_id_counter,
 )
 from sagent.types.tape import (
@@ -299,6 +303,12 @@ class SessionMeta:
     status: str = ""
     """Lifecycle status string."""
 
+    checkpoint: Checkpoint | None = None
+    """Latest agent-reported handoff; never proof of current job state."""
+
+    checkpoint_updated_at: float = 0.0
+    """Wall-clock time of the last explicit checkpoint update."""
+
     tokens: TokenCount = dataclasses.field(default_factory=TokenCount)
     """Aggregate token counts across the session."""
 
@@ -338,6 +348,10 @@ class SessionMeta:
             "account": self.account,
             "name": self.name,
             "status": self.status,
+            "checkpoint": dataclasses.asdict(self.checkpoint)
+            if self.checkpoint is not None
+            else None,
+            "checkpoint_updated_at": self.checkpoint_updated_at,
             "tokens": {
                 "input_tokens": self.tokens.request,
                 "output_tokens": self.tokens.response,
@@ -378,6 +392,8 @@ class SessionMeta:
             account=str(d.get("account") or ""),
             name=str(d.get("name") or ""),
             status=str(d.get("status") or ""),
+            checkpoint=_checkpoint_from_json(d.get("checkpoint")),
+            checkpoint_updated_at=_read(d.get("checkpoint_updated_at"), float, 0.0),
             tokens=TokenCount(
                 request=_read(tokens_d.get("input_tokens"), int, 0),
                 response=_read(tokens_d.get("output_tokens"), int, 0),
@@ -648,16 +664,28 @@ def install_session_persistence(
 
     def _on_event(event: RuntimeEvent) -> None:
         nonlocal meta_written, last_status, last_tool_state
-        if not isinstance(
+        child_report = forwarded_checkpoint(event)
+        if child_report is None and not isinstance(
             event,
-            (SaveSession, StatusChanged, ModelServiceSuspended, NoticeMessage),
+            (
+                SaveSession,
+                StatusChanged,
+                CheckpointChanged,
+                ModelServiceSuspended,
+                NoticeMessage,
+            ),
         ):
             return
         tape_delta = [
             record for record in agent.runtime.tape if record.ref not in persisted_refs
         ]
         status_changed = agent.status != last_status
-        write_meta = tape_delta or status_changed or not meta_written
+        write_meta = (
+            tape_delta
+            or status_changed
+            or isinstance(event, CheckpointChanged)
+            or not meta_written
+        )
         tool_state = serialize_tool_state(agent.tool_state)
         write_tool_state = tool_state != last_tool_state
         spec = agent.model_recipe
@@ -669,6 +697,8 @@ def install_session_persistence(
             account=(spec.account or "") if spec else "",
             name=agent.name,
             status=agent.status,
+            checkpoint=getattr(agent, "checkpoint", None),
+            checkpoint_updated_at=getattr(agent, "checkpoint_updated_at", 0.0),
             tokens=agent.total_tokens,
             spend=agent.cost_tracker.spend,
             own_spend=agent.own_spend,
@@ -682,7 +712,11 @@ def install_session_persistence(
             meta=meta.serialize() if write_meta else None,
             tape_delta=tape_delta or None,
             runtime_events=(event,)
-            if isinstance(event, (ModelServiceSuspended, NoticeMessage))
+            if child_report is not None
+            or isinstance(
+                event,
+                (CheckpointChanged, ModelServiceSuspended, NoticeMessage),
+            )
             else None,
             tool_state_snapshot=tool_state if write_tool_state else None,
         )
@@ -1527,6 +1561,19 @@ def _tool_result_kind_from_json(raw: object, content: str) -> ToolResultKind:
 
 def _runtime_event_to_json(event: RuntimeEvent) -> dict[str, object]:
     """Encode persisted runtime metadata events."""
+    child_report = forwarded_checkpoint(event)
+    if child_report is not None:
+        label, change = child_report
+        return {**_runtime_event_to_json(change), "source": label}
+    if isinstance(event, CheckpointChanged):
+        return {
+            "kind": "runtime_event",
+            "type": "checkpoint_changed",
+            "timestamp": event.observed_at,
+            "checkpoint": dataclasses.asdict(event.checkpoint)
+            if event.checkpoint is not None
+            else None,
+        }
     if isinstance(event, ModelServiceSuspended):
         return {
             "kind": "runtime_event",
@@ -1561,6 +1608,20 @@ def _runtime_event_from_json(record: Mapping[str, object]) -> RuntimeEvent | Non
     """Decode persisted runtime metadata events."""
     if record.get("kind") != "runtime_event":
         return None
+    if record.get("type") == "checkpoint_changed":
+        checkpoint = _checkpoint_from_json(record.get("checkpoint"))
+        if record.get("checkpoint") is not None and checkpoint is None:
+            return None
+        change = CheckpointChanged(
+            checkpoint=checkpoint,
+            observed_at=_read(record.get("timestamp"), float, 0.0),
+        )
+        source = record.get("source")
+        return (
+            ChildEvent(label=source, inner=change)
+            if isinstance(source, str) and source
+            else change
+        )
     if record.get("type") == "model_service_suspended":
         error = _service_error_snapshot_from_json(record.get("error"))
         if error is None:
@@ -1585,6 +1646,20 @@ def _runtime_event_from_json(record: Mapping[str, object]) -> RuntimeEvent | Non
             else None,
         )
     return None
+
+
+def _checkpoint_from_json(raw: object) -> Checkpoint | None:
+    """Read a complete report; malformed or legacy metadata has no checkpoint."""
+    if not isinstance(raw, Mapping):
+        return None
+    progress, pending, user_action = (
+        raw.get(key) for key in ("progress", "pending", "user_action")
+    )
+    if not isinstance(progress, str) or not progress.strip():
+        return None
+    if not isinstance(pending, str) or not isinstance(user_action, str):
+        return None
+    return Checkpoint(progress=progress, pending=pending, user_action=user_action)
 
 
 # Legacy ``recoverable`` / ``fatal`` values (never produced in practice) decode to

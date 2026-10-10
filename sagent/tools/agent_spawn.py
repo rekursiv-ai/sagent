@@ -69,6 +69,7 @@ from sagent.types.runtime import (
     AgentIdle,
     AgentSendMessage,
     AssistantMessage,
+    CheckpointChanged,
     ChildDoneEvent,
     ChildEvent,
     ModelContextEvent,
@@ -1012,7 +1013,12 @@ class AgentSpawn:
 # ``test_every_always_forwarded_event_renders_a_child_block``). Error
 # ``ToolResult``s also always forward, but only when ``is_error`` -- handled
 # separately at the call site.
-_ALWAYS_FORWARD_TYPES = (ModelResponseError, ModelServiceSuspended, NoticeMessage)
+_ALWAYS_FORWARD_TYPES = (
+    ModelResponseError,
+    ModelServiceSuspended,
+    NoticeMessage,
+    CheckpointChanged,
+)
 
 
 def always_forwarded_sample() -> tuple[RuntimeEvent, ...]:
@@ -1039,6 +1045,7 @@ def always_forwarded_sample() -> tuple[RuntimeEvent, ...]:
             error=ServiceErrorSnapshot(type_name="E", message="m"),
         ),
         NoticeMessage(text="[sample]", tier="advisory"),
+        CheckpointChanged(checkpoint=None, observed_at=0.0),
         ToolResult(call_id="c", content="boom", is_error=True),
     )
 

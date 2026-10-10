@@ -18,6 +18,7 @@ import functools
 
 from sagent.agent.context import alive_splices, masked_refs_by_alive
 from sagent.compaction.files import MICROCOMPACTED_ARGS_KEY
+from sagent.repl.checkpoints import format_pending
 from sagent.repl.render import (
     make_render_observer,
     render_tool_result,
@@ -64,6 +65,12 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
     show_thinking = printer.show_thinking
     tape = agent.runtime.tape
     if not tape:
+        if getattr(agent, "checkpoint", None) is not None or getattr(
+            agent,
+            "child_checkpoints",
+            {},
+        ):
+            printer.write_slash_block(format_pending(agent))
         return
     tools = agent.tools_map
     policy = functools.partial(_replay_output_policy, tools, _tool_names_by_call(tape))
@@ -120,6 +127,12 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
         parts.append(f"${cost:.2f}")
     parts.extend(_mode_parts(agent))
     printer.write_line(f"── {' · '.join(parts)} ──")
+    if getattr(agent, "checkpoint", None) is not None or getattr(
+        agent,
+        "child_checkpoints",
+        {},
+    ):
+        printer.write_slash_block(format_pending(agent))
 
 
 def _mode_parts(agent: Agent) -> list[str]:

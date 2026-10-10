@@ -46,6 +46,7 @@ from sagent.types.capability import ModelSettings, ThinkingEffort
 from sagent.types.cost import ServiceTier
 from sagent.types.providers import ModelResolver, Provider
 from sagent.types.runtime import (
+    Checkpoint,
     Clear,
     Compact,
     Recompact,
@@ -68,6 +69,7 @@ class AgentSelfAgent(AgentLike, Protocol):
     model: Model
     model_recipe: ModelRecipe | None
     status: str
+    checkpoint: Checkpoint | None
     max_request_tokens: int
     max_response_tokens: int
     cost_tracker: CostTracker
@@ -124,6 +126,31 @@ class AgentSelf:
                     "description": (
                         "Optional status text; omit to keep the current status."
                     ),
+                },
+                "checkpoint": {
+                    "type": ["object", "null"],
+                    "description": (
+                        "Report a handoff when progress, pending work or required human action changes. "
+                        "The latest report stays visible. Do not repeat unchanged waiting prose. "
+                        "This reports known state; it does not verify a job or mark an assignment complete. "
+                        "Use null to clear. Omit to keep."
+                    ),
+                    "properties": {
+                        "progress": {
+                            "type": "string",
+                            "description": "Verified progress or evidence; nonempty.",
+                        },
+                        "pending": {
+                            "type": "string",
+                            "description": "Pending result or work; empty if none reported.",
+                        },
+                        "user_action": {
+                            "type": "string",
+                            "description": "Required human action; empty if none reported. Say unknown when unknown.",
+                        },
+                    },
+                    "required": ["progress", "pending", "user_action"],
+                    "additionalProperties": False,
                 },
                 "context": {
                     "type": "string",
@@ -274,6 +301,12 @@ class _PatchPlan:
 
     status: str | None = None
     """New status string (rendered in the status pane), or ``None`` to keep."""
+
+    checkpoint_set: bool = False
+    """Whether the directive explicitly changes or clears the checkpoint."""
+
+    checkpoint: Checkpoint | None = None
+    """Validated handoff, or ``None`` to clear when explicitly supplied."""
 
     model: ModelChange | None = None
     """Prepared model swap, or ``None`` to keep."""
@@ -762,6 +795,10 @@ def _session_lines(agent: AgentSelfAgent) -> list[str]:
 def _summary_parts(d: Mapping[str, object]) -> list[str]:
     """Return compact summary fragments for an AgentSelf patch."""
     parts: list[str] = []
+    if "checkpoint" in d:
+        parts.append(
+            "checkpoint" if d["checkpoint"] is not None else "clear checkpoint",
+        )
     if d.get("status") is not None:
         parts.append(f"status={d.get('status')}")
     if d.get("context") is not None:
@@ -820,6 +857,9 @@ def _build_patch_plan(
     status = _plan_status(d)
     if isinstance(status, ToolResult):
         return status
+    checkpoint = _plan_checkpoint(d)
+    if isinstance(checkpoint, ToolResult):
+        return checkpoint
     model_plan = _plan_model(agent, d)
     if isinstance(model_plan, ToolResult):
         return model_plan
@@ -841,6 +881,8 @@ def _build_patch_plan(
     context = cast(str | None, d.get("context"))
     return _PatchPlan(
         status=status,
+        checkpoint_set="checkpoint" in d,
+        checkpoint=checkpoint,
         model=model_plan,
         model_options=options,
         max_request_tokens=limits.get("max_request_tokens"),
@@ -856,6 +898,14 @@ def _build_patch_plan(
 def _commit_patch_plan(agent: AgentSelfAgent, plan: _PatchPlan) -> list[str]:
     """Apply a fully validated AgentSelf patch plan."""
     parts: list[str] = []
+    if plan.checkpoint_set:
+        changed = agent.checkpoint != plan.checkpoint or getattr(
+            agent,
+            "checkpoint_restored",
+            False,
+        )
+        agent.checkpoint = plan.checkpoint
+        parts.append("checkpoint updated" if changed else "checkpoint unchanged")
     if plan.status is not None:
         agent.status = plan.status
         parts.append(f"status={plan.status}")
@@ -972,6 +1022,30 @@ def _validate_patch(d: Mapping[str, object]) -> ToolResult | None:
             is_error=True,
         )
     return None
+
+
+def _plan_checkpoint(d: Mapping[str, object]) -> Checkpoint | ToolResult | None:
+    """Validate a complete explicit report before any part of the patch mutates."""
+    raw = d.get("checkpoint")
+    if raw is None:
+        return None
+    keys = {"progress", "pending", "user_action"}
+    if (
+        not isinstance(raw, Mapping)
+        or set(cast(Mapping[str, object], raw)) != keys
+        or any(not isinstance(raw.get(key), str) for key in keys)
+        or not cast(str, raw["progress"]).strip()
+    ):
+        return ToolResult(
+            call_id="",
+            content="checkpoint requires progress, pending and user_action strings; progress must be nonempty.",
+            is_error=True,
+        )
+    return Checkpoint(
+        progress=cast(str, raw["progress"]).strip(),
+        pending=cast(str, raw["pending"]).strip(),
+        user_action=cast(str, raw["user_action"]).strip(),
+    )
 
 
 def _plan_status(d: Mapping[str, object]) -> str | ToolResult | None:
