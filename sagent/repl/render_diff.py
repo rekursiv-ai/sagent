@@ -18,7 +18,8 @@ library; this file is intentionally not generic across surfaces.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from collections import deque
+from typing import TYPE_CHECKING, Final, Protocol
 
 import difflib
 import re
@@ -105,7 +106,70 @@ _WORD_RE = re.compile(r"(\s+|\w+|[^\s\w]+)")
 _md = MarkdownIt()
 
 
-def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None:
+class _DiffPrinter(Protocol):
+    """The small output surface shared by full and preview rendering."""
+
+    @property
+    def width(self) -> int:
+        """Available terminal cells."""
+        ...
+
+    def print(self, text: Text, /) -> None:
+        """Print one styled diff line."""
+        ...
+
+
+class _DiffPreview:
+    """Keep bounded styled rows while counting all wrapped rows."""
+
+    def __init__(self, console: Console) -> None:
+        self.console = console
+        self.width = max(1, console.width)
+        self.head: list[Text] = []
+        self.tail: deque[Text] = deque(maxlen=4)
+        self.count = 0
+
+    def print(self, text: Text) -> None:
+        """Wrap with Rich's cell widths before applying the preview limit."""
+        for row in text.wrap(self.console, self.width, overflow="fold"):
+            if self.count < 8:
+                self.head.append(row)
+            else:
+                self.tail.append(row)
+            self.count += 1
+
+    def finish(self, number: int) -> None:
+        """Show retained rows and the route to the full original diff."""
+        for row in self.head:
+            self.console.print(row)
+        hidden = self.count - len(self.head) - len(self.tail)
+        if hidden > 0:
+            self.console.print(
+                Text(f"  … {hidden} rows omitted · /details {number}", style="dim"),
+            )
+        for row in self.tail:
+            self.console.print(row)
+
+
+class _DiffConsole:
+    """Adapt Rich's variadic print method to the diff's one-line surface."""
+
+    def __init__(self, console: Console) -> None:
+        self.console = console
+        self.width = console.width
+
+    def print(self, text: Text) -> None:
+        """Print one styled line."""
+        self.console.print(text)
+
+
+def render_diff_detail(
+    console: Console,
+    diff: str,
+    file_path: str = "",
+    *,
+    detail_number: int = 0,
+) -> None:
     """Render a unified diff string as a colored diff.
 
     Line numbers are read directly from @@ headers (already absolute).
@@ -114,6 +178,7 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
       console: Rich console to print to.
       diff: Unified diff text (lines starting with ``+``/``-``/`` ``).
       file_path: Filename hint for syntax highlighting.
+      detail_number: Saved entry ID; nonzero enables a compact preview.
 
     """
     lexer = _get_lexer(file_path)
@@ -128,8 +193,22 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
     )
 
     body_lines = [ln for ln in lines if not _HUNK_RE.match(ln)]
-    word_pairs = _pair_word_diffs(body_lines)
+    if detail_number and len(body_lines) > 12:
+        # Pair only the two visible regions. Never pair across the omitted
+        # gap or spend quadratic matching work on hidden changes.
+        word_pairs = _pair_word_diffs(body_lines[:8])
+        tail_start = max(8, len(body_lines) - 4)
+        word_pairs.update(
+            (index + tail_start, (partner + tail_start, parts))
+            for index, (partner, parts) in _pair_word_diffs(
+                body_lines[tail_start:],
+            ).items()
+        )
+    else:
+        word_pairs = _pair_word_diffs(body_lines)
     width = console.width
+    preview = _DiffPreview(console) if detail_number else None
+    sink: _DiffPrinter = preview if preview is not None else _DiffConsole(console)
 
     body_idx = 0
     old_ln = new_ln = 0
@@ -139,12 +218,13 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
             old_ln = int(m.group(1))
             new_ln = int(m.group(2))
             continue
+        visible = not detail_number or body_idx < 8 or body_idx >= len(body_lines) - 4
 
         if line.startswith("-"):
             if body_idx in word_pairs:
                 _, parts = word_pairs[body_idx]
                 _render_word_diff_line(
-                    console,
+                    sink,
                     old_ln,
                     "-",
                     parts=parts,
@@ -153,9 +233,11 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
                     lexer=lexer,
                 )
             else:
-                content_text = _highlight(line[1:], lexer)
+                content_text = (
+                    _highlight(line[1:], lexer) if visible else Text(line[1:])
+                )
                 _render_diff_line(
-                    console,
+                    sink,
                     old_ln,
                     "-",
                     content_text=content_text,
@@ -167,7 +249,7 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
             if body_idx in word_pairs:
                 _, parts = word_pairs[body_idx]
                 _render_word_diff_line(
-                    console,
+                    sink,
                     new_ln,
                     "+",
                     parts=parts,
@@ -176,9 +258,11 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
                     lexer=lexer,
                 )
             else:
-                content_text = _highlight(line[1:], lexer)
+                content_text = (
+                    _highlight(line[1:], lexer) if visible else Text(line[1:])
+                )
                 _render_diff_line(
-                    console,
+                    sink,
                     new_ln,
                     "+",
                     content_text=content_text,
@@ -187,9 +271,9 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
                 )
             new_ln += 1
         else:
-            content_text = _highlight(line[1:], lexer)
+            content_text = _highlight(line[1:], lexer) if visible else Text(line[1:])
             _render_diff_line(
-                console,
+                sink,
                 new_ln,
                 " ",
                 content_text=content_text,
@@ -199,6 +283,8 @@ def render_diff_detail(console: Console, diff: str, file_path: str = "") -> None
             old_ln += 1
             new_ln += 1
         body_idx += 1
+    if preview is not None:
+        preview.finish(detail_number)
 
 
 def find_stable_boundary(text: str) -> int:
@@ -369,7 +455,7 @@ def _pair_word_diffs(
 
 
 def _render_diff_line(
-    console: Console,
+    console: _DiffPrinter,
     lineno: int,
     sigil: str,
     *,
@@ -396,7 +482,7 @@ def _render_diff_line(
 
 
 def _render_word_diff_line(
-    console: Console,
+    console: _DiffPrinter,
     lineno: int,
     sigil: str,
     *,

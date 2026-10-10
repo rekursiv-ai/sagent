@@ -5,6 +5,57 @@ Output is always indented, never glyphed.
 
 Errors and hints are always shown, regardless of the output setting.
 
+## Compact commands and diffs
+
+In the interactive REPL, command previews apply their row budget after
+wrapping to the available terminal width. Bash keeps its configured first
+3 and last 1 display rows by default. A long single-line command therefore
+has the same visible budget as a multiline command. Output-body settings
+still count logical lines as before.
+
+Edit diffs show the first 8 and last 4 display rows, with added/removed
+totals computed from the complete diff. Short diffs render completely.
+An omission marker counts hidden display rows and points to the original:
+
+```text
+  … 148 rows omitted · /details 2
+```
+
+Use `/details 2` to open that complete command or diff. `/details` opens
+the latest item with a compact preview. Ctrl+O opens the same view while
+preserving the draft and cursor in the input pane.
+
+Inside the details view:
+
+- Click an item header, or use Enter/Space, to expand or collapse it.
+- Up/Down select another item. Tab switches between the list and text.
+- Ctrl+F searches the complete item, expanding it first if necessary.
+- Ctrl+Y copies a selection, or the complete original item when nothing
+  is selected. macOS uses `pbcopy`; other terminals receive OSC 52.
+- F2 disables mouse handling for native terminal text selection. Clipboard
+  and selection support depend on the terminal.
+- Esc, q, or Ctrl+C closes the view. During search, Esc first exits search.
+- The footer shows the original text file for inspection with another tool.
+
+The view is read only. Opening or expanding an item does not dispatch
+input, call a model, rerun a command, or change the session tape. Agent
+tasks continue while the view is open. Transcript output is buffered and
+printed when it closes; newly arriving items appear in the list without
+changing the selected item. Mouse interaction is confined to this view.
+Already printed terminal scrollback stays ordinary selectable text.
+
+Original commands and diffs are saved in private temporary files for the
+REPL invocation and removed on normal exit, cancellation, or failure.
+IDs and raw-file paths are local to that invocation. Session replay
+rebuilds details from the retained tape; these files are not a permanent
+archive of messages removed by clear or compaction. Terminal control
+characters are displayed visibly in the inspector, while the raw files
+and complete-item copying retain the exact original text.
+
+If storage fails, the renderer reports the failure and prints the full
+payload. Non-interactive printers keep their existing rendering. When
+inspection runs without a terminal, it prints the selected complete item.
+
 Default policy when output is on: first 2 lines, `⋯ N lines ⋯`, last 2
 lines. Both counts are per-tool defaults and CLI-configurable.
 

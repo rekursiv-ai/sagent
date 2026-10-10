@@ -858,6 +858,7 @@ sagent commands
   /login                      re-auth current provider
 
   /tasks                      list running work (agents + fg + bg)
+  /details  [<id>]            inspect full commands and diffs (Ctrl+O)
   /send     <target> <text>   send to subagent target: label, glob, {a,b}, /re/
   /halt     [<target>]        halt self or matching subagents (Ctrl+C)
   /kill     <qid|all|target>  cancel tool task(s) or matching subagents

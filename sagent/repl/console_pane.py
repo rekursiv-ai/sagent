@@ -8,10 +8,13 @@ duplicate -- the formatting logic is already correct and battle-tested.
 
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import SpooledTemporaryFile
 from typing import TYPE_CHECKING, Final, Literal, assert_never, cast
 
 import io
 import re
+import sys
 
 
 if TYPE_CHECKING:
@@ -20,12 +23,15 @@ if TYPE_CHECKING:
     from rich.cells import chop_cells
     from rich.console import Console
     from rich.text import Text
+
+    from sagent.repl.tool_details_view import show_details
 else:
     from wrapt import lazy_import
 
     chop_cells = lazy_import("rich.cells", "chop_cells")  # ~60 ms; wrapping uses it.
     Console = lazy_import("rich.console", "Console")  # ~60 ms; ConsolePrinter uses it.
     Text = lazy_import("rich.text", "Text")
+    show_details = lazy_import("sagent.repl.tool_details_view", "show_details")
 
 from sagent.repl.format import (
     print_user_bar,
@@ -42,10 +48,12 @@ from sagent.repl.render_diff import (
     render_diff_detail,
 )
 from sagent.repl.tight_markdown import TightMarkdown
+from sagent.repl.tool_details import Detail, ToolDetails, display_text
 from sagent.tools.display import (
     OutputSpec,
     ToolDisplay,
     format_output,
+    format_preview,
 )
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -70,9 +78,70 @@ class ConsolePrinter:
     show_thinking: bool
     """Whether reasoning renders here; ``/thinking show|hide`` flips it."""
 
-    def __init__(self, console: Console, *, show_thinking: bool = True) -> None:
+    def __init__(
+        self,
+        console: Console,
+        *,
+        show_thinking: bool = True,
+        details: ToolDetails | None = None,
+        detail_source: str = "",
+    ) -> None:
         self.console = console
         self.show_thinking = show_thinking
+        self.details = details
+        self._detail_source = detail_source
+        self._inspecting = False
+
+    def _save_detail(
+        self,
+        title: str,
+        kind: Literal["command", "diff"],
+        text: str,
+    ) -> Detail | None:
+        if self.details is None:
+            return None
+        if self._detail_source:
+            title = f"{self._detail_source}: {title}"
+        try:
+            return self.details.add(title, kind, text)
+        except OSError as exc:
+            self.write_tool_error(
+                f"Could not save tool details: {exc}. Showing complete text.",
+            )
+            return None
+
+    async def inspect_details(self, number: int = 0) -> None:
+        """Inspect saved text without changing the agent or its input buffer."""
+        if self.details is None or (entry := self.details.get(number)) is None:
+            self.write_tool_error(
+                "No matching tool details. Use /details or /details <id>.",
+            )
+            return
+        if self._inspecting:
+            return
+        if not self.console.is_terminal or not sys.stdin.isatty():
+            self.write_line(display_text(entry.read()))
+            return
+        self._inspecting = True
+        original_file = self.console.file
+        # Rendering continues into a spool while the viewer owns the screen.
+        # Agent tasks and persistence keep running; pending output is restored
+        # on close, cancellation, or failure, including child-block writes.
+        with SpooledTemporaryFile(
+            mode="w+",
+            encoding="utf-8",
+            max_size=1_048_576,
+        ) as pending:
+            self.console.file = pending
+            try:
+                await show_details(self.details, number)
+            finally:
+                self.console.file = original_file
+                self._inspecting = False
+                _ = pending.seek(0)
+                while chunk := pending.read(65_536):
+                    _ = original_file.write(chunk)
+                original_file.flush()
 
     def write_line(self, text: str) -> None:
         """Render a complete line; the console adds the newline.
@@ -190,12 +259,33 @@ class ConsolePrinter:
         if not rest:
             return
         spec = command or OutputSpec(show=True)
-        rows = format_output(rest, spec, width=self.console.width - len(_INPUT_GLYPH))
+        entry = self._save_detail(header, "command", rest)
+        width = max(1, self.console.width - len(_INPUT_GLYPH))
+        rows = (
+            format_preview(rest, spec, width=width)
+            if entry is not None
+            else format_output(
+                rest,
+                OutputSpec(show=True, unbounded=True)
+                if self.details is not None
+                else spec,
+                width=width,
+            )
+        )
         for i, row in enumerate(rows):
             marker = _INPUT_GLYPH if i == 0 else _OUTPUT_INDENT
             body = highlight_source(row, lang) if lang else Text(row)
             body.stylize("dim")
             self.console.print(Text(marker, style="dim") + body)
+        if entry is not None and (
+            not rows or any(row.startswith("… ") or row.endswith("…") for row in rows)
+        ):
+            self.console.print(
+                Text(
+                    f"{_OUTPUT_INDENT}Full command: /details {entry.number}",
+                    style="dim",
+                ),
+            )
 
     def write_tool_error(self, text: str) -> None:
         """Render a red tool-error at the output indent (multi-line aware).
@@ -327,7 +417,7 @@ class ConsolePrinter:
             highlight=False,
             soft_wrap=False,
         )
-        inner = ConsolePrinter(inner_console)
+        inner = ConsolePrinter(inner_console, details=self.details, detail_source=label)
         for item in items:
             _render_child_item(inner, item, output_policy=output_policy)
 
@@ -355,7 +445,13 @@ class ConsolePrinter:
 
     def write_diff(self, diff: str, file_path: str = "") -> None:
         """Render a unified diff with syntax highlighting."""
-        render_diff_detail(self.console, diff, file_path=file_path)
+        entry = self._save_detail(Path(file_path).name or "Edit", "diff", diff)
+        render_diff_detail(
+            self.console,
+            diff,
+            file_path=file_path,
+            detail_number=entry.number if entry is not None else 0,
+        )
 
     def set_terminal_title(self, text: str) -> None:
         """Write an OSC 0 title escape (no-op when stderr is not a TTY)."""

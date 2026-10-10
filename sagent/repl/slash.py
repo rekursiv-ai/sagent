@@ -144,6 +144,13 @@ class Tasks:
 
 
 @dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
+class Details:
+    """User typed ``/details [id]``; inspect a local command or diff."""
+
+    number: int = 0
+
+
+@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
 class Text:
     """User typed plain (non-slash) input; dispatch as a preempting ``UserMessage``."""
 
@@ -203,6 +210,7 @@ type SlashAction = (
     | Login
     | Help
     | Tasks
+    | Details
     | Text
     | Defer
     | Send
@@ -238,6 +246,18 @@ def parse_slash(line: str) -> SlashAction | None:
         return Help()
     if stripped == "/tasks":
         return Tasks()
+    arg = _arg_after("/details", stripped)
+    if arg is not None:
+        if not arg:
+            return Details()
+        if (
+            len(arg) <= 19
+            and arg.isascii()
+            and arg.isdecimal()
+            and 0 < int(arg) <= 2**63 - 1
+        ):
+            return Details(number=int(arg))
+        return Unknown(text="/details requires a positive numeric id")
     if stripped == "/clear":
         return Clear()
     if stripped == "/login":
@@ -293,7 +313,7 @@ def parse_slash(line: str) -> SlashAction | None:
         # Public list of supported commands; drives the unknown-command help line.
         supported = (
             "/help /clear /compact /recompact /model /provider /thinking /effort"
-            " /tool /login /tasks /halt /kill /defer /send /quit /exit"
+            " /tool /login /tasks /details /halt /kill /defer /send /quit /exit"
         )
         return Unknown(text=f"unknown command: {cmd}. Supported: {supported}")
     return Text(content=stripped)

@@ -62,6 +62,7 @@ from sagent.repl.keybindings import NavState, build_key_bindings
 from sagent.repl.render import make_render_observer
 from sagent.repl.replay import replay_messages
 from sagent.repl.status_pane import render_status_pane
+from sagent.repl.tool_details import ToolDetails
 from sagent.tools.display import ToolDisplay, row_spec
 from sagent.types.exceptions import log_exception_or_warning
 from sagent.types.runtime import (
@@ -110,8 +111,9 @@ async def run_repl(
     )
     queues = InputQueues()
     nav = NavState()
-    with patch_stdout(raw=True):
+    with patch_stdout(raw=True), ToolDetails() as details:
         console = Console(stderr=True)
+        printer = ConsolePrinter(console, show_thinking=show_thinking, details=details)
         session: PromptSession[str] = PromptSession(
             functools.partial(render_input_pane, agent, queues),
             multiline=True,
@@ -120,11 +122,15 @@ async def run_repl(
             auto_suggest=AutoSuggestFromHistory(),
             bottom_toolbar=functools.partial(render_status_pane, agent),
             refresh_interval=0.2,
-            key_bindings=build_key_bindings(agent, queues, nav),
+            key_bindings=build_key_bindings(
+                agent,
+                queues,
+                nav,
+                inspect_details=printer.inspect_details,
+            ),
             enable_open_in_editor=False,
             style=style,
         )
-        printer = ConsolePrinter(console, show_thinking=show_thinking)
         render_observer = make_render_observer(
             printer,
             output_policy=lambda call_id: _tool_output_policy(agent, call_id),

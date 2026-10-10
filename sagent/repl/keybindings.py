@@ -52,6 +52,8 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
     from prompt_toolkit.buffer import Buffer
     from prompt_toolkit.key_binding import KeyPressEvent
 
@@ -121,6 +123,8 @@ def build_key_bindings(
     agent: Agent,
     queues: InputQueues,
     nav: NavState | None = None,
+    *,
+    inspect_details: Callable[[], Coroutine[object, object, None]] | None = None,
 ) -> KeyBindings:
     """Build the REPL keybindings bound to ``agent``, ``queues``, and ``nav``.
 
@@ -128,6 +132,7 @@ def build_key_bindings(
       agent: Agent these key handlers will mutate.
       queues: The queue and deferred panes.
       nav: Up/Down navigation state. Created fresh if omitted.
+      inspect_details: Optional local viewer, preserving the live input buffer.
 
     Returns:
       kb: Configured ``KeyBindings``.
@@ -162,6 +167,12 @@ def build_key_bindings(
     kb.add("c-z")(_kb_suspend)
     kb.add("c-_")(_kb_undo)
     kb.add("escape", "z")(_kb_undo)
+    if inspect_details is not None:
+
+        @kb.add("c-o", filter=~is_done)
+        def _open_details(event: KeyPressEvent) -> None:
+            event.app.create_background_task(inspect_details())
+
     return kb
 
 
