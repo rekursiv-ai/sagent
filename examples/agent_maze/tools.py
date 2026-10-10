@@ -11,7 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
-from treekle.codec import PlainTree, immutable
+from treekle import PlainTree, immutable
 
 from sagent.agent.state import agent_label_var, agent_registry
 from sagent.types.runtime import AgentSendQueuedMessage, ToolResult

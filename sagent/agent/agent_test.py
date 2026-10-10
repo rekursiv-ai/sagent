@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 
-from treekle.codec import PlainTree
+from treekle import PlainTree
 
 import httpx2
 import pytest

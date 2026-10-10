@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, cast
 import asyncio
 import time
 
-from treekle.codec import PlainTree, immutable
+from treekle import PlainTree, immutable
 
 from sagent.agent.agent import Agent
 from sagent.agent.session_io import append_persistent_agent_lifecycle

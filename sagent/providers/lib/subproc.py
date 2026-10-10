@@ -23,7 +23,7 @@ import logging
 import shutil
 import signal
 
-from treekle.codec import MutablePlainTree
+from treekle import MutablePlainTree
 
 from sagent.types.exceptions import log_task_exception
 

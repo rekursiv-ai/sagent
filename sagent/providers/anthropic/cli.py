@@ -32,7 +32,7 @@ import re
 import shutil
 import subprocess
 
-from treekle.codec import MutablePlainTree, PlainTree, ReadError, from_plain, loads
+from treekle import MutablePlainTree, PlainTree, ReadError, from_plain, loads
 
 import fastjsonschema
 

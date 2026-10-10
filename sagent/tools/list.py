@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated, Final
 import asyncio
 import time
 
-from treekle.codec import from_plain, immutable
+from treekle import from_plain, immutable
 
 from sagent.tools.core import load_tool_description, resolve_tool_path
 from sagent.tools.display import Toggle, Wrap

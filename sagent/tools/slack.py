@@ -25,7 +25,7 @@ import asyncio
 import json
 import logging
 
-from treekle.codec import PlainTree, ReadError, from_plain, immutable, loads
+from treekle import PlainTree, ReadError, from_plain, immutable, loads
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 

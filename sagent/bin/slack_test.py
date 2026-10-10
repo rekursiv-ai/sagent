@@ -68,7 +68,7 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
-    from treekle.codec import MutablePlainTree
+    from treekle import MutablePlainTree
 
 
 @pytest.fixture(autouse=True)

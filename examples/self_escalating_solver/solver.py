@@ -32,7 +32,7 @@ import re
 import subprocess
 import tempfile
 
-from treekle.codec import PlainTree, immutable
+from treekle import PlainTree, immutable
 
 from sagent.agent.agent import Agent
 from sagent.tools import AgentSelf

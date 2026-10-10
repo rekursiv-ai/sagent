@@ -11,7 +11,7 @@ import inspect
 import json
 import logging
 
-from treekle.codec import from_plain, loads, mutable
+from treekle import from_plain, loads, mutable
 
 from sagent.catalog.openai import (
     keeps_reasoning_across_turns,

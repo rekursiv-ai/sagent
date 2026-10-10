@@ -47,7 +47,7 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from treekle.codec import MutablePlainTree
+    from treekle import MutablePlainTree
 
 
 _CRED_PAYLOAD: dict[str, object] = {

@@ -29,7 +29,7 @@ import threading
 import time
 import typing
 
-from treekle.codec import PlainTree, from_plain, immutable
+from treekle import PlainTree, from_plain, immutable
 
 import yaml
 

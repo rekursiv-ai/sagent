@@ -17,7 +17,7 @@ from sagent.types.runtime import UserMessage
 
 
 if TYPE_CHECKING:
-    from treekle.codec import MutablePlainTree
+    from treekle import MutablePlainTree
 
 
 def test_moonshot_from_key() -> None:

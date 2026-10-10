@@ -56,7 +56,7 @@ else:
     image = lazy_import("sagent.lib.image")
 
 
-from treekle.codec import MutablePlainTree, from_plain, mutable
+from treekle import MutablePlainTree, from_plain, mutable
 
 from sagent.catalog.anthropic import api, models, usage_tokens
 from sagent.catalog.table import ModelCatalog

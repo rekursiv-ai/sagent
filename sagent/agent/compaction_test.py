@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 import asyncio
 
-from treekle.codec import PlainTree
+from treekle import PlainTree
 
 import pytest
 

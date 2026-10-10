@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import json
 import operator
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import httpx2
 import pytest
@@ -65,7 +65,7 @@ from sagent.types.runtime import (
 
 if TYPE_CHECKING:
     from anthropic.types import MessageParam
-    from treekle.codec import MutablePlainTree
+    from treekle import MutablePlainTree
 
     import anthropic as anthropic_sdk
 

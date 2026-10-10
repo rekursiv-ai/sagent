@@ -27,7 +27,7 @@ import logging
 import time
 import uuid
 
-from treekle.codec import PlainTree, from_plain, immutable
+from treekle import PlainTree, from_plain, immutable
 
 from sagent.agent.agent import Agent, SystemPromptArg
 from sagent.agent.background import BackgroundTaskEntry

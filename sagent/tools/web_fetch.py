@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Annotated, cast, get_args
 
 import asyncio
 
-from treekle.codec import PlainTree, immutable, mutable
+from treekle import PlainTree, immutable, mutable
 from wesearch.fetch import Extractor, PolicyParams, Transport
 from wesearch.fetch.custom_types import FetchBodyParamsSchema, HttpMethod
 from wesearch.types.errors import BotDetectionError, FetchError

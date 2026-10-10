@@ -42,7 +42,7 @@ import json
 import logging
 import tempfile
 
-from treekle.codec import ReadError, from_plain
+from treekle import ReadError, from_plain
 
 
 logger = logging.getLogger(__name__)

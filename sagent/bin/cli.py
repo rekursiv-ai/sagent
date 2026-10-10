@@ -61,7 +61,7 @@ import shlex
 import signal
 import sys
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 from sagent import (
     providers,
@@ -130,7 +130,7 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
 
-    from treekle.codec import MutablePlainTree
+    from treekle import MutablePlainTree
 
     from sagent.types.tools import (
         Tool,

@@ -9,7 +9,7 @@ from typing import ClassVar, cast
 import json
 import logging
 
-from treekle.codec import MutablePlainTree, from_plain
+from treekle import MutablePlainTree, from_plain
 
 import httpx2
 import pytest

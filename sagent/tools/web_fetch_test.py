@@ -8,7 +8,7 @@ from unittest.mock import patch
 import asyncio
 import socket
 
-from treekle.codec import immutable
+from treekle import immutable
 from wesearch.fetch import PolicyParams
 from wesearch.types.errors import CloudflareChallengeError, FetchError
 from wesearch.web import FetchResult

@@ -10,7 +10,7 @@ import asyncio
 import base64
 import json
 
-from treekle.codec import PlainTree
+from treekle import PlainTree
 
 import pytest
 

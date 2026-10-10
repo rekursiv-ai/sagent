@@ -38,7 +38,7 @@ import sys
 import time
 import uuid
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 from sagent.lib.userdirs import data_dir
 

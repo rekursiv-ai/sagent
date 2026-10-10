@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import asyncio
 import logging
 
-from treekle.codec import PlainTree, immutable
+from treekle import PlainTree, immutable
 
 from sagent.agent.state import agent_label_var, agent_registry
 from sagent.tools.core import load_tool_description, opt_int

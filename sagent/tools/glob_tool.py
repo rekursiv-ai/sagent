@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Final
 
 import time
 
-from treekle.codec import from_plain, immutable
+from treekle import from_plain, immutable
 
 from sagent.agent.state import approx_tokens
 from sagent.lib.files.glob import GlobError, glob

@@ -22,7 +22,7 @@ import signal
 import subprocess
 import time
 
-from treekle.codec import from_plain, immutable
+from treekle import from_plain, immutable
 
 from sagent.agent.runtime import EXCLUSIVE_KEY
 from sagent.agent.state import (

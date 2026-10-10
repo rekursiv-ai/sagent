@@ -40,7 +40,7 @@ import os
 import re
 import sys
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import httpx2
 

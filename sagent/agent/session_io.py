@@ -39,7 +39,7 @@ import os
 import threading
 import time
 
-from treekle.codec import ReadError, from_plain
+from treekle import ReadError, from_plain
 
 from sagent.agent.context import (
     alive_splices,

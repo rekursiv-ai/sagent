@@ -13,7 +13,7 @@ from sagent.types.model import ModelRequest
 
 
 if TYPE_CHECKING:
-    from treekle.codec import MutablePlainTree
+    from treekle import MutablePlainTree
 
 
 def test_minimax_from_key() -> None:

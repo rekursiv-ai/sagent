@@ -10,7 +10,7 @@ import asyncio
 import json
 import re
 
-from treekle.codec import from_plain, immutable
+from treekle import from_plain, immutable
 
 from sagent.agent.state import (
     approx_tokens,

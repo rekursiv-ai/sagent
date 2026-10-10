@@ -14,7 +14,7 @@ import json
 import logging
 import os
 
-from treekle.codec import from_plain, loads
+from treekle import from_plain, loads
 
 import httpx2
 import openai
@@ -64,7 +64,7 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from treekle.codec import MutablePlainTree, PlainTree
+    from treekle import MutablePlainTree, PlainTree
 
 
 @dataclass(slots=True, kw_only=True)

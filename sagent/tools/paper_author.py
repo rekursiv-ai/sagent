@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 import asyncio
 
-from treekle.codec import PlainTree, immutable
+from treekle import PlainTree, immutable
 from wesearch.paper.authors import author_metadata, author_papers, search_authors
 from wesearch.paper.errors import PaperError
 from wesearch.paper.render import (

@@ -16,7 +16,7 @@ import os
 import subprocess
 import sys
 
-from treekle.codec import ReadError
+from treekle import ReadError
 
 import pytest
 

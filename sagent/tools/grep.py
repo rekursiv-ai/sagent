@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Annotated, Final, cast, get_args
 
 import re
 
-from treekle.codec import from_plain, immutable
+from treekle import from_plain, immutable
 
 from sagent.agent.state import approx_tokens
 from sagent.lib.files.grep import GrepError, OutputMode, Query, grep

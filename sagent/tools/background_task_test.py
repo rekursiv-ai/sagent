@@ -10,7 +10,7 @@ import contextlib
 import json
 import time
 
-from treekle.codec import immutable
+from treekle import immutable
 
 import pytest
 

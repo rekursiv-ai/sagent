@@ -66,7 +66,7 @@ else:
     _starlette_routing = lazy_import("starlette.routing")
     uvicorn = lazy_import("uvicorn")
 
-from treekle.codec import mutable
+from treekle import mutable
 
 from sagent.agent.background import (
     backgroundable,

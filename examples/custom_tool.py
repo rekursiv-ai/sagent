@@ -8,7 +8,7 @@ from typing import cast
 import asyncio
 import sys
 
-from treekle.codec import immutable
+from treekle import immutable
 
 from sagent.agent.agent import Agent
 from sagent.providers import Google

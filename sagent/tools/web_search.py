@@ -9,7 +9,7 @@ from typing import Annotated, cast
 import asyncio
 import re
 
-from treekle.codec import immutable
+from treekle import immutable
 from wesearch.fetch import Transport
 from wesearch.search.custom_types import (
     SearchBackends,

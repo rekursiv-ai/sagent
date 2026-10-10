@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Final
 
 import logging
 
-from treekle.codec import PlainTree, immutable
+from treekle import PlainTree, immutable
 
 from sagent.agent.agent import Agent, ObservedModel
 from sagent.agent.retry import (

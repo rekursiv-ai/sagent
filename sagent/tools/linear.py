@@ -26,7 +26,7 @@ import asyncio
 import json
 import os
 
-from treekle.codec import (
+from treekle import (
     MutablePlainTree,
     PlainTree,
     ReadError,

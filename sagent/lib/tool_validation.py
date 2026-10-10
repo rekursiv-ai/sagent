@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING, cast
 
 import json
 
-from treekle.codec import mutable
+from treekle import mutable
 
 import fastjsonschema
 
 
 if TYPE_CHECKING:
-    from treekle.codec import PlainTree
+    from treekle import PlainTree
 
 
 def validate_tool_input(

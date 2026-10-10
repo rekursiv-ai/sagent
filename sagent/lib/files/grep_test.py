@@ -11,7 +11,7 @@ import pathlib
 import shutil
 import subprocess
 
-from treekle.codec import from_plain
+from treekle import from_plain
 
 import pytest
 

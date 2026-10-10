@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Final
 
 import asyncio
 
-from treekle.codec import PlainTree, from_plain, immutable
+from treekle import PlainTree, from_plain, immutable
 from wesearch.paper.errors import PaperError
 from wesearch.paper.render import (
     format_record,

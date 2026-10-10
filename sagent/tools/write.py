@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Annotated
 
 import re
 
-from treekle.codec import immutable
+from treekle import immutable
 
 from sagent.agent.state import get_tool_state
 from sagent.lib.atomic_file import atomic_write_bytes

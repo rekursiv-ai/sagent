@@ -50,7 +50,7 @@ from sagent.types.runtime import UserMessage
 
 
 if TYPE_CHECKING:
-    from treekle.codec import MutablePlainTree
+    from treekle import MutablePlainTree
 
     from sagent.types.model import Model
 

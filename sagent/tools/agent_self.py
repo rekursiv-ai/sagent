@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import asyncio
 import dataclasses
 
-from treekle.codec import PlainTree, immutable
+from treekle import PlainTree, immutable
 
 from sagent.agent.agent import ModelChange
 from sagent.agent.state import (

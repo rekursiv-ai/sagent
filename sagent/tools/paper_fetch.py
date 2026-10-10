@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 import asyncio
 import logging
 
-from treekle.codec import PlainTree, immutable
+from treekle import PlainTree, immutable
 from wesearch.paper.errors import PaperError
 from wesearch.paper.fetch import batch_oa_urls, download, looks_like_pdf
 from wesearch.paper.ids import id_slug, s2_wire_id
