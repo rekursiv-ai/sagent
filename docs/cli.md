@@ -179,6 +179,16 @@ REPL keys:
 
 ### Steering subagents
 
+Subagent replies appear under the worker's label. When several workers stream
+at once, each worker keeps its unfinished text until a stable Markdown block,
+the end of its response, or its own tool event. A speaker change does not split
+another worker's words or code block. Separate replies from a persistent worker
+finish separately, even when they have no trailing newline.
+
+This can delay an unfinished paragraph until the worker reaches a boundary.
+The existing 65,536-character buffer limit still applies. Cancellation preserves
+the received text and shows `[interrupted]` under that worker's label.
+
 `/send`, `/halt`, and `/kill` accept a shared target syntax for live
 persistent subagents:
 

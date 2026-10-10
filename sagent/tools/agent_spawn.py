@@ -72,6 +72,8 @@ from sagent.types.runtime import (
     ChildDoneEvent,
     ChildEvent,
     ModelContextEvent,
+    ModelResponseCancelled,
+    ModelResponseComplete,
     ModelResponseError,
     ModelResponsePartial,
     ModelResponseThinking,
@@ -1044,7 +1046,7 @@ def always_forwarded_sample() -> tuple[RuntimeEvent, ...]:
 
 
 # Verbosity -> set of RuntimeEvent subclasses forwarded to the parent observer.
-# verbosity 0: nothing; 1: tool labels + tool results + assistant text;
+# verbosity 0: nothing; 1: tool labels + tool results + assistant text and boundaries;
 # 2: also thinking blocks. See ``_ALWAYS_FORWARD_TYPES`` for the always-on set.
 _VERBOSITY: dict[int, frozenset[type]] = {
     0: frozenset(),
@@ -1053,6 +1055,8 @@ _VERBOSITY: dict[int, frozenset[type]] = {
             ToolLabel,
             ToolResult,
             ModelResponsePartial,
+            ModelResponseComplete,
+            ModelResponseCancelled,
         },
     ),
     2: frozenset(
@@ -1060,6 +1064,8 @@ _VERBOSITY: dict[int, frozenset[type]] = {
             ToolLabel,
             ToolResult,
             ModelResponsePartial,
+            ModelResponseComplete,
+            ModelResponseCancelled,
             ModelResponseThinking,
         },
     ),

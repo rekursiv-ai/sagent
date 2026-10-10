@@ -54,6 +54,8 @@ from sagent.types.runtime import (
     ChildDoneEvent,
     ChildEvent,
     ModelIdle,
+    ModelResponseCancelled,
+    ModelResponseComplete,
     ModelResponsePartial,
     ModelServiceSuspended,
     NoticeMessage,
@@ -1432,6 +1434,31 @@ def _make_forwarder(
         label=label,
         notify_on_asleep=notify_on_asleep,
     )
+
+
+@pytest.mark.parametrize("verbosity", [0, 1, 2, 99])
+def test_forwarder_sends_response_boundaries_with_visible_text(verbosity: int) -> None:
+    """Completion and cancellation reach the display without inbox delivery."""
+    parent = _make_parent()
+    events: list[RuntimeEvent] = []
+    parent.runtime.observers.append(events.append)
+    forwarder = agent_spawn._build_forwarder(
+        "reader",
+        verbosity,
+        parent,
+        child=_make_parent(),
+    )
+    assert forwarder is not None
+    partial = ModelResponsePartial(text="Reply.")
+    complete = ModelResponseComplete(message=AssistantMessage(text="Reply."))
+    cancelled = ModelResponseCancelled()
+    for event in [partial, complete, cancelled]:
+        forwarder(event)
+    expected = [] if verbosity == 0 else [partial, complete, cancelled]
+    assert [
+        event.inner for event in events if isinstance(event, ChildEvent)
+    ] == expected
+    assert parent.runtime.inbox.empty()
 
 
 def test_forwarder_notify_on_asleep_false_skips_inbox_push() -> None:
