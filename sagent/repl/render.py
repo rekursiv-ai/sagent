@@ -254,6 +254,14 @@ class Printer(Protocol):
         """Write thinking text."""
         ...
 
+    def write_thinking_chunk(self, text: str, *, label: str = "") -> None:
+        """Append a reasoning delta to the current visible block."""
+        ...
+
+    def finish_thinking(self, *, label: str | None = None) -> None:
+        """Close a visible reasoning block before other output."""
+        ...
+
     def write_diff(self, diff: str, file_path: str = "") -> None:
         """Write a diff."""
         ...
@@ -424,6 +432,19 @@ class RecordingPrinter:
     def write_thinking(self, text: str) -> None:
         """Record thinking text."""
         self.thinkings.append(text)
+
+    def write_thinking_chunk(self, text: str, *, label: str = "") -> None:
+        """Record a reasoning delta with its source label."""
+        if not text:
+            return
+        if label:
+            self.child_blocks.append((label, [ModelResponseThinking(text=text)]))
+        else:
+            self.thinkings.append(text)
+
+    def finish_thinking(self, *, label: str | None = None) -> None:
+        """No terminal line needs closing in the recording sink."""
+        del label
 
     def write_diff(self, diff: str, file_path: str = "") -> None:
         """Record a diff."""
@@ -599,6 +620,30 @@ class RenderObserver:
             logger.exception("render observer failed for %s", type(event).__name__)
 
     def _dispatch(self, event: RuntimeEvent) -> None:
+        # Status changes only set the terminal title. Child reasoning is
+        # classified after unwrapping in _consume_child below.
+        if isinstance(
+            event,
+            (
+                UserMessage,
+                AgentSendMessage,
+                ModelResponsePartial,
+                ModelResponseComplete,
+                ToolLabel,
+                ToolResult,
+                DetachedResult,
+                ToolResultPartial,
+                ModelResponseCancelled,
+                ModelServiceSuspended,
+                NoticeMessage,
+                ModelResponseError,
+                ModelSwitchRejected,
+                CompactStarted,
+                CompactComplete,
+                CompactFailed,
+            ),
+        ):
+            self._printer.finish_thinking()
         # A ``hidden`` message reaches the model but not the human: flush any
         # pending stream so ordering holds, then render nothing for it.
         if isinstance(event, SessionMessage) and event.hidden:
@@ -617,7 +662,11 @@ class RenderObserver:
                 # Read per event, not captured: ``/thinking hide`` must take
                 # effect on the stream already in flight.
                 if self._printer.show_thinking:
-                    self._printer.write_thinking(text)
+                    if text:
+                        self._flush_stream()
+                        self._printer.write_thinking_chunk(text)
+                else:
+                    self._printer.finish_thinking()
             case ModelResponseComplete():
                 self._flush_stream()
             case ToolLabel(text=text):
@@ -681,6 +730,7 @@ class RenderObserver:
             case ChildEvent(label=label, inner=inner):
                 self._consume_child(label, inner)
             case ChildDoneEvent(label=label):
+                self._printer.finish_thinking(label=label)
                 self._flush_child(label)
             case StatusChanged(text=text):
                 self._printer.set_terminal_title(text)
@@ -763,6 +813,24 @@ class RenderObserver:
             if other != label:
                 self._move_text_to_items(other)
                 self._emit_child(other)
+        if isinstance(inner, ModelResponseThinking):
+            if self._printer.show_thinking:
+                if inner.text:
+                    self._flush_stream()
+                    self._move_text_to_items(label)
+                    self._emit_child(label)
+                    self._printer.write_thinking_chunk(inner.text, label=label)
+            else:
+                self._printer.finish_thinking()
+            return
+        if (
+            isinstance(
+                inner,
+                (ModelResponsePartial, ModelResponseComplete, ModelResponseCancelled),
+            )
+            or _child_atomic_item(inner) is not None
+        ):
+            self._printer.finish_thinking()
         if isinstance(inner, ModelResponsePartial):
             buf = self._child_text.get(label, "") + inner.text
             boundary = find_stable_boundary(buf)

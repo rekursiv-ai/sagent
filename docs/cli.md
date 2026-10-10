@@ -281,3 +281,18 @@ Routing order:
 7. Otherwise the router replies with guidance.
 
 Slack agents use persona files from `--persona-dir`. `create sara` loads `sara.md`, then `default.md`, then falls back to `You are sara.`
+
+## Reasoning display
+
+With thinking visible, the interactive CLI appends provider reasoning fragments
+under one `Thinking` heading, preserving spaces and paragraph breaks. The heading
+appears when reasoning starts. The interactive prompt commits complete wrapped
+lines so its redraw cannot overwrite an unfinished line. Any remaining text
+appears when the block closes. Terminal wrapping retains the body indentation.
+
+Replies, tool output, interruptions and changes between parent and child agents
+close the current display block. Each child's reasoning retains its agent label.
+
+`/thinking hide` and `/thinking show` control local visibility, including during
+a response. They do not change whether the model reasons. The display contains
+the reasoning text or summary that the selected provider exposes.

@@ -17,13 +17,14 @@ import re
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from rich.cells import chop_cells
+    from rich.cells import chop_cells, get_character_cell_size
     from rich.console import Console
     from rich.text import Text
 else:
     from wrapt import lazy_import
 
     chop_cells = lazy_import("rich.cells", "chop_cells")  # ~60 ms; wrapping uses it.
+    get_character_cell_size = lazy_import("rich.cells", "get_character_cell_size")
     Console = lazy_import("rich.console", "Console")  # ~60 ms; ConsolePrinter uses it.
     Text = lazy_import("rich.text", "Text")
 
@@ -70,9 +71,23 @@ class ConsolePrinter:
     show_thinking: bool
     """Whether reasoning renders here; ``/thinking show|hide`` flips it."""
 
-    def __init__(self, console: Console, *, show_thinking: bool = True) -> None:
+    def __init__(
+        self,
+        console: Console,
+        *,
+        show_thinking: bool = True,
+        thinking_line_buffered: bool = False,
+    ) -> None:
         self.console = console
         self.show_thinking = show_thinking
+        self._thinking_open = False
+        self._thinking_label: str = ""
+        self._thinking_prefix = ""
+        self._thinking_column = 0
+        self._thinking_line_start = True
+        self._thinking_cr = False
+        self._thinking_line_buffered = thinking_line_buffered
+        self._thinking_pending = ""
 
     def write_line(self, text: str) -> None:
         """Render a complete line; the console adds the newline.
@@ -151,6 +166,7 @@ class ConsolePrinter:
         the user's interaction stream, not under a model turn.
 
         """
+        self.finish_thinking()
         for line in (text or "").splitlines() or [""]:
             self.console.print(Text(line, style="dim"))
 
@@ -308,6 +324,7 @@ class ConsolePrinter:
         """
         if not items:
             return
+        self.finish_thinking()
         gutter_width = max(14, len(label) + 5 + len(_CHILD_INDENT))
         pfx = _gutter_prefix(label, gutter_width)
         indent = " " * gutter_width
@@ -347,11 +364,89 @@ class ConsolePrinter:
         self.console.file.flush()
 
     def write_thinking(self, text: str) -> None:
-        """Render italic dim 'Thinking' header followed by indented body."""
-        self.console.print(Text("∴ Thinking", style="italic dim"))
-        for line in (text or "").splitlines() or [""]:
-            self.console.print(Text(f"  {line}", style="dim"))
+        """Render a complete reasoning block, including replayed child text."""
+        self.finish_thinking()
+        self.write_thinking_chunk(text)
+        self.finish_thinking()
+
+    def write_thinking_chunk(self, text: str, *, label: str = "") -> None:
+        """Append reasoning, retaining heading and wrap state.
+
+        Stream boundaries need not coincide with words, newlines or wide
+        characters. Track terminal cells across calls rather than asking
+        Rich to wrap each fragment independently. No full-response buffer
+        or cursor rewriting is needed. Interactive prompts can retain the
+        unfinished line so a prompt redraw cannot overwrite it.
+        """
+        if not text:
+            return
+        if self._thinking_open and label != self._thinking_label:
+            self.finish_thinking()
+        if not self._thinking_open:
+            gutter_width = max(14, len(label) + 5 + len(_CHILD_INDENT)) if label else 0
+            header_prefix = _gutter_prefix(label, gutter_width) if label else ""
+            self._thinking_prefix = " " * (gutter_width or 2)
+            self.console.print(Text(f"{header_prefix}∴ Thinking", style="italic dim"))
+            self._thinking_open = True
+            self._thinking_label = label
+
+        prefix = self._thinking_prefix[: max(0, self.console.width - 1)]
+        width = max(1, self.console.width - len(prefix))
+        out: list[str] = []
+        for char in text:
+            if char == "\n" and self._thinking_cr:
+                self._thinking_cr = False
+                continue
+            self._thinking_cr = char == "\r"
+            if char in "\r\n":
+                out.append("\n")
+                self._thinking_column = 0
+                self._thinking_line_start = True
+                continue
+            chars = " " * (8 - self._thinking_column % 8) if char == "\t" else char
+            for part in chars:
+                cells = get_character_cell_size(part)
+                if self._thinking_column and self._thinking_column + cells > width:
+                    out.append("\n")
+                    self._thinking_column = 0
+                    self._thinking_line_start = True
+                if self._thinking_line_start:
+                    out.append(prefix)
+                    self._thinking_line_start = False
+                out.append(part)
+                self._thinking_column += cells
+        payload = self._thinking_pending + "".join(out)
+        if self._thinking_line_buffered:
+            # prompt-toolkit redraws its input at the start of an unfinished
+            # output line. Commit complete lines only; retain the tail until
+            # a wrap, newline or visible event boundary makes it safe.
+            complete, newline, self._thinking_pending = payload.rpartition("\n")
+            if not newline:
+                self._thinking_pending = payload
+                return
+            payload = complete + newline
+        self.console.print(Text(payload, style="dim"), end="", soft_wrap=True)
+
+    def finish_thinking(self, *, label: str | None = None) -> None:
+        """Terminate an open reasoning line and separate subsequent output."""
+        if not self._thinking_open or (
+            label is not None and label != self._thinking_label
+        ):
+            return
+        if self._thinking_pending:
+            self.console.print(
+                Text(self._thinking_pending, style="dim"),
+                soft_wrap=True,
+            )
+            self._thinking_pending = ""
+        elif not self._thinking_line_start:
+            self.console.print()
         self.console.print()
+        self._thinking_open = False
+        self._thinking_label = ""
+        self._thinking_column = 0
+        self._thinking_line_start = True
+        self._thinking_cr = False
 
     def write_diff(self, diff: str, file_path: str = "") -> None:
         """Render a unified diff with syntax highlighting."""
