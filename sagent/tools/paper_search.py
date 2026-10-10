@@ -215,8 +215,14 @@ class PaperSearch:
         except PaperError as e:
             return ToolResult(call_id="", content=str(e), is_error=True)
 
-        text = self._render(result.records, result.total, limit, cap)
-        text += _empty_hint(result.records, q)
+        text = self._render(
+            result.records,
+            result.total,
+            limit,
+            cap,
+            complete=result.complete,
+        )
+        text += _empty_hint(result.records, q, complete=result.complete)
         if result.complete:
             _cache[cache_key] = text
         return ToolResult(call_id="", content=text)
@@ -227,19 +233,35 @@ class PaperSearch:
         total: int,
         limit: int | None,
         abstract_chars: int | None,
+        *,
+        complete: bool = True,
     ) -> str:
-        """Format search hits as newline-joined text with truncation notice."""
+        """Format hits with truncation and incomplete-coverage notices."""
         shown = hits if limit is None else hits[:limit]
         if not shown:
-            return "(no results)"
-        lines = [format_record(r, abstract_chars=abstract_chars) for r in shown]
-        return "\n".join(lines) + truncation_notice(len(shown), total)
+            text = (
+                "(no results)" if complete else "(no results in the retrieved portion)"
+            )
+        else:
+            lines = [format_record(r, abstract_chars=abstract_chars) for r in shown]
+            text = "\n".join(lines) + truncation_notice(len(shown), total)
+        if not complete and (not shown or total <= len(shown)):
+            text = (
+                "Search coverage is incomplete; returned records may omit "
+                "matches from the queried sources.\n" + text
+            )
+        return text
 
 
-def _empty_hint(hits: list[PaperRecord], query: str) -> str:
+def _empty_hint(
+    hits: list[PaperRecord],
+    query: str,
+    *,
+    complete: bool = True,
+) -> str:
     """Guidance appended when a search returned nothing."""
     hint = ""
-    if not hits and len(query.split()) > 1:
+    if complete and not hits and len(query.split()) > 1:
         # Every backend ANDs query terms against title/abstract, so a
         # multi-term query zeroes out when one rare term has no co-occurring
         # paper. Dropping terms is the only cross-backend way to broaden.

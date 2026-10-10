@@ -140,6 +140,11 @@ Paper tools use Semantic Scholar, OpenAlex, arXiv, and open-access PDF metadata.
 - `source="openalex"` queries OpenAlex.
 - `source="fused"` merges both, deduplicating by DOI.
 - Optional filters: `year_from`, `year_to`, `open_access_only`, `limit`, `abstract_chars`.
+- Incomplete searches retain retrieved papers. A coverage notice is added when
+  the existing truncation notice does not already show that results are missing.
+  Coverage can be incomplete because of backend errors or retrieval limits;
+  the notice does not distinguish the cause. An empty incomplete response does
+  not establish that no papers match.
 
 `PaperDetails` accepts DOI or arXiv IDs. Omit `operation` for metadata, use `operation="references"` for cited papers, and `operation="citations"` for citing papers. Citation mode also supports `influential_only` and `year_from`.
 
