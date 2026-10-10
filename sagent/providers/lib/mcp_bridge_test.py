@@ -10,9 +10,10 @@ import asyncio
 import base64
 import json
 
+from treekle.codec import PlainTree
+
 import pytest
 
-from sagent.lib.codec import PlainTree
 from sagent.providers.lib.mcp_bridge import ToolsBridge
 from sagent.types.runtime import (
     BytesMessage,

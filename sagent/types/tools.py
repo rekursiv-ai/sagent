@@ -17,7 +17,8 @@ from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from sagent.lib.codec import PlainTree
+    from treekle.codec import PlainTree
+
     from sagent.types.runtime import ToolResult
     from sagent.types.settings import AgentSettings
 

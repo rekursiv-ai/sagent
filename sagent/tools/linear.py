@@ -26,16 +26,16 @@ import asyncio
 import json
 import os
 
-from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
-from wesearch.types.errors import FetchError
-
-from sagent.lib.codec import (
+from treekle.codec import (
     MutablePlainTree,
     PlainTree,
     ReadError,
     from_plain,
     immutable,
 )
+from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
+from wesearch.types.errors import FetchError
+
 from sagent.tools.core import load_tool_description
 from sagent.types.runtime import ToolResult
 

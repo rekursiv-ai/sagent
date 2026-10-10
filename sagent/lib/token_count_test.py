@@ -16,7 +16,8 @@ if TYPE_CHECKING:
     from sagent.types.tools import Tool
 from collections.abc import Mapping
 
-from sagent.lib.codec import PlainTree
+from treekle.codec import PlainTree
+
 from sagent.testing import MockModelCaps
 from sagent.types.model import ModelRequest
 from sagent.types.runtime import (

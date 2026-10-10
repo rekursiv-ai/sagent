@@ -42,10 +42,11 @@ else:
     httpx2 = lazy_import("httpx2")  # 100ms cold.
     image = lazy_import("sagent.lib.image")
 
+from treekle.codec import MutablePlainTree, ReadError, from_plain, loads, mutable
+
 from sagent.catalog.openai import compatible
 from sagent.catalog.table import ModelCatalog, ModelTable, base_model_id
 from sagent.lib import debug_log
-from sagent.lib.codec import MutablePlainTree, ReadError, from_plain, loads, mutable
 from sagent.providers.lib.errors import (
     error_status_code,
     is_context_overflow_text,

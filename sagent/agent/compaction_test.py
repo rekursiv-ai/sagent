@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING
 
 import asyncio
 
+from treekle.codec import PlainTree
+
 import pytest
 
 from sagent.agent.background import BackgroundTaskEntry
@@ -18,7 +20,6 @@ from sagent.agent.compaction import (
 )
 from sagent.agent.state import ToolState
 from sagent.compaction.history import append_to_first_user
-from sagent.lib.codec import PlainTree
 from sagent.types.compactor import ReattachPolicy
 from sagent.types.runtime import (
     AssistantMessage,

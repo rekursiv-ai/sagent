@@ -18,7 +18,7 @@ from sagent.types.runtime import UserMessage
 
 
 if TYPE_CHECKING:
-    from sagent.lib.codec import MutablePlainTree
+    from treekle.codec import MutablePlainTree
 
 
 def test_dashscope_from_key() -> None:

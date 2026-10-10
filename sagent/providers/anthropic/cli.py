@@ -32,12 +32,13 @@ import re
 import shutil
 import subprocess
 
+from treekle.codec import MutablePlainTree, PlainTree, ReadError, from_plain, loads
+
 import fastjsonschema
 
 from sagent.catalog.anthropic import cli, models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.codec import MutablePlainTree, PlainTree, ReadError, from_plain, loads
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.lib.cli_respawn import (
     CLISubprocessModel,

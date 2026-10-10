@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Final
 
 import asyncio
 
+from treekle.codec import PlainTree, from_plain, immutable
 from wesearch.paper.errors import PaperError
 from wesearch.paper.render import (
     format_record,
@@ -22,7 +23,6 @@ from wesearch.paper.search import Source, search
 
 import cachetools
 
-from sagent.lib.codec import PlainTree, from_plain, immutable
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     validate_abstract_chars,

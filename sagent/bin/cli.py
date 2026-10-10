@@ -61,6 +61,8 @@ import shlex
 import signal
 import sys
 
+from treekle.codec import from_plain
+
 from sagent import (
     providers,
     sessions,
@@ -77,7 +79,6 @@ from sagent.agent.session_io import (
 from sagent.agent.state import agent_registry, unique_registry_label
 from sagent.catalog.table import UnknownModelError, UnsupportedTagError
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.codec import from_plain
 from sagent.lib.userdirs import data_dir
 from sagent.prompt import build_system
 from sagent.providers import (
@@ -129,7 +130,8 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
 
-    from sagent.lib.codec import MutablePlainTree
+    from treekle.codec import MutablePlainTree
+
     from sagent.types.tools import (
         Tool,
     )

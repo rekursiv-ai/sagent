@@ -15,7 +15,8 @@ from typing import TYPE_CHECKING, Protocol
 import json
 import logging
 
-from sagent.lib.codec import mutable
+from treekle.codec import mutable
+
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,

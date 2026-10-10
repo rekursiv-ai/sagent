@@ -9,6 +9,7 @@ from typing import Annotated, cast
 import asyncio
 import re
 
+from treekle.codec import immutable
 from wesearch.fetch import Transport
 from wesearch.search.custom_types import (
     SearchBackends,
@@ -19,7 +20,6 @@ from wesearch.search.render import format_result
 from wesearch.search.search import SearchParamsSchema, search
 from wesearch.types.errors import BotDetectionError
 
-from sagent.lib.codec import immutable
 from sagent.tools.core import (
     load_tool_description,
     truncate_to_budget,

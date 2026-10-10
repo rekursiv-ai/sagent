@@ -8,12 +8,13 @@ from typing import TYPE_CHECKING
 
 import json
 
+from treekle.codec import from_plain, loads
+
 import httpx2
 import pytest
 
 from sagent.agent.agent import Agent
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.codec import from_plain, loads
 from sagent.providers.openai.api import OpenAI
 from sagent.tools.bash import Bash
 from sagent.types.runtime import (

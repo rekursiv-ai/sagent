@@ -54,8 +54,9 @@ import re
 import time
 import uuid
 
+from treekle.codec import MutablePlainTree, from_plain, mutable
+
 from sagent.lib import token_count
-from sagent.lib.codec import MutablePlainTree, from_plain, mutable
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.lib.model_base import ModelDefaults
 from sagent.providers.lib.stop_reason import normalize_stop_reason

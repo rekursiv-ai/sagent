@@ -26,8 +26,9 @@ import platform
 import shutil
 import subprocess
 
+from treekle.codec import PlainTree, immutable
+
 from sagent.agent.state import get_tool_state
-from sagent.lib.codec import PlainTree, immutable
 from sagent.tools.core import load_tool_description, run_sync
 from sagent.types.runtime import ToolResult
 

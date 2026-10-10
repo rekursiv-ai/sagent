@@ -8,13 +8,13 @@ from typing import TYPE_CHECKING, cast
 
 import json
 
-import fastjsonschema
+from treekle.codec import mutable
 
-from sagent.lib.codec import mutable
+import fastjsonschema
 
 
 if TYPE_CHECKING:
-    from sagent.lib.codec import PlainTree
+    from treekle.codec import PlainTree
 
 
 def validate_tool_input(

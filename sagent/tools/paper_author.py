@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import asyncio
 
+from treekle.codec import PlainTree, immutable
 from wesearch.paper.authors import author_metadata, author_papers, search_authors
 from wesearch.paper.errors import PaperError
 from wesearch.paper.render import (
@@ -23,7 +24,6 @@ from wesearch.paper.render import (
 
 import cachetools
 
-from sagent.lib.codec import PlainTree, immutable
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     parse_optional_ids,

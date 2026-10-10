@@ -27,6 +27,8 @@ import logging
 import time
 import uuid
 
+from treekle.codec import PlainTree, from_plain, immutable
+
 from sagent.agent.agent import Agent, SystemPromptArg
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.session_io import (
@@ -42,7 +44,6 @@ from sagent.agent.state import (
     get_tool_state,
     max_depth_var,
 )
-from sagent.lib.codec import PlainTree, from_plain, immutable
 from sagent.providers import PROVIDER_NAMES
 from sagent.providers.providers import (
     build_provider_with_account_fallback,

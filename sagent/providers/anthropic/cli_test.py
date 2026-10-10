@@ -57,7 +57,7 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from sagent.lib.codec import MutablePlainTree
+    from treekle.codec import MutablePlainTree
 
 
 def _noop_sync_tools_bridge(

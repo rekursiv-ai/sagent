@@ -11,12 +11,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import json
 import operator
 
+from treekle.codec import from_plain
+
 import httpx2
 import pytest
 
 from sagent.agent.retry import error_status, is_retryable
 from sagent.bin.cli import DEFAULT_TOOLS, resolve_tools
-from sagent.lib.codec import from_plain
 from sagent.providers.anthropic.api import (
     Anthropic,
     _AnthropicModel,
@@ -64,10 +65,10 @@ from sagent.types.runtime import (
 
 if TYPE_CHECKING:
     from anthropic.types import MessageParam
+    from treekle.codec import MutablePlainTree
 
     import anthropic as anthropic_sdk
 
-    from sagent.lib.codec import MutablePlainTree
     from sagent.types.capability import ThinkingBudget, ThinkingOutput
     from sagent.types.tools import Tool
 

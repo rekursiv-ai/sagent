@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, cast
 
 import json
 
-from sagent.lib.codec import MutablePlainTree, PlainTree, from_plain
+from treekle.codec import MutablePlainTree, PlainTree, from_plain
+
 from sagent.providers.selfhosted.server import (
     SelfHosted,
     SelfHostedModel,

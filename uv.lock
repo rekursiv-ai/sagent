@@ -3485,6 +3485,7 @@ dependencies = [
     { name = "rignore" },
     { name = "starlette" },
     { name = "tiktoken" },
+    { name = "treekle" },
     { name = "uvicorn" },
     { name = "webp" },
     { name = "wesearch" },
@@ -3601,6 +3602,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'selfhosted'", specifier = "==2.11.0" },
     { name = "torchvision", marker = "extra == 'selfhosted'", specifier = "==0.26.0" },
     { name = "transformers", marker = "extra == 'selfhosted'", specifier = ">=5.8.0" },
+    { name = "treekle", git = "https://github.com/rekursiv-ai/treekle?branch=main" },
     { name = "uvicorn", specifier = ">=0.30.0" },
     { name = "webp", specifier = ">=0.4.0" },
     { name = "wesearch", git = "https://github.com/rekursiv-ai/wesearch?branch=main" },
@@ -4079,6 +4081,11 @@ wheels = [
 ]
 
 [[package]]
+name = "treekle"
+version = "0.1.0"
+source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#aaeed7e409e97d3a792c1c2f32139838a48a510b" }
+
+[[package]]
 name = "triton"
 version = "3.6.0"
 source = { registry = "https://pypi.org/simple" }
@@ -4388,7 +4395,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.13"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#61a041447e07f1641bec4a68a702a264a8c09efe" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#afaa3c251ab723fe5bcf05aac08249c77e031a99" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },
@@ -4397,6 +4404,7 @@ dependencies = [
     { name = "html2text" },
     { name = "markdownify" },
     { name = "trafilatura" },
+    { name = "treekle" },
     { name = "wrapt" },
     { name = "zendriver" },
     { name = "zstandard" },

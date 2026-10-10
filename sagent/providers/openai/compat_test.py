@@ -9,13 +9,14 @@ from typing import ClassVar, cast
 import json
 import logging
 
+from treekle.codec import MutablePlainTree, from_plain
+
 import httpx2
 import pytest
 import tiktoken
 
 from sagent.catalog.openai import compatible
 from sagent.catalog.table import ModelCatalog, ModelTable
-from sagent.lib.codec import MutablePlainTree, from_plain
 from sagent.providers.dashscope.api import DashScope
 from sagent.providers.lib.errors import error_status_code
 from sagent.providers.minimax.api import MiniMax

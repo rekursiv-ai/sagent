@@ -16,6 +16,8 @@ import os
 import subprocess
 import sys
 
+from treekle.codec import ReadError
+
 import pytest
 
 from sagent import sessions
@@ -58,7 +60,6 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.catalog.table import UnknownModelError
-from sagent.lib.codec import ReadError
 from sagent.providers import PROVIDER_NAMES
 from sagent.sessions import SessionInfo, project_dir
 from sagent.testing import FakeAgent, MockModelCaps

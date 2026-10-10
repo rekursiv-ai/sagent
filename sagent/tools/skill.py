@@ -24,8 +24,9 @@ import dataclasses
 import logging
 import re
 
+from treekle.codec import PlainTree, immutable
+
 from sagent.agent.state import ToolState, get_tool_state
-from sagent.lib.codec import PlainTree, immutable
 from sagent.lib.dotsagent import parse_frontmatter, walk_up
 from sagent.lib.userdirs import data_dir
 from sagent.tools.core import load_tool_description

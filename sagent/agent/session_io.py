@@ -39,6 +39,8 @@ import os
 import threading
 import time
 
+from treekle.codec import ReadError, from_plain
+
 from sagent.agent.context import (
     alive_splices,
     masked_refs_by_alive,
@@ -50,7 +52,6 @@ from sagent.agent.state import (
     ToolState,
 )
 from sagent.lib.atomic_file import write_all
-from sagent.lib.codec import ReadError, from_plain
 from sagent.providers.providers import (
     build_provider_with_account_fallback,
 )

@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Final
 
 import logging
 
+from treekle.codec import PlainTree, immutable
+
 from sagent.agent.agent import Agent, ObservedModel
 from sagent.agent.retry import (
     RateLimitError,
@@ -29,7 +31,6 @@ from sagent.agent.retry import (
 )
 from sagent.agent.state import current_agent_var
 from sagent.lib import debug_log
-from sagent.lib.codec import PlainTree, immutable
 from sagent.types.model import (
     Model,
     ModelRequest,

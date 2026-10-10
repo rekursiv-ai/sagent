@@ -96,10 +96,11 @@ else:
     openai = lazy_import("openai")  # 493ms cold.
 
 
+from treekle.codec import MutablePlainTree, ReadError, from_plain, loads
+
 from sagent.catalog.openai import subscription, subscription_models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.codec import MutablePlainTree, ReadError, from_plain, loads
 from sagent.providers.lib.oauth import (
     AuthCodeListener,
     credential_file_lock,

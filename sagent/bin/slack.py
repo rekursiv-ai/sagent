@@ -71,6 +71,7 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
+from treekle.codec import MutablePlainTree, ReadError, from_plain
 
 import httpx2
 
@@ -82,7 +83,6 @@ from sagent.bin.cli import (
     resolve_tools,
 )
 from sagent.compaction.summary import SummaryCompactor
-from sagent.lib.codec import MutablePlainTree, ReadError, from_plain
 from sagent.lib.userdirs import data_dir
 from sagent.providers import build_provider
 from sagent.tools.slack import Slack, SlackSender

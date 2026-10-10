@@ -20,6 +20,8 @@ from typing import TYPE_CHECKING, Protocol, cast
 import asyncio
 import dataclasses
 
+from treekle.codec import PlainTree, immutable
+
 from sagent.agent.agent import ModelChange
 from sagent.agent.state import (
     AgentLike,
@@ -31,7 +33,6 @@ from sagent.catalog.table import (
     UnsupportedTagError,
     base_model_id,
 )
-from sagent.lib.codec import PlainTree, immutable
 from sagent.providers.providers import (
     PROVIDER_NAMES,
     infer_provider,

@@ -8,11 +8,12 @@ from unittest.mock import MagicMock, patch
 
 import time
 
+from treekle.codec import from_plain
+
 import pytest
 
 from sagent.agent.agent import ActivityTracker, Agent
 from sagent.agent.cost_tracker import CostTracker
-from sagent.lib.codec import from_plain
 from sagent.repl.status_pane import render_status_pane
 from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.settings import AgentSettings

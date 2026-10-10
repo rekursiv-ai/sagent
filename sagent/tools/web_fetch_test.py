@@ -8,13 +8,13 @@ from unittest.mock import patch
 import asyncio
 import socket
 
+from treekle.codec import immutable
 from wesearch.fetch import PolicyParams
 from wesearch.types.errors import CloudflareChallengeError, FetchError
 from wesearch.web import FetchResult
 
 import pytest
 
-from sagent.lib.codec import immutable
 from sagent.tools.lib.bash import parse_bash
 from sagent.tools.web_fetch import (
     WebFetch,

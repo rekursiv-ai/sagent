@@ -8,10 +8,11 @@ from typing import TYPE_CHECKING, cast
 
 import logging
 
+from treekle.codec import MutablePlainTree, PlainTree, from_plain, loads
+
 import httpx2
 import pytest
 
-from sagent.lib.codec import MutablePlainTree, PlainTree, from_plain, loads
 from sagent.providers.google.api import (
     Google,
     _build_request,

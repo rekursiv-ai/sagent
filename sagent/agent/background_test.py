@@ -8,6 +8,8 @@ from typing import cast
 
 import asyncio
 
+from treekle.codec import PlainTree
+
 import pytest
 
 from sagent.agent.background import (
@@ -17,7 +19,6 @@ from sagent.agent.background import (
     bg_augmented_schema,
     split_bg_args,
 )
-from sagent.lib.codec import PlainTree
 from sagent.types.runtime import ToolResult
 
 

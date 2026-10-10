@@ -17,8 +17,9 @@ from dataclasses import replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
+from treekle.codec import from_plain
+
 from sagent.catalog.table import ModelTable
-from sagent.lib.codec import from_plain
 from sagent.types.capability import (
     ContextTag,
     ModelCapability,

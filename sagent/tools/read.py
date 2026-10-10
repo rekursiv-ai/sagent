@@ -10,12 +10,13 @@ import asyncio
 import json
 import re
 
+from treekle.codec import from_plain, immutable
+
 from sagent.agent.state import (
     approx_tokens,
     current_agent_var,
     get_tool_state,
 )
-from sagent.lib.codec import from_plain, immutable
 from sagent.tools.core import (
     bound_by_tokens,
     file_lock_key,

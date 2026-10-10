@@ -32,7 +32,8 @@ from sagent.providers.openai.compat import (
 
 
 if TYPE_CHECKING:
-    from sagent.lib.codec import MutablePlainTree
+    from treekle.codec import MutablePlainTree
+
     from sagent.types.model import (
         ModelRequest,
     )

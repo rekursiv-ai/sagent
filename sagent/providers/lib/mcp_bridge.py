@@ -66,12 +66,13 @@ else:
     _starlette_routing = lazy_import("starlette.routing")
     uvicorn = lazy_import("uvicorn")
 
+from treekle.codec import mutable
+
 from sagent.agent.background import (
     backgroundable,
     bg_augmented_schema,
     split_bg_args,
 )
-from sagent.lib.codec import mutable
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.types.exceptions import log_task_exception
 from sagent.types.runtime import RuntimeEvent, ToolLabel, ToolResult

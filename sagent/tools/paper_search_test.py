@@ -23,7 +23,7 @@ from sagent.tools.paper_search import PaperSearch, _empty_hint
 
 
 if TYPE_CHECKING:
-    from sagent.lib.codec import MutablePlainTree
+    from treekle.codec import MutablePlainTree
 
 
 def _result(

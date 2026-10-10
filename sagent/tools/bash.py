@@ -22,6 +22,8 @@ import signal
 import subprocess
 import time
 
+from treekle.codec import from_plain, immutable
+
 from sagent.agent.runtime import EXCLUSIVE_KEY
 from sagent.agent.state import (
     ToolState,
@@ -29,7 +31,6 @@ from sagent.agent.state import (
     get_tool_state,
 )
 from sagent.lib import debug_log
-from sagent.lib.codec import from_plain, immutable
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,

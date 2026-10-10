@@ -11,9 +11,10 @@ import pathlib
 import shutil
 import subprocess
 
+from treekle.codec import from_plain
+
 import pytest
 
-from sagent.lib.codec import from_plain
 from sagent.lib.files.grep import (
     ARGV_CHARS,
     GrepError,

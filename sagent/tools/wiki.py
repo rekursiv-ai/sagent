@@ -22,8 +22,9 @@ from typing import TYPE_CHECKING, Final
 import logging
 import re
 
+from treekle.codec import PlainTree, immutable
+
 from sagent.agent.state import get_tool_state
-from sagent.lib.codec import PlainTree, immutable
 from sagent.tools.core import load_tool_description, run_sync
 from sagent.tools.prompt_text import escape_prompt_text
 from sagent.types.runtime import ToolResult

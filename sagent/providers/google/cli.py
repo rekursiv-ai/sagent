@@ -34,12 +34,13 @@ import logging
 import os
 import shutil
 
+from treekle.codec import MutablePlainTree, PlainTree, from_plain
+
 import fastjsonschema
 
 from sagent.catalog.google import cli, models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.codec import MutablePlainTree, PlainTree, from_plain
 from sagent.providers.google.api import Google, gemini_image_tokens
 from sagent.providers.lib.cli_respawn import (
     CLISubprocessModel,

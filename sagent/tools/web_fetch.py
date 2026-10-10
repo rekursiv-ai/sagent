@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Annotated, cast, get_args
 
 import asyncio
 
+from treekle.codec import PlainTree, immutable, mutable
 from wesearch.fetch import Extractor, PolicyParams, Transport
 from wesearch.fetch.custom_types import FetchBodyParamsSchema, HttpMethod
 from wesearch.types.errors import BotDetectionError, FetchError
@@ -14,7 +15,6 @@ from wesearch.web import fetch_web
 
 import cachetools
 
-from sagent.lib.codec import PlainTree, immutable, mutable
 from sagent.tools.core import (
     load_tool_description,
     truncate_to_budget,

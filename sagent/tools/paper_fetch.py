@@ -18,13 +18,13 @@ from typing import TYPE_CHECKING
 import asyncio
 import logging
 
+from treekle.codec import PlainTree, immutable
 from wesearch.paper.errors import PaperError
 from wesearch.paper.fetch import batch_oa_urls, download, looks_like_pdf
 from wesearch.paper.ids import id_slug, s2_wire_id
 
 from sagent.lib import userdirs
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.codec import PlainTree, immutable
 from sagent.tools.core import load_tool_description
 from sagent.tools.paper_common import (
     normalize_id_arg,

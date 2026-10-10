@@ -34,7 +34,8 @@ from sagent.types.cost import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from sagent.lib.codec import MutablePlainTree
+    from treekle.codec import MutablePlainTree
+
     from sagent.types.capability import ModelSettings
 
 

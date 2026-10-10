@@ -14,6 +14,8 @@ import json
 import logging
 import os
 
+from treekle.codec import from_plain, loads
+
 import httpx2
 import openai
 import pytest
@@ -21,7 +23,6 @@ import pytest
 from sagent.agent.retry import is_rate_limited, is_retryable
 from sagent.agent.session_io import _entry_from_json, _entry_to_json
 from sagent.catalog.openai import reasoning_effort
-from sagent.lib.codec import from_plain, loads
 from sagent.providers.lib.id_remap import IdRemapper
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.responses import (
@@ -63,7 +64,7 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from sagent.lib.codec import MutablePlainTree, PlainTree
+    from treekle.codec import MutablePlainTree, PlainTree
 
 
 @dataclass(slots=True, kw_only=True)

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import asyncio
 
+from treekle.codec import PlainTree, from_plain, immutable
 from wesearch.paper.details import (
     GraphSource,
     Listing,
@@ -29,7 +30,6 @@ from wesearch.paper.render import (
 
 import cachetools
 
-from sagent.lib.codec import PlainTree, from_plain, immutable
 from sagent.tools.core import load_tool_description, opt_int
 from sagent.tools.paper_common import (
     normalize_id_arg,

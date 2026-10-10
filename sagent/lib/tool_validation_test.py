@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from sagent.lib.codec import immutable
+from treekle.codec import immutable
+
 from sagent.lib.tool_validation import validate_tool_input
 
 

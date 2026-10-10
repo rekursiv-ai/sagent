@@ -10,6 +10,8 @@ import contextlib
 import json
 import time
 
+from treekle.codec import immutable
+
 import pytest
 
 from sagent.agent.agent import Agent
@@ -18,7 +20,6 @@ from sagent.agent.background import (
     BackgroundTaskEntry,
 )
 from sagent.agent.state import agent_registry, current_agent_var
-from sagent.lib.codec import immutable
 from sagent.testing import FakeAgent, MockModelCaps, with_fake_agent
 from sagent.tools.background_task import (
     BackgroundTask,

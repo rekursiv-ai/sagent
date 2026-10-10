@@ -29,6 +29,8 @@ import threading
 import time
 import typing
 
+from treekle.codec import PlainTree, from_plain, immutable
+
 import yaml
 
 from sagent.agent.state import (
@@ -36,7 +38,6 @@ from sagent.agent.state import (
     current_agent_var,
     get_tool_state,
 )
-from sagent.lib.codec import PlainTree, from_plain, immutable
 from sagent.types.runtime import ToolResult
 
 

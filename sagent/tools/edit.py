@@ -15,9 +15,10 @@ import difflib
 import re
 import shlex
 
+from treekle.codec import from_plain, immutable
+
 from sagent.agent.state import get_tool_state
 from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.lib.codec import from_plain, immutable
 from sagent.tools.core import (
     file_lock_key,
     load_tool_description,

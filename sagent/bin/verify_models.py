@@ -40,10 +40,11 @@ import os
 import re
 import sys
 
+from treekle.codec import from_plain
+
 import httpx2
 
 from sagent import providers
-from sagent.lib.codec import from_plain
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.google.api import Google
 from sagent.providers.openai.api import OpenAI

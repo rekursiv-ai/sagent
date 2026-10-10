@@ -32,8 +32,9 @@ import re
 import subprocess
 import tempfile
 
+from treekle.codec import PlainTree, immutable
+
 from sagent.agent.agent import Agent
-from sagent.lib.codec import PlainTree, immutable
 from sagent.tools import AgentSelf
 from sagent.types.runtime import (
     AssistantMessage,
