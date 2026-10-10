@@ -277,6 +277,7 @@ def resource_marker_aliases(
         ("gpu_triton", ("cuda",)),
         ("network_anthropic", ("integration",)),
         ("network_duckduckgo", ("integration",)),
+        ("network_e2b", ("integration",)),
         ("network_gemini", ("integration",)),
         ("network_google_search", ("integration",)),
         ("network_github", ("integration",)),
