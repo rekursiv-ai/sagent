@@ -4,6 +4,7 @@ from typing import Any, NoReturn
 import weakref
 
 from torch import nn
+from torch.distributed._composable.contract import contract
 from torch.distributed._composable_state import _State
 
 import torch
@@ -42,6 +43,7 @@ class DDP:
     def set_requires_gradient_sync(self, requires_gradient_sync: bool) -> None: ...
     def register_comm_hook(self, *args, **kwargs) -> None: ...
 
+@contract(state_cls=_ReplicateState)
 def replicate(
     module: nn.Module,
     ignored_modules: Iterable[nn.Module] | None = ...,
