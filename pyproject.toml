@@ -224,7 +224,7 @@ markers = [
     "network_openreview: reaches OpenReview over the network",
     "network_pypi: reaches PyPI over the network",
     "network_searxng: reaches a SearXNG service over the network",
-    "network_shadeform: reaches Shadeform over the network",
+    "network_gpu_cloud: reaches a GPU cloud provider over the network",
     "network_slack: reaches Slack over the network",
     "network_together: reaches Together over the network",
     "network_wandb: reaches Weights & Biases over the network",
