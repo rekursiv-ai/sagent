@@ -65,6 +65,7 @@ from sagent.types.runtime import (
     ToolResultKind,
     ToolResultPartial,
     UserMessage,
+    user_message_parts,
 )
 
 
@@ -538,6 +539,22 @@ def strip_reminders(content: str) -> str:
     ).strip("\n")
 
 
+def render_user_message(
+    printer: Printer,
+    message: UserMessage | AgentSendMessage,
+) -> None:
+    """Render each original sender using structured batching provenance."""
+    if message.hidden:
+        return
+    for part in user_message_parts(message):
+        if part.hidden:
+            continue
+        if part.source is None:
+            printer.write_user_bar(part.text)
+        else:
+            printer.write_agent_bar(part.source, part.text)
+
+
 def make_render_observer(
     printer: Printer,
     *,
@@ -605,12 +622,9 @@ class RenderObserver:
             self._flush_stream()
             return
         match event:
-            case UserMessage(text=text):
+            case UserMessage() | AgentSendMessage():
                 self._flush_stream()
-                self._printer.write_user_bar(text)
-            case AgentSendMessage(source=source, text=text):
-                self._flush_stream()
-                self._printer.write_agent_bar(source, text)
+                render_user_message(self._printer, event)
             case ModelResponsePartial(text=text):
                 self._feed_stream(text)
             case ModelResponseThinking(text=text):

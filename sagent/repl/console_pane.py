@@ -35,6 +35,7 @@ from sagent.repl.render import (
     ChildItem,
     error_text,
     render_tool_result,
+    render_user_message,
     service_suspended_text,
 )
 from sagent.repl.render_diff import (
@@ -498,9 +499,7 @@ def _render_child_item(
                     else None
                 ),
             )
-        case AgentSendMessage(source=source, text=text):
-            printer.write_agent_bar(source, text)
-        case UserMessage(text=text):
-            printer.write_user_bar(text)
+        case AgentSendMessage() | UserMessage():
+            render_user_message(printer, item)
         case _:
             assert_never(item)

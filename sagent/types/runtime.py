@@ -126,9 +126,12 @@ __all__ = [
     "Undetach",
     "UserDeferredMessage",
     "UserMessage",
+    "UserMessagePart",
     "UserQueuedMessage",
     "labeled_agent_send_text",
+    "merge_user_message_parts",
     "reset_id_counter",
+    "user_message_parts",
     "wire_role",
 ]
 
@@ -223,6 +226,20 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class UserMessagePart:
+    """Display provenance for one part of a combined user-role message."""
+
+    text: str
+    """Original text, without an added sender label."""
+
+    source: str | None = None
+    """Agent sender, or ``None`` for human input."""
+
+    hidden: bool = False
+    """Whether this part should be suppressed in the REPL."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class UserMessage(SessionMessage):
     """Human-authored user-role text the model should see."""
 
@@ -231,6 +248,10 @@ class UserMessage(SessionMessage):
 
     attachments: tuple[BytesMessage, ...] = ()
     """Image/PDF payloads sent alongside the text."""
+
+    parts: tuple[UserMessagePart, ...] = ()
+    """Original sources when batching combined distinct senders. Render-only;
+    providers continue to receive ``text`` and ``attachments``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -245,6 +266,39 @@ class AgentSendMessage(SessionMessage):
 
     attachments: tuple[BytesMessage, ...] = ()
     """Image/PDF payloads sent alongside the text."""
+
+    parts: tuple[UserMessagePart, ...] = ()
+    """Original sources when combined with other user-role messages."""
+
+
+def user_message_parts(
+    message: UserMessage | AgentSendMessage,
+) -> tuple[UserMessagePart, ...]:
+    """Return flat display parts without inferring a sender from text."""
+    return message.parts or (
+        UserMessagePart(
+            text=message.text,
+            source=message.source if isinstance(message, AgentSendMessage) else None,
+            hidden=message.hidden,
+        ),
+    )
+
+
+def merge_user_message_parts(
+    prior: UserMessage | AgentSendMessage,
+    entry: UserMessage | AgentSendMessage,
+) -> tuple[UserMessagePart, ...]:
+    """Keep provenance when a merge crosses a sender or visibility boundary."""
+    prior_source = prior.source if isinstance(prior, AgentSendMessage) else None
+    entry_source = entry.source if isinstance(entry, AgentSendMessage) else None
+    if (
+        not prior.parts
+        and not entry.parts
+        and prior_source == entry_source
+        and prior.hidden == entry.hidden
+    ):
+        return ()
+    return (*user_message_parts(prior), *user_message_parts(entry))
 
 
 def labeled_agent_send_text(entry: AgentSendMessage) -> str:

@@ -177,6 +177,12 @@ REPL keys:
 - `Ctrl+X Ctrl+E`: edit in `$EDITOR`.
 - `Ctrl+C`: cancel current input or operation.
 
+Human input uses the input bar. Messages delivered by agents show their sender
+with a `[from NAME]` label, including when several deliveries arrive while the
+parent is responding. New saved sessions preserve these sender labels when
+replayed. Older saved batches without sender metadata retain their previous
+display; Sagent does not infer authorship from labels typed into message text.
+
 ### Steering subagents
 
 `/send`, `/halt`, and `/kill` accept a shared target syntax for live

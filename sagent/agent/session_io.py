@@ -79,6 +79,7 @@ from sagent.types.runtime import (
     ToolResult,
     ToolResultKind,
     UserMessage,
+    UserMessagePart,
     reset_id_counter,
 )
 from sagent.types.tape import (
@@ -1062,6 +1063,45 @@ def _thinking_from_json(raw: object) -> tuple[Mapping[str, object], ...]:
     )
 
 
+def _message_parts_to_json(
+    parts: tuple[UserMessagePart, ...],
+) -> dict[str, object]:
+    """Persist optional display provenance without changing legacy records."""
+    if not parts:
+        return {}
+    return {
+        "parts": [
+            {"text": part.text, "source": part.source, "hidden": part.hidden}
+            for part in parts
+        ],
+    }
+
+
+def _message_parts_from_json(raw: object) -> tuple[UserMessagePart, ...]:
+    """Load flat display provenance; old sessions have no such field."""
+    if not isinstance(raw, list):
+        return ()
+    parts: list[UserMessagePart] = []
+    for item in cast(list[object], raw):
+        if not isinstance(item, dict):
+            return ()
+        data = cast(dict[str, object], item)
+        text = data.get("text")
+        source = data.get("source")
+        if not isinstance(text, str) or (
+            source is not None and not isinstance(source, str)
+        ):
+            return ()
+        parts.append(
+            UserMessagePart(
+                text=text,
+                source=source,
+                hidden=_json_bool(data.get("hidden")),
+            ),
+        )
+    return tuple(parts)
+
+
 def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
     """Encode one ``TapeEvent`` body (no ``kind`` / ``ref`` wrapping)."""
     if isinstance(entry, CompactStarted):
@@ -1091,6 +1131,7 @@ def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
             "parent_id": entry.parent_id,
             "timestamp": entry.timestamp,
             "hidden": entry.hidden,
+            **_message_parts_to_json(entry.parts),
         }
     if isinstance(entry, AgentSendMessage):
         return {
@@ -1102,6 +1143,7 @@ def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
             "parent_id": entry.parent_id,
             "timestamp": entry.timestamp,
             "hidden": entry.hidden,
+            **_message_parts_to_json(entry.parts),
         }
     if isinstance(entry, AssistantMessage):
         return {
@@ -1426,6 +1468,7 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             parent_id=parent_id,
             timestamp=timestamp,
             hidden=hidden,
+            parts=_message_parts_from_json(d.get("parts")),
         )
     if t == "agent_send":
         return AgentSendMessage(
@@ -1436,6 +1479,7 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
             parent_id=parent_id,
             timestamp=timestamp,
             hidden=hidden,
+            parts=_message_parts_from_json(d.get("parts")),
         )
     if t == "assistant":
         raw_tcs = d.get("tool_calls")

@@ -292,6 +292,7 @@ from sagent.types.runtime import (
     UserDeferredMessage,
     UserMessage,
     UserQueuedMessage,
+    merge_user_message_parts,
     wire_role,
 )
 from sagent.types.tape import (
@@ -2570,6 +2571,8 @@ class AgentRuntime:
         assert isinstance(tail, (UserMessage, AgentSendMessage))
         text = f"{tail.text}\n\n{item.text}"
         attachments = tail.attachments + item.attachments
+        parts = merge_user_message_parts(tail, item)
+        hidden = tail.hidden and item.hidden
         # Same-type merges preserve the tail's id (downstream consumers key
         # on it). Cross-type merges adopt the agent type when either side
         # is an ``AgentSendMessage`` so the source attribution survives;
@@ -2580,18 +2583,24 @@ class AgentRuntime:
                 tail,
                 text=text,
                 attachments=attachments,
+                parts=parts,
+                hidden=hidden,
             )
         elif isinstance(item, AgentSendMessage):
             combined = dataclasses.replace(
                 item,
                 text=text,
                 attachments=attachments,
+                parts=parts,
+                hidden=hidden,
             )
         else:
             combined = dataclasses.replace(
                 tail,
                 text=text,
                 attachments=attachments,
+                parts=parts,
+                hidden=hidden,
             )
         tail_origin = resolved.origins[-1]
         # When the visible tail is itself a coalesce splice's payload,
