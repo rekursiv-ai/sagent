@@ -17,7 +17,9 @@ jsonpickle's spelling where one exists:
 - ``py/float``, ``py/complex``, ``py/b64``, ``py/path``, ``py/uuid``,
   ``py/datetime``: values a dialect lacks.
 - ``py/reduce``, ``py/hook``: a pickle reduce recipe and a caller-supplied codec.
-- ``py/id``: a back-reference, so a shared object or a cycle survives.
+- ``py/ref``: a back-reference by the path of the object's first occurrence, so a
+  shared object or a cycle survives. ``py/id``, the older back-reference by
+  encounter number, still reads.
 - ``json://``: a dict key that is not a string, or that reads like a tag.
 
 ``to_plain`` takes a ``dialect`` naming the target format, which decides what
@@ -47,6 +49,56 @@ It is lenient about syntax and strict about type: it accepts JSON, falls back
 to the bare word, and lets ``T`` decide, so ``parse("123", str)`` is ``"123"``.
 The result then passes through ``from_plain``, so text that does not fit ``T``
 raises :class:`ReadError`, never a default.
+
+Why not another serializer:
+
+tl;dr: No library is perfect, including this one.
+
+library     C/Rust  text  class from data  callables  shared refs  best-effort
+----------  ------  ----  ---------------  ---------  -----------  -----------
+msgspec     ✓       ✓     ✗                ✗          ✗            ✗
+pydantic    ✓       ✓     ✗                ✗          ✗            ✗
+cattrs      ✗       ✓     ✗                ✗          ✗            ✗
+mashumaro   ✗       ✓     ✗                ✗          ✗            ✗
+pickle      ✓       ✗     ✓                ✓          ✓            ✗
+jsonpickle  ✗       ✓     ✓                ✓          ✓            ✗
+codec       ✗       ✓     ✓                ✓          ✓            ✓
+
+- C/Rust: the core is a compiled extension, not pure Python.
+- text: encodes to human-readable text (JSON), not opaque bytes.
+- class from data: decode builds a class the payload names by import path,
+  beyond the declared type and its subclasses.
+- callables: a function round-trips by import path, with no special field type.
+- shared refs: an object referenced twice decodes as one object; cycles too.
+- best-effort: bad input yields the partial value and every bad part's location.
+
+In our case being pure python is a bad thing; native implementations are
+faster and our preference would be to use msgspec. However we need pickle
+semantics but as raw text.
+
+Each mark is what a probe of msgspec 0.22, pydantic 2.13, cattrs 26.2,
+mashumaro 3.23, and jsonpickle 4.1 returned:
+
+library     text    class from data  callables      shared refs  best-effort
+----------  ------  ---------------  -------------  -----------  -----------------
+msgspec     JSON    ``dict``         raises         split        first error
+pydantic    JSON    ``dict``         raises         split        all, no value
+cattrs      JSON    raises           raises         split        all, no value
+mashumaro   JSON    raises           raises         split        first error
+pickle      binary  the class        same function  kept         first error
+jsonpickle  JSON    the class        same function  kept         no error, ``dict``
+codec       JSON    the class        same function  kept         partial value, all
+
+- text: what one dataclass encodes to.
+- class from data: an ``object`` field given a payload naming another class.
+- callables: a field holding a module-level function.
+- shared refs: one object in two fields; "split" decodes two separate copies.
+- best-effort: two bad fields.
+
+Fast libraries decode only classes known ahead of time: a class named in the
+data means an import and code run on read. Codec gates that behind
+``allow_imports``. One cycle shape fails to read: one through a dataclass
+decoded as its declared type.
 """
 
 from __future__ import annotations
@@ -512,8 +564,9 @@ class _Encoding:
       hooks: Codecs for leaf types with no built-in conversion.
       make_list: Builds a sequence node: ``list`` or ``tuple``.
       make_dict: Builds a mapping node: ``dict`` or ``MappingProxyType``.
-      seen: Encounter number by ``id``, for ``py/id``.
-      alive: Every numbered object, so its ``id`` is not reused mid-walk.
+      at: Where the node being encoded sits.
+      seen: The path of each registered object's first occurrence, by ``id``.
+      alive: Every registered object, so its ``id`` is not reused mid-walk.
 
     """
 
@@ -521,7 +574,8 @@ class _Encoding:
     hooks: Hooks
     make_list: Callable[[list[PlainTree]], PlainTree]
     make_dict: Callable[[dict[str, PlainTree]], PlainTree]
-    seen: dict[int, int] = field(default_factory=dict[int, int])
+    at: list[str | int] = field(default_factory=list[str | int])
+    seen: dict[int, FieldPath] = field(default_factory=dict[int, FieldPath])
     alive: list[object] = field(default_factory=list[object])
 
 
@@ -536,6 +590,7 @@ class _Decoding:
       untagged: Whether the input holds no tag, so an ``object`` part is
         returned as the input itself rather than copied.
       built: Every numbered object, by encounter order, for ``py/id``.
+      placed: Every registered object, by where it sits, for ``py/ref``.
       bad: Each part that did not read, by where it sits.
 
     """
@@ -545,6 +600,7 @@ class _Decoding:
     strict: bool = True
     untagged: bool = False
     built: list[object] = field(default_factory=list[object])
+    placed: dict[FieldPath, object] = field(default_factory=dict[FieldPath, object])
     bad: dict[FieldPath, Invalid] = field(default_factory=dict[FieldPath, Invalid])
 
 
@@ -577,7 +633,7 @@ def _frozen_dict(items: dict[str, PlainTree]) -> PlainTree:
 
 
 def _encode(value: object, state: _Encoding) -> PlainTree:
-    """Encode one node: plain passthrough, ``py/id`` repeat, else its encoder."""
+    """Encode one node: plain passthrough, ``py/ref`` repeat, else its encoder."""
     kind = type(value)
     if value is None or (isinstance(value, (str, int)) and kind in _NATIVE_LEAVES):
         return value
@@ -585,10 +641,19 @@ def _encode(value: object, state: _Encoding) -> PlainTree:
         return _encode_float(value, state)
     seen = state.seen.get(id(value))
     if seen is not None:
-        return state.make_dict({"py/id": seen})
+        return state.make_dict({"py/ref": state.make_list(list(seen))})
     if kind in state.hooks:
         return _encode_hooked(value, state)
     return _encoder_for(kind)(value, state)
+
+
+def _encode_at(value: object, key: str | int, state: _Encoding) -> PlainTree:
+    """Encode a container's part, which sits at ``key`` below the current node."""
+    state.at.append(key)
+    try:
+        return _encode(value, state)
+    finally:
+        state.at.pop()
 
 
 def _text_to_plain(text: str, target: object) -> MutablePlainTree:
@@ -637,7 +702,16 @@ def _decode(
     at: FieldPath,
     state: _Decoding,
 ) -> object:
-    """Decode one node: ``py/id``, else its tag's decoder, else ``target``'s."""
+    """Decode one node: a reference, else its tag's decoder, else ``target``'s."""
+    # Every node under a config reads as ``object``, so this path is the hot
+    # one: a leaf passes through and a tag picks its decoder with no alias,
+    # dispatch, or fit check, each of which is the identity for ``object``.
+    if target is object:
+        kind = type(data)
+        if kind in _PLAIN_LEAVES:
+            return data
+        if kind is dict and not state.untagged:
+            return _decode_tagged(cast("dict[str, PlainTree]", data), at, state)
     target = _resolve_alias(target)
     if not _is_plain(data):
         if _fits(data, target):
@@ -650,7 +724,9 @@ def _decode(
     decoder = _decoder_for(target)
     if decoder is _decode_union or not isinstance(data, Mapping):
         return decoder(data, target, at, state)
-    if "py/id" in data:
+    if "py/ref" in data:
+        value = _decode_path_reference(data, state)
+    elif "py/id" in data:
         value = _decode_reference(data, state)
     else:
         tag = _tag_of(data)
@@ -674,6 +750,35 @@ def _decode(
     if not _fits(value, target):
         raise ReadError(f"cannot read {value!r} as {target}")
     return value
+
+
+def _decode_tagged(
+    data: dict[str, PlainTree],
+    at: FieldPath,
+    state: _Decoding,
+) -> object:
+    """Decode a dict read as ``object``: by its tag, else as a plain dict."""
+    if "py/object" in data:
+        if not state.allow_imports:
+            return _decode_dict(data, object, at, state)
+        return _decode_object(data, object, at, state)
+    if len(data) == 1:
+        tag = next(iter(data))
+        if tag == "py/ref":
+            return _decode_path_reference(data, state)
+        if tag == "py/id":
+            return _decode_reference(data, state)
+        decoder = _TAG_DECODERS.get(tag)
+        if decoder is not None:
+            return decoder(data[tag], object, at, state)
+    tag = _tag_of(data)
+    if tag is None:
+        return _decode_dict(data, object, at, state)
+    if "py/ref" in data:
+        return _decode_path_reference(data, state)
+    if "py/id" in data:
+        return _decode_reference(data, state)
+    raise ReadError(f"invalid {tag} envelope: {data!r}")
 
 
 def _is_plain(data: object) -> bool:
@@ -778,10 +883,10 @@ def _fits(value: object, target: object) -> bool:
 
 
 # Registering before encoding children is what makes cycles terminate: a
-# back-reference reached below finds the parent already numbered.
+# back-reference reached below finds the parent already placed.
 def _register(value: object, state: _Encoding) -> None:
-    """Assign ``value`` its encounter number, before its children are encoded."""
-    state.seen[id(value)] = len(state.alive)
+    """Record where ``value`` first sits, before its children are encoded."""
+    state.seen[id(value)] = tuple(state.at)
     state.alive.append(value)
 
 
@@ -810,6 +915,39 @@ def _decode_reference(
     if value is _PENDING:
         raise ReadError(f"py/id {index} names a value still being built")
     return value
+
+
+def _decode_path_reference(
+    node: Mapping[str, PlainTree],
+    state: _Decoding,
+) -> object:
+    """Return the object a ``py/ref`` envelope names by its first path."""
+    path = node["py/ref"]
+    if (
+        len(node) != 1
+        or isinstance(path, (str, Mapping))
+        or not isinstance(path, Sequence)
+        or not all(type(step) in (str, int) for step in path)
+    ):
+        raise ReadError(f"invalid py/ref reference: {dict(node)!r}")
+    value = state.placed.get(tuple(cast("Sequence[str | int]", path)), _ABSENT_REF)
+    if value is _ABSENT_REF:
+        raise ReadError(f"py/ref {list(path)!r} names no earlier value")
+    if value is _PENDING:
+        raise ReadError(f"py/ref {list(path)!r} names a value still being built")
+    return value
+
+
+def _place(value: object, at: FieldPath, state: _Decoding) -> None:
+    """Record ``value`` by encounter number for ``py/id`` and by path for ``py/ref``."""
+    state.built.append(value)
+    state.placed[at] = value
+
+
+def _replace(index: int, value: object, at: FieldPath, state: _Decoding) -> None:
+    """Fill a slot ``_place`` reserved with ``_PENDING`` once ``value`` is built."""
+    state.built[index] = value
+    state.placed[at] = value
 
 
 def _invalid(
@@ -1115,10 +1253,12 @@ def _decode_literal(
 
 
 def _encode_list(value: object, state: _Encoding) -> PlainTree:
-    """Encode a list, numbering it for ``py/id``."""
+    """Encode a list, registering it for ``py/ref``."""
     items = cast("Sequence[object]", value)
     _register(value, state)
-    return state.make_list([_encode(item, state) for item in items])
+    return state.make_list(
+        [_encode_at(item, index, state) for index, item in enumerate(items)],
+    )
 
 
 def _decode_list(
@@ -1132,7 +1272,7 @@ def _decode_list(
         raise ReadError(f"cannot read {data!r} as {target}")
     item = _element_type(target)
     result: list[object] = []
-    state.built.append(result)
+    _place(result, at, state)
     result.extend(
         _decode_part(raw, item, (*at, index), state) for index, raw in enumerate(data)
     )
@@ -1140,8 +1280,11 @@ def _decode_list(
 
 
 def _encode_tuple(value: object, state: _Encoding) -> PlainTree:
-    """Encode a tuple as ``py/tuple``; tuples take no ``py/id`` number."""
-    items = [_encode(item, state) for item in cast("tuple[object, ...]", value)]
+    """Encode a tuple as ``py/tuple``; a tuple is a value, never referenced."""
+    items = [
+        _encode_at(item, index, state)
+        for index, item in enumerate(cast("tuple[object, ...]", value))
+    ]
     return state.make_dict({"py/tuple": state.make_list(items)})
 
 
@@ -1174,7 +1317,7 @@ def _encode_set(value: object, state: _Encoding) -> PlainTree:
     members = cast("AbstractSet[object]", value)
     _register(value, state)
     ordered = sorted(members, key=lambda member: _set_order_key(member, state))
-    items = [_encode(member, state) for member in ordered]
+    items = [_encode_at(member, index, state) for index, member in enumerate(ordered)]
     return state.make_dict({"py/set": state.make_list(items)})
 
 
@@ -1189,7 +1332,7 @@ def _decode_set(
         raise ReadError(f"cannot read {data!r} as {target}")
     item = _element_type(target)
     result: set[object] = set()
-    state.built.append(result)
+    _place(result, at, state)
     for index, raw in enumerate(data):
         member = _decode_part(raw, item, (*at, index), state)
         try:
@@ -1200,10 +1343,10 @@ def _decode_set(
 
 
 def _encode_frozenset(value: object, state: _Encoding) -> PlainTree:
-    """Encode a frozenset as ``py/frozenset``; it takes no ``py/id`` number."""
+    """Encode a frozenset as ``py/frozenset``; a frozenset is never referenced."""
     members = cast("AbstractSet[object]", value)
     ordered = sorted(members, key=lambda member: _set_order_key(member, state))
-    items = [_encode(member, state) for member in ordered]
+    items = [_encode_at(member, index, state) for index, member in enumerate(ordered)]
     return state.make_dict({"py/frozenset": state.make_list(items)})
 
 
@@ -1227,7 +1370,7 @@ def _decode_frozenset(
 
 
 def _set_order_key(value: object, state: _Encoding) -> tuple[str, str]:
-    """Return a set member's sort key without consuming ``py/id`` numbers."""
+    """Return a set member's sort key without registering anything it reaches."""
     mark = len(state.alive)
     try:
         encoded = _encode(value, state)
@@ -1241,12 +1384,11 @@ def _encode_dict(value: object, state: _Encoding) -> PlainTree:
     """Encode a dict, escaping keys through ``_encode_key``."""
     mapping = cast("Mapping[object, object]", value)
     _register(value, state)
-    return state.make_dict(
-        {
-            _encode_key(key, state): _encode(member, state)
-            for key, member in mapping.items()
-        },
-    )
+    encoded: dict[str, PlainTree] = {}
+    for key, member in mapping.items():
+        name = _encode_key(key, state)
+        encoded[name] = _encode_at(member, name, state)
+    return state.make_dict(encoded)
 
 
 def _decode_dict(
@@ -1261,7 +1403,7 @@ def _decode_dict(
     args = cast("tuple[object, ...]", get_args(target))
     key_type, value_type = args if len(args) == 2 else (object, object)
     result: dict[Hashable, object] = {}
-    state.built.append(result)
+    _place(result, at, state)
     for key, raw in data.items():
         where = (*at, key)
         try:
@@ -1298,7 +1440,13 @@ def _encode_key(key: object, state: _Encoding) -> str:
     """Return a dict key, ``json://``-escaping non-strings and tag lookalikes."""
     if isinstance(key, str) and not key.startswith(("py/", "json://")):
         return key
-    return "json://" + json.dumps(mutable(_encode(key, state)))
+    # A key is text, so nothing inside it has a path a later ``py/ref`` can name.
+    mark = len(state.alive)
+    try:
+        encoded = _encode(key, state)
+    finally:
+        _rollback(state, mark)
+    return "json://" + json.dumps(mutable(encoded))
 
 
 # A YAML reader yields non-str keys such as ``True``; they read as is.
@@ -1378,7 +1526,7 @@ def _encode_object(value: object, state: _Encoding) -> PlainTree:
     for name in _attribute_names(value):
         member: object = getattr(value, name, _PENDING)
         if member is not _PENDING:
-            payload[name] = _encode(member, state)
+            payload[name] = _encode_at(member, name, state)
     return state.make_dict(payload)
 
 
@@ -1441,7 +1589,7 @@ def _decode_object(
         if not isinstance(kind, type):
             raise ReadError(f"{path!r} does not name a class")
         value = _allocate(kind)
-        state.built.append(value)
+        _place(value, at, state)
         for attribute, raw in data.items():
             if attribute != "py/object":
                 member = _decode_part(raw, object, (*at, attribute), state)
@@ -1456,7 +1604,7 @@ def _decode_object(
             f"{name}: unknown field(s) {unknown}; valid: {sorted(types)}",
         )
     index = len(state.built)
-    state.built.append(_PENDING)
+    _place(_PENDING, at, state)
     before = len(state.bad)
     members = {
         key: _decode_part(raw, types[key], (*at, key), state)
@@ -1476,7 +1624,7 @@ def _decode_object(
         rest = {k: v for k, v in members.items() if k not in init}
     for key, member in rest.items():
         object.__setattr__(value, key, member)
-    state.built[index] = value
+    _replace(index, value, at, state)
     return value
 
 
@@ -1505,7 +1653,7 @@ def _encode_hooked(value: object, state: _Encoding) -> PlainTree:
     # The payload is arbitrary caller data, so it takes the same walk as any
     # other value: it may hold non-finite floats or tag-like keys.
     path = _import_path(type(value))
-    payload = _encode(encode_hook(value), state)
+    payload = _encode_at(encode_hook(value), 1, state)
     return state.make_dict({"py/hook": state.make_list([path, payload])})
 
 
@@ -1531,9 +1679,9 @@ def _decode_hooked(
     # The encoder numbers the hooked value before its payload, so the slot is
     # reserved in that order and filled once the hook rebuilds it.
     index = len(state.built)
-    state.built.append(_PENDING)
+    _place(_PENDING, at, state)
     value = hook[1](_decode(payload, object, (*at, 1), state))
-    state.built[index] = value
+    _replace(index, value, at, state)
     return value
 
 
@@ -1552,9 +1700,8 @@ def _encode_reduce(value: object, state: _Encoding) -> PlainTree:
         if any(part is not None for part in rest):
             _register(value, state)
         elements = [
-            _encode(func, state),
-            _encode(args, state),
-            *(_encode(part, state) for part in rest),
+            _encode_at(part, index, state)
+            for index, part in enumerate((func, args, *rest))
         ]
     except TypeError:
         _rollback(state, mark)
@@ -1596,7 +1743,7 @@ def _decode_reduce(
     stateful = any(part is not None for part in data[2:])
     index = len(state.built)
     if stateful:
-        state.built.append(_PENDING)
+        _place(_PENDING, at, state)
     func = (
         target
         if isinstance(target, type) and data[0] == {"py/type": _import_name(target)}
@@ -1610,7 +1757,7 @@ def _decode_reduce(
     except (TypeError, ValueError) as error:
         raise ReadError(f"py/reduce call failed: {error}") from error
     if stateful:
-        state.built[index] = value
+        _replace(index, value, at, state)
     if len(data) > 2 and data[2] is not None:
         _apply_state(value, _decode(data[2], object, (*at, 2), state))
     if len(data) > 3 and data[3] is not None:
@@ -1684,7 +1831,7 @@ def _decode_union(
             sorted(members, key=lambda member: _import_name(member) != path),
         )
     for member in members if tagged else _union_candidates(data, members):
-        built, bad = len(state.built), set(state.bad)
+        built, bad, placed = len(state.built), set(state.bad), set(state.placed)
         try:
             value = _decode(data, member, at, state)
         except ReadError:
@@ -1694,6 +1841,8 @@ def _decode_union(
         del state.built[built:]
         for key in set(state.bad) - bad:
             del state.bad[key]
+        for key in set(state.placed) - placed:
+            del state.placed[key]
     raise ReadError(f"cannot read {data!r} as {target}")
 
 
@@ -1839,25 +1988,38 @@ def _resolve(path: str, state: _Decoding) -> object:
 
 
 def _resolve_import(path: str) -> object:
-    """Import the longest importable prefix of ``path``, then walk the rest."""
+    """Walk ``path`` from its longest loaded prefix, else its longest importable one."""
     parts = path.split(".")
+    # A nested class such as ``pkg.mod.Cls.Config`` names no module at
+    # ``pkg.mod.Cls``; trying to import it first costs a failed finder search
+    # per class, so a loaded ancestor is walked before anything is imported.
     for split in range(len(parts) - 1, 0, -1):
-        module_name = ".".join(parts[:split])
-        # A loaded module skips the import machinery, whose lock and finder
-        # lookups cost more than the attribute walk below.
-        module = sys.modules.get(module_name)
-        if module is None:
-            try:
-                module = importlib.import_module(module_name)
-            except ImportError:
-                continue
-        resolved: object = module
-        for part in parts[split:]:
-            resolved = getattr(resolved, part, _PENDING)
-            if resolved is _PENDING:
-                raise AttributeError(f"{path!r} has no attribute {part!r}")
+        module = sys.modules.get(".".join(parts[:split]))
+        if module is not None:
+            resolved = _walk(module, parts[split:])
+            if resolved is not _PENDING:
+                return resolved
+            break
+    for split in range(len(parts) - 1, 0, -1):
+        try:
+            module = importlib.import_module(".".join(parts[:split]))
+        except ImportError:
+            continue
+        resolved = _walk(module, parts[split:])
+        if resolved is _PENDING:
+            raise AttributeError(f"{path!r} names no attribute of {module.__name__!r}")
         return resolved
     raise ImportError(f"Cannot resolve path: {path!r}")
+
+
+def _walk(start: object, parts: Iterable[str]) -> object:
+    """Return the attribute chain ``parts`` names from ``start``, else ``_PENDING``."""
+    resolved = start
+    for part in parts:
+        resolved = getattr(resolved, part, _PENDING)
+        if resolved is _PENDING:
+            break
+    return resolved
 
 
 def _resolve_alias(target: object) -> object:
@@ -1963,6 +2125,12 @@ _TAGS: Final = (
 _NATIVE_LEAVES: Final = frozenset((str, int, bool))
 
 
+_PLAIN_LEAVES: Final = frozenset(
+    cast("tuple[type, ...]", get_args(_resolve_alias(Plain))),
+)
+"""The exact :data:`Plain` types, which read as ``object`` unchanged."""
+
+
 _LAX_BOOLS: Final[Mapping[str, int]] = MappingProxyType(
     {"true": 1, "false": 0, "1": 1, "0": 0},
 )
@@ -1976,7 +2144,11 @@ _SKIPPED_ATTRIBUTES: Final = frozenset(("__weakref__", "__dict__"))
 
 
 _PENDING: Final = object()
-"""Fills a ``py/id`` slot reserved for a value built after its children."""
+"""Fills a reference slot reserved for a value built after its children."""
+
+
+_ABSENT_REF: Final = object()
+"""Marks a ``py/ref`` path that names no placed value."""
 
 
 _NATIVE_ORIGINS: Final[Mapping[type, tuple[object, ...]]] = MappingProxyType(

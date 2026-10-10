@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass, field, make_dataclass
 from decimal import Decimal
+from email import mime
+from email.mime import text as mime_text
 from enum import Enum
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -27,8 +29,10 @@ from zoneinfo import ZoneInfo
 
 import datetime as dt
 import gc
+import importlib
 import json
 import math
+import sys
 import threading
 import weakref
 
@@ -227,13 +231,23 @@ class TestToPlain:
     def test_shared_objects_become_references(self) -> None:
         shared = [1]
 
-        assert to_plain([shared, shared]) == [[1], {"py/id": 1}]
+        assert to_plain([shared, shared]) == [[1], {"py/ref": [0]}]
+
+    def test_a_reference_names_the_path_of_the_first_occurrence(self) -> None:
+        shared = {"k": 1}
+
+        tree = to_plain({"a": {"b": (shared,)}, "c": shared})
+
+        assert tree == {
+            "a": {"b": {"py/tuple": [{"k": 1}]}},
+            "c": {"py/ref": ["a", "b", 0]},
+        }
 
     def test_cycles_terminate(self) -> None:
         cycle: list[object] = []
         cycle.append(cycle)
 
-        assert to_plain(cycle) == [{"py/id": 0}]
+        assert to_plain(cycle) == [{"py/ref": []}]
 
     def test_tag_lookalike_and_non_str_keys_are_escaped(self) -> None:
         tree = to_plain({"py/x": 1, 2: 3, "json://y": 4})
@@ -570,6 +584,106 @@ class TestCapabilities:
             "s": {1},
             "m": MappingProxyType({"a": 1}),
         }
+
+
+class TestReferences:
+    def test_a_path_reference_resolves_to_the_same_object(self) -> None:
+        tree = {"a": {"b": {"py/tuple": [{"k": 1}]}}, "c": {"py/ref": ["a", "b", 0]}}
+
+        restored = from_plain(tree, object)
+
+        assert isinstance(restored, dict)
+        assert restored["c"] is restored["a"]["b"][0]
+
+    def test_a_path_reference_closes_a_cycle(self) -> None:
+        tree: codec.MutablePlainTree = [{"py/ref": []}]
+
+        restored = from_plain(tree, object)
+
+        assert isinstance(restored, list)
+        assert restored[0] is restored
+
+    def test_a_legacy_index_reference_still_reads(self) -> None:
+        restored = from_plain([[1], {"py/id": 1}], object)
+
+        assert isinstance(restored, list)
+        assert restored[1] is restored[0]
+
+    def test_a_legacy_dataclass_cycle_still_reads(self) -> None:
+        tree = {
+            "py/object": f"{__name__}.Node",
+            "name": "p",
+            "children": [{"py/id": 0}],
+        }
+
+        restored = from_plain(tree, object, allow_imports=True)
+
+        assert isinstance(restored, Node)
+        assert restored.children[0] is restored
+
+    def test_a_shared_object_inside_a_reduce_round_trips(self) -> None:
+        shared = [1]
+        value = OrderedDict([("a", shared), ("b", shared)])
+
+        restored = _round_trip(value)
+
+        assert isinstance(restored, OrderedDict)
+        assert restored["a"] is restored["b"]
+
+    def test_a_shared_hooked_leaf_round_trips(self) -> None:
+        shared = Tensor([1.0])
+        tree = to_plain([shared, shared], hooks=_HOOKS)
+
+        restored = from_plain(tree, object, hooks=_HOOKS, allow_imports=True)
+
+        assert isinstance(tree, list)
+        assert tree[1] == {"py/ref": [0]}
+        assert isinstance(restored, list)
+        assert restored[0] is restored[1]
+
+    def test_a_shared_set_member_round_trips(self) -> None:
+        shared = Point(x=1)
+
+        first, second = cast("list[object]", _round_trip([{shared}, shared]))
+
+        assert isinstance(first, set)
+        assert next(iter(cast("set[object]", first))) is second
+
+    def test_a_reference_into_an_unbuilt_dataclass_is_invalid(self) -> None:
+        tree: codec.MutablePlainTree = {"name": "n", "children": [{"py/ref": []}]}
+
+        with pytest.raises(ReadError) as raised:
+            from_plain(tree, Node)
+
+        assert list(raised.value.bad) == [("children", 0)]
+        assert "still being built" in raised.value.bad["children", 0].reason
+
+    def test_a_typed_dataclass_is_placed_for_a_later_reference(self) -> None:
+        tree = {"a": {"x": 1}, "b": {"py/ref": ["a"]}}
+
+        restored = from_plain(tree, dict[str, Point])
+
+        assert restored["b"] is restored["a"]
+
+    @pytest.mark.parametrize(
+        "ref",
+        [["missing"], [0, 0], "a", 1, [True], [1.5], None],
+        ids=repr,
+    )
+    def test_a_bad_path_reference_is_rejected(
+        self,
+        ref: codec.MutablePlainTree,
+    ) -> None:
+        with pytest.raises(ReadError, match="py/ref"):
+            from_plain({"a": [1], "b": {"py/ref": ref}}, object)
+
+    def test_a_reference_to_a_later_node_is_rejected(self) -> None:
+        with pytest.raises(ReadError, match="py/ref"):
+            from_plain({"a": {"py/ref": ["b"]}, "b": [1]}, object)
+
+    def test_a_reference_with_extra_keys_is_rejected(self) -> None:
+        with pytest.raises(ReadError):
+            from_plain({"a": [1], "b": {"py/ref": ["a"], "x": 1}}, object)
 
 
 class TestMalformedTrees:
@@ -1246,6 +1360,72 @@ class TestObjectTagForTarget:
     def test_a_decimal_reads_as_a_float(self) -> None:
         assert from_plain(Decimal("1.50"), float) == 1.5
         assert type(from_plain(Decimal("1.50"), float)) is float
+
+
+class TestResolveImport:
+    def test_a_nested_class_resolves_without_an_import_attempt(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        attempts: list[str] = []
+        real = importlib.import_module
+
+        def spy(name: str) -> object:
+            attempts.append(name)
+            return real(name)
+
+        monkeypatch.setattr(importlib, "import_module", spy)
+
+        assert codec._resolve_import(f"{__name__}.Holder.__init__") is (Holder.__init__)
+        assert attempts == []
+
+    def test_an_unloaded_submodule_is_imported(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # The loaded parent lacks the attribute until its submodule imports.
+        monkeypatch.delattr(mime, "text")
+        monkeypatch.delitem(sys.modules, "email.mime.text")
+
+        resolved = codec._resolve_import("email.mime.text.MIMEText")
+
+        assert isinstance(resolved, type)
+        assert resolved.__name__ == mime_text.MIMEText.__name__
+
+    def test_a_missing_attribute_of_a_loaded_module_raises(self) -> None:
+        with pytest.raises(AttributeError, match=f"no attribute of '{__name__}'"):
+            codec._resolve_import(f"{__name__}.no_such_name")
+
+
+class TestFieldTypes:
+    def test_a_dataclass_lists_fields_then_non_init_slots(self) -> None:
+        assert dict(codec._field_types(Flagged)) == {"name": str, "_done": bool}
+
+    def test_a_typed_dict_lists_its_hints(self) -> None:
+        assert dict(codec._field_types(Meta)) == {"size": int, "name": str}
+
+    def test_a_missing_hint_reads_as_object(self) -> None:
+        assert codec._field_types(Slotted) == {}
+        assert codec._field_types(LocalReduce) == {}
+
+    def test_a_module_level_class_is_cached(self) -> None:
+        first = codec._field_types(Point)
+
+        assert codec._field_types(Point) is first
+        assert codec._FIELD_TYPES[Point] is first
+
+    def test_a_self_naming_class_is_not_cached(self) -> None:
+        codec._field_types(Node)
+
+        assert Node not in codec._FIELD_TYPES
+
+    def test_a_class_its_module_does_not_name_is_not_cached(self) -> None:
+        @dataclass(kw_only=True, slots=True)
+        class Local:
+            x: int
+
+        assert codec._field_types(Local) == {"x": int}
+        assert Local not in codec._FIELD_TYPES
 
 
 class TestCaches:
