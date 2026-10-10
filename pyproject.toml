@@ -336,6 +336,7 @@ extend-safe-fixes = [
     "C4",     # Collection and comprehension rewrites.
     "E711",   # Compare to None with identity.
     "E712",   # Compare booleans by truthiness.
+    "E731",   # Do not assign a `lambda` expression, use a `def`.
     "F401",   # Remove unused imports.
     "F601",   # Remove overwritten dictionary entries.
     "F841",   # Remove unused local bindings.
