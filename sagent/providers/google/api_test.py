@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING, cast
 
 import logging
 
-from treekle import MutablePlainTree, PlainTree, from_plain, loads
+from treekle import MutablePlainTree, PlainTree, from_plain
+from treekle.wire import json_loads
 
 import httpx2
 import pytest
@@ -759,7 +760,7 @@ async def test_google_actual_request_tokens_wraps_generate_request() -> None:
     )
     assert n == 314
     assert seen[0].url.path.endswith(":countTokens")
-    body = from_plain(loads(seen[0].content), dict[str, object])
+    body = from_plain(json_loads(seen[0].content), dict[str, object])
     assert set(body) == {"generateContentRequest"}
     inner = from_plain(body["generateContentRequest"], dict[str, object])
     model_id = m.capability.wire_model_id or m.capability.model_id

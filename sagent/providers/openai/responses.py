@@ -11,7 +11,8 @@ import inspect
 import json
 import logging
 
-from treekle import from_plain, loads, mutable
+from treekle import from_plain, mutable
+from treekle.wire import json_loads
 
 from sagent.catalog.openai import (
     keeps_reasoning_across_turns,
@@ -853,7 +854,7 @@ def _parse_tool_arguments(
             continue
         saw_args = True
         try:
-            parsed = from_plain(loads(args_str), dict[str, object])
+            parsed = from_plain(json_loads(args_str), dict[str, object])
         except json.JSONDecodeError:
             logger.warning(
                 "OpenAI Responses tool arguments were invalid JSON: "

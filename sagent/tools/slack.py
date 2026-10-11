@@ -25,7 +25,8 @@ import asyncio
 import json
 import logging
 
-from treekle import PlainTree, ReadError, from_plain, immutable, loads
+from treekle import PlainTree, ReadError, from_plain, immutable
+from treekle.wire import json_loads
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
@@ -431,7 +432,7 @@ async def _slack_call(
             is_error=True,
         )
     try:
-        body = from_plain(loads(raw[0]), dict[str, object])
+        body = from_plain(json_loads(raw[0]), dict[str, object])
     except (json.JSONDecodeError, ReadError) as error:
         return ToolResult(
             call_id="",

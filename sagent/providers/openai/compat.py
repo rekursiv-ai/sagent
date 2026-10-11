@@ -42,7 +42,8 @@ else:
     httpx2 = lazy_import("httpx2")  # 100ms cold.
     image = lazy_import("sagent.lib.image")
 
-from treekle import MutablePlainTree, ReadError, from_plain, loads, mutable
+from treekle import MutablePlainTree, ReadError, from_plain, mutable
+from treekle.wire import json_loads
 
 from sagent.catalog.openai import compatible
 from sagent.catalog.table import ModelCatalog, ModelTable, base_model_id
@@ -663,7 +664,7 @@ async def consume_stream(
                 saw_done = True
                 break
             try:
-                event = from_plain(loads(data_str), dict[str, object])
+                event = from_plain(json_loads(data_str), dict[str, object])
             except (json.JSONDecodeError, ReadError):
                 continue
             if "error" in event or event.get("object") == "error":

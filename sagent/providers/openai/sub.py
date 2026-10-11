@@ -96,7 +96,8 @@ else:
     openai = lazy_import("openai")  # 493ms cold.
 
 
-from treekle import MutablePlainTree, ReadError, from_plain, loads
+from treekle import MutablePlainTree, ReadError, from_plain
+from treekle.wire import json_loads
 
 from sagent.catalog.openai import subscription, subscription_models
 from sagent.catalog.table import ModelCatalog
@@ -773,7 +774,7 @@ def _jwt_payload(token: str) -> dict[str, object]:
     raw = parts[1]
     raw += "=" * (-len(raw) % 4)
     try:
-        return from_plain(loads(base64.urlsafe_b64decode(raw)), dict[str, object])
+        return from_plain(json_loads(base64.urlsafe_b64decode(raw)), dict[str, object])
     except (ValueError, ReadError):
         return {}
 

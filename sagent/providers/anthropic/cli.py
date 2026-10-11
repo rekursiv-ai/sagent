@@ -32,7 +32,8 @@ import re
 import shutil
 import subprocess
 
-from treekle import MutablePlainTree, PlainTree, ReadError, from_plain, loads
+from treekle import MutablePlainTree, PlainTree, ReadError, from_plain
+from treekle.wire import json_loads
 
 import fastjsonschema
 
@@ -189,7 +190,7 @@ def _claude_auth_status(binary: str) -> bool | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     try:
-        status = from_plain(loads(proc.stdout), dict[str, object])
+        status = from_plain(json_loads(proc.stdout), dict[str, object])
     except (json.JSONDecodeError, ReadError):
         return None
     logged_in = status.get("loggedIn")
@@ -1433,7 +1434,7 @@ def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
         return None
     try:
         raw = from_plain(
-            loads(path.read_text(encoding="utf-8")),
+            json_loads(path.read_text(encoding="utf-8")),
             dict[str, object],
         )
         _CREDENTIALS_VALIDATOR(raw)

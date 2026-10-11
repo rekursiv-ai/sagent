@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 import json
 
-from treekle import from_plain, loads
+from treekle import from_plain
+from treekle.wire import json_loads
 
 import httpx2
 import pytest
@@ -101,7 +102,9 @@ async def test_compacting_agent_preserves_prefix_past_half_window(
     finally:
         await provider.close_sdk()
     assert len(capture.payloads) > 3
-    bodies = [from_plain(loads(raw), dict[str, object]) for raw in capture.payloads]
+    bodies = [
+        from_plain(json_loads(raw), dict[str, object]) for raw in capture.payloads
+    ]
     for before, after in pairwise(bodies):
         if after["store"] is False:
             continue
