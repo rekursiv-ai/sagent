@@ -6,15 +6,16 @@ live in :mod:`sagent.tools.lib.bash`.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Final
 
 import asyncio
 import atexit
 import contextlib
 import functools
+import io
 import logging
 import os
 import secrets
@@ -47,7 +48,7 @@ from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable
 
     from bashlex.ast import (
         node as Node,  # noqa: N812 -- PascalCase for the type name; bashlex spells it lowercase.
@@ -58,6 +59,11 @@ logger = logging.getLogger(__name__)
 
 BASH_DEFAULT_TIMEOUT_MS = 120_000  # house-ignore[globals] -- Default timeout dial.
 BASH_MAX_TIMEOUT_MS = 600_000  # house-ignore[globals] -- Max timeout dial.
+
+# Behind a wrapper this process cannot tell whether the shell's directory exists, so
+# the shell's own script enters it: ``$2`` is the tool's directory, ``$3`` where the
+# tool started.
+_ENTER_CWD: Final = 'cd -- "$2" 2>/dev/null || cd -- "$3" 2>/dev/null || cd /\n'
 
 # Kept-alive references to background subprocesses so their Popen
 # objects don't get garbage-collected mid-run.
@@ -108,6 +114,18 @@ class Bash:
           is registered as a lint source; its output is surfaced on the
           result's ``hint`` field, and the same nudges are prepended to
           ``content`` as a ``<system-reminder>`` so the model sees them.
+      exec_prefix: Words placed before ``/bin/bash``, so a wrapper command can run
+          the shell somewhere else, such as under another user or in a container.
+          Empty runs the shell directly. The wrapper must run its arguments with
+          its standard streams and exit status unchanged. Not a command-line
+          setting.
+      env: Environment of the spawned process; ``None`` inherits this process's.
+          With a wrapper it is the wrapper's environment, so the shell sees what
+          the wrapper carries across. Never shown in ``repr``. Not a command-line
+          setting.
+      drain_sec: Seconds a stopped call waits for the output of a process that
+          outlives the stop, before it gives up on that output. Not a command-line
+          setting.
       command_head_rows: Leading command rows kept. The first line of a
           shell command identifies it.
       command_tail_rows: Trailing command rows kept. The last line
@@ -167,6 +185,11 @@ class Bash:
     )
 
     peers: Sequence[object] = ()
+    exec_prefix: Sequence[str] = ()
+    # Left out of ``repr``: the environment may hold secrets, and a tool's repr ends
+    # up in logs and tracebacks.
+    env: Mapping[str, str] | None = field(default=None, repr=False)
+    drain_sec: float = 1.0
     command_head_rows: Annotated[int, CLI_SETTABLE] = 3
     command_tail_rows: Annotated[int, CLI_SETTABLE] = 1
     command_lang: Annotated[str, CLI_SETTABLE] = "bash"
@@ -254,7 +277,9 @@ class Bash:
         Cancellation propagates natively: ``asyncio.create_subprocess_exec``
         starts the bash process in its own session group, and on
         ``CancelledError`` we ``SIGTERM`` (then ``SIGKILL``) the whole
-        group before re-raising.
+        group before re-raising. Behind an ``exec_prefix`` the group may be
+        out of this process's reach, so the shell's own guard ends it instead
+        (see :func:`_guard`).
 
         Args:
           args: Parsed tool directive mapping.
@@ -280,14 +305,25 @@ class Bash:
             default=False,
         )
         state = get_tool_state()
-        _ensure_valid_cwd(state)
+        # A wrapped shell may sit where this process cannot look, so its script
+        # judges the directory instead.
+        if not self.exec_prefix:
+            _ensure_valid_cwd(state)
         if run_as_fully_detached:
-            text = _run_as_fully_detached(command, state=state)
+            text = _run_as_fully_detached(
+                command,
+                state=state,
+                exec_prefix=self.exec_prefix,
+                env=self.env,
+            )
         else:
             text = await _run_foreground(
                 command,
                 state=state,
                 timeout_s=_timeout_seconds(timeout),
+                exec_prefix=self.exec_prefix,
+                env=self.env,
+                drain_sec=self.drain_sec,
             )
         body = text
         if not self._peer_matchers:
@@ -327,11 +363,35 @@ def _ensure_valid_cwd(state: ToolState) -> None:
         state.bash_cwd = state.start_cwd if Path(state.start_cwd).is_dir() else "/"
 
 
-def _run_as_fully_detached(command: str, *, state: ToolState) -> str:
+def _run_as_fully_detached(
+    command: str,
+    *,
+    state: ToolState,
+    exec_prefix: Sequence[str] = (),
+    env: Mapping[str, str] | None = None,
+) -> str:
     """Spawn an unmanaged detached background process."""
+    # Behind a wrapper the shell enters its directory itself, as the foreground
+    # path does. No guard: nothing waits on a detached process, so nothing could
+    # tell it to stop.
+    argv = (
+        [
+            *exec_prefix,
+            "/bin/bash",
+            "-c",
+            f'{_ENTER_CWD}eval "$1"',
+            "bash",
+            command,
+            state.bash_cwd,
+            state.start_cwd,
+        ]
+        if exec_prefix
+        else ["/bin/bash", "-c", command]
+    )
     proc = subprocess.Popen(  # noqa: S603 -- The agent's own command runs through a fixed bash argv; that is this tool's purpose.
-        ["/bin/bash", "-c", command],
-        cwd=state.bash_cwd,
+        argv,
+        cwd="/" if exec_prefix else state.bash_cwd,
+        env=env,
         # Bash must not share the REPL terminal; interactive children
         # otherwise steal prompt-toolkit keystrokes from the user.
         stdin=subprocess.DEVNULL,
@@ -354,7 +414,15 @@ def _timeout_seconds(timeout_ms: float) -> float:
     return min(max(timeout_ms, 1), BASH_MAX_TIMEOUT_MS) / 1000
 
 
-async def _run_foreground(command: str, *, state: ToolState, timeout_s: float) -> str:
+async def _run_foreground(
+    command: str,
+    *,
+    state: ToolState,
+    timeout_s: float,
+    exec_prefix: Sequence[str] = (),
+    env: Mapping[str, str] | None = None,
+    drain_sec: float = 1.0,
+) -> str:
     """Run a foreground bash command via :mod:`asyncio.subprocess`."""
     sentinel = f"__SAGENT_CWD_{secrets.token_hex(4)}__"
     # ``printf`` with a LEADING newline, not ``echo``: a command whose
@@ -378,43 +446,67 @@ async def _run_foreground(command: str, *, state: ToolState, timeout_s: float) -
     # in a continuation (``echo hi \``) consumed the very next line and
     # printed ``__rc=0`` as its own output.
     tracked_cmd = f"trap '{report}' EXIT\neval \"$1\"\n__rc=$?\n{report}\nexit $__rc"
-    proc = await asyncio.create_subprocess_exec(
-        "/bin/bash",
-        "-c",
-        tracked_cmd,
+    # Behind a wrapper this process may be unable to signal the shell, so the wrapper
+    # starts from ``/``, the shell's script enters its directory itself, and the shell
+    # takes a pipe held here as its stdin. That pipe closing is how it hears that it
+    # must stop.
+    held = _HeldPipe() if exec_prefix else None
+    try:
         # ``$0``: names the shell in ``$0`` and in its error prefixes, so a
         # syntax error still reads ``bash: ...`` as it did when the command was
         # the ``-c`` string itself.
-        "bash",
-        command,
-        stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        cwd=state.bash_cwd,
-        start_new_session=True,
-    )
-    start = time.monotonic()
-    # ``communicate()`` is driven by a task we own, so a timeout cancels
-    # the WAIT and not the read: the partial stdout/stderr collected
-    # before the kill stays reachable. Re-awaiting a cancelled
-    # ``communicate()`` instead returns only what buffered afterwards,
-    # dropping the very output the drain exists to recover.
-    comm = asyncio.ensure_future(proc.communicate())
-    try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            asyncio.shield(comm),
-            timeout=timeout_s,
+        if held is None:
+            argv = ["/bin/bash", "-c", tracked_cmd, "bash", command]
+        else:
+            argv = [
+                *exec_prefix,
+                "/bin/bash",
+                "-c",
+                _guard() + tracked_cmd,
+                "bash",
+                command,
+                state.bash_cwd,
+                state.start_cwd,
+            ]
+        proc = await asyncio.create_subprocess_exec(
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL if held is None else held.reader,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=state.bash_cwd if held is None else "/",
+            env=env,
+            start_new_session=True,
         )
-    except TimeoutError:
-        await _kill_process_group(proc)
-        stdout_bytes, stderr_bytes = await _drain(proc, comm)
-        reason = f"timeout after {time.monotonic() - start:.1f}s"
-    except asyncio.CancelledError:
-        _ = comm.cancel()
-        await _kill_process_group(proc)
-        raise
-    else:
-        reason = ""
+        start = time.monotonic()
+        # ``communicate()`` is driven by a task we own, so a timeout cancels
+        # the WAIT and not the read: the partial stdout/stderr collected
+        # before the kill stays reachable. Re-awaiting a cancelled
+        # ``communicate()`` instead returns only what buffered afterwards,
+        # dropping the very output the drain exists to recover.
+        comm = asyncio.ensure_future(proc.communicate())
+        try:
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                asyncio.shield(comm),
+                timeout=timeout_s,
+            )
+        except TimeoutError:
+            await _kill_process_group(proc, held=held)
+            drained = await _drain(proc, comm, grace_sec=drain_sec)
+            stdout_bytes, stderr_bytes = drained or (b"", b"")
+            reason = f"timeout after {time.monotonic() - start:.1f}s"
+            if drained is None:
+                reason += "; the shell did not stop and its output is lost"
+        except asyncio.CancelledError:
+            _ = comm.cancel()
+            await _kill_process_group(proc, held=held)
+            raise
+        else:
+            reason = ""
+            if held is not None:
+                held.release()
+    finally:
+        if held is not None:
+            held.close()
     return _process_output(
         proc,
         stdout_bytes.decode("utf-8", errors="replace"),
@@ -422,15 +514,78 @@ async def _run_foreground(command: str, *, state: ToolState, timeout_s: float) -
         sentinel=sentinel,
         state=state,
         reason=reason,
+        check_cwd=held is None,
     )
+
+
+# The shell runs where this process may have no power to signal it -- ``killpg``
+# answers EPERM across users -- so the only thing that reaches it is what it can see:
+# its stdin, a pipe this process holds the write end of (see :class:`_HeldPipe`). A
+# watcher inside the shell reads that pipe. One line means the call ended normally
+# and it leaves; end-of-file with no line means the call timed out, was cancelled, or
+# this process died, and it ends the process group: TERM, then KILL after
+# ``kill_after_sec``. A killed caller therefore leaves no shell behind.
+#
+# The watcher is started from a second subshell so it is no child of the shell: a bare
+# ``wait`` in the command would otherwise wait on it until the call timed out. It
+# ignores TERM because it sits in the group it signals, and dying of its own TERM
+# would skip the KILL that a command trapping TERM needs. It keeps the pipe on fd 9
+# and the command gets /dev/null, as it does without a wrapper.
+def _guard(*, kill_after_sec: float = 2.0) -> str:
+    """Return the script prologue that lets the shell be stopped from outside."""
+    return (
+        f"{_ENTER_CWD}exec 9<&0 </dev/null\n"
+        "( ( trap '' TERM; read -r _ <&9 ||"
+        f" {{ kill -TERM 0; sleep {kill_after_sec:g}; kill -KILL 0; }} )"
+        " >/dev/null 2>&1 & )\n"
+        "exec 9<&-\n"
+    )
+
+
+class _HeldPipe:
+    """A shell's stdin, whose write end this process keeps while the shell runs."""
+
+    def __init__(self) -> None:
+        reader, writer = os.pipe()
+        self.reader = io.FileIO(reader)
+        self._writer = io.FileIO(writer, "w")
+
+    def release(self) -> None:
+        """End the call normally: the one line that tells the guard to stand down."""
+        _ = self._writer.write(b"\n")
+        self._writer.close()
+
+    def close(self) -> None:
+        """Close both ends; with no line written first, the guard ends the group."""
+        self._writer.close()
+        self.reader.close()
 
 
 # Keyed on the GROUP, never the leader: ``start_new_session`` makes the group id the
 # leader's pid, and that group outlives the leader. Skipping the kill once the leader
 # exited, or asking ``getpgid`` of a reaped leader, left a backgrounded descendant
 # running with the pipe open, so the drain below never saw EOF.
-async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
+#
+# With ``held`` the group may be out of reach, so closing the pipe is the stop and this
+# process waits at most ``wait_sec`` for the wrapper to end: longer than the guard's
+# grace, and never forever.
+async def _kill_process_group(
+    proc: asyncio.subprocess.Process,
+    *,
+    held: _HeldPipe | None = None,
+    wait_sec: float = 5.0,
+) -> None:
     """SIGTERM then SIGKILL the process group; await the leader's reaping."""
+    if held is not None:
+        held.close()
+        try:
+            _ = await asyncio.wait_for(proc.wait(), timeout=wait_sec)
+        except TimeoutError:
+            # Without this the drain would wait on the wrapper as long as it lives.
+            logger.warning("Shell outlived its stop; killing wrapper pid=%d", proc.pid)
+            with _suppress_oserror():
+                proc.kill()
+        return
     with _suppress_oserror():
         os.killpg(proc.pid, signal.SIGTERM)
     with contextlib.suppress(TimeoutError):
@@ -442,20 +597,28 @@ async def _kill_process_group(proc: asyncio.subprocess.Process) -> None:
 
 # A descendant that left the group (its own ``setsid``) survives the group kill and
 # can hold the pipe open forever, so the drain is bounded and then the pipes closed.
+# ``communicate`` ends in a wait for the process, so with the pipes closed the only
+# thing left to wait for is a process that may be out of reach (see :func:`_guard`),
+# and that wait is bounded too. Its output is lost with it, because
+# ``communicate`` returns the output only together with the exit.
 async def _drain(
     proc: asyncio.subprocess.Process,
     comm: asyncio.Future[tuple[bytes, bytes]],
     *,
     grace_sec: float = 1.0,
-) -> tuple[bytes, bytes]:
-    """Collect what the killed command wrote, giving up after ``grace_sec``."""
+) -> tuple[bytes, bytes] | None:
+    """Collect what the killed command wrote; None if its process would not end."""
     try:
         return await asyncio.wait_for(asyncio.shield(comm), timeout=grace_sec)
     except TimeoutError:
         for stream in (proc.stdout, proc.stderr):
             if stream is not None:
                 stream.feed_eof()
-        return await comm
+    try:
+        return await asyncio.wait_for(comm, timeout=grace_sec)
+    except TimeoutError:
+        logger.warning("Shell outlived its stop; giving up on its output")
+        return None
 
 
 # The single exit path for every outcome -- clean, failed, timed out -- so the sentinel
@@ -468,13 +631,14 @@ def _process_output(
     sentinel: str,
     state: ToolState,
     reason: str = "",
+    check_cwd: bool = True,
 ) -> str:
     """Extract the cwd sentinel, bound the output, append diagnostics."""
     body_lines: list[str] = []
     for line in stdout.split("\n"):
         if line.startswith(f"{sentinel}="):
             new_cwd = line[len(f"{sentinel}=") :]
-            if new_cwd and Path(new_cwd).is_dir():
+            if new_cwd and (not check_cwd or Path(new_cwd).is_dir()):
                 state.bash_cwd = new_cwd
         else:
             body_lines.append(line)

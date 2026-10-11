@@ -25,6 +25,7 @@ from sagent.agent.state import (
     max_depth_var,
     tool_state_var,
 )
+from sagent.compaction.summary import SummaryCompactor
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.providers import PROVIDER_NAMES
 from sagent.testing import MockModelCaps
@@ -34,6 +35,7 @@ from sagent.tools.agent_spawn import (
     AgentSpawn,
     ChildStats,
     _ChildForwarder,
+    _last_agent_send_content,
     _last_assistant_result,
     _persistent_tasks,
     _pick_field,
@@ -654,6 +656,55 @@ def test_build_child_cold_diverges_from_parent_via_bundled_tool() -> None:
     )
     assert child.system != parent.system
     assert child.system.startswith(parent.system)
+
+
+def test_build_child_starts_where_the_parents_shell_is() -> None:
+    """A child's shell begins in the directory its parent's does, not the host's."""
+    spawn = AgentSpawn()
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        system="You are the root agent.",
+        tools=[spawn],
+    )
+    parent.tool_state.start_cwd = "/srv/work"
+    parent.tool_state.bash_cwd = "/srv/work/sub"
+    child_tools = spawn._resolve_tools(None, parent)
+    assert isinstance(child_tools, list)
+    child = spawn._build_child(
+        system=None,
+        child_model=StubProviderModel(),
+        child_spec=None,
+        child_tools=child_tools,
+        max_rounds=None,
+        model_options={},
+        parent_agent=parent,
+    )
+    assert child.tool_state.start_cwd == "/srv/work"
+    assert child.tool_state.bash_cwd == "/srv/work/sub"
+
+
+def test_the_last_agent_send_content_skips_calls_without_text() -> None:
+    message = AssistantMessage(
+        tool_calls=(
+            ToolCall(id="t1", name="AgentSend", args={"content": "kept"}),
+            ToolCall(id="t2", name="AgentSend", args={"content": {"not": "text"}}),
+            ToolCall(id="t3", name="AgentSend", args={"to": "parent"}),
+            ToolCall(id="t4", name="AgentSend", args={"content": ""}),
+        ),
+    )
+    assert _last_agent_send_content(message) == "kept"
+    assert (
+        _last_agent_send_content(AssistantMessage(tool_calls=message.tool_calls[1:]))
+        is None
+    )
+
+
+def test_a_child_inherits_the_factory_compactor_then_the_parents_then_none() -> None:
+    factory, inherited = SummaryCompactor(), SummaryCompactor()
+    parent = Agent(model=StubProviderModel(), tools=[], compactor=inherited)
+    assert AgentSpawn(compactor=factory)._inherit_compactor(parent) is factory
+    assert AgentSpawn()._inherit_compactor(parent) is inherited
+    assert AgentSpawn()._inherit_compactor(None) is None
 
 
 def test_build_child_hot_materializes_callable_factory_system_once() -> None:
