@@ -138,7 +138,7 @@ def test_install_input_queue_committer_installs_before_tool_spawn_hook() -> None
         queue=QueuedInputBlock(text="interrupt now"),
         deferred=QueuedInputBlock(text="later"),
     )
-    _ = install_input_queue_committer(_as_queue_agent(agent), queues)
+    _ = install_input_queue_committer(cast(Agent, agent), queues)
     hook = agent.runtime.before_tool_spawn
     assert callable(hook)
     pushed = hook(AssistantMessage(text="tool next"))
@@ -162,7 +162,7 @@ def test_install_input_queue_committer_preserves_existing_before_tool_spawn_hook
     agent.runtime.before_tool_spawn = _original
     queues = InputQueues(queue=QueuedInputBlock(text="interrupt now"))
 
-    _ = install_input_queue_committer(_as_queue_agent(agent), queues)
+    _ = install_input_queue_committer(cast(Agent, agent), queues)
 
     hook = agent.runtime.before_tool_spawn
     assert callable(hook)
@@ -182,7 +182,7 @@ def test_install_input_queue_committer_composes_existing_empty_hook() -> None:
     agent.runtime.before_tool_spawn = _original
     queues = InputQueues(queue=QueuedInputBlock(text="interrupt now"))
 
-    _ = install_input_queue_committer(_as_queue_agent(agent), queues)
+    _ = install_input_queue_committer(cast(Agent, agent), queues)
 
     hook = agent.runtime.before_tool_spawn
     assert callable(hook)
@@ -197,7 +197,7 @@ def test_install_input_queue_committer_composes_existing_empty_hook() -> None:
 def test_install_input_queue_committer_composes_later_before_tool_spawn_hook() -> None:
     agent = _QueueAgent()
     queues = InputQueues()
-    _ = install_input_queue_committer(_as_queue_agent(agent), queues)
+    _ = install_input_queue_committer(cast(Agent, agent), queues)
     later_error = ModelResponseError(RuntimeError("later hook"))
 
     def _later(message: AssistantMessage) -> RuntimeEvent | None:
@@ -205,7 +205,7 @@ def test_install_input_queue_committer_composes_later_before_tool_spawn_hook() -
         return later_error
 
     agent.runtime.before_tool_spawn = _later
-    observer = _input_queue_committer_observer(_as_queue_agent(agent), queues)
+    observer = _input_queue_committer_observer(cast(Agent, agent), queues)
     observer(AgentIdle())
 
     hook = agent.runtime.before_tool_spawn
@@ -216,7 +216,7 @@ def test_install_input_queue_committer_composes_later_before_tool_spawn_hook() -
 def test_install_input_queue_committer_deferred_skips_model_response_complete() -> None:
     agent = _QueueAgent()
     queues = InputQueues(deferred=QueuedInputBlock(text="later"))
-    observer = _input_queue_committer_observer(_as_queue_agent(agent), queues)
+    observer = _input_queue_committer_observer(cast(Agent, agent), queues)
     observer(ModelResponseComplete(message=AssistantMessage(text="done")))
     assert queues.deferred is not None
     assert queues.deferred.text == "later"
@@ -234,7 +234,7 @@ def test_install_input_queue_committer_uninstall_restores_before_tool_spawn() ->
     original = agent.runtime.before_tool_spawn
     queues = InputQueues(queue=QueuedInputBlock(text="interrupt now"))
 
-    uninstall = install_input_queue_committer(_as_queue_agent(agent), queues)
+    uninstall = install_input_queue_committer(cast(Agent, agent), queues)
     # Install: hook wrapped, observer attached.
     assert agent.runtime.before_tool_spawn is not original
     initial_observer_count = len(agent.runtime.observers)
@@ -262,7 +262,7 @@ def test_install_input_queue_committer_uninstall_preserves_later_hook() -> None:
     """
     agent = _QueueAgent()
     queues = InputQueues()
-    uninstall = install_input_queue_committer(_as_queue_agent(agent), queues)
+    uninstall = install_input_queue_committer(cast(Agent, agent), queues)
     later_error = ModelResponseError(RuntimeError("later owner"))
 
     def _later_hook(message: AssistantMessage) -> RuntimeEvent | None:
@@ -563,10 +563,6 @@ class _QueueRuntime:
 @dataclass(slots=True, kw_only=True)
 class _QueueAgent:
     runtime: _QueueRuntime = field(default_factory=_QueueRuntime)
-
-
-def _as_queue_agent(a: _QueueAgent) -> Agent:
-    return cast(Agent, a)
 
 
 def test_do_switch_model_no_spec_writes_error() -> None:

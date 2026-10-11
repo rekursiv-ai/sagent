@@ -35,11 +35,6 @@ from sagent.types.tape import (
 _REF = TapeRef(session_id="s", ordinal=0)
 
 
-def _ref(ordinal: int) -> TapeRef:
-    """Test helper: build a TapeRef with the standard session id."""
-    return TapeRef(session_id="s", ordinal=ordinal)
-
-
 def test_coalesce_roles_is_total_on_duplicate_tool_call_ids() -> None:
     """Merging adjacent AMs that share a tool_call id must not raise.
 
@@ -739,7 +734,7 @@ def test_replay_preserves_all_fields() -> None:
     splice = ContextSplice.replay(
         ref=_REF,
         mask=(MaskRange(session_id="s", lo=1, hi=2),),
-        insert_after=_ref(3),
+        insert_after=TapeRef(session_id="s", ordinal=3),
         payload=(UserMessage(text="x"),),
         strategy="summary",
         token_before=10,

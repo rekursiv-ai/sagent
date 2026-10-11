@@ -926,13 +926,9 @@ class _FakeAgent:
     runtime: _FakeRuntime = field(default_factory=_FakeRuntime)
 
 
-def _as_real_agent(a: _FakeAgent) -> Agent:
-    return cast(Agent, a)
-
-
 def test_render_input_pane_empty_queue_renders_only_sigil() -> None:
     """Empty queues render only the ``> `` prompt token."""
-    fp = render_input_pane(_as_real_agent(_FakeAgent()), InputQueues())
+    fp = render_input_pane(cast(Agent, _FakeAgent()), InputQueues())
     assert list(fp) == [("class:input_pane", "> ")]
 
 
@@ -950,7 +946,7 @@ def test_render_input_pane_shows_mid_stream_queue() -> None:
         UserMessage(text="tuttle"),
         UserMessage(text="lawnmower"),
     ]
-    fp = render_input_pane(_as_real_agent(fake), InputQueues())
+    fp = render_input_pane(cast(Agent, fake), InputQueues())
     # ``FormattedText`` entries are 2- or 3-tuples (the 3rd is an
     # optional mouse handler). Index-access to stay shape-agnostic.
     rendered = "".join(t[1] for t in fp)
@@ -983,7 +979,7 @@ def test_render_input_pane_hides_agent_sourced_mid_stream() -> None:
         UserMessage(text="user-pending"),
         AgentSendMessage(source="reviewer", text="agent-payload"),
     ]
-    fp = render_input_pane(_as_real_agent(fake), InputQueues())
+    fp = render_input_pane(cast(Agent, fake), InputQueues())
     rendered = "".join(t[1] for t in fp)
     assert "pending: user-pending" in rendered
     assert "agent-payload" not in rendered, (
@@ -994,7 +990,7 @@ def test_render_input_pane_hides_agent_sourced_mid_stream() -> None:
 def test_render_input_pane_single_block_renders_full_text() -> None:
     """A deferred message renders with the ``[deferred]`` prefix."""
     fp = render_input_pane(
-        _as_real_agent(_FakeAgent()),
+        cast(Agent, _FakeAgent()),
         InputQueues(deferred=QueuedInputBlock(text="hello world")),
     )
     parts = list(fp)
@@ -1007,7 +1003,7 @@ def test_render_input_pane_labels_retractable_and_pending_queues() -> None:
     fake = _FakeAgent()
     fake.runtime._mid_stream_queue = [UserMessage(text="already sent")]
     fp = render_input_pane(
-        _as_real_agent(fake),
+        cast(Agent, fake),
         InputQueues(deferred=QueuedInputBlock(text="tab staged")),
     )
     rendered = "".join(t[1] for t in fp)
@@ -1018,7 +1014,7 @@ def test_render_input_pane_labels_retractable_and_pending_queues() -> None:
 def test_render_input_pane_deferred_above_queue() -> None:
     """Spec: deferred pane renders above the queue pane; queue has no prefix."""
     fp = render_input_pane(
-        _as_real_agent(_FakeAgent()),
+        cast(Agent, _FakeAgent()),
         InputQueues(
             queue=QueuedInputBlock(text="q-msg"),
             deferred=QueuedInputBlock(text="d-msg"),
@@ -1033,7 +1029,7 @@ def test_render_input_pane_deferred_above_queue() -> None:
 def test_render_input_pane_preserves_multi_line_block_content() -> None:
     """Internal newlines in a block are preserved verbatim (no collapse)."""
     fp = render_input_pane(
-        _as_real_agent(_FakeAgent()),
+        cast(Agent, _FakeAgent()),
         InputQueues(deferred=QueuedInputBlock(text="line1\nline2")),
     )
     parts = list(fp)

@@ -61,22 +61,19 @@ class _ResolvedProvider(ModelResolver, Protocol):
     def model(self, model_id: str | None = None) -> Model: ...
 
 
-def _request() -> ModelRequest:
-    """Return the smallest request that carries a thinking knob to the wire."""
-    return ModelRequest(messages=[UserMessage(text="x")])
-
-
 def _anthropic_thinking(model: Model, settings: ModelSettings) -> object:
     """Anthropic's ``output_config``, or ``None`` when it sends none."""
     assert isinstance(model, _AnthropicModel)
     model._settings = settings
-    return model._build_kwargs(_request(), []).get("output_config")
+    return model._build_kwargs(ModelRequest(messages=[UserMessage(text="x")]), []).get(
+        "output_config",
+    )
 
 
 def _google_thinking(model: Model, settings: ModelSettings) -> object:
     """Gemini's ``thinkingConfig``, or ``None`` when it sends none."""
     body: dict[str, MutablePlainTree] = _build_request(
-        _request(),
+        ModelRequest(messages=[UserMessage(text="x")]),
         model.capability,
         settings,
         settings.limits,
@@ -89,14 +86,19 @@ def _google_thinking(model: Model, settings: ModelSettings) -> object:
 def _responses_thinking(model: Model, settings: ModelSettings) -> object:
     assert isinstance(model, _OpenAIResponsesModel)
     model._settings = settings
-    return model._build_kwargs(_request()).get("reasoning")
+    return model._build_kwargs(ModelRequest(messages=[UserMessage(text="x")])).get(
+        "reasoning",
+    )
 
 
 def _chat_thinking(model: Model, settings: ModelSettings) -> object:
     """Chat-completions reasoning knobs, or ``None`` when it sends none."""
     assert isinstance(model, OpenAICompatModel)
     model._settings = settings
-    body = model._build_body(_request(), stream=False)
+    body = model._build_body(
+        ModelRequest(messages=[UserMessage(text="x")]),
+        stream=False,
+    )
     knobs = {
         k: v
         for k, v in body.items()

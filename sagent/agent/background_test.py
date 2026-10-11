@@ -55,10 +55,6 @@ class _StubTool:
         return ToolResult(call_id="", content="ok")
 
 
-def _props(schema: Mapping[str, PlainTree]) -> Mapping[str, object]:
-    return cast(Mapping[str, object], schema["properties"])
-
-
 def test_background_aware_tool_injects_into_schemaless_tool() -> None:
     """B1: a ``type: object`` schema without ``properties`` still gets BG fields.
 
@@ -69,7 +65,7 @@ def test_background_aware_tool_injects_into_schemaless_tool() -> None:
     """
     tool = _StubTool(directive_schema={"type": "object"})
     wrapped = BackgroundAwareTool(tool)
-    props = _props(wrapped.directive_schema)
+    props = cast(Mapping[str, object], wrapped.directive_schema["properties"])
     assert "background" in props
     assert "delay" in props
 
@@ -80,7 +76,7 @@ def test_background_aware_tool_preserves_existing_properties() -> None:
         directive_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
     )
     wrapped = BackgroundAwareTool(tool)
-    props = _props(wrapped.directive_schema)
+    props = cast(Mapping[str, object], wrapped.directive_schema["properties"])
     assert "msg" in props
     assert "background" in props
     assert "delay" in props

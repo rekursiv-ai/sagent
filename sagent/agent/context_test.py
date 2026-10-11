@@ -34,7 +34,6 @@ from sagent.types.tape import (
     ContextSplice,
     MaskRange,
     ReferrableTapeEvent,
-    TapeEvent,
     TapeRecord,
     TapeRef,
 )
@@ -46,10 +45,6 @@ if TYPE_CHECKING:
 
 def _ref(ordinal: int, session: str = "s") -> TapeRef:
     return TapeRef(session_id=session, ordinal=ordinal)
-
-
-def _hr(ordinal: int, entry: TapeEvent, session: str = "s") -> ReferrableTapeEvent:
-    return ReferrableTapeEvent(ref=_ref(ordinal, session), event=entry)
 
 
 def _splice(
@@ -133,14 +128,18 @@ def test_empty_tape_resolves_to_empty_messages() -> None:
 
 def test_history_only_tape_renders_in_tape_order() -> None:
     """Pure history records emit their entries in tape order."""
-    tape = [_hr(0, _user("a")), _hr(1, _assistant("b")), _hr(2, _user("c"))]
+    tape = [
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
+        ReferrableTapeEvent(ref=_ref(1, "s"), event=_assistant("b")),
+        ReferrableTapeEvent(ref=_ref(2, "s"), event=_user("c")),
+    ]
     msgs = _resolve_messages(tape)
     assert [getattr(m, "text", None) for m in msgs] == ["a", "b", "c"]
 
 
 def test_history_entries_are_object_identical_across_calls() -> None:
     """The resolver returns the same ``TapeEvent`` instances."""
-    hr = _hr(0, _user("x"))
+    hr = ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("x"))
     tape = [hr]
     first = resolve_context(tape)
     second = resolve_context(tape)
@@ -157,8 +156,8 @@ def test_splice_masks_earlier_history_record() -> None:
     which is where ``b`` used to be in tape order.
     """
     tape = [
-        _hr(0, _user("a")),
-        _hr(1, _user("b")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
+        ReferrableTapeEvent(ref=_ref(1, "s"), event=_user("b")),
         _splice(
             2,
             mask=(MaskRange.between(_ref(1), _ref(1)),),
@@ -172,8 +171,8 @@ def test_splice_masks_earlier_history_record() -> None:
 
 def test_splice_mask_respects_session_id() -> None:
     tape = [
-        _hr(0, _user("a0"), session="a"),
-        _hr(0, _user("b0"), session="b"),
+        ReferrableTapeEvent(ref=_ref(0, "a"), event=_user("a0")),
+        ReferrableTapeEvent(ref=_ref(0, "b"), event=_user("b0")),
         _splice(
             1,
             mask=(MaskRange.between(_ref(0, "a"), _ref(0, "a")),),
@@ -189,7 +188,7 @@ def test_splice_mask_respects_session_id() -> None:
 def test_splice_with_no_anchor_inserts_at_head() -> None:
     """``insert_after=None`` injects payload at the start of the view."""
     tape = [
-        _hr(0, _user("a")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
         _splice(1, mask=(), insert_after=None, payload=(_user("HEAD"),)),
     ]
     msgs = _resolve_messages(tape)
@@ -199,8 +198,8 @@ def test_splice_with_no_anchor_inserts_at_head() -> None:
 def test_splice_payload_renders_after_anchor() -> None:
     """``insert_after=ref(N)`` places payload immediately after ref(N)."""
     tape = [
-        _hr(0, _user("a")),
-        _hr(1, _user("b")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
+        ReferrableTapeEvent(ref=_ref(1, "s"), event=_user("b")),
         _splice(2, insert_after=_ref(0), payload=(_user("X"),)),
     ]
     # Payload at insert_after=ref(0) lands between a and b in tape order.
@@ -211,9 +210,9 @@ def test_splice_payload_renders_after_anchor() -> None:
 def test_pure_deletion_with_empty_payload() -> None:
     """A splice with empty payload is pure deletion: masked ref vanishes."""
     tape = [
-        _hr(0, _user("a")),
-        _hr(1, _user("b")),
-        _hr(2, _user("c")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
+        ReferrableTapeEvent(ref=_ref(1, "s"), event=_user("b")),
+        ReferrableTapeEvent(ref=_ref(2, "s"), event=_user("c")),
         _splice(3, mask=(MaskRange.between(_ref(1), _ref(1)),), payload=()),
     ]
     msgs = _resolve_messages(tape)
@@ -223,7 +222,7 @@ def test_pure_deletion_with_empty_payload() -> None:
 def test_pure_insertion_with_empty_mask() -> None:
     """A splice with empty mask is pure insertion at the anchor."""
     tape = [
-        _hr(0, _user("a")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
         _splice(1, mask=(), insert_after=_ref(0), payload=(_user("X"),)),
     ]
     msgs = _resolve_messages(tape)
@@ -233,11 +232,11 @@ def test_pure_insertion_with_empty_mask() -> None:
 def test_multi_range_mask_removes_non_contiguous_positions() -> None:
     """A single splice with two mask ranges removes both ranges."""
     tape = [
-        _hr(0, _user("a")),
-        _hr(1, _user("b")),
-        _hr(2, _user("c")),
-        _hr(3, _user("d")),
-        _hr(4, _user("e")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
+        ReferrableTapeEvent(ref=_ref(1, "s"), event=_user("b")),
+        ReferrableTapeEvent(ref=_ref(2, "s"), event=_user("c")),
+        ReferrableTapeEvent(ref=_ref(3, "s"), event=_user("d")),
+        ReferrableTapeEvent(ref=_ref(4, "s"), event=_user("e")),
         _splice(
             5,
             mask=(
@@ -256,9 +255,9 @@ def test_multi_range_mask_removes_non_contiguous_positions() -> None:
 def test_barrier_splice_masks_entire_prefix() -> None:
     """A splice whose mask covers from head to last ref masks everything."""
     tape = [
-        _hr(0, _user("a")),
-        _hr(1, _user("b")),
-        _hr(2, _user("c")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
+        ReferrableTapeEvent(ref=_ref(1, "s"), event=_user("b")),
+        ReferrableTapeEvent(ref=_ref(2, "s"), event=_user("c")),
         _splice(
             3,
             mask=(MaskRange.between(_ref(0), _ref(2)),),
@@ -273,15 +272,15 @@ def test_barrier_splice_masks_entire_prefix() -> None:
 def test_history_records_after_barrier_apply_normally() -> None:
     """Records appended after a barrier-style splice render after its payload."""
     tape = [
-        _hr(0, _user("a")),
-        _hr(1, _user("b")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
+        ReferrableTapeEvent(ref=_ref(1, "s"), event=_user("b")),
         _splice(
             2,
             mask=(MaskRange.between(_ref(0), _ref(1)),),
             insert_after=None,
             payload=(_user("SUMMARY"),),
         ),
-        _hr(3, _user("c")),
+        ReferrableTapeEvent(ref=_ref(3, "s"), event=_user("c")),
     ]
     msgs = _resolve_messages(tape)
     assert [getattr(m, "text", None) for m in msgs] == ["SUMMARY", "c"]
@@ -298,16 +297,16 @@ def test_cover_the_cover_resurrects_originally_masked_content() -> None:
     its insert_after.
     """
     tape = [
-        _hr(0, _user("a")),
-        _hr(1, _user("b")),
-        _hr(2, _user("c")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
+        ReferrableTapeEvent(ref=_ref(1, "s"), event=_user("b")),
+        ReferrableTapeEvent(ref=_ref(2, "s"), event=_user("c")),
         _splice(
             3,
             mask=(MaskRange.between(_ref(1), _ref(1)),),
             insert_after=_ref(0),
             payload=(_user("D"),),
         ),
-        _hr(4, _user("e")),
+        ReferrableTapeEvent(ref=_ref(4, "s"), event=_user("e")),
         _splice(
             5,
             mask=(MaskRange.between(_ref(3), _ref(3)),),
@@ -324,7 +323,7 @@ def test_cover_the_cover_resurrects_originally_masked_content() -> None:
 def test_dead_splice_does_not_contribute_payload() -> None:
     """A splice whose record ref is masked contributes nothing."""
     tape = [
-        _hr(0, _user("a")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
         _splice(
             1,
             mask=(),
@@ -351,11 +350,11 @@ def test_user_example_walkthrough() -> None:
     g at pos 6 masks b at pos 1. Each adds its own payload.
     """
     tape = [
-        _hr(0, _user("a")),
-        _hr(1, _user("b")),
-        _hr(2, _user("c")),
-        _hr(3, _user("d")),
-        _hr(4, _user("e")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
+        ReferrableTapeEvent(ref=_ref(1, "s"), event=_user("b")),
+        ReferrableTapeEvent(ref=_ref(2, "s"), event=_user("c")),
+        ReferrableTapeEvent(ref=_ref(3, "s"), event=_user("d")),
+        ReferrableTapeEvent(ref=_ref(4, "s"), event=_user("e")),
         _splice(
             5,
             mask=(MaskRange.between(_ref(3), _ref(3)),),
@@ -379,7 +378,7 @@ def test_user_example_walkthrough() -> None:
 def test_alive_splices_excludes_masked_splice_ref() -> None:
     """A splice masked by a later splice is not in the alive set."""
     tape = [
-        _hr(0, _user("a")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
         _splice(1, mask=(), insert_after=_ref(0), payload=(_user("X"),)),
         _splice(2, mask=(MaskRange.between(_ref(1), _ref(1)),), payload=()),
     ]
@@ -391,8 +390,8 @@ def test_alive_splices_excludes_masked_splice_ref() -> None:
 def test_masked_refs_by_alive_excludes_dead_splice_masking() -> None:
     """A dead splice's mask does not contribute to the alive-masked set."""
     tape = [
-        _hr(0, _user("a")),
-        _hr(1, _user("b")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
+        ReferrableTapeEvent(ref=_ref(1, "s"), event=_user("b")),
         _splice(2, mask=(MaskRange.between(_ref(1), _ref(1)),), payload=()),
         _splice(3, mask=(MaskRange.between(_ref(2), _ref(2)),), payload=()),
     ]
@@ -407,7 +406,9 @@ def test_masked_refs_by_alive_excludes_dead_splice_masking() -> None:
 def test_alive_splices_handles_large_alive_splice_sets_quickly() -> None:
     tape: list[TapeRecord] = []
     for idx in range(2_000):
-        tape.append(_hr(idx * 2, _user(str(idx))))
+        tape.append(
+            ReferrableTapeEvent(ref=_ref((idx * 2), "s"), event=_user(str(idx))),
+        )
         tape.append(
             _splice(
                 idx * 2 + 1,
@@ -424,13 +425,16 @@ def test_alive_splices_handles_large_alive_splice_sets_quickly() -> None:
 
 def test_version_equals_tape_length() -> None:
     """``version`` reports the number of tape records."""
-    tape = [_hr(0, _user("a")), _hr(1, _user("b"))]
+    tape = [
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a")),
+        ReferrableTapeEvent(ref=_ref(1, "s"), event=_user("b")),
+    ]
     assert resolve_context(tape).version == 2
 
 
 def test_resolved_context_returns_independent_message_list() -> None:
     """Mutating the returned list does not affect a fresh resolve."""
-    tape = [_hr(0, _user("a"))]
+    tape = [ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("a"))]
     first = resolve_context(tape)
     first.messages.append(_user("BOGUS"))
     second = resolve_context(tape)
@@ -457,7 +461,7 @@ def test_resolve_scales_linearly_in_tape_length() -> None:
     tape: list[TapeRecord] = []
     ordinal = 0
     for i in range(200):
-        tape.append(_hr(ordinal, _user(f"u{i}")))
+        tape.append(ReferrableTapeEvent(ref=_ref(ordinal, "s"), event=_user(f"u{i}")))
         ordinal += 1
         tape.append(
             _splice(
@@ -608,9 +612,12 @@ def test_validate_unknown_tool_result_after_batch_raises() -> None:
 def test_resolved_context_after_compaction_validates_cleanly() -> None:
     """A summary-style splice yields a wire-format-valid resolved view."""
     tape = [
-        _hr(0, _user("go")),
-        _hr(1, _assistant(tool_calls=(_tool_call("t1"),))),
-        _hr(2, _tool_result("t1")),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("go")),
+        ReferrableTapeEvent(
+            ref=_ref(1, "s"),
+            event=_assistant(tool_calls=(_tool_call("t1"),)),
+        ),
+        ReferrableTapeEvent(ref=_ref(2, "s"), event=_tool_result("t1")),
         _splice(
             3,
             mask=(MaskRange.between(_ref(0), _ref(2)),),
@@ -626,9 +633,15 @@ def test_resolved_context_after_compaction_validates_cleanly() -> None:
 def test_detached_splice_keeps_tool_pairing_valid() -> None:
     """Real TR splice into placeholder slot yields a valid context."""
     tape = [
-        _hr(0, _user("go")),
-        _hr(1, _assistant(tool_calls=(_tool_call("t1"),))),
-        _hr(2, _tool_result("t1", content=DETACHED_PLACEHOLDER)),
+        ReferrableTapeEvent(ref=_ref(0, "s"), event=_user("go")),
+        ReferrableTapeEvent(
+            ref=_ref(1, "s"),
+            event=_assistant(tool_calls=(_tool_call("t1"),)),
+        ),
+        ReferrableTapeEvent(
+            ref=_ref(2, "s"),
+            event=_tool_result("t1", content=DETACHED_PLACEHOLDER),
+        ),
         _splice(
             3,
             mask=(MaskRange.between(_ref(2), _ref(2)),),
