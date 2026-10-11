@@ -40,11 +40,6 @@ def _ref(ordinal: int) -> TapeRef:
     return TapeRef(session_id="s", ordinal=ordinal)
 
 
-def _mr(lo: int, hi: int, session_id: str = "s") -> MaskRange:
-    """Test helper: build a single-session MaskRange."""
-    return MaskRange(session_id=session_id, lo=lo, hi=hi)
-
-
 def test_coalesce_roles_is_total_on_duplicate_tool_call_ids() -> None:
     """Merging adjacent AMs that share a tool_call id must not raise.
 
@@ -381,22 +376,34 @@ def test_coalesce_roles_idempotent_multi_source_labels_once() -> None:
 
 def test_merge_mask_ranges_preserves_gaps() -> None:
     """Sparse ranges stay sparse; a real gap is not filled."""
-    merged = merge_mask_ranges((_mr(1, 1), _mr(10, 10)))
-    assert merged == (_mr(1, 1), _mr(10, 10))
+    merged = merge_mask_ranges(
+        (
+            MaskRange(session_id="s", lo=1, hi=1),
+            MaskRange(session_id="s", lo=10, hi=10),
+        ),
+    )
+    assert merged == (
+        MaskRange(session_id="s", lo=1, hi=1),
+        MaskRange(session_id="s", lo=10, hi=10),
+    )
 
 
 def test_merge_mask_ranges_coalesces_overlapping_and_touching() -> None:
     """Overlapping or adjacent (abutting) ranges merge into one."""
     # Touching: 1..3 and 4..5 abut (gap 0) -> one range.
-    assert merge_mask_ranges((_mr(1, 3), _mr(4, 5))) == (_mr(1, 5),)
+    assert merge_mask_ranges(
+        (MaskRange(session_id="s", lo=1, hi=3), MaskRange(session_id="s", lo=4, hi=5)),
+    ) == (MaskRange(session_id="s", lo=1, hi=5),)
     # Overlapping: 1..5 and 3..8 -> one range.
-    assert merge_mask_ranges((_mr(1, 5), _mr(3, 8))) == (_mr(1, 8),)
+    assert merge_mask_ranges(
+        (MaskRange(session_id="s", lo=1, hi=5), MaskRange(session_id="s", lo=3, hi=8)),
+    ) == (MaskRange(session_id="s", lo=1, hi=8),)
 
 
 def test_merge_mask_ranges_partitions_by_session() -> None:
     """Ranges in different sessions never merge across the boundary."""
-    a = _mr(1, 1, session_id="a")
-    b = _mr(1, 1, session_id="b")
+    a = MaskRange(session_id="a", lo=1, hi=1)
+    b = MaskRange(session_id="b", lo=1, hi=1)
     merged = merge_mask_ranges((a, b))
     assert set(merged) == {a, b}
 
@@ -602,20 +609,35 @@ def test_two_back_to_back_unpaired_ams_rejected() -> None:
 
 def test_mask_disjoint_within_splice_passes() -> None:
     """Two disjoint mask ranges in the same splice pass validation."""
-    splice = _splice(mask=(_mr(1, 2), _mr(5, 7)))
+    splice = _splice(
+        mask=(
+            MaskRange(session_id="s", lo=1, hi=2),
+            MaskRange(session_id="s", lo=5, hi=7),
+        ),
+    )
     assert len(splice.mask) == 2
 
 
 def test_mask_adjacent_ranges_within_splice_pass() -> None:
     """Adjacent (touching) ranges do not share a position; allowed."""
-    splice = _splice(mask=(_mr(1, 3), _mr(4, 6)))
+    splice = _splice(
+        mask=(
+            MaskRange(session_id="s", lo=1, hi=3),
+            MaskRange(session_id="s", lo=4, hi=6),
+        ),
+    )
     assert len(splice.mask) == 2
 
 
 def test_mask_overlap_within_splice_rejected() -> None:
     """Two mask ranges in the same splice that share a position fail."""
     with pytest.raises(InvalidPayloadError, match="mask ranges overlap"):
-        _splice(mask=(_mr(1, 5), _mr(4, 8)))
+        _splice(
+            mask=(
+                MaskRange(session_id="s", lo=1, hi=5),
+                MaskRange(session_id="s", lo=4, hi=8),
+            ),
+        )
 
 
 def test_mask_inverted_range_unconstructable() -> None:
@@ -648,7 +670,10 @@ def test_replay_bypasses_validation() -> None:
     )
     splice = ContextSplice.replay(
         ref=_REF,
-        mask=(_mr(1, 5), _mr(4, 8)),
+        mask=(
+            MaskRange(session_id="s", lo=1, hi=5),
+            MaskRange(session_id="s", lo=4, hi=8),
+        ),
         insert_after=None,
         payload=(am,),
         strategy="legacy",
@@ -713,7 +738,7 @@ def test_replay_preserves_all_fields() -> None:
     """``replay()`` populates every dataclass field, including defaults."""
     splice = ContextSplice.replay(
         ref=_REF,
-        mask=(_mr(1, 2),),
+        mask=(MaskRange(session_id="s", lo=1, hi=2),),
         insert_after=_ref(3),
         payload=(UserMessage(text="x"),),
         strategy="summary",

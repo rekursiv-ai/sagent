@@ -854,7 +854,7 @@ def _parse_tool_arguments(
             continue
         saw_args = True
         try:
-            parsed = from_plain(json_loads(args_str), dict[str, object])
+            parsed = json_loads(args_str, dict[str, object])
         except json.JSONDecodeError:
             logger.warning(
                 "OpenAI Responses tool arguments were invalid JSON: "

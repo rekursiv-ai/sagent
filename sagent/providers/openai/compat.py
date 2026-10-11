@@ -664,7 +664,7 @@ async def consume_stream(
                 saw_done = True
                 break
             try:
-                event = from_plain(json_loads(data_str), dict[str, object])
+                event = json_loads(data_str, dict[str, object])
             except (json.JSONDecodeError, ReadError):
                 continue
             if "error" in event or event.get("object") == "error":

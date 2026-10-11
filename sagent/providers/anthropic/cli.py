@@ -190,7 +190,7 @@ def _claude_auth_status(binary: str) -> bool | None:
     except (OSError, subprocess.TimeoutExpired):
         return None
     try:
-        status = from_plain(json_loads(proc.stdout), dict[str, object])
+        status = json_loads(proc.stdout, dict[str, object])
     except (json.JSONDecodeError, ReadError):
         return None
     logged_in = status.get("loggedIn")
@@ -1433,10 +1433,7 @@ def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
     if not path.exists():
         return None
     try:
-        raw = from_plain(
-            json_loads(path.read_text(encoding="utf-8")),
-            dict[str, object],
-        )
+        raw = json_loads(path.read_text(encoding="utf-8"), dict[str, object])
         _CREDENTIALS_VALIDATOR(raw)
     except (OSError, json.JSONDecodeError, ReadError):
         return None

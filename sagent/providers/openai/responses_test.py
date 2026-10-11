@@ -75,7 +75,7 @@ class _Wire:
 
     async def send(self, request: httpx2.Request) -> httpx2.Response:
         self.paths.append(request.url.path)
-        self.requests.append(from_plain(json_loads(request.content), dict[str, object]))
+        self.requests.append(json_loads(request.content, dict[str, object]))
         if request.url.path != "/v1/responses":
             return httpx2.Response(
                 404,
@@ -204,7 +204,7 @@ async def test_api_stream_uses_responses_with_supported_knobs(
     assert response.tokens.cache_read == 4
     assert wire.paths == ["/v1/responses"]
     records = [
-        from_plain(json_loads(line), dict[str, object])
+        json_loads(line, dict[str, object])
         for line in log_path.read_text().splitlines()
     ]
     assert any(
@@ -1257,10 +1257,7 @@ async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
         assert isinstance(number, int)
         assert (number % 17, number % 19, number % 23) == (12, 7, 5)
         restored = _entry_from_json(
-            from_plain(
-                json_loads(json.dumps(_entry_to_json(first.message))),
-                dict[str, object],
-            ),
+            json_loads(json.dumps(_entry_to_json(first.message)), dict[str, object]),
         )
         assert isinstance(restored, AssistantMessage)
         assert restored == first.message

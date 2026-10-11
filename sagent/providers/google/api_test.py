@@ -760,7 +760,7 @@ async def test_google_actual_request_tokens_wraps_generate_request() -> None:
     )
     assert n == 314
     assert seen[0].url.path.endswith(":countTokens")
-    body = from_plain(json_loads(seen[0].content), dict[str, object])
+    body = json_loads(seen[0].content, dict[str, object])
     assert set(body) == {"generateContentRequest"}
     inner = from_plain(body["generateContentRequest"], dict[str, object])
     model_id = m.capability.wire_model_id or m.capability.model_id

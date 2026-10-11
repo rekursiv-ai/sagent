@@ -432,7 +432,7 @@ async def _slack_call(
             is_error=True,
         )
     try:
-        body = from_plain(json_loads(raw[0]), dict[str, object])
+        body = json_loads(raw[0], dict[str, object])
     except (json.JSONDecodeError, ReadError) as error:
         return ToolResult(
             call_id="",
