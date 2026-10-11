@@ -38,8 +38,7 @@ import sys
 import time
 import uuid
 
-from treekle import ReadError
-from treekle.wire import json_loads
+from treekle import ReadError, json_loads
 
 from sagent.lib.userdirs import data_dir
 

@@ -31,8 +31,8 @@ from treekle import (
     ReadError,
     from_plain,
     immutable,
+    json_loads,
 )
-from treekle.wire import json_loads
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 

@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING, cast
 
 import logging
 
-from treekle import MutablePlainTree, PlainTree, from_plain
-from treekle.wire import json_loads
+from treekle import MutablePlainTree, PlainTree, from_plain, json_loads
 
 import httpx2
 import pytest

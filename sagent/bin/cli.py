@@ -61,8 +61,7 @@ import shlex
 import signal
 import sys
 
-from treekle import from_plain
-from treekle.wire import json_loads
+from treekle import from_plain, json_loads
 
 from sagent import (
     providers,

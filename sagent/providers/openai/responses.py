@@ -11,8 +11,7 @@ import inspect
 import json
 import logging
 
-from treekle import from_plain, mutable
-from treekle.wire import json_loads
+from treekle import from_plain, json_loads, mutable
 
 from sagent.catalog.openai import (
     keeps_reasoning_across_turns,

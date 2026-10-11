@@ -54,8 +54,7 @@ import re
 import time
 import uuid
 
-from treekle import MutablePlainTree, mutable
-from treekle.wire import json_loads
+from treekle import MutablePlainTree, json_loads, mutable
 
 from sagent.lib import token_count
 from sagent.providers.lib.id_remap import IdRemapper

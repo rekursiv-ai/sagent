@@ -96,8 +96,7 @@ else:
     openai = lazy_import("openai")  # 493ms cold.
 
 
-from treekle import MutablePlainTree, ReadError, from_plain
-from treekle.wire import json_loads
+from treekle import MutablePlainTree, ReadError, from_plain, json_loads
 
 from sagent.catalog.openai import subscription, subscription_models
 from sagent.catalog.table import ModelCatalog

@@ -32,8 +32,7 @@ import re
 import shutil
 import subprocess
 
-from treekle import MutablePlainTree, PlainTree, ReadError, from_plain
-from treekle.wire import json_loads
+from treekle import MutablePlainTree, PlainTree, ReadError, from_plain, json_loads
 
 import fastjsonschema
 

@@ -4083,7 +4083,7 @@ wheels = [
 [[package]]
 name = "treekle"
 version = "0.1.0"
-source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#7bf150bfa46dbdffb68c522be1f0cf09189328c6" }
+source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#f03dc417f4efb1aee9659bf8733d9a865498cbc8" }
 
 [[package]]
 name = "triton"
@@ -4395,7 +4395,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.13"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#93c69e3e8e29c3c9b26204e9bb88f7342522d914" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#42f992f636bc24638a3e9747bacb9c9b86297268" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

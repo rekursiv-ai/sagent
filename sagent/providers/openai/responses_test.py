@@ -14,8 +14,7 @@ import json
 import logging
 import os
 
-from treekle import from_plain
-from treekle.wire import json_loads
+from treekle import from_plain, json_loads
 
 import httpx2
 import openai

@@ -10,8 +10,7 @@ import asyncio
 import json
 import re
 
-from treekle import ReadError, from_plain, immutable
-from treekle.wire import json_loads
+from treekle import ReadError, from_plain, immutable, json_loads
 
 from sagent.agent.state import (
     approx_tokens,
