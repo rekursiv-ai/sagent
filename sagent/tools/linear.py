@@ -23,7 +23,6 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Final, cast
 
 import asyncio
-import json
 import os
 
 from treekle import (
@@ -33,6 +32,7 @@ from treekle import (
     from_plain,
     immutable,
 )
+from treekle.wire import json_loads
 from wesearch.fetch import ContentParams, RequestParams, RetryParams, fetch
 from wesearch.types.errors import FetchError
 
@@ -485,13 +485,12 @@ async def _gql(
             content=(f"Linear API HTTP {e.status}: {e.body.decode(errors='replace')}"),
             is_error=True,
         )
-    document = json.loads(raw[0])
     try:
-        body = from_plain(document, dict[str, object])
+        body = json_loads(raw[0], dict[str, object])
     except ReadError:
         return ToolResult(
             call_id="",
-            content=f"Linear GraphQL returned a non-object body: {document}",
+            content=f"Linear GraphQL returned a non-object body: {json_loads(raw[0])}",
             is_error=True,
         )
     if errors := body.get("errors"):

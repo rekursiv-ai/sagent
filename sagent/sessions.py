@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Final, cast
+from typing import IO, TYPE_CHECKING, Final
 
 import contextlib
 import json
@@ -38,7 +38,8 @@ import sys
 import time
 import uuid
 
-from treekle import from_plain
+from treekle import ReadError
+from treekle.wire import json_loads
 
 from sagent.lib.userdirs import data_dir
 
@@ -776,14 +777,13 @@ def _iter_jsonl(lines: Iterable[str]) -> Iterator[dict[str, object]]:
         if not line:
             continue
         try:
-            parsed: object = json.loads(line)
+            record = json_loads(line, dict[str, object])
         except json.JSONDecodeError:
             logger.warning("Skipping malformed JSONL line: %r", line[:120])
             continue
-        if not isinstance(parsed, dict):
+        except ReadError:
             logger.warning("Skipping non-dict JSONL record: %r", line[:120])
             continue
-        record = from_plain(cast(object, parsed), dict[str, object])
         yield record
 
 

@@ -10,7 +10,8 @@ import asyncio
 import json
 import re
 
-from treekle import from_plain, immutable
+from treekle import ReadError, from_plain, immutable
+from treekle.wire import json_loads
 
 from sagent.agent.state import (
     approx_tokens,
@@ -401,7 +402,7 @@ def _read_image(p: Path, *, file_path: str, suffix: str) -> ToolResult:
 def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
     """Parse a Jupyter notebook and return cell contents as text."""
     try:
-        nb = json.loads(p.read_text(encoding="utf-8"))
+        nb_d = json_loads(p.read_text(encoding="utf-8"), dict[str, object])
     # ``is_error`` on every unreadable shape, matching the missing-file
     # and not-a-file paths above: a caller branching on the flag -- which
     # is what it exists for -- otherwise reads a corrupt notebook as a
@@ -418,13 +419,12 @@ def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
             content=f"[Non-UTF-8 notebook: {file_path}: {e}]",
             is_error=True,
         )
-    if not isinstance(nb, dict):
+    except ReadError:
         return ToolResult(
             call_id="",
             content=f"[Not a valid Jupyter notebook: {file_path}]",
             is_error=True,
         )
-    nb_d = from_plain(cast(object, nb), dict[str, object])
     cells_raw = from_plain(nb_d.get("cells"), object, default=[])
     cells = cast(list[object], cells_raw) if isinstance(cells_raw, list) else []
     parts: list[str] = []

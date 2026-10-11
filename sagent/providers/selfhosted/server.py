@@ -54,7 +54,8 @@ import re
 import time
 import uuid
 
-from treekle import MutablePlainTree, from_plain, mutable
+from treekle import MutablePlainTree, mutable
+from treekle.wire import json_loads
 
 from sagent.lib import token_count
 from sagent.providers.lib.id_remap import IdRemapper
@@ -1072,17 +1073,12 @@ def _parse_deepseek_tool_call(raw: str) -> ToolCall | None:
     json_match = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
     if name_match is None or json_match is None:
         return None
+    # The regex requires a ``{...}`` body, so a decoded value is an object.
     try:
-        parsed: object = json.loads(json_match.group(1))
+        args = json_loads(json_match.group(1), dict[str, object])
     except json.JSONDecodeError:
         return None
-    # The regex requires a ``{...}`` body, so ``parsed`` is an object and
-    # ``convert`` cannot raise here.
-    return ToolCall(
-        id=str(uuid.uuid4())[:12],
-        name=name_match.group(1),
-        args=from_plain(parsed, dict[str, object]),
-    )
+    return ToolCall(id=str(uuid.uuid4())[:12], name=name_match.group(1), args=args)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

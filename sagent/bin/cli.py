@@ -62,6 +62,7 @@ import signal
 import sys
 
 from treekle import from_plain
+from treekle.wire import json_loads
 
 from sagent import (
     providers,
@@ -1448,13 +1449,12 @@ def _parse_stream_json(raw: str) -> str:
         if not line:
             continue
         try:
-            obj: object = json.loads(line)
+            record = json_loads(line, dict[str, object])
         except json.JSONDecodeError as e:
             raise ValueError(f"invalid JSON line in stream-json input: {e}") from e
-        # ``read`` raises on a non-object, which is fatal. A bare ``{}`` is a
+        # A non-object raises ``ReadError``, which is fatal. A bare ``{}`` is a
         # valid prompt-less line and must be skipped, exactly like the
         # prompt-less ``{"other": "data"}``.
-        record = from_plain(obj, dict[str, object])
         p = from_plain(record.get("prompt"), str, default="")
         if p:
             prompts.append(p)
