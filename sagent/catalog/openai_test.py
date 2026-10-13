@@ -332,6 +332,6 @@ def test_reasoning_context_spans_turns_only_on_5_6_and_later(
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)

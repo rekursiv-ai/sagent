@@ -49,6 +49,6 @@ def test_google_refuses_a_budget_for_no_thinking() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)

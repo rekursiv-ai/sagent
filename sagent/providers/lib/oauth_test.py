@@ -328,6 +328,6 @@ def test_callback_without_a_code_is_an_error() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)

@@ -381,6 +381,6 @@ def test_persist_raises_on_a_zero_byte_write_instead_of_spinning(
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)

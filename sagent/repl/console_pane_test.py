@@ -416,6 +416,6 @@ def test_child_user_facing_error_drops_the_class_name_prefix() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)

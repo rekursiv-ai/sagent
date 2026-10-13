@@ -11,8 +11,7 @@ any test or package conftest imports NumPy or torch. In the monorepo the
 repo-root conftest applies them; the public tree has no such root.
 """
 
-from sagent.lib.testing.resource_markers import pytest_collection_modifyitems
-from sagent.lib.testing.threads import cap_math_threads
+from sagent.lib.testing.resources import cap_math_threads, pytest_collection_modifyitems
 
 
 __all__ = ["pytest_collection_modifyitems"]

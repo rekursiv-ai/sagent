@@ -1,8 +1,44 @@
-"""Shared pytest resource-marker rollups and timeout budgets."""
+"""What a test process may use: directories, threads, stack depth, time, services.
+
+A package's conftest wires these in once::
+
+    from sagent.lib.testing.resources import (
+        cap_math_threads,
+        isolate_user_dirs,
+        pytest_collection_modifyitems,
+        pytest_configure,
+    )
+
+    cap_math_threads()
+
+    __all__ = [
+        "isolate_user_dirs",
+        "pytest_collection_modifyitems",
+        "pytest_configure",
+    ]
+
+They live here rather than in a conftest because a conftest does not ship in a
+wheel: an exported package whose tests import another package's conftest gets
+nothing.
+
+- Directories: ``isolate_user_dirs`` points every ``userdirs`` lookup at a
+  per-test tmp directory, so a test can neither clobber the developer's
+  real config, data, cache, or state, nor pass against what happens to be
+  there. ``@pytest.mark.real_user_dirs`` opts out, for a test that drives a
+  live service with the operator's real credentials. It cannot reach a
+  module-level constant that called a ``userdirs`` helper at import time:
+  imports run before any fixture.
+- Threads: ``cap_math_threads`` gives each process one math thread.
+- Stack depth: ``recursion_headroom`` caps how deep a test may recurse.
+- Time and services: ``pytest_collection_modifyitems`` turns each resource
+  marker into a timeout, family markers, and a skip where the resource is
+  absent.
+"""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from contextlib import contextmanager
 from functools import cache
 from importlib import util
 from pathlib import Path
@@ -10,15 +46,187 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import ast
 import os
+import sys
+import tempfile
+import traceback
 
 import pytest
+
+
+if TYPE_CHECKING:
+    from collections.abc import Generator, Iterator
 
 
 _CWD: Final = Path(__file__).resolve().parent
 
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
+def pytest_configure(config: pytest.Config) -> None:
+    """Declare the ``real_user_dirs`` marker. Re-export beside the fixture.
+
+    Declared in code rather than a pyproject ``markers`` list because this
+    module is vendored into every exported package and each carries its OWN
+    pyproject: a marker listed only in the monorepo's is unregistered
+    downstream, and every export runs ``filterwarnings = ["error"]``, which
+    turns pytest's unknown-mark warning into a collection error. The marker
+    travels with the code that honors it.
+
+    It must be the hook, registered at configure time: the unknown-mark
+    warning fires during COLLECTION, so the fixture cannot declare it late.
+    A conftest with no hook of its own re-exports this one by name::
+
+        from sagent.lib.testing.resources import (
+            isolate_user_dirs,
+            pytest_configure,
+        )
+
+        __all__ = ["isolate_user_dirs", "pytest_configure"]
+
+    A conftest that already defines ``pytest_configure`` imports this under
+    another name and calls it from its own body.
+
+    Args:
+      config: The pytest config to add the marker line to.
+
+    """
+    config.addinivalue_line(
+        "markers",
+        "real_user_dirs: opt out of XDG isolation; the test drives a live"
+        " service with the operator's real credentials, which a tmp XDG root"
+        " would replace with an empty directory",
+    )
+
+
+@pytest.fixture(autouse=True)
+def isolate_user_dirs(
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Path | None:
+    """Point every XDG base directory at a per-test tmp root.
+
+    Sets the environment rather than patching the ``userdirs`` functions: the
+    env var is the seam production reads, so a test exercises the real
+    resolution -- including a wrong ``app`` argument, which a patched function
+    would hide. Patching also only reaches the one module that imported the
+    helper, leaving every other caller pointed at the real directory.
+
+    A test that drives a LIVE external service opts out with
+    ``@pytest.mark.real_user_dirs``: its credentials are the operator's real
+    ones, and a tmp XDG root silently replaces them with an empty directory.
+    The marker exists so that need is expressible HERE. Without it the opt-out
+    has to be spelled at the call site -- the caller hand-builds
+    ``Path.home() / ".local/state/..."`` to dodge the fixture, reintroducing
+    exactly the per-platform layout ``userdirs`` exists to delete.
+
+    Args:
+      request: Pytest request; checked for real_user_dirs marker.
+      tmp_path_factory: Factory for creating per-test tmp directories.
+      monkeypatch: Fixture for temporary environment modifications.
+
+    Returns:
+      root: The tmp directory the four XDG variables point at, or ``None``
+        when the test opted out. Assertions normally do not need it; call the
+        ``userdirs`` helper instead.
+
+    """
+    # FixtureRequest.node is an un-annotated abstract property upstream
+    # (_pytest.fixtures); function scope makes it the test Item.
+    node = cast(pytest.Item, request.node)
+    if node.get_closest_marker("real_user_dirs") is not None:
+        return None
+    # Its OWN directory, deliberately NOT a subdirectory of ``tmp_path``.
+    # Placing it under ``tmp_path`` costs one fewer allocation but is wrong: a
+    # large family of tests asserts on the CONTENTS of ``tmp_path`` to prove an
+    # atomic write left no temp file behind, and a ``userdirs`` entry appearing
+    # there fails 15 of them (``temp file leaked: ['userdirs']``). The XDG root
+    # must be invisible to the directory under test.
+    # Keep these roots out of numbered allocation's per-test sibling scans.
+    parent = tmp_path_factory.getbasetemp() / "userdirs"
+    parent.mkdir(mode=0o700, exist_ok=True)
+    root = Path(tempfile.mkdtemp(prefix="isolate-", dir=parent))
+    # This IS the fixture that repoints userdirs, so it spells the variables.
+    for leaf in ("config", "data", "cache", "state"):
+        (root / leaf).mkdir(mode=0o700)
+        variable = f"XDG_{leaf.upper()}_HOME"  # house-ignore[xdg-literal] -- This IS the fixture that repoints userdirs, so it spells the variables.
+        monkeypatch.setenv(variable, str(root / leaf))
+    return root
+
+
+def cap_math_threads() -> None:
+    """Give each process one math thread, before any native library loads.
+
+    xdist parallelizes at the process level, so a worker that also spawns a
+    full-width BLAS/OpenMP pool oversubscribes the box: N workers x N threads.
+    The effect is not a mild slowdown -- an 8-worker run turns 2ms training
+    steps into seconds and trips per-test timeouts.
+
+    Must run before NumPy/PyTorch/SciPy import: torch reads ``OMP_NUM_THREADS``
+    at import and pins its ATen intra-op pool to match. Conftest import is early
+    enough; ``addopts`` is not.
+
+    ``MKL_CBWR`` pins a CPU-independent GEMM kernel. It is NOT redundant with
+    the bfb harness's float64 upcast: that upcast removes the float32 kernel's
+    error, but a float64 GEMM's reduction order still varies with the kernel
+    MKL selects, and a float64 difference lands on a different float32 bit
+    whenever the exact value sits near a rounding boundary. Absorbed almost
+    always, not always -- which is a test that fails on one machine in many,
+    the worst failure a golden can have. Removing it was measured inert on an
+    AMD host, where MKL takes a generic path anyway, and broke an Intel one.
+    MKL reads it at its first GEMM, so it must be set before any matmul runs.
+
+    Numba's ``prange`` pool is ``NUMBA_NUM_THREADS`` wide, every CPU by
+    default, so an xdist worker keeps two: under ``pytest -n 32`` unit tests of
+    10 ms took up to 2 s. A serial run keeps every CPU (an 8,192-world Craftax
+    pool builds in 0.29 s on 128 threads, 7.4 s on two). Idle pool threads
+    must sleep either way: spinning, they slowed every later test in the
+    process 20-30x. A pytest plugin imports Numba before any conftest, and
+    Numba re-reads its environment only at compile time, so a kernel loaded
+    from cache could launch the pool at the stale width; reloading here, before
+    any test runs, fixes the width before launch, after which Numba refuses to
+    change it.
+
+    Every variable uses ``setdefault``, so an explicit
+    ``OMP_NUM_THREADS=8 pytest`` always wins.
+    """
+    for name in (
+        "OMP_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+        "VECLIB_MAXIMUM_THREADS",  # macOS Accelerate.
+        "BLIS_NUM_THREADS",
+    ):
+        os.environ.setdefault(name, "1")  # noqa: TID251 -- Thread cap the operator may override; not a provisioned cache path.
+    os.environ.setdefault("MKL_CBWR", "COMPATIBLE")  # noqa: TID251 -- Kernel pin the operator may override; not a provisioned cache path.
+    os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")  # noqa: TID251 -- Thread policy the operator may override; not a provisioned cache path.
+    if "PYTEST_XDIST_WORKER" in os.environ:
+        os.environ.setdefault("NUMBA_NUM_THREADS", "2")  # noqa: TID251 -- Thread cap the operator may override; not a provisioned cache path.
+    numba_config = cast(_NumbaConfig | None, sys.modules.get("numba.core.config"))
+    if numba_config is not None:
+        numba_config.reload_config()
+
+
+@contextmanager
+def recursion_headroom(frames: int) -> Generator[None]:
+    """Cap the recursion limit ``frames`` above the caller's own depth.
+
+    Inside, input nested deeper than ``frames`` raises ``RecursionError`` in any
+    code that recurses once per level, so a test of iterative code needs only a
+    small input instead of one deeper than the default limit.
+
+    Args:
+      frames: How many frames deeper than the caller the code may go.
+
+    Yields:
+      None: The limit is restored on exit.
+
+    """
+    before = sys.getrecursionlimit()
+    sys.setrecursionlimit(sum(1 for _ in traceback.walk_stack(None)) + frames)
+    try:
+        yield
+    finally:
+        sys.setrecursionlimit(before)
 
 
 class MarkedItem(Protocol):
@@ -137,50 +345,6 @@ def apply_golden_marker(items: Sequence[GoldenMarkedItem]) -> None:
             and item.get_closest_marker("golden") is None
         ):
             item.add_marker(pytest.mark.golden)
-
-
-class _ModuleSource:
-    """Parsed functions, module-level names, and imports for one source module."""
-
-    def __init__(
-        self,
-        tree: ast.Module,
-        path: Path,
-        *,
-        mentions_testdata: bool,
-    ) -> None:
-        self.path = path
-        self.mentions_testdata = mentions_testdata
-        self.functions = {
-            node.name: node
-            for node in tree.body
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
-        }
-        self.golden_names = {
-            target.id
-            for node in tree.body
-            if isinstance(node, (ast.Assign, ast.AnnAssign))
-            and node.value is not None
-            and _names_checked_in_testdata(node.value)
-            for target in (
-                node.targets if isinstance(node, ast.Assign) else [node.target]
-            )
-            if isinstance(target, ast.Name)
-        }
-        self.imports: dict[str, tuple[str, str | None]] = {}
-        for node in tree.body:
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    self.imports[alias.asname or alias.name.split(".")[-1]] = (
-                        alias.name,
-                        None,
-                    )
-            elif isinstance(node, ast.ImportFrom) and node.module is not None:
-                for alias in node.names:
-                    self.imports[alias.asname or alias.name] = (
-                        node.module,
-                        alias.name,
-                    )
 
 
 @cache
@@ -431,6 +595,54 @@ def apply_resource_markers(
                 live_llm_env_var=live_llm_env_var,
                 ci_skipped_marks=ci_skipped_marks,
             )
+
+
+class _NumbaConfig(Protocol):
+    def reload_config(self) -> None: ...
+
+
+class _ModuleSource:
+    """Parsed functions, module-level names, and imports for one source module."""
+
+    def __init__(
+        self,
+        tree: ast.Module,
+        path: Path,
+        *,
+        mentions_testdata: bool,
+    ) -> None:
+        self.path = path
+        self.mentions_testdata = mentions_testdata
+        self.functions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        self.golden_names = {
+            target.id
+            for node in tree.body
+            if isinstance(node, (ast.Assign, ast.AnnAssign))
+            and node.value is not None
+            and _names_checked_in_testdata(node.value)
+            for target in (
+                node.targets if isinstance(node, ast.Assign) else [node.target]
+            )
+            if isinstance(target, ast.Name)
+        }
+        self.imports: dict[str, tuple[str, str | None]] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    self.imports[alias.asname or alias.name.split(".")[-1]] = (
+                        alias.name,
+                        None,
+                    )
+            elif isinstance(node, ast.ImportFrom) and node.module is not None:
+                for alias in node.names:
+                    self.imports[alias.asname or alias.name] = (
+                        node.module,
+                        alias.name,
+                    )
 
 
 def _apply_skip_policy(

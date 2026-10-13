@@ -51,6 +51,6 @@ def test_every_public_protocol_is_exported() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)

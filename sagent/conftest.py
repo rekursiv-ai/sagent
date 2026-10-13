@@ -13,9 +13,11 @@ from sagent.agent.state import (
     agent_registry,
     fresh_default_tool_state,
 )
-from sagent.lib.testing import userdirs_fixture
-from sagent.lib.testing.resource_markers import pytest_collection_modifyitems
-from sagent.lib.testing.userdirs_fixture import isolate_user_dirs
+from sagent.lib.testing import resources
+from sagent.lib.testing.resources import (
+    isolate_user_dirs,
+    pytest_collection_modifyitems,
+)
 from sagent.tools.agent_spawn import _persistent_tasks
 
 
@@ -43,7 +45,7 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "cli_real_llm: spawns a live LLM CLI (claude, codex); skipped unless RUN_REAL_LLM=1",
     )
-    userdirs_fixture.pytest_configure(config)
+    resources.pytest_configure(config)
 
 
 @pytest.fixture(autouse=True)

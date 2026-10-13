@@ -360,6 +360,6 @@ def test_resolve_accepts_a_vendor_id() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)

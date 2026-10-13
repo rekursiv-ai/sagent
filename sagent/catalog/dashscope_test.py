@@ -139,6 +139,6 @@ def test_each_effort_sends_its_thinking_budget(
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)

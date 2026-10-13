@@ -3288,6 +3288,6 @@ def test_unpersisted_session_error_flags_silent_data_loss(tmp_path: Path) -> Non
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)

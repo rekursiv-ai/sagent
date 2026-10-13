@@ -200,6 +200,6 @@ def test_summarize_cache_waste_aggregates_by_cause() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)

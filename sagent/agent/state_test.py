@@ -40,6 +40,6 @@ def test_a_small_read_keeps_its_text_for_diffs(tmp_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)

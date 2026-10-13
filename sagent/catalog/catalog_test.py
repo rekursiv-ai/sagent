@@ -514,6 +514,6 @@ def test_sonnet_5_5_is_the_newest_sonnet_at_its_published_rate() -> None:
 
 
 if __name__ == "__main__":
-    from sagent.lib.testing.main import test_main
+    from sagent.lib.testing.runner import test_main
 
     test_main(__file__)
