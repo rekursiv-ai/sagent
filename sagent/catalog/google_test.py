@@ -213,6 +213,41 @@ def test_budget_none_sends_no_thinking_config() -> None:
 
 
 @pytest.mark.parametrize(
+    ("effort", "budget"),
+    [
+        ("min", "1024"),
+        ("low", "4096"),
+        ("medium", "8192"),
+        ("high", "16384"),
+        ("xhigh", "20480"),
+        ("max", "24576"),
+    ],
+)
+def test_each_effort_sends_its_thinking_budget(
+    effort: ThinkingEffort,
+    budget: str,
+) -> None:
+    assert google.thinking_budget(effort) == budget
+
+
+def test_effort_none_has_no_thinking_budget() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"^effort 'none' sends no budget; omit thinkingConfig$",
+    ):
+        google.thinking_budget("none")
+
+
+@pytest.mark.parametrize("effort", ["none", "xhigh", "max"])
+def test_gemini_3_has_no_level_for_none_or_past_high(effort: ThinkingEffort) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"^effort '{effort}' has no Gemini thinkingLevel$",
+    ):
+        google._thinking_level(effort)
+
+
+@pytest.mark.parametrize(
     "transport",
     [google.api(), google.cli(), google.subscription()],
     ids=["api", "cli", "subscription"],

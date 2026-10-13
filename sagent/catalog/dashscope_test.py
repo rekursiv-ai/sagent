@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import TYPE_CHECKING
 
 import pytest
 
 from sagent.catalog import dashscope
 from sagent.types.cost import PriceKey
+
+
+if TYPE_CHECKING:
+    from sagent.types.capability import ThinkingEffort
 
 
 _TODAY = date(2026, 10, 3)
@@ -112,6 +117,25 @@ def test_vendor_ids_resolve_to_their_rows(model_id: str, wire_id: str) -> None:
 
 def test_a_bare_family_names_its_newest_row() -> None:
     assert dashscope.models()["qwen-max"].model_id == "qwen-max-3.8"
+
+
+@pytest.mark.parametrize(
+    ("effort", "budget"),
+    [
+        ("none", "0"),
+        ("min", "1024"),
+        ("low", "4096"),
+        ("medium", "8192"),
+        ("high", "16384"),
+        ("xhigh", "20480"),
+        ("max", "24576"),
+    ],
+)
+def test_each_effort_sends_its_thinking_budget(
+    effort: ThinkingEffort,
+    budget: str,
+) -> None:
+    assert dashscope.thinking_budget(effort) == budget
 
 
 if __name__ == "__main__":
