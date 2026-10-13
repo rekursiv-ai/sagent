@@ -37,18 +37,21 @@ nothing.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from contextlib import contextmanager
-from functools import cache
+from functools import cache, partial
 from importlib import util
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import ast
+import operator
 import os
 import sys
 import tempfile
 import traceback
+
+from _pytest.mark.expression import Expression
 
 import pytest
 
@@ -94,6 +97,13 @@ def pytest_configure(config: pytest.Config) -> None:
         " service with the operator's real credentials, which a tmp XDG root"
         " would replace with an empty directory",
     )
+    # A run that deselects ``cuda`` runs only CPU tests, and a test that is
+    # not marked may not reach a GPU: hidden, its stray CUDA use fails here as
+    # it does in CI, instead of passing or not on whatever else holds the GPU.
+    # Set before any test imports torch, and inherited by xdist workers.
+    markexpr = str(config.getoption("markexpr", default=""))
+    if markexpr and not Expression.compile(markexpr).evaluate(_names("cuda")):
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 
 @pytest.fixture(autouse=True)
@@ -599,6 +609,11 @@ def apply_resource_markers(
 
 class _NumbaConfig(Protocol):
     def reload_config(self) -> None: ...
+
+
+def _names(marker: str) -> Callable[..., bool]:
+    """Return a ``-m`` matcher under which an item carries ``marker`` alone."""
+    return partial(operator.eq, marker)
 
 
 class _ModuleSource:
