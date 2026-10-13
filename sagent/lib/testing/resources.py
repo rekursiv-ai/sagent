@@ -37,16 +37,18 @@ nothing.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from contextlib import contextmanager
-from functools import cache, partial
+from dataclasses import dataclass
+from functools import cache
 from importlib import util
+from itertools import compress, product
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import ast
-import operator
 import os
+import re
 import sys
 import tempfile
 import traceback
@@ -61,6 +63,14 @@ if TYPE_CHECKING:
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+_IDENT: Final = re.compile(r"[A-Za-z_][\w:.+-]*")
+"""A marker name as ``-m`` tokenizes one."""
+
+
+_KEYWORDS: Final = frozenset(("and", "or", "not", "True", "False"))
+"""Words a ``-m`` expression reserves, which name no marker."""
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -102,7 +112,7 @@ def pytest_configure(config: pytest.Config) -> None:
     # it does in CI, instead of passing or not on whatever else holds the GPU.
     # Set before any test imports torch, and inherited by xdist workers.
     markexpr = str(config.getoption("markexpr", default=""))
-    if markexpr and not Expression.compile(markexpr).evaluate(_names("cuda")):
+    if markexpr and not _selects_any(markexpr, marker="cuda"):
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
 
@@ -611,9 +621,28 @@ class _NumbaConfig(Protocol):
     def reload_config(self) -> None: ...
 
 
-def _names(marker: str) -> Callable[..., bool]:
-    """Return a ``-m`` matcher under which an item carries ``marker`` alone."""
-    return partial(operator.eq, marker)
+# A ``cuda`` test also carries other markers (``slow``, ``gpu_cuda_runtime``), so
+# testing an item holding ``cuda`` alone hid the GPU from ``-m "cuda and slow"``.
+# Every other name the expression mentions is tried both ways instead.
+def _selects_any(markexpr: str, *, marker: str) -> bool:
+    """Return whether ``markexpr`` selects some test that carries ``marker``."""
+    expression = Expression.compile(markexpr)
+    others = sorted(set(_IDENT.findall(markexpr)) - _KEYWORDS - {marker})
+    return any(
+        expression.evaluate(_Carries(names={marker, *compress(others, carried)}))
+        for carried in product((False, True), repeat=len(others))
+    )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Carries:
+    """A ``-m`` matcher for an item that carries exactly ``names``."""
+
+    names: set[str]
+
+    def __call__(self, name: str, /, **kwargs: str | int | bool | None) -> bool:
+        del kwargs
+        return name in self.names
 
 
 class _ModuleSource:
