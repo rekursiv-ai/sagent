@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import asyncio
 import base64
 import contextlib
 import io
@@ -26,6 +27,7 @@ from sagent.providers.lib.errors import (
 from sagent.providers.lib.oauth import credentials_path
 from sagent.providers.openai import sub
 from sagent.providers.openai.sub import (
+    LeasedToken,
     OpenAISubscription,
     _jwt_claim,
     _jwt_exp,
@@ -1170,7 +1172,7 @@ class TestRefreshLifecycle:
             await provider._refresh()
 
         http.post.assert_awaited_once_with(
-            sub._TOKEN_URL,
+            f"{sub.DEFAULT_ISSUER}/oauth/token",
             json={
                 "grant_type": "refresh_token",
                 "refresh_token": _STALE_REFRESH,
@@ -1459,6 +1461,152 @@ class TestRefreshErrors:
             pytest.raises(httpx2.HTTPStatusError),
         ):
             await provider._refresh()
+
+
+_ISSUER = "https://issuer.test"
+
+
+class _Lease:
+    """A lender that records each ask and lends ``fresh``, after a turn of the loop."""
+
+    def __init__(self, fresh: str) -> None:
+        self.fresh = fresh
+        self.rejected: list[str] = []
+
+    async def __call__(self, *, rejected: str) -> LeasedToken:
+        self.rejected.append(rejected)
+        # A real lease waits on the server, which lets a sibling call in meanwhile.
+        await asyncio.sleep(0)
+        return LeasedToken(
+            access_token=self.fresh,
+            account_id="acc-lent",
+            expires_at=time.time() + 3600,
+        )
+
+
+def _answers(*responses: httpx2.Response) -> AsyncMock:
+    """Return a patched ``httpx2.AsyncClient`` whose POSTs answer ``responses``."""
+    http = AsyncMock()
+    http.post = AsyncMock(side_effect=list(responses))
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+    return http
+
+
+def _answer(status: int, body: dict[str, object]) -> httpx2.Response:
+    return httpx2.Response(status, json=body, request=httpx2.Request("POST", _ISSUER))
+
+
+def _borrowing(access: str, *, lease: _Lease, expires_at: float) -> OpenAISubscription:
+    return OpenAISubscription.borrowing(
+        LeasedToken(access_token=access, account_id="acc", expires_at=expires_at),
+        lease=lease,
+    )
+
+
+@pytest.mark.anyio
+async def test_a_leased_provider_never_posts_to_the_token_url() -> None:
+    lease = _Lease(_make_jwt({"exp": time.time() + 3600}))
+    provider = _borrowing(_make_jwt({"exp": 0.0}), lease=lease, expires_at=0.0)
+    with patch(
+        "sagent.providers.openai.sub.httpx2.AsyncClient",
+    ) as client:
+        sdk = await provider.get_sdk()
+    await sdk.close()
+
+    assert lease.rejected == [""]
+    assert sdk.api_key == lease.fresh
+    client.assert_not_called()
+    assert not sub._default_credentials_path().parent.exists()
+
+
+@pytest.mark.anyio
+async def test_concurrent_calls_on_an_aged_token_borrow_once() -> None:
+    lease = _Lease(_make_jwt({"exp": time.time() + 3600}))
+    provider = _borrowing(_make_jwt({"exp": 0.0}), lease=lease, expires_at=0.0)
+
+    first, second = await asyncio.gather(provider.get_sdk(), provider.get_sdk())
+    await first.close()
+
+    assert lease.rejected == [""]
+    assert first is second
+
+
+@pytest.mark.anyio
+async def test_a_401_passes_the_rejected_token_to_the_lease() -> None:
+    later = time.time() + 3600
+    refused = _make_jwt({"exp": later, "n": 1})
+    lease = _Lease(_make_jwt({"exp": later, "n": 2}))
+    provider = _borrowing(refused, lease=lease, expires_at=later)
+    stale = await provider.get_sdk()
+
+    await provider.handle_auth_error()
+    fresh = await provider.get_sdk()
+    await fresh.close()
+
+    assert lease.rejected == [refused]
+    assert fresh is not stale
+    assert fresh.api_key == lease.fresh
+
+
+def _posted(http: AsyncMock) -> list[tuple[str, object]]:
+    """Return each POST's URL and its JSON or form body, in order."""
+    return [
+        (str(call.args[0]), call.kwargs.get("json", call.kwargs.get("data")))
+        for call in http.post.await_args_list
+    ]
+
+
+@pytest.mark.anyio
+async def test_device_code_requests_match_codex() -> None:
+    access = _make_jwt({"exp": time.time() + 3600})
+    http = _answers(
+        _answer(200, {"device_auth_id": "d-1", "user_code": "ABCD", "interval": "5"}),
+        _answer(403, {}),
+        _answer(200, {"authorization_code": "c-1", "code_verifier": "v"}),
+        _answer(200, {"access_token": access, "refresh_token": _FRESH_REFRESH}),
+    )
+    with patch(
+        "sagent.providers.openai.sub.httpx2.AsyncClient",
+        return_value=http,
+    ):
+        code = await sub.request_device_code(issuer=_ISSUER)
+        pending = await sub.poll_device_code(code, issuer=_ISSUER)
+        creds = await sub.poll_device_code(code, issuer=_ISSUER)
+
+    poll = {"device_auth_id": "d-1", "user_code": "ABCD"}
+    assert _posted(http) == [
+        (f"{_ISSUER}/api/accounts/deviceauth/usercode", {"client_id": sub._CLIENT_ID}),
+        (f"{_ISSUER}/api/accounts/deviceauth/token", poll),
+        (f"{_ISSUER}/api/accounts/deviceauth/token", poll),
+        (
+            f"{_ISSUER}/oauth/token",
+            {
+                "grant_type": "authorization_code",
+                "code": "c-1",
+                "redirect_uri": f"{_ISSUER}/deviceauth/callback",
+                "client_id": sub._CLIENT_ID,
+                "code_verifier": "v",
+            },
+        ),
+    ]
+    assert code.verification_url == f"{_ISSUER}/codex/device"
+    assert code.interval_sec == 5.0
+    assert pending is None
+    assert creds is not None
+    assert creds["refresh_token"] == _FRESH_REFRESH
+
+
+@pytest.mark.anyio
+async def test_refresh_grant_raises_auth_refresh_error_on_400() -> None:
+    with (
+        patch(
+            "sagent.providers.openai.sub.httpx2.AsyncClient",
+            return_value=_answers(_answer(400, {"error": "refresh_token_reused"})),
+        ),
+        pytest.raises(AuthRefreshError),
+    ):
+        await sub.refresh_grant(_STALE_REFRESH, account_id="acc", issuer=_ISSUER)
 
 
 if __name__ == "__main__":

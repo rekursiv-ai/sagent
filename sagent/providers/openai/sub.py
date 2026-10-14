@@ -27,6 +27,11 @@ below are taken from OpenAI's open-source Codex CLI (Apache-2.0):
                                                     PKCE params, originator)
         codex-rs/model-provider-info/src/lib.rs:237
                                                  -- chatgpt.com/backend-api/codex
+    and, at commit 78dc2503840d05f4411ae184bb5560ef327fce3c:
+        codex-rs/login/src/device_code_auth.rs:63-215
+                                                 -- device-code sign-in (user
+                                                    code, token poll, exchange)
+        codex-rs/login/src/auth/revoke.rs:48-131 -- refresh-token revocation
 
 This module re-implements that documented protocol in Python against
 the same ``chatgpt.com/backend-api/codex`` endpoint, using the user's
@@ -49,12 +54,14 @@ should prefer the API-key path (``OpenAI.from_key``).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import (
     IO,
     TYPE_CHECKING,
     Final,
     NotRequired,
+    Protocol,
     TypedDict,
     cast,
     override,
@@ -121,12 +128,12 @@ logger = logging.getLogger(__name__)
 # OAuth/protocol constants below mirror OpenAI's open-source Codex CLI
 # (Apache-2.0); see this module's NOTICE block for full citations.
 #   CLIENT_ID:   codex-rs/login/src/auth/manager.rs:921
-#   token URL:   codex-rs/login/src/auth/manager.rs:94
+#   token URL:   codex-rs/login/src/auth/manager.rs:94 ({issuer}/oauth/token)
 #   issuer:      codex-rs/login/src/server.rs:51
 #   scope:       codex-rs/login/src/server.rs:493 (verbatim match)
 #   base URL:    codex-rs/model-provider-info/src/lib.rs:237.
 _CLIENT_ID: Final = "app_EMoamEEZ73f0CkXaXp7hrann"
-_TOKEN_URL: Final = "https://auth.openai.com/oauth/token"  # noqa: S105 -- This literal is a public OAuth endpoint, not a credential.
+DEFAULT_ISSUER: Final = "https://auth.openai.com"
 DEFAULT_CREDENTIALS_PATH = Path(".codex") / "auth.json"
 _SCOPES: Final = (
     "openid profile email offline_access api.connectors.read api.connectors.invoke"
@@ -150,6 +157,53 @@ def _default_credentials_path() -> Path:
 
 class _CredentialFileError(ValueError):
     """Stored credentials do not match the subscription OAuth schema."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DeviceCode:
+    """A device-code sign-in in progress: what the user enters, and how to poll it."""
+
+    verification_url: str
+    user_code: str
+    device_auth_id: str
+    interval_sec: float
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LeasedToken:
+    """An access token lent by whoever holds the refresh token."""
+
+    access_token: str
+    account_id: str
+    expires_at: float
+
+
+class TokenLease(Protocol):
+    """Lends an access token: a fresh one when ``rejected`` was refused."""
+
+    async def __call__(self, *, rejected: str) -> LeasedToken:
+        """Return a usable access token.
+
+        Args:
+          rejected: The access token the model endpoint refused; empty when the
+            token only aged out by the local clock.
+
+        Returns:
+          token: A token that is not ``rejected``, unless the holder has no newer.
+
+        Raises:
+          AuthRefreshError: The login is expired or revoked.
+
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LoginInfo:
+    """What a login says of its own account: the ChatGPT plan and the email."""
+
+    plan: str
+    email: str
 
 
 class OpenAISubscription:
@@ -183,13 +237,17 @@ class OpenAISubscription:
         expires_at: float,
         account: str | None = None,
         refresh_buffer_sec: float = DEFAULT_REFRESH_BUFFER_SEC,
+        lease: TokenLease | None = None,
     ) -> None:
         self._access_token = access_token
-        self._refresh_token = refresh_token
+        self._refresh_token: str = refresh_token
         self._account_id = account_id  # ChatGPT account id (from JWT)
         self._account = account  # Local credential slot name.
         self._expires_at = expires_at
         self._refresh_buffer_sec = refresh_buffer_sec
+        # With a lease, another process holds the refresh token: this one borrows
+        # access tokens and never refreshes, so no file or token URL is touched.
+        self._lease = lease
         # Client and its token cached together, per loop: the client's
         # pool belongs to the loop that opened it, and a token outliving
         # its client would authenticate a connection that no longer
@@ -254,6 +312,33 @@ class OpenAISubscription:
             refresh_buffer_sec=refresh_buffer_sec,
         )
 
+    # Not ``from_lease``: ``build_provider`` dispatches ``from_<auth>``, so a saved
+    # recipe naming this auth would rebuild a provider with no one to lend it tokens.
+    @classmethod
+    def borrowing(
+        cls,
+        token: LeasedToken,
+        *,
+        lease: TokenLease,
+    ) -> OpenAISubscription:
+        """Create a provider that borrows access tokens and holds no refresh token.
+
+        Args:
+          token: The access token to start with.
+          lease: Lends the next token when this one ages out or is refused.
+
+        Returns:
+          provider: A provider that never refreshes and never reads or writes a file.
+
+        """
+        return cls(
+            access_token=token.access_token,
+            refresh_token="",
+            account_id=token.account_id,
+            expires_at=token.expires_at,
+            lease=lease,
+        )
+
     @classmethod
     def login(
         cls,
@@ -305,7 +390,7 @@ class OpenAISubscription:
                 raise RuntimeError(f"Failed to start callback listener: {e}") from e
 
         url = (
-            "https://auth.openai.com/oauth/authorize"
+            f"{DEFAULT_ISSUER}/oauth/authorize"
             f"?client_id={quote_plus(_CLIENT_ID)}"
             f"&response_type=code"
             f"&redirect_uri={quote_plus(redirect_uri)}"
@@ -339,48 +424,21 @@ class OpenAISubscription:
 
         with httpx2.Client() as http:
             r = http.post(
-                _TOKEN_URL,
-                data={
-                    "grant_type": "authorization_code",
-                    "code": auth_code,
-                    "redirect_uri": redirect_uri,
-                    "client_id": _CLIENT_ID,
-                    "code_verifier": verifier,
-                },
+                f"{DEFAULT_ISSUER}/oauth/token",
+                data=_code_form(
+                    code=auth_code,
+                    verifier=verifier,
+                    redirect_uri=redirect_uri,
+                ),
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=15.0,
             )
-            if r.status_code >= 400:
-                body = r.text[:500]
-                raise RuntimeError(f"Token exchange failed ({r.status_code}): {body}")
-            data: dict[str, MutablePlainTree] = cast(
-                dict[str, MutablePlainTree],
-                r.json(),
-            )
-
-        access_token = str(data["access_token"])
-        account_id = _jwt_claim(
-            access_token,
-            "https://api.openai.com/auth",
-            "chatgpt_account_id",
-        )
-        creds = cls.Credentials(
-            access_token=access_token,
-            refresh_token=str(data["refresh_token"]),
-            account_id=account_id,
-            expires_at=_token_expiry(access_token, data),
-        )
-        id_token = data.get("id_token")
-        if isinstance(id_token, str):
-            creds["id_token"] = id_token
-
+        creds = _code_grant(r)
         cls.save(creds, account=account)
-        plan = _jwt_claim(
-            access_token,
-            "https://api.openai.com/auth",
-            "chatgpt_plan_type",
+        out.write(
+            f"Authenticated (plan={login_info(creds).plan}, "
+            f"account={creds['account_id'][:8]}...).\n",
         )
-        out.write(f"Authenticated (plan={plan}, account={account_id[:8]}...).\n")
         out.flush()
         return creds
 
@@ -522,6 +580,8 @@ class OpenAISubscription:
         """Return a valid access token, reloading from disk or refreshing."""
         if not self.expired:
             return self._access_token
+        if self._lease is not None:
+            return await self._lent(self._lease)
         cred_path = credentials_path(_default_credentials_path(), self._account)
         async with self._lock.get(), credential_file_lock(cred_path):
             if not self.expired:
@@ -535,8 +595,16 @@ class OpenAISubscription:
         """Reload credentials from disk or force-refresh on 401.
 
         Holds the cross-process credential lock so a concurrent
-        sibling can't refresh between our disk-check and POST.
+        sibling can't refresh between our disk-check and POST. A borrowing
+        provider asks its lease instead, naming the refused token.
         """
+        if self._lease is not None:
+            # Named before the wait: a sibling call that already replaced it lets
+            # the lender see this token is not the one it holds, and refresh nothing.
+            rejected = self._access_token
+            async with self._lock.get():
+                await self._borrow(self._lease, rejected=rejected)
+            return
         cred_path = credentials_path(_default_credentials_path(), self._account)
         async with self._lock.get(), credential_file_lock(cred_path):
             # Adopt a sibling's fresher creds only if they are actually valid;
@@ -547,41 +615,27 @@ class OpenAISubscription:
             await self._refresh()
             await self._discard_sdk()
 
+    # Checked again under the lock: a sibling call that borrowed first would otherwise
+    # have its fresh client closed under it by this call's borrow.
+    async def _lent(self, lease: TokenLease) -> str:
+        """Return a valid access token, borrowing one if this one aged out."""
+        async with self._lock.get():
+            if self.expired:
+                await self._borrow(lease, rejected="")
+            return self._access_token
+
+    # The caller must already hold ``self._lock``.
+    async def _borrow(self, lease: TokenLease, *, rejected: str) -> None:
+        """Take the lease's access token, and drop the client of the old one."""
+        token = await lease(rejected=rejected)
+        self._access_token = token.access_token
+        self._account_id = token.account_id
+        self._expires_at = token.expires_at
+        await self._discard_sdk()
+
     async def _refresh(self) -> None:
         """Exchange the refresh token for a new access token."""
-        async with httpx2.AsyncClient() as http:
-            r = await http.post(
-                _TOKEN_URL,
-                json={
-                    "grant_type": "refresh_token",
-                    "refresh_token": self._refresh_token,
-                    "client_id": _CLIENT_ID,
-                },
-                headers={"Content-Type": "application/json"},
-                timeout=15.0,
-            )
-            if r.status_code in (400, 401):
-                # Refresh token was rotated by another process, revoked
-                # server-side, or aged out. Retrying is pointless --
-                # surface a clean user-facing error so the renderer
-                # shows actionable text instead of an httpx2 traceback.
-                raise AuthRefreshError(
-                    "OpenAI Codex subscription session expired or revoked. "
-                    "Run /login to re-authenticate, or /model to switch "
-                    "providers.",
-                )
-            r.raise_for_status()
-            data: dict[str, MutablePlainTree] = cast(
-                dict[str, MutablePlainTree],
-                r.json(),
-            )
-        access_token = str(data["access_token"])
-        creds = OpenAISubscription.Credentials(
-            access_token=access_token,
-            refresh_token=str(data["refresh_token"]),
-            account_id=self._account_id,
-            expires_at=_token_expiry(access_token, data),
-        )
+        creds = await refresh_grant(self._refresh_token, account_id=self._account_id)
         self._access_token = creds["access_token"]
         self._refresh_token = creds["refresh_token"]
         self._expires_at = creds["expires_at"]
@@ -719,6 +773,230 @@ class OpenAISubscription:
         atomic_write_bytes(p, json.dumps(existing).encode(), file_mode=0o600)
 
 
+async def request_device_code(*, issuer: str = DEFAULT_ISSUER) -> DeviceCode:
+    """Ask the issuer for a one-time code the user enters on its device page.
+
+    Args:
+      issuer: The OAuth issuer's origin.
+
+    Returns:
+      code: The page and the code to show the user, and how often to poll.
+
+    Raises:
+      HTTPStatusError: The issuer refused; a 404 means device sign-in is off.
+
+    """
+    async with httpx2.AsyncClient() as http:
+        r = await http.post(
+            f"{issuer}/api/accounts/deviceauth/usercode",
+            json={"client_id": _CLIENT_ID},
+            headers={"Content-Type": "application/json"},
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        data = cast(dict[str, MutablePlainTree], r.json())
+    # Codex reads the code under either name, and the interval as text
+    # (device_code_auth.rs:27-53).
+    return DeviceCode(
+        verification_url=f"{issuer}/codex/device",
+        user_code=from_plain(data.get("user_code") or data.get("usercode"), str),
+        device_auth_id=from_plain(data.get("device_auth_id"), str),
+        interval_sec=from_plain(
+            data.get("interval"),
+            float,
+            default=0.0,
+            strict=False,
+        ),
+    )
+
+
+async def poll_device_code(
+    code: DeviceCode,
+    *,
+    issuer: str = DEFAULT_ISSUER,
+) -> OpenAISubscription.Credentials | None:
+    """Ask once whether the user approved ``code``; exchange it when they have.
+
+    Args:
+      code: What :func:`request_device_code` returned.
+      issuer: The OAuth issuer's origin.
+
+    Returns:
+      creds: The login's tokens, or ``None`` while the code waits for approval.
+
+    Raises:
+      HTTPStatusError: The issuer refused the poll.
+      RuntimeError: The approved code could not be exchanged.
+
+    """
+    async with httpx2.AsyncClient() as http:
+        r = await http.post(
+            f"{issuer}/api/accounts/deviceauth/token",
+            json={"device_auth_id": code.device_auth_id, "user_code": code.user_code},
+            headers={"Content-Type": "application/json"},
+            timeout=15.0,
+        )
+        # Codex keeps polling on both (device_code_auth.rs:131).
+        if r.status_code in (403, 404):
+            return None
+        r.raise_for_status()
+        data = cast(dict[str, MutablePlainTree], r.json())
+    return await exchange_code(
+        code=from_plain(data.get("authorization_code"), str),
+        verifier=from_plain(data.get("code_verifier"), str),
+        redirect_uri=f"{issuer}/deviceauth/callback",
+        issuer=issuer,
+    )
+
+
+async def exchange_code(
+    *,
+    code: str,
+    verifier: str,
+    redirect_uri: str,
+    issuer: str = DEFAULT_ISSUER,
+) -> OpenAISubscription.Credentials:
+    """Exchange an authorization code for a login's tokens.
+
+    Args:
+      code: The authorization code.
+      verifier: The PKCE verifier the code was issued for.
+      redirect_uri: The redirect URI the code was issued for.
+      issuer: The OAuth issuer's origin.
+
+    Returns:
+      creds: The login's tokens.
+
+    Raises:
+      RuntimeError: The issuer refused the exchange.
+
+    """
+    async with httpx2.AsyncClient() as http:
+        r = await http.post(
+            f"{issuer}/oauth/token",
+            data=_code_form(code=code, verifier=verifier, redirect_uri=redirect_uri),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=15.0,
+        )
+    return _code_grant(r)
+
+
+async def refresh_grant(
+    refresh_token: str,
+    *,
+    account_id: str,
+    id_token: str = "",
+    issuer: str = DEFAULT_ISSUER,
+) -> OpenAISubscription.Credentials:
+    """Exchange a refresh token for fresh tokens; the old refresh token is spent.
+
+    Args:
+      refresh_token: The token posted.
+      account_id: The ChatGPT account the login is for, which the answer keeps.
+      id_token: The login's ID token, kept when the answer holds none.
+      issuer: The OAuth issuer's origin.
+
+    Returns:
+      fresh: The new tokens, keeping ``refresh_token`` and ``id_token`` when the
+        answer holds none, as Codex's optional fields allow (manager.rs:1711-1715).
+
+    Raises:
+      AuthRefreshError: The refresh token was rotated, revoked or aged out.
+      HTTPStatusError: The issuer failed otherwise.
+
+    """
+    async with httpx2.AsyncClient() as http:
+        r = await http.post(
+            f"{issuer}/oauth/token",
+            json={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": _CLIENT_ID,
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=15.0,
+        )
+        if r.status_code in (400, 401):
+            # Refresh token was rotated by another process, revoked
+            # server-side, or aged out. Retrying is pointless --
+            # surface a clean user-facing error so the renderer
+            # shows actionable text instead of an httpx2 traceback.
+            raise AuthRefreshError(
+                "OpenAI Codex subscription session expired or revoked. "
+                "Run /login to re-authenticate, or /model to switch "
+                "providers.",
+            )
+        r.raise_for_status()
+        data = cast(dict[str, MutablePlainTree], r.json())
+    access_token = str(data["access_token"])
+    fresh = OpenAISubscription.Credentials(
+        access_token=access_token,
+        refresh_token=from_plain(data.get("refresh_token"), str, default="")
+        or refresh_token,
+        account_id=account_id,
+        expires_at=_token_expiry(access_token, data),
+    )
+    id_token = from_plain(data.get("id_token"), str, default="") or id_token
+    if id_token:
+        fresh["id_token"] = id_token
+    return fresh
+
+
+async def revoke_refresh_token(
+    refresh_token: str,
+    *,
+    issuer: str = DEFAULT_ISSUER,
+) -> None:
+    """Revoke a refresh token at the issuer, as Codex's logout does (revoke.rs).
+
+    Args:
+      refresh_token: The token to revoke.
+      issuer: The OAuth issuer's origin.
+
+    Raises:
+      HTTPError: The issuer refused or could not be reached.
+
+    """
+    async with httpx2.AsyncClient() as http:
+        r = await http.post(
+            f"{issuer}/oauth/revoke",
+            json={
+                "token": refresh_token,
+                "token_type_hint": "refresh_token",
+                "client_id": _CLIENT_ID,
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=10.0,
+        )
+        r.raise_for_status()
+
+
+def login_info(creds: OpenAISubscription.Credentials) -> LoginInfo:
+    """Read the plan and the email a login's tokens carry, the ID token first.
+
+    Args:
+      creds: The login's tokens.
+
+    Returns:
+      info: The ChatGPT plan and the account's email; empty when no token says.
+
+    """
+    tokens = (creds.get("id_token", ""), creds["access_token"])
+    plans = (
+        _jwt_claim(each, "https://api.openai.com/auth", "chatgpt_plan_type")
+        for each in tokens
+    )
+    emails = (
+        _jwt_text(each, "email")
+        or _jwt_claim(each, "https://api.openai.com/profile", "email")
+        for each in tokens
+    )
+    return LoginInfo(
+        plan=next(filter(None, plans), ""),
+        email=next(filter(None, emails), ""),
+    )
+
+
 class _OpenAISubModel(_OpenAIResponsesModel):
     """OAuth retry and Codex-specific request restrictions."""
 
@@ -742,6 +1020,40 @@ class _OpenAISubModel(_OpenAIResponsesModel):
         except openai.AuthenticationError:
             await self._provider.handle_auth_error()
         return await super().stream(request, publish)
+
+
+def _code_form(*, code: str, verifier: str, redirect_uri: str) -> dict[str, str]:
+    """Return the form that exchanges an authorization code (server.rs:797-830)."""
+    return {
+        "grant_type": "authorization_code",
+        "code": code,
+        "redirect_uri": redirect_uri,
+        "client_id": _CLIENT_ID,
+        "code_verifier": verifier,
+    }
+
+
+def _code_grant(response: httpx2.Response) -> OpenAISubscription.Credentials:
+    """Read the tokens a code exchange answered with."""
+    if response.status_code >= 400:
+        body = response.text[:500]
+        raise RuntimeError(f"Token exchange failed ({response.status_code}): {body}")
+    data = cast(dict[str, MutablePlainTree], response.json())
+    access_token = str(data["access_token"])
+    creds = OpenAISubscription.Credentials(
+        access_token=access_token,
+        refresh_token=str(data["refresh_token"]),
+        account_id=_jwt_claim(
+            access_token,
+            "https://api.openai.com/auth",
+            "chatgpt_account_id",
+        ),
+        expires_at=_token_expiry(access_token, data),
+    )
+    id_token = data.get("id_token")
+    if isinstance(id_token, str):
+        creds["id_token"] = id_token
+    return creds
 
 
 def _token_expiry(access_token: str, grant: dict[str, MutablePlainTree]) -> float:
@@ -794,4 +1106,10 @@ def _jwt_claim(token: str, namespace: str, key: str) -> str:
     if not isinstance(claims, dict):
         return ""
     claim = cast(dict[str, object], claims).get(key)
+    return claim if isinstance(claim, str) else ""
+
+
+def _jwt_text(token: str, key: str) -> str:
+    """Extract a top-level string claim from a JWT."""
+    claim = _jwt_payload(token).get(key)
     return claim if isinstance(claim, str) else ""
