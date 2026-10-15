@@ -155,6 +155,8 @@ class Row:
 
     Attributes:
       text: The line as ``rg --no-heading`` prints it, ``name:N:`` prefix included.
+      prefix_end: Character offset in ``text`` where the line's own text begins,
+        after its ``name:N:``/``name-N-`` prefix; 0 for a row that is not a line.
       column: Character offset in ``text`` where the line's first match begins;
         ``-1`` when no match begins there: context, ``--``, a count, a file
         name, a binary-file note, or a line a multiline match continues onto.
@@ -162,6 +164,7 @@ class Row:
     """
 
     text: str
+    prefix_end: int = 0
     column: int = -1
 
 
@@ -342,7 +345,7 @@ def _file_blocks(out: bytes, *, query: Query) -> list[tuple[str, list[Row]]]:
             # ``-U`` prints a run of matched lines as one block that repeats its
             # first column on every line, so only the run's first line is located.
             if query.multiline and previous == (name, number - 1):
-                row = Row(text=row.text)
+                row = Row(text=row.text, prefix_end=row.prefix_end)
             previous = (name, number) if matched else ("", 0)
         if not blocks or blocks[-1][0] != name:
             blocks.append((name, []))
@@ -369,15 +372,15 @@ def _content_row(
     shown = "-" if marker == _CONTEXT else ":"
     prefix = f"{name}{shown}{number.decode()}{shown}" if query.line_numbers else ""
     prefix = prefix or f"{name}{shown}"
-    if marker == _CONTEXT:
-        return name, int(number), Row(text=prefix + rest.decode(errors="replace"))
-    byte_column, _, rest = rest.partition(marker)
-    column = len(prefix) + len(rest[: int(byte_column) - 1].decode(errors="replace"))
-    return (
-        name,
-        int(number),
-        Row(text=prefix + rest.decode(errors="replace"), column=column),
-    )
+    if marker == _MATCH:
+        byte_column, _, rest = rest.partition(marker)
+        column = len(prefix) + len(
+            rest[: int(byte_column) - 1].decode(errors="replace"),
+        )
+    else:
+        column = -1
+    text = prefix + rest.decode(errors="replace")
+    return name, int(number), Row(text=text, prefix_end=len(prefix), column=column)
 
 
 def _plain_row(row: str) -> tuple[str, str]:
@@ -751,7 +754,11 @@ def _row(
     prefix = (
         f"{name}{separator}{f'{index + 1}{separator}' if query.line_numbers else ''}"
     )
-    return Row(text=prefix + line, column=len(prefix) + column if column >= 0 else -1)
+    return Row(
+        text=prefix + line,
+        prefix_end=len(prefix),
+        column=len(prefix) + column if column >= 0 else -1,
+    )
 
 
 def _small(targets: Sequence[Path], query: Query) -> _Found | None:

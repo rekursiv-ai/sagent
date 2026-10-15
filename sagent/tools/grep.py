@@ -667,7 +667,7 @@ def _clip(row: Row) -> str:
     # counting it made a long path clip a short line.
     if len(line) <= _MAX_LINE_CHARS:
         return line
-    cut = _row_prefix_end(line)
+    cut = row.prefix_end
     text = line[cut:]
     if len(text) <= _MAX_LINE_CHARS:
         return line
@@ -677,21 +677,6 @@ def _clip(row: Row) -> str:
     head = f"[{start:,} chars] " if start else ""
     tail = f" [{len(text) - end:,} chars]" if end < len(text) else ""
     return f"{line[:cut]}{head}{text[start:end]}{tail}"
-
-
-# A path may itself hold ``-1-`` (``a-1-b.py``) and the text may hold ``:5:``, so no
-# regex alone can say where the path ends. The row's file is the one that exists.
-def _row_prefix_end(line: str) -> int:
-    """Return where a row's ``path:N:`` or ``path-N-`` prefix ends, else 0."""
-    candidates = list(_ROW_SEPARATOR.finditer(line))
-    for found in candidates:
-        if Path(line[: found.start()]).is_file():
-            return found.end()
-    return candidates[0].end() if candidates else 0
-
-
-_ROW_SEPARATOR: Final = re.compile(r"([:-])\d+\1")
-"""A ``:N:`` (match) or ``-N-`` (context) separator after a row's path."""
 
 
 def _resume_note(*, withheld: int, resume: int) -> str:

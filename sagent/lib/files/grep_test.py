@@ -167,10 +167,29 @@ def test_rows_locate_their_first_match_in_characters(
         context_before=1,
         line_numbers=numbered,
     )
+    context = f"{f}-1-" if numbered else f"{f}-"
     prefix = f"{f}:2:" if numbered else f"{f}:"
     assert grep_rows(f, query) == [
-        Row(text=f"{f}-1-a" if numbered else f"{f}-a"),
-        Row(text=f"{prefix}ééx hit hit", column=len(prefix) + 4),
+        Row(text=f"{context}a", prefix_end=len(context)),
+        Row(
+            text=f"{prefix}ééx hit hit",
+            prefix_end=len(prefix),
+            column=len(prefix) + 4,
+        ),
+    ]
+
+
+@_BOTH
+def test_a_path_holding_a_separator_keeps_its_prefix_whole(tmp_path: Path) -> None:
+    f = tmp_path / "a-1-b.txt"
+    f.write_text("x:5: hit\n")
+    query = Query(pattern="hit", output_mode="content")
+    assert grep_rows(f, query) == [
+        Row(
+            text=f"{f}:1:x:5: hit",
+            prefix_end=len(f"{f}:1:"),
+            column=len(f"{f}:1:") + 5,
+        ),
     ]
 
 
@@ -187,8 +206,9 @@ def test_a_posix_class_is_located_by_ripgrep(tmp_path: Path) -> None:
     f = tmp_path / "f.txt"
     f.write_text("-- abc123\n")
     query = Query(pattern="[[:alpha:]]+[[:digit:]]+", output_mode="content")
+    prefix = f"{f}:1:"
     assert grep_rows(f, query) == [
-        Row(text=f"{f}:1:-- abc123", column=len(f"{f}:1:") + 3),
+        Row(text=f"{prefix}-- abc123", prefix_end=len(prefix), column=len(prefix) + 3),
     ]
 
 
