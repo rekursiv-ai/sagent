@@ -20,7 +20,9 @@ from sagent.lib.files.grep import (
     GrepError,
     OutputMode,
     Query,
+    Row,
     grep,
+    grep_rows,
     rg_command,
 )
 
@@ -148,6 +150,45 @@ def test_overlapping_context_merges_into_one_group(
         "--",
         f"{f}-6-d",
         f"{f}:7:HIT",
+    ]
+
+
+@_BOTH
+@pytest.mark.parametrize("numbered", [True, False])
+def test_rows_locate_their_first_match_in_characters(
+    tmp_path: Path,
+    numbered: bool,
+) -> None:
+    f = tmp_path / "f.txt"
+    f.write_text("a\nééx hit hit\n")
+    query = Query(
+        pattern="hit",
+        output_mode="content",
+        context_before=1,
+        line_numbers=numbered,
+    )
+    prefix = f"{f}:2:" if numbered else f"{f}:"
+    assert grep_rows(f, query) == [
+        Row(text=f"{f}-1-a" if numbered else f"{f}-a"),
+        Row(text=f"{prefix}ééx hit hit", column=len(prefix) + 4),
+    ]
+
+
+@_BOTH
+def test_a_multiline_run_is_located_on_its_first_line(tmp_path: Path) -> None:
+    f = tmp_path / "f.txt"
+    f.write_text("x foo\nbar\n  zz\n")
+    query = Query(pattern=r"foo\nbar|zz", output_mode="content", multiline=True)
+    assert [row.column for row in grep_rows(f, query)] == [len(f"{f}:1:") + 2, -1, -1]
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_a_posix_class_is_located_by_ripgrep(tmp_path: Path) -> None:
+    f = tmp_path / "f.txt"
+    f.write_text("-- abc123\n")
+    query = Query(pattern="[[:alpha:]]+[[:digit:]]+", output_mode="content")
+    assert grep_rows(f, query) == [
+        Row(text=f"{f}:1:-- abc123", column=len(f"{f}:1:") + 3),
     ]
 
 
@@ -845,7 +886,7 @@ def test_rg_command_with_every_knob_off(tmp_path: Path) -> None:
     assert rg_command("/rg", [tmp_path, tmp_path / "f"], query) == [
         *_RG_BASE,
         *_RG_VCS,
-        *("--", "pat", str(tmp_path), str(tmp_path / "f")),
+        *("--column", "--", "pat", str(tmp_path), str(tmp_path / "f")),
     ]
 
 

@@ -7,12 +7,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Final, cast, get_args
 
 import re
-import warnings
 
 from treekle import from_plain, immutable
 
 from sagent.agent.state import approx_tokens
-from sagent.lib.files.grep import GrepError, OutputMode, Query, grep
+from sagent.lib.files.grep import GrepError, OutputMode, Query, Row, grep_rows
 from sagent.tools.core import (
     bound_by_tokens,
     load_tool_description,
@@ -592,26 +591,10 @@ def _search(
 ) -> str | ToolResult:
     """Run ``query`` and page its lines; a failed search is a tool error."""
     try:
-        lines = grep(path, query)
+        rows = grep_rows(path, query)
     except GrepError as error:
         return _error(str(error))
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", FutureWarning)
-            pattern = re.compile(
-                query.pattern,
-                re.IGNORECASE if query.case_insensitive else 0,
-            )
-    except (re.error, FutureWarning):
-        # Ripgrep syntax Python cannot compile: the clip window starts at 0.
-        pattern = None
-    return _paginate(
-        lines,
-        keep_first=keep_first,
-        keep_last=keep_last,
-        offset=offset,
-        pattern=pattern,
-    )
+    return _paginate(rows, keep_first=keep_first, keep_last=keep_last, offset=offset)
 
 
 # The single place either backend slices. Both produce one entry per line for every
@@ -626,12 +609,11 @@ def _search(
 # is agnostic to how they were produced, so context rows page like any others; a group
 # separator inside the window is simply one more entry.
 def _paginate(
-    lines: list[str],
+    lines: list[Row],
     *,
     keep_first: int,
     keep_last: int,
     offset: int,
-    pattern: re.Pattern[str] | None = None,
 ) -> str:
     """Apply the pagination knobs to already-rendered output lines."""
     # Where the shown window BEGINS in the full match set. Every resume
@@ -651,7 +633,7 @@ def _paginate(
             lines = lines[:keep_first]
     if not lines:
         return "(no matches)"
-    lines = [_clip(line, pattern=pattern) for line in lines]
+    clipped = [_clip(line) for line in lines]
     # The token bound is the backstop for an unpaginated search: the
     # caller's knobs are a window, and neither says how wide a match is.
     # The resume note is part of the result, so its own cost comes out of
@@ -660,14 +642,14 @@ def _paginate(
     # Reserve the note by rendering the REAL one for the worst case (all
     # entries withheld), not a second hand-written copy: a stand-in with
     # placeholder values drifts from what actually ships.
-    reserved = _resume_note(withheld=len(lines), resume=start + len(lines))
+    reserved = _resume_note(withheld=len(clipped), resume=start + len(clipped))
     body, kept = bound_by_tokens(
-        (f"{line}\n" for line in lines),
+        (f"{line}\n" for line in clipped),
         budget=max(1, budget - approx_tokens(reserved)),
     )
     body = body.rstrip("\n")
-    if kept < len(lines):
-        body += _resume_note(withheld=len(lines) - kept, resume=start + kept)
+    if kept < len(clipped):
+        body += _resume_note(withheld=len(clipped) - kept, resume=start + kept)
     return body
 
 
@@ -678,8 +660,9 @@ _MAX_LINE_CHARS: Final = 500
 # Not ``rg --max-columns``: that keeps only a long line's LEADING columns, so a match
 # further right (a needle in minified JSON) vanished. The window is centred on the
 # first match instead, which is the part a search result exists to show.
-def _clip(line: str, *, pattern: re.Pattern[str] | None) -> str:
+def _clip(row: Row) -> str:
     """Cut a row's text to :data:`_MAX_LINE_CHARS` around its first match."""
+    line = row.text
     # The ``path:line:`` prefix is kept whole: it is how the row is located, and
     # counting it made a long path clip a short line.
     if len(line) <= _MAX_LINE_CHARS:
@@ -688,8 +671,7 @@ def _clip(line: str, *, pattern: re.Pattern[str] | None) -> str:
     text = line[cut:]
     if len(text) <= _MAX_LINE_CHARS:
         return line
-    found = pattern.search(text) if pattern is not None else None
-    center = found.start() if found is not None else 0
+    center = max(0, row.column - cut)
     start = max(0, min(center - _MAX_LINE_CHARS // 2, len(text) - _MAX_LINE_CHARS))
     end = start + _MAX_LINE_CHARS
     head = f"[{start:,} chars] " if start else ""

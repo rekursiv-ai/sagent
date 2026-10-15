@@ -125,10 +125,10 @@ async def test_a_wide_line_is_clipped_around_its_match(
 
 
 @pytest.mark.asyncio
-async def test_a_posix_class_pattern_searches_without_a_future_warning(
+async def test_a_wide_line_is_clipped_around_a_posix_class_match(
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "a.txt").write_text("abc123\n")
+    (tmp_path / "wide.txt").write_text("-" * 2_000 + "abc123" + "-" * 2_000)
     result = await _run_grep(
         {
             "pattern": "[[:alpha:]]+[[:digit:]]+",

@@ -2008,23 +2008,22 @@ def _renumber_duplicate_refs(tape: list[TapeRecord]) -> list[TapeRecord]:
         # made the whole session unloadable.
         dataclasses.replace(record, mask=merge_mask_ranges(record.mask + extra))
         if isinstance(record, ContextSplice)
-        and (extra := _mask_for_moved(record, index, moved))
+        and (
+            extra := tuple(
+                (
+                    MaskRange(
+                        session_id=fresh.session_id,
+                        lo=fresh.ordinal,
+                        hi=fresh.ordinal,
+                    )
+                    for original, fresh, record_index in moved
+                    if record_index < index and mask_contains_ref(record.mask, original)
+                ),
+            )
+        )
         else record
         for index, record in kept_at
     ]
-
-
-def _mask_for_moved(
-    splice: ContextSplice,
-    splice_index: int,
-    moved: Sequence[tuple[TapeRef, TapeRef, int]],
-) -> tuple[MaskRange, ...]:
-    """Ranges extending ``splice``'s mask onto records it was written after."""
-    return tuple(
-        MaskRange(session_id=fresh.session_id, lo=fresh.ordinal, hi=fresh.ordinal)
-        for original, fresh, record_index in moved
-        if record_index < splice_index and mask_contains_ref(splice.mask, original)
-    )
 
 
 # Ordinal first, NEVER ``session_id`` first: the resolver anchors each splice against

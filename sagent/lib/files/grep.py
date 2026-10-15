@@ -2,7 +2,7 @@
 
 Both backends take one :class:`Query` and return the same lines -- one entry per
 match, per context line, per ``--`` group separator, per counted file, or per
-matching file. A directory is walked in path order with ``.git``/``.svn``/
+matching file -- each as a :class:`Row` locating its first match. A directory is walked in path order with ``.git``/``.svn``/
 ``.hg`` and ``.gitignore``d trees skipped, hidden entries searched, symlinks
 not followed, and binary (NUL-bearing) files skipped. A file named outright is
 searched whatever its name, type or ignore status, as ripgrep searches it. The
@@ -62,8 +62,8 @@ _NEWLINE_HINT: Final = (
 )
 
 # Field separators ripgrep is told to print; no path or text line holds them.
-_MATCH: Final = "\x01"
-_CONTEXT: Final = "\x02"
+_MATCH: Final = b"\x01"
+_CONTEXT: Final = b"\x02"
 
 # What ripgrep's own engine says when only PCRE2 can run the pattern.
 _NEEDS_PCRE2: Final = ("look-around", "backreferences are not supported")
@@ -149,6 +149,22 @@ class Query:
     text: bool = False
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Row:
+    """One output line and where its first match begins.
+
+    Attributes:
+      text: The line as ``rg --no-heading`` prints it, ``name:N:`` prefix included.
+      column: Character offset in ``text`` where the line's first match begins;
+        ``-1`` when no match begins there: context, ``--``, a count, a file
+        name, a binary-file note, or a line a multiline match continues onto.
+
+    """
+
+    text: str
+    column: int = -1
+
+
 def grep(
     paths: Path | Sequence[Path],
     query: Query,
@@ -156,7 +172,18 @@ def grep(
     *,
     timeout_sec: float = 30,
 ) -> list[str]:
-    """Run ``query`` over ``paths`` and return its output lines.
+    """Run ``query`` over ``paths`` and return the text of :func:`grep_rows`."""
+    return [row.text for row in grep_rows(paths, query, timeout_sec=timeout_sec)]
+
+
+def grep_rows(
+    paths: Path | Sequence[Path],
+    query: Query,
+    /,
+    *,
+    timeout_sec: float = 30,
+) -> list[Row]:
+    """Run ``query`` over ``paths`` and return its output rows.
 
     Args:
       paths: A file or directory, or several, searched in the order given.
@@ -164,7 +191,7 @@ def grep(
       timeout_sec: Cap on each ``rg`` run.
 
     Returns:
-      lines: The rendered output, one entry per line; empty when nothing matched.
+      rows: The rendered output, one entry per line; empty when nothing matched.
 
     Raises:
       GrepError: A path is missing, ``file_type`` is unknown, the pattern is
@@ -213,8 +240,8 @@ def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
         # slower on this repo). Its parallel output is grouped per file and
         # sorted here instead, and control-byte field separators make each
         # row's file name and kind unambiguous for that.
-        f"--field-match-separator={_MATCH}",
-        f"--field-context-separator={_CONTEXT}",
+        f"--field-match-separator={_MATCH.decode()}",
+        f"--field-context-separator={_CONTEXT.decode()}",
         # No ``--max-columns``: it hides a match far right on a long line (a
         # needle in a minified bundle) that the Python backend returns whole.
     ]
@@ -230,6 +257,8 @@ def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
         cmd.append("-l")
     elif query.output_mode == "count":
         cmd.append("-c")
+    else:
+        cmd.append("--column")
     if query.context_before > 0:
         cmd.extend(["-B", str(query.context_before)])
     if query.context_after > 0:
@@ -253,7 +282,7 @@ def _grep_rg(
     query: Query,
     *,
     timeout_sec: float,
-) -> list[str]:
+) -> list[Row]:
     """Answer ``query`` with ripgrep, one run per argv-sized batch of paths."""
     batches = list(_batches(paths))
     run = partial(_run_rg, query=query, timeout_sec=timeout_sec)
@@ -273,60 +302,82 @@ def _grep_rg(
         blocks = [*first, *(block for found in rest for block in found)]
     order = {str(path): i for i, path in enumerate(paths)}
     blocks.sort(key=lambda block: _sort_key(block[0], paths, order))
-    lines: list[str] = []
-    for _, rows in blocks:
+    rows: list[Row] = []
+    for _, block in blocks:
         # Ripgrep separates context groups of different files with ``--``.
-        if lines and _has_context(query):
-            lines.append("--")
-        lines.extend(rows)
-    return lines
+        if rows and _has_context(query):
+            rows.append(Row(text="--"))
+        rows.extend(block)
+    return rows
 
 
-# ``-l`` prints one name per line. Content rows read ``name M [n M] text`` with
-# ``M`` the ``_MATCH``/``_CONTEXT`` byte, which no path holds, so the first one
-# ends the name. ``-c`` rows split at their last ``:``; a binary-file note
+# ``-l`` prints one name per line. Content rows read ``name M n M [col M] text``
+# with ``M`` the ``_MATCH``/``_CONTEXT`` byte, which no path holds, so the first
+# one ends the name. ``-c`` rows split at their last ``:``; a binary-file note
 # splits at its fixed suffix, so either preserves colons in the file name.
 # ``--`` lines separate context groups and are re-added after sorting.
-def _file_blocks(
-    out: str,
-    *,
-    names_only: bool,
-    numbered: bool,
-) -> list[tuple[str, list[str]]]:
-    """Group ripgrep's output into ``(file, rendered rows)`` blocks."""
-    rows = _lines(out)
-    if names_only:
-        return [(name, [name]) for name in rows]
-    blocks: list[tuple[str, list[str]]] = []
+def _file_blocks(out: bytes, *, query: Query) -> list[tuple[str, list[Row]]]:
+    """Group ripgrep's output into ``(file, rows)`` blocks."""
+    lines = out.removesuffix(b"\n").split(b"\n") if out else []
+    if query.output_mode == "files_with_matches":
+        names = (line.decode(errors="replace") for line in lines)
+        return [(name, [Row(text=name)]) for name in names]
+    blocks: list[tuple[str, list[Row]]] = []
     gap = False
-    for row in rows:
-        if row == "--":
+    previous = ("", 0)
+    for line in lines:
+        if line == b"--":
             gap = True
             continue
         cut = min(
-            (i for i in (row.find(_MATCH), row.find(_CONTEXT)) if i >= 0),
+            (i for i in (line.find(_MATCH), line.find(_CONTEXT)) if i >= 0),
             default=-1,
         )
         if cut < 0:
-            name, rendered = _plain_row(row)
+            name, text = _plain_row(line.decode(errors="replace"))
+            row = Row(text=text)
         else:
-            name = row[:cut]
-            marker = row[cut]
-            shown = ":" if marker == _MATCH else "-"
-            rest = row[cut + 1 :]
-            if numbered:
-                number, _, rest = rest.partition(marker)
-                rest = f"{number}{shown}{rest}"
-            rendered = f"{name}{shown}{rest}"
+            name, number, row = _content_row(line, cut=cut, query=query)
+            matched = row.column >= 0
+            # ``-U`` prints a run of matched lines as one block that repeats its
+            # first column on every line, so only the run's first line is located.
+            if query.multiline and previous == (name, number - 1):
+                row = Row(text=row.text)
+            previous = (name, number) if matched else ("", 0)
         if not blocks or blocks[-1][0] != name:
             blocks.append((name, []))
         elif gap:
             # A gap between groups of one file stays; between files it is
             # re-added after sorting.
-            blocks[-1][1].append("--")
+            blocks[-1][1].append(Row(text="--"))
         gap = False
-        blocks[-1][1].append(rendered)
+        blocks[-1][1].append(row)
     return blocks
+
+
+# ``--column`` implies ``-n`` and counts 1-based bytes of the printed UTF-8 line.
+def _content_row(
+    line: bytes,
+    *,
+    cut: int,
+    query: Query,
+) -> tuple[str, int, Row]:
+    """Split a content row into its file, line number, and :class:`Row`."""
+    marker = line[cut : cut + 1]
+    number, _, rest = line[cut + 1 :].partition(marker)
+    name = line[:cut].decode(errors="replace")
+    shown = "-" if marker == _CONTEXT else ":"
+    prefix = f"{name}{shown}{number.decode()}{shown}" if query.line_numbers else ""
+    prefix = prefix or f"{name}{shown}"
+    if marker == _CONTEXT:
+        return name, int(number), Row(text=prefix + rest.decode(errors="replace"))
+    byte_column, _, rest = rest.partition(marker)
+    column = len(prefix) + len(rest[: int(byte_column) - 1].decode(errors="replace"))
+    return (
+        name,
+        int(number),
+        Row(text=prefix + rest.decode(errors="replace"), column=column),
+    )
 
 
 def _plain_row(row: str) -> tuple[str, str]:
@@ -359,7 +410,7 @@ def _run_rg(
     *,
     query: Query,
     timeout_sec: float,
-) -> list[tuple[str, list[str]]]:
+) -> list[tuple[str, list[Row]]]:
     """Run one ``rg`` argv and return its output, grouped by file."""
     try:
         done = subprocess.run(  # noqa: S603 -- Fixed ripgrep argv, no shell.
@@ -387,11 +438,7 @@ def _run_rg(
         raise GrepError(f"ripgrep error (exit {done.returncode}): {err}")
     # Bytes, split on ``\n`` alone: a ``\r`` inside a matched line is part of
     # it, and text-mode decoding would turn it into a line break.
-    return _file_blocks(
-        done.stdout.decode(errors="replace"),
-        names_only=query.output_mode == "files_with_matches",
-        numbered=query.line_numbers,
-    )
+    return _file_blocks(done.stdout, query=query)
 
 
 def _batches(paths: Sequence[Path]) -> Iterator[list[Path]]:
@@ -470,16 +517,16 @@ def _grep_python(
     query: Query,
     *,
     found: _Found | None = None,
-) -> list[str]:
+) -> list[Row]:
     """Answer ``query`` in Python, matching ripgrep's output line for line."""
     pattern = _compile(query)
-    lines: list[str] = []
+    lines: list[Row] = []
     listed = found if found is not None else (list(_files(p, query)) for p in paths)
     for files in listed:
         for name, file, walked in files:
             rows = _search_file(pattern, file, name=name, walked=walked, query=query)
             if lines and rows and _has_context(query):
-                lines.append("--")
+                lines.append(Row(text="--"))
             lines.extend(rows)
     return lines
 
@@ -528,7 +575,7 @@ def _search_file(
     name: str,
     walked: bool,
     query: Query,
-) -> list[str]:
+) -> list[Row]:
     """Render one file's output lines, or none when it is skipped."""
     try:
         raw = file.read_bytes()
@@ -545,9 +592,8 @@ def _search_file(
     found = _file_lines(pattern, text.replace("\0", "\ue000"), name=name, query=query)
     if found and query.output_mode == "content":
         offset = raw.index(b"\0")
-        return [
-            f'{name}: binary file matches (found "\\0" byte around offset {offset})',
-        ]
+        note = f'{name}: binary file matches (found "\\0" byte around offset {offset})'
+        return [Row(text=note)]
     return found
 
 
@@ -575,9 +621,9 @@ def _lines(text: str) -> list[str]:
 # searched by itself, since only that decides how ``^``/``$``/``\s``/lookaround
 # see its ends. A nominee that fails resumes the scan one character on, so a
 # cross-line false hit cannot hide a real match later on the same line.
-def _line_hits(pattern: re.Pattern[str], text: str) -> list[int]:
-    """Return the 0-based lines ``pattern`` matches when searched line by line."""
-    hits: list[int] = []
+def _line_hits(pattern: re.Pattern[str], text: str) -> dict[int, int]:
+    """Map each 0-based line ``pattern`` matches, searched alone, to its column."""
+    hits: dict[int, int] = {}
     line_no = 0
     counted = 0
     pos = 0
@@ -590,8 +636,8 @@ def _line_hits(pattern: re.Pattern[str], text: str) -> list[int]:
         end = len(text) if end < 0 else end
         line_no += text.count("\n", counted, start)
         counted = start
-        if pattern.search(text[start:end]):
-            hits.append(line_no)
+        if found := pattern.search(text[start:end]):
+            hits[line_no] = found.start()
             pos = end + 1
         else:
             pos = match.start() + 1
@@ -604,7 +650,7 @@ def _file_lines(
     *,
     name: str,
     query: Query,
-) -> list[str]:
+) -> list[Row]:
     """Render one file's output lines."""
     if query.multiline:
         count, hits = _multiline_hits(pattern, text)
@@ -615,18 +661,19 @@ def _file_lines(
         return []
     split = _lines(text)
     if query.output_mode == "files_with_matches":
-        return [name]
+        return [Row(text=name)]
     if query.output_mode == "count":
-        return [f"{name}:{count}"]
+        return [Row(text=f"{name}:{count}")]
     if not _has_context(query):
-        return [_row(name, i, split[i], query=query) for i in hits]
-    shown = set(hits)
-    out: list[str] = []
-    for start, end in _context_groups(hits, len(split), query=query):
+        return [_row(name, i, split[i], query=query, column=hits[i]) for i in hits]
+    out: list[Row] = []
+    for start, end in _context_groups(list(hits), len(split), query=query):
         if out:
-            out.append("--")
+            out.append(Row(text="--"))
         out.extend(
-            _row(name, j, split[j], query=query, separator=":" if j in shown else "-")
+            _row(name, j, split[j], query=query, column=hits[j])
+            if j in hits
+            else _row(name, j, split[j], query=query, separator="-")
             for j in range(start, end)
         )
     return out
@@ -638,22 +685,30 @@ def _file_lines(
 # holding a newline is the evidence used here, so ``x|\n`` over text with no
 # newline match counts lines where ripgrep counts matches. An empty match
 # after a final newline sits on no line.
-def _multiline_hits(pattern: re.Pattern[str], text: str) -> tuple[int, list[int]]:
-    """Return the ``-c`` count and the 0-based lines the matches touch."""
+def _multiline_hits(
+    pattern: re.Pattern[str],
+    text: str,
+) -> tuple[int, dict[int, int]]:
+    """Return the ``-c`` count and each touched 0-based line's match column."""
     matches = [
         match
         for match in pattern.finditer(text)
         if match.start() != len(text) or (text and not text.endswith("\n"))
     ]
-    lines: set[int] = set()
+    lines: dict[int, int] = {}
     for match in matches:
         start = text[: match.start()].count("\n")
+        lines.setdefault(start, match.start() - text.rfind("\n", 0, match.start()) - 1)
         # A match ending in ``\n`` ends on that newline's line, not the next.
-        lines.update(
-            range(start, start + match.group().removesuffix("\n").count("\n") + 1),
-        )
+        for line in range(
+            start + 1,
+            start + match.group().removesuffix("\n").count("\n") + 1,
+        ):
+            lines.setdefault(line, -1)
     across = any("\n" in match.group() for match in matches)
-    return (len(matches) if across else len(lines)), sorted(lines)
+    # Ripgrep locates only the first line of a run of matched lines.
+    located = {i: -1 if i - 1 in lines else column for i, column in lines.items()}
+    return (len(matches) if across else len(lines)), dict(sorted(located.items()))
 
 
 def _has_context(query: Query) -> bool:
@@ -690,10 +745,13 @@ def _row(
     *,
     query: Query,
     separator: str = ":",
-) -> str:
+    column: int = -1,
+) -> Row:
     """Render one line as ``rg --no-heading``: ``:`` for a match, ``-`` for context."""
-    number = f"{index + 1}{separator}" if query.line_numbers else ""
-    return f"{name}{separator}{number}{line}"
+    prefix = (
+        f"{name}{separator}{f'{index + 1}{separator}' if query.line_numbers else ''}"
+    )
+    return Row(text=prefix + line, column=len(prefix) + column if column >= 0 else -1)
 
 
 def _small(targets: Sequence[Path], query: Query) -> _Found | None:
