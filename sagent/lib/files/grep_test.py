@@ -21,6 +21,7 @@ from sagent.lib.files.grep import (
     OutputMode,
     Query,
     Row,
+    _sort_key,
     grep,
     grep_rows,
     rg_command,
@@ -30,6 +31,7 @@ from sagent.lib.files.grep import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
+    from typing import BinaryIO
 
     import os
 
@@ -1000,6 +1002,99 @@ def test_patterns_that_spell_flags_do_not_change_output(
     file.write_text(f"a {pattern} b\n")
     query = Query(pattern=pattern, output_mode="content", line_numbers=numbered)
     assert grep(file, query) == [f"{file}:{'1:' if numbered else ''}a {pattern} b"]
+
+
+@_BOTH
+def test_a_raw_newline_in_the_pattern_needs_multiline(tmp_path: Path) -> None:
+    file = tmp_path / "f"
+    file.write_text("a\nb\n")
+    with pytest.raises(GrepError, match="multiline is off"):
+        grep(file, Query(pattern="a\nb"))
+
+
+def test_an_unreadable_file_is_skipped(tmp_path: Path) -> None:
+    for name in ("a.txt", "b.txt"):
+        (tmp_path / name).write_text("hit\n")
+    real = pathlib.Path.read_bytes
+
+    def unreadable(self: pathlib.Path) -> bytes:
+        if self.name == "a.txt":
+            raise PermissionError(self)
+        return real(self)
+
+    with patch("pathlib.Path.read_bytes", unreadable):
+        assert grep(tmp_path, Query(pattern="hit")) == [str(tmp_path / "b.txt")]
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [(r"\Ahit", ["f.txt:1:hit"])],
+    ids=["ripgrep-only-syntax"],
+)
+def test_a_pattern_python_cannot_judge_goes_to_rg(
+    tmp_path: Path,
+    pattern: str,
+    expected: list[str],
+) -> None:
+    file = tmp_path / "f.txt"
+    file.write_text("hit\n")
+    with (
+        patch("sagent.lib.files.grep.SMALL_FILES", 8),
+        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
+        contextlib.chdir(tmp_path),
+    ):
+        found = grep(
+            pathlib.Path("f.txt"),
+            Query(pattern=pattern, output_mode="content"),
+        )
+    assert run.called
+    assert found == expected
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_a_pattern_python_rejects_gets_rgs_answer(tmp_path: Path) -> None:
+    file = tmp_path / "f.txt"
+    file.write_text("hit\n")
+    with (
+        patch("sagent.lib.files.grep.SMALL_FILES", 8),
+        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
+        pytest.raises(GrepError, match="ripgrep error"),
+    ):
+        grep(file, Query(pattern="("))
+    assert run.called
+
+
+@pytest.mark.parametrize("rg", [True], ids=["rg"])
+def test_a_sample_file_that_will_not_open_is_left_out(tmp_path: Path) -> None:
+    paths = [tmp_path / name for name in ("a.txt", "b.txt")]
+    for path in paths:
+        path.write_text("value = 1\n" * 8)
+    real = pathlib.Path.open
+    opened: list[str] = []
+
+    def flaky(self: pathlib.Path, mode: str = "r") -> BinaryIO:
+        opened.append(self.name)
+        if self.name == "a.txt":
+            raise PermissionError(self)
+        assert mode == "rb"
+        return real(self, "rb")
+
+    with (
+        patch("sagent.lib.files.grep.SMALL_FILES", 8),
+        patch("sagent.lib.files.grep._SAMPLE", 16),
+        patch("sagent.lib.files.grep._search_file", return_value=[]),
+        patch("pathlib.Path.open", flaky),
+    ):
+        assert grep(paths, Query(pattern="value")) == []
+    assert opened == ["a.txt", "b.txt"]
+
+
+def test_a_name_outside_every_path_sorts_last() -> None:
+    paths = [pathlib.Path("a"), pathlib.Path("b/")]
+    order = {"a": 0}
+    keys = [_sort_key(name, paths, order) for name in ("z", "b/c", "a")]
+    assert keys == [(2, ("z",)), (1, ("c",)), (0, ())]
 
 
 if __name__ == "__main__":
