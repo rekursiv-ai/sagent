@@ -368,6 +368,29 @@ async def test_compact_with_keep_recent_preserves_tail() -> None:
 
 
 @pytest.mark.asyncio
+async def test_compact_records_the_kept_tail_count_on_a_successful_summary() -> None:
+    """A ``summary`` splice reports its kept tail, so a reader never sees a false 0.
+
+    Only the fallback splice used to carry ``preserved_tail_count``; a successful
+    summary left it at the default, so a kept tail was indistinguishable from a
+    dropped one in the on-disk record and in ``CompactComplete``.
+    """
+    model = _ScriptedModel(stream_responses=[_summary_resp("partial summary")])
+    compactor = SummaryCompactor(keep_recent=2)
+    history: list[ModelContextEvent] = [
+        UserMessage(text="m1"),
+        AssistantMessage(text="a1"),
+        UserMessage(text="m2"),
+        AssistantMessage(text="a2"),
+        UserMessage(text="m3"),
+        AssistantMessage(text="a3"),
+    ]
+    override = await _build_compact_override(compactor, history, model)
+    assert override.strategy == "summary"
+    assert override.preserved_tail_count == 2
+
+
+@pytest.mark.asyncio
 async def test_compact_preserves_current_user_turn_by_default() -> None:
     body = "summary before current turn"
     model = _ScriptedModel(stream_responses=[_summary_resp(body)])

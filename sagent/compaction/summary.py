@@ -487,6 +487,11 @@ class SummaryCompactor:
             strategy="summary",
             token_before=token_before,
             token_after=token_after,
+            # A successful summary keeps ``to_keep`` verbatim too; recording the
+            # count here (not on the fallback alone) is what makes the kept tail
+            # observable -- a reader of a ``summary`` splice otherwise saw 0 and
+            # could not tell a kept tail from a dropped one.
+            preserved_tail_count=len(to_keep),
         )
 
     # The single owner of tool-result truncation: every request caps results at
