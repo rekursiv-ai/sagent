@@ -155,7 +155,9 @@ the Sagent process.
 
 ## Web tools
 
-`WebSearch` uses DuckDuckGo by default.
+`WebSearch` tries Google, DuckDuckGo, SearXNG (when `SEARXNG_URL` is set),
+then Brave (when `BRAVE_API_KEY` is set), skipping a blocked, unconfigured,
+or empty backend. Answers are cached host-wide for an hour.
 
 Use `allowed_domains` and `blocked_domains` to scope results.
 
