@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Final, cast, get_args
 
 import re
+import warnings
 
 from treekle import from_plain, immutable
 
@@ -595,11 +596,13 @@ def _search(
     except GrepError as error:
         return _error(str(error))
     try:
-        pattern = re.compile(
-            query.pattern,
-            re.IGNORECASE if query.case_insensitive else 0,
-        )
-    except re.error:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", FutureWarning)
+            pattern = re.compile(
+                query.pattern,
+                re.IGNORECASE if query.case_insensitive else 0,
+            )
+    except (re.error, FutureWarning):
         # Ripgrep syntax Python cannot compile: the clip window starts at 0.
         pattern = None
     return _paginate(

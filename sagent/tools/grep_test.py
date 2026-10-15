@@ -125,6 +125,22 @@ async def test_a_wide_line_is_clipped_around_its_match(
 
 
 @pytest.mark.asyncio
+async def test_a_posix_class_pattern_searches_without_a_future_warning(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.txt").write_text("abc123\n")
+    result = await _run_grep(
+        {
+            "pattern": "[[:alpha:]]+[[:digit:]]+",
+            "path": str(tmp_path),
+            "output_mode": "content",
+        },
+        tmp_path,
+    )
+    assert "abc123" in result.content, result.content
+
+
+@pytest.mark.asyncio
 async def test_a_narrow_line_is_not_clipped(tmp_path: Path) -> None:
     """The path prefix is not text: a long path must not clip a short line."""
     line = "x" * 400 + "NEEDLE"
