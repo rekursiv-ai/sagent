@@ -7984,6 +7984,47 @@ async def test_tool_call_round_cap_blocks_second_round_when_cap_is_one() -> None
 
 
 @pytest.mark.asyncio
+async def test_a_refused_round_calls_the_model_only_for_the_next_message() -> None:
+    """A refused response never joins the history, so nothing calls the model on it.
+
+    A call on the history the refused response left would answer the old message
+    inside the next one.
+    """
+
+    @dataclass(slots=True, kw_only=True)
+    class QuietTool(StubTool):
+        @override
+        def serialize_key(self, args: Mapping[str, object]) -> str | None:
+            del args
+            return None
+
+        @override
+        async def run(self, args: Mapping[str, object]) -> ToolResult:
+            del args
+            return ToolResult(call_id="", content="ran")
+
+    model = StubModel(
+        responses=[
+            AssistantMessage(tool_calls=(ToolCall(id="c1", name="Echo", args={}),)),
+            AssistantMessage(tool_calls=(ToolCall(id="c2", name="Echo", args={}),)),
+        ],
+    )
+    a = Agent(model=model, tools=[QuietTool()], max_tool_call_rounds=1)
+    _ = [event async for event in a.run(UserMessage(text="go"))]
+    _ = [event async for event in a.run(UserMessage(text="next"))]
+
+    asked = [
+        next(
+            message.text
+            for message in reversed(request.messages)
+            if isinstance(message, UserMessage)
+        )
+        for request in model.received
+    ]
+    assert asked == ["go", "go", "next"]
+
+
+@pytest.mark.asyncio
 async def test_clear_drops_cancelled_background_result_after_fresh_turn() -> None:
     started = asyncio.Event()
     idle = asyncio.Event()

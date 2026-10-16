@@ -5242,6 +5242,11 @@ class TestUserMessageAlternation:
             f"peer attribution lost when merging two sources; got {tail!r}"
         )
 
+    def test_coalescing_no_user_side_entry_is_refused_by_name(self) -> None:
+        """An empty run has no entry to stand for it, which the error says."""
+        with pytest.raises(ValueError, match=r"^Expected len\(merged\) == 1\.$"):
+            _ = runtime._coalesce_user_side([])
+
     def test_append_or_coalesce_user_merges_cross_type(self) -> None:
         """UserMessage tail + AgentSend incoming merge into a single user turn."""
         agent = _runtime_for_alternation_tests()

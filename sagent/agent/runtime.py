@@ -1667,6 +1667,7 @@ class AgentRuntime:
                     self._was_idle = True
                 items = await self.inbox.drain()
                 self._was_idle = False
+                refused = False
 
                 for item_idx, item in enumerate(items):
                     match item:
@@ -2028,6 +2029,7 @@ class AgentRuntime:
                                     before_tool_spawn,
                                     *items[item_idx + 1 :],
                                 )
+                                refused = True
                                 break
                             self.append_history(msg)
                             self.publish(item)
@@ -2156,6 +2158,12 @@ class AgentRuntime:
 
                         case _:
                             pass
+
+                # A refused response never joined the history, which still ends where
+                # the model was called from: the event it was refused with goes first,
+                # or the gate below calls the model again on the same history.
+                if refused:
+                    continue
 
                 if (
                     self._pending_switches
