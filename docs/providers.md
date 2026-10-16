@@ -111,6 +111,57 @@ model = LocalProvider.from_env().model("local-model")
 
 See `examples/openai_compatible_provider.py` for a runnable version.
 
+### Hosted gateway example: A2Agent
+
+`examples/a2agent_provider.py` defines an `A2Agent` subclass of `OpenAICompat`
+and sends one prompt using the existing transport. It is a standalone Python
+example, not a new built-in `sagent --provider` option or an endorsement.
+
+The [API reference](https://a2agent.me/llms.txt) documents the base URL and
+Bearer authentication. Supply a private key through `A2AGENT_API_KEY` and an
+exact model ID available to that key. To inspect the model list:
+
+```bash
+curl --fail-with-body https://api.a2agent.me/v1/models \
+  -H "Authorization: Bearer $A2AGENT_API_KEY"
+```
+
+Model discovery alone does not establish context limits, prices, or tool
+support. Confirm input/output limits for the chosen route and all five token
+rates for the key's group before running the example. The following variables
+must be set to those confirmed values; prices are USD per million tokens:
+
+```bash
+uv run python examples/a2agent_provider.py \
+  --model "$A2AGENT_MODEL" \
+  --input-limit "$A2AGENT_INPUT_LIMIT" \
+  --output-limit "$A2AGENT_OUTPUT_LIMIT" \
+  --input-price "$A2AGENT_INPUT_PRICE" \
+  --output-price "$A2AGENT_OUTPUT_PRICE" \
+  --cache-read-price "$A2AGENT_CACHE_READ_PRICE" \
+  --cache-write-price "$A2AGENT_CACHE_WRITE_PRICE" \
+  --cache-write-1h-price "$A2AGENT_CACHE_WRITE_1H_PRICE"
+```
+
+Do not copy another vendor's rates or use zero for unknown prices. Explicit
+zero rates are accepted only for meters confirmed to be unbilled. The example
+has no baked-in model list, default model choice, or assumed pricing. Its
+`default` and `utility` roles both resolve to the one model you configure;
+separate calls to `create_provider` keep their catalogs independent.
+
+`--base-url` overrides the complete API base (default
+`https://api.a2agent.me/v1`); only use endpoints you trust with the key. The
+transport appends `/chat/completions`. `buffer()` still uses SSE internally,
+so this example requires streaming support even though it prints a final
+response. Model/route-specific reasoning controls and embeddings are outside
+this example's scope. Check tool calling separately before attaching agent
+tools.
+
+The accompanying tests use mock HTTP responses and dummy keys, not live
+A2Agent inference. Test with your own key before relying on the integration.
+Requests send prompt content to a hosted service and may incur charges;
+keep keys out of source files, public CI, logs, and issue reports.
+
 ## Self-hosted HuggingFace models
 
 Use `SelfHosted` for HuggingFace causal LMs loaded through `transformers`:
