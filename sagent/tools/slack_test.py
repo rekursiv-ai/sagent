@@ -8,7 +8,6 @@ import asyncio
 import json
 import logging
 
-from wesearch.fetch import FetchSession
 from wesearch.types.errors import FetchError
 
 import pytest
@@ -60,7 +59,7 @@ def test_send_success() -> None:
     payload = _ok({"ts": "1.0", "channel": "C1"})
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ) as mock_fetch:
         result = asyncio.run(
             Slack(token=_TOKEN, username="bot", icon_url="https://i").run(
@@ -89,7 +88,7 @@ def test_a_non_object_body_is_a_tool_error(raw: bytes) -> None:
     """``Tool.run`` must not raise on a proxy error page or a non-object body."""
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(raw, FetchSession()),
+        return_value=raw,
     ):
         result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_users"}))
     assert result.is_error
@@ -100,7 +99,7 @@ def test_list_users_all_deleted_says_so() -> None:
     payload = _ok({"members": [{"id": "U1", "name": "gone", "deleted": True}]})
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ):
         result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_users"}))
     assert result.content == "(no users)"
@@ -110,7 +109,7 @@ def test_send_does_not_log_the_message_body(caplog: pytest.LogCaptureFixture) ->
     with (
         patch(
             "sagent.tools.slack.fetch",
-            return_value=(_ok({"ts": "1.0", "channel": "C1"}), FetchSession()),
+            return_value=_ok({"ts": "1.0", "channel": "C1"}),
         ),
         caplog.at_level(logging.DEBUG),
     ):
@@ -125,7 +124,7 @@ def test_send_does_not_log_the_message_body(caplog: pytest.LogCaptureFixture) ->
 def test_send_api_error() -> None:
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(_not_ok("channel_not_found"), FetchSession()),
+        return_value=_not_ok("channel_not_found"),
     ):
         result = asyncio.run(
             Slack(token=_TOKEN).run(
@@ -157,7 +156,7 @@ def test_list_channels_empty() -> None:
     payload = _ok({"channels": []})
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ):
         result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_channels"}))
     assert result.content == "(no channels)"
@@ -174,7 +173,7 @@ def test_list_channels_renders() -> None:
     )
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ):
         result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_channels"}))
     assert "C1  #general" in result.content
@@ -193,7 +192,7 @@ def test_list_messages_empty() -> None:
     payload = _ok({"messages": []})
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ):
         result = asyncio.run(
             Slack(token=_TOKEN).run({"operation": "list_messages", "channel": "C1"}),
@@ -217,7 +216,7 @@ def test_list_messages_renders_with_reactions() -> None:
     )
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ):
         result = asyncio.run(
             Slack(token=_TOKEN).run({"operation": "list_messages", "channel": "C1"}),
@@ -236,7 +235,7 @@ def test_read_thread_renders() -> None:
     payload = _ok({"messages": [{"ts": "1.0", "user": "U1", "text": "parent"}]})
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ):
         result = asyncio.run(
             Slack(token=_TOKEN).run(
@@ -261,7 +260,7 @@ def test_list_users_filters_deleted() -> None:
     )
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ):
         result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_users"}))
     assert "U1  @alice" in result.content
@@ -272,7 +271,7 @@ def test_list_users_empty() -> None:
     payload = _ok({"members": []})
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ):
         result = asyncio.run(Slack(token=_TOKEN).run({"operation": "list_users"}))
     assert result.content == "(no users)"
@@ -288,7 +287,7 @@ def test_create_channel_success() -> None:
     payload = _ok({"channel": {"id": "C-new"}})
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ):
         result = asyncio.run(
             Slack(token=_TOKEN).run(
@@ -308,7 +307,7 @@ def test_send_convenience_method() -> None:
     payload = _ok({"ts": "9.9", "channel": "C9"})
     with patch(
         "sagent.tools.slack.fetch",
-        return_value=(payload, FetchSession()),
+        return_value=payload,
     ):
         result = asyncio.run(Slack(token=_TOKEN).send("C9", "hi"))
     assert isinstance(result, str)

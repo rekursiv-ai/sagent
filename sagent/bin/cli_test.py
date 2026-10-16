@@ -17,6 +17,7 @@ import subprocess
 import sys
 
 from treekle import ReadError
+from wesearch.fetch import FetchSession
 
 import pytest
 
@@ -1022,6 +1023,22 @@ def test_resolve_tools_known_subset_includes_bash() -> None:
     # Bash is constructed last regardless of position; the order in
     # ``names`` follows the request order.
     assert names == ["Read", "Bash"]
+
+
+def test_resolve_tools_gives_every_web_tool_one_session() -> None:
+    names = [
+        "WebFetch",
+        "WebSearch",
+        "PaperSearch",
+        "PaperDetails",
+        "PaperAuthor",
+        "PaperFetch",
+    ]
+    sessions = [getattr(t, "session", None) for t in resolve_tools(names)]
+    assert isinstance(sessions[0], FetchSession)
+    assert all(s is sessions[0] for s in sessions)
+    other = resolve_tools(["WebFetch"])[0]
+    assert getattr(other, "session", None) is not sessions[0]
 
 
 def test_last_assistant_text_empty() -> None:

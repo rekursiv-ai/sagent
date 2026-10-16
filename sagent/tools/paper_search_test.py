@@ -14,9 +14,9 @@ from unittest.mock import patch
 
 import asyncio
 
-from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.errors import PaperError
 from wesearch.paper.search import SearchResult
+from wesearch.paper.types import PaperRecord
 
 from sagent.tools import paper_search
 from sagent.tools.paper_search import PaperSearch, _empty_hint

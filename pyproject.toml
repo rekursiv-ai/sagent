@@ -41,8 +41,8 @@ dependencies = [
     "tiktoken>=0.12.0",
     # web client / scraping
     "httpx2>=2.12",
-    # 0.1.11 for `wesearch.fetch.custom_types` (WebFetch) and
-    # `wesearch.search.render` (WebSearch); neither exists in 0.1.10.
+    # 0.1.11 for the WebFetch/WebSearch parameter schemas (now
+    # `wesearch.mcp.types`) and `wesearch.search.render`.
     "wesearch>=0.1.11",
     # web server / api
     "uvicorn>=0.30.0",

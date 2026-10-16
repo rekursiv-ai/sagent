@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Annotated, cast, get_args
 import asyncio
 
 from treekle import PlainTree, immutable, mutable
-from wesearch.fetch import Extractor, PolicyParams, Transport
-from wesearch.fetch.custom_types import FetchBodyParamsSchema, HttpMethod
+from wesearch.fetch import Extractor, FetchSession, PolicyParams, Transport
+from wesearch.mcp.types import FetchBodyParamsSchema, FetchMethod
 from wesearch.types.errors import BotDetectionError, FetchError
 from wesearch.web import fetch_web
 
@@ -69,6 +69,12 @@ class WebFetch:
             tuple[Transport, Extractor, str],
             str,
         ](maxsize=128, ttl=15 * 60),
+        repr=False,
+        compare=False,
+    )
+
+    session: FetchSession = field(
+        default_factory=FetchSession,
         repr=False,
         compare=False,
     )
@@ -152,7 +158,7 @@ class WebFetch:
         directive = dict(args)
         if isinstance(directive.get("method"), str):
             directive["method"] = str(directive["method"]).upper()
-            if directive["method"] not in get_args(HttpMethod):
+            if directive["method"] not in get_args(FetchMethod):
                 # Named separately from the generic coercion error: a rejected
                 # VERB wants the reason ("this tool does not do PUT") ahead of
                 # the list of accepted values.
@@ -171,7 +177,7 @@ class WebFetch:
         except ValueError as e:
             return ToolResult(call_id="", content=str(e), is_error=True)
         raw_url = str(params["url"])
-        method = cast(HttpMethod, params["method"])
+        method = cast(FetchMethod, params["method"])
         transport = cast(Transport, params["transport"])
         extractor = cast(Extractor, params["extractor"])
 
@@ -205,6 +211,7 @@ class WebFetch:
                 json_body=json_body,
                 form_body=form_body,
                 policy=PolicyParams(transport=transport, extractor=extractor),
+                session=self.session,
             )
         except BotDetectionError as e:
             # fetch() classified the block at the boundary: surface the SPECIFIC
@@ -221,7 +228,7 @@ class WebFetch:
 
 
 def _request_bodies(
-    method: HttpMethod,
+    method: FetchMethod,
     args: Mapping[str, object],
 ) -> tuple[PlainTree, dict[str, str] | None]:
     """Return POST request bodies from a tool directive."""

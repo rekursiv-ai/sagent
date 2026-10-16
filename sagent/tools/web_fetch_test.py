@@ -9,7 +9,7 @@ import asyncio
 import socket
 
 from treekle import immutable
-from wesearch.fetch import PolicyParams
+from wesearch.fetch import FetchSession, PolicyParams
 from wesearch.types.errors import CloudflareChallengeError, FetchError
 from wesearch.web import FetchResult
 
@@ -67,14 +67,27 @@ def test_prompt_empty() -> None:
     assert WebFetch().prompt() == ""
 
 
-def test_run_leaves_the_agent_url_untrusted() -> None:
-    """``run`` states a transport and nothing else; SSRF safety is the default.
+def test_every_fetch_shares_the_tool_session() -> None:
+    sessions: list[object] = []
 
-    The tool used to pass an SSRF resolver explicitly, which is what cost it
-    every browser transport -- the library rejected that resolver on the browser
-    legs. Holding no policy beyond the transport is the point: this wrapper is
-    thin, and the safe behavior is wesearch's default.
-    """
+    def fake_fetch_web(url: str, **kwargs: object) -> FetchResult:
+        del url
+        sessions.append(kwargs.get("session"))
+        return _result("{}")
+
+    tool = WebFetch()
+    with patch(
+        "sagent.tools.web_fetch.fetch_web",
+        side_effect=fake_fetch_web,
+    ):
+        asyncio.run(tool.run({"url": "https://a.example"}))
+        asyncio.run(tool.run({"url": "https://b.example"}))
+    assert isinstance(sessions[0], FetchSession)
+    assert sessions[1] is sessions[0]
+
+
+def test_run_refuses_private_hosts_for_the_agent_url() -> None:
+    """The agent's URL keeps wesearch's default: private hosts are refused."""
     captured: dict[str, object] = {}
 
     def fake_fetch_web(url: str, **kwargs: object) -> FetchResult:
@@ -90,7 +103,7 @@ def test_run_leaves_the_agent_url_untrusted() -> None:
     assert not result.is_error
     policy = captured["policy"]
     assert isinstance(policy, PolicyParams)
-    assert policy.trust == "untrusted"
+    assert policy.allow_private_hosts is False
 
 
 def test_run_appends_truncation_notice_when_body_exceeds_limit() -> None:

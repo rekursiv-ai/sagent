@@ -14,9 +14,9 @@ from unittest.mock import patch
 
 import asyncio
 
-from wesearch.paper.custom_types import PaperRecord
 from wesearch.paper.details import Listing
 from wesearch.paper.errors import PaperError
+from wesearch.paper.types import PaperRecord
 
 import pytest
 
@@ -253,18 +253,23 @@ def test_run_references() -> None:
         records=[PaperRecord(title="Cited Paper", year=2019)],
         complete=True,
     )
+    tool = PaperDetails()
     with patch(
         "sagent.tools.paper_details.references",
         return_value=listing,
     ) as m:
         result = asyncio.run(
-            PaperDetails().run(
+            tool.run(
                 {"ids": ["10.1234/ref_target"], "operation": "references"},
             ),
         )
     assert "Cited Paper" in result.content
     assert m.call_args.args == ("doi", "10.1234/ref_target")
-    assert m.call_args.kwargs == {"limit": None, "source": "s2"}
+    assert m.call_args.kwargs == {
+        "limit": None,
+        "source": "s2",
+        "session": tool.session,
+    }
 
 
 def test_run_references_empty() -> None:
@@ -282,12 +287,13 @@ def test_run_references_empty() -> None:
 
 def test_run_citations_delegates_filters() -> None:
     listing = Listing(records=[PaperRecord(title="New", year=2022)], complete=True)
+    tool = PaperDetails()
     with patch(
         "sagent.tools.paper_details.citations",
         return_value=listing,
     ) as m:
         result = asyncio.run(
-            PaperDetails().run(
+            tool.run(
                 {
                     "ids": ["10.1234/cit_target"],
                     "operation": "citations",
@@ -304,6 +310,7 @@ def test_run_citations_delegates_filters() -> None:
         "source": "s2",
         "influential_only": True,
         "year_from": 2020,
+        "session": tool.session,
     }
 
 

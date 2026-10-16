@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 import asyncio
 
 from treekle import PlainTree, immutable
+from wesearch.fetch import FetchSession
 from wesearch.paper.authors import author_metadata, author_papers, search_authors
 from wesearch.paper.errors import PaperError
 from wesearch.paper.render import (
@@ -118,6 +119,9 @@ class PaperAuthor:
         },
     )
 
+    def __init__(self, *, session: FetchSession | None = None) -> None:
+        self.session = FetchSession() if session is None else session
+
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation.
 
@@ -205,7 +209,11 @@ class PaperAuthor:
         cached = _cache.get(key)
         if cached is not None:
             return ToolResult(call_id="", content=cached)
-        records = await asyncio.to_thread(author_metadata, author_ids)
+        records = await asyncio.to_thread(
+            author_metadata,
+            author_ids,
+            session=self.session,
+        )
         blocks = [
             format_author_block(rec) if rec is not None else f"{label}: not found"
             for label, rec in zip(author_ids, records, strict=True)
@@ -254,7 +262,12 @@ class PaperAuthor:
 
     async def _search(self, query: str, *, limit: int | None) -> str:
         """Search authors by name and return ranked results."""
-        result = await asyncio.to_thread(search_authors, query, limit=limit)
+        result = await asyncio.to_thread(
+            search_authors,
+            query,
+            limit=limit,
+            session=self.session,
+        )
         if not result.records:
             return "(no results)"
         body = "\n".join(format_author_line(r) for r in result.records)
@@ -262,7 +275,11 @@ class PaperAuthor:
 
     async def _author(self, author_id: str) -> str:
         """Fetch full metadata for a single author."""
-        records = await asyncio.to_thread(author_metadata, [author_id])
+        records = await asyncio.to_thread(
+            author_metadata,
+            [author_id],
+            session=self.session,
+        )
         rec = records[0]
         if rec is None:
             return f"{author_id}: not found"
@@ -284,6 +301,7 @@ class PaperAuthor:
             limit=limit,
             year_from=year_from,
             year_to=year_to,
+            session=self.session,
         )
         if not listing.records:
             return "(no results)"

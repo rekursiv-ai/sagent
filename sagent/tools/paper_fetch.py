@@ -19,6 +19,7 @@ import asyncio
 import logging
 
 from treekle import PlainTree, immutable
+from wesearch.fetch import FetchSession
 from wesearch.paper.errors import PaperError
 from wesearch.paper.fetch import batch_oa_urls, download, looks_like_pdf
 from wesearch.paper.ids import id_slug, s2_wire_id
@@ -38,7 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
     from pathlib import Path
 
-    from wesearch.paper.custom_types import IdType
+    from wesearch.paper.types import IdType
 
 
 logger = logging.getLogger(__name__)
@@ -76,10 +77,16 @@ class PaperFetch:
         },
     )
 
-    def __init__(self, *, cache_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        cache_dir: Path | None = None,
+        session: FetchSession | None = None,
+    ) -> None:
         self._cache_dir = (
             cache_dir or userdirs.cache_dir() / "rekursiv-ai" / "wesearch" / "papers"
         )
+        self.session = FetchSession() if session is None else session
 
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation."""
@@ -126,7 +133,11 @@ class PaperFetch:
         # Batch-resolve open-access URLs in one gated request. ``None`` for the
         # whole list means the batch call failed -- fall back to per-id lookups.
         wire_ids = [s2_wire_id(kind, canonical) for kind, canonical in parsed_ids]
-        oa_urls = await asyncio.to_thread(batch_oa_urls, wire_ids)
+        oa_urls = await asyncio.to_thread(
+            batch_oa_urls,
+            wire_ids,
+            session=self.session,
+        )
         looked_up = oa_urls is not None
         urls = oa_urls if oa_urls is not None else [None] * len(parsed_ids)
         results = await asyncio.gather(
@@ -162,6 +173,7 @@ class PaperFetch:
                 canonical,
                 oa_url=oa_url,
                 oa_looked_up=oa_looked_up,
+                session=self.session,
             )
         except PaperError as e:
             return ToolResult(call_id="", content=str(e), is_error=True)

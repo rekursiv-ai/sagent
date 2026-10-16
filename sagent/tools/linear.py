@@ -486,11 +486,11 @@ async def _gql(
             is_error=True,
         )
     try:
-        body = json_loads(raw[0], dict[str, object])
+        body = json_loads(raw, dict[str, object])
     except ReadError:
         return ToolResult(
             call_id="",
-            content=f"Linear GraphQL returned a non-object body: {json_loads(raw[0])}",
+            content=f"Linear GraphQL returned a non-object body: {json_loads(raw)}",
             is_error=True,
         )
     if errors := body.get("errors"):

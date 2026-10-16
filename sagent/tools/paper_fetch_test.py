@@ -166,13 +166,12 @@ def test_run_cache_garbage_refetches(tmp_path: Path) -> None:
 def test_run_single_download_writes_cache(tmp_path: Path) -> None:
     """A single id fetches once, writes the bytes, and renders the source."""
     cache_file = tmp_path / "arxiv_1234.56789.pdf"
+    tool = PaperFetch(cache_dir=tmp_path)
     with patch(
         "sagent.tools.paper_fetch.download",
         return_value=(_FAKE_PDF, "arxiv"),
     ) as download:
-        result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
-        )
+        result = asyncio.run(tool.run({"ids": ["1234.56789"]}))
     assert not result.is_error
     assert result.content == f"Downloaded via arxiv: {cache_file}"
     assert cache_file.read_bytes() == _FAKE_PDF
@@ -182,6 +181,7 @@ def test_run_single_download_writes_cache(tmp_path: Path) -> None:
         "1234.56789",
         oa_url=None,
         oa_looked_up=False,
+        session=tool.session,
     )
 
 
@@ -223,7 +223,9 @@ def test_run_multi_batches_oa_then_fetches(tmp_path: Path) -> None:
         *,
         oa_url: str | None,
         oa_looked_up: bool,
+        session: object,
     ) -> tuple[bytes, str]:
+        del session
         del kind, canonical, oa_url, oa_looked_up
         return _FAKE_PDF, "open_access"
 
@@ -237,11 +239,13 @@ def test_run_multi_batches_oa_then_fetches(tmp_path: Path) -> None:
             side_effect=fake_download,
         ) as download,
     ):
-        result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["10.1234/aa", "10.1234/bb"]}),
-        )
+        tool = PaperFetch(cache_dir=tmp_path)
+        result = asyncio.run(tool.run({"ids": ["10.1234/aa", "10.1234/bb"]}))
 
-    batch.assert_called_once_with(["DOI:10.1234/aa", "DOI:10.1234/bb"])
+    batch.assert_called_once_with(
+        ["DOI:10.1234/aa", "DOI:10.1234/bb"],
+        session=tool.session,
+    )
     assert result.content.count("Downloaded via open_access") == 2
     assert (tmp_path / "doi_10.1234_aa.pdf").exists()
     assert (tmp_path / "doi_10.1234_bb.pdf").exists()
@@ -283,7 +287,9 @@ def test_run_multi_joined_output_order(tmp_path: Path) -> None:
         *,
         oa_url: str | None,
         oa_looked_up: bool,
+        session: object,
     ) -> tuple[bytes, str]:
+        del session
         del kind
         del oa_url, oa_looked_up
         return _FAKE_PDF, sources[canonical]
@@ -316,7 +322,9 @@ def test_run_multi_error_if_any_id_fails(tmp_path: Path) -> None:
         *,
         oa_url: str | None,
         oa_looked_up: bool,
+        session: object,
     ) -> tuple[bytes, str]:
+        del session
         del kind
         del oa_url, oa_looked_up
         if canonical == "10.1234/bb":

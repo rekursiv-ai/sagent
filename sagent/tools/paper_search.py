@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Final
 import asyncio
 
 from treekle import PlainTree, from_plain, immutable
+from wesearch.fetch import FetchSession
 from wesearch.paper.errors import PaperError
 from wesearch.paper.render import (
     format_record,
@@ -35,7 +36,7 @@ from sagent.types.runtime import ToolResult
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from wesearch.paper.custom_types import PaperRecord
+    from wesearch.paper.types import PaperRecord
 
 
 _VALID_SOURCES: Final[tuple[Source, ...]] = (
@@ -125,6 +126,9 @@ class PaperSearch:
         },
     )
 
+    def __init__(self, *, session: FetchSession | None = None) -> None:
+        self.session = FetchSession() if session is None else session
+
     def summary(self, args: Mapping[str, object]) -> str:
         """Return a short display label for this invocation.
 
@@ -211,6 +215,7 @@ class PaperSearch:
                 year_from=year_from,
                 year_to=year_to,
                 open_access_only=open_access_only,
+                session=self.session,
             )
         except PaperError as e:
             return ToolResult(call_id="", content=str(e), is_error=True)

@@ -37,7 +37,7 @@ from sagent.types.runtime import ToolResult
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from wesearch.paper.custom_types import IdType
+    from wesearch.paper.types import IdType
 
 
 __all__ = [

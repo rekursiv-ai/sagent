@@ -62,6 +62,7 @@ import signal
 import sys
 
 from treekle import from_plain, json_loads
+from wesearch.fetch import FetchSession
 
 from sagent import (
     providers,
@@ -207,6 +208,16 @@ def resolve_tools(
     if names == ["none"]:
         return []
     provider_aware = {"AgentSpawn", "AgentSelf"}
+    session_aware = {
+        "WebFetch",
+        "WebSearch",
+        "PaperSearch",
+        "PaperDetails",
+        "PaperAuthor",
+        "PaperFetch",
+    }
+    # One per agent tree: every web tool reuses its connections, Chrome, and egress.
+    session = FetchSession()
     non_bash: dict[str, Tool] = {}
     for name in names:
         if name == "Bash":
@@ -217,6 +228,8 @@ def resolve_tools(
         kwargs = _tool_kwargs(cls, by_tool.get(name, {}))
         if name in provider_aware:
             non_bash[name] = cls(allow_providers=allow_providers, **kwargs)
+        elif name in session_aware:
+            non_bash[name] = cls(session=session, **kwargs)
         else:
             non_bash[name] = cls(**kwargs)
     resolved: list[Tool] = []

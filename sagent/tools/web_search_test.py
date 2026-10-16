@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import asyncio
 
-from wesearch.search.custom_types import SearchResult
+from wesearch.search.types import SearchResult
 from wesearch.types.errors import GoogleSorryError, PuzzleChallengeError
 
 import pytest
@@ -208,7 +208,9 @@ def test_run_valid_backend_passes_through() -> None:
         *,
         backend: object,
         categories: object = "general",
+        session: object = None,
     ) -> list[SearchResult]:
+        del session
         captured["q"] = q
         captured["backend"] = backend
         captured["categories"] = categories
@@ -232,7 +234,9 @@ def test_run_explicit_transport_passes_through() -> None:
         backend: object,
         categories: object,
         transport: object,
+        session: object = None,
     ) -> list[SearchResult]:
+        del session
         del q, backend, categories
         captured["transport"] = transport
         return []
@@ -260,7 +264,9 @@ def test_run_with_allowed_and_blocked_domains() -> None:
         *,
         backend: object,
         categories: object = "general",
+        session: object = None,
     ) -> list[SearchResult]:
+        del session
         captured["q"] = q
         del backend, categories
         return []
@@ -299,7 +305,9 @@ def test_run_leaves_backend_resolution_to_the_library() -> None:
         *,
         backend: object,
         categories: object = "general",
+        session: object = None,
     ) -> list[SearchResult]:
+        del session
         del q
         captured["backend"] = backend
         captured["categories"] = categories

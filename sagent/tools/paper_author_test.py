@@ -14,9 +14,9 @@ from unittest.mock import patch
 import asyncio
 
 from wesearch.paper.authors import AuthorSearchResult
-from wesearch.paper.custom_types import AuthorRecord, PaperRecord
 from wesearch.paper.details import Listing
 from wesearch.paper.errors import PaperError
+from wesearch.paper.types import AuthorRecord, PaperRecord
 
 from sagent.tools.paper_author import (
     PaperAuthor,
@@ -341,12 +341,13 @@ def test_run_papers_incomplete_more_matches() -> None:
 def test_run_papers_passes_year_bounds() -> None:
     _clear_cache()
     ret = Listing(records=[], complete=True)
+    tool = PaperAuthor()
     with patch(
         "sagent.tools.paper_author.author_papers",
         return_value=ret,
     ) as m:
         _ = asyncio.run(
-            PaperAuthor().run(
+            tool.run(
                 {
                     "ids": ["10"],
                     "operation": "papers",
@@ -356,7 +357,12 @@ def test_run_papers_passes_year_bounds() -> None:
                 },
             ),
         )
-    assert m.call_args.kwargs == {"limit": 5, "year_from": 2020, "year_to": 2023}
+    assert m.call_args.kwargs == {
+        "limit": 5,
+        "year_from": 2020,
+        "year_to": 2023,
+        "session": tool.session,
+    }
 
 
 # ---------------------------------------------------------------------------
