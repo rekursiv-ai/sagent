@@ -25,6 +25,7 @@ cas
 consol
 coo
 copyable
+crate
 deque
 dota
 dur
@@ -37,6 +38,7 @@ iam
 iff
 jupyter
 lite
+mut
 nd
 nmae
 numer
