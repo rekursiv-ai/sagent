@@ -3144,7 +3144,7 @@ wheels = [
 [[package]]
 name = "rekursiv-ai-typeshed"
 version = "0.1.4"
-source = { git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main#122c600ceac308a87c877684f6d7a5430aeb2f27" }
+source = { git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main#7747ab32165010acf4a134170fe7543d4b96946b" }
 dependencies = [
     { name = "basedpyright" },
     { name = "ty" },
@@ -3153,7 +3153,7 @@ dependencies = [
 [[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.4"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#122c600ceac308a87c877684f6d7a5430aeb2f27" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#7747ab32165010acf4a134170fe7543d4b96946b" }
 
 [[package]]
 name = "requests"
@@ -4360,7 +4360,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.13"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#7d8cdaf13ff06c2dc81b729b7a8954aa2d4c0344" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#4ebdf39fc806818564b2c7a9abca88db223fdcca" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },
