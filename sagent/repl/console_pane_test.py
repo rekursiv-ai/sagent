@@ -17,12 +17,19 @@ from sagent.repl.console_pane import (
     ConsolePrinter,
     _wrap_label,
 )
+from sagent.repl.render import make_render_observer, strict_observer
 from sagent.tools.display import OutputSpec, ToolDisplay
 from sagent.types.exceptions import AuthRefreshError
 from sagent.types.runtime import (
     AssistantMessage,
+    ChildDoneEvent,
+    ChildEvent,
+    ModelResponseCancelled,
+    ModelResponseComplete,
     ModelResponseError,
+    ModelResponsePartial,
     ModelResponseThinking,
+    StatusChanged,
     ToolLabel,
     ToolResult,
     UserMessage,
@@ -33,6 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from sagent.repl.render import ChildItem
+    from sagent.types.runtime import RuntimeEvent
 
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
@@ -254,6 +262,188 @@ def test_write_thinking_includes_header_and_body() -> None:
     assert "Thinking" in out
     assert "plan A" in out
     assert "plan B" in out
+
+
+def test_thinking_deltas_are_visible_immediately_under_one_header() -> None:
+    printer, buf = _printer()
+    obs = make_render_observer(printer)
+    with strict_observer():
+        obs(ModelResponseThinking(text="Keep"))
+        assert "Keep" in buf.getvalue()
+        obs(ModelResponseThinking(text=" track"))
+        obs(ModelResponseThinking(text=" of progress."))
+        obs(ModelResponseComplete(message=AssistantMessage(text="")))
+    assert buf.getvalue() == "∴ Thinking\n  Keep track of progress.\n\n"
+
+
+@pytest.mark.parametrize("width", [16, 25, 80])
+def test_thinking_wrap_is_independent_of_delta_boundaries(width: int) -> None:
+    text = "Keep track of progress.\n\n界面 e\u0301 stays readable.\r\nNext\tline."
+    whole, whole_buf = _printer(width)
+    whole.write_thinking(text)
+    split, split_buf = _printer(width)
+    # Include splits inside words, CRLF and a combining sequence.
+    for char in text:
+        split.write_thinking_chunk(char)
+    split.finish_thinking()
+    assert split_buf.getvalue() == whole_buf.getvalue()
+    lines = split_buf.getvalue().splitlines()
+    assert all(cell_len(line) <= width for line in lines)
+    assert all(line.startswith("  ") for line in lines[1:] if line)
+
+
+def test_repl_thinking_commits_complete_lines_and_flushes_the_tail() -> None:
+    buf = io.StringIO()
+    printer = ConsolePrinter(
+        Console(file=buf, width=24, color_system=None),
+        thinking_line_buffered=True,
+    )
+    printer.write_thinking_chunk("Keep")
+    assert buf.getvalue() == "∴ Thinking\n"
+    printer.write_thinking_chunk(" track\nNext")
+    assert buf.getvalue() == "∴ Thinking\n  Keep track\n"
+    printer.finish_thinking()
+    assert buf.getvalue() == "∴ Thinking\n  Keep track\n  Next\n\n"
+
+
+@pytest.mark.parametrize("width", [16, 25, 80])
+def test_repl_thinking_tail_survives_arbitrary_fragments_and_wrapping(
+    width: int,
+) -> None:
+    text = "A longer reasoning line wraps safely.\n界面 e\u0301 stays readable.\r\nNext\tline."
+    whole, whole_buf = _printer(width)
+    whole.write_thinking(text)
+    buf = io.StringIO()
+    printer = ConsolePrinter(
+        Console(file=buf, width=width, color_system=None),
+        thinking_line_buffered=True,
+    )
+    for char in text:
+        printer.write_thinking_chunk(char)
+        assert buf.getvalue().endswith("\n")
+    printer.finish_thinking()
+    assert buf.getvalue() == whole_buf.getvalue()
+
+
+def test_empty_thinking_delta_does_not_print_a_header() -> None:
+    printer, buf = _printer()
+    printer.write_thinking_chunk("")
+    printer.finish_thinking()
+    assert buf.getvalue() == ""
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        ModelResponseComplete(message=AssistantMessage(text="")),
+        ModelResponseCancelled(),
+        ToolLabel(text="Bash inspect", call_id="c1"),
+        ToolResult(call_id="c1", content="done", summary="tool completed"),
+        ModelResponseError(exception=RuntimeError("failed")),
+        UserMessage(text="new request"),
+    ],
+)
+def test_thinking_boundary_closes_line_and_starts_a_new_block(
+    boundary: RuntimeEvent,
+) -> None:
+    printer, buf = _printer()
+    obs = make_render_observer(printer)
+    with strict_observer():
+        obs(ModelResponseThinking(text="first"))
+        obs(boundary)
+        obs(ModelResponseThinking(text="second"))
+        obs(ModelResponseComplete(message=AssistantMessage(text="")))
+    out = buf.getvalue()
+    assert "  first\n\n" in out
+    assert out.count("∴ Thinking") == 2
+    assert out.index("first") < out.index("second")
+
+
+def test_answer_then_reasoning_preserves_output_order() -> None:
+    printer, buf = _printer()
+    obs = make_render_observer(printer)
+    with strict_observer():
+        obs(ModelResponsePartial(text="Earlier answer"))
+        obs(ModelResponseThinking(text="Later reasoning"))
+        obs(ModelResponsePartial(text="Final answer"))
+        obs(ModelResponseComplete(message=AssistantMessage(text="")))
+    out = buf.getvalue()
+    assert out.index("Earlier answer") < out.index("Later reasoning")
+    assert out.index("Later reasoning") < out.index("Final answer")
+
+
+def test_thinking_hide_show_mid_stream_closes_visible_text() -> None:
+    printer, buf = _printer()
+    obs = make_render_observer(printer)
+    with strict_observer():
+        obs(ModelResponseThinking(text="visible"))
+        printer.show_thinking = False
+        obs(ModelResponseThinking(text="hidden"))
+        printer.show_thinking = True
+        obs(ModelResponseThinking(text="shown again"))
+        obs(ModelResponseComplete(message=AssistantMessage(text="")))
+    out = buf.getvalue()
+    assert "hidden" not in out
+    assert out.count("∴ Thinking") == 2
+    assert "  visible\n\n" in out
+
+
+def test_status_updates_do_not_split_thinking() -> None:
+    printer, buf = _printer()
+    obs = make_render_observer(printer)
+    with strict_observer():
+        obs(ModelResponseThinking(text="one"))
+        obs(StatusChanged(text="working"))
+        obs(ModelResponseThinking(text=" thought"))
+        obs(ModelResponseComplete(message=AssistantMessage(text="")))
+    assert buf.getvalue() == "∴ Thinking\n  one thought\n\n"
+
+
+def test_child_reasoning_stream_retains_label_and_one_header() -> None:
+    printer, buf = _printer()
+    obs = make_render_observer(printer)
+    with strict_observer():
+        for delta in ["child", " reasoning"]:
+            obs(ChildEvent(label="Agent_0", inner=ModelResponseThinking(text=delta)))
+        obs(ChildDoneEvent(label="Agent_0", elapsed=1, tokens=0, cost=0))
+    out = buf.getvalue()
+    assert out.count("Thinking") == out.count("Agent_0") == 1
+    assert "child reasoning" in out
+    assert out.endswith("\n\n")
+
+
+def test_interleaved_reasoning_keeps_parent_and_children_separate() -> None:
+    printer, buf = _printer()
+    obs = make_render_observer(printer)
+    with strict_observer():
+        obs(ModelResponseThinking(text="parent"))
+        obs(ChildEvent(label="Agent_0", inner=ModelResponseThinking(text="child zero")))
+        obs(ChildEvent(label="Agent_1", inner=ModelResponseThinking(text="child one")))
+        obs(ModelResponseThinking(text="parent again"))
+        obs(ModelResponseComplete(message=AssistantMessage(text="")))
+    out = buf.getvalue()
+    assert out.count("Thinking") == 4
+    assert out.index("parent") < out.index("child zero") < out.index("child one")
+    assert out.index("child one") < out.index("parent again")
+
+
+def test_hidden_child_thinking_does_not_leak() -> None:
+    printer, buf = _printer()
+    printer.show_thinking = False
+    obs = make_render_observer(printer)
+    obs(ChildEvent(label="Agent_0", inner=ModelResponseThinking(text="private")))
+    assert buf.getvalue() == ""
+
+
+def test_unrelated_child_completion_does_not_split_parent_thinking() -> None:
+    printer, buf = _printer()
+    obs = make_render_observer(printer)
+    with strict_observer():
+        obs(ModelResponseThinking(text="one"))
+        obs(ChildDoneEvent(label="Agent_0", elapsed=1, tokens=0, cost=0))
+        obs(ModelResponseThinking(text=" thought"))
+        obs(ModelResponseComplete(message=AssistantMessage(text="")))
+    assert buf.getvalue() == "∴ Thinking\n  one thought\n\n"
 
 
 def test_set_terminal_title_does_not_raise() -> None:
