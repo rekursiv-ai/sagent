@@ -508,7 +508,8 @@ repos:
               for f in "$@"; do
                 case "$f" in
                   *_test.py|test_*.py|*/conftest.py) ;;
-                  *.py) cov+=("--cov=${f%/*}") ;;
+                  */*.py) cov+=("--cov=${f%/*}") ;;
+                  *.py) cov+=("--cov=.") ;;
                 esac;
               done;
               if ((${#cov[@]})); then
