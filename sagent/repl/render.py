@@ -741,10 +741,6 @@ class RenderObserver:
         if remaining:
             self._printer.write_markdown(remaining)
 
-    # Whenever the active child label changes, every *other* label's pending text and
-    # items are flushed first. Cost is O(other children) per event -- intentional, not
-    # a hot path: the cross-child flush keeps slow children from rendering interleaved
-    # into the wrong slot, and the typical cohort fanout is small.
     def _consume_child(self, label: str, inner: RuntimeEvent) -> None:
         """Buffer one child event; flush at stable boundaries or atomic events."""
         # ``ChildEvent`` may nest: a grandchild forwards through its
@@ -755,14 +751,22 @@ class RenderObserver:
         # and disappear from the UI.
         while isinstance(inner, ChildEvent):
             inner = inner.inner
-        # When the active child label changes, flush any pending
-        # streaming text from the previous label too -- otherwise a slow
-        # child's partial output lingers until its ``ChildDoneEvent``
-        # and renders in the wrong slot.
-        for other in list(self._child_items.keys() | self._child_text.keys()):
-            if other != label:
-                self._move_text_to_items(other)
-                self._emit_child(other)
+        # Each child keeps its unfinished text across speaker switches.
+        # Flush at its own paragraph, response or tool boundary instead;
+        # flushing on another speaker's chunk splits words and code fences.
+        if isinstance(inner, ModelResponseComplete):
+            # The assembled message repeats the partials already received.
+            # Use it only as a boundary, including for persistent children
+            # whose service stays alive between replies.
+            self._flush_child(label)
+            return
+        if isinstance(inner, ModelResponseCancelled):
+            self._move_text_to_items(label)
+            self._child_items.setdefault(label, []).append(
+                NoticeMessage(text="[interrupted]"),
+            )
+            self._emit_child(label)
+            return
         if isinstance(inner, ModelResponsePartial):
             buf = self._child_text.get(label, "") + inner.text
             boundary = find_stable_boundary(buf)
@@ -815,9 +819,9 @@ class RenderObserver:
             )
 
 
-# Any forwardable atomic child event renders in the child block; only
-# ``ModelResponsePartial`` needs separate streaming handling (done in ``_consume_child``
-# before this is called). The accepted set must stay a superset of what ``agent_spawn``
+# Forwardable atomic child events render in the child block. Streamed text and
+# response boundaries are handled separately in ``_consume_child``. The accepted
+# set must stay a superset of what ``agent_spawn``
 # always-forwards -- see ``test_every_always_forwarded_event_renders_a_child_block``.
 def _child_atomic_item(inner: RuntimeEvent) -> ChildItem | None:
     """Translate a non-streaming child event into a child-block item."""
@@ -826,8 +830,8 @@ def _child_atomic_item(inner: RuntimeEvent) -> ChildItem | None:
     return None
 
 
-# Atomic child events that render in a child block (everything the forwarder
-# may cross, minus the streamed ``ModelResponsePartial`` handled upstream).
+# Atomic child events that render directly in a child block. Streamed text,
+# completion and cancellation have their own handling in ``_consume_child``.
 _CHILD_ITEM_TYPES = (
     ToolLabel,
     ModelResponseThinking,
