@@ -1,3 +1,0 @@
-from typing import Any
-
-def is_from_package(obj: Any) -> bool: ...

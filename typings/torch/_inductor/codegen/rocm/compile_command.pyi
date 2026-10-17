@@ -1,9 +1,0 @@
-log = ...
-
-def rocm_compiler() -> str | None: ...
-def rocm_compile_command(
-    src_files: list[str],
-    dst_file: str,
-    dst_file_ext: str,
-    extra_args: list[str] | None = ...,
-) -> str: ...

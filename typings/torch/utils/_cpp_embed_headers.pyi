@@ -1,8 +1,0 @@
-from collections.abc import Sequence
-from pathlib import Path
-
-def read_file(fname: Path | str) -> list[str]: ...
-def embed_headers(
-    fname: str,
-    include_dirs: Sequence[str] | Sequence[Path] | str | None = ...,
-) -> str: ...

@@ -320,7 +320,8 @@ repos:
         exclude: |
           (?x)^(
             (.*/)?third_party/
-            |(.*/)?typings/
+            |typings/
+            |(.*/)?rekursiv_ai_typeshed/typings/
           )
 
       # `basedpyright-global` at pre-push is the real gate.

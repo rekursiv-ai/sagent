@@ -1,9 +1,0 @@
-from torch.distributed.tensor._op_schema import OpSchema, OutputSharding
-from torch.distributed.tensor._ops.utils import register_prop_rule
-
-aten = ...
-
-@register_prop_rule(aten.convolution.default)
-def convolution_rules(op_schema: OpSchema) -> OutputSharding: ...
-@register_prop_rule(aten.convolution_backward.default)
-def convolution_backward_rules(op_schema: OpSchema) -> OutputSharding: ...

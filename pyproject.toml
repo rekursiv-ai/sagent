@@ -121,7 +121,7 @@ typecheck = [
     "basedpyright>=1.40.1",
     "ty>=0.0.84",
     "rekursiv-ai-typeshed",
-    "hatchling>=1.32.4",  # packages/rekursiv-ai-typeshed/rekursiv_ai_typeshed/hatch_build.py subscripts its one-parameter BuildHookInterface.
+    "rekursiv-ai-typings",
 ]
 "pre-commit" = [
     "pre-commit>=4.6",
@@ -595,12 +595,12 @@ useLibraryCodeForTypes = false
 # `stubPath` (not `extraPaths`) is the one root that resolves ahead of an
 # installed package's inline types.
 stubPath = "typings"
-# typings/ is ALSO a source root so a stub package can ship a placeholder .py:
-# triton is linux-only (uv.lock `sys_platform == 'linux'`), so without this
-# every `import triton` fails `reportMissingModuleSource` on macOS, and an inline
-# suppression would fail `reportUnnecessaryTypeIgnoreComment` on linux. Stubs
-# still win over source, so no type changes. Mirrors [tool.ty.environment].
-extraPaths = ["typings"]
+# typings/ is ALSO a source root so a local stub can ship a placeholder .py.
+# `rekursiv-ai-typings` installs its own placeholder trees (triton is
+# linux-only, so without one every `import triton` fails
+# `reportMissingModuleSource` on macOS) under .venv/share. Stubs still win
+# over source, so no type changes.
+extraPaths = ["typings", ".venv/share/rekursiv-ai-typings"]
 # `rekursiv-ai-typeshed` (a `typecheck` dependency): the checkers' bundled stdlib
 # with `int`/`float` `__pow__` returning `float` rather than typeshed's `Any`,
 # which would otherwise make every `x ** 0.5` a `reportAny` violation.
@@ -745,7 +745,8 @@ explicit = true
 
 [tool.uv.sources]
 treekle = { git = "https://github.com/rekursiv-ai/treekle", branch = "main" }
-rekursiv-ai-typeshed = { path = "packages/rekursiv-ai-typeshed" }
+rekursiv-ai-typeshed = { git = "https://github.com/rekursiv-ai/typings", subdirectory = "typeshed", branch = "main" }
+rekursiv-ai-typings = { git = "https://github.com/rekursiv-ai/typings", branch = "main" }
 configgle = { git = "https://github.com/rekursiv-ai/configgle", branch = "main" }
 priml = { git = "https://github.com/rekursiv-ai/priml", branch = "main" }
 wesearch = { git = "https://github.com/rekursiv-ai/wesearch", branch = "main" }
