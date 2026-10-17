@@ -512,7 +512,10 @@ repos:
                 esac;
               done;
               if ((${#cov[@]})); then
-                cov+=(--cov-append --no-cov-on-fail);
+                # The run measures whole directories but tests only the changed
+                # files, so its total counts every untested sibling as 0%.
+                # `coverage-summary` applies `fail_under` to the changed files.
+                cov+=(--cov-append --no-cov-on-fail --cov-fail-under=0);
                 if [ "${PRECOMMIT_COVERAGE_DETAIL:-}" = 1 ]; then
                   cov+=(--cov-report=term-missing:skip-covered);
                 else
@@ -539,6 +542,10 @@ repos:
       # 2,700 rows, 2,348 of them 0% files no test executed. Never
       # `coverage report --include`: it matched 2,727 globs per file for 48s.
       # An unreadable data file still fails the hook.
+      #
+      # Enforces `fail_under` on the changed, non-omitted sources taken
+      # together, a file no test executed counting 0%; `pytest` above cannot,
+      # its total spans unchanged siblings. No floor (the monorepo) skips this.
         # `coverage-summary` takes no filenames, so pre-commit cannot split its work
         # into argv chunks; this twin collects them into a spool file.
       - id: coverage-summary-pre
@@ -571,7 +578,7 @@ repos:
               esac;
             done;
             ((${#sources[@]})) || exit 0;
-            printf "%s\n" "${sources[@]}" | uv --quiet run --frozen --group pre-commit python -c "import os, sys, coverage; c = coverage.Coverage(); c.load(); data = c.get_data(); files = sys.stdin.read().split(); ran = [f for f in files if data.lines(os.path.abspath(f))]; rows = sorted((100 * (len(s) - len(m)) / len(s), f, len(m), len(s), gaps) for f, s, _, m, gaps in map(c.analysis2, ran) if 100 * (len(s) - len(m)) < 98 * len(s)); rows and print(\"\n\".join(f\"{p:5.1f}%  {n:>4}/{t:<4} missed  {os.path.relpath(f)}  {g[:60]}\" for p, f, n, t, g in rows[:20])); rows[20:] and print(f\"... and {len(rows) - 20} more below 98%\"); print(f\"{len(ran) - len(rows)} changed file(s) at >= 98%; {len(files) - len(ran)} executed by no test.\")"
+            printf "%s\n" "${sources[@]}" | uv --quiet run --frozen --group pre-commit python -c "import fnmatch, os, sys, coverage; c = coverage.Coverage(); c.load(); data = c.get_data(); files = sys.stdin.read().split(); ran = [f for f in files if data.lines(os.path.abspath(f))]; rows = sorted((100 * (len(s) - len(m)) / len(s), f, len(m), len(s), gaps) for f, s, _, m, gaps in map(c.analysis2, ran) if 100 * (len(s) - len(m)) < 98 * len(s)); rows and print(\"\n\".join(f\"{p:5.1f}%  {n:>4}/{t:<4} missed  {os.path.relpath(f)}  {g[:60]}\" for p, f, n, t, g in rows[:20])); rows[20:] and print(f\"... and {len(rows) - 20} more below 98%\"); print(f\"{len(ran) - len(rows)} changed file(s) at >= 98%; {len(files) - len(ran)} executed by no test.\"); floor = c.config.fail_under; kept = [f for f in files if floor and not any(fnmatch.fnmatch(os.path.abspath(f), p) for p in c.config.run_omit)]; counts = [(len(s), len(m)) for _, s, _, m, _ in map(c.analysis2, kept)]; total = sum(n for n, _ in counts); covered = total - sum(m for _, m in counts); total and 100 * covered < floor * total and sys.exit(f\"Changed files are {100 * covered / total:.2f}% covered, below fail_under={floor:g}.\")"
           ' bash
 
   # === Pre-Push Gates =========================================================
