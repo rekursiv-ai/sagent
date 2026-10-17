@@ -534,7 +534,7 @@ repos:
       # Missing coverage is normal when no source module was tested.
       #
       # Lists the 20 worst CHANGED source files a test executed that are below
-      # 95%, then one count line for the rest. `pytest` measures each changed
+      # 98%, then one count line for the rest. `pytest` measures each changed
       # file's whole directory (`--cov=${f%/*}`), and `--all-files` printed
       # 2,700 rows, 2,348 of them 0% files no test executed. Never
       # `coverage report --include`: it matched 2,727 globs per file for 48s.
@@ -571,7 +571,7 @@ repos:
               esac;
             done;
             ((${#sources[@]})) || exit 0;
-            printf "%s\n" "${sources[@]}" | uv --quiet run --frozen --group pre-commit python -c "import os, sys, coverage; c = coverage.Coverage(); c.load(); data = c.get_data(); files = sys.stdin.read().split(); ran = [f for f in files if data.lines(os.path.abspath(f))]; rows = sorted((100 * (len(s) - len(m)) / len(s), f, len(m), len(s), gaps) for f, s, _, m, gaps in map(c.analysis2, ran) if 100 * (len(s) - len(m)) < 95 * len(s)); rows and print(\"\n\".join(f\"{p:5.1f}%  {n:>4}/{t:<4} missed  {os.path.relpath(f)}  {g[:60]}\" for p, f, n, t, g in rows[:20])); rows[20:] and print(f\"... and {len(rows) - 20} more below 95%\"); print(f\"{len(ran) - len(rows)} changed file(s) at >= 95%; {len(files) - len(ran)} executed by no test.\")"
+            printf "%s\n" "${sources[@]}" | uv --quiet run --frozen --group pre-commit python -c "import os, sys, coverage; c = coverage.Coverage(); c.load(); data = c.get_data(); files = sys.stdin.read().split(); ran = [f for f in files if data.lines(os.path.abspath(f))]; rows = sorted((100 * (len(s) - len(m)) / len(s), f, len(m), len(s), gaps) for f, s, _, m, gaps in map(c.analysis2, ran) if 100 * (len(s) - len(m)) < 98 * len(s)); rows and print(\"\n\".join(f\"{p:5.1f}%  {n:>4}/{t:<4} missed  {os.path.relpath(f)}  {g[:60]}\" for p, f, n, t, g in rows[:20])); rows[20:] and print(f\"... and {len(rows) - 20} more below 98%\"); print(f\"{len(ran) - len(rows)} changed file(s) at >= 98%; {len(files) - len(ran)} executed by no test.\")"
           ' bash
 
   # === Pre-Push Gates =========================================================
