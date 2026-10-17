@@ -89,6 +89,7 @@ from sagent.repl.slash_handlers import (
     do_switch_thinking,
     format_tasks,
 )
+from sagent.repl.tool_details import DetailsPrinter
 from sagent.tools.background_task import cancel_persistent_subagent
 from sagent.tools.tool_spec import (
     ToolSpecError,
@@ -662,6 +663,13 @@ async def _dispatch(
         case slash.Tasks():
             if printer is not None:
                 printer.write_line(format_tasks(agent))
+        case slash.Details(number=number):
+            if isinstance(printer, DetailsPrinter):
+                await printer.inspect_details(number)
+            elif printer is not None:
+                printer.write_tool_error(
+                    "/details is available in the interactive terminal",
+                )
         case slash.Text(content=content):
             agent.runtime.inbox.push_back(UserMessage(text=content))
         case slash.Defer(content=content):

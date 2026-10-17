@@ -1,0 +1,40 @@
+    47 + after line 46
+    48 + after line 47
+    49 + after line 48
+    50 + after line 49
+    51 + after line 50
+    52 + after line 51
+    53 + after line 52
+    54 + after line 53
+    55 + after line 54
+    56 + after line 55
+    57 + after line 56
+    58 + after line 57
+    59 + after line 58
+    60 + after line 59
+    61 + after line 60
+    62 + after line 61
+    63 + after line 62
+    64 + after line 63
+    65 + after line 64
+    66 + after line 65
+    67 + after line 66
+    68 + after line 67
+    69 + after line 68
+    70 + after line 69
+    71 + after line 70
+    72 + after line 71
+    73 + after line 72
+    74 + after line 73
+    75 + after line 74
+    76 + after line 75
+    77 + after line 76
+    78 + after line 77
+    79 + after line 78
+    80 + after line 79
+     Replaced 1 occurrence(s) in /Users/lokaahai/Documents/ChatGPT/rekursive_tesitng/sagent-pr-live-
+     recheck-20261011/native/runs/635-before/project/example.txt
+
+LIVE_TEST_DONE
+>
+[1m 5s 12K↑ 1229↓ 0↟ 0↡ $0.04]

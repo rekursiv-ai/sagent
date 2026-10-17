@@ -1,0 +1,314 @@
+{
+  "capture_date": "2026-10-11",
+  "capture_type": "Native macOS Terminal.app window captures made with screencapture -l <window id>",
+  "not_rendered": "No image in this folder was drawn from terminal cells. Each PNG is the window as macOS composited it.",
+  "method": [
+    "Images over the repository's 800 KB limit were re-encoded losslessly. Their pixels were checked against the captured PNG, whose hash is kept.",
+    "Each run opened its own Terminal.app window, sized it through Terminal's scripting interface, and started the CLI there.",
+    "A small PTY relay in that window passed the CLI's output to Terminal unchanged and accepted typed keys from the test driver.",
+    "Terminal answered cursor and size queries itself. Window resizes reached the CLI as real SIGWINCH changes.",
+    "The relay saved the raw output. Each .screen.txt is that output replayed with pyte at the moment of capture, for reading and search only."
+  ],
+  "platform": {
+    "macos": "27.0.1",
+    "macos_build": "26A434",
+    "terminal_app": "2.15",
+    "display": "Built-in Retina display, 2x backing scale",
+    "terminal_profile": "Default Terminal.app profile, SF Mono Terminal 12 pt"
+  },
+  "provider": "OpenAISubscription",
+  "model": "sol-6.1",
+  "relay_sha256": "12a24f407098edf83aad180f3dc866456f876418bedc077349c4bbec60d6ca52",
+  "driver_sha256": "b825dc62873d4e9663bef9650a71b57e687e4813b471f1050f065190a8f8d138",
+  "runs": {
+    "635-before": {
+      "source_commit": "f4db9bf079159df5ad8eedd704101ff256a99216",
+      "argv_after_executable": [
+        "--provider",
+        "OpenAISubscription",
+        "--model",
+        "sol-6.1",
+        "--recipe",
+        "bare",
+        "--tools",
+        "Bash",
+        "Read",
+        "Edit",
+        "--session",
+        "<run>/session",
+        "--history",
+        "<run>/history",
+        "--thinking",
+        "hide",
+        "--effort",
+        "low",
+        "--max-budget-usd",
+        "3",
+        "--max-tool-call-rounds",
+        "8",
+        "--max-request-tokens",
+        "20000",
+        "--max-response-tokens",
+        "4000",
+        "--system",
+        "This is an isolated CLI UI test. Work only in the current scratch directory. Use only the requested tools. Do not access other paths or network tools."
+      ],
+      "terminal_env": {
+        "TERM": "xterm-256color",
+        "COLORTERM": "truecolor",
+        "TERM_PROGRAM": "Apple_Terminal",
+        "TERM_PROGRAM_VERSION": "488",
+        "LANG": "en_IN.UTF-8"
+      },
+      "exit_status": 0,
+      "checks": {
+        "bash_executions": 1,
+        "edited_lines": 80,
+        "exact_command_and_edit_arguments": true
+      },
+      "assets": [
+        {
+          "name": "before-command",
+          "image": "before-command.png",
+          "image_sha256": "905c9a5dd937fcbb9d73e33dcf21d035ab815a8678815ccf5d14005e1eb4fe0b",
+          "captured_png_sha256": "98becf790e286380a47dcc5a43e52a3a4297cbc6113a87aad5b82c2cb449edae",
+          "encoding": "lossless PNG re-save",
+          "pixels_identical_to_capture": true,
+          "pixels": [
+            1474,
+            1298
+          ],
+          "terminal_columns_rows": [
+            100,
+            40
+          ],
+          "cli_alive_at_capture": true,
+          "ansi": "before-command.ansi.gz",
+          "ansi_uncompressed_sha256": "3ba8f5298d8c1066488c973618689a22005fb5ba7458ec48fb0d72c8e4ec12c2",
+          "screen_text": "before-command.screen.txt"
+        },
+        {
+          "name": "before-diff",
+          "image": "before-diff.png",
+          "image_sha256": "9514101443d0bf57652dfe845cd63e5f64bb82eb117fa7cc2d242537af7ae27a",
+          "captured_png_sha256": "9514101443d0bf57652dfe845cd63e5f64bb82eb117fa7cc2d242537af7ae27a",
+          "encoding": "captured PNG bytes",
+          "pixels_identical_to_capture": true,
+          "pixels": [
+            1474,
+            1298
+          ],
+          "terminal_columns_rows": [
+            100,
+            40
+          ],
+          "cli_alive_at_capture": true,
+          "ansi": "before-diff.ansi.gz",
+          "ansi_uncompressed_sha256": "bc8c8f15197dc049a965aeb21ceefd37fd2328b2a4f6b9ef64636379cc89ea29",
+          "screen_text": "before-diff.screen.txt"
+        }
+      ]
+    },
+    "635-after": {
+      "source_commit": "ecfe987169b6dc6cdb1cb8a609bf08e28e4c67c8",
+      "argv_after_executable": [
+        "--provider",
+        "OpenAISubscription",
+        "--model",
+        "sol-6.1",
+        "--recipe",
+        "bare",
+        "--tools",
+        "Bash",
+        "Read",
+        "Edit",
+        "--session",
+        "<run>/session",
+        "--history",
+        "<run>/history",
+        "--thinking",
+        "hide",
+        "--effort",
+        "low",
+        "--max-budget-usd",
+        "3",
+        "--max-tool-call-rounds",
+        "8",
+        "--max-request-tokens",
+        "20000",
+        "--max-response-tokens",
+        "4000",
+        "--system",
+        "This is an isolated CLI UI test. Work only in the current scratch directory. Use only the requested tools. Do not access other paths or network tools."
+      ],
+      "terminal_env": {
+        "TERM": "xterm-256color",
+        "COLORTERM": "truecolor",
+        "TERM_PROGRAM": "Apple_Terminal",
+        "TERM_PROGRAM_VERSION": "488",
+        "LANG": "en_IN.UTF-8"
+      },
+      "exit_status": 0,
+      "checks": {
+        "bash_executions": 1,
+        "edited_lines": 80,
+        "exact_command_and_edit_arguments": true,
+        "ctrl_o_opened_latest_diff": true,
+        "mouse_header_click_expanded_full_diff": true,
+        "search_reached_after_line_79": true,
+        "draft_restored_after_close": true,
+        "details_command_id": 1,
+        "details_diff_id": 2,
+        "details_command_shows_marker": true,
+        "session_unchanged_by_inspection": true,
+        "bash_not_rerun_by_inspection": true
+      },
+      "assets": [
+        {
+          "name": "after-command",
+          "image": "after-command.png",
+          "image_sha256": "60c016bd8dd48c97885be97e32f5273ac989d3a09b191abf8af319e48ed2344d",
+          "captured_png_sha256": "60c016bd8dd48c97885be97e32f5273ac989d3a09b191abf8af319e48ed2344d",
+          "encoding": "captured PNG bytes",
+          "pixels_identical_to_capture": true,
+          "pixels": [
+            1474,
+            1298
+          ],
+          "terminal_columns_rows": [
+            100,
+            40
+          ],
+          "cli_alive_at_capture": true,
+          "ansi": "after-command.ansi.gz",
+          "ansi_uncompressed_sha256": "4c532525340dfaf2484dfc46c2cbb61907081c038b76b3d268b0f14099b21436",
+          "screen_text": "after-command.screen.txt"
+        },
+        {
+          "name": "after-diff",
+          "image": "after-diff.png",
+          "image_sha256": "89d00d9d6d9c8b8e39c91f891a2169ab98ad5c9e143eaf6f458e1afbc7e6d1bf",
+          "captured_png_sha256": "89d00d9d6d9c8b8e39c91f891a2169ab98ad5c9e143eaf6f458e1afbc7e6d1bf",
+          "encoding": "captured PNG bytes",
+          "pixels_identical_to_capture": true,
+          "pixels": [
+            1474,
+            1298
+          ],
+          "terminal_columns_rows": [
+            100,
+            40
+          ],
+          "cli_alive_at_capture": true,
+          "ansi": "after-diff.ansi.gz",
+          "ansi_uncompressed_sha256": "229cabde3daaaf5018eb80883f7e286be9c0f6d87aceb01c01a16c174f9f02b9",
+          "screen_text": "after-diff.screen.txt"
+        },
+        {
+          "name": "after-details-collapsed",
+          "image": "after-details-collapsed.png",
+          "image_sha256": "d90ab2d619cef11f1aa203eb59bf41667282851a734e09dfb4cdc9c9f3429a19",
+          "captured_png_sha256": "d90ab2d619cef11f1aa203eb59bf41667282851a734e09dfb4cdc9c9f3429a19",
+          "encoding": "captured PNG bytes",
+          "pixels_identical_to_capture": true,
+          "pixels": [
+            1474,
+            1298
+          ],
+          "terminal_columns_rows": [
+            100,
+            40
+          ],
+          "cli_alive_at_capture": true,
+          "ansi": "after-details-collapsed.ansi.gz",
+          "ansi_uncompressed_sha256": "f794bab15c12016a4d92cc0d437520dd6410951d58c4891d1cc1e833de6afb80",
+          "screen_text": "after-details-collapsed.screen.txt"
+        },
+        {
+          "name": "after-details-expanded",
+          "image": "after-details-expanded.png",
+          "image_sha256": "d41c7331ec4fd113e6ea2002c9eb05356deaf17d8207adbd81015960b96241a4",
+          "captured_png_sha256": "d41c7331ec4fd113e6ea2002c9eb05356deaf17d8207adbd81015960b96241a4",
+          "encoding": "captured PNG bytes",
+          "pixels_identical_to_capture": true,
+          "pixels": [
+            1474,
+            1298
+          ],
+          "terminal_columns_rows": [
+            100,
+            40
+          ],
+          "cli_alive_at_capture": true,
+          "ansi": "after-details-expanded.ansi.gz",
+          "ansi_uncompressed_sha256": "a9de0154aa7e4ee0460cb8f7f16f664db26c87f154a420355665a4dae64168ae",
+          "screen_text": "after-details-expanded.screen.txt"
+        },
+        {
+          "name": "after-details-search",
+          "image": "after-details-search.png",
+          "image_sha256": "2007648672dc27bd35459294f793ad30f1e7f54c0e7b5bb142b6805af0b6406f",
+          "captured_png_sha256": "2007648672dc27bd35459294f793ad30f1e7f54c0e7b5bb142b6805af0b6406f",
+          "encoding": "captured PNG bytes",
+          "pixels_identical_to_capture": true,
+          "pixels": [
+            1474,
+            1298
+          ],
+          "terminal_columns_rows": [
+            100,
+            40
+          ],
+          "cli_alive_at_capture": true,
+          "ansi": "after-details-search.ansi.gz",
+          "ansi_uncompressed_sha256": "1a1efa7586759974b32056bea1e421c654d8b437045ec9dfe7702e2f46f0d05f",
+          "screen_text": "after-details-search.screen.txt"
+        },
+        {
+          "name": "after-draft-restored",
+          "image": "after-draft-restored.png",
+          "image_sha256": "5180f5b21d140c0e643a565e46b7d208c0786388fc8af9276b877535dda0db95",
+          "captured_png_sha256": "5180f5b21d140c0e643a565e46b7d208c0786388fc8af9276b877535dda0db95",
+          "encoding": "captured PNG bytes",
+          "pixels_identical_to_capture": true,
+          "pixels": [
+            1474,
+            1298
+          ],
+          "terminal_columns_rows": [
+            100,
+            40
+          ],
+          "cli_alive_at_capture": true,
+          "ansi": "after-draft-restored.ansi.gz",
+          "ansi_uncompressed_sha256": "8d3b0180404048e62a7f78bc8613f0a6875562e84a20be3b02474597b5cf5ddf",
+          "screen_text": "after-draft-restored.screen.txt"
+        },
+        {
+          "name": "after-details-command",
+          "image": "after-details-command.webp",
+          "image_sha256": "e5ed858f61df58da5becbfa6efd2a6014e2f6f59a05ca4ec479a476db3348e54",
+          "captured_png_sha256": "7c730ede4acea607ba77f23e42f60c803da95b7fd4b4fdf1057041ded41632ea",
+          "encoding": "lossless WebP re-encode",
+          "pixels_identical_to_capture": true,
+          "pixels": [
+            1474,
+            1298
+          ],
+          "terminal_columns_rows": [
+            100,
+            40
+          ],
+          "cli_alive_at_capture": true,
+          "ansi": "after-details-command.ansi.gz",
+          "ansi_uncompressed_sha256": "3e162f948269e14f9a8e6a40bbebe0d9fdafcee73b46d41426da67867a0d872b",
+          "screen_text": "after-details-command.screen.txt"
+        }
+      ]
+    }
+  },
+  "limits": [
+    "Keys and mouse reports were written to the CLI's PTY by the driver. No physical keyboard or mouse event was generated, because Accessibility access is not granted to this session.",
+    "Live provider coverage is OpenAISubscription on macOS only."
+  ]
+}
