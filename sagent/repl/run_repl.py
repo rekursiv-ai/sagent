@@ -50,6 +50,7 @@ else:
 
 from sagent.agent.session_io import unpersisted_session_error
 from sagent.lib.userdirs import state_dir
+from sagent.repl.checkpoints import render_pending_pane
 from sagent.repl.console_pane import ConsolePrinter
 from sagent.repl.input_pane import (
     REPL_PUMP_KEY,
@@ -112,13 +113,23 @@ async def run_repl(
     nav = NavState()
     with patch_stdout(raw=True):
         console = Console(stderr=True)
+
+        def toolbar() -> str:
+            """Keep reported pending work visible while the input remains usable."""
+            status = render_status_pane(agent)
+            pending = render_pending_pane(
+                agent,
+                width=session.app.output.get_size().columns,
+            )
+            return "\n".join(part for part in (status, pending) if part)
+
         session: PromptSession[str] = PromptSession(
             functools.partial(render_input_pane, agent, queues),
             multiline=True,
             erase_when_done=True,
             history=FileHistory(str(history_path)),
             auto_suggest=AutoSuggestFromHistory(),
-            bottom_toolbar=functools.partial(render_status_pane, agent),
+            bottom_toolbar=toolbar,
             refresh_interval=0.2,
             key_bindings=build_key_bindings(agent, queues, nav),
             enable_open_in_editor=False,

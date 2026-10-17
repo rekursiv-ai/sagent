@@ -75,6 +75,7 @@ from sagent.agent.state import (
     agent_registry,
 )
 from sagent.repl import slash
+from sagent.repl.checkpoints import format_pending
 from sagent.repl.render import HELP_TEXT
 from sagent.repl.slash import (
     QUIT_WORDS,
@@ -662,6 +663,9 @@ async def _dispatch(
         case slash.Tasks():
             if printer is not None:
                 printer.write_line(format_tasks(agent))
+        case slash.Pending():
+            if printer is not None:
+                printer.write_slash_block(format_pending(agent))
         case slash.Text(content=content):
             agent.runtime.inbox.push_back(UserMessage(text=content))
         case slash.Defer(content=content):

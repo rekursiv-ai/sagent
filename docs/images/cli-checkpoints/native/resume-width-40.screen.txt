@@ -1,0 +1,34 @@
+  Bash Run delayed local fixture receipt
+  ⎿  python3 receipt.py
+  AgentSelf checkpoint
+> [detached tool call_859e7b83ec7d4e2fbe
+  DetachedArrived
+  AgentSelf checkpoint
+── resumed · 14 messages · $0.03 · OpenA
+pending-demo | reported 2026-10-11T03:44
+Saved checkpoint; current pending work h
+Checkpoint (agent report)
+Progress: Both fixture receipts verified
+Pending: Fixture approval
+User action: Type fixture-approved.
+pending-demo | reported 2026-10-11T03:44
+Saved checkpoint; current pending work h
+Checkpoint (agent report)
+Progress: Both fixture receipts verified
+Pending: Fixture approval
+User action: Type fixture-approved.
+>
+
+
+
+
+
+
+
+
+
+[16s 14K↑ 164↓ 0↟ 4096↡ $0.03]
+/pending (1) | Saved, not rechecked: pe…
+Progress: Both fixture receipts verified
+Pending: Fixture approval
+User action: Type fixture-approved.

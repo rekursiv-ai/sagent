@@ -1,0 +1,34 @@
+[OpenAISubscription] sol-6.1
+> Run this harmless local UI fixture. First use Bash to run 'python3 receipt.py --initial' and verif
+  y INITIAL_RECEIPT_OK. Then run 'python3 receipt.py' with background=true exactly once. While its f
+  inal receipt is pending, report progress='Initial fixture receipt verified', pending='Delayed loca
+  l fixture receipt', user_action=''. Use AgentSelf checkpoint if that field is present in its schem
+  a; otherwise report those three fields in a short reply. When FINAL_RECEIPT_OK arrives, report pro
+  gress='Both fixture receipts verified', pending='Fixture approval', user_action='Type fixture-appr
+  oved.'. Use the same available reporting mechanism. End each turn after reporting. Do not poll, ed
+  it files, spawn workers or claim this fixture is an external evaluation.
+  AgentSelf status=Verify local fixture receipts
+  Bash Run initial local fixture receipt
+  ⎿  python3 receipt.py --initial
+     INITIAL_RECEIPT_OK
+  Bash Run delayed local fixture receipt
+  ⎿  python3 receipt.py
+  AgentSelf checkpoint
+> [detached tool call_859e7b83ec7d4e2fbe281f3a04ce69dd completed]
+  DetachedArrived
+  AgentSelf checkpoint
+── resumed · 14 messages · $0.03 · OpenAISubscription/sol-6.1 · auth=credentials · effort=low ──
+pending-demo | reported 2026-10-11T03:44:55.081244+00:00
+Saved checkpoint; current pending work has not been rechecked.
+Checkpoint (agent report)
+Progress: Both fixture receipts verified
+Pending: Fixture approval
+User action: Type fixture-approved.
+>
+
+
+[16s 14K↑ 164↓ 0↟ 4096↡ $0.03]
+/pending (1) | Saved, not rechecked: pending-demo
+Progress: Both fixture receipts verified
+Pending: Fixture approval
+User action: Type fixture-approved.
