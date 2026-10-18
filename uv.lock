@@ -11,6 +11,11 @@ supported-markers = [
     "sys_platform == 'linux'",
     "sys_platform == 'darwin'",
 ]
+required-markers = [
+    "platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "platform_machine == 'aarch64' and sys_platform == 'linux'",
+    "platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
 
 [[package]]
 name = "accelerate"
@@ -3143,8 +3148,8 @@ wheels = [
 
 [[package]]
 name = "rekursiv-ai-typeshed"
-version = "0.1.4"
-source = { git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main#7747ab32165010acf4a134170fe7543d4b96946b" }
+version = "0.1.5"
+source = { git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main#be5b5e9b89ba264ce14d0b155beaff030b4ed944" }
 dependencies = [
     { name = "basedpyright" },
     { name = "ty" },
@@ -3152,8 +3157,8 @@ dependencies = [
 
 [[package]]
 name = "rekursiv-ai-typings"
-version = "0.1.4"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#7747ab32165010acf4a134170fe7543d4b96946b" }
+version = "0.1.5"
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#be5b5e9b89ba264ce14d0b155beaff030b4ed944" }
 
 [[package]]
 name = "requests"
@@ -3489,6 +3494,7 @@ slack = [
 [package.dev-dependencies]
 debug = [
     { name = "ipython" },
+    { name = "tqdm" },
 ]
 dev = [
     { name = "basedpyright" },
@@ -3504,6 +3510,7 @@ dev = [
     { name = "rekursiv-ai-typeshed" },
     { name = "rekursiv-ai-typings" },
     { name = "ruff" },
+    { name = "tqdm" },
     { name = "ty" },
 ]
 lint = [
@@ -3585,7 +3592,10 @@ requires-dist = [
 provides-extras = ["slack", "selfhosted"]
 
 [package.metadata.requires-dev]
-debug = [{ name = "ipython" }]
+debug = [
+    { name = "ipython" },
+    { name = "tqdm" },
+]
 dev = [
     { name = "basedpyright", specifier = ">=1.40.1" },
     { name = "codespell", specifier = ">=2.2.4" },
@@ -3600,6 +3610,7 @@ dev = [
     { name = "rekursiv-ai-typeshed", git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main" },
     { name = "rekursiv-ai-typings", git = "https://github.com/rekursiv-ai/typings?branch=main" },
     { name = "ruff" },
+    { name = "tqdm" },
     { name = "ty", specifier = ">=0.0.84" },
 ]
 lint = [
