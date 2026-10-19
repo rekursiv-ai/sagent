@@ -15,6 +15,9 @@ All notable sagent changes are documented here. This project follows
   delays show tenths of a second.
 - The wheel no longer ships `sagent.lib.testing` or the
   `scripts/repro_ctrld_hang.py` repro, which import test-only modules.
+- `restore_model` keeps the default model with an info line, not an error and a
+  traceback, when the session's auth has no `from_<auth>` constructor (such as
+  a lease a caller builds itself); the caller's next turn sets its model.
 
 ## 0.1.19 - 2026-10-07
 

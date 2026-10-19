@@ -54,6 +54,7 @@ from sagent.agent.state import (
 from sagent.lib.atomic_file import write_all
 from sagent.providers.providers import (
     build_provider_with_account_fallback,
+    provider_class,
 )
 from sagent.sessions import restrict_path
 from sagent.types.cost import TokenCost, TokenCount
@@ -959,6 +960,18 @@ def restore_model(
 
     """
     if not meta.provider or not meta.model_id:
+        return None
+    # An auth the provider has no constructor for, such as a lease on a person's own
+    # login, is built only by the caller that recorded it, whose next turn sets the
+    # model again: keeping the default here is the expected outcome, not a failure.
+    cls = provider_class(meta.provider)
+    if cls is not None and not hasattr(cls, f"from_{meta.auth}"):
+        logger.info(
+            "Model %s/%s uses auth %r, which only its caller builds; keeping default",
+            meta.provider,
+            meta.model_id,
+            meta.auth,
+        )
         return None
     try:
         provider, account = build_provider_with_account_fallback(

@@ -2957,6 +2957,28 @@ def test_restore_model_returns_none_on_attribute_error(
     assert "AttributeError: unknown provider 'DoesNotExist'" in caplog.text
 
 
+def test_restore_model_leaves_an_auth_only_its_caller_builds_to_the_caller(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A lease on a person's login keeps the default without an error or a build."""
+    meta = SessionMeta(provider="OpenAISubscription", model_id="sol-6.1", auth="lease")
+    with (
+        caplog.at_level("INFO"),
+        patch("sagent.providers.providers.build_provider") as build,
+    ):
+        assert restore_model(meta) is None
+    build.assert_not_called()
+    assert [(each.levelname, each.getMessage()) for each in caplog.records] == [
+        (
+            "INFO",
+            (
+                "Model OpenAISubscription/sol-6.1 uses auth 'lease', which only its "
+                "caller builds; keeping default"
+            ),
+        ),
+    ]
+
+
 def test_restore_model_success_path() -> None:
     """A working provider builds a model and spec."""
 
