@@ -42,11 +42,12 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cache
 from importlib import util
-from itertools import compress, product
+from itertools import compress, islice, product
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import ast
+import inspect
 import os
 import re
 import sys
@@ -242,7 +243,15 @@ def recursion_headroom(frames: int) -> Generator[None]:
 
     """
     before = sys.getrecursionlimit()
-    sys.setrecursionlimit(sum(1 for _ in traceback.walk_stack(None)) + frames)
+    # The walk starts at this generator's frame and skips it and the
+    # ``_GeneratorContextManager.__enter__`` that resumed it, so it counts from the
+    # ``with`` statement's frame. ``walk_stack(None)`` starts at a different frame
+    # per version: the ``with`` frame on 3.12, but this one on 3.14, which left
+    # the limit two frames looser there.
+    sys.setrecursionlimit(
+        sum(1 for _ in islice(traceback.walk_stack(inspect.currentframe()), 2, None))
+        + frames,
+    )
     try:
         yield
     finally:
