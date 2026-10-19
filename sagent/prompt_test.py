@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-from unittest.mock import patch
-
 import subprocess
 
 import pytest
@@ -21,16 +18,12 @@ from sagent.prompt import (
 from sagent.types.capability import ModelCapability
 
 
-if TYPE_CHECKING:
-    from collections.abc import Iterator
-
-
 def _model(model_id: str) -> ModelCapability:
     return ModelCapability(model_id=model_id)
 
 
 @pytest.fixture(autouse=True)
-def stub_recipe_and_helpers() -> Iterator[None]:
+def stub_recipe_and_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace recipe + AGENTS.md + memory hooks with deterministic stubs.
 
     Without this, ``prompt.build_system`` reads filesystem assets and
@@ -60,46 +53,29 @@ def stub_recipe_and_helpers() -> Iterator[None]:
             return "static body {keep_recent}"
         return str(path)
 
-    patches = [
-        patch(
-            "sagent.prompt.recipe_dict",
-            side_effect=fake_recipe_dict,
-        ),
-        patch(
-            "sagent.prompt.recipe_list",
-            side_effect=fake_recipe_list,
-        ),
-        patch(
-            "sagent.prompt.read_asset",
-            side_effect=fake_read_asset,
-        ),
-        patch(
-            "sagent.prompt.agents_md.build_section",
-            return_value="AGENTS_SECTION",
-        ),
-        patch(
-            "sagent.prompt.memory.build_system_section",
-            return_value="MEMORY_SECTION",
-        ),
-        patch(
-            "sagent.prompt._is_git_repo",
-            return_value=False,
-        ),
-        patch(
-            "sagent.prompt._is_git_worktree",
-            return_value=False,
-        ),
-    ]
-    with (
-        patches[0],
-        patches[1],
-        patches[2],
-        patches[3],
-        patches[4],
-        patches[5],
-        patches[6],
-    ):
-        yield
+    def fake_agents(*_args: object, **_kwargs: object) -> str:
+        return "AGENTS_SECTION"
+
+    def fake_memory(*_args: object, **_kwargs: object) -> str:
+        return "MEMORY_SECTION"
+
+    def not_git(cwd: str) -> bool:
+        del cwd
+        return False
+
+    monkeypatch.setattr("sagent.prompt.recipe_dict", fake_recipe_dict)
+    monkeypatch.setattr("sagent.prompt.recipe_list", fake_recipe_list)
+    monkeypatch.setattr("sagent.prompt.read_asset", fake_read_asset)
+    monkeypatch.setattr(
+        "sagent.prompt.agents_md.build_section",
+        fake_agents,
+    )
+    monkeypatch.setattr(
+        "sagent.prompt.memory.build_system_section",
+        fake_memory,
+    )
+    monkeypatch.setattr("sagent.prompt._is_git_repo", not_git)
+    monkeypatch.setattr("sagent.prompt._is_git_worktree", not_git)
 
 
 def test_build_system_returns_concatenated_string() -> None:
