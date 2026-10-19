@@ -1043,6 +1043,14 @@ def test_strip_reminders_keeps_first_line_indentation() -> None:
     assert strip_reminders("\n<system-reminder>x</system-reminder>\n  a\n") == "  a"
 
 
+def test_an_empty_error_renders_as_its_type_alone() -> None:
+    """Httpx raises ``ConnectTimeout("")``, which rendered ``ConnectTimeout: ``."""
+    p = RecordingPrinter()
+    obs = make_render_observer(p)
+    obs(CompactFailed(exception=TimeoutError(), tape_len=1))
+    assert p.dim_lines == ["[compaction failed: TimeoutError]"]
+
+
 def test_compact_failed_user_facing_error_has_no_class_prefix() -> None:
     p = RecordingPrinter()
     obs = make_render_observer(p)

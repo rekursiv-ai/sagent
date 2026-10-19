@@ -3,6 +3,19 @@
 All notable sagent changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Changed
+
+- Every Anthropic and OpenAI client waits 30 seconds to connect, up from the
+  SDKs' 5, and leaves retries to `send_with_retry` (`max_retries=0`). One
+  stalled attempt used to cost three connects.
+- An exception with no message renders as its type alone (`ConnectTimeout`,
+  not `ConnectTimeout: `) in retry notes, tool errors and the REPL; retry
+  delays show tenths of a second.
+- The wheel no longer ships `sagent.lib.testing` or the
+  `scripts/repro_ctrld_hang.py` repro, which import test-only modules.
+
 ## 0.1.19 - 2026-10-07
 
 ### Added

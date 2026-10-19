@@ -17,18 +17,17 @@ and the executor (calls the compactor once per partition).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast, override
 
 import pytest
 
 from sagent.compaction.scrunch import (
-    ScrunchTooLargeError,
     plan_scrunch,
     scrunch_to_fit,
 )
 from sagent.testing import MockModelCaps
-from sagent.types.model import Model
+from sagent.types.model import Model, ModelRequest
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -323,7 +322,8 @@ async def test_scrunch_to_fit_already_fits_returns_no_splices() -> None:
 async def test_scrunch_to_fit_one_pass_when_one_partition_suffices() -> None:
     """One scrunch pass produces one splice when the deficit fits in one."""
     # 4 messages, ~25 tokens each = ~100 tokens total. Target 50.
-    context: list[ModelContextEvent] = [_user("x" * 100) for _ in range(4)]
+    users = [_user(f"{i}" + "x" * 99) for i in range(4)]
+    context: list[ModelContextEvent] = list(users)
     tape = _tape_from(context)
     compactor = _SizedCompactor(summary_chars=20)
     result = await scrunch_to_fit(
@@ -338,9 +338,220 @@ async def test_scrunch_to_fit_one_pass_when_one_partition_suffices() -> None:
     )
     assert len(result.splices) >= 1
     assert len(compactor.calls) == len(result.splices)
-    # First call's first entry must be the oldest message in context.
-    first_call = compactor.calls[0]
-    assert first_call[0] is context[0]
+    # First call starts with the oldest message (adjacent user turns merge).
+    first = compactor.calls[0][0]
+    assert isinstance(first, UserMessage)
+    assert first.text.startswith(users[0].text)
+
+
+@pytest.mark.asyncio
+async def test_scrunch_folds_a_summary_larger_than_its_estimate() -> None:
+    """Pass 1 re-summarized the pass-0 summary alone, which cannot shrink.
+
+    The planner grows a partition only while it is under the summary
+    estimate; a real summary past that estimate stood alone once the next
+    entry overflowed the cap. Live: ``311543 -> 312037 tokens; cannot make
+    progress`` on a 1.5 MB diff.
+    """
+    context: list[ModelContextEvent] = [_user("x" * 400) for _ in range(6)]
+    tape = _tape_from(context)
+    compactor = _SizedCompactor(summary_chars=160)
+    result = await scrunch_to_fit(
+        context=context,
+        tape=tape,
+        model=_stub_model(),
+        compactor=compactor,
+        mint_ref=_ref_factory(len(tape)),
+        target_input_tokens=100,
+        max_partition_tokens=120,
+        summary_size_estimate_tokens=5,
+    )
+    assert (
+        _stub_model().approx_request_tokens(
+            ModelRequest(messages=list(result.view)),
+        )
+        <= 100
+    )
+
+
+@dataclass(slots=True, kw_only=True)
+class _OnceBloatingCompactor(_SizedCompactor):
+    """Return an oversized summary on one call, a normal one otherwise."""
+
+    bloat_call: int = 1
+    bloat_chars: int = 4_000
+
+    @override
+    async def compact(
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[ModelContextEvent],
+        model: object,
+        mint_ref: Callable[[], TapeRef],
+        custom_instructions: str | None = None,
+    ) -> ContextSplice:
+        splice = await super(_OnceBloatingCompactor, self).compact(
+            tape,
+            context,
+            model,
+            mint_ref,
+            custom_instructions,
+        )
+        if len(self.calls) - 1 != self.bloat_call:
+            return splice
+        return replace(splice, payload=(UserMessage(text="B" * self.bloat_chars),))
+
+
+@pytest.mark.asyncio
+async def test_one_rejected_pass_is_retried_and_the_fold_still_fits() -> None:
+    """Summaries are sampled: a pass that grew the view is retried, not fatal."""
+    context: list[ModelContextEvent] = [_user("x" * 400) for _ in range(8)]
+    tape = _tape_from(context)
+    compactor = _OnceBloatingCompactor(summary_chars=20, bloat_call=1)
+    result = await scrunch_to_fit(
+        context=context,
+        tape=tape,
+        model=_stub_model(),
+        compactor=compactor,
+        mint_ref=_ref_factory(len(tape)),
+        target_input_tokens=100,
+        max_partition_tokens=250,
+        summary_size_estimate_tokens=5,
+    )
+    assert result.stopped == ""
+    assert (
+        _stub_model().approx_request_tokens(
+            ModelRequest(messages=list(result.view)),
+        )
+        <= 100
+    )
+
+
+@dataclass(slots=True, kw_only=True)
+class _BloatAfterFirstCompactor(_SizedCompactor):
+    """Summarize once, then bloat every later call: a producer gone bad."""
+
+    @override
+    async def compact(
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[ModelContextEvent],
+        model: object,
+        mint_ref: Callable[[], TapeRef],
+        custom_instructions: str | None = None,
+    ) -> ContextSplice:
+        splice = await super(_BloatAfterFirstCompactor, self).compact(
+            tape,
+            context,
+            model,
+            mint_ref,
+            custom_instructions,
+        )
+        if len(self.calls) == 1:
+            return replace(splice, payload=(UserMessage(text="FIRST-SUMMARY"),))
+        return replace(splice, payload=(UserMessage(text="B" * 4_000),))
+
+
+@pytest.mark.asyncio
+async def test_a_scrunch_that_stops_short_keeps_every_accepted_pass() -> None:
+    """Live: pass 8 grew the view, and the bridge restored the full input.
+
+    ``did not shrink (665543 -> 665674)`` raised, the bridge caught it, and
+    eight passes of summaries were discarded for the original 1.4M tokens.
+    """
+    context: list[ModelContextEvent] = [_user("x" * 400) for _ in range(8)]
+    tape = _tape_from(context)
+    result = await scrunch_to_fit(
+        context=context,
+        tape=tape,
+        model=_stub_model(),
+        compactor=_BloatAfterFirstCompactor(summary_chars=20),
+        mint_ref=_ref_factory(len(tape)),
+        target_input_tokens=100,
+        max_partition_tokens=250,
+        summary_size_estimate_tokens=5,
+    )
+    assert "did not shrink" in result.stopped
+    assert any(
+        isinstance(e, UserMessage) and e.text == "FIRST-SUMMARY" for e in result.view
+    )
+    assert len(result.view) < len(context)
+
+
+@dataclass(slots=True, kw_only=True)
+class _FallbackOnceCompactor(_SizedCompactor):
+    """Return one splice that summarized only part of its input; else summaries.
+
+    Attributes:
+      fallback_call: Index of the call whose splice drops input.
+      strategy: The dropping splice's strategy: ``summary_fallback`` for a
+          missing summary, ``summary`` for a group dropped on overflow.
+
+    """
+
+    fallback_call: int = 0
+    strategy: str = "summary_fallback"
+
+    @override
+    async def compact(
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[ModelContextEvent],
+        model: object,
+        mint_ref: Callable[[], TapeRef],
+        custom_instructions: str | None = None,
+    ) -> ContextSplice:
+        splice = await super(_FallbackOnceCompactor, self).compact(
+            tape,
+            context,
+            model,
+            mint_ref,
+            custom_instructions,
+        )
+        if len(self.calls) - 1 != self.fallback_call:
+            return replace(splice, payload=(UserMessage(text=_kept(context)),))
+        return replace(
+            splice,
+            payload=(UserMessage(text="Compaction failed."),),
+            strategy=self.strategy,
+            fallback_reason="dropped input",
+        )
+
+
+def _kept(context: Sequence[ModelContextEvent]) -> str:
+    """Name every marker letter the summarized entries carried, summaries too."""
+    # None of these letters occur in the fallback notice or the summary
+    # prefix, so a marker in the view proves its chunk was not dropped.
+    seen = "".join(e.text for e in context if isinstance(e, UserMessage))
+    return "S:" + "".join(sorted(set(seen) & set("qrsuvwxy")))
+
+
+@pytest.mark.parametrize("strategy", ["summary_fallback", "summary"])
+@pytest.mark.asyncio
+async def test_a_splice_that_dropped_input_is_retried_not_accepted(
+    strategy: str,
+) -> None:
+    """Live: ``missing <summary>`` replaced ~100k tokens with a notice.
+
+    A splice that summarized only part of its input -- a fallback, or a
+    summary built after dropping groups on overflow -- is shorter than its
+    input, so scrunch counted the loss as progress.
+    """
+    context: list[ModelContextEvent] = [_user(m * 400) for m in "qrsuvwxy"]
+    tape = _tape_from(context)
+    compactor = _FallbackOnceCompactor(summary_chars=20, strategy=strategy)
+    result = await scrunch_to_fit(
+        context=context,
+        tape=tape,
+        model=_stub_model(),
+        compactor=compactor,
+        mint_ref=_ref_factory(len(tape)),
+        target_input_tokens=100,
+        max_partition_tokens=250,
+        summary_size_estimate_tokens=5,
+    )
+    carried = "".join(e.text for e in result.view if isinstance(e, UserMessage))
+    assert set("qrsuvwxy") <= set(carried), carried[:80]
 
 
 @pytest.mark.asyncio
@@ -439,14 +650,12 @@ async def test_scrunch_to_fit_view_matches_flat_fold_across_passes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_scrunch_to_fit_raises_when_producer_overflows() -> None:
-    """Producer compactor itself raises -> wrap in ScrunchTooLargeError.
+async def test_scrunch_to_fit_stops_when_the_producer_raises() -> None:
+    """A producer that raises on every partition stops the fold, not the caller.
 
-    Scrunch cannot make progress when the producer compactor cannot
-    summarize any partition we hand it. Wrap the producer's error in
-    :class:`ScrunchTooLargeError` so the agent layer can surface a
-    useful diagnostic instead of a bare ``PromptTooLongError`` from
-    the compactor's internal ``stream`` call.
+    The view comes back unchanged with the reason in ``stopped``, so the
+    caller's one over-target check surfaces the failure -- a bare
+    ``PromptTooLongError`` from the compactor's ``stream`` never escapes.
     """
 
     @dataclass(slots=True, kw_only=True)
@@ -465,41 +674,44 @@ async def test_scrunch_to_fit_raises_when_producer_overflows() -> None:
     context: list[ModelContextEvent] = [_user("x" * 100_000), _user("ok")]
     tape = _tape_from(context)
 
-    with pytest.raises(ScrunchTooLargeError):
-        _ = await scrunch_to_fit(
-            context=context,
-            tape=tape,
-            model=_stub_model(),
-            compactor=_AlwaysOverflowsCompactor(),
-            mint_ref=_ref_factory(len(tape)),
-            target_input_tokens=200,
-            max_partition_tokens=200,
-        )
+    result = await scrunch_to_fit(
+        context=context,
+        tape=tape,
+        model=_stub_model(),
+        compactor=_AlwaysOverflowsCompactor(),
+        mint_ref=_ref_factory(len(tape)),
+        target_input_tokens=200,
+        max_partition_tokens=200,
+    )
+
+    assert "partition itself too large" in result.stopped
+    assert result.view == tuple(context)
 
 
 @pytest.mark.asyncio
-async def test_scrunch_to_fit_raises_when_summary_does_not_shrink() -> None:
-    """Producer that returns a summary equal-or-larger than input -> raise.
+async def test_scrunch_to_fit_stops_when_summaries_never_shrink() -> None:
+    """A producer whose summary is never smaller than its input cannot spin.
 
-    Without this guard the executor would loop summarizing every pass
-    without making progress (the resolved view never gets smaller).
-    Raise instead of spinning.
+    The executor stops after a bounded number of rejected passes rather
+    than summarizing forever, and names the reason.
     """
-    # Producer "summary" is larger than the partition input.
     context: list[ModelContextEvent] = [_user("x" * 100) for _ in range(4)]
     tape = _tape_from(context)
     compactor = _SizedCompactor(summary_chars=10_000)
-    with pytest.raises(ScrunchTooLargeError, match=r"shrink"):
-        _ = await scrunch_to_fit(
-            context=context,
-            tape=tape,
-            model=_stub_model(),
-            compactor=compactor,
-            mint_ref=_ref_factory(len(tape)),
-            target_input_tokens=50,
-            max_partition_tokens=500,
-            summary_size_estimate_tokens=5,
-        )
+    result = await scrunch_to_fit(
+        context=context,
+        tape=tape,
+        model=_stub_model(),
+        compactor=compactor,
+        mint_ref=_ref_factory(len(tape)),
+        target_input_tokens=50,
+        max_partition_tokens=500,
+        summary_size_estimate_tokens=5,
+    )
+
+    assert "did not shrink" in result.stopped
+    assert result.view == tuple(context)
+    assert len(compactor.calls) < 16
 
 
 @pytest.mark.asyncio

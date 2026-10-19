@@ -9,15 +9,20 @@ import os
 from sagent.catalog.openai import api, models
 from sagent.catalog.table import ModelCatalog
 from sagent.providers.lib.perloop import PerLoop
-from sagent.providers.openai.responses import _OpenAIResponsesModel
+from sagent.providers.openai.responses import (
+    _STREAM_IDLE_TIMEOUT,
+    _OpenAIResponsesModel,
+)
 
 
 if TYPE_CHECKING:
+    import httpx2
     import openai as openai_sdk
 
 else:
     from wrapt import lazy_import
 
+    httpx2 = lazy_import("httpx2")
     openai_sdk = lazy_import("openai")
 
 __all__ = ["OpenAI"]
@@ -105,4 +110,6 @@ class OpenAI:
             api_key=self.api_key,
             base_url=self.base_url,
             max_retries=0,
+            # The SDK's 5s connect default fails on one Wi-Fi stall.
+            timeout=httpx2.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
         )

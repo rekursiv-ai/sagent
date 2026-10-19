@@ -403,7 +403,7 @@ repos:
       #
       # Tolerate exit 5 (nothing collected): a selection whose every test
       # carries a deselected marker collects zero, which is not a failure --
-      # editing `chrome/echo.py` reported RED on seven passing integration
+      # editing `chrome/conftest.py` reported RED on seven passing integration
       # tests. A real failure is exit 1 and still fails.
       #
       # `-n` is chosen from selection size because neither setting wins

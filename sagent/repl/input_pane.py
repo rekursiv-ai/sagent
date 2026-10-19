@@ -75,7 +75,7 @@ from sagent.agent.state import (
     agent_registry,
 )
 from sagent.repl import slash
-from sagent.repl.render import HELP_TEXT
+from sagent.repl.render import HELP_TEXT, error_text
 from sagent.repl.slash import (
     QUIT_WORDS,
     Controllable,
@@ -343,14 +343,7 @@ async def _input_pump(
                 exc,
             )
             if printer is not None:
-                # Polished message for UserFacingError; ClassName prefix
-                # for unexpected exceptions (helps the operator).
-                detail = (
-                    str(exc)
-                    if isinstance(exc, UserFacingError)
-                    else f"{type(exc).__name__}: {exc}"
-                )
-                printer.write_tool_error(f"[input pump] {detail}")
+                printer.write_tool_error(f"[input pump] {error_text(exc)}")
 
 
 # Routed text lands as an ``AgentSendMessage`` attributed to ``sender`` so the child

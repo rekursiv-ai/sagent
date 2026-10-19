@@ -243,6 +243,7 @@ from sagent.agent.context import (
     validate_context,
 )
 from sagent.types.exceptions import (
+    describe,
     log_exception_or_warning,
     log_task_exception,
 )
@@ -3107,7 +3108,7 @@ class AgentRuntime:
             result = ToolResult(
                 call_id=call.id,
                 parent_id=parent_id,
-                content=f"{type(exc).__name__}: {exc}",
+                content=describe(exc),
                 is_error=True,
             )
         finally:

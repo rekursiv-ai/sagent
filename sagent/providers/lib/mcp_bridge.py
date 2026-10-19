@@ -74,7 +74,7 @@ from sagent.agent.background import (
     split_bg_args,
 )
 from sagent.lib.tool_validation import validate_tool_input
-from sagent.types.exceptions import log_task_exception
+from sagent.types.exceptions import describe, log_task_exception
 from sagent.types.runtime import RuntimeEvent, ToolLabel, ToolResult
 
 
@@ -519,7 +519,7 @@ class ToolsBridge:
         except Exception as exc:  # noqa: BLE001 -- tool boundary converts ordinary failures to result content; CancelledError propagates.
             return ToolResult(
                 call_id="",
-                content=f"{type(exc).__name__}: {exc}",
+                content=describe(exc),
                 is_error=True,
             )
 
@@ -577,7 +577,7 @@ class ToolsBridge:
             except Exception as exc:  # noqa: BLE001 -- record any failure as the detached result.
                 self._bg_done[detach_id] = ToolResult(
                     call_id=detach_id,
-                    content=f"{type(exc).__name__}: {exc}",
+                    content=describe(exc),
                     is_error=True,
                 )
 

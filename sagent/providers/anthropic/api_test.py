@@ -1377,6 +1377,21 @@ async def test_anthropic_stream_does_not_misclassify_unrelated_block(
 
 
 @pytest.mark.asyncio
+async def test_anthropic_sdk_connect_timeout_outlasts_a_network_stall() -> None:
+    """The SDK default connect timeout is 5s; a Wi-Fi stall outlasted it.
+
+    Only ``send_with_retry`` retries: the SDK's own two retries made one stalled
+    attempt three 30s connects, so five attempts blocked for ~450s.
+    """
+    sdk = await Anthropic.from_key("k").get_sdk()
+    timeout = sdk.timeout
+    assert isinstance(timeout, httpx2.Timeout)
+    assert (timeout.connect, timeout.read) == (30.0, 600.0)
+    assert sdk.max_retries == 0
+    await sdk.close()
+
+
+@pytest.mark.asyncio
 async def test_anthropic_raw_stream_reads_status_error_body() -> None:
     p = Anthropic.from_key("k")
     sdk = await p.get_sdk()

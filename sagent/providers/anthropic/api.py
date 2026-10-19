@@ -336,7 +336,14 @@ class Anthropic:
         async with self._lock.get():
             sdk = self._sdks.get()
             if sdk is None:
-                sdk = anthropic.AsyncAnthropic(api_key=self._api_key)
+                sdk = anthropic.AsyncAnthropic(
+                    api_key=self._api_key,
+                    # ``send_with_retry`` owns retries: the SDK's two more made
+                    # one stalled attempt three 30s connects.
+                    max_retries=0,
+                    # The SDK's 5s connect default fails on one Wi-Fi stall.
+                    timeout=httpx2.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
+                )
                 self._sdks.set(sdk)
             return sdk
 

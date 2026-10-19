@@ -75,6 +75,18 @@ def test_openai_from_key_constructs() -> None:
     assert p.base_url == "https://api.openai.com/v1"
 
 
+@pytest.mark.asyncio
+async def test_openai_sdk_connect_timeout_outlasts_a_network_stall() -> None:
+    """The SDK default connect timeout is 5s; a Wi-Fi stall outlasted it."""
+    provider = OpenAI.from_key("k")
+    sdk = await provider.get_sdk()
+    timeout = sdk.timeout
+    assert isinstance(timeout, httpx2.Timeout)
+    assert (timeout.connect, timeout.read) == (30.0, 600.0)
+    await provider.close_sdk()
+    assert sdk.is_closed()
+
+
 def test_openai_from_env_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     with pytest.raises(RuntimeError, match="API key not configured"):

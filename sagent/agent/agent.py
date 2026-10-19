@@ -82,14 +82,15 @@ from sagent.agent.state import (
     unique_registry_label,
 )
 from sagent.catalog.table import UnknownModelError, UnsupportedTagError
+
+# The module, not its names: ``fold`` imports ``agent.retry``, which loads this
+# package, so a fold-first import reaches here before ``fold`` defines them.
+from sagent.compaction import fold
 from sagent.compaction.history import (
     MAX_CONSECUTIVE_COMPACT_FAILURES,
     estimate_entry_tokens,
 )
-from sagent.compaction.scrunch import (
-    ScrunchTooLargeError,
-    scrunch_to_fit,
-)
+from sagent.compaction.scrunch import scrunch_to_fit
 from sagent.lib import last_models
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.providers import providers
@@ -103,6 +104,7 @@ from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.exceptions import (
     BudgetExhaustedError,
     ContextOverflowError,
+    describe,
     log_exception_or_warning,
     log_task_exception,
 )
@@ -2684,6 +2686,8 @@ def _wire_request_bytes(
 # masquerade as context exhaustion -- the failure mode that misled session ``bc528d70``.
 def _compact_failure_error(last_err: Exception, model: Model) -> Exception:
     """Pick the user-facing error after a failed ``compact_now``."""
+    if isinstance(last_err, ContextOverflowError):
+        return last_err
     if model.is_context_overflow(last_err):
         return _context_overflow_error()
     return last_err
@@ -3416,7 +3420,7 @@ class _AgentTool:
             logger.exception("background tool %r failed", self._inner.name)
             processed = runtime.ToolResult(
                 call_id=call_id,
-                content=f"{type(exc).__name__}: {exc}",
+                content=describe(exc),
                 is_error=True,
             )
         # Order matters and must stay await-free: push the result, THEN
@@ -3588,19 +3592,15 @@ class _AgentCompactor:
         if not payload or isinstance(payload[-1], runtime.AssistantMessage):
             payload.append(runtime.UserMessage(text="[continuation]"))
 
-        # Scrunch rescue: when the producer's normal output still
-        # exceeds the agent's input budget, partition the payload
-        # oldest-first and re-run the producer per partition until the
-        # resolved view fits. The same ``largest_context`` the proactive
-        # gate and the willRetriggerNextTurn check below consume, so a
-        # payload cannot skip scrunch yet be flagged as already over
-        # threshold. Without this, the next provider call sees the same
-        # overflow that triggered compaction and the recovery loop wedges.
+        # Rescue: when the producer's normal output still exceeds the
+        # agent's input budget, fold each oversized user message, then
+        # partition the rest oldest-first and re-run the producer per
+        # partition until the resolved view fits. The same
+        # ``largest_context`` the proactive gate and the over-target check
+        # below consume, so the rescue and the verdict cannot disagree.
         target = self._inner.largest_context(self._agent.budget)
         # A degenerate budget (response + buffer >= window) leaves no room
-        # to scrunch into; ``scrunch_to_fit`` rejects a non-positive
-        # partition cap. Skip rather than raise -- the willRetriggerNextTurn
-        # annotation below still flags the payload as oversized.
+        # to fold into; the over-target check below raises for it.
         if target > 0:
             try:
                 payload_tokens_for_scrunch = self._agent.model.approx_request_tokens(
@@ -3633,7 +3633,15 @@ class _AgentCompactor:
                         self._agent.model,
                         payload,
                     )
-                    scrunch_target = max(1, target - max(0, overhead))
+                    scrunch_target = target - max(0, overhead)
+                    if scrunch_target <= 0:
+                        raise _context_overflow_error(
+                            final_tokens=payload_tokens_for_scrunch,
+                        )
+                    payload = await self._fold_messages(
+                        payload,
+                        target_input_tokens=scrunch_target,
+                    )
                     payload = await self._scrunch_payload(
                         payload=payload,
                         mint_ref=mint_ref,
@@ -3665,6 +3673,7 @@ class _AgentCompactor:
         # in lockstep: any compactor that overrides headroom math stays
         # the single source of truth.
         fallback_reason = override.fallback_reason
+        payload_tokens: int | None = None
         try:
             payload_tokens = self._agent.model.approx_request_tokens(
                 materialize_request(
@@ -3697,6 +3706,10 @@ class _AgentCompactor:
                 "willRetriggerNextTurn estimate skipped; continuing",
                 exc,
             )
+        # Reporting success here sent the unchanged oversized request to the
+        # provider once per overflow-recovery attempt.
+        if payload_tokens is not None and payload_tokens > target:
+            raise _context_overflow_error(final_tokens=payload_tokens)
 
         if (
             tuple(payload) == override.payload
@@ -3719,6 +3732,48 @@ class _AgentCompactor:
             paired_externally=unpaired_call_ids(payload),
         )
 
+    # Scrunch folds whole entries, so one user message bigger than a summary call can
+    # never shrink through it. Each such message is folded to an even share of the
+    # target first; what remains for scrunch is ordinary history.
+    async def _fold_messages(
+        self,
+        payload: list[runtime.ModelContextEvent],
+        *,
+        target_input_tokens: int,
+    ) -> list[runtime.ModelContextEvent]:
+        """Fold every user-side message too large for one summary call."""
+        model = ObservedModel(self._agent.model, self._agent.record_side_response)
+        call_tokens = self._agent.max_request_tokens - self._agent.max_response_tokens
+        oversized = {
+            index
+            for index, entry in enumerate(payload)
+            if isinstance(entry, (runtime.UserMessage, runtime.AgentSendMessage))
+            and 2 * model.approx_text_tokens(entry.text) > target_input_tokens
+        }
+        if not oversized:
+            return payload
+        share = max(1, target_input_tokens // (2 * len(oversized)))
+        out: list[runtime.ModelContextEvent] = []
+        for index, entry in enumerate(payload):
+            if index in oversized:
+                assert isinstance(
+                    entry,
+                    (runtime.UserMessage, runtime.AgentSendMessage),
+                )
+                try:
+                    text = await fold.fold_text(
+                        entry.text,
+                        model=model,
+                        max_tokens=share,
+                        call_tokens=call_tokens,
+                    )
+                except fold.FoldError as exc:
+                    raise _context_overflow_error() from exc
+                out.append(dataclasses.replace(entry, text=text))
+            else:
+                out.append(entry)
+        return out
+
     # The bridge runs scrunch as an internal rescue: scrunch's per- partition splices
     # land in a throwaway tape, the final resolved view is extracted, and the bridge
     # folds it into a single return payload. The runtime sees one combined splice, not
@@ -3731,7 +3786,7 @@ class _AgentCompactor:
         mint_ref: Callable[[], TapeRef],
         target_input_tokens: int,
     ) -> list[runtime.ModelContextEvent]:
-        """Apply the scrunch maneuver to ``payload`` until it fits."""
+        """Apply the scrunch maneuver to ``payload``; return its best view."""
         # Build a throwaway tape mirroring ``payload`` so scrunch can
         # reference its entries by ordinal. The runtime never sees these
         # refs: ``scratch_tape`` is local and never escapes, so the
@@ -3746,35 +3801,27 @@ class _AgentCompactor:
             )
             for i, entry in enumerate(payload)
         ]
-        try:
-            result = await scrunch_to_fit(
-                context=payload,
-                tape=scratch_tape,
-                model=ObservedModel(
-                    self._agent.model,
-                    self._agent.record_side_response,
-                ),
-                compactor=self._inner,
-                mint_ref=mint_ref,
-                target_input_tokens=target_input_tokens,
-                max_partition_tokens=target_input_tokens,
-            )
-        except ScrunchTooLargeError as exc:
-            # Scrunch hit its forward-progress floor: typically a
-            # single message larger than the partition cap. The
-            # bridge surfaces the failure to the caller via the
-            # ``fallback_reason`` channel rather than raising; the
-            # next provider call may still overflow, but at least the
-            # bridge returns a well-formed splice.
-            logger.warning("scrunch could not make progress: %s", exc)
-            return payload
+        result = await scrunch_to_fit(
+            context=payload,
+            tape=scratch_tape,
+            model=ObservedModel(
+                self._agent.model,
+                self._agent.record_side_response,
+            ),
+            compactor=self._inner,
+            mint_ref=mint_ref,
+            target_input_tokens=target_input_tokens,
+            max_partition_tokens=target_input_tokens,
+        )
         # ``scrunch_to_fit`` returns the final resolved view it tracked
-        # internally. Consume it directly: re-deriving the view from
-        # ``result.splices`` would compose the per-pass masks under the
-        # resolver's cover-the-cover undelete semantics and resurrect
-        # content an earlier pass folded away (a later pass masks an
-        # earlier pass's splice ref). The executor's flat replacement is
-        # the ground truth.
+        # internally -- its best so far even when it stopped short, so the
+        # bridge's one over-target check decides between sending and raising.
+        # Consume it directly: re-deriving the view from ``result.splices``
+        # would compose the per-pass masks under the resolver's
+        # cover-the-cover undelete semantics and resurrect content an earlier
+        # pass folded away (a later pass masks an earlier pass's splice ref).
+        if result.stopped:
+            logger.warning("scrunch stopped short of its target: %s", result.stopped)
         return list(result.view)
 
 

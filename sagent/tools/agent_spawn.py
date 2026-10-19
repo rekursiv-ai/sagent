@@ -64,6 +64,7 @@ from sagent.tools.core import (
 )
 from sagent.types.capability import ThinkingEffort
 from sagent.types.cost import ServiceTier
+from sagent.types.exceptions import describe
 from sagent.types.model import Model, ModelRecipe
 from sagent.types.providers import Provider
 from sagent.types.runtime import (
@@ -1175,10 +1176,7 @@ class _ChildForwarder:
             self._parent_agent.runtime.inbox.push_back(
                 AgentSendMessage(
                     source=self._label,
-                    text=(
-                        f"[{self._label} failed] "
-                        f"{type(event.exception).__name__}: {event.exception}"
-                    ),
+                    text=f"[{self._label} failed] {describe(event.exception)}",
                 ),
             )
         if isinstance(event, AgentIdle) and self._notify_on_asleep:
@@ -1544,7 +1542,7 @@ def _child_error_result(label: str, error: BaseException) -> ToolResult:
     """Report a child's terminal model error as the spawn's error result."""
     return ToolResult(
         call_id="",
-        content=f"Child agent {label!r} failed: {type(error).__name__}: {error}",
+        content=f"Child agent {label!r} failed: {describe(error)}",
         is_error=True,
     )
 

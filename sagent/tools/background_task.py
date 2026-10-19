@@ -32,6 +32,7 @@ from sagent.agent.state import (
     current_agent_var,
 )
 from sagent.tools.core import load_tool_description
+from sagent.types.exceptions import describe
 from sagent.types.runtime import (
     CANCELLED_PLACEHOLDER,
     DetachedResult,
@@ -372,7 +373,7 @@ async def _await_detached(
                 return fut.result()
             return ToolResult(
                 call_id=call_id,
-                content=f"{type(exc).__name__}: {exc}",
+                content=describe(exc),
                 is_error=True,
             )
         if fut.done():

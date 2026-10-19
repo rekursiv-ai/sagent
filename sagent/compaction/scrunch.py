@@ -61,11 +61,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+_MAX_REJECTED_PASSES = (
+    3  # house-ignore[globals] -- Consecutive rejected passes before giving up.
+)
+
+
 __all__ = [
     "DEFAULT_SAFETY_FLOOR_TOKENS",
     "ScrunchPlan",
     "ScrunchResult",
-    "ScrunchTooLargeError",
     "plan_scrunch",
     "scrunch_to_fit",
 ]
@@ -78,17 +82,6 @@ __all__ = [
 DEFAULT_SAFETY_FLOOR_TOKENS = (
     8_000  # house-ignore[globals] -- Safety floor token budget (runtime knob).
 )
-
-
-class ScrunchTooLargeError(RuntimeError):
-    """Scrunch cannot make progress on the current context.
-
-    Either a single message exceeds the per-partition cap (the
-    producer compactor's own summarization call would overflow), or
-    every partition the planner tried produced a summary no smaller
-    than its input. The caller must truncate the offending content or
-    surface the failure to the user.
-    """
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -118,11 +111,15 @@ class ScrunchResult:
           callers must consume it directly rather than re-deriving the
           view from ``splices`` (the masks compose under cover-the-cover
           undelete semantics the executor's flat replacement does not).
+      stopped: Why the maneuver ended before ``view`` fit its target; empty
+          when it fit. ``view`` still carries every pass that succeeded, so
+          the caller, not scrunch, decides whether a short fold is usable.
 
     """
 
     splices: tuple[ContextSplice, ...]
     view: tuple[ModelContextEvent, ...]
+    stopped: str = ""
 
 
 def plan_scrunch(
@@ -355,13 +352,14 @@ async def scrunch_to_fit(
 
     Returns:
       result: ``ScrunchResult`` carrying the produced splices (in append
-          order) and the final resolved view.
+          order) and the best view so far. ``stopped`` names why the view
+          still exceeds the target: the producer raised, ``max_passes``
+          ran out, or consecutive passes dropped input or failed to
+          shrink. Each such pass is rejected and retried first; earlier
+          passes always stay in ``view``.
 
     Raises:
-      ScrunchTooLargeError: A single message exceeds the per-partition
-          cap (the producer would overflow), or ``max_passes`` ran out
-          without the view fitting, or a producer call returned a
-          summary that did not shrink the partition.
+      ValueError: ``max_passes`` is less than 1.
 
     """
     if max_passes < 1:
@@ -389,6 +387,8 @@ async def scrunch_to_fit(
     working_context: list[ModelContextEvent] = list(context)
     working_tape: list[TapeRecord] = list(tape)
     last_size = _approx_tokens(working_context, model)
+    rejected = 0
+    stopped = ""
     for pass_idx in range(max_passes):
         if _approx_tokens(working_context, model) <= target_input_tokens:
             break
@@ -402,14 +402,8 @@ async def scrunch_to_fit(
         if not plan.partitions:
             break
         partition = plan.partitions[0]
-        if partition.stop - partition.start <= 0:
-            raise ScrunchTooLargeError(
-                f"scrunch pass {pass_idx}: a single message exceeds the"
-                f" {max_partition_tokens}-token partition cap; cannot fold"
-                f" without truncation",
-            )
-        partition_context = working_context[partition.start : partition.stop]
         partition_tape = working_tape[partition.start : partition.stop]
+        partition_context = working_context[partition.start : partition.stop]
         if _approx_tokens(partition_context, model) > max_partition_tokens:
             # Pair-safe grow forced the partition past the cap. Producer
             # may still succeed (its own retry shrinks tool results)
@@ -429,48 +423,68 @@ async def scrunch_to_fit(
                 mint_ref=mint_ref,
                 custom_instructions=None,
             )
-        except Exception as exc:
-            raise ScrunchTooLargeError(
-                f"scrunch pass {pass_idx}: producer compactor failed on a"
-                f" {len(partition_context)}-message partition: {exc}",
-            ) from exc
-        produced.append(splice)
-        # Replace the partition's working entries with the summary's
-        # payload. The summary's mask is the producer's concern; the
-        # executor tracks visible content directly.
+        except Exception as exc:  # noqa: BLE001 -- The producer calls a model; any failure ends the fold with its best view.
+            stopped = (
+                f"pass {pass_idx}: producer failed on a"
+                f" {len(partition_context)}-message partition: {exc}"
+            )
+            break
         new_entries = list(splice.payload)
-        working_context = (
+        candidate = (
             working_context[: partition.start]
             + new_entries
             + working_context[partition.stop :]
         )
-        working_tape = [
-            *working_tape[: partition.start],
-            splice,
-            *working_tape[partition.stop :],
-        ]
         # Progress is measured on the WHOLE resolved view, not the single
         # partition: scrunch's contract is to shrink the total toward
         # ``target``. A pass that shrinks its partition locally but leaves
         # the total unchanged (or larger) is not making global progress
         # and would spin -- the whole-view axis is the correct guard.
-        new_size = _approx_tokens(working_context, model)
-        if new_size >= last_size:
-            raise ScrunchTooLargeError(
-                f"scrunch pass {pass_idx}: producer summary did not"
-                f" shrink the resolved view ({last_size} -> {new_size}"
-                f" tokens); cannot make progress",
-            )
+        new_size = _approx_tokens(candidate, model)
+        # A splice that dropped input is shorter than its input only because
+        # of the loss -- a fallback, or a summary of groups left after an
+        # overflow -- so accepting it would count lost history as progress.
+        failure = (
+            f"producer dropped input ({splice.fallback_reason})"
+            if splice.fallback_reason
+            else f"producer summary did not shrink the resolved view"
+            f" ({last_size} -> {new_size} tokens)"
+            if new_size >= last_size
+            else ""
+        )
+        if failure:
+            # Summaries are sampled, so the same partition can succeed on a
+            # retry; a rejected pass leaves earlier passes' progress intact.
+            rejected += 1
+            logger.warning("scrunch pass %d rejected: %s", pass_idx, failure)
+            if rejected >= _MAX_REJECTED_PASSES:
+                stopped = f"pass {pass_idx}: {failure}"
+                break
+            continue
+        rejected = 0
+        produced.append(splice)
+        working_context = candidate
+        working_tape = [
+            *working_tape[: partition.start],
+            splice,
+            *working_tape[partition.stop :],
+        ]
+        # The planner's floor keeps a partition larger than one summary; a
+        # stale estimate let the next pass take a real summary alone, which
+        # no producer can shrink. Learn the size producers actually emit.
+        summary_size_estimate_tokens = max(
+            summary_size_estimate_tokens,
+            min(_approx_tokens(new_entries, model), max_partition_tokens - 1),
+        )
         last_size = new_size
     else:
-        # max_passes exhausted with the context still over target.
         if _approx_tokens(working_context, model) > target_input_tokens:
-            raise ScrunchTooLargeError(
-                f"scrunch did not fit after {max_passes} passes; final"
-                f" estimate {_approx_tokens(working_context, model)}"
-                f" still exceeds target {target_input_tokens}",
-            )
-    return ScrunchResult(splices=tuple(produced), view=tuple(working_context))
+            stopped = f"no fit after {max_passes} passes"
+    return ScrunchResult(
+        splices=tuple(produced),
+        view=tuple(working_context),
+        stopped=stopped,
+    )
 
 
 def _approx_tokens(context: Sequence[ModelContextEvent], model: Model) -> int:

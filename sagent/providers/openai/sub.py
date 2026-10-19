@@ -117,7 +117,10 @@ from sagent.providers.lib.oauth import (
 )
 from sagent.providers.lib.perloop import PerLoop
 from sagent.providers.openai.api import OpenAI
-from sagent.providers.openai.responses import _OpenAIResponsesModel
+from sagent.providers.openai.responses import (
+    _STREAM_IDLE_TIMEOUT,
+    _OpenAIResponsesModel,
+)
 from sagent.types.exceptions import (
     AuthRefreshError,
 )
@@ -507,6 +510,10 @@ class OpenAISubscription:
                     # signing (codex-rs/login/src/auth/default_client.rs).
                     "originator": "codex",
                 },
+                # ``send_with_retry`` owns retries, as for the API-key client.
+                max_retries=0,
+                # The SDK's 5s connect default fails on one Wi-Fi stall.
+                timeout=httpx2.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
             )
             self._authed.set((sdk, token))
             if cached is not None:
@@ -998,7 +1005,11 @@ def login_info(creds: OpenAISubscription.Credentials) -> LoginInfo:
 
 
 class _OpenAISubModel(_OpenAIResponsesModel):
-    """OAuth retry and Codex-specific request restrictions."""
+    """OAuth retry and Codex-specific request restrictions.
+
+    ``max_output_tokens`` passes through: Codex enforces it (measured 2026-10-18,
+    ``luna-6``: a 300 cap stopped at 300 with ``max_tokens``).
+    """
 
     _provider: OpenAISubscription
 
@@ -1006,7 +1017,6 @@ class _OpenAISubModel(_OpenAIResponsesModel):
     def _build_kwargs(self, request: ModelRequest) -> ResponseCreateParamsStreaming:
         body = super()._build_kwargs(request)
         body.pop("temperature", None)
-        body.pop("max_output_tokens", None)
         return body
 
     @override

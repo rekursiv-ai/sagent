@@ -17,6 +17,7 @@ __all__ = [
     "BudgetExhaustedError",
     "ContextOverflowError",
     "UserFacingError",
+    "describe",
     "log_exception_or_warning",
     "log_task_exception",
 ]
@@ -101,6 +102,15 @@ class ContextOverflowError(UserFacingError):
         super().__init__(message)
         self.attempts = attempts
         self.final_tokens = final_tokens
+
+
+# Httpx raises ``ConnectTimeout("")``; the ``f"{type(e).__name__}: {e}"`` this replaces
+# rendered it ``ConnectTimeout: `` in every message a failed request produced.
+def describe(error: BaseException, *, status: int | None = None) -> str:
+    """Name ``error`` by type, HTTP status, and message, omitting empty parts."""
+    status_part = f" {status}" if status is not None else ""
+    message = str(error)
+    return f"{type(error).__name__}{status_part}" + (f": {message}" if message else "")
 
 
 def log_exception_or_warning(

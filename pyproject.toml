@@ -76,29 +76,9 @@ dependencies = [
     "rignore>=0.8.1",
 ]
 
-[project.optional-dependencies]
-# The `sagent-slack` entrypoint (bin/slack.py) is the only slack_sdk consumer
-# and is not reached by `import sagent` or the main CLI, so its deps are opt-in.
-# aiohttp is required transitively by slack_sdk.socket_mode.aiohttp. Install via
-# `pip install sagent[slack]`; the bin/slack.py shebang passes `--extra slack`.
-slack = [
-    "slack-sdk>=3.33.0",
-    "aiohttp>=3.13.5",
-]
-selfhosted = [
-    "accelerate>=1.13.0",
-    "auto-round>=0.12.3",
-    "compressed-tensors",
-    "kernels>=0.13.0",
-    "nvidia-cudnn-cu13 ; sys_platform == 'linux'",
-    "nvidia_cudnn_frontend ; sys_platform == 'linux'",
-    "protobuf",
-    "safetensors",
-    "sentencepiece",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
-    "transformers>=5.8.0",
-]
+[project.scripts]
+sagent = "sagent.bin.cli:main"
+sagent-slack = "sagent.bin.slack:main"
 
 [dependency-groups]
 # NEVER ADD MORE DEPENDENCIES!
@@ -138,10 +118,6 @@ dev = [
 
 # NEVER ADD MORE DEPENDENCY GROUPS!
 
-[project.scripts]
-sagent = "sagent.bin.cli:main"
-sagent-slack = "sagent.bin.slack:main"
-
 [project.urls]
 Homepage = "https://www.rekursiv.ai"
 Repository = "https://github.com/rekursiv-ai/sagent"
@@ -149,6 +125,30 @@ Documentation = "https://github.com/rekursiv-ai/sagent/tree/main/docs"
 Source = "https://github.com/rekursiv-ai/sagent"
 Issues = "https://github.com/rekursiv-ai/sagent/issues"
 Changelog = "https://github.com/rekursiv-ai/sagent/releases"
+
+[project.optional-dependencies]
+# The `sagent-slack` entrypoint (bin/slack.py) is the only slack_sdk consumer
+# and is not reached by `import sagent` or the main CLI, so its deps are opt-in.
+# aiohttp is required transitively by slack_sdk.socket_mode.aiohttp. Install via
+# `pip install sagent[slack]`; the bin/slack.py shebang passes `--extra slack`.
+slack = [
+    "slack-sdk>=3.33.0",
+    "aiohttp>=3.13.5",
+]
+selfhosted = [
+    "accelerate>=1.13.0",
+    "auto-round>=0.12.3",
+    "compressed-tensors",
+    "kernels>=0.13.0",
+    "nvidia-cudnn-cu13 ; sys_platform == 'linux'",
+    "nvidia_cudnn_frontend ; sys_platform == 'linux'",
+    "protobuf",
+    "safetensors",
+    "sentencepiece",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "transformers>=5.8.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -166,7 +166,7 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sagent"]
-exclude = ["**/*_test.py", "**/conftest.py"]
+exclude = ["**/*_test.py", "**/conftest.py", "sagent/lib/testing/**", "sagent/scripts/repro_ctrld_hang.py"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [".github/**", ".codespell-ignore"]
@@ -340,28 +340,6 @@ extend-include = ["*.ipynb"]
 
 select = ["ALL"]
 
-extend-safe-fixes = [
-    "C4",     # Collection and comprehension rewrites.
-    "D301",   # Use `r"""` if any backslashes in a docstring.
-    "E711",   # Compare to None with identity.
-    "E712",   # Compare booleans by truthiness.
-    "E731",   # Do not assign a `lambda` expression, use a `def`.
-    "F401",   # Remove unused imports.
-    "F601",   # Remove overwritten dictionary entries.
-    "F841",   # Remove unused local bindings.
-    "ISC004", # Unparenthesized implicit string concatenation in collection.
-    "PT006",  # Use tuple for pytest.mark.parametrize names.
-    "PT007",  # Use tuple/list consistently for pytest values.
-    "PT018",  # Split composite assertions.
-    "PYI034", # Annotate __enter__/__new__/__iadd__ returns as Self.
-    "RET504", # Remove unnecessary local assignment directly before return.
-    "RUF007", # Prefer `itertools.pairwise()` over `zip()` when iterating over successive pairs.
-    "SIM102", # Collapse nested if statements.
-    "SIM105", # Use contextlib.suppress instead of try-except-pass.
-    "TC",     # Type-checking import and annotation rewrites.
-    "UP",     # Python syntax upgrades.
-]
-
 ignore = [
     # COM812 is deliberately ignored here and re-enabled only by the
     # pre-commit `ruff-check` hook (`--extend-select COM812`). Selecting it in
@@ -419,6 +397,28 @@ ignore = [
     # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
 
+extend-safe-fixes = [
+    "C4",     # Collection and comprehension rewrites.
+    "D301",   # Use `r"""` if any backslashes in a docstring.
+    "E711",   # Compare to None with identity.
+    "E712",   # Compare booleans by truthiness.
+    "E731",   # Do not assign a `lambda` expression, use a `def`.
+    "F401",   # Remove unused imports.
+    "F601",   # Remove overwritten dictionary entries.
+    "F841",   # Remove unused local bindings.
+    "ISC004", # Unparenthesized implicit string concatenation in collection.
+    "PT006",  # Use tuple for pytest.mark.parametrize names.
+    "PT007",  # Use tuple/list consistently for pytest values.
+    "PT018",  # Split composite assertions.
+    "PYI034", # Annotate __enter__/__new__/__iadd__ returns as Self.
+    "RET504", # Remove unnecessary local assignment directly before return.
+    "RUF007", # Prefer `itertools.pairwise()` over `zip()` when iterating over successive pairs.
+    "SIM102", # Collapse nested if statements.
+    "SIM105", # Use contextlib.suppress instead of try-except-pass.
+    "TC",     # Type-checking import and annotation rewrites.
+    "UP",     # Python syntax upgrades.
+]
+
 [tool.ruff.lint.per-file-ignores]
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 
@@ -440,6 +440,22 @@ ignore = [
     "S101",    # Use of `assert` detected.
     "S301",    # Pickle usage.
     "SLF001",  # Private member access.
+    # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
+]
+
+
+"*.ipynb" = [
+    "ARG001",  # Unused function argument (callbacks).
+    "BLE001",  # Blind exception (sandboxed exec).
+    "E402",    # Module level import not at top of file.
+    "F811",    # Redefinition across cells.
+    "F821",    # Undefined name (e.g., `display` from IPython).
+    "INP001",  # Implicit namespace package.
+    "PLC0415", # Import not at top level.
+    "RUF100",  # Preserve noqa for jupytext-synced .py files.
+    "S102",    # Use of exec.
+    "S301",    # Pickle usage.
+    "T201",    # Print found.
     # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
 
@@ -499,27 +515,12 @@ ignore = [
     "TID251",  # Banned API.
     # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
-
-"*.ipynb" = [
-    "ARG001",  # Unused function argument (callbacks).
-    "BLE001",  # Blind exception (sandboxed exec).
-    "E402",    # Module level import not at top of file.
-    "F811",    # Redefinition across cells.
-    "F821",    # Undefined name (e.g., `display` from IPython).
-    "INP001",  # Implicit namespace package.
-    "PLC0415", # Import not at top level.
-    "RUF100",  # Preserve noqa for jupytext-synced .py files.
-    "S102",    # Use of exec.
-    "S301",    # Pickle usage.
-    "T201",    # Print found.
-    # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
-]
-
 "{**/docs/**,**/scripts/**}" = [
     "INP001",  # Standalone example scripts.
     "T201",    # Print found. (Eval scripts use print for output.)
     # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 ]
+
 
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 
@@ -629,8 +630,8 @@ exclude = [
     "build/",
     "dist/",
     "**/third_party/",
-    "**/typings/",
     # NEVER ADD MORE EXCLUSIONS! SUPPRESS IN FILE!
+    "**/typings/",
 ]
 ignore = [
     "**/.venv/",
@@ -642,8 +643,8 @@ ignore = [
     "build/",
     "dist/",
     "**/third_party/",
-    "**/typings/",
     # NEVER ADD MORE IGNORES! SUPPRESS IN FILE!
+    "**/typings/",
 ]
 pythonPlatform = "Linux"
 pythonVersion = "3.12"  # Intentional; test at 3.12 for exports.
@@ -665,6 +666,7 @@ reportMissingModuleSource = false
 reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-only stubs.
 # NEVER ADD MORE SUPPRESSIONS! SUPPRESS IN FILE!
 
+
 [tool.ty.environment]
 python-version = "3.12"  # Intentional; test at 3.12 for exports.
 # Same patch as `[tool.basedpyright] typeshedPath`, with ty's real `ty_extensions`.
@@ -683,8 +685,8 @@ exclude = [
     "build/",
     "dist/",
     "**/third_party/",
-    "**/typings/",
     # NEVER ADD MORE EXCLUSIONS! SUPPRESS IN FILE!
+    "**/typings/",
 ]
 
 [tool.ty.rules]
@@ -692,6 +694,7 @@ all = "warn"
 
 [[tool.ty.overrides]]
 include = ["*_test.py"]
+
 [tool.ty.overrides.rules]
 invalid-key = "ignore"
 
@@ -760,8 +763,8 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
-treekle = { git = "https://github.com/rekursiv-ai/treekle", branch = "main" }
 rekursiv-ai-typeshed = { git = "https://github.com/rekursiv-ai/typings", subdirectory = "typeshed", branch = "main" }
+treekle = { git = "https://github.com/rekursiv-ai/treekle", branch = "main" }
 rekursiv-ai-typings = { git = "https://github.com/rekursiv-ai/typings", branch = "main" }
 configgle = { git = "https://github.com/rekursiv-ai/configgle", branch = "main" }
 priml = { git = "https://github.com/rekursiv-ai/priml", branch = "main" }

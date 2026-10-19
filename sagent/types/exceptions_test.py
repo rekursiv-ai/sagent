@@ -12,6 +12,7 @@ from sagent.types.exceptions import (
     AuthRefreshError,
     ContextOverflowError,
     UserFacingError,
+    describe,
     log_exception_or_warning,
     log_task_exception,
 )
@@ -217,6 +218,24 @@ class TestLogExceptionOrWarning:
         assert len(recs) == 1
         assert recs[0].levelname == "WARNING"
         assert recs[0].exc_info is None
+
+
+@pytest.mark.parametrize(
+    ("error", "status", "expected"),
+    [
+        pytest.param(TimeoutError(), None, "TimeoutError", id="empty"),
+        pytest.param(ValueError("bad"), None, "ValueError: bad", id="message"),
+        pytest.param(TimeoutError(), 504, "TimeoutError 504", id="status"),
+        pytest.param(ValueError("bad"), 500, "ValueError 500: bad", id="both"),
+    ],
+)
+def test_describe_omits_empty_parts(
+    error: BaseException,
+    status: int | None,
+    expected: str,
+) -> None:
+    """Httpx raises ``ConnectTimeout("")``, which rendered ``ConnectTimeout: ``."""
+    assert describe(error, status=status) == expected
 
 
 def test_context_overflow_error_is_user_facing() -> None:

@@ -87,6 +87,7 @@ from sagent.lib.userdirs import data_dir
 from sagent.providers import build_provider
 from sagent.tools.slack import Slack, SlackSender
 from sagent.types.capability import ThinkingEffort
+from sagent.types.exceptions import describe
 from sagent.types.model import ModelRecipe
 from sagent.types.runtime import (
     AssistantMessage,
@@ -1041,7 +1042,7 @@ def _render_event(event: RuntimeEvent) -> str | None:
         return "\n".join(lines) if lines else None
 
     if isinstance(event, ModelResponseError):
-        return f"✗ {type(event.exception).__name__}: {event.exception}"
+        return f"✗ {describe(event.exception)}"
 
     # Streaming chunks (ModelResponsePartial) are intentionally skipped --
     # the final AssistantMessage carries the full text and avoids log spam.

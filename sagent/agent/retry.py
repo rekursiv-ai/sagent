@@ -45,6 +45,7 @@ from sagent.providers.lib.stop_reason import (
     TRUNCATED_STOP_REASONS,
 )
 from sagent.types import runtime
+from sagent.types.exceptions import describe
 from sagent.types.model import (
     Model,
     ModelRequest,
@@ -476,7 +477,6 @@ async def send_with_retry(
                 f" ceiling ({INTERACTIVE_MAX_SLEEP_SEC:.0f}s); skipping it and"
                 " sending now",
             )
-    last_error: Exception | None = None
     prior_emitted = ""
     attempt = -1
     stream_attempt = 0
@@ -484,10 +484,10 @@ async def send_with_retry(
     rate_limit_attempt = 0
     rate_limit_deadline: float | None = None
     stream_interrupts = 0
+    # Never exits by falling through: each pass returns, raises, or retries, and
+    # the generic branch raises exhaustion before ``attempt`` reaches the cap.
     while True:
         attempt += 1
-        if attempt >= max_attempts:
-            break
         live = attempt == 0 and not prior_emitted
         chunks: list[str] = []
         sink = _make_stream_sink(chunks, publish if live else None)
@@ -535,12 +535,11 @@ async def send_with_retry(
         except Exception as e:
             if model.is_context_overflow(e):
                 publish_recoverable(
-                    f"context overflow (attempt {attempt}): {type(e).__name__}: {e}",
+                    f"context overflow (attempt {attempt}): {describe(e)}",
                 )
                 raise
             if not is_retryable(e, model):
                 raise
-            last_error = e
             if live:
                 prior_emitted = "".join(chunks)
             status = error_status(e)
@@ -586,7 +585,8 @@ async def send_with_retry(
                 persistent_attempt += 1
                 if persistent_attempt >= max_persistent_attempts:
                     raise RetriesExhaustedError(
-                        f"Failed after {persistent_attempt} persistent attempts: {e}",
+                        f"Failed after {persistent_attempt} persistent attempts:"
+                        f" {describe(e)}",
                     ) from e
                 attempt_label = persistent_attempt - 1
                 # Exponent is the 0-based attempt index, uniform with the
@@ -625,7 +625,7 @@ async def send_with_retry(
                 # out (Issue#424).
                 if attempt + 1 >= max_attempts:
                     raise RetriesExhaustedError(
-                        f"Failed after {max_attempts} attempts: {e}",
+                        f"Failed after {max_attempts} attempts: {describe(e)}",
                     ) from e
                 delay = _backoff_delay(attempt, cap=MAX_RETRY_DELAY)
                 if server_delay is not None:
@@ -633,17 +633,14 @@ async def send_with_retry(
                 attempt_label = attempt
             diagnostics = error_diagnostics(e)
             publish_recoverable(
-                f"retry attempt {attempt_label}, waiting {delay:.1f}s:"
-                f" {type(e).__name__}: {e}"
+                f"retry attempt {attempt_label}, waiting {delay:.1f}s: {describe(e)}"
                 + (f" [{diagnostics}]" if diagnostics else ""),
             )
             logger.warning(
-                "API error (attempt %d/%d): %s%s: %s. Retrying in %.0fs.%s",
+                "API error (attempt %d/%d): %s. Retrying in %.1fs.%s",
                 attempt_label + 1,
                 max_attempts,
-                type(e).__name__,
-                f" {status}" if status is not None else "",
-                e,
+                describe(e, status=status),
                 delay,
                 f" {diagnostics}" if diagnostics else "",
             )
@@ -660,9 +657,6 @@ async def send_with_retry(
             if on_service_suspended is not None and notable:
                 on_service_suspended(retry_at, delay, server_delay is not None, e)
             await asyncio.sleep(delay)
-    raise RetriesExhaustedError(
-        f"Failed after {max_attempts} attempts: {last_error}",
-    ) from last_error
 
 
 # The base doubles per attempt (``RETRY_BASE_SEC * 2**attempt``) and is clamped to
@@ -858,7 +852,7 @@ def _response_body_text(response: object) -> str:
     except httpx2.ResponseNotRead:
         return ""
     if isinstance(raw, (bytes, bytearray)):
-        return raw.decode("utf-8", errors="replace")
+        return raw.decode(errors="replace")
     return ""
 
 

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, ClassVar, cast, override
 
 import asyncio
 import logging
+import random
 import time
 
 import httpx2
@@ -789,6 +790,109 @@ async def test_send_with_retry_retries_on_retryable_error(
     assert resp.message.text == "recovered"
     assert model.stream_calls == 2
     assert any("retry attempt" in n for n in notes)
+
+
+@pytest.mark.asyncio
+async def test_send_with_retry_names_an_empty_error_and_its_sub_second_delay(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An empty ``ConnectTimeout`` must not log ``: .``, nor a 0.5s wait as 0s.
+
+    httpx raises ``ConnectTimeout("")``, and the first backoff is under a
+    second, which a whole-second format rounds to zero.
+    """
+
+    async def _no_wait(delay_sec: float) -> None:
+        del delay_sec
+
+    def _no_jitter(low: float, high: float) -> float:
+        del high
+        return low
+
+    monkeypatch.setattr(asyncio, "sleep", _no_wait)
+    monkeypatch.setattr(random, "uniform", _no_jitter)
+    model = _ScriptedModel(
+        stream_responses=[httpx2.ConnectTimeout(""), _resp("recovered")],
+    )
+    notes: list[str] = []
+    with caplog.at_level(logging.WARNING):
+        await send_with_retry(
+            model,
+            _request(),
+            publish=_silent,
+            max_attempts=3,
+            persistent_retry=False,
+            publish_recoverable=notes.append,
+        )
+    assert "API error (attempt 1/3): ConnectTimeout. Retrying in 0.5s." in caplog.text
+    assert notes == ["retry attempt 0, waiting 0.5s: ConnectTimeout"]
+
+
+@pytest.mark.asyncio
+async def test_retries_exhausted_on_an_empty_error_names_its_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The final message must not end ``attempts: `` when the error has no text."""
+
+    async def _no_wait(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", _no_wait)
+    model = _ScriptedModel(
+        stream_responses=[httpx2.ConnectTimeout(""), httpx2.ConnectTimeout("")],
+    )
+    with pytest.raises(RetriesExhaustedError) as raised:
+        await send_with_retry(
+            model,
+            _request(),
+            publish=_silent,
+            max_attempts=2,
+            persistent_retry=False,
+            publish_recoverable=_silent,
+        )
+    assert str(raised.value) == "Failed after 2 attempts: ConnectTimeout"
+
+
+@pytest.mark.asyncio
+async def test_persistent_retries_exhausted_on_an_empty_error_names_its_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _no_wait(delay_sec: float) -> None:
+        del delay_sec
+
+    monkeypatch.setattr(asyncio, "sleep", _no_wait)
+    err = httpx2.RemoteProtocolError("")
+    model = _PersistentModel(stream_responses=[err, err])
+    with pytest.raises(RetriesExhaustedError) as raised:
+        await send_with_retry(
+            model,
+            _request(),
+            publish=_silent,
+            max_attempts=5,
+            persistent_retry=True,
+            publish_recoverable=_silent,
+            max_persistent_attempts=2,
+        )
+    assert str(raised.value) == (
+        "Failed after 2 persistent attempts: RemoteProtocolError"
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_note_on_an_empty_error_names_its_type() -> None:
+    model = _ScriptedModel(stream_responses=[RuntimeError()], is_overflow=True)
+    notes: list[str] = []
+    with pytest.raises(RuntimeError):
+        await send_with_retry(
+            model,
+            _request(),
+            publish=_silent,
+            max_attempts=3,
+            persistent_retry=False,
+            publish_recoverable=notes.append,
+        )
+    assert notes == ["context overflow (attempt 0): RuntimeError"]
 
 
 @pytest.mark.asyncio
@@ -1581,6 +1685,45 @@ def test_service_error_snapshot_survives_unread_streaming_body() -> None:
     assert snapshot.status == 429
     assert snapshot.body == ""
     assert snapshot.headers["request-id"] == "req-1"
+
+
+class _BytesOnlyResponse:
+    """A response exposing its body only as ``content``, as a raw SDK error can."""
+
+    status_code: ClassVar[int] = 502
+    headers: ClassVar[dict[str, str]] = {}
+
+    def __init__(self, content: object) -> None:
+        self.content = content
+
+
+@pytest.mark.parametrize(
+    ("content", "body"),
+    [
+        pytest.param(
+            b"na\xc3\xafve \xff",
+            "na\u00efve \ufffd",
+            id="bytes-replaces-invalid",
+        ),
+        pytest.param(bytearray(b"gone"), "gone", id="bytearray"),
+        pytest.param(None, "", id="no-body"),
+    ],
+)
+def test_service_error_snapshot_decodes_a_content_only_body(
+    content: object,
+    body: str,
+) -> None:
+    err = _HTTPError(cast(_FakeResponse, _BytesOnlyResponse(content)))
+    assert service_error_snapshot(err).body == body
+
+
+def test_service_error_snapshot_tolerates_a_response_without_a_body() -> None:
+    class _Bodiless:
+        status_code: ClassVar[int] = 502
+        headers: ClassVar[dict[str, str]] = {}
+
+    err = _HTTPError(cast(_FakeResponse, _Bodiless()))
+    assert service_error_snapshot(err).body == ""
 
 
 def test_error_diagnostics_survives_unread_streaming_body() -> None:

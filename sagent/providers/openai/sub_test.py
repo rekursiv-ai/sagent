@@ -605,6 +605,20 @@ def test_a_request_with_no_tools_says_nothing_about_parallel_calls() -> None:
     assert "parallel_tool_calls" not in _create_kwargs_for()
 
 
+def test_a_subscription_request_keeps_its_response_cap() -> None:
+    """Live 2026-10-18: Codex honors the cap; stripping it let a 300 cap ship 453.
+
+    The endpoint answered ``stop_reason=max_tokens`` at exactly the cap once the
+    field was sent, so dropping it disabled every caller's response budget.
+    """
+    model = _make_provider().model("sol-5.6")
+    request = ModelRequest(messages=[UserMessage(text="hi")], max_response_tokens=300)
+
+    body = dict(model._build_kwargs(request))
+
+    assert body["max_output_tokens"] == 300
+
+
 def _wire_effort_for(*, model_id: str, effort: ThinkingEffort) -> object:
     """Return the ``reasoning.effort`` value the request carried."""
     reasoning = (_create_kwargs_for(model_id=model_id, effort=effort))["reasoning"]
@@ -1518,6 +1532,24 @@ async def test_a_leased_provider_never_posts_to_the_token_url() -> None:
     assert sdk.api_key == lease.fresh
     client.assert_not_called()
     assert not sub._default_credentials_path().parent.exists()
+
+
+@pytest.mark.anyio
+async def test_sdk_matches_the_api_key_client_transport() -> None:
+    """Connect waits out a network stall; only ``send_with_retry`` retries.
+
+    The SDK's own default (5s connect, two retries) failed fast and then
+    multiplied every attempt of the agent's retry loop by three.
+    """
+    lease = _Lease(_make_jwt({"exp": time.time() + 3600}))
+    provider = _borrowing(lease.fresh, lease=lease, expires_at=time.time() + 3600)
+    sdk = await provider.get_sdk()
+    await sdk.close()
+
+    timeout = sdk.timeout
+    assert isinstance(timeout, httpx2.Timeout)
+    assert (timeout.connect, timeout.read) == (30.0, 600.0)
+    assert sdk.max_retries == 0
 
 
 @pytest.mark.anyio

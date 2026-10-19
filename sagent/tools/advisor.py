@@ -31,6 +31,7 @@ from sagent.agent.retry import (
 )
 from sagent.agent.state import current_agent_var
 from sagent.lib import debug_log
+from sagent.types.exceptions import describe
 from sagent.types.model import (
     Model,
     ModelRequest,
@@ -195,7 +196,7 @@ class Advisor:
         ) as exc:
             return ToolResult(
                 call_id="",
-                content=f"Advisor consult failed: {type(exc).__name__}: {exc}",
+                content=f"Advisor consult failed: {describe(exc)}",
                 is_error=True,
             )
         return ToolResult(call_id="", content=response.message.text)
