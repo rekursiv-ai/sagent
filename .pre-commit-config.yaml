@@ -541,16 +541,14 @@ repos:
       # Keep after pytest: pre-commit runs hooks in declaration order.
       # Missing coverage is normal when no source module was tested.
       #
-      # Lists the 20 worst CHANGED source files a test executed that are below
-      # 98%, then one count line for the rest. `pytest` measures each changed
-      # file's whole directory (`--cov=${f%/*}`), and `--all-files` printed
-      # 2,700 rows, 2,348 of them 0% files no test executed. Never
-      # `coverage report --include`: it matched 2,727 globs per file for 48s.
-      # An unreadable data file still fails the hook.
-      #
       # Enforces `fail_under` on the changed, non-omitted sources taken
       # together, a file no test executed counting 0%; `pytest` above cannot,
-      # its total spans unchanged siblings. No floor (the monorepo) skips this.
+      # its total spans unchanged siblings. On failure it names each file short
+      # of the floor with its missed lines. No floor (the monorepo) skips this:
+      # there `pytest` runs only sidecar tests, so a file reached by another's
+      # imports reads as a false low, and `coverage-floor` gates per file.
+      # Never `coverage report --include`: it matched 2,727 globs per file for
+      # 48s. An unreadable data file still fails the hook.
         # `coverage-summary` takes no filenames, so pre-commit cannot split its work
         # into argv chunks; this twin collects them into a spool file.
       - id: coverage-summary-pre
@@ -570,8 +568,6 @@ repos:
         types: [python]
         require_serial: true
         pass_filenames: false
-        # Pre-commit otherwise hides the report when this hook passes.
-        verbose: true
         entry: >-
           bash -c '
             p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/coverage-summary.$p; files=(); if [ -f "$spool" ]; then while IFS= read -r -d "" f; do files+=("$f"); done < "$spool"; rm -f "$spool"; set -- "${files[@]}"; fi;
@@ -585,7 +581,7 @@ repos:
               esac;
             done;
             ((${#sources[@]})) || exit 0;
-            printf "%s\n" "${sources[@]}" | uv --quiet run --frozen --group pre-commit python -c "import fnmatch, os, sys, coverage; c = coverage.Coverage(); c.load(); data = c.get_data(); files = sys.stdin.read().split(); ran = [f for f in files if data.lines(os.path.abspath(f))]; rows = sorted((100 * (len(s) - len(m)) / len(s), f, len(m), len(s), gaps) for f, s, _, m, gaps in map(c.analysis2, ran) if 100 * (len(s) - len(m)) < 98 * len(s)); rows and print(\"\n\".join(f\"{p:5.1f}%  {n:>4}/{t:<4} missed  {os.path.relpath(f)}  {g[:60]}\" for p, f, n, t, g in rows[:20])); rows[20:] and print(f\"... and {len(rows) - 20} more below 98%\"); print(f\"{len(ran) - len(rows)} changed file(s) at >= 98%; {len(files) - len(ran)} executed by no test.\"); floor = c.config.fail_under; kept = [f for f in files if floor and not any(fnmatch.fnmatch(os.path.abspath(f), p) for p in c.config.run_omit)]; counts = [(len(s), len(m)) for _, s, _, m, _ in map(c.analysis2, kept)]; total = sum(n for n, _ in counts); covered = total - sum(m for _, m in counts); total and 100 * covered < floor * total and sys.exit(f\"Changed files are {100 * covered / total:.2f}% covered, below fail_under={floor:g}.\")"
+            printf "%s\n" "${sources[@]}" | uv --quiet run --frozen --group pre-commit python -c "import fnmatch, os, sys, coverage; c = coverage.Coverage(); c.load(); floor = c.config.fail_under; files = sys.stdin.read().split(); kept = [f for f in files if floor and not any(fnmatch.fnmatch(os.path.abspath(f), p) for p in c.config.run_omit)]; rows = [(f, len(s), len(m), gaps) for f, s, _, m, gaps in map(c.analysis2, kept)]; total = sum(n for _, n, _, _ in rows); covered = total - sum(m for _, _, m, _ in rows); short = [r for r in rows if r[1] and 100 * (r[1] - r[2]) < floor * r[1]]; total and 100 * covered < floor * total and sys.exit(\"\n\".join([*(f\"{os.path.relpath(f)}  {m}/{n} missed  {g}\" for f, n, m, g in short), f\"Changed files are {100 * covered / total:.2f}% covered, below fail_under={floor:g}.\"]))"
           ' bash
 
   # === Pre-Push Gates =========================================================
