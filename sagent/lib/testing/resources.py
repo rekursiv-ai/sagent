@@ -195,6 +195,12 @@ def cap_math_threads() -> None:
     AMD host, where MKL takes a generic path anyway, and broke an Intel one.
     MKL reads it at its first GEMM, so it must be set before any matmul runs.
 
+    ``OPENBLAS_CORETYPE`` is the same pin for NumPy's OpenBLAS, which picks its
+    kernel per CPU at load. Measured on an AMD engineering sample it picked
+    ``SkylakeX``, and a float64 SVD moved by one ULP from the golden that
+    ``Haswell`` and ``Zen`` reproduce. OpenBLAS reads it once at load, so it
+    must be set before NumPy imports.
+
     Numba's ``prange`` pool is ``NUMBA_NUM_THREADS`` wide, every CPU by
     default, so an xdist worker keeps two: under ``pytest -n 32`` unit tests of
     10 ms took up to 2 s. A serial run keeps every CPU (an 8,192-world Craftax
@@ -218,13 +224,27 @@ def cap_math_threads() -> None:
         "BLIS_NUM_THREADS",
     ):
         os.environ.setdefault(name, "1")  # noqa: TID251 -- Thread cap the operator may override; not a provisioned cache path.
-    os.environ.setdefault("MKL_CBWR", "COMPATIBLE")  # noqa: TID251 -- Kernel pin the operator may override; not a provisioned cache path.
+    for name, value in kernel_pins().items():
+        os.environ.setdefault(name, value)  # noqa: TID251 -- Kernel pin the operator may override; not a provisioned cache path.
     os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")  # noqa: TID251 -- Thread policy the operator may override; not a provisioned cache path.
     if "PYTEST_XDIST_WORKER" in os.environ:
         os.environ.setdefault("NUMBA_NUM_THREADS", "2")  # noqa: TID251 -- Thread cap the operator may override; not a provisioned cache path.
     numba_config = cast(_NumbaConfig | None, sys.modules.get("numba.core.config"))
     if numba_config is not None:
         numba_config.reload_config()
+
+
+def kernel_pins() -> dict[str, str]:
+    """Return the BLAS kernel pins ``cap_math_threads`` sets, for a child's env.
+
+    A pytest plugin loads NumPy before any conftest runs, so a pytest
+    subprocess needs these in its environment at launch to reach OpenBLAS.
+
+    Returns:
+      pins: Each pinned variable's name and value.
+
+    """
+    return {"MKL_CBWR": "COMPATIBLE", "OPENBLAS_CORETYPE": "Haswell"}
 
 
 @contextmanager
