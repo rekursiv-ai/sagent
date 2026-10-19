@@ -36,7 +36,6 @@ from treekle import PlainTree, immutable
 
 from sagent.agent.agent import Agent
 from sagent.tools import AgentSelf
-from sagent.types.exceptions import describe
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
@@ -287,7 +286,7 @@ async def run_condition(
         async for _ in events:
             pass
     except Exception as e:  # noqa: BLE001 -- The example boundary reports any solver failure without aborting cleanup.
-        err = describe(e)[:200]
+        err = f"{type(e).__name__}: {str(e)[:100]}"
 
     history = cast(list[ModelContextEvent], agent.history)  # ty: ignore[redundant-cast] -- The cast documents the runtime protocol across an untyped solver boundary.  # pyright: ignore[reportUnnecessaryCast] -- Agent's import boundary is unknown to basedpyright.
     timeline = _build_timeline(history, tool, model.tagged_model_id)
