@@ -6270,7 +6270,7 @@ async def test_agent_idle_suppressed_while_compact_task_running() -> None:
             timeout_sec=1.0,
         )
         # While the compactor blocks, AgentIdle must not fire.
-        idles_during_compact = []
+        idles_during_compact: list[AgentIdle] = []
         for _ in range(10):
             await asyncio.sleep(0)
             idles_during_compact = [
@@ -7708,7 +7708,7 @@ def test_legacy_cross_session_mask_range_dropped_at_deserialize() -> None:
             [{"session_id": sid, "ordinal": 1}, {"session_id": "legacy", "ordinal": 1}],
         ],
         "insert_after": None,
-        "payload": [],
+        "payload": list[object](),
         "strategy": "legacy",
     }
     ref = TapeRef(session_id=sid, ordinal=2)

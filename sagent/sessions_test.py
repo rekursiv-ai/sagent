@@ -942,7 +942,7 @@ def test_migration_survives_one_unreadable_file(tmp_path: Path) -> None:
     def failing_copy2(source: str, target: str) -> str:
         if Path(source).name == "bad":
             raise OSError("unreadable")
-        return str(real_copy(source, target))
+        return real_copy(source, target)
 
     with patch.object(shutil, "copy2", failing_copy2):
         sessions._copy_tree_merge(src, tmp_path / "dst")

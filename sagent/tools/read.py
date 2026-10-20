@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Final, cast
 
 import asyncio
+import contextlib
 import json
 import re
 
@@ -424,8 +425,9 @@ def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
             content=f"[Not a valid Jupyter notebook: {file_path}]",
             is_error=True,
         )
-    cells_raw = from_plain(nb_d.get("cells"), object, default=[])
-    cells = cast(list[object], cells_raw) if isinstance(cells_raw, list) else []
+    cells: list[object] = []
+    with contextlib.suppress(ReadError):
+        cells = from_plain(nb_d.get("cells"), list[object], default=cells)
     parts: list[str] = []
     for i, cell in enumerate(cells):
         if not isinstance(cell, dict):
@@ -455,8 +457,9 @@ def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
 # notebook for.
 def _collect_cell_outputs(cell: Mapping[str, object], parts: list[str]) -> None:
     """Append text outputs from a notebook cell to ``parts``."""
-    outputs_raw = from_plain(cell.get("outputs"), object, default=[])
-    outputs = cast(list[object], outputs_raw) if isinstance(outputs_raw, list) else []
+    outputs: list[object] = []
+    with contextlib.suppress(ReadError):
+        outputs = from_plain(cell.get("outputs"), list[object], default=outputs)
     for out_d in outputs:
         if not isinstance(out_d, dict):
             continue

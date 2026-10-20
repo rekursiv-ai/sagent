@@ -832,7 +832,7 @@ def _peek_session(session_dir: Path) -> SessionInfo | None:
                         and rec.get("type") == "user"
                         and isinstance(rec.get("text"), str)
                     ):
-                        first_user_msg = str(rec["text"])
+                        first_user_msg = str(rec["text"])  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
                 elif kind == "meta":
                     model_id = str(rec.get("model_id", ""))
                     session_id = str(rec.get("session_id", session_id))

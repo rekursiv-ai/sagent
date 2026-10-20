@@ -23,9 +23,8 @@ model id is injected, so it runs on Gemini or Anthropic unchanged.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Mapping, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import TYPE_CHECKING, Any, Final
 
 import asyncio
 import re
@@ -38,14 +37,14 @@ from sagent.agent.agent import Agent
 from sagent.tools import AgentSelf
 from sagent.types.runtime import (
     AssistantMessage,
-    ModelContextEvent,
-    RuntimeEvent,
     ToolResult,
     UserMessage,
 )
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from sagent.types.model import Model, ModelRecipe
     from sagent.types.tools import Tool
 
@@ -279,16 +278,13 @@ async def run_condition(
     )
     err = ""
     try:
-        events = cast(
-            AsyncGenerator[RuntimeEvent, None],
-            agent.run(UserMessage(text=TASK)),
-        )  # ty: ignore[redundant-cast] -- The cast documents the runtime protocol across an untyped solver boundary.  # pyright: ignore[reportUnnecessaryCast] -- Agent's import boundary is unknown to basedpyright.
+        events = agent.run(UserMessage(text=TASK))
         async for _ in events:
             pass
     except Exception as e:  # noqa: BLE001 -- The example boundary reports any solver failure without aborting cleanup.
         err = f"{type(e).__name__}: {str(e)[:100]}"
 
-    history = cast(list[ModelContextEvent], agent.history)  # ty: ignore[redundant-cast] -- The cast documents the runtime protocol across an untyped solver boundary.  # pyright: ignore[reportUnnecessaryCast] -- Agent's import boundary is unknown to basedpyright.
+    history = agent.history
     timeline = _build_timeline(history, tool, model.tagged_model_id)
     swaps = [s for s in timeline if s["kind"] == "swap"]
     verdicts = [c["verdict"] for c in tool.calls if c["verdict"]]

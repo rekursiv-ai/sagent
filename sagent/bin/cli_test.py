@@ -146,8 +146,8 @@ class _ChildStubModel(MockModelCaps):
     supports_thinking: bool = True
 
 
-def _child_record(**overrides: object) -> PersistentAgentRecord:
-    record = PersistentAgentRecord(
+def _child_record() -> PersistentAgentRecord:
+    return PersistentAgentRecord(
         label="fix-tools",
         run_id="run-1",
         session_dir="",
@@ -160,7 +160,6 @@ def _child_record(**overrides: object) -> PersistentAgentRecord:
         system="system text",
         notify_on_asleep=True,
     )
-    return dataclasses.replace(record, **overrides)
 
 
 def _stub_build_provider(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,7 +234,11 @@ async def test_resumed_child_exit_persists_terminal_state(
     append_session(
         tmp_path / "session.jsonl",
         persistent_agents=[
-            _child_record(label="resumed-child", session_dir=str(tmp_path / "c")),
+            dataclasses.replace(
+                _child_record(),
+                label="resumed-child",
+                session_dir=str(tmp_path / "c"),
+            ),
         ],
     )
     await _resume_persistent_agents(
@@ -255,7 +258,8 @@ def test_build_persistent_child_restores_thinking_state(
 ) -> None:
     """The thinking axes round-trip through a persistent-child rebuild."""
     _stub_build_provider(monkeypatch)
-    record = _child_record(
+    record = dataclasses.replace(
+        _child_record(),
         thinking_budget="auto",
         thinking_output="text",
         show_thinking=False,
@@ -274,7 +278,7 @@ def test_build_persistent_child_restores_frozen_system(
     top of that snapshot, so the resumed prompt must stay frozen.
     """
     _stub_build_provider(monkeypatch)
-    record = _child_record(frozen_system=True)
+    record = dataclasses.replace(_child_record(), frozen_system=True)
     child = _build_persistent_child(record, allow_providers=())
     assert child.frozen_system is True
 
@@ -309,7 +313,7 @@ def test_resumed_persistent_child_missing_account_falls_back_to_default(
     )
 
     child = _build_persistent_child(
-        _child_record(account="work"),
+        dataclasses.replace(_child_record(), account="work"),
         allow_providers=(),
     )
 
@@ -346,7 +350,7 @@ def test_resumed_persistent_child_preserves_available_named_account(
     )
 
     child = _build_persistent_child(
-        _child_record(account="work"),
+        dataclasses.replace(_child_record(), account="work"),
         allow_providers=(),
     )
 
@@ -386,7 +390,11 @@ def test_resumed_persistent_child_explicit_limits_survive_model_switch(
 ) -> None:
     _stub_build_provider(monkeypatch)
     child = _build_persistent_child(
-        _child_record(max_request_tokens=50_000, max_response_tokens=512),
+        dataclasses.replace(
+            _child_record(),
+            max_request_tokens=50_000,
+            max_response_tokens=512,
+        ),
         allow_providers=(),
     )
 

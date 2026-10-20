@@ -1027,7 +1027,7 @@ def _plan_model(
             provider, inferred_auth = inferred
             auth = auth if auth is not None else inferred_auth
     allow = _allowed_providers()
-    if provider not in (None, spec.provider) and provider not in allow:
+    if provider is not None and provider != spec.provider and provider not in allow:
         return provider_not_allowed_result(provider, allow, spec.provider)
     try:
         return agent.prepare_model_change(

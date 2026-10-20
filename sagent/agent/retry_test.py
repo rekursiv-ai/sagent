@@ -478,7 +478,7 @@ def test_extract_retry_after_structured_ms_none_falls_through() -> None:
     """
 
     class _CliRetryableError(Exception):
-        retry_after_ms = None
+        retry_after_ms: None = None
         response = _FakeResponse(429, {"retry-after": "7"})
 
     assert extract_retry_after(_CliRetryableError()) == pytest.approx(7.0)

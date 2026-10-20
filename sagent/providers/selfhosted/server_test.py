@@ -388,7 +388,7 @@ def test_self_hosted_model_properties() -> None:
     # Structural-only stub: the model reads ``hosted_*`` and ``tokenizer``
     # here, so only ``native_model`` stays absent.
     stub = _StubProvider()
-    m = SelfHostedModel(provider=stub)  # pyright: ignore[reportArgumentType] -- The test double implements only the provider surface exercised by this constructor.  # ty: ignore[invalid-argument-type] -- The test double implements only the provider surface exercised by this constructor.
+    m = SelfHostedModel(provider=stub)  # pyright: ignore[reportArgumentType] -- The test double implements only the provider surface exercised by this constructor.  # ty: ignore[invalid-argument-type] -- The test double implements only the provider surface exercised by this constructor.  # pyrefly: ignore[bad-argument-type] -- The test double implements only the provider surface exercised by this constructor.
     assert m.limits.max_request_tokens == 1234
     assert m.capability.model_id == "stub/qwen"
     assert m.limits.max_response_tokens == 567

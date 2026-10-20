@@ -103,7 +103,7 @@ else:
     openai = lazy_import("openai")  # 493ms cold.
 
 
-from treekle import MutablePlainTree, ReadError, from_plain, json_loads
+from treekle import MutablePlainTree, from_plain, json_loads
 
 from sagent.catalog.openai import subscription, subscription_models
 from sagent.catalog.table import ModelCatalog
@@ -1011,7 +1011,7 @@ class _OpenAISubModel(_OpenAIResponsesModel):
     ``luna-6``: a 300 cap stopped at 300 with ``max_tokens``).
     """
 
-    _provider: OpenAISubscription
+    _provider: OpenAISubscription  # pyrefly: ignore[bad-override-mutable-attribute] -- Narrowed to the provider this model is built from; nothing assigns another.
 
     @override
     def _build_kwargs(self, request: ModelRequest) -> ResponseCreateParamsStreaming:
@@ -1096,7 +1096,7 @@ def _jwt_payload(token: str) -> dict[str, object]:
     raw += "=" * (-len(raw) % 4)
     try:
         return json_loads(base64.urlsafe_b64decode(raw), dict[str, object])
-    except (ValueError, ReadError):
+    except ValueError:
         return {}
 
 

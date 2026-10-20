@@ -834,7 +834,7 @@ def test_format_tasks_lists_registered_agent_fg_idle() -> None:
     other = MagicMock()
     other.runtime.model_call = None
     other.runtime.compact_task = None
-    other.background = {}
+    other.background = dict[str, object]()
     with patch(
         "sagent.repl.slash_handlers.agent_registry",
         {"Agent_0": other},
@@ -1629,7 +1629,7 @@ def _make_kb_event(text: str) -> KeyPressEvent:
     buf.cursor_position = len(text)
     buf.document.text_before_cursor = text
     buf.document.text = text
-    buf.history.get_strings.return_value = []
+    buf.history.get_strings.return_value = list[str]()
     event = MagicMock()
     event.current_buffer = buf
     return cast(KeyPressEvent, event)
@@ -2499,7 +2499,7 @@ def test_format_tasks_persistent_subagent_shows_idle_phase() -> None:
     parent.background = {"child-1": job}
     child = MagicMock()
     child.work = None
-    child.background = {}
+    child.background = dict[str, object]()
     child.runtime = _make_runtime()
     with patch(
         "sagent.repl.slash_handlers.agent_registry",

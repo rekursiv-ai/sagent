@@ -6,7 +6,7 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from typing import TYPE_CHECKING, ClassVar, Final, Self, override
-from urllib import error, request
+from urllib import request
 
 import atexit
 import os
@@ -303,7 +303,7 @@ def _http_ok(url: str) -> bool:
     try:
         with request.urlopen(url, timeout=0.2) as response:  # noqa: S310 -- local/provider-supplied readiness URL only.
             return bool(200 <= response.status < 300)
-    except (OSError, error.URLError):
+    except OSError:
         return False
 
 

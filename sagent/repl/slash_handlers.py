@@ -182,7 +182,7 @@ async def do_login(agent: Controllable, printer: Printer | None) -> None:
         return
     try:
         await agent.relogin()
-    except (ValueError, RuntimeError, OSError, TimeoutError) as exc:
+    except (ValueError, RuntimeError, OSError) as exc:
         _write(printer, f"[/login] {exc}")
         return
     _write(printer, f"[/login] {spec.provider} re-authenticated")

@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Final, TypedDict, override
+from typing import TYPE_CHECKING, Final, override
+from typing_extensions import TypedDict
 from unittest.mock import MagicMock, patch
 
 import asyncio
@@ -79,7 +80,7 @@ if TYPE_CHECKING:
 _AGENT_SPAWN_LOGGER = agent_spawn.__name__
 
 
-class _SpawnScope(TypedDict):
+class _SpawnScope(TypedDict, closed=True):
     child_path: str
     eff_max_depth: int | None
 

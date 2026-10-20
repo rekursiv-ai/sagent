@@ -674,7 +674,7 @@ class _AnthropicModel(ModelDefaults):
         for k in ("max_tokens", "temperature", "stop_sequences", "service_tier"):
             kwargs.pop(k, None)
         try:
-            result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType] -- SDK overload omits dynamic kwargs.  # ty: ignore[invalid-argument-type] -- SDK overload cannot model validated dynamic kwargs.
+            result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType] -- SDK overload omits dynamic kwargs.  # ty: ignore[invalid-argument-type] -- SDK overload cannot model validated dynamic kwargs.  # pyrefly: ignore[bad-argument-type] -- SDK overload cannot model validated dynamic kwargs.
         except anthropic.AuthenticationError:
             await self._provider.handle_auth_error(failed=sdk)
             sdk = await self._provider.get_sdk()
@@ -683,7 +683,7 @@ class _AnthropicModel(ModelDefaults):
                 messages,
                 cache_ttl=self._cache_ttl_wire(),
             )
-            result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType] -- SDK overload omits dynamic kwargs.  # ty: ignore[invalid-argument-type] -- SDK overload cannot model validated dynamic kwargs.
+            result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType] -- SDK overload omits dynamic kwargs.  # ty: ignore[invalid-argument-type] -- SDK overload cannot model validated dynamic kwargs.  # pyrefly: ignore[bad-argument-type] -- SDK overload cannot model validated dynamic kwargs.
         return result.input_tokens
 
     def is_context_overflow(self, error: Exception) -> bool:
@@ -878,7 +878,7 @@ class _AnthropicModel(ModelDefaults):
             model=self.capability.model_id,
             roles=debug_log.role_sequence(messages),
             n_messages=len(messages),
-            n_tools=len(kwargs.get("tools") or []),  # pyright: ignore[reportArgumentType] -- kwargs is dynamically assembled.  # ty: ignore[invalid-argument-type] -- kwargs.tools is validated as a list at runtime.
+            n_tools=len(request.tools),
             thinking=kwargs.get("thinking"),
             speed=extra_body.get("speed"),
             fast_beta=_FAST_MODE_BETA in extra_headers.get("anthropic-beta", ""),
@@ -1013,7 +1013,7 @@ async def _raw_message_stream(
     # its own streams the same alias (``_response._parse`` unwraps ``Annotated``
     # before use), so narrowing this to one member class would break decoding.
     stream: AsyncStream[RawMessageStreamEvent] = AsyncStream(  # pyright: ignore[reportUnknownVariableType] -- the Annotated `cast_to` leaves `_T` unsolved.
-        cast_to=anthropic.types.RawMessageStreamEvent,  # ty: ignore[invalid-argument-type] -- SDK alias is Annotated[...], not type[_T]; unwrapped at runtime  # pyright: ignore[reportArgumentType] -- SDK alias is unwrapped by the SDK at runtime.
+        cast_to=anthropic.types.RawMessageStreamEvent,  # ty: ignore[invalid-argument-type] -- SDK alias is Annotated[...], not type[_T]; unwrapped at runtime.  # pyright: ignore[reportArgumentType] -- SDK alias is unwrapped by the SDK at runtime.  # pyrefly: ignore[bad-argument-type] -- SDK alias is Annotated[...], not type[_T]; unwrapped at runtime.
         response=response,
         client=sdk,
     )

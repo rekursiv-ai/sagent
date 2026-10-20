@@ -113,7 +113,9 @@ class ModelTable(Mapping[str, ModelCapability]):
     rows: tuple[ModelCapability, ...]
     """Every row, newest-first within each family."""
 
-    roles: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+    roles: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType[str, str]({}),
+    )
     """Role name to the family or id it means (``{"default": "opus"}``)."""
 
     _by_id: Mapping[str, ModelCapability] = field(init=False, repr=False)

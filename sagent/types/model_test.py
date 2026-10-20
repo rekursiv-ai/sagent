@@ -136,12 +136,12 @@ def test_token_count_add_returns_not_implemented_for_non_token_count() -> None:
     and (if that also fails) raise a clear ``TypeError`` naming both
     operand types.
     """
-    assert TokenCount().__add__(1) is NotImplemented  # ty: ignore[invalid-argument-type] -- The negative test passes a foreign operand to verify deferral.  # pyright: ignore[reportArgumentType] -- The negative test passes a foreign operand to verify deferral.
+    assert TokenCount().__add__(1) is NotImplemented  # ty: ignore[invalid-argument-type] -- The negative test passes a foreign operand to verify deferral.  # pyright: ignore[reportArgumentType] -- The negative test passes a foreign operand to verify deferral.  # pyrefly: ignore[bad-argument-type] -- The negative test passes a foreign operand to verify deferral.
 
 
 def test_token_count_sub_returns_not_implemented_for_non_token_count() -> None:
     """B15: ``__sub__`` similarly defers instead of raising ``AttributeError``."""
-    assert TokenCount().__sub__("nope") is NotImplemented  # ty: ignore[invalid-argument-type] -- The negative test passes a foreign operand to verify deferral.  # pyright: ignore[reportArgumentType] -- The negative test passes a foreign operand to verify deferral.
+    assert TokenCount().__sub__("nope") is NotImplemented  # ty: ignore[invalid-argument-type] -- The negative test passes a foreign operand to verify deferral.  # pyright: ignore[reportArgumentType] -- The negative test passes a foreign operand to verify deferral.  # pyrefly: ignore[bad-argument-type] -- The negative test passes a foreign operand to verify deferral.
 
 
 # ---- ModelRecipe -----------------------------------------------------------

@@ -812,11 +812,11 @@ class TestRenderEvent:
         # ``AssistantMessage`` isn't in the ``RuntimeEvent`` union but the
         # renderer accepts it for the cases where the agent runtime
         # publishes assistant messages as part of an observer fanout.
-        ev: RuntimeEvent = AssistantMessage(text="hello")  # ty: ignore[invalid-assignment] -- The fixture uses a runtime event outside the narrow static union.  # pyright: ignore[reportAssignmentType] -- The fixture uses a runtime event outside the narrow static union.
+        ev: RuntimeEvent = AssistantMessage(text="hello")  # ty: ignore[invalid-assignment] -- The fixture uses a runtime event outside the narrow static union.  # pyright: ignore[reportAssignmentType] -- The fixture uses a runtime event outside the narrow static union.  # pyrefly: ignore[bad-assignment] -- The fixture uses a runtime event outside the narrow static union.
         assert _render_event(ev) == "hello"
 
     def test_assistant_message_empty(self) -> None:
-        ev: RuntimeEvent = AssistantMessage(text="   ")  # ty: ignore[invalid-assignment] -- The fixture uses a runtime event outside the narrow static union.  # pyright: ignore[reportAssignmentType] -- The fixture uses a runtime event outside the narrow static union.
+        ev: RuntimeEvent = AssistantMessage(text="   ")  # ty: ignore[invalid-assignment] -- The fixture uses a runtime event outside the narrow static union.  # pyright: ignore[reportAssignmentType] -- The fixture uses a runtime event outside the narrow static union.  # pyrefly: ignore[bad-assignment] -- The fixture uses a runtime event outside the narrow static union.
         assert _render_event(ev) is None
 
     def test_tool_result_with_hint(self) -> None:
@@ -1061,7 +1061,7 @@ class TestHandle:
         req = MagicMock()
         req.type = "events_api"
         req.envelope_id = "env1"
-        req.payload = {}
+        req.payload = dict[str, object]()
         await adapter._handle(
             cast(AsyncBaseSocketModeClient, client),
             cast(SocketModeRequest, req),
@@ -1532,7 +1532,7 @@ class TestAdapterConstruction:
 
         fake_child.serve_forever = _serve
         fake_child.shutdown = MagicMock()
-        fake_child.runtime.observers = []
+        fake_child.runtime.observers = list[object]()
 
         with (
             patch(

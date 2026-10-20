@@ -40,6 +40,8 @@ from sagent.types.cost import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from sagent.types.cost import ServiceTier
+
 
 __all__ = ["api", "models"]
 
@@ -52,7 +54,8 @@ def api() -> ModelCapability:
 
     """
     transport = compatible()
-    return replace(transport, service_tier=transport.service_tier | {"priority"})
+    priority: frozenset[ServiceTier] = frozenset({"priority"})
+    return replace(transport, service_tier=transport.service_tier | priority)
 
 
 def models() -> ModelTable:

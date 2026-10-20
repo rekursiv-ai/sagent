@@ -492,7 +492,7 @@ class _FailedResponse:
         (),
         {"code": "server_error", "message": "backend failed"},
     )()
-    incomplete_details = None
+    incomplete_details: None = None
 
 
 class _IncompleteEvent:
@@ -507,7 +507,7 @@ class _IncompleteResponse:
 
     id: str = "resp_incomplete"
     status: str = "incomplete"
-    error = None
+    error: None = None
 
     def __init__(self, reason: str) -> None:
         self.incomplete_details = type("Incomplete", (), {"reason": reason})()

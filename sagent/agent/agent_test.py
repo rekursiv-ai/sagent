@@ -921,14 +921,14 @@ def test_agent_tools_map_preserves_compact_restorable_identity() -> None:
         async def post_compact_restore(
             self,
             history: list[ModelContextEvent],
-            tool_state: object,
+            tool_state: ToolState,
             *,
-            budget_chars: int = 100_000,
+            budget_tokens: int,
+            estimate_tokens: Callable[[str], int],
         ) -> None:
-            del history, tool_state, budget_chars
+            del history, tool_state, budget_tokens, estimate_tokens
 
     tool = _RestorableStub()
-    assert isinstance(tool, CompactRestorable)
     a = _build_agent(tools=[tool])
     stored = a.tools_map["Echo"]
     assert isinstance(stored, CompactRestorable), (
@@ -3731,23 +3731,23 @@ async def test_activity_active_spans_tool_execution() -> None:
     assert a.activity.active is True
 
     a.publish(ModelResponseComplete(message=msg_with_tools))
-    assert a.activity.active is True, (
+    assert a.activity.active is True, (  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
         "spinner should keep ticking while tools run; tool_calls in the "
         "response mean the cohort is about to fire"
     )
 
     # Tool result arrives.
     a.publish(ToolResult(call_id="c1", content="ok"))
-    assert a.activity.active is True
+    assert a.activity.active is True  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
 
     # Round 2 model call fires.
     a.publish(ModelCallStarted())
-    assert a.activity.active is True
+    assert a.activity.active is True  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
 
     # Round 2 has no tool calls; model truly idles.
     a.publish(ModelResponseComplete(message=AssistantMessage(text="done")))
     a.publish(ModelIdle())
-    assert a.activity.active is False, "ModelIdle marks the end of the round chain"
+    assert a.activity.active is False, "ModelIdle marks the end of the round chain"  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
 
 
 @pytest.mark.asyncio
@@ -3768,7 +3768,7 @@ async def test_activity_active_clears_on_model_response_error() -> None:
     assert a.activity.active is True
 
     a.publish(ModelResponseError(RuntimeError("boom")))
-    assert a.activity.active is False, (
+    assert a.activity.active is False, (  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
         "ModelResponseError is terminal -- spinner must stop"
     )
     assert a.activity.current_call_start == 0.0, (
@@ -5014,7 +5014,7 @@ async def test_compact_if_needed_triggers_on_last_response_total() -> None:
         ),
     )
     await a.compact_if_needed(history, a.model)
-    assert rec.compacted is True
+    assert rec.compacted is True  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
 
 
 @pytest.mark.asyncio
@@ -10485,11 +10485,13 @@ async def test_fold_messages_folds_only_oversized_user_side_text_to_even_shares(
     target = 1_000
     at_half = a.model.approx_text_tokens("h" * 2_000)
     assert at_half == target // 2, "the boundary message must sit exactly at half"
+    big_user = UserMessage(text="u" * 8_000)
+    big_send = AgentSendMessage(source="peer", text="s" * 8_000)
     payload: list[ModelContextEvent] = [
-        UserMessage(text="u" * 8_000),
+        big_user,
         AssistantMessage(text="a" * 8_000),
         UserMessage(text="h" * 2_000),
-        AgentSendMessage(source="peer", text="s" * 8_000),
+        big_send,
         UserMessage(text="small"),
     ]
 
@@ -10499,8 +10501,8 @@ async def test_fold_messages_folds_only_oversized_user_side_text_to_even_shares(
     assert out[1:3] == payload[1:3]
     assert out[4] is payload[4]
     # A fold replaces only the text; the message keeps its identity and source.
-    assert out[0] == replace(payload[0], text="folded u")
-    assert out[3] == replace(payload[3], text="folded s")
+    assert out[0] == replace(big_user, text="folded u")
+    assert out[3] == replace(big_send, text="folded s")
 
     # A target too small to split still gives each fold at least one token.
     folds.clear()

@@ -372,7 +372,7 @@ class SummaryCompactor:
                 )
         else:
             to_summarize = _strip_attachments(history)
-            to_keep = []
+            to_keep: list[ModelContextEvent] = []
 
         token_before = estimate_entry_tokens(compact_model, history)
 

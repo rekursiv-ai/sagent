@@ -1696,7 +1696,7 @@ def _dispatch_stream_event(
     """Route one stream_event payload to the runtime ``publish`` sink."""
     event_type = event.get("type")
     if event_type == "content_block_start":
-        idx = int(cast(int, event.get("index") or 0))
+        idx = int(cast(int, event.get("index") or 0))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         block = cast(dict[str, MutablePlainTree], event.get("content_block") or {})
         if block.get("type") == "thinking":
             thinking_blocks.append(_new_thinking_block())
@@ -1711,7 +1711,7 @@ def _dispatch_stream_event(
         delta = cast(dict[str, MutablePlainTree], event.get("delta") or {})
         delta_type = delta.get("type")
         if delta_type == "input_json_delta":
-            idx = int(cast(int, event.get("index") or 0))
+            idx = int(cast(int, event.get("index") or 0))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
             state = tool_use_blocks.get(idx)
             if state is not None:
                 partial = cast(str, delta.get("partial_json") or "")
@@ -1742,7 +1742,7 @@ def _dispatch_stream_event(
             return
         return
     if event_type == "content_block_stop":
-        idx = int(cast(int, event.get("index") or 0))
+        idx = int(cast(int, event.get("index") or 0))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         state = tool_use_blocks.pop(idx, None)
         if state is None:
             return

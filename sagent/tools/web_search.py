@@ -16,7 +16,6 @@ from wesearch.search.render import format_result
 from wesearch.search.search import search
 from wesearch.search.types import (
     SearchBackends,
-    SearchError,
     SearxngCategory,
 )
 from wesearch.types.errors import BotDetectionError
@@ -182,7 +181,7 @@ class WebSearch:
                 f"{reason} {err.guidance}" if reason != err.guidance else err.guidance
             )
             return ToolResult(call_id="", content=content, is_error=True)
-        except (RuntimeError, SearchError, ValueError) as err:
+        except (RuntimeError, ValueError) as err:
             return ToolResult(call_id="", content=str(err), is_error=True)
         if not results:
             text = "(no results)"

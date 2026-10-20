@@ -136,7 +136,7 @@ def test_multiplication_commutes() -> None:
 def test_a_price_must_state_every_rate() -> None:
     """An unstated rate would bill $0; construction refuses it."""
     with pytest.raises(TypeError):
-        _ = TokenPrice(request=5.0)  # ty: ignore[missing-argument] -- the missing rates are the point.  # pyright: ignore[reportCallIssue] -- same.
+        _ = TokenPrice(request=5.0)  # ty: ignore[missing-argument] -- the missing rates are the point.  # pyright: ignore[reportCallIssue] -- same.  # pyrefly: ignore[missing-argument] -- the missing rates are the point.
 
 
 def _catalog() -> PriceCatalog:

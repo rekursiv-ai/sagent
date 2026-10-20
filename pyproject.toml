@@ -415,6 +415,7 @@ extend-safe-fixes = [
     "PYI034", # Annotate __enter__/__new__/__iadd__ returns as Self.
     "RET504", # Remove unnecessary local assignment directly before return.
     "RUF007", # Prefer `itertools.pairwise()` over `zip()` when iterating over successive pairs.
+    "RUF022", # `__all__` is not sorted.
     "SIM102", # Collapse nested if statements.
     "SIM105", # Use contextlib.suppress instead of try-except-pass.
     "TC",     # Type-checking import and annotation rewrites.
@@ -702,6 +703,9 @@ error-on-warning = true
 output-format = "concise"   # Choices: full concise gitlab github junit
 
 [tool.pyrefly]
+# Explicit: the default also globs `**/*.ipynb`, which the excludes then drop
+# with a warning on every run.
+project-includes = ["**/*.py", "**/*.pyi"]
 project-excludes = [
     "**/.venv/",
     "**/.venv-ci312/",
@@ -726,8 +730,9 @@ python-interpreter-path = ".venv/bin/python"
 python-platform = "linux"
 python-version = "3.12.0"  # Intentional; test at 3.12 for exports.
 preset = "strict"
-infer-with-first-use = false
+infer-with-first-use = true  # Like ty: an empty `[]`/`{}` takes its first use's type.
 output-format = "min-text"
+min-severity = "warn"
 
 # Mirrors the `[tool.basedpyright]` rules turned off there.
 [tool.pyrefly.errors]

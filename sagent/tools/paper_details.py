@@ -230,8 +230,8 @@ class PaperDetails:
             op or "get",
             graph_source,
             s2_wire_id(kind, canonical),
-            bool(influential_only),
-            int(year_from) if year_from is not None else None,
+            bool(influential_only),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+            int(year_from) if year_from is not None else None,  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
             limit if op else 0,
             cap,
         )

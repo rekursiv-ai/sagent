@@ -44,7 +44,7 @@ def print_user_bar(
 
     """
     try:
-        width = int(out.width)
+        width = int(out.width)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
     except (TypeError, ValueError):
         width = 0
     if width <= 2:

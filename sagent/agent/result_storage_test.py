@@ -306,7 +306,7 @@ def test_persist_handles_posix_short_writes(
             limit = next(chunk_sizes)
         except StopIteration:
             return real_write(fd, data)
-        return real_write(fd, bytes(data[:limit]))
+        return real_write(fd, data[:limit])
 
     monkeypatch.setattr(os, "write", short_write)
 

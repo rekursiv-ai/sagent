@@ -210,7 +210,7 @@ def restore_tool_state(state: ToolState, snapshot: Mapping[str, object]) -> None
     raw_dirs = snapshot.get("additional_dirs")
     if isinstance(raw_dirs, list):
         state.additional_dirs = [
-            str(x) for x in cast(list[object], raw_dirs) if isinstance(x, str)
+            x for x in cast(list[object], raw_dirs) if isinstance(x, str)
         ]
     state.reset_tool_recall()
     raw_rc = snapshot.get("read_cache")
@@ -1280,9 +1280,7 @@ def _splice_from_json(
     paired: frozenset[str] = frozenset[str]()
     if isinstance(raw_paired, list):
         paired = frozenset(
-            str(item)
-            for item in cast(list[object], raw_paired)
-            if isinstance(item, str)
+            item for item in cast(list[object], raw_paired) if isinstance(item, str)
         )
     # ``replay()`` skips both mask-disjointness and payload-pairing
     # validation; legacy sessions converted to splice format may carry
@@ -1350,9 +1348,7 @@ def _legacy_override_to_splice(
     paired: frozenset[str] = frozenset[str]()
     if isinstance(raw_paired, list):
         paired = frozenset(
-            str(item)
-            for item in cast(list[object], raw_paired)
-            if isinstance(item, str)
+            item for item in cast(list[object], raw_paired) if isinstance(item, str)
         )
     return ContextSplice.replay(
         ref=ref,
@@ -1654,9 +1650,7 @@ def _persistent_agent_from_json(
         return None
     raw_tools = record.get("tools")
     tools = (
-        tuple(
-            str(tool) for tool in cast(list[object], raw_tools) if isinstance(tool, str)
-        )
+        tuple(tool for tool in cast(list[object], raw_tools) if isinstance(tool, str))
         if isinstance(raw_tools, list)
         else ()
     )

@@ -1061,7 +1061,7 @@ async def test_writeback_credentials_atomic_and_0o600(
 
     real_open = os.open
 
-    def _flaky_open(path: str, flags: int, mode: int = 0o777) -> int:
+    def _flaky_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
         if str(path).startswith(str(target)):
             raise OSError("simulated disk full")
         return real_open(path, flags, mode)

@@ -282,7 +282,7 @@ class _OpenAIResponsesModel(ModelDefaults):
         )
         try:
             raw = await sdk.responses.with_raw_response.create(
-                **self._build_kwargs(request),
+                **self._build_kwargs(request),  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
             )
             self._last_usage = openai_usage(raw.headers)
             events = raw.parse(to=openai.AsyncStream[responses.ResponseStreamEvent])
@@ -615,11 +615,11 @@ async def _consume_stream(
                 elif isinstance(event, responses.ResponseOutputItemDoneEvent):
                     item = event.item
                     if item.type == "function_call":
-                        tc_id = str(item.call_id or "")
-                        tc_name = str(item.name or "")
+                        tc_id = item.call_id or ""
+                        tc_name = item.name or ""
                         item_id = item.id or ""
                         delta_args = "".join(tool_args.get(item_id, []))
-                        done_args = str(item.arguments or "")
+                        done_args = item.arguments or ""
                         args = _parse_tool_arguments(
                             delta_args,
                             done_args,

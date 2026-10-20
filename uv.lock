@@ -3154,7 +3154,7 @@ wheels = [
 [[package]]
 name = "rekursiv-ai-typeshed"
 version = "0.1.5"
-source = { git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main#8552606cf998b2a9669b4cf311209ab565d2e89f" }
+source = { git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main#786d01e6a6599c7a3960c217c70906c90c1a4d56" }
 dependencies = [
     { name = "basedpyright" },
     { name = "ty" },
@@ -3163,7 +3163,7 @@ dependencies = [
 [[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.5"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#8552606cf998b2a9669b4cf311209ab565d2e89f" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#786d01e6a6599c7a3960c217c70906c90c1a4d56" }
 
 [[package]]
 name = "requests"
@@ -4073,7 +4073,7 @@ wheels = [
 [[package]]
 name = "treekle"
 version = "0.2.0"
-source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#71200f6de45f85d276635c98a5415fafbaa6dbea" }
+source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#8d8845e09844ef72124f51626e1314fa7c1518e5" }
 
 [[package]]
 name = "triton"
@@ -4385,7 +4385,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.13"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#1a37cc96a78ebc8148e021f664dd02d3518c5d0c" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#9828a762c8de2eeb23b49a299eb049dd675f723d" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

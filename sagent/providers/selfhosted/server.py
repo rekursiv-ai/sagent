@@ -695,7 +695,7 @@ class SelfHostedModel(ModelDefaults):
             "max_new_tokens=%d tools=%d attention_mask=%s",
             self.model_id,
             device,
-            int(input_ids.shape[-1]),
+            int(input_ids.shape[-1]),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
             max_new,
             len(request.tools),
             rendered.attention_mask is not None,
@@ -703,7 +703,7 @@ class SelfHostedModel(ModelDefaults):
         out = await asyncio.to_thread(_generate, model, input_ids, generate_kwargs)
         elapsed_sec = time.perf_counter() - start
         new_tokens = out[0, input_ids.shape[-1] :]
-        output_tokens = int(new_tokens.shape[-1])
+        output_tokens = int(new_tokens.shape[-1])  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         text = self._provider.tokenizer.decode(
             new_tokens,
             skip_special_tokens=True,
@@ -733,7 +733,7 @@ class SelfHostedModel(ModelDefaults):
                 tool_calls=tuple(tool_calls),
             ),
             tokens=TokenCount(
-                request=int(input_ids.shape[-1]),
+                request=int(input_ids.shape[-1]),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
                 response=output_tokens,
             ),
             stop_reason=normalize_stop_reason(

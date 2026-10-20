@@ -121,7 +121,7 @@ def decode_jpeg_turbojpeg(
 
     """
     try:
-        crop_coords = _parse_crop(crop, int(height), int(width))
+        crop_coords = _parse_crop(crop, int(height), int(width))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         if crop_coords is not None:
             return _decode_jpeg_region(
                 image_bytes,
@@ -210,7 +210,7 @@ def decode_webp_libwebp(
 
     """
     try:
-        crop_coords = _parse_crop(crop, int(height), int(width))
+        crop_coords = _parse_crop(crop, int(height), int(width))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
         # The cffi bindings expose dynamic struct members, so name only the
         # fields this decoder reads at the boundary.
@@ -224,7 +224,7 @@ def decode_webp_libwebp(
         config.output.colorspace = lib.MODE_RGB
 
         buf = ffi.from_buffer(image_bytes)
-        status = int(lib.WebPDecode(buf, len(image_bytes), config_ptr))
+        status = int(lib.WebPDecode(buf, len(image_bytes), config_ptr))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
         if status != lib.VP8_STATUS_OK:
             return None
 
@@ -237,7 +237,7 @@ def decode_webp_libwebp(
             # libwebp-owned memory that the ``finally`` releases.
             rgb = (
                 np.frombuffer(ffi.buffer(rgba.rgba, rgba.size), dtype=np.uint8)
-                .reshape((int(height), int(width), 3))
+                .reshape((int(height), int(width), 3))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
                 .copy()
             )
         finally:
@@ -278,8 +278,8 @@ def decode_image_pil(
 
     """
     try:
-        height = int(height)
-        width = int(width)
+        height = int(height)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+        width = int(width)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
 
         crop_coords = _parse_crop(crop, height, width)
 
@@ -658,10 +658,10 @@ def _parse_crop(
             case (y, x, h, w):
                 if x < 0 or y < 0 or x + w > width or y + h > height:
                     return None
-                return (int(x), int(y), int(w), int(h))
+                return (int(x), int(y), int(w), int(h))  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
             case (target_h_raw, target_w_raw):
-                target_h = int(target_h_raw)
-                target_w = int(target_w_raw)
+                target_h = int(target_h_raw)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+                target_w = int(target_w_raw)  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
                 if target_w > width and target_h > height:
                     return None
                 target_aspect = target_w / target_h

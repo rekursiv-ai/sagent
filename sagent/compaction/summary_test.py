@@ -113,7 +113,7 @@ async def _apply_compact(
 
 def _last_prompt_text(model: _ScriptedModel) -> str:
     """Concatenated text of the last request's messages (the compaction prompt)."""
-    return cast(
+    return cast(  # pyrefly: ignore[redundant-cast] -- ty or basedpyright needs this cast; pyrefly already infers it.
         str,
         "\n".join(
             getattr(m, "text", "") or getattr(m, "content", "")
@@ -1594,7 +1594,7 @@ def test_strip_attachments_drop_keeps_later_entries_and_logs_why(
 def test_summary_compactor_rejects_invalid_direction() -> None:
     with pytest.raises(ValueError, match="direction"):
         _ = SummaryCompactor(
-            direction="sideways",  # ty: ignore[invalid-argument-type] -- The negative test passes a deliberately invalid Literal value.  # pyright: ignore[reportArgumentType] -- The negative test passes a deliberately invalid Literal value.
+            direction="sideways",  # ty: ignore[invalid-argument-type] -- The negative test passes a deliberately invalid Literal value.  # pyright: ignore[reportArgumentType] -- The negative test passes a deliberately invalid Literal value.  # pyrefly: ignore[bad-argument-type] -- The negative test passes a deliberately invalid Literal value.
         )
 
 
