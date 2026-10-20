@@ -56,9 +56,7 @@ __all__ = [
 # hand-written tuple omitted would be unparseable while type-checking clean.
 # The default window's ``""`` is filtered out -- no id carries it.
 CONTEXT_TAGS: Final[tuple[ContextTag, ...]] = tuple(
-    t
-    for t in cast(tuple[ContextTag, ...], get_args(cast(object, ContextTag.__value__)))
-    if t
+    t for t in cast(tuple[ContextTag, ...], get_args(ContextTag.__value__)) if t
 )
 """Window-size suffixes a model id may carry (e.g. ``...+1m``)."""
 

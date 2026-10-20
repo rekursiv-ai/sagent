@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, TypeAliasType, cast, get_args
+from typing import TYPE_CHECKING, Final, cast, get_args
 
 import pytest
 
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 _EFFORTS: Final = cast(
     "tuple[ThinkingEffort, ...]",
-    get_args(cast(TypeAliasType, ThinkingEffort.__value__)),
+    get_args(ThinkingEffort.__value__),
 )
 _BUDGETS: Final = {
     "min": "1024",

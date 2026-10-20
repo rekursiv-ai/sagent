@@ -701,6 +701,40 @@ invalid-key = "ignore"
 error-on-warning = true
 output-format = "concise"   # Choices: full concise gitlab github junit
 
+[tool.pyrefly]
+project-excludes = [
+    "**/.venv/",
+    "**/.venv-ci312/",
+    "**/node_modules/",
+    "*.egg-info/",
+    "**/*.ipynb",
+    ".pytest_cache/",
+    "build/",
+    "dist/",
+    "**/third_party/",
+    "typings/",
+    "**/.export/typings/",
+    "**/rekursiv_ai_typeshed/typings/",
+    "website/rekursiv-ai.github.io/_site/",
+]
+search-path = ["typings"]
+# No `typeshed-path`: ty's tree (`[tool.ty.environment] typeshed`) makes pyrefly
+# 1.4.0 flag every `-> Self` call as an unused coroutine (879 false positives).
+# Pinned beside the config: an interpreter found through a symlinked home splits
+# site-packages from the typeshed, and `pathlib.Path` stops matching `PathLike`.
+python-interpreter-path = ".venv/bin/python"
+python-platform = "linux"
+python-version = "3.12.0"  # Intentional; test at 3.12 for exports.
+preset = "strict"
+infer-with-first-use = false
+output-format = "min-text"
+
+# Mirrors the `[tool.basedpyright]` rules turned off there.
+[tool.pyrefly.errors]
+no-access = "ignore"           # reportPrivateUsage
+missing-super-call = "ignore"  # reportMissingSuperCall
+unused-call-result = "ignore"  # reportUnusedCallResult
+
 [tool.codespell]
 # some_variable_with_typo = "connexion"  # codespell:ignore
 builtin = "clear,rare,code"
