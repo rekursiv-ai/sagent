@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
     # Prefer https://awesome-python.com deps over alternatives.
-    "treekle>=0.2.0",
+    "treekle>=0.3.0",
     # media
     "imagesize>=1.4",
     "pillow",
@@ -104,8 +104,8 @@ typecheck = [
     "pyrefly>=1.4.0",
     "ty>=0.0.84",
     # Extra.
-    "rekursiv-ai-typeshed",
-    "rekursiv-ai-typings",
+    "rekursiv-ai-typeshed>=0.1.6",
+    "rekursiv-ai-typings>=0.1.6",
 ]
 "pre-commit" = [
     "pre-commit>=4.6",
