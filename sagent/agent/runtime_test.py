@@ -7698,7 +7698,7 @@ def test_legacy_cross_session_mask_range_dropped_at_deserialize() -> None:
     same-session ranges, so downstream coalesce never sees a malformed range.
     """
     sid = "s"
-    record = {
+    record: dict[str, object] = {
         "kind": "context_splice",
         "ref": {"session_id": sid, "ordinal": 2},
         "mask": [
@@ -7708,7 +7708,7 @@ def test_legacy_cross_session_mask_range_dropped_at_deserialize() -> None:
             [{"session_id": sid, "ordinal": 1}, {"session_id": "legacy", "ordinal": 1}],
         ],
         "insert_after": None,
-        "payload": list[object](),
+        "payload": [],
         "strategy": "legacy",
     }
     ref = TapeRef(session_id=sid, ordinal=2)

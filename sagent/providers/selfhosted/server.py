@@ -54,7 +54,7 @@ import re
 import time
 import uuid
 
-from treekle import MutablePlainTree, json_loads, mutable
+from treekle import MutablePlainTree, ReadError, json_loads, mutable
 
 from sagent.lib import token_count
 from sagent.providers.lib.id_remap import IdRemapper
@@ -695,7 +695,7 @@ class SelfHostedModel(ModelDefaults):
             "max_new_tokens=%d tools=%d attention_mask=%s",
             self.model_id,
             device,
-            int(input_ids.shape[-1]),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+            input_ids.shape[-1],
             max_new,
             len(request.tools),
             rendered.attention_mask is not None,
@@ -703,7 +703,7 @@ class SelfHostedModel(ModelDefaults):
         out = await asyncio.to_thread(_generate, model, input_ids, generate_kwargs)
         elapsed_sec = time.perf_counter() - start
         new_tokens = out[0, input_ids.shape[-1] :]
-        output_tokens = int(new_tokens.shape[-1])  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+        output_tokens = new_tokens.shape[-1]
         text = self._provider.tokenizer.decode(
             new_tokens,
             skip_special_tokens=True,
@@ -733,7 +733,7 @@ class SelfHostedModel(ModelDefaults):
                 tool_calls=tuple(tool_calls),
             ),
             tokens=TokenCount(
-                request=int(input_ids.shape[-1]),  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+                request=input_ids.shape[-1],
                 response=output_tokens,
             ),
             stop_reason=normalize_stop_reason(
@@ -1069,13 +1069,12 @@ def _parse_deepseek_tool_call(raw: str) -> ToolCall | None:
     r"""DeepSeek/Kimi format: ``function\n{name}\n```json\n{args}\n``` ``."""
     text = raw.strip()
     name_match = re.search(r"function\s*\n\s*([A-Za-z0-9_]+)", text)
-    json_match = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    json_match = re.search(r"```json\s*(.*?)\s*```", text, flags=re.DOTALL)
     if name_match is None or json_match is None:
         return None
-    # The regex requires a ``{...}`` body, so a decoded value is an object.
     try:
         args = json_loads(json_match.group(1), dict[str, object])
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, ReadError):
         return None
     return ToolCall(id=str(uuid.uuid4())[:12], name=name_match.group(1), args=args)
 

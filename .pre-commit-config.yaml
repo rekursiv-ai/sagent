@@ -305,24 +305,58 @@ repos:
       # is rayon-parallel and saturates every core alone (17 threads measured
       # for one invocation on a 16-core box); concurrent, pre-commit multiplies
       # that by cpu_count.
-      - id: ty-check
-        name: ty-check
+      #
+      # Passing filenames makes ty ignore `[tool.ty.src].exclude`; not passing
+      # them makes every commit repo-wide. Hence the duplication: the exclude
+      # below must mirror pyproject.toml's `[tool.ty.src]`.
+      #
+      # One spool for both checkers: same files, same excludes. Written once
+      # here; `ty-check` harvests it into a second spool `pyrefly-check` reads.
+      - id: typecheck-spool
+        name: typecheck-spool
+        # `run ty-check`/`run pyrefly-check` select this twin too.
+        alias: typecheck
         language: system
         stages: [pre-commit]
         require_serial: true
-        # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
-        alias: superseded-at-pre-push
-        # Passing filenames makes ty ignore `[tool.ty.src].exclude`; not passing
-        # them makes every commit repo-wide. Hence the duplication: the exclude
-        # below must mirror pyproject.toml's `[tool.ty.src]`.
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit ty check
-        exclude: |
+        exclude: &typecheck-exclude |
           (?x)^(
             (.*/)?third_party/
             |typings/
             |(.*/)?rekursiv_ai_typeshed/typings/
           )
+        entry: >-
+          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' typecheck
+      - id: ty-check
+        name: ty-check
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        pass_filenames: false
+        # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
+        alias: superseded-at-pre-push
+        types_or: [python, pyi]
+        entry: *worker-entry
+        args:
+          - WORKERS_TY_CHECK
+          - |
+            p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/typecheck.$p; files=(); if [ -f "$spool" ]; then while IFS= read -r -d "" f; do files+=("$f"); done < "$spool"; rm -f "$spool"; set -- "${files[@]}"; fi;
+            (($#)) || exit 0
+            files=("$@")
+            # The harvest names dependents without this hook's `exclude`, and both
+            # checkers check a NAMED path even when their own config excludes it.
+            kept=()
+            for f in "${files[@]}"; do
+              case "/$f" in */third_party/*|/typings/*|*/rekursiv_ai_typeshed/typings/*) continue;; esac
+              kept+=("$f")
+            done
+            files=("${kept[@]}")
+            # Hand the harvested set to `pyrefly-check`, so the walk runs once.
+            printf "%s\0" "${files[@]}" > "${spool%/*}/typecheck-harvested.$p"
+            ((${#files[@]})) || exit 0
+            exec uv --quiet run --frozen --group pre-commit ty check "${files[@]}"
+        exclude: *typecheck-exclude
 
       # `basedpyright-global` at pre-push is the real gate.
       # Do not weaken that one on the strength of this passing.
@@ -338,12 +372,13 @@ repos:
       #
         # `basedpyright` takes no filenames, so pre-commit cannot split its work
         # into argv chunks; this twin collects them into a spool file.
-      - id: basedpyright-pre
-        name: basedpyright-pre
+      - id: basedpyright-spool
+        name: basedpyright-spool
         # `run basedpyright` selects this twin too, so its spool exists.
         alias: basedpyright
         language: system
-        stages: [pre-commit]
+        # Off: `pyrefly-check` is the checker. Run with `--hook-stage manual`.
+        stages: [manual]
         require_serial: true
         types_or: [python, pyi]
         exclude: |
@@ -356,14 +391,13 @@ repos:
       - id: basedpyright
         name: basedpyright
         language: system
-        stages: [pre-commit]
+        # Off: `pyrefly-check` is the checker. Run with `--hook-stage manual`.
+        stages: [manual]
         # Pre-commit discards a PASSING hook's output (see the Pre-Push Gates
         # note on `verbose`); this keeps basedpyright's summary line visible.
         verbose: true
         require_serial: true
         pass_filenames: false
-        # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
-        alias: superseded-at-pre-push
         types_or: [python, pyi]
         entry: *worker-entry
         # `files` stays `"$@"` unless BOTH the opt-in is set and the harvester
@@ -393,6 +427,43 @@ repos:
             |(.*/)?third_party/
           )
 
+      # Default type checker; `basedpyright` above runs only under
+      # `--hook-stage manual`. Named files bypass pyproject's
+      # `project-excludes`, so the exclude below mirrors it.
+      #
+      # Spooled, like `basedpyright`: per argv chunk, concurrent `--fix` runs
+      # delete asserts under one another's line numbers.
+      #
+      - id: pyrefly-check
+        name: pyrefly-check
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        pass_filenames: false
+        # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
+        alias: superseded-at-pre-push
+        types_or: [python, pyi]
+        entry: *worker-entry
+        args:
+          - WORKERS_PYREFLY_CHECK
+          - |
+            p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/typecheck-harvested.$p; files=(); if [ -f "$spool" ]; then while IFS= read -r -d "" f; do files+=("$f"); done < "$spool"; rm -f "$spool"; set -- "${files[@]}"; fi;
+            # A skipped `ty-check` leaves no harvest; read the raw spool instead.
+            raw=${spool%/*}/typecheck.$p
+            if (($# == 0)) && [ -f "$raw" ]; then
+              files=()
+              while IFS= read -r -d "" f; do files+=("$f"); done < "$raw"
+              rm -f "$raw"
+              set -- "${files[@]}"
+            fi
+            (($#)) || exit 0
+            files=("$@")
+            check=(pyrefly check --threads="$WORKERS")
+            exec uv --quiet run --frozen --group pre-commit "${check[@]}" "${files[@]}"
+        exclude: *typecheck-exclude
+
+  - repo: local
+    hooks:
       # Runs the test file PAIRED with each changed source file, nothing
       # transitive: ~1s, versus the whole suite at pre-push.
       #
@@ -447,8 +518,8 @@ repos:
 
         # `pytest` takes no filenames, so pre-commit cannot split its work
         # into argv chunks; this twin collects them into a spool file.
-      - id: pytest-pre
-        name: pytest-pre
+      - id: pytest-spool
+        name: pytest-spool
         # `run pytest` selects this twin too, so its spool exists.
         alias: pytest
         language: system
@@ -551,8 +622,8 @@ repos:
       # 48s. An unreadable data file still fails the hook.
         # `coverage-summary` takes no filenames, so pre-commit cannot split its work
         # into argv chunks; this twin collects them into a spool file.
-      - id: coverage-summary-pre
-        name: coverage-summary-pre
+      - id: coverage-summary-spool
+        name: coverage-summary-spool
         # `run coverage-summary` selects this twin too, so its spool exists.
         alias: coverage-summary
         language: system
@@ -589,7 +660,7 @@ repos:
   # To enable:  uv run pre-commit install --hook-type pre-push
   # To disable: uv run pre-commit uninstall --hook-type pre-push
   #
-  # `ty-check`, `basedpyright` and `pytest` above each answer a strictly weaker
+  # `ty-check`, `pyrefly-check` and `pytest` above each answer a strictly weaker
   # question than a hook here, so all three carry
   # `alias: superseded-at-pre-push` -- a plain `SKIP=` selector letting a lane
   # that runs the pre-push tier drop them in one token, with no hook ids to
@@ -644,7 +715,8 @@ repos:
         language: system
         always_run: true
         pass_filenames: false
-        stages: [pre-push]
+        # Off: `pyrefly-check-global` is the checker. Run with `--hook-stage manual`.
+        stages: [manual]
         entry: *worker-entry
         args:
           - WORKERS_BASEDPYRIGHT_GLOBAL
@@ -652,6 +724,19 @@ repos:
             exec env NODE_OPTIONS=--max-old-space-size=2048
             uv --quiet run --frozen --group pre-commit
             basedpyright --threads="$WORKERS"
+
+      - id: pyrefly-check-global
+        name: pyrefly-check-global
+        language: system
+        always_run: true
+        pass_filenames: false
+        stages: [pre-push]
+        entry: *worker-entry
+        args:
+          - WORKERS_PYREFLY_CHECK_GLOBAL
+          - >-
+            exec uv --quiet run --frozen --group pre-commit
+            pyrefly check --threads="$WORKERS"
 
       - id: pytest-global
         name: pytest-global

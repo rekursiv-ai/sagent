@@ -834,7 +834,7 @@ def test_format_tasks_lists_registered_agent_fg_idle() -> None:
     other = MagicMock()
     other.runtime.model_call = None
     other.runtime.compact_task = None
-    other.background = dict[str, object]()
+    other.background = dict[str, BackgroundTaskEntry]()
     with patch(
         "sagent.repl.slash_handlers.agent_registry",
         {"Agent_0": other},
@@ -2499,7 +2499,7 @@ def test_format_tasks_persistent_subagent_shows_idle_phase() -> None:
     parent.background = {"child-1": job}
     child = MagicMock()
     child.work = None
-    child.background = dict[str, object]()
+    child.background = dict[str, BackgroundTaskEntry]()
     child.runtime = _make_runtime()
     with patch(
         "sagent.repl.slash_handlers.agent_registry",

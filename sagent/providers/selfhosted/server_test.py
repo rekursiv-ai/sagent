@@ -319,6 +319,22 @@ def test_parse_deepseek_tool_call_non_dict_args_returns_none() -> None:
     assert _parse_deepseek_tool_call(raw) is None
 
 
+def test_parse_deepseek_tool_call_reads_multiline_arguments() -> None:
+    raw = 'function\nBash\n```json\n{\n  "cmd": "ls"\n}\n```'
+    tc = _parse_deepseek_tool_call(raw)
+    assert tc is not None
+    assert dict(tc.args) == {"cmd": "ls"}
+
+
+def test_parse_deepseek_tool_call_mints_a_fresh_twelve_character_id() -> None:
+    raw = 'function\nBash\n```json\n{"cmd": "ls"}\n```'
+    first, second = _parse_deepseek_tool_call(raw), _parse_deepseek_tool_call(raw)
+    assert first is not None
+    assert second is not None
+    assert len(first.id) == 12
+    assert first.id != second.id
+
+
 def test_disable_generate_cache_mps_true() -> None:
     assert _disable_generate_cache("mps") is True
     assert _disable_generate_cache("mps:0") is True

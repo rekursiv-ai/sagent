@@ -157,7 +157,7 @@ class WebFetch:
         # values ARE, not which spellings of them a directive may use.
         directive = dict(args)
         if isinstance(directive.get("method"), str):
-            directive["method"] = str(directive["method"]).upper()  # pyrefly: ignore[unnecessary-type-conversion] -- The stub's type hides the runtime value (numpy/torch scalar or non-str key); the conversion is load-bearing.
+            directive["method"] = str(directive["method"]).upper()  # pyrefly: ignore[unnecessary-type-conversion] -- ty or basedpyright types this value more loosely than pyrefly; the conversion narrows it for them.
             if directive["method"] not in get_args(FetchMethod):
                 # Named separately from the generic coercion error: a rejected
                 # VERB wants the reason ("this tool does not do PUT") ahead of

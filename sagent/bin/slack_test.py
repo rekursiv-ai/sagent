@@ -6,6 +6,7 @@ All tests stub the Slack SDK -- no network calls.
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -1532,7 +1533,7 @@ class TestAdapterConstruction:
 
         fake_child.serve_forever = _serve
         fake_child.shutdown = MagicMock()
-        fake_child.runtime.observers = list[object]()
+        fake_child.runtime.observers = list[Callable[[RuntimeEvent], None]]()
 
         with (
             patch(

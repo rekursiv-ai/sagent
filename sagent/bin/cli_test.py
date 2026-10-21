@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, Final, cast
+from typing import TYPE_CHECKING, ClassVar, Final, Unpack, cast
+from typing_extensions import TypedDict
 
 import argparse
 import asyncio
@@ -146,8 +147,24 @@ class _ChildStubModel(MockModelCaps):
     supports_thinking: bool = True
 
 
-def _child_record() -> PersistentAgentRecord:
-    return PersistentAgentRecord(
+class _PersistentAgentRecordFields(TypedDict, total=False, closed=True):
+    """The ``PersistentAgentRecord`` fields a test overrides."""
+
+    account: str | None
+    frozen_system: bool
+    label: str
+    max_request_tokens: int | None
+    max_response_tokens: int | None
+    session_dir: str
+    show_thinking: bool
+    thinking_budget: str
+    thinking_output: str
+
+
+def _child_record(
+    **overrides: Unpack[_PersistentAgentRecordFields],
+) -> PersistentAgentRecord:
+    built = PersistentAgentRecord(
         label="fix-tools",
         run_id="run-1",
         session_dir="",
@@ -160,6 +177,7 @@ def _child_record() -> PersistentAgentRecord:
         system="system text",
         notify_on_asleep=True,
     )
+    return dataclasses.replace(built, **overrides)
 
 
 def _stub_build_provider(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -234,11 +252,7 @@ async def test_resumed_child_exit_persists_terminal_state(
     append_session(
         tmp_path / "session.jsonl",
         persistent_agents=[
-            dataclasses.replace(
-                _child_record(),
-                label="resumed-child",
-                session_dir=str(tmp_path / "c"),
-            ),
+            _child_record(label="resumed-child", session_dir=str(tmp_path / "c")),
         ],
     )
     await _resume_persistent_agents(
@@ -258,8 +272,7 @@ def test_build_persistent_child_restores_thinking_state(
 ) -> None:
     """The thinking axes round-trip through a persistent-child rebuild."""
     _stub_build_provider(monkeypatch)
-    record = dataclasses.replace(
-        _child_record(),
+    record = _child_record(
         thinking_budget="auto",
         thinking_output="text",
         show_thinking=False,
@@ -278,7 +291,7 @@ def test_build_persistent_child_restores_frozen_system(
     top of that snapshot, so the resumed prompt must stay frozen.
     """
     _stub_build_provider(monkeypatch)
-    record = dataclasses.replace(_child_record(), frozen_system=True)
+    record = _child_record(frozen_system=True)
     child = _build_persistent_child(record, allow_providers=())
     assert child.frozen_system is True
 
@@ -313,7 +326,7 @@ def test_resumed_persistent_child_missing_account_falls_back_to_default(
     )
 
     child = _build_persistent_child(
-        dataclasses.replace(_child_record(), account="work"),
+        _child_record(account="work"),
         allow_providers=(),
     )
 
@@ -350,7 +363,7 @@ def test_resumed_persistent_child_preserves_available_named_account(
     )
 
     child = _build_persistent_child(
-        dataclasses.replace(_child_record(), account="work"),
+        _child_record(account="work"),
         allow_providers=(),
     )
 
@@ -390,11 +403,7 @@ def test_resumed_persistent_child_explicit_limits_survive_model_switch(
 ) -> None:
     _stub_build_provider(monkeypatch)
     child = _build_persistent_child(
-        dataclasses.replace(
-            _child_record(),
-            max_request_tokens=50_000,
-            max_response_tokens=512,
-        ),
+        _child_record(max_request_tokens=50_000, max_response_tokens=512),
         allow_providers=(),
     )
 
