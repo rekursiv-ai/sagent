@@ -6,14 +6,13 @@ from pathlib import Path
 from typing import Final
 
 import os
-import re
 import subprocess
 import sys
 
 import pytest
 
-from sagent.lib import worker_count as worker_count_module
-from sagent.lib.worker_count import capped_workers, default_workers, worker_count
+from tools.precommit import worker_count as worker_count_module
+from tools.precommit.worker_count import capped_workers, default_workers, worker_count
 
 
 _THIS: Final = Path(__file__).resolve()
@@ -138,6 +137,21 @@ def test_workers_default_overrides_the_formula(
     assert default_workers(cpu=cpu, meminfo=meminfo) == 3
     monkeypatch.setenv("WORKERS_DEFAULT", "junk")
     assert default_workers(cpu=cpu, meminfo=meminfo) == 1
+
+
+def test_the_override_is_read_from_the_environment_passed_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A gate resolves workers from its own environment, never the process's."""
+    cpu = _topology(tmp_path / "cpu", [(0, c, 1) for c in range(32)])
+    meminfo = _meminfo(tmp_path / "m", 1_000_000)
+    monkeypatch.setenv("WORKERS_DEFAULT", "3")
+
+    assert (
+        default_workers(environ={"WORKERS_DEFAULT": "7"}, cpu=cpu, meminfo=meminfo) == 7
+    )
+    assert default_workers(environ={}, cpu=cpu, meminfo=meminfo) == 12
 
 
 @pytest.mark.parametrize(
@@ -307,36 +321,6 @@ def test_cores_without_frequencies_are_all_performance_cores(tmp_path: Path) -> 
         (topology / "core_id").write_text(f"{core}\n")
     meminfo = _meminfo(tmp_path / "meminfo", 1_000_000)
     assert default_workers(cpu=cpu, meminfo=meminfo) == 6
-
-
-def _hook_workers(override: dict[str, str]) -> int:
-    """Run the ``&worker-entry`` anchor from the repo root; return the ``$WORKERS`` it exports."""
-    config = (_REPO / ".pre-commit-config.yaml").read_text()
-    match = re.search(
-        r"entry: &worker-entry >-\n\s+bash -c '\n(.*?)\n\s+' bash",
-        config,
-        re.DOTALL,
-    )
-    assert match is not None
-    env = {k: v for k, v in os.environ.items() if k != "WORKERS_DEFAULT"} | override
-    hook = subprocess.run(  # noqa: S603 -- No shell injection: the script is the repo's own hook text.
-        ["bash", "-c", match.group(1), "bash", "WORKERS_FOR_TEST", 'echo "$WORKERS"'],  # noqa: S607 -- The hook's own shell.
-        capture_output=True,
-        text=True,
-        check=True,
-        env=env,
-        cwd=_REPO,
-    )
-    return int(hook.stdout.split()[-1])
-
-
-def test_the_pre_commit_hook_sizes_its_workers_with_this_module() -> None:
-    assert _hook_workers({}) == default_workers()
-
-
-def test_the_hook_honors_its_own_override_then_workers_default() -> None:
-    assert _hook_workers({"WORKERS_FOR_TEST": "7", "WORKERS_DEFAULT": "3"}) == 7
-    assert _hook_workers({"WORKERS_DEFAULT": "3"}) == 3
 
 
 def test_running_the_module_prints_only_the_count() -> None:

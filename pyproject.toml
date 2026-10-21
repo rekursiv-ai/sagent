@@ -294,7 +294,6 @@ omit = [
     "*/tests/*",
     "*/.venv/*",
     "*/typings/*",
-    "*/tools/*",
     "*/scripts/*",
     "*/testdata/*",
     "*/__main__.py",

@@ -5,9 +5,9 @@
 exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
 Size a worker pool: parse a ``--workers`` argument, or compute the machine's default.
 
-Run (``python -m sagent.lib.worker_count``), it prints the machine's default
-count and nothing else; the pre-commit hooks read their ``$WORKERS`` from it.
-``--units N [--per-worker K]`` caps that count by the job's size.
+Run (``python -m tools.precommit.worker_count``), it prints the machine's default
+count and nothing else. ``--units N [--per-worker K]`` caps that count by the
+job's size.
 
 - :func:`worker_count` coerces a ``--workers`` argument without letting argparse
   exit 2. Every pre-commit gate shares it: ``affected.py`` sizes a thread pool
@@ -15,9 +15,9 @@ count and nothing else; the pre-commit hooks read their ``$WORKERS`` from it.
   a process pool over files, ``check_export_leaks.py`` a Copybara subprocess
   fan-out, and ``mutated.py`` a mutmut run.
 - :func:`default_workers` is the count to use when none is given, and the one
-  place it is computed: ``.pre-commit-config.yaml``'s ``&worker-entry`` anchor
-  runs this module, and so does any tool that sizes a pool, so every job on a
-  machine takes the same share of it. ``WORKERS_DEFAULT`` overrides it.
+  place it is computed: the pre-commit gates call it, and so does any tool that
+  sizes a pool, so every job on a machine takes the same share of it.
+  ``WORKERS_DEFAULT`` overrides it.
 
 The formula::
 
@@ -58,7 +58,7 @@ memory an app marked disposable.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import os
@@ -66,17 +66,19 @@ import shutil
 import subprocess
 
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+
 def worker_count(value: str) -> int:
     """Return ``value`` as a worker count, treating anything unusable as serial.
 
-    NOT `type=int`. Every hook interpolates `--workers "$WORKERS"`, so a shell
-    that never ran the `&worker-entry` wrapper passes `--workers ''` -- argparse
-    exits 2, and the hook reads that nonzero exit as an empty selection and
-    falls back to the sidecar probe. A silent downgrade to the scope the graph
-    exists to beat is worse than running serial, which is what an unsized
-    caller asked for. Every gate the module docstring lists shares this for
-    the same reason: one `&worker-entry` anchor wraps them all, so each
-    inherits that same empty-string case.
+    NOT `type=int`. A caller that interpolates an unset count passes
+    `--workers ''` -- argparse exits 2, and a gate reads that nonzero exit as an
+    empty selection and falls back to its floor. A silent downgrade is worse
+    than running serial, which is what an unsized caller asked for. Every
+    override variable (`WORKERS_DEFAULT`, `WORKERS_<HOOK>`) is parsed here for
+    the same reason.
 
     Which makes EVERY escaping exception the same bug, so the conversion is
     guarded by `try`, not by a predicate. `str.isdigit()` was one, and it
@@ -102,10 +104,11 @@ def default_workers(
     *,
     units: int | None = None,
     per_worker: int = 1,
+    environ: Mapping[str, str] = os.environ,
     cpu: Path = Path("/sys/devices/system/cpu"),
     meminfo: Path = Path("/proc/meminfo"),
 ) -> int:
-    """Return the worker count for a job on this machine, as the pre-commit hooks size theirs.
+    """Return the worker count for a job on this machine, as the pre-commit gates size theirs.
 
     ``WORKERS_DEFAULT``, when set, wins (parsed by :func:`worker_count`).
     Otherwise the module docstring's formula: 3/8 of the physical cores,
@@ -116,6 +119,7 @@ def default_workers(
       units: The job's size, in whatever it parallelizes over; None is unknown,
         and leaves the machine's count.
       per_worker: Units one worker needs to pay for its startup.
+      environ: Environment ``WORKERS_DEFAULT`` is read from.
       cpu: Linux's CPU topology directory; absent, macOS ``sysctl`` is read.
       meminfo: Linux's memory report; absent, macOS ``vm_stat`` is read.
 
@@ -128,7 +132,7 @@ def default_workers(
     """
     if per_worker < 1:
         raise ValueError(f"per_worker={per_worker} must be at least 1.")
-    override = os.environ.get("WORKERS_DEFAULT", "")
+    override = environ.get("WORKERS_DEFAULT", "")
     if override:
         return worker_count(override)
     phys, perf = _cores(cpu)
@@ -177,7 +181,7 @@ def main() -> int:
     )
     _add_arguments(parser)
     flags = cast(Flags, parser.parse_args())
-    print(default_workers(units=flags.units, per_worker=flags.per_worker))  # noqa: T201 -- The count is the whole output; the hook reads it.
+    print(default_workers(units=flags.units, per_worker=flags.per_worker))  # noqa: T201 -- The count is the whole output; a shell caller reads it.
     return 0
 
 
@@ -232,8 +236,8 @@ def _core_key(cpu: Path) -> tuple[int | None, int | None]:
     )
 
 
-# ``vm_stat`` wins wherever it is on PATH, as it did in the pre-commit hook, so one
-# memory figure drives the cap on macOS and on a Linux test host.
+# ``vm_stat`` wins wherever it is on PATH, so one memory figure drives the cap on
+# macOS and on a Linux test host that fakes it.
 def _available_mib(meminfo: Path) -> int | None:
     """Return memory available without paging, in MiB, or None if unknown."""
     if shutil.which("vm_stat") is not None:
@@ -246,10 +250,10 @@ def _available_mib(meminfo: Path) -> int | None:
 
 
 def _vm_stat_mib() -> int | None:
-    """Return macOS free, purgeable and file-backed memory in MiB, as the hook counts it."""
+    """Return macOS free, purgeable and file-backed memory in MiB."""
     try:
         text = subprocess.run(
-            ["vm_stat"],  # noqa: S607 -- A system tool found on PATH, as the hook finds it.
+            ["vm_stat"],  # noqa: S607 -- A system tool found on PATH.
             capture_output=True,
             text=True,
             check=True,
@@ -278,7 +282,7 @@ def _sysctl_text(name: str) -> str:
     """Return a macOS ``sysctl`` value, or '' where there is none."""
     try:
         return subprocess.run(  # noqa: S603 -- No shell; the argv is sysctl and a name this module spells.
-            ["sysctl", "-n", name],  # noqa: S607 -- A system tool found on PATH, as the hook finds it.
+            ["sysctl", "-n", name],  # noqa: S607 -- A system tool found on PATH.
             capture_output=True,
             text=True,
             check=True,

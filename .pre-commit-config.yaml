@@ -192,62 +192,14 @@ repos:
 
   - repo: local
     hooks:
-      # Spooled hooks. pre-commit splits a hook's filenames into 128 KiB argv
-      # chunks and calls it once per chunk, serially: `--all-files` called each
-      # whole-repo hook 3-5 times, one exporting all 8 packages 5 times (161s
-      # for a 5.5s job) and the pytest chunks racing on one `.coverage`. Each
-      # heavy hook is therefore a pair. `<id>-pre`, with the SAME file
-      # selectors, appends pre-commit's chunks to a NUL-delimited file keyed by
-      # the pre-commit process; `<id>` follows with `pass_filenames: false`,
-      # loads that file as "$@", deletes it, and runs once.
+      # Worker counts. Every heavy hook below sizes its own pool with
+      # `tools.precommit.worker_count.default_workers`, whose docstring derives the
+      # formula, and runs below interactive priority. Overrides,
+      # most specific first: `WORKERS_<HOOK_ID>` (`WORKERS_PYTEST_GLOBAL=1`),
+      # then `WORKERS_DEFAULT`. Per hook is what CI needs: the integration tier
+      # holds ~1.8 GB of torch/jax per worker and OOM-killed a 2-vCPU runner at
+      # two, while a type checker on the same box wants more.
       #
-      # Single definition of `&worker-entry` anchor.
-      #
-      # It sizes $WORKERS, then runs the hook's command line from the single
-      # `args` entry; per-hook differences (env vars, marker filters, exit-5
-      # tolerance, capability guards) live in that arg, so the sizing exists
-      # once. The count comes from `python -m sagent.lib.worker_count`:
-      # it is the one place the formula lives (its docstring has the
-      # derivation), every tool that sizes a pool imports it, and every public
-      # export vendors it, so the gates and the tools agree.
-      #
-      #
-      # Appended filenames reach the inner command as "$@" after an explicit
-      # `bash` $0: plain `bash -c "$@"` would eat the first FILENAME as $0 and
-      # drop it from the check.
-      #
-      # The command also runs under `nice -n 19`, so interactive work wins the
-      # CPU; on an idle box that costs nothing. `nice` alone is not enough: it
-      # orders CPU time, not memory, so it cannot stop paging.
-      #
-      # Overriding, most specific first: each hook honors the variable named as
-      # its FIRST arg (`WORKERS_PYTEST_INTEGRATION_GLOBAL=1`), then
-      # `WORKERS_DEFAULT` (read by the module), then the formula. Per-hook is
-      # what CI needs -- the integration tier holds ~1.8 GB of torch/jax per
-      # worker and OOM-killed a 2-vCPU runner at two workers, while basedpyright
-      # on the same box wants more. A bare `WORKERS=` is deliberately NOT read:
-      # the wrapper exports `WORKERS`, so reusing that name as the input would
-      # leak one hook's resolved count into every later hook in the same shell.
-      - id: worker-sizing
-        name: worker-sizing (anchor only; never runs)
-        language: fail
-        stages: [manual]
-        files: $^
-        # $1 is the name of the variable this hook's count may be OVERRIDDEN by;
-        # `$WORKERS` is the resolved value every `args` command reads. Two names
-        # because the override is optional -- a command reading
-        # `$WORKERS_PYTEST_GLOBAL` directly would emit `-n=` on the usual run
-        # where nobody set it, and never reach the module.
-        entry: &worker-entry >-
-          bash -c '
-            eval "WORKERS=\${$1:-}"; shift;
-            if [ -z "$WORKERS" ]; then
-              WORKERS=$(uv --quiet run --frozen python -m sagent.lib.worker_count) || exit 1;
-            fi;
-            export WORKERS;
-            exec nice -n 19 bash -c "$1" bash "${@:2}"
-          ' bash
-
       - id: codespell
         name: codespell
         language: system
@@ -301,33 +253,25 @@ repos:
   - repo: local
     hooks:
       # No official ty hook yet (https://github.com/astral-sh/ty/issues/269).
-      # `require_serial: true` for the same reason as `basedpyright` below: ty
-      # is rayon-parallel and saturates every core alone (17 threads measured
-      # for one invocation on a 16-core box); concurrent, pre-commit multiplies
-      # that by cpu_count.
+      # The `precommit` module holds the gates: each runs once over the
+      # files its `-spool` twin collected, sizes its own workers, and drops
+      # what `[tool.pyrefly] project-excludes` names. `pyrefly-check` checks
+      # the files `ty-check` checked, so a graph walk runs once.
       #
-      # Passing filenames makes ty ignore `[tool.ty.src].exclude`; not passing
-      # them makes every commit repo-wide. Hence the duplication: the exclude
-      # below must mirror pyproject.toml's `[tool.ty.src]`.
+      # Each twin's `alias` is its gate's id, so `pre-commit run ty-check`
+      # selects both; a gate whose spool was never written fails rather than
+      # pass on nothing.
       #
-      # One spool for both checkers: same files, same excludes. Written once
-      # here; `ty-check` harvests it into a second spool `pyrefly-check` reads.
-      - id: typecheck-spool
-        name: typecheck-spool
-        # `run ty-check`/`run pyrefly-check` select this twin too.
-        alias: typecheck
+      # `require_serial: true`: the checkers saturate every core alone, and
+      # pre-commit would otherwise run cpu_count of them at once.
+      - id: ty-check-spool
+        name: ty-check-spool
+        alias: ty-check
         language: system
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi]
-        exclude: &typecheck-exclude |
-          (?x)^(
-            (.*/)?third_party/
-            |typings/
-            |(.*/)?rekursiv_ai_typeshed/typings/
-          )
-        entry: >-
-          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' typecheck
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit spool ty-check
       - id: ty-check
         name: ty-check
         language: system
@@ -337,61 +281,26 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types_or: [python, pyi]
-        entry: *worker-entry
-        args:
-          - WORKERS_TY_CHECK
-          - |
-            p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/typecheck.$p; files=(); if [ -f "$spool" ]; then while IFS= read -r -d "" f; do files+=("$f"); done < "$spool"; rm -f "$spool"; set -- "${files[@]}"; fi;
-            (($#)) || exit 0
-            files=("$@")
-            # The harvest names dependents without this hook's `exclude`, and both
-            # checkers check a NAMED path even when their own config excludes it.
-            kept=()
-            for f in "${files[@]}"; do
-              case "/$f" in */third_party/*|/typings/*|*/rekursiv_ai_typeshed/typings/*) continue;; esac
-              kept+=("$f")
-            done
-            files=("${kept[@]}")
-            # Hand the harvested set to `pyrefly-check`, so the walk runs once.
-            printf "%s\0" "${files[@]}" > "${spool%/*}/typecheck-harvested.$p"
-            ((${#files[@]})) || exit 0
-            exec uv --quiet run --frozen --group pre-commit ty check "${files[@]}"
-        exclude: *typecheck-exclude
-
-      # `basedpyright-global` at pre-push is the real gate.
-      # Do not weaken that one on the strength of this passing.
-      #
-      # The exclude mirrors pyproject's `[tool.basedpyright] exclude` for the
-      # reason `ty-check` above documents. Monorepo-only paths carry
-      #
-      # `require_serial: true` because this hook parallelizes itself. Without
-      # it pre-commit forks ~cpu_count partitions CONCURRENTLY, each its own
-      # basedpyright at `--threads=$WORKERS` -- a 500-file changeset launched 18
-      # processes and ~96 Node workers on a 16-core box. Serial partitioning is
-      # what makes $WORKERS a cap.
-      #
-        # `basedpyright` takes no filenames, so pre-commit cannot split its work
-        # into argv chunks; this twin collects them into a spool file.
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit ty-check
+      # Off: `pyrefly-check` is the checker. Run with `--hook-stage manual`.
+      # Named files bypass pyproject's `[tool.basedpyright] exclude`, so the
+      # twin's exclude mirrors it.
       - id: basedpyright-spool
         name: basedpyright-spool
-        # `run basedpyright` selects this twin too, so its spool exists.
         alias: basedpyright
         language: system
-        # Off: `pyrefly-check` is the checker. Run with `--hook-stage manual`.
         stages: [manual]
         require_serial: true
         types_or: [python, pyi]
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit spool basedpyright
         exclude: |
           (?x)^(
             typings/
             |(.*/)?third_party/
           )
-        entry: >-
-          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' basedpyright
       - id: basedpyright
         name: basedpyright
         language: system
-        # Off: `pyrefly-check` is the checker. Run with `--hook-stage manual`.
         stages: [manual]
         # Pre-commit discards a PASSING hook's output (see the Pre-Push Gates
         # note on `verbose`); this keeps basedpyright's summary line visible.
@@ -399,41 +308,20 @@ repos:
         require_serial: true
         pass_filenames: false
         types_or: [python, pyi]
-        entry: *worker-entry
-        # `files` stays `"$@"` unless BOTH the opt-in is set and the harvester
-        # exists. An exported package has neither: the fenced block below is
-        # stripped from the exported config, because the harvester's monorepo
-        # path would trip the `monorepo-references` leak check.
-        #
-        # An ARRAY throughout, never a scalar. Flattening argv into a string and
-        # re-splitting on IFS turns `dir with space/mod.py` into three arguments
-        # and lets a `*` in a filename glob against the worktree. The harvester
-        # emits one path per line for the same reason, and `--` keeps a
-        # leading-dash filename from parsing as an option.
-        #
-        # A literal (`|`) script, not folded: the copybarista markers below are
-        # shell comments, and folding would join the rest of the script onto them.
-        args:
-          - WORKERS_BASEDPYRIGHT
-          - |
-            p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/basedpyright.$p; files=(); if [ -f "$spool" ]; then while IFS= read -r -d "" f; do files+=("$f"); done < "$spool"; rm -f "$spool"; set -- "${files[@]}"; fi;
-            files=("$@")
-            check=(basedpyright --threads="$WORKERS")
-            exec env NODE_OPTIONS=--max-old-space-size=2048 \
-              uv --quiet run --frozen --group pre-commit "${check[@]}" "${files[@]}"
-        exclude: |
-          (?x)^(
-            typings/
-            |(.*/)?third_party/
-          )
-
+        entry: >-
+          env NODE_OPTIONS=--max-old-space-size=2048
+          uv --quiet run --frozen --group pre-commit python -m tools.precommit
+          basedpyright
       # Default type checker; `basedpyright` above runs only under
-      # `--hook-stage manual`. Named files bypass pyproject's
-      # `project-excludes`, so the exclude below mirrors it.
-      #
-      # Spooled, like `basedpyright`: per argv chunk, concurrent `--fix` runs
-      # delete asserts under one another's line numbers.
-      #
+      # `--hook-stage manual`.
+      - id: pyrefly-check-spool
+        name: pyrefly-check-spool
+        alias: pyrefly-check
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        types_or: [python, pyi]
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit spool pyrefly-check
       - id: pyrefly-check
         name: pyrefly-check
         language: system
@@ -443,81 +331,31 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types_or: [python, pyi]
-        entry: *worker-entry
-        args:
-          - WORKERS_PYREFLY_CHECK
-          - |
-            p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/typecheck-harvested.$p; files=(); if [ -f "$spool" ]; then while IFS= read -r -d "" f; do files+=("$f"); done < "$spool"; rm -f "$spool"; set -- "${files[@]}"; fi;
-            # A skipped `ty-check` leaves no harvest; read the raw spool instead.
-            raw=${spool%/*}/typecheck.$p
-            if (($# == 0)) && [ -f "$raw" ]; then
-              files=()
-              while IFS= read -r -d "" f; do files+=("$f"); done < "$raw"
-              rm -f "$raw"
-              set -- "${files[@]}"
-            fi
-            (($#)) || exit 0
-            files=("$@")
-            check=(pyrefly check --threads="$WORKERS")
-            exec uv --quiet run --frozen --group pre-commit "${check[@]}" "${files[@]}"
-        exclude: *typecheck-exclude
-
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit pyrefly-check
   - repo: local
     hooks:
-      # Runs the test file PAIRED with each changed source file, nothing
-      # transitive: ~1s, versus the whole suite at pre-push.
+      # Each heavy hook below is a `-spool` twin, which collects pre-commit's
+      # file chunks, then the hook, which runs once over all of them through
+      # the `precommit` module at this machine's worker count.
       #
-      # Probes both sidecar spellings and a sibling tests/ directory; a layout
-      # matching none runs nothing and exits 0. Green here means "no paired test
-      # found", not "tested" -- acceptable only because pre-push is the gate.
+      # Runs the tests PAIRED with each changed file (`x_test.py`, `test_x.py`,
+      # beside it or under `tests/`), then applies `fail_under` to the changed
+      # sources alone. ~1s, versus the whole suite at pre-push. Green with no
+      # pair found means "untested", acceptable only because pre-push is the
+      # gate. Exit 5 (nothing collected) passes: a selection whose every test
+      # carries a deselected marker is not a failure.
       #
       #
-      # Tolerate exit 5 (nothing collected): a selection whose every test
-      # carries a deselected marker collects zero, which is not a failure --
-      # editing `chrome/conftest.py` reported RED on seven passing integration
-      # tests. A real failure is exit 1 and still fails.
-      #
-      # `-n` is chosen from selection size because neither setting wins
-      # everywhere: xdist costs a fixed ~5s startup, a sidecar is ~0.23s serial
-      # vs ~0.10s spread, so the curves cross. Measured on the 16-thread workstation (WORKERS=5),
-      # files -> wall:
+      # `-n` only from 16 test files (SIDECAR_XDIST_MIN overrides): xdist's ~5s
+      # startup lost below that on the 16-thread workstation at 5 workers.
       #
       #   files    8    12    16    20    60
       #   serial  5.7s  7.6s  6.8s  12.4s 27.8s
       #   -n5     8.1s  9.0s  7.5s   8.0s 16.3s
       #
-      # The threshold sits at the crossover, one below the first size where -n
-      # won, so a few-file commit -- what this tier exists for -- never pays
-      # startup and a sweeping refactor still gets workers. SIDECAR_XDIST_MIN
-      # overrides.
-      #
-      # `require_serial: true` is a separate axis, governing pre-commit's OWN
-      # argv partitioning: it forks cpu_count copies of this whole hook, which
-      # multiplies the startup cost the threshold avoids and stacks on any `-n`.
-      # 60 files as 16 forked hooks burned 73s of CPU for the same 16.3s wall
-      # one hook at -n5 reaches on 36s.
-      #
-      # Coverage targets are directories (`--cov=${f%/*}`), never dotted modules:
-      # coverage imports a dotted target's package before collection, and a
-      # package importing torch then fails every later torch import with
-      # "'_has_torch_function' already has a docstring".
-      # Erase before pytest so --cov-append cannot retain earlier measurements.
-      # Run even when pytest skips every file, or the summary reports stale data.
-      - id: coverage-erase
-        name: coverage-erase
-        language: system
-        stages: [pre-commit]
-        always_run: true
-        pass_filenames: false
-        require_serial: true
-        entry: >-
-          bash -c '
-            uv --quiet run --frozen --group pre-commit python -c "import coverage" 2>/dev/null || exit 0;
-            uv --quiet run --frozen --group pre-commit coverage erase
-          ' bash
-
-        # `pytest` takes no filenames, so pre-commit cannot split its work
-        # into argv chunks; this twin collects them into a spool file.
+      # Coverage targets are directories, never dotted modules: coverage
+      # imports a dotted target's package before collection, and a package
+      # importing torch then fails every later torch import.
       - id: pytest-spool
         name: pytest-spool
         # `run pytest` selects this twin too, so its spool exists.
@@ -526,135 +364,20 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types: [python]
-        entry: >-
-          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' pytest
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit spool pytest
       - id: pytest
         name: pytest
         language: system
         stages: [pre-commit]
         require_serial: true
         pass_filenames: false
-        # See `basedpyright` above: a passing hook's output is discarded, which
-        # made "did any test run at all?" unanswerable from a green line.
+        # A passing hook's output is discarded otherwise, which made "did any
+        # test run at all?" unanswerable from a green line.
         verbose: true
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types: [python]
-        entry: *worker-entry
-        # The inline loop is the SIDECAR PROBE and it is the DEFAULT. The
-        # harvester supersedes it only under `PRECOMMIT_CODEGRAPH_PYTEST`, and
-        # never in an exported package: the fenced block below is stripped from
-        # the exported config, because the harvester's monorepo path would trip
-        # the `monorepo-references` leak check.
-        #
-        # The probe also runs whenever the harvester yields NOTHING -- a nonzero
-        # exit or an empty selection. Without that, a corrupt or stale index
-        # made this hook run zero tests and exit green, which is worse than not
-        # having the index at all.
-        #
-        # A literal (`|`) script, not folded, for the reason `basedpyright`
-        # gives above: the copybarista markers below are shell comments, and
-        # folding would join the rest of the script onto them.
-        args:
-          - WORKERS_PYTEST
-          - |
-            p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/pytest.$p; files=(); if [ -f "$spool" ]; then while IFS= read -r -d "" f; do files+=("$f"); done < "$spool"; rm -f "$spool"; set -- "${files[@]}"; fi;
-            tests=();
-            if [ ${#tests[@]} -eq 0 ]; then
-              for f in "$@"; do
-                dir=$(dirname "$f");
-                stem=$(basename "$f" .py); stem=${stem%_test}; stem=${stem#test_};
-                for cand in "$dir/${stem}_test.py" "$dir/test_${stem}.py" \
-                            "$dir/tests/${stem}_test.py" "$dir/tests/test_${stem}.py"; do
-                  [ -f "$cand" ] && tests+=("$cand");
-                done;
-              done;
-              ((${#tests[@]})) &&
-                IFS=$'\n' read -r -d '' -a tests < <(printf "%s\n" "${tests[@]}" | sort -u && printf '\0');
-            fi;
-            [ ${#tests[@]} -eq 0 ] && exit 0;
-            dist=();
-            # Files, not nodeids: the threshold was measured in files, and a
-            # harvest's dozens of nodeids from one file paid xdist startup.
-            nfiles=$(printf "%s\n" "${tests[@]%%::*}" | sort -u | wc -l);
-            ((nfiles >= ${SIDECAR_XDIST_MIN:-16})) && dist=(-n "$WORKERS");
-            cov=();
-            if uv --quiet run --frozen --group pre-commit python -c "import pytest_cov" 2>/dev/null; then
-              for f in "$@"; do
-                case "$f" in
-                  *_test.py|test_*.py|*/conftest.py) ;;
-                  */*.py) cov+=("--cov=${f%/*}") ;;
-                  *.py) cov+=("--cov=.") ;;
-                esac;
-              done;
-              if ((${#cov[@]})); then
-                # The run measures whole directories but tests only the changed
-                # files, so its total counts every untested sibling as 0%.
-                # `coverage-summary` applies `fail_under` to the changed files.
-                cov+=(--cov-append --no-cov-on-fail --cov-fail-under=0);
-                if [ "${PRECOMMIT_COVERAGE_DETAIL:-}" = 1 ]; then
-                  cov+=(--cov-report=term-missing:skip-covered);
-                else
-                  cov+=(--cov-report=);
-                fi;
-              fi;
-            fi;
-            # An @argfile, not argv: a deep harvest names thousands of nodeids,
-            # and a wide diff one `--cov` per file; either overflowed ARG_MAX
-            # ("Argument list too long").
-            argfile=$(mktemp);
-            trap 'rm -f "$argfile"' EXIT;
-            { ((${#cov[@]})) && printf "%s\n" "${cov[@]}" | sort -u;
-              printf "%s\n" "${tests[@]}"; } > "$argfile";
-            uv --quiet run --frozen --group pre-commit pytest "${dist[@]}" -q --tb=short "@$argfile" ||
-              test "$?" = 5
-
-      # Keep after pytest: pre-commit runs hooks in declaration order.
-      # Missing coverage is normal when no source module was tested.
-      #
-      # Enforces `fail_under` on the changed, non-omitted sources taken
-      # together, a file no test executed counting 0%; `pytest` above cannot,
-      # its total spans unchanged siblings. On failure it names each file short
-      # of the floor with its missed lines. No floor (the monorepo) skips this:
-      # there `pytest` runs only sidecar tests, so a file reached by another's
-      # imports reads as a false low, and `coverage-floor` gates per file.
-      # Never `coverage report --include`: it matched 2,727 globs per file for
-      # 48s. An unreadable data file still fails the hook.
-        # `coverage-summary` takes no filenames, so pre-commit cannot split its work
-        # into argv chunks; this twin collects them into a spool file.
-      - id: coverage-summary-spool
-        name: coverage-summary-spool
-        # `run coverage-summary` selects this twin too, so its spool exists.
-        alias: coverage-summary
-        language: system
-        stages: [pre-commit]
-        require_serial: true
-        types: [python]
-        entry: >-
-          bash -c 'p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; d=${TMPDIR:-/tmp}/precommit-spool-$(id -u); mkdir -p -m 700 "$d"; printf "%s\0" "$@" >> "$d/$0.$p"' coverage-summary
-      - id: coverage-summary
-        name: coverage-summary
-        language: system
-        stages: [pre-commit]
-        types: [python]
-        require_serial: true
-        pass_filenames: false
-        entry: >-
-          bash -c '
-            p=$PPID; while [ "$p" -gt 1 ]; do case "$(ps -o command= -p "$p")" in *pre[-_]commit\ *) break;; esac; p=$(ps -o ppid= -p "$p" | tr -d " "); done; spool=${TMPDIR:-/tmp}/precommit-spool-$(id -u)/coverage-summary.$p; files=(); if [ -f "$spool" ]; then while IFS= read -r -d "" f; do files+=("$f"); done < "$spool"; rm -f "$spool"; set -- "${files[@]}"; fi;
-            uv --quiet run --frozen --group pre-commit python -c "import coverage" 2>/dev/null || exit 0;
-            [ -f .coverage ] || exit 0;
-            sources=();
-            for f in "$@"; do
-              case "$f" in
-                *_test.py|test_*.py|*/conftest.py|conftest.py) ;;
-                *.py) sources+=("$f") ;;
-              esac;
-            done;
-            ((${#sources[@]})) || exit 0;
-            printf "%s\n" "${sources[@]}" | uv --quiet run --frozen --group pre-commit python -c "import fnmatch, os, sys, coverage; c = coverage.Coverage(); c.load(); floor = c.config.fail_under; files = sys.stdin.read().split(); kept = [f for f in files if floor and not any(fnmatch.fnmatch(os.path.abspath(f), p) for p in c.config.run_omit)]; rows = [(f, len(s), len(m), gaps) for f, s, _, m, gaps in map(c.analysis2, kept)]; total = sum(n for _, n, _, _ in rows); covered = total - sum(m for _, _, m, _ in rows); short = [r for r in rows if r[1] and 100 * (r[1] - r[2]) < floor * r[1]]; total and 100 * covered < floor * total and sys.exit(\"\n\".join([*(f\"{os.path.relpath(f)}  {m}/{n} missed  {g}\" for f, n, m, g in short), f\"Changed files are {100 * covered / total:.2f}% covered, below fail_under={floor:g}.\"]))"
-          ' bash
-
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit pytest
   # === Pre-Push Gates =========================================================
   #
   # To enable:  uv run pre-commit install --hook-type pre-push
@@ -671,33 +394,10 @@ repos:
   # voids pyproject's excludes), and on a 2-vCPU runner it blew the 30-minute
   # job cap while `basedpyright-global` answered the same question in 12.
   #
-  # Every `*worker-entry` below resolves the anchor DEFINED on the pre-commit
-  # `worker-sizing` hook, which sits first among the local hooks because a YAML
-  # alias must follow its definition; moving that hook past any reference is a
-  # YAML error, not a silent regression. `precommit_regex_test.py` asserts every
-  # reference stays byte-identical, so pasting the wrapper in place of one fails.
-  #
-  # progress output. Every pytest tier here runs for minutes and used to emit a
-  # single verdict line, which is also why the OOM that killed one looked like a
-  # hang. TWO layers suppress the transcript and both are undone below; fixing
-  # either alone still leaves a silent hook.
-  #
-  #   `verbose: true` -- pre-commit captures a hook's stdout and stderr into one
-  #   buffer and prints it only `if verbose or hook.verbose or retcode or
-  #   files_modified`, so a PASSING hook's output is discarded. Set per hook
-  #   rather than relying on a `--verbose` the caller may not pass.
-  #
-  #   `env PYTHONUNBUFFERED=1` -- that buffer is a PIPE, not a tty, so libc
-  #   block-buffers pytest's writes. Measured on the ci_smoke tier: piped
-  #   default and piped `-v` both held 0 bytes for 24s and flushed everything at
-  #   exit, while PYTHONUNBUFFERED had 709 bytes out by t=8s. Without it the
-  #   progress exists only once the process ends, which is exactly when an OOM
-  #   kill has already discarded it.
-  #
-  # Deliberately NOT `-v`: it changes what pytest writes (one line per test),
-  # not when, and measured no earlier than the default. The per-file `pytest`
-  # hook is excluded from both -- it finishes in ~1s, and a pytest transcript on
-  # every commit would bury the hooks that failed.
+  # The pytest tiers are defined in the `precommit` module's `tiers.py`: each
+  # tier's marker, empty-collection tolerance and capability guard, and the
+  # rules for when testmon may select. `verbose: true` because pre-commit prints
+  # a PASSING hook's output only under it, and every tier runs for minutes.
 
   - repo: local
     hooks:
@@ -717,13 +417,10 @@ repos:
         pass_filenames: false
         # Off: `pyrefly-check-global` is the checker. Run with `--hook-stage manual`.
         stages: [manual]
-        entry: *worker-entry
-        args:
-          - WORKERS_BASEDPYRIGHT_GLOBAL
-          - >-
-            exec env NODE_OPTIONS=--max-old-space-size=2048
-            uv --quiet run --frozen --group pre-commit
-            basedpyright --threads="$WORKERS"
+        entry: >-
+          env NODE_OPTIONS=--max-old-space-size=2048
+          uv --quiet run --frozen --group pre-commit python -m tools.precommit
+          threaded basedpyright-global -- basedpyright --threads={workers}
 
       - id: pyrefly-check-global
         name: pyrefly-check-global
@@ -731,12 +428,9 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        entry: *worker-entry
-        args:
-          - WORKERS_PYREFLY_CHECK_GLOBAL
-          - >-
-            exec uv --quiet run --frozen --group pre-commit
-            pyrefly check --threads="$WORKERS"
+        entry: >-
+          uv --quiet run --frozen --group pre-commit python -m tools.precommit
+          threaded pyrefly-check-global -- pyrefly check --threads={workers}
 
       - id: pytest-global
         name: pytest-global
@@ -744,241 +438,30 @@ repos:
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        # See `progress output` at the head of the Pre-Push Gates section.
         verbose: true
-        # Deliberately no testmon when this hook is sharded. It deselects in
-        # `pytest_ignore_collect`, a COLLECTION hook, while pytest-split partitions in
-        # `pytest_collection_modifyitems` -- and testmon ALSO registers that
-        # hook, `trylast=True`, exactly as pytest-split does. Which one wins is
-        # plugin registration order, not anything either declares. Measured when
-        # they last ran together: one shard with a warm database ran 8 tests
-        # where the cold run ran 118, and the four shards' union covered 76 of
-        # 257 rather than all of them. Tests went unrun and the gate stayed
-        # green.
-        #
-        # So the two are mutually exclusive, and the choice is DERIVED rather
-        # than configured twice: `$PYTEST_SPLIT_ARGS` non-empty means this run is
-        # one shard of several, so it must run every test it was handed and
-        # selection is off; empty means one process owns the whole tier and
-        # testmon selects. The workflow sets that variable per matrix job (from
-        # `matrix_entries` in ops/github/precommit_matrix.py) and nothing sets it
-        # locally, so a local pre-push selects and a sharded CI job does not,
-        # with no second switch to keep in step. `testmon_gate_test.py` runs
-        # this shell both ways to prove it.
-        #
-        # Unquoted on purpose: it must word-split into flags.
-        #
-        # It must be `--testmon-forceselect`, NOT plain `--testmon`: pyproject's
-        # addopts carries a default `-m 'not ci_smoke and ...'`, and testmon
-        # self-deactivates whenever `-m` is present, collecting a database and
-        # selecting nothing -- indistinguishable from working
-        # (tarpas/pytest-testmon#238). On a cache miss it runs everything, so it
-        # is fail-safe.
-        #
-        # COVERAGE_CORE=ctrace: coverage defaults to core=sysmon on 3.14, which
-        # cannot carry the dynamic contexts testmon switches per test. It warns,
-        # and pyproject's `filterwarnings = ["error"]` turns that into an
-        # INTERNALERROR collecting zero tests. Testmon builds Coverage with
-        # config_file=False, so only the env var reaches it.
-        #
-        # --no-cov only when pytest-cov is installed AND testmon is not
-        # selecting: the flag is an error without the plugin ("unrecognized
-        # arguments: --no-cov"), and testmon needs coverage to see which tests
-        # touched changed code. This file is copied into every exported package,
-        # not all of which carry either plugin.
-        #
-        # Whole-tree coverage is opt-in because it adds tracing overhead.
-        # Replace cov rather than append: the branch above may set --no-cov.
-        #
-        # The selection file is written by `selected_nodeids_plugin`, which
-        # emits node ids and nothing else, so an empty selection is a byte-empty
-        # file and the `-eq 0` guard below sees it. The reader still keeps only
-        # lines containing `::`: the plugin is probed for, not assumed, and an
-        # exported package that answers no falls back to a plain collection
-        # whose stdout a caller might still redirect here. One non-node-id
-        # argument makes pytest collect ZERO tests -- not the rest minus one --
-        # so the filter is cheap insurance against reintroducing that.
-        entry: *worker-entry
-        args:
-          - WORKERS_PYTEST_GLOBAL
-          - >-
-            CI_TESTMON=1;
-            nodeids=();
-            if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
-            while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
-            [ ${#nodeids[@]} -eq 0 ] && exit 0;
-            fi;
-            select=(); cov=(); sel=();
-            has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
-            if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && has "import testmon"; then
-            select=(--testmon-forceselect);
-            elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
-            :;
-            else has "import pytest_cov" && cov=(--no-cov);
-            fi;
-            if [ -n "${PYTEST_COVERAGE_REPORT:-}" ] && has "import pytest_cov"; then
-            cov=(--cov=loop --cov=ops --cov-report=term:skip-covered);
-            fi;
-            if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
-            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
-            uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${select[@]}" "${sel[@]}" -q --tb=short
-            --collect-only;
-            status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
-            fi;
-            exec env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
-            uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" $PYTEST_TESTMON_ARGS -q --tb=short
-            $PYTEST_PROGRESS_ARGS $PYTEST_SPLIT_ARGS "${nodeids[@]}"
-
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit tier pytest-global
       - id: pytest-slow-global
         name: pytest-slow-global
         language: system
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        # See `progress output` at the head of the Pre-Push Gates section.
         verbose: true
-        # --no-cov only when pytest-cov is installed: the flag errors without
-        # the plugin, and no pre-push tier needs coverage.
-        #
-        # Tolerate exit 5 (nothing collected): a tree may ship no tests for this
-        # marker. Not fail-open -- `pytest-global` above still fails on an empty
-        # collection, and `marker_tiers_test.py` fails any tier that goes empty
-        # without being declared empty.
-        #
-        # $PYTEST_SPLIT_ARGS is what makes this tier's four CI jobs distinct.
-        # Omitting it was silent for four runs: the workflow set the variable,
-        # this hook ignored it, and all four "shards" ran the identical 725
-        # tests at ~23 minutes each -- no split, no memory bound, 4x the billed
-        # time. Unquoted on purpose: it must word-split into flags, and it is
-        # empty for every local run.
-        entry: *worker-entry
-        args:
-          - WORKERS_PYTEST_SLOW_GLOBAL
-          - >-
-            nodeids=();
-            if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
-            while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
-            [ ${#nodeids[@]} -eq 0 ] && exit 0;
-            fi;
-            select=(); cov=(); sel=();
-            has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
-            if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
-            select=(--testmon-forceselect);
-            elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
-            :;
-            else has "import pytest_cov" && cov=(--no-cov);
-            fi;
-            if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
-            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
-            uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${select[@]}" -q --tb=short --collect-only
-            -m "slow and not cluster and not cuda and not integration and not performance"
-            "${sel[@]}";
-            status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
-            fi;
-            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
-            uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" $PYTEST_TESTMON_ARGS -q --tb=short
-            $PYTEST_PROGRESS_ARGS
-            -m "slow and not cluster and not cuda and not integration and not performance"
-            $PYTEST_SPLIT_ARGS "${nodeids[@]}"
-            || test "$?" = 5
-
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit tier pytest-slow-global
       - id: pytest-ci-smoke-global
         name: pytest-ci-smoke-global
         language: system
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        # See `progress output` at the head of the Pre-Push Gates section.
         verbose: true
-        # Slower package/CLI smoke tests, deselected by the pyproject marker
-        # filter. Exit 5 tolerated: see pytest-slow-global above.
-        entry: *worker-entry
-        args:
-          - WORKERS_PYTEST_CI_SMOKE_GLOBAL
-          - >-
-            nodeids=();
-            if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
-            while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
-            [ ${#nodeids[@]} -eq 0 ] && exit 0;
-            fi;
-            select=(); cov=(); sel=();
-            has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
-            if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
-            select=(--testmon-forceselect);
-            elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
-            :;
-            else has "import pytest_cov" && cov=(--no-cov);
-            fi;
-            if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
-            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
-            uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${select[@]}" -q --tb=short --durations=20
-            --collect-only -m ci_smoke "${sel[@]}";
-            status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
-            fi;
-            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
-            uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" $PYTEST_TESTMON_ARGS -q --tb=short --durations=20
-            $PYTEST_PROGRESS_ARGS -m ci_smoke
-            $PYTEST_SPLIT_ARGS "${nodeids[@]}"
-            || test "$?" = 5
-
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit tier pytest-ci-smoke-global
       - id: pytest-integration-global
         name: pytest-integration-global
         language: system
         always_run: true
         pass_filenames: false
         stages: [pre-push]
-        # See `progress output` at the head of the Pre-Push Gates section.
         verbose: true
-        # Gated on the CAPABILITY, not an env var: these need a real Postgres,
-        # so skip when `pg_config` is absent and RUN when it is there. A
-        # RUN_INTEGRATION=1 opt-in left the pgvector this image installs
-        # provisioned and never exercised.
-        #
-        # `pg_config` present but pgvector missing still fails loudly ("extension
-        # \"vector\" is not available") -- a broken provision, not a machine
-        # without a database, and must not be silently skipped.
-        #
-        # Exit 5 tolerated: see pytest-slow-global above.
-        #
-        # $PYTEST_SPLIT_ARGS: see pytest-slow-global above -- this tier was
-        # unsharded in practice for the same reason.
-        entry: *worker-entry
-        args:
-          - WORKERS_PYTEST_INTEGRATION_GLOBAL
-          - >-
-            command -v pg_config >/dev/null 2>&1 || exit 0;
-            nodeids=();
-            if [ -n "${PYTEST_NODEIDS_FILE:-}" ]; then
-            while IFS= read -r nodeid; do case "$nodeid" in *::*) nodeids+=("$nodeid") ;; esac; done < "$PYTEST_NODEIDS_FILE";
-            [ ${#nodeids[@]} -eq 0 ] && exit 0;
-            fi;
-            select=(); cov=(); sel=();
-            has() { uv --quiet run --frozen --group pre-commit python -c "$1" 2>/dev/null; };
-            if [ -z "${PYTEST_FORCE_ALL:-}" ] && [ -z "$PYTEST_SPLIT_ARGS" ] && { [ -n "${PYTEST_COLLECT_SELECTED:-}" ] || [ -z "${GITHUB_ACTIONS:-}" ]; } && has "import testmon"; then
-            select=(--testmon-forceselect);
-            elif [ -n "${PYTEST_TESTMON_ARGS:-}" ]; then
-            :;
-            else has "import pytest_cov" && cov=(--no-cov);
-            fi;
-            if [ -n "${PYTEST_COLLECT_SELECTED:-}" ]; then
-            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
-            uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${select[@]}" -q --tb=short --dist=loadgroup
-            --collect-only -m integration "${sel[@]}";
-            status="$?"; test "$status" = 0 || test "$status" = 5; exit "$?";
-            fi;
-            env PYTHONUNBUFFERED=1 COVERAGE_CORE=ctrace
-            uv --quiet run --frozen --group pre-commit
-            pytest -n="$WORKERS" "${cov[@]}" "${select[@]}" $PYTEST_TESTMON_ARGS -q --tb=short --dist=loadgroup
-            $PYTEST_PROGRESS_ARGS -m integration
-            $PYTEST_SPLIT_ARGS "${nodeids[@]}"
-            || test "$?" = 5
-
-
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit tier pytest-integration-global
 # NEVER EDIT THIS FILE!
