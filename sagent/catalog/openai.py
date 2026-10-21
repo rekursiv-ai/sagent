@@ -1246,7 +1246,7 @@ def _fit_patch_budget(width: int, height: int, budget: int) -> tuple[int, int]:
     """Shrink an image to the patch budget, as images-vision step B states it."""
     if budget <= 0 or _patch_count(width, height) <= budget:
         return width, height
-    shrink = ((32**2 * budget) / (width * height)) ** 0.5
+    shrink = float(((32**2 * budget) / (width * height)) ** 0.5)
     adjusted = shrink * min(
         math.floor(width * shrink / 32) / (width * shrink / 32),
         math.floor(height * shrink / 32) / (height * shrink / 32),
