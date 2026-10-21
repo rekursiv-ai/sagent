@@ -3604,8 +3604,8 @@ requires-dist = [
     { name = "slack-sdk", marker = "extra == 'slack'", specifier = ">=3.33.0" },
     { name = "starlette", specifier = ">=0.40" },
     { name = "tiktoken", specifier = ">=0.12.0" },
-    { name = "torch", marker = "extra == 'selfhosted'", specifier = "==2.11.0" },
-    { name = "torchvision", marker = "extra == 'selfhosted'", specifier = "==0.26.0" },
+    { name = "torch", marker = "extra == 'selfhosted'", specifier = ">=2.11.0" },
+    { name = "torchvision", marker = "extra == 'selfhosted'", specifier = ">=0.26.0" },
     { name = "transformers", marker = "extra == 'selfhosted'", specifier = ">=5.8.0" },
     { name = "treekle", git = "https://github.com/rekursiv-ai/treekle?branch=main" },
     { name = "uvicorn", specifier = ">=0.30.0" },
@@ -4095,7 +4095,7 @@ wheels = [
 [[package]]
 name = "treekle"
 version = "0.3.1"
-source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#4ef2e0daee565ecaa4f9f15cec6afe96a8f49e4e" }
+source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#f1af1e9d5be438cff31bd44a1c1ee4fd2c9fcd73" }
 
 [[package]]
 name = "triton"

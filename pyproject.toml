@@ -147,8 +147,8 @@ selfhosted = [
     "protobuf",
     "safetensors",
     "sentencepiece",
-    "torch==2.11.0",
-    "torchvision==0.26.0",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
     "transformers>=5.8.0",
 ]
 
@@ -810,6 +810,4 @@ explicit = true
 rekursiv-ai-typeshed = { git = "https://github.com/rekursiv-ai/typings", subdirectory = "typeshed", branch = "main" }
 treekle = { git = "https://github.com/rekursiv-ai/treekle", branch = "main" }
 rekursiv-ai-typings = { git = "https://github.com/rekursiv-ai/typings", branch = "main" }
-configgle = { git = "https://github.com/rekursiv-ai/configgle", branch = "main" }
-priml = { git = "https://github.com/rekursiv-ai/priml", branch = "main" }
 wesearch = { git = "https://github.com/rekursiv-ai/wesearch", branch = "main" }
