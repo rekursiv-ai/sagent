@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, override
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -502,45 +501,6 @@ def test_a_junk_xdist_threshold_keeps_the_default(
     assert "-n" not in tools.calls[-1]
 
 
-def _codegraph_sync(tmp_path: Path, tools: _Recorder, **environ: str) -> int:
-    return precommit.codegraph_sync(
-        _context(tmp_path, tools, **environ),
-        caches=tmp_path / "caches",
-    )
-
-
-@pytest.mark.parametrize("value", ["0", "00", "", "false", "01", "-1", " 1 "])
-def test_a_disabled_opt_in_never_syncs_the_index(tmp_path: Path, value: str) -> None:
-    """``PRECOMMIT_CODEGRAPH=0`` once re-synced a 417 MB index every commit."""
-    tools = _Recorder()
-
-    assert (
-        _codegraph_sync(
-            tmp_path,
-            tools,
-            PRECOMMIT_CODEGRAPH_PYTEST=value,
-            PRECOMMIT_CODEGRAPH_TYPECHECK=value,
-        )
-        == 0
-    )
-    assert tools.calls == []
-
-
-@pytest.mark.parametrize(
-    "variable",
-    ["PRECOMMIT_CODEGRAPH_PYTEST", "PRECOMMIT_CODEGRAPH_TYPECHECK"],
-)
-def test_either_gate_opting_in_syncs_the_index(
-    tmp_path: Path,
-    variable: str,
-) -> None:
-    """A gate reading a never-synced index silently falls back to its floor."""
-    tools = _Recorder(status=1)
-
-    assert _codegraph_sync(tmp_path, tools, **{variable: "1"}) == 0
-    assert tools.calls[-1] == ["codegraph", "sync", "--quiet"]
-
-
 @pytest.mark.parametrize(("count", "spread"), [(15, False), (16, True)])
 def test_pytest_spreads_only_across_enough_test_files(
     tmp_path: Path,
@@ -811,24 +771,6 @@ def test_the_cli_runs_pytest(
 
     assert precommit.main() == 4
     assert processes.calls[-1][1:4] == ["-m", "coverage", "erase"]
-
-
-def test_the_cli_syncs_the_index_into_the_named_caches(
-    processes: _Processes,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    monkeypatch.setenv("PRECOMMIT_CODEGRAPH_PYTEST", "1")
-    monkeypatch.setattr(shutil, "which", _on_path)
-    monkeypatch.setattr(
-        sys,
-        "argv",
-        ["precommit", "codegraph-sync", "--caches", str(tmp_path / "caches")],
-    )
-
-    assert precommit.main() == 0
-    assert (tmp_path / ".codegraph").readlink() == tmp_path / "caches" / tmp_path.name
-    assert processes.calls[-1] == ["codegraph", "sync", "--quiet"]
 
 
 def test_the_cli_runs_a_tier(

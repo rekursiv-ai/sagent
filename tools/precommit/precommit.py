@@ -13,7 +13,6 @@ Gates:
   pytest         The tests paired with the spooled files, then their coverage.
   run GATE       A module once over GATE's files: ``-m MODULE ... --workers N
                  -- FILES``.
-  codegraph-sync The CodeGraph index, when a gate opted in to walking it.
   tier NAME      One whole-suite pytest tier from ``TIERS``.
   threaded NAME  A command, each ``{workers}`` in it set to the count.
 
@@ -41,12 +40,7 @@ import subprocess
 import sys
 import tempfile
 
-from tools.precommit import (
-    codegraph_sync as sync,
-    coverage_summary,
-    scope,
-    spool,
-)
+from tools.precommit import coverage_summary, scope, spool
 from tools.precommit.tiers import TIERS, Tier
 from tools.precommit.worker_count import default_workers, worker_count
 
@@ -254,25 +248,6 @@ def pytest(context: Context, *, dependents: str | None) -> int:
     return int(bool(below))
 
 
-def codegraph_sync(context: Context, *, caches: Path) -> int:
-    """Sync the CodeGraph index when a gate opted in to walking it.
-
-    Args:
-      context: What the gate reads and runs.
-      caches: Where the index lives, one directory per worktree name.
-
-    Returns:
-      exit_code: Always 0; a gate without an index falls back to its floor.
-
-    """
-    if any(
-        positive(context.environ.get(name, ""))
-        for name in ("PRECOMMIT_CODEGRAPH_PYTEST", "PRECOMMIT_CODEGRAPH_TYPECHECK")
-    ):
-        sync.sync(context.root, caches=caches, run=context.run, which=context.which)
-    return 0
-
-
 def run(
     name: str,
     *,
@@ -470,7 +445,6 @@ class Flags(Protocol):
     fixer: str | None
     when: str | None
     argv: list[str]
-    caches: Path
     plugin: str | None
 
 
@@ -508,14 +482,6 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     tests = commands.add_parser("pytest", help="Run the tests paired with the spool.")
     tests.set_defaults(handler=_test)
     _add_dependents(tests)
-    index = commands.add_parser("codegraph-sync", help="Sync the CodeGraph index.")
-    index.set_defaults(handler=_sync_index)
-    index.add_argument(
-        "--caches",
-        type=Path,
-        required=True,
-        help="Where the index lives, one directory per worktree name.",
-    )
     once = commands.add_parser("run", help="Run a module once over a spool.")
     once.set_defaults(handler=_run_once)
     once.add_argument("gate", help="The gate, naming its spool and worker override.")
@@ -571,10 +537,6 @@ def _check(flags: Flags, context: Context) -> int:
 
 def _test(flags: Flags, context: Context) -> int:
     return pytest(context, dependents=flags.dependents)
-
-
-def _sync_index(flags: Flags, context: Context) -> int:
-    return codegraph_sync(context, caches=flags.caches)
 
 
 def _run_once(flags: Flags, context: Context) -> int:
