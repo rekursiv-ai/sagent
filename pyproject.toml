@@ -103,8 +103,6 @@ typecheck = [
     "basedpyright>=1.40.1",
     "pyrefly>=1.4.0",
     "ty>=0.0.84",
-    # Extra.
-    "rekursiv-ai-typeshed>=0.1.6",
     "rekursiv-ai-typings>=0.1.6",
 ]
 "pre-commit" = [
@@ -612,12 +610,6 @@ stubPath = "typings"
 # `reportMissingModuleSource` on macOS) under .venv/share. Stubs still win
 # over source, so no type changes.
 extraPaths = ["typings", ".venv/share/rekursiv-ai-typings"]
-# `rekursiv-ai-typeshed` (a `typecheck` dependency): the checkers' bundled stdlib
-# with `int`/`float` `__pow__` returning `float` rather than typeshed's `Any`,
-# which would otherwise make every `x ** 0.5` a `reportAny` violation.
-# `uv sync` installs it as shared data at this path; the `basedpyright/` tree
-# also carries configgle's `Intersection` polyfill.
-typeshedPath = ".venv/share/rekursiv-ai-typeshed/basedpyright"
 # `exclude` and `ignore` are the SAME list on purpose. `exclude` stops a path
 # from being a checked source; `ignore` also silences diagnostics when an
 # included file imports it. Pyright has no single key for both, so keep them
@@ -670,8 +662,6 @@ reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-on
 
 [tool.ty.environment]
 python-version = "3.12"  # Intentional; test at 3.12 for exports.
-# Same patch as `[tool.basedpyright] typeshedPath`, with ty's real `ty_extensions`.
-typeshed = ".venv/share/rekursiv-ai-typeshed/ty"
 extra-paths = ["typings"]
 
 # Mirrors `[tool.basedpyright] exclude`, minus entries ty never walks anyway
@@ -724,12 +714,9 @@ project-excludes = [
     "**/third_party/",
     "typings/",
     "**/.export/typings/",
-    "**/rekursiv_ai_typeshed/typings/",
     "website/rekursiv-ai.github.io/_site/",
 ]
 search-path = ["typings"]
-# No `typeshed-path`: ty's tree (`[tool.ty.environment] typeshed`) makes pyrefly
-# 1.4.0 flag every `-> Self` call as an unused coroutine (879 false positives).
 # Pinned beside the config: an interpreter found through a symlinked home splits
 # site-packages from the typeshed, and `pathlib.Path` stops matching `PathLike`.
 python-interpreter-path = ".venv/bin/python"
@@ -777,12 +764,6 @@ required-environments = [
 [tool.uv.workspace]
 members = []
 
-[tool.uv.extra-build-dependencies]
-rekursiv-ai-typeshed = [
-    {requirement = "basedpyright", match-runtime = true},
-    {requirement = "ty", match-runtime = true},
-]
-
 [tool.uv.pip]
 compile-bytecode = true
 
@@ -807,7 +788,6 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
-rekursiv-ai-typeshed = { git = "https://github.com/rekursiv-ai/typings", subdirectory = "typeshed", branch = "main" }
 treekle = { git = "https://github.com/rekursiv-ai/treekle", branch = "main" }
 rekursiv-ai-typings = { git = "https://github.com/rekursiv-ai/typings", branch = "main" }
 wesearch = { git = "https://github.com/rekursiv-ai/wesearch", branch = "main" }

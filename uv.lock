@@ -3168,18 +3168,9 @@ wheels = [
 ]
 
 [[package]]
-name = "rekursiv-ai-typeshed"
-version = "0.1.7"
-source = { git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main#f0726c31a7303b11c5835df5b62e919d71773a16" }
-dependencies = [
-    { name = "basedpyright" },
-    { name = "ty" },
-]
-
-[[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.7"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#f0726c31a7303b11c5835df5b62e919d71773a16" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#3e4c18b6bfef29962136221a579c4ad3ef319658" }
 
 [[package]]
 name = "requests"
@@ -3529,7 +3520,6 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
-    { name = "rekursiv-ai-typeshed" },
     { name = "rekursiv-ai-typings" },
     { name = "ruff" },
     { name = "tqdm" },
@@ -3550,7 +3540,6 @@ pre-commit = [
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "pytest-xdist" },
-    { name = "rekursiv-ai-typeshed" },
     { name = "rekursiv-ai-typings" },
     { name = "ruff" },
     { name = "ty" },
@@ -3566,7 +3555,6 @@ test = [
 typecheck = [
     { name = "basedpyright" },
     { name = "pyrefly" },
-    { name = "rekursiv-ai-typeshed" },
     { name = "rekursiv-ai-typings" },
     { name = "ty" },
 ]
@@ -3632,7 +3620,6 @@ dev = [
     { name = "pytest-cov" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "rekursiv-ai-typeshed", git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main" },
     { name = "rekursiv-ai-typings", git = "https://github.com/rekursiv-ai/typings?branch=main" },
     { name = "ruff" },
     { name = "tqdm" },
@@ -3653,7 +3640,6 @@ pre-commit = [
     { name = "pytest-cov" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
-    { name = "rekursiv-ai-typeshed", git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main" },
     { name = "rekursiv-ai-typings", git = "https://github.com/rekursiv-ai/typings?branch=main" },
     { name = "ruff" },
     { name = "ty", specifier = ">=0.0.84" },
@@ -3669,7 +3655,6 @@ test = [
 typecheck = [
     { name = "basedpyright", specifier = ">=1.40.1" },
     { name = "pyrefly", specifier = ">=1.4.0" },
-    { name = "rekursiv-ai-typeshed", git = "https://github.com/rekursiv-ai/typings?subdirectory=typeshed&branch=main" },
     { name = "rekursiv-ai-typings", git = "https://github.com/rekursiv-ai/typings?branch=main" },
     { name = "ty", specifier = ">=0.0.84" },
 ]
@@ -4095,7 +4080,7 @@ wheels = [
 [[package]]
 name = "treekle"
 version = "0.3.1"
-source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#9299d2666a6ea7b02bccce9dff65557bacb774b8" }
+source = { git = "https://github.com/rekursiv-ai/treekle?branch=main#20a03c1a5c099c214d0a694b9ccbab21ffa541e2" }
 
 [[package]]
 name = "triton"
@@ -4407,7 +4392,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.14"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#e3aa9b80b3cdf47ef575a0219bc7b5fa4335bfb4" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#ba5a76e3f84346a03cba40428dd6a870198b8c0c" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },
