@@ -741,7 +741,12 @@ async def test_a_descendant_that_leaves_the_group_cannot_hang_the_drain(
     state.bash_cwd = str(tmp_path)
     state.start_cwd = str(tmp_path)
     out = await asyncio.wait_for(
-        _run_foreground("setsid sleep 10 & echo started", state=state, timeout_s=0.2),
+        _run_foreground(
+            "setsid sleep 10 & echo started",
+            state=state,
+            timeout_s=0.05,
+            drain_sec=0.05,
+        ),
         timeout=5.0,
     )
     assert "started" in out, out
