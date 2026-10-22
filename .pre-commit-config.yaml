@@ -193,7 +193,7 @@ repos:
   - repo: local
     hooks:
       # Worker counts. Every heavy hook below sizes its own pool with
-      # `tools.precommit.worker_count.default_workers`, whose docstring derives the
+      # `tools.gate.worker_count.default_workers`, whose docstring derives the
       # formula, and runs below interactive priority. Overrides,
       # most specific first: `WORKERS_<HOOK_ID>` (`WORKERS_PYTEST_GLOBAL=1`),
       # then `WORKERS_DEFAULT`. Per hook is what CI needs: the integration tier
@@ -271,7 +271,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit spool ty-check
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.gate spool ty-check
       - id: ty-check
         name: ty-check
         language: system
@@ -281,7 +281,7 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit ty-check
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.typecheck ty-check
       # Off: `pyrefly-check` is the checker. Run with `--hook-stage manual`.
       # Named files bypass pyproject's `[tool.basedpyright] exclude`, so the
       # twin's exclude mirrors it.
@@ -292,7 +292,7 @@ repos:
         stages: [manual]
         require_serial: true
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit spool basedpyright
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.gate spool basedpyright
         exclude: |
           (?x)^(
             typings/
@@ -310,7 +310,7 @@ repos:
         types_or: [python, pyi]
         entry: >-
           env NODE_OPTIONS=--max-old-space-size=2048
-          uv --quiet run --frozen --group pre-commit python -m tools.precommit
+          uv --quiet run --frozen --group pre-commit python -m tools.typecheck
           basedpyright
       # Default type checker; `basedpyright` above runs only under
       # `--hook-stage manual`.
@@ -321,7 +321,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit spool pyrefly-check
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.gate spool pyrefly-check
       - id: pyrefly-check
         name: pyrefly-check
         language: system
@@ -331,7 +331,7 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit pyrefly-check
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.typecheck pyrefly-check
   - repo: local
     hooks:
       # Each heavy hook below is a `-spool` twin, which collects pre-commit's
@@ -364,7 +364,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types: [python]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit spool pytest
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.gate spool pytest
       - id: pytest
         name: pytest
         language: system
@@ -377,7 +377,7 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types: [python]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit pytest
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.testing pytest
   # === Pre-Push Gates =========================================================
   #
   # To enable:  uv run pre-commit install --hook-type pre-push
@@ -419,7 +419,7 @@ repos:
         stages: [manual]
         entry: >-
           env NODE_OPTIONS=--max-old-space-size=2048
-          uv --quiet run --frozen --group pre-commit python -m tools.precommit
+          uv --quiet run --frozen --group pre-commit python -m tools.gate
           threaded basedpyright-global -- basedpyright --threads={workers}
 
       - id: pyrefly-check-global
@@ -429,7 +429,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         entry: >-
-          uv --quiet run --frozen --group pre-commit python -m tools.precommit
+          uv --quiet run --frozen --group pre-commit python -m tools.gate
           threaded pyrefly-check-global -- pyrefly check --threads={workers}
 
       - id: pytest-global
@@ -439,7 +439,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit tier pytest-global
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.testing tier pytest-global
       - id: pytest-slow-global
         name: pytest-slow-global
         language: system
@@ -447,7 +447,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit tier pytest-slow-global
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.testing tier pytest-slow-global
       - id: pytest-ci-smoke-global
         name: pytest-ci-smoke-global
         language: system
@@ -455,7 +455,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit tier pytest-ci-smoke-global
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.testing tier pytest-ci-smoke-global
       - id: pytest-integration-global
         name: pytest-integration-global
         language: system
@@ -463,5 +463,5 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.precommit tier pytest-integration-global
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.testing tier pytest-integration-global
 # NEVER EDIT THIS FILE!

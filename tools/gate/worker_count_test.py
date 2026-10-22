@@ -11,8 +11,8 @@ import sys
 
 import pytest
 
-from tools.precommit import worker_count as worker_count_module
-from tools.precommit.worker_count import capped_workers, default_workers, worker_count
+from tools.gate import worker_count as worker_count_module
+from tools.gate.worker_count import capped_workers, default_workers, worker_count
 
 
 _THIS: Final = Path(__file__).resolve()

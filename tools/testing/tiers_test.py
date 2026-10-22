@@ -6,7 +6,7 @@ from itertools import combinations
 
 import pytest
 
-from tools.precommit.tiers import TIERS, Tier
+from tools.testing.tiers import TIERS, Tier
 
 
 @pytest.mark.parametrize(

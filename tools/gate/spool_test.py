@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tools.precommit import spool
+from tools.gate import spool
 
 
 if TYPE_CHECKING:
@@ -53,7 +53,7 @@ def test_the_directory_is_private(tmp_path: Path) -> None:
     assert (tmp_path / "spool").stat().st_mode & 0o777 == 0o700
 
 
-_UV = "uv --quiet run --frozen --group pre-commit python -m tools.precommit ty"
+_UV = "uv --quiet run --frozen --group pre-commit python -m tools.gate ty"
 
 
 @pytest.mark.parametrize(

@@ -9,7 +9,7 @@ import gc
 import coverage
 import pytest
 
-from tools.precommit import coverage_summary
+from tools.testing import coverage_summary
 
 
 if TYPE_CHECKING:

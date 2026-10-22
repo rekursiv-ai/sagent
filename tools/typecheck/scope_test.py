@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from tools.precommit import scope
+from tools.typecheck import scope
 
 
 if TYPE_CHECKING:
