@@ -5,19 +5,22 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import argparse
-import os
-import subprocess
 import sys
 
 import pytest
 
-from tools import conftest
-from tools.gate import gate, spool
+from tools.gate import fakes, gate, spool
 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+
+@pytest.fixture
+def processes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> fakes.Processes:
+    """Record what ``main`` runs, under no gate's settings."""
+    return fakes.isolate(tmp_path, monkeypatch=monkeypatch)
 
 
 @pytest.mark.parametrize(
@@ -59,13 +62,13 @@ def test_only_a_positive_integer_turns_the_graph_on(value: str, expected: int) -
 
 def _run_gate(
     tmp_path: Path,
-    tools: conftest.Recorder,
+    tools: fakes.Recorder,
     files: Sequence[str],
     *,
     when: str | None = None,
     **environ: str,
 ) -> int:
-    context = conftest.context(tmp_path, tools, **environ)
+    context = fakes.context(tmp_path, tools, **environ)
     spool.append(context.directory, gate="leaks", key=9, paths=files)
     return gate.run(
         "leaks",
@@ -76,7 +79,7 @@ def _run_gate(
 
 
 def test_run_hands_a_module_the_spool_at_its_worker_count(tmp_path: Path) -> None:
-    tools = conftest.Recorder(status=3)
+    tools = fakes.Recorder(status=3)
 
     assert _run_gate(tmp_path, tools, ["a b.py", "c.py"], WORKERS_LEAKS="2") == 3
     assert tools.calls[0][1:] == [
@@ -93,7 +96,7 @@ def test_run_hands_a_module_the_spool_at_its_worker_count(tmp_path: Path) -> Non
 
 def test_run_with_nothing_spooled_runs_nothing(tmp_path: Path) -> None:
     """With no files the mutation runner mutates `.`: 5940 files."""
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
     assert _run_gate(tmp_path, tools, []) == 0
     assert tools.calls == []
@@ -114,7 +117,7 @@ def test_run_with_nothing_spooled_runs_nothing(tmp_path: Path) -> None:
     ],
 )
 def test_run_waits_for_its_opt_in(tmp_path: Path, value: str, runs: bool) -> None:
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
     _run_gate(tmp_path, tools, ["a.py"], when="OPT_IN", OPT_IN=value)
 
@@ -126,12 +129,12 @@ def test_run_without_its_spool_fails(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
     assert (
         gate.run(
             "leaks",
-            context=conftest.context(tmp_path, tools),
+            context=fakes.context(tmp_path, tools),
             when=None,
             command=["pkg.leaks"],
         )
@@ -171,7 +174,7 @@ def test_run_without_a_module_is_a_usage_error() -> None:
 
 
 def test_the_cli_spools_then_runs_one_module(
-    processes: conftest.Processes,
+    processes: fakes.Processes,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Outside pre-commit every call shares key 1, so the spool meets its gate."""
@@ -198,13 +201,13 @@ def test_the_cli_spools_then_runs_one_module(
 
 
 def test_the_cli_runs_a_threaded_tool(
-    processes: conftest.Processes,
+    processes: fakes.Processes,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
         sys,
         "argv",
-        ["precommit", "threaded", "tool", "--", "tool", "--threads={workers}"],
+        ["gate", "threaded", "tool", "--", "tool", "--threads={workers}"],
     )
 
     assert gate.main() == 4
@@ -212,10 +215,10 @@ def test_the_cli_runs_a_threaded_tool(
 
 
 def test_every_command_runs_below_interactive_priority(
-    processes: conftest.Processes,
+    processes: fakes.Processes,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(sys, "argv", ["precommit", "spool", "x", "a.py"])
+    monkeypatch.setattr(sys, "argv", ["gate", "spool", "x", "a.py"])
 
     assert gate.main() == 0
     assert processes.niceness == [19]
@@ -223,14 +226,14 @@ def test_every_command_runs_below_interactive_priority(
 
 @pytest.mark.parametrize(("status", "expected"), [(0, "a\n"), (1, None)])
 def test_output_is_stdout_only_on_success(
-    processes: conftest.Processes,
+    processes: fakes.Processes,
     status: int,
     expected: str | None,
 ) -> None:
     processes.status, processes.stdout = status, "a\n"
 
     assert gate._output(["tool"]) == expected
-    assert gate._run(["tool"]) == status
+    assert gate.run_argv(["tool"]) == status
 
 
 @pytest.mark.parametrize(
@@ -238,28 +241,13 @@ def test_output_is_stdout_only_on_success(
     [("  77 /usr/bin/pre-commit run\n", (77, "/usr/bin/pre-commit run")), ("", None)],
 )
 def test_a_process_is_its_parent_and_command(
-    processes: conftest.Processes,
+    processes: fakes.Processes,
     stdout: str,
     expected: tuple[int, str] | None,
 ) -> None:
     processes.stdout = stdout
 
     assert gate._process(5) == expected
-
-
-def test_the_gates_import_without_coverage_installed(tmp_path: Path) -> None:
-    """An export without pytest-cov still type-checks and spools; madcatter has none."""
-    blocker = tmp_path / "coverage.py"
-    blocker.write_text("raise ModuleNotFoundError(\"No module named 'coverage'\")\n")
-    done = subprocess.run(  # noqa: S603 -- this interpreter; fixed argv.
-        [sys.executable, "-c", f"import {gate.__name__}"],
-        env={**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), *sys.path])},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-    assert done.returncode == 0, done.stderr
 
 
 def test_installed_finds_importable_modules() -> None:
@@ -272,17 +260,17 @@ def test_a_missing_tool_is_exit_127_not_a_traceback(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A commit must not die on a tool a machine lacks, as ``npm`` once did."""
-    assert gate._run(["no-such-tool-anywhere"]) == 127
+    assert gate.run_argv(["no-such-tool-anywhere"]) == 127
     assert gate._output(["no-such-tool-anywhere"]) is None
     assert "no-such-tool-anywhere" in capsys.readouterr().err
 
 
 def test_threaded_fills_in_the_gate_worker_count(tmp_path: Path) -> None:
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
     gate.threaded(
         "pyrefly-check-global",
-        context=conftest.context(tmp_path, tools, WORKERS_PYREFLY_CHECK_GLOBAL="2"),
+        context=fakes.context(tmp_path, tools, WORKERS_PYREFLY_CHECK_GLOBAL="2"),
         command=["pyrefly", "check", "--threads={workers}"],
     )
 

@@ -1,8 +1,4 @@
-"""Stand-ins for the processes a gate runs, shared by the gates' tests.
-
-The ``processes`` fixture reaches every test under ``codedoctor``; the gate,
-type-check and pytest tests import ``Recorder``, ``Processes`` and ``context``.
-"""
+"""Stand-ins for the processes a gate runs, shared by the gates' tests."""
 
 from __future__ import annotations
 
@@ -10,16 +6,17 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import os
+import re
 import subprocess
 import tempfile
-
-import pytest
 
 from tools.gate import gate
 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+    import pytest
 
 
 class Recorder:
@@ -43,7 +40,15 @@ class Recorder:
         self.argfiles: list[list[str]] = []
 
     def run(self, argv: Sequence[str]) -> int:
-        """Record ``argv`` and each ``@argfile`` it names; return the next status."""
+        """Record ``argv`` and each ``@argfile`` it names; return the next status.
+
+        Args:
+          argv: The command a gate ran.
+
+        Returns:
+          status: The next of ``statuses``, else ``status``.
+
+        """
         self.calls.append(list(argv))
         self.argfiles.extend(
             Path(arg[1:]).read_text().splitlines()
@@ -123,18 +128,23 @@ class Processes:
         return subprocess.CompletedProcess(argv, self.status, stdout=self.stdout)
 
 
-@pytest.fixture
-def processes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Processes:
-    """Run ``main`` in ``tmp_path`` with every child process recorded.
+def isolate(tmp_path: Path, *, monkeypatch: pytest.MonkeyPatch) -> Processes:
+    """Run a gate's ``main`` in ``tmp_path``, every child process recorded.
+
+    Drops each variable a gate reads, so the run sees one worker and no opt-in
+    whatever gate the test suite itself runs under.
 
     Args:
       tmp_path: The test's directory, made the cwd and ``TMPDIR``.
-      monkeypatch: Swaps ``subprocess.run`` and ``os.nice``.
+      monkeypatch: Restores everything this changes.
 
     Returns:
       recorded: What ``main`` ran.
 
     """
+    for name in list(os.environ):
+        if re.match(r"(WORKERS|PYTEST|PRECOMMIT|SIDECAR)_|GITHUB_ACTIONS$", name):
+            monkeypatch.delenv(name)
     recorded = Processes(status=4, stdout="")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TMPDIR", str(tmp_path))

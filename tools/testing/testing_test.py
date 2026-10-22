@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, override
 
+import os
+import subprocess
 import sys
 
 import coverage
 import pytest
 
-from tools import conftest
-from tools.gate import gate, spool
+from tools.gate import fakes, gate, spool
 from tools.testing import testing
 from tools.testing.tiers import TIERS
 from tools.typecheck import typecheck
@@ -19,19 +20,48 @@ from tools.typecheck import typecheck
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+    from types import ModuleType
+
+
+@pytest.fixture
+def processes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> fakes.Processes:
+    """Record what ``main`` runs, under no gate's settings."""
+    return fakes.isolate(tmp_path, monkeypatch=monkeypatch)
+
+
+@pytest.mark.parametrize("module", [gate, typecheck, testing])
+def test_every_gate_imports_without_coverage_installed(
+    tmp_path: Path,
+    module: ModuleType,
+) -> None:
+    """An export without pytest-cov still type-checks and spools; madcatter has none.
+
+    ``testing`` is the one that reaches ``coverage``, through ``coverage_summary``.
+    """
+    blocker = tmp_path / "coverage.py"
+    blocker.write_text("raise ModuleNotFoundError(\"No module named 'coverage'\")\n")
+    done = subprocess.run(  # noqa: S603 -- this interpreter; fixed argv.
+        [sys.executable, "-c", f"import {module.__name__}"],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join([str(tmp_path), *sys.path])},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert done.returncode == 0, done.stderr
 
 
 def test_one_gates_depth_never_widens_the_other(tmp_path: Path) -> None:
     """Each gate reads its own variable; the other's is not an opt-in."""
     spool.append(tmp_path / "spool", gate="ty-check", key=9, paths=["a.py"])
-    checker = conftest.Recorder(output="b.py\n")
+    checker = fakes.Recorder(output="b.py\n")
     typecheck.typecheck(
         "ty-check",
-        context=conftest.context(tmp_path, checker, PRECOMMIT_CODEGRAPH_PYTEST="3"),
+        context=fakes.context(tmp_path, checker, PRECOMMIT_CODEGRAPH_PYTEST="3"),
         dependents="pkg.affected",
         fixer=None,
     )
-    tests = conftest.Recorder(output="b_test.py::t\n", installed=False)
+    tests = fakes.Recorder(output="b_test.py::t\n", installed=False)
     _pytest(
         tmp_path,
         tests,
@@ -47,14 +77,14 @@ def test_one_gates_depth_never_widens_the_other(tmp_path: Path) -> None:
 
 def _pytest(
     tmp_path: Path,
-    tools: conftest.Recorder,
+    tools: fakes.Recorder,
     files: Sequence[str],
     *,
     existing: Sequence[str] = (),
     dependents: str | None = None,
     **environ: str,
 ) -> int:
-    context = conftest.context(tmp_path, tools, **environ)
+    context = fakes.context(tmp_path, tools, **environ)
     for name in (*files, *existing):
         (context.root / name).parent.mkdir(parents=True, exist_ok=True)
         (context.root / name).touch()
@@ -65,7 +95,7 @@ def _pytest(
 def test_pytest_runs_each_changed_files_pairs_with_its_directory_measured(
     tmp_path: Path,
 ) -> None:
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
     _pytest(
         tmp_path,
@@ -93,7 +123,7 @@ def test_pytest_runs_each_changed_files_pairs_with_its_directory_measured(
 
 
 def test_pytest_without_pytest_cov_measures_nothing(tmp_path: Path) -> None:
-    tools = conftest.Recorder(installed=False)
+    tools = fakes.Recorder(installed=False)
 
     _pytest(tmp_path, tools, ["a.py"], existing=["a_test.py"])
 
@@ -102,7 +132,7 @@ def test_pytest_without_pytest_cov_measures_nothing(tmp_path: Path) -> None:
 
 
 def test_pytest_without_a_pair_runs_nothing(tmp_path: Path) -> None:
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
     assert _pytest(tmp_path, tools, ["a.py"]) == 0
     assert [call[1:3] for call in tools.calls] == [["-m", "coverage"]]
@@ -115,13 +145,13 @@ def test_pytest_passes_an_empty_collection_and_fails_a_failure(
     expected: int,
 ) -> None:
     """Exit 5 is a selection whose every test carries a deselected marker."""
-    tools = conftest.Recorder(statuses=[0, status])
+    tools = fakes.Recorder(statuses=[0, status])
 
     assert _pytest(tmp_path, tools, ["a.py"], existing=["a_test.py"]) == expected
 
 
 def test_a_failed_erase_fails_before_any_test_runs(tmp_path: Path) -> None:
-    tools = conftest.Recorder(status=19)
+    tools = fakes.Recorder(status=19)
 
     assert _pytest(tmp_path, tools, ["a.py"], existing=["a_test.py"]) == 19
     assert len(tools.calls) == 1
@@ -144,21 +174,21 @@ def test_pytest_fails_changed_sources_below_the_floor(
     data.write()
     monkeypatch.chdir(root)
 
-    assert _pytest(tmp_path, conftest.Recorder(), ["a.py", "a_test.py"]) == expected
+    assert _pytest(tmp_path, fakes.Recorder(), ["a.py", "a_test.py"]) == expected
     assert ("below fail_under=100" in capsys.readouterr().err) is bool(expected)
 
 
 def test_pytest_without_coverage_data_skips_the_summary(tmp_path: Path) -> None:
-    assert _pytest(tmp_path, conftest.Recorder(), ["a.py", "a_test.py"]) == 0
+    assert _pytest(tmp_path, fakes.Recorder(), ["a.py", "a_test.py"]) == 0
 
 
 def test_pytest_without_its_spool_fails(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
-    assert testing.pytest(conftest.context(tmp_path, tools), dependents=None) == 1
+    assert testing.pytest(fakes.context(tmp_path, tools), dependents=None) == 1
     assert tools.calls == []
     assert "pytest-spool" in capsys.readouterr().err
 
@@ -168,7 +198,7 @@ def test_a_junk_xdist_threshold_keeps_the_default(
     tmp_path: Path,
     threshold: str,
 ) -> None:
-    tools = conftest.Recorder(output="".join(f"t{i}_test.py::a\n" for i in range(15)))
+    tools = fakes.Recorder(output="".join(f"t{i}_test.py::a\n" for i in range(15)))
 
     _pytest(
         tmp_path,
@@ -189,7 +219,7 @@ def test_pytest_spreads_only_across_enough_test_files(
     spread: bool,
 ) -> None:
     """Xdist's ~5s startup loses below 16 files; nodeids count by file."""
-    tools = conftest.Recorder(
+    tools = fakes.Recorder(
         output="".join(f"t{i}_test.py::a\nt{i}_test.py::b\n" for i in range(count)),
     )
 
@@ -205,7 +235,7 @@ def test_pytest_spreads_only_across_enough_test_files(
 
 
 def test_pytest_prefers_the_graphs_tests_to_the_pairs(tmp_path: Path) -> None:
-    tools = conftest.Recorder(output="b_test.py::t\n", installed=False)
+    tools = fakes.Recorder(output="b_test.py::t\n", installed=False)
 
     _pytest(
         tmp_path,
@@ -227,7 +257,7 @@ def test_pytest_falls_back_to_the_pairs_when_the_graph_names_nothing(
     output: str | None,
 ) -> None:
     """A stale index once ran zero tests and passed."""
-    tools = conftest.Recorder(output=output, installed=False)
+    tools = fakes.Recorder(output=output, installed=False)
 
     _pytest(
         tmp_path,
@@ -242,7 +272,7 @@ def test_pytest_falls_back_to_the_pairs_when_the_graph_names_nothing(
 
 
 def test_pytest_asks_for_missed_lines_on_request(tmp_path: Path) -> None:
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
     _pytest(
         tmp_path,
@@ -256,7 +286,7 @@ def test_pytest_asks_for_missed_lines_on_request(tmp_path: Path) -> None:
 
 
 def test_the_cli_runs_pytest(
-    processes: conftest.Processes,
+    processes: fakes.Processes,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -270,19 +300,9 @@ def test_the_cli_runs_pytest(
 
 
 def test_the_cli_runs_a_tier(
-    processes: conftest.Processes,
+    processes: fakes.Processes,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CI runs this suite inside a shard; its ``PYTEST_*`` must not reach the tier."""
-    for name in (
-        "PYTEST_SPLIT_ARGS",
-        "PYTEST_NODEIDS_FILE",
-        "PYTEST_COLLECT_SELECTED",
-        "PYTEST_TESTMON_ARGS",
-        "PYTEST_PROGRESS_ARGS",
-        "PYTEST_COVERAGE_REPORT",
-    ):
-        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("PYTEST_FORCE_ALL", "1")
     monkeypatch.setattr(sys, "argv", ["testing", "tier", "pytest-ci-smoke-global"])
 
@@ -290,7 +310,7 @@ def test_the_cli_runs_a_tier(
     assert processes.calls[-1][-2:] == ["-m", "ci_smoke"]
 
 
-class _Tiers(conftest.Recorder):
+class _Tiers(fakes.Recorder):
     """A recorder whose ``has`` answers per module."""
 
     def __init__(
@@ -313,13 +333,13 @@ _PLUGIN = "pkg.nodeids"
 def _tier(
     tmp_path: Path,
     name: str,
-    tools: conftest.Recorder,
+    tools: fakes.Recorder,
     **environ: str,
 ) -> list[str]:
     """Run tier ``name``; return the pytest argv after ``-m pytest -n=N``."""
     testing.tier(
         TIERS[name],
-        context=conftest.context(tmp_path, tools, **environ),
+        context=fakes.context(tmp_path, tools, **environ),
         plugin=_PLUGIN,
     )
     (argv,) = tools.calls
@@ -426,7 +446,7 @@ def test_a_selection_of_nothing_runs_nothing(tmp_path: Path, name: str) -> None:
     assert (
         testing.tier(
             TIERS[name],
-            context=conftest.context(tmp_path, tools, PYTEST_NODEIDS_FILE=str(listing)),
+            context=fakes.context(tmp_path, tools, PYTEST_NODEIDS_FILE=str(listing)),
             plugin=None,
         )
         == 0
@@ -484,7 +504,7 @@ def test_only_declared_tiers_pass_an_empty_collection(
 
     code = testing.tier(
         TIERS[name],
-        context=conftest.context(tmp_path, tools),
+        context=fakes.context(tmp_path, tools),
         plugin=None,
     )
 
@@ -502,7 +522,7 @@ def test_a_collection_counts_an_empty_one_as_success(
 
     code = testing.tier(
         TIERS[name],
-        context=conftest.context(tmp_path, tools, PYTEST_COLLECT_SELECTED="s.txt"),
+        context=fakes.context(tmp_path, tools, PYTEST_COLLECT_SELECTED="s.txt"),
         plugin=None,
     )
 
@@ -515,7 +535,7 @@ def test_a_tier_without_its_capability_runs_nothing(tmp_path: Path) -> None:
     assert (
         testing.tier(
             TIERS["pytest-integration-global"],
-            context=conftest.context(tmp_path, tools),
+            context=fakes.context(tmp_path, tools),
             plugin=None,
         )
         == 0

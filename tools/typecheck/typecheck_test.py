@@ -8,15 +8,20 @@ import sys
 
 import pytest
 
-from tools import conftest
-from tools.gate import gate, spool
+from tools.gate import fakes, gate, spool
 from tools.typecheck import typecheck
 
 
-def _gate(
+@pytest.fixture
+def processes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> fakes.Processes:
+    """Record what ``main`` runs, under no gate's settings."""
+    return fakes.isolate(tmp_path, monkeypatch=monkeypatch)
+
+
+def _typecheck(
     name: str,
     tmp_path: Path,
-    tools: conftest.Recorder,
+    tools: fakes.Recorder,
     *,
     dependents: str | None = None,
     fixer: str | None = None,
@@ -24,7 +29,7 @@ def _gate(
 ) -> int:
     return typecheck.typecheck(
         name,
-        context=conftest.context(tmp_path, tools, **environ),
+        context=fakes.context(tmp_path, tools, **environ),
         dependents=dependents,
         fixer=fixer,
     )
@@ -39,9 +44,9 @@ def _spool(tmp_path: Path, *paths: str) -> None:
 def test_ty_checks_every_spooled_file_once_minus_excludes(tmp_path: Path) -> None:
     _spool(tmp_path, "a.py")
     _spool(tmp_path, "x/third_party/v.py", "b.py", "a.py")
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
-    assert _gate("ty-check", tmp_path, tools) == 0
+    assert _typecheck("ty-check", tmp_path, tools) == 0
     assert [[Path(call[0]).name, *call[1:]] for call in tools.calls] == [
         ["ty", "check", "--force-exclude", "a.py", "b.py"],
     ]
@@ -49,10 +54,10 @@ def test_ty_checks_every_spooled_file_once_minus_excludes(tmp_path: Path) -> Non
 
 def test_pyrefly_checks_what_ty_checked(tmp_path: Path) -> None:
     _spool(tmp_path, "a.py")
-    _gate("ty-check", tmp_path, conftest.Recorder())
-    tools = conftest.Recorder()
+    _typecheck("ty-check", tmp_path, fakes.Recorder())
+    tools = fakes.Recorder()
 
-    assert _gate("pyrefly-check", tmp_path, tools) == 0
+    assert _typecheck("pyrefly-check", tmp_path, tools) == 0
     assert [[Path(call[0]).name, *call[1:]] for call in tools.calls] == [
         ["pyrefly", "check", "--threads=3", "a.py"],
     ]
@@ -64,9 +69,9 @@ def test_pyrefly_checks_the_spool_when_ty_was_skipped(tmp_path: Path) -> None:
     It widens on its own then, at its own worker count.
     """
     _spool(tmp_path, "a.py", "third_party/v.py")
-    tools = conftest.Recorder(output="a.py\nb.py\nthird_party/v.py\n")
+    tools = fakes.Recorder(output="a.py\nb.py\nthird_party/v.py\n")
 
-    status = _gate(
+    status = _typecheck(
         "pyrefly-check",
         tmp_path,
         tools,
@@ -85,11 +90,11 @@ def test_pyrefly_checks_the_spool_when_ty_was_skipped(tmp_path: Path) -> None:
 def test_pyrefly_checks_nothing_when_ty_checked_nothing(tmp_path: Path) -> None:
     """Every spooled file excluded: an empty hand-off, not a missing one."""
     _spool(tmp_path, "third_party/v.py")
-    _gate("ty-check", tmp_path, conftest.Recorder())
+    _typecheck("ty-check", tmp_path, fakes.Recorder())
     _spool(tmp_path, "a.py")
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
-    assert _gate("pyrefly-check", tmp_path, tools) == 0
+    assert _typecheck("pyrefly-check", tmp_path, tools) == 0
     assert tools.calls == []
 
 
@@ -103,9 +108,9 @@ def test_the_fixer_runs_the_checker_in_its_place(
     checker: str,
 ) -> None:
     _spool(tmp_path, "a.py")
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
-    _gate(name, tmp_path, tools, fixer="pkg.fixer")
+    _typecheck(name, tmp_path, tools, fixer="pkg.fixer")
 
     assert tools.calls[0][1:] == [
         "-m",
@@ -123,9 +128,9 @@ def test_the_fixer_runs_the_checker_in_its_place(
 @pytest.mark.parametrize("name", ["ty-check", "pyrefly-check", "basedpyright"])
 def test_nothing_to_check_runs_nothing(tmp_path: Path, name: str) -> None:
     spool.write(tmp_path / "spool", gate=name, key=9, paths=[])
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
-    assert _gate(name, tmp_path, tools) == 0
+    assert _typecheck(name, tmp_path, tools) == 0
     assert tools.calls == []
 
 
@@ -136,35 +141,35 @@ def test_a_checker_without_its_spool_fails(
     name: str,
 ) -> None:
     """``pre-commit run ty-check`` once ran without its twin and passed a type error."""
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
-    assert _gate(name, tmp_path, tools) == 1
+    assert _typecheck(name, tmp_path, tools) == 1
     assert tools.calls == []
     assert f"{name}-spool" in capsys.readouterr().err
 
 
 def test_basedpyright_checks_its_spool_at_its_thread_count(tmp_path: Path) -> None:
     _spool(tmp_path, "a.py", "b.py")
-    tools = conftest.Recorder()
+    tools = fakes.Recorder()
 
-    assert _gate("basedpyright", tmp_path, tools) == 0
+    assert _typecheck("basedpyright", tmp_path, tools) == 0
     assert [[Path(call[0]).name, *call[1:]] for call in tools.calls] == [
         ["basedpyright", "--threads=3", "a.py", "b.py"],
     ]
 
 
 @pytest.mark.parametrize("name", ["ty-check", "pyrefly-check", "basedpyright"])
-def test_a_failing_tool_fails_the_gate(tmp_path: Path, name: str) -> None:
+def test_a_failing_tool_fails_the_typecheck(tmp_path: Path, name: str) -> None:
     _spool(tmp_path, "a.py")
 
-    assert _gate(name, tmp_path, conftest.Recorder(status=1)) == 1
+    assert _typecheck(name, tmp_path, fakes.Recorder(status=1)) == 1
 
 
 def test_dependents_widen_the_files_then_excludes_apply(tmp_path: Path) -> None:
     _spool(tmp_path, "a.py")
-    tools = conftest.Recorder(output="a.py\nb.py\nthird_party/c.py\n")
+    tools = fakes.Recorder(output="a.py\nb.py\nthird_party/c.py\n")
 
-    _gate(
+    _typecheck(
         "ty-check",
         tmp_path,
         tools,
@@ -195,9 +200,9 @@ def test_a_failed_or_empty_walk_checks_the_spooled_files(
 ) -> None:
     """A broken index must not shrink the check to nothing."""
     _spool(tmp_path, "a.py")
-    tools = conftest.Recorder(output=output)
+    tools = fakes.Recorder(output=output)
 
-    _gate(
+    _typecheck(
         "ty-check",
         tmp_path,
         tools,
@@ -218,9 +223,9 @@ def test_the_walk_needs_both_the_module_and_the_opt_in(
     value: str,
 ) -> None:
     _spool(tmp_path, "a.py")
-    tools = conftest.Recorder(output="b.py\n")
+    tools = fakes.Recorder(output="b.py\n")
 
-    _gate(
+    _typecheck(
         "ty-check",
         tmp_path,
         tools,
@@ -254,7 +259,7 @@ def test_a_tool_beside_the_interpreter_wins(
     ],
 )
 def test_the_cli_checks_what_the_gate_spooled(
-    processes: conftest.Processes,
+    processes: fakes.Processes,
     monkeypatch: pytest.MonkeyPatch,
     checker: str,
     argv: list[str],

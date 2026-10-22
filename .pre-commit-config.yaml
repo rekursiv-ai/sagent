@@ -193,9 +193,10 @@ repos:
   - repo: local
     hooks:
       # Worker counts. Every heavy hook below sizes its own pool with
+      # `gate.workers`, which falls back to
       # `tools.gate.worker_count.default_workers`, whose docstring derives the
-      # formula, and runs below interactive priority. Overrides,
-      # most specific first: `WORKERS_<HOOK_ID>` (`WORKERS_PYTEST_GLOBAL=1`),
+      # formula, and runs below interactive priority. Overrides, most specific
+      # first: `WORKERS_<HOOK_ID>` (`WORKERS_PYTEST_GLOBAL=1`),
       # then `WORKERS_DEFAULT`. Per hook is what CI needs: the integration tier
       # holds ~1.8 GB of torch/jax per worker and OOM-killed a 2-vCPU runner at
       # two, while a type checker on the same box wants more.
@@ -253,7 +254,7 @@ repos:
   - repo: local
     hooks:
       # No official ty hook yet (https://github.com/astral-sh/ty/issues/269).
-      # The `precommit` module holds the gates: each runs once over the
+      # The `typecheck` module holds these gates: each runs once over the
       # files its `-spool` twin collected, sizes its own workers, and drops
       # what `[tool.pyrefly] project-excludes` names. `pyrefly-check` checks
       # the files `ty-check` checked, so a graph walk runs once.
@@ -336,7 +337,7 @@ repos:
     hooks:
       # Each heavy hook below is a `-spool` twin, which collects pre-commit's
       # file chunks, then the hook, which runs once over all of them through
-      # the `precommit` module at this machine's worker count.
+      # the `gate` or `testing` module at this machine's worker count.
       #
       # Runs the tests PAIRED with each changed file (`x_test.py`, `test_x.py`,
       # beside it or under `tests/`), then applies `fail_under` to the changed
@@ -394,7 +395,7 @@ repos:
   # voids pyproject's excludes), and on a 2-vCPU runner it blew the 30-minute
   # job cap while `basedpyright-global` answered the same question in 12.
   #
-  # The pytest tiers are defined in the `precommit` module's `tiers.py`: each
+  # The pytest tiers are defined in the `testing` module's `tiers.py`: each
   # tier's marker, empty-collection tolerance and capability guard, and the
   # rules for when testmon may select. `verbose: true` because pre-commit prints
   # a PASSING hook's output only under it, and every tier runs for minutes.

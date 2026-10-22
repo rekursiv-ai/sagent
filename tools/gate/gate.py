@@ -96,7 +96,7 @@ def context() -> Context:
         key=spool.run_key(os.getpid(), process=_process),
         root=Path.cwd(),
         environ=os.environ,
-        run=_run,
+        run=run_argv,
         output=_output,
         installed=_installed,
         which=shutil.which,
@@ -186,6 +186,14 @@ def positive(value: str) -> int:
 
     """
     return int(value) if re.fullmatch(r"[1-9][0-9]*", value) else 0
+
+
+def run_argv(argv: Sequence[str]) -> int:
+    """Run ``argv``; return its exit code, or 127 and a message when not installed."""
+    try:
+        return subprocess.run(argv, check=False).returncode  # noqa: S603 -- gate argv.
+    except FileNotFoundError:
+        return _missing(argv[0])
 
 
 def unspooled(name: str) -> int:
@@ -315,13 +323,6 @@ def _run_once(flags: Flags, context: Context) -> int:
 
 def _run_threaded(flags: Flags, context: Context) -> int:
     return threaded(flags.gate, context=context, command=flags.argv)
-
-
-def _run(argv: Sequence[str]) -> int:
-    try:
-        return subprocess.run(argv, check=False).returncode  # noqa: S603 -- gate argv.
-    except FileNotFoundError:
-        return _missing(argv[0])
 
 
 def _output(argv: Sequence[str]) -> str | None:

@@ -35,8 +35,8 @@ def shortfall(sources: Sequence[str]) -> list[str]:
       lines: Empty when the floor holds or there is none.
 
     """
-    # Here, not at the top: every gate imports this module, and an export
-    # without pytest-cov has no coverage; the gate calls this only with it.
+    # Here, not at the top: the ``testing`` gates import this module, and an
+    # export without pytest-cov has no coverage; the gate calls this only with it.
     import coverage  # noqa: PLC0415 -- optional in exports; see above.
 
     measured = coverage.Coverage()
