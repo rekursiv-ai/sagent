@@ -232,6 +232,13 @@ class UserMessage(SessionMessage):
     attachments: tuple[BytesMessage, ...] = ()
     """Image/PDF payloads sent alongside the text."""
 
+    cache_point: bool = False
+    """Ask the provider to cache the prompt up to the end of this message.
+
+    For a shared prefix -- one long document sent ahead of several different
+    questions. Providers that cache prefixes automatically ignore it.
+    """
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentSendMessage(SessionMessage):

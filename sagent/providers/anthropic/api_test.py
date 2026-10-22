@@ -272,6 +272,23 @@ def test_build_messages_user_text_only() -> None:
     assert any(b.get("text") == "hi" for b in blocks)
 
 
+def test_build_messages_marks_a_cache_point_ahead_of_the_last_message() -> None:
+    document = UserMessage(text="long shared document", cache_point=True)
+    question = UserMessage(text="the question")
+    msgs = _build_messages(_make_request([document, question]), cache_ttl="1h")
+    # Two user messages in a row coalesce into one wire message; both blocks
+    # keep their own cache_control.
+    blocks = [b for m in msgs for b in cast(list[dict[str, object]], m["content"])]
+    marks = [(b.get("text"), b.get("cache_control")) for b in blocks]
+    assert marks == [
+        ("long shared document", {"type": "ephemeral", "ttl": "1h"}),
+        ("the question", {"type": "ephemeral", "ttl": "1h"}),
+    ]
+    plain = _build_messages(_make_request([UserMessage(text="a"), question]))
+    first = cast(list[dict[str, object]], plain[0]["content"])[0]
+    assert "cache_control" not in first
+
+
 def test_build_messages_assistant_with_tool_call_remaps_id() -> None:
     asst = AssistantMessage(
         text="thinking",

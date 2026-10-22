@@ -1134,6 +1134,8 @@ def _build_messages(
             # role=user wire message that holds the pending tool_results.
             # Emitting a separate role=user message breaks Anthropic's
             # strict alternation and triggers HTTP 400.
+            if isinstance(entry, UserMessage) and entry.cache_point and blocks:
+                blocks[-1] = {**blocks[-1], "cache_control": _cache_mark(cache_ttl)}
             if pending_tool_results:
                 pending_tool_results.extend(blocks)
                 _flush_tool_results(messages, pending_tool_results)
