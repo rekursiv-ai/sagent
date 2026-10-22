@@ -1,6 +1,8 @@
-"""Anthropic catalog rows, checked against the published docs (2026-10-03)."""
+"""Anthropic catalog rows, checked against the published docs (2026-10-21)."""
 
 from __future__ import annotations
+
+from datetime import date
 
 import dataclasses
 
@@ -21,11 +23,80 @@ def test_sonnet_5_5_bills_its_published_card() -> None:
     )
 
 
+def test_sonnet_5_5_cache_reads_halve_from_2026_10_07() -> None:
+    """https://www.anthropic.com/claude-haiku-5-5, "Further updates"."""
+    prices = anthropic.models()["sonnet-5.5"].prices
+    before = prices.rate(service_tier="auto", prompt_tokens=1, at=date(2026, 10, 6))
+    after = prices.rate(service_tier="auto", prompt_tokens=1, at=date(2026, 10, 7))
+    assert (before.cache_read, after.cache_read) == (0.2, 0.1)
+    assert dataclasses.replace(after, cache_read=0.2) == before
+
+
+@pytest.mark.parametrize(
+    ("prompt_tokens", "card"),
+    [
+        (
+            100_000,
+            TokenPrice(
+                request=0.1,
+                response=0.5,
+                cache_write=0.125,
+                cache_write_1h=0.2,
+                cache_read=0.01,
+            ),
+        ),
+        (
+            100_001,
+            TokenPrice(
+                request=0.5,
+                response=2.5,
+                cache_write=0.625,
+                cache_write_1h=1.0,
+                cache_read=0.05,
+            ),
+        ),
+    ],
+)
+def test_haiku_5_5_bills_by_prompt_length(prompt_tokens: int, card: TokenPrice) -> None:
+    """https://platform.claude.com/docs/en/about-claude/pricing, long context."""
+    prices = anthropic.models()["haiku-5.5"].prices
+    at = date(2026, 10, 21)
+    assert prices.rate(service_tier="auto", prompt_tokens=prompt_tokens, at=at) == card
+
+
+def test_haiku_5_5_is_the_newest_haiku() -> None:
+    """https://platform.claude.com/docs/en/models/haiku-5-5/overview."""
+    rows = anthropic.models()
+    row = rows["haiku"]
+    assert (row.model_id, row.wire_model_id) == ("haiku-5.5", "claude-haiku-5-5")
+    assert row.knowledge_cutoff == "June 2026"
+    assert "medium" in row.thinking.effort
+    assert "priority" not in row.service_tier
+    limits = row.context[""]
+    assert (limits.max_request_tokens, limits.max_response_tokens) == (
+        1_000_000,
+        128_000,
+    )
+
+
+@pytest.mark.parametrize(
+    ("role", "model_id"),
+    [
+        ("best", "fable-5.1"),
+        ("default", "opus-5.5"),
+        ("everyday", "sonnet-5.5"),
+        ("utility", "haiku-5.5"),
+    ],
+)
+def test_roles_climb_one_model_line_each(role: str, model_id: str) -> None:
+    """https://platform.claude.com/docs/en/about-claude/models/choosing-a-model."""
+    assert anthropic.models()[role].model_id == model_id
+
+
 def test_sonnet_5_5_is_the_newest_sonnet() -> None:
     rows = anthropic.models()
     assert rows["sonnet-5.5"].wire_model_id == "claude-sonnet-5-5"
     assert rows["sonnet"].model_id == "sonnet-5.5"
-    assert rows["utility"].model_id == "sonnet-5.5"
     limits = rows["sonnet-5.5"].context[""]
     assert (limits.max_request_tokens, limits.max_response_tokens) == (
         1_000_000,
@@ -98,6 +169,7 @@ def test_image_cap_leaves_room_for_base64_under_10_mb() -> None:
         "opus-4.7",
         "sonnet-5.5",
         "sonnet-5.0",
+        "haiku-5.5",
     ],
 )
 def test_omitted_display_models_still_offer_summarized_text(model_id: str) -> None:

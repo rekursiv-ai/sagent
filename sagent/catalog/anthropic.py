@@ -14,6 +14,7 @@ Sources:
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import date
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
@@ -68,7 +69,7 @@ CACHE_TTL_SEC: Final = frozenset({300.0, 3600.0})
 #
 # Knowledge cutoffs are the vendor's "reliable knowledge cutoff", and prices
 # its published table (input, output, 5m/1h cache write, cache hit), both
-# verified on 2026-10-03.
+# verified on 2026-10-21.
 def models() -> ModelTable:
     """Return every Anthropic model, as the API-key transport sees it.
 
@@ -133,6 +134,13 @@ def models() -> ModelTable:
                 cache_read=1.0,
             ),
         ),
+    )
+    sonnet_5_5 = _card(
+        request=2.0,
+        response=10.0,
+        cache_write=2.5,
+        cache_write_1h=4.0,
+        cache_read=0.2,
     )
     rows = (
         fable_5_1,
@@ -245,13 +253,8 @@ def models() -> ModelTable:
             model_id="sonnet-5.5",
             wire_model_id="claude-sonnet-5-5",
             prices=_prices(
-                _card(
-                    request=2.0,
-                    response=10.0,
-                    cache_write=2.5,
-                    cache_write_1h=4.0,
-                    cache_read=0.2,
-                ),
+                sonnet_5_5,
+                repriced=(date(2026, 10, 7), replace(sonnet_5_5, cache_read=0.1)),
             ),
         ),
         replace(
@@ -316,6 +319,29 @@ def models() -> ModelTable:
                 budget=frozenset({"none", "fixed"}),
             ),
         ),
+        # A prompt over 100k tokens, cache reads and writes included, bills the
+        # whole request at the higher card.
+        replace(
+            default,
+            model_id="haiku-5.5",
+            wire_model_id="claude-haiku-5-5",
+            prices=_prices(
+                _card(
+                    request=0.1,
+                    response=0.5,
+                    cache_write=0.125,
+                    cache_write_1h=0.2,
+                    cache_read=0.01,
+                ),
+                over_100k=_card(
+                    request=0.5,
+                    response=2.5,
+                    cache_write=0.625,
+                    cache_write_1h=1.0,
+                    cache_read=0.05,
+                ),
+            ),
+        ),
         replace(
             default,
             model_id="haiku-4.5",
@@ -347,7 +373,12 @@ def models() -> ModelTable:
     rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
     return ModelTable(
         rows=rows,
-        roles={"best": "fable", "default": "opus", "utility": "sonnet"},
+        roles={
+            "best": "fable",
+            "default": "opus",
+            "everyday": "sonnet",
+            "utility": "haiku",
+        },
     )
 
 
@@ -479,9 +510,15 @@ def _prices(
     *,
     fast_request: float = 0.0,
     fast_response: float = 0.0,
+    over_100k: TokenPrice | None = None,
+    repriced: tuple[date, TokenPrice] | None = None,
 ) -> PriceCatalog:
-    """Return the standard card, plus the fast-mode card when the model has one."""
+    """Return the standard card, plus any fast, >100k-prompt, or later card."""
     cards = {PriceKey("auto"): standard}
+    if over_100k is not None:
+        cards[PriceKey("auto", 100_000)] = over_100k
+    if repriced is not None:
+        cards[PriceKey("auto", effective_date=repriced[0])] = repriced[1]
     if fast_request:
         scale = fast_request / standard.request
         cards[PriceKey("priority")] = _card(

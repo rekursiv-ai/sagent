@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date
+from typing import TYPE_CHECKING
 
 import pytest
 
@@ -15,6 +16,12 @@ from sagent.types.capability import (
     ThinkingEffort,
 )
 from sagent.types.cost import PriceKey, ServiceTier, TokenPrice
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from sagent.catalog.table import ModelTable
 
 
 _TODAY = date(2026, 9, 24)
@@ -257,6 +264,24 @@ def test_sol_6_1_bills_its_published_card_and_is_the_default() -> None:
     assert sol.prices[PriceKey("priority")].cache_read == 0.2
     assert sol.thinking.effort == frozenset({"low", "medium", "high", "xhigh", "max"})
     assert openai.models()["default"] is sol
+
+
+@pytest.mark.parametrize("table", [openai.models, openai.subscription_models])
+@pytest.mark.parametrize(
+    ("role", "model_id"),
+    [
+        ("best", "astra-6.0"),
+        ("default", "sol-6.1"),
+        ("everyday", "terra-5.6"),
+        ("utility", "luna-6.0"),
+    ],
+)
+def test_roles_climb_one_model_line_each(
+    table: Callable[[], ModelTable],
+    role: str,
+    model_id: str,
+) -> None:
+    assert table()[role].model_id == model_id
 
 
 @pytest.mark.parametrize(

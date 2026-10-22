@@ -233,7 +233,11 @@ def models() -> ModelTable:
     # /models: "For any new projects, use ... 3.5 Flash-Lite or 3.8 Flash".
     return ModelTable(
         rows=rows,
-        roles={"default": "gemini-pro", "utility": "gemini-flash-lite"},
+        roles={
+            "default": "gemini-pro",
+            "everyday": "gemini-flash",
+            "utility": "gemini-flash-lite",
+        },
     )
 
 

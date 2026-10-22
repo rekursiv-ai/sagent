@@ -69,7 +69,9 @@ def test_shut_down_models_are_gone(model_id: str) -> None:
 
 def test_roles_follow_googles_guidance_for_new_projects() -> None:
     rows = google.models()
+    assert rows["best"].model_id == "gemini-pro-3.1"
     assert rows["default"].model_id == "gemini-pro-3.1"
+    assert rows["everyday"].model_id == "gemini-flash-3.8"
     assert rows["utility"].model_id == "gemini-flash-lite-3.5"
 
 

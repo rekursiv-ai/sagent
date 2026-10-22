@@ -769,7 +769,8 @@ def test_anthropic_roles_resolve_to_the_latest_of_each_family() -> None:
     p = Anthropic.from_key("k")
     assert p.catalog.resolve("best")[0].model_id == "fable-5.1"
     assert p.catalog.resolve("default")[0].model_id == "opus-5.5"
-    assert p.catalog.resolve("utility")[0].model_id == "sonnet-5.5"
+    assert p.catalog.resolve("everyday")[0].model_id == "sonnet-5.5"
+    assert p.catalog.resolve("utility")[0].model_id == "haiku-5.5"
     assert p.model().limits.max_request_tokens == 1_000_000
     assert "context-1m-2025-08-07" not in p.model().limits.request_betas
 
@@ -782,10 +783,10 @@ def test_anthropic_opus_5_5_defaults_to_full_window() -> None:
     assert small.limits.max_request_tokens == 200_000
 
 
-def test_anthropic_utility_model_uses_latest_sonnet() -> None:
+def test_anthropic_utility_model_uses_latest_haiku() -> None:
     p = Anthropic.from_key("k")
     m = p.model("utility")
-    assert m.capability.model_id == "sonnet-5.5"
+    assert m.capability.model_id == "haiku-5.5"
 
 
 def test_anthropic_subscription_property_false_on_api_key() -> None:

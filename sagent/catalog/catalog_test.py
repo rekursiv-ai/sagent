@@ -81,10 +81,10 @@ def test_models_is_a_function_not_a_table(module: ModuleType) -> None:
 
 
 @pytest.mark.parametrize("module", _VENDORS, ids=_module_id)
-def test_every_catalog_names_its_default_and_utility_rows(module: ModuleType) -> None:
+def test_every_catalog_names_its_four_role_rows(module: ModuleType) -> None:
     models = _models(module)
-    assert models["default"].model_id in models
-    assert models["utility"].model_id in models
+    for role in ("best", "default", "everyday", "utility"):
+        assert models[role].model_id in models, role
 
 
 @pytest.mark.parametrize("module", _VENDORS, ids=_module_id)
@@ -509,7 +509,7 @@ def test_sonnet_5_5_is_the_newest_sonnet_at_its_published_rate() -> None:
         cache_write_1h=4.0,
         cache_read=0.2,
     )
-    assert rows["utility"].model_id == "sonnet-5.5"
+    assert rows["everyday"].model_id == "sonnet-5.5"
     assert rows["sonnet"].model_id == "sonnet-5.5"
 
 

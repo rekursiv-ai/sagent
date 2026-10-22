@@ -207,6 +207,30 @@ def test_duplicate_ids_are_rejected() -> None:
         _ = ModelTable(rows=(_opus(), _opus()))
 
 
+def test_best_and_everyday_fall_back_to_default_when_undeclared() -> None:
+    """A vendor with nothing above or below its default still answers both."""
+    table = _table()
+    assert table["best"].model_id == "opus-5.5"
+    assert table["everyday"].model_id == "opus-5.5"
+    assert table.roles["best"] == table.roles["everyday"] == "opus"
+
+
+def test_a_declared_best_or_everyday_outranks_the_fallback() -> None:
+    table = ModelTable(
+        rows=(_opus("opus-5.5"), _opus("sonnet-5.5")),
+        roles={"best": "opus", "default": "opus", "everyday": "sonnet"},
+    )
+    assert table["everyday"].model_id == "sonnet-5.5"
+    assert table["best"].model_id == "opus-5.5"
+
+
+def test_without_a_default_nothing_falls_back() -> None:
+    table = ModelTable(rows=(_opus(),))
+    assert "best" not in table
+    assert "everyday" not in table
+    assert dict(table.roles) == {}
+
+
 def test_roles_are_frozen() -> None:
     roles = {"default": "opus"}
     table = ModelTable(rows=(_opus(),), roles=roles)
@@ -341,7 +365,7 @@ def test_resolve_names_the_known_models_and_roles_on_a_miss() -> None:
         _ = catalog.resolve("nope")
     assert str(raised.value) == (
         "Unknown model 'nope'. Known models: opus-5.5, opus-5.0, opus-4.8,"
-        " sonnet-5.5, sonnet-5.0, sonnet-4.6, default, utility"
+        " sonnet-5.5, sonnet-5.0, sonnet-4.6, default, utility, best, everyday"
     )
 
 

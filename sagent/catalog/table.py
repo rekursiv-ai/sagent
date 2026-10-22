@@ -1,7 +1,10 @@
 """Which model a name means, and what it can do over one transport.
 
 A vendor catalog is a :class:`ModelTable`: its rows, newest-first within
-each family, plus a few roles (``default``, ``utility``, ``best``). Its keys
+each family, plus its roles, a price ladder from the vendor's most capable
+model down: ``best``, ``default``, ``everyday``, ``utility``. A table that
+names a ``default`` but no ``best`` or ``everyday`` answers both with its
+default, so every vendor answers all four. Its keys
 are the exact names, each ``family-major.minor`` (``opus-5.0``, never
 ``opus-5``). One name reaches a row four ways, in this order:
 
@@ -43,6 +46,7 @@ from sagent.types.capability import (
 
 __all__ = [
     "CONTEXT_TAGS",
+    "FALLBACK_ROLES",
     "ModelCatalog",
     "ModelTable",
     "UnknownModelError",
@@ -59,6 +63,9 @@ CONTEXT_TAGS: Final[tuple[ContextTag, ...]] = tuple(
     t for t in cast(tuple[ContextTag, ...], get_args(ContextTag.__value__)) if t
 )
 """Window-size suffixes a model id may carry (e.g. ``...+1m``)."""
+
+FALLBACK_ROLES: Final = ("best", "everyday")
+"""Roles that mean ``default`` in a table that does not name them."""
 
 
 class UnknownModelError(ValueError):
@@ -128,7 +135,11 @@ class ModelTable(Mapping[str, ModelCapability]):
                 raise ValueError(f"duplicate model id {row.model_id!r}")
             by_id[row.model_id] = row
         object.__setattr__(self, "_by_id", MappingProxyType(by_id))
-        object.__setattr__(self, "roles", MappingProxyType(dict(self.roles)))
+        roles = dict(self.roles)
+        if "default" in roles:
+            for role in FALLBACK_ROLES:
+                roles.setdefault(role, roles["default"])
+        object.__setattr__(self, "roles", MappingProxyType(roles))
         for role, target in self.roles.items():
             if self._named(target) is None:
                 raise ValueError(f"role {role!r} names no model: {target!r}")

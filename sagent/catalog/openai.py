@@ -53,7 +53,9 @@ __all__ = [
 ]
 
 
-_ROLES: Final = MappingProxyType({"default": "sol", "utility": "luna"})
+_ROLES: Final = MappingProxyType(
+    {"best": "astra", "default": "sol", "everyday": "terra", "utility": "luna"},
+)
 """Role names both tables resolve, to the family each picks."""
 
 # "Input modalities: text" on each model page.
@@ -1149,18 +1151,18 @@ def served_tier(reported: str | None) -> ServiceTier | None:
         for, so the caller decides which rate to fall back to.
 
     """
-    match reported:
+    tiers: dict[str | None, ServiceTier] = {
+        None: "auto",
+        "auto": "auto",
+        "default": "auto",
         # Scale Tier is prepaid capacity, metered at the standard card.
-        case None | "auto" | "default" | "scale":
-            return "auto"
-        case "flex":
-            return "flex"
-        case "priority" | "fast":
-            return "priority"
-        case "ultrafast":
-            return "ultrafast"
-        case _:
-            return None
+        "scale": "auto",
+        "flex": "flex",
+        "priority": "priority",
+        "fast": "priority",
+        "ultrafast": "ultrafast",
+    }
+    return tiers.get(reported)
 
 
 def _card(

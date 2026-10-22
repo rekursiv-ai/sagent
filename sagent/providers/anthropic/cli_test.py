@@ -530,10 +530,10 @@ def test_catalog_inherits_from_anthropic() -> None:
     assert tuple(AnthropicCLI.catalog.models) == tuple(Anthropic.catalog.models)
 
 
-def test_utility_model_picks_latest_sonnet() -> None:
+def test_utility_model_picks_latest_haiku() -> None:
     provider = AnthropicCLI()
     model = provider.model("utility")
-    assert model.capability.model_id == "sonnet-5.5"
+    assert model.capability.model_id == "haiku-5.5"
 
 
 def test_model_capabilities() -> None:
