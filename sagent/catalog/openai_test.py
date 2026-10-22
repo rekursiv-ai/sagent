@@ -272,11 +272,11 @@ def test_sol_6_1_bills_its_published_card_and_is_the_default() -> None:
     [
         ("best", "astra-6.0"),
         ("default", "sol-6.1"),
-        ("everyday", "terra-5.6"),
+        ("everyday", "sol-6.1"),
         ("utility", "luna-6.0"),
     ],
 )
-def test_roles_climb_one_model_line_each(
+def test_roles_resolve_the_selected_model(
     table: Callable[[], ModelTable],
     role: str,
     model_id: str,

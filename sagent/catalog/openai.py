@@ -54,7 +54,12 @@ __all__ = [
 
 
 _ROLES: Final = MappingProxyType(
-    {"best": "astra", "default": "sol", "everyday": "terra", "utility": "luna"},
+    {
+        "best": "astra",
+        "default": "sol",
+        "everyday": "sol",  # Intentional; terra is more expensive than sol.
+        "utility": "luna",
+    },
 )
 """Role names both tables resolve, to the family each picks."""
 
