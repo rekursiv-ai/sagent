@@ -3170,7 +3170,7 @@ wheels = [
 [[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.8"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#4883a2fd370ab9debc864d00096358cbc8bffb94" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#8eecd0e842f307c7f9f6ba9f349c9cca8bda38f2" }
 
 [[package]]
 name = "requests"
@@ -4408,7 +4408,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.14"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#24531991fb4b6f7b1c2553e5bc44ebb177ee767d" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#63b9a41700294725ee1321f0b8065cdacf619b24" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

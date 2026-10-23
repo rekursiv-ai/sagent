@@ -63,11 +63,11 @@ jobs:
       - id: settings
         name: Check settings
         env:
-          IMPORT_TOKEN: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
+          IMPORT_TOKEN: ${{ vars.SYNC_APP_ID != '' && secrets.SYNC_APP_PRIVATE_KEY != '' && 'configured' || '' }}
         run: |
           missing=false
           if [ -z "$IMPORT_TOKEN" ]; then
-            echo "::error::Set COPYBARISTA_IMPORT_TOKEN with repo and workflow scopes."
+            echo "::error::Set SYNC_APP_ID and SYNC_APP_PRIVATE_KEY."
             missing=true
           fi
           if [ -z "$TARGET_REPO" ]; then
@@ -92,6 +92,31 @@ jobs:
           fi
           echo "enabled=true" >> "$GITHUB_OUTPUT"
 
+      - name: Create sync App token
+        id: sync-app-token
+        if: steps.settings.outputs.enabled == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          app-id: ${{ vars.SYNC_APP_ID }}
+          private-key: ${{ secrets.SYNC_APP_PRIVATE_KEY }}
+          owner: "rekursiv-ai"
+          repositories: ${{ env.TARGET_REPO }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Verify sync App identity
+        if: steps.settings.outputs.enabled == 'true'
+        env:
+          EXPECTED_SYNC_APP_SLUG: "rekursiv-sync"
+          ACTUAL_SYNC_APP_SLUG: ${{ steps.sync-app-token.outputs.app-slug }}
+        run: |
+          # The pinned action authenticates the App and resolves its installation;
+          # its slug output identifies the App that minted this token. GET /user
+          # does not accept installation tokens.
+          if [ "$ACTUAL_SYNC_APP_SLUG" != "$EXPECTED_SYNC_APP_SLUG" ]; then
+            echo "::error::Sync token belongs to App '$ACTUAL_SYNC_APP_SLUG', expected '$EXPECTED_SYNC_APP_SLUG'."
+            exit 1
+          fi
       # The target checkout comes first because it carries the import ledger the
       # merge baseline is read from, and because the trusted helper is installed
       # out of it before any public tree exists on disk. It keeps
@@ -102,7 +127,7 @@ jobs:
         if: steps.settings.outputs.enabled == 'true'
         with:
           repository: ${{ env.TARGET_REPO }}
-          token: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
+          token: ${{ steps.sync-app-token.outputs.token }}
           ref: main
           path: target
           persist-credentials: false
@@ -263,7 +288,7 @@ jobs:
       - name: Open or update target import PR
         if: steps.refs.outputs.import == 'true' && github.event_name != 'pull_request'
         env:
-          GH_TOKEN: ${{ secrets.COPYBARISTA_IMPORT_TOKEN }}
+          GH_TOKEN: ${{ steps.sync-app-token.outputs.token }}
         run: |
           public_base_ref="${{ steps.refs.outputs.base_ref }}"
           public_head_ref="${{ steps.refs.outputs.head_ref }}"
