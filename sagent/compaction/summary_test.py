@@ -24,6 +24,7 @@ from sagent.compaction.summary import (
     build_continuation,
 )
 from sagent.testing import MockModelCaps
+from sagent.types.capability import ThinkingEffort
 from sagent.types.model import (
     Model,
     ModelRequest,
@@ -1152,6 +1153,76 @@ async def test_compactor_uses_alternate_model_when_provided() -> None:
     first = result[0]
     assert isinstance(first, UserMessage)
     assert body in first.text
+
+
+@dataclass(slots=True, kw_only=True)
+class _Thinks(_ScriptedModel):
+    """A scripted model that offers low and high effort, and notes each call's."""
+
+    supports_thinking: bool = True
+    valid_efforts: tuple[ThinkingEffort, ...] = ("low", "high")
+    efforts: list[ThinkingEffort] = field(default_factory=list)
+
+    @override
+    async def stream(
+        self,
+        request: ModelRequest,
+        publish: Callable[[RuntimeEvent], None] | None = None,
+    ) -> ModelResponse:
+        self.efforts.append(self.settings.thinking_effort)
+        return await super(_Thinks, self).stream(request, publish)
+
+
+_HISTORY: list[ModelContextEvent] = [
+    UserMessage(text="x"),
+    AssistantMessage(text="y"),
+]
+
+
+@pytest.mark.asyncio
+async def test_compact_runs_its_calls_at_the_given_effort_and_restores_the_models() -> (
+    None
+):
+    model = _Thinks(stream_responses=[_summary_resp("s")])
+    model.settings.thinking_effort = "high"
+
+    _ = await _apply_compact(SummaryCompactor(effort="low"), _HISTORY, model)
+
+    assert model.efforts == ["low"]
+    assert model.settings.thinking_effort == "high"
+
+
+@pytest.mark.asyncio
+async def test_compact_restores_the_models_effort_after_an_error() -> None:
+    model = _Thinks(stream_responses=[RuntimeError("provider failed")])
+    model.settings.thinking_effort = "high"
+
+    with pytest.raises(RuntimeError, match="provider failed"):
+        _ = await _apply_compact(SummaryCompactor(effort="low"), _HISTORY, model)
+
+    assert model.settings.thinking_effort == "high"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("offers", "start", "ran"),
+    [
+        (("high",), "high", "high"),
+        (("low", "high"), "none", "none"),
+    ],
+)
+async def test_compact_keeps_the_models_effort_it_cannot_lower_to(
+    offers: tuple[ThinkingEffort, ...],
+    start: ThinkingEffort,
+    ran: ThinkingEffort,
+) -> None:
+    model = _Thinks(stream_responses=[_summary_resp("s")], valid_efforts=offers)
+    model.settings.thinking_effort = start
+
+    _ = await _apply_compact(SummaryCompactor(effort="low"), _HISTORY, model)
+
+    assert model.efforts == [ran]
+    assert model.settings.thinking_effort == start
 
 
 @dataclass(slots=True, kw_only=True)

@@ -14,8 +14,9 @@ Usage::
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from html import escape
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal, get_args
 
 import dataclasses
 import logging
@@ -26,6 +27,7 @@ from sagent.agent.retry import send_with_retry
 from sagent.compaction.history import estimate_entry_tokens
 from sagent.providers.lib.stop_reason import TRUNCATED_STOP_REASONS
 from sagent.tools.core import read_asset, recipe_dict
+from sagent.types.capability import ThinkingEffort
 from sagent.types.compactor import ReattachPolicy
 from sagent.types.model import (
     Model,
@@ -53,7 +55,7 @@ from sagent.types.tape import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Generator, Sequence
 
     from sagent.types.settings import AgentSettings
 
@@ -116,6 +118,10 @@ class SummaryCompactor:
           shortens some result, then drops whole rounds. ``0`` disables
           the cap. Default ``8000``.
       model: Optional model override; otherwise uses the caller's model.
+      effort: Thinking effort for the summary's model calls. The model's own
+          setting returns afterwards, even on error; a model that does not
+          offer it keeps its own, and one already at or below it is not
+          raised. ``None`` leaves the model as it is.
 
     Raises:
       ValueError: ``max_attempts`` is less than 1, or ``utilization_trigger``
@@ -138,6 +144,7 @@ class SummaryCompactor:
         retry_tool_result_cap_chars: int = 8_000,
         reattach: ReattachPolicy | None = None,
         model: Model | None = None,
+        effort: ThinkingEffort | None = None,
     ) -> None:
         if max_attempts < 1:
             raise ValueError(f"max_attempts must be >= 1, got {max_attempts}")
@@ -171,6 +178,7 @@ class SummaryCompactor:
         self._retry_tool_result_cap_chars = retry_tool_result_cap_chars
         self._reattach = reattach or ReattachPolicy()
         self._model = model
+        self._effort = effort
 
     @property
     def reattach(self) -> ReattachPolicy:
@@ -322,6 +330,24 @@ class SummaryCompactor:
 
         """
         compact_model = self._model or model
+        with _at_effort(compact_model, self._effort):
+            return await self._summarize(
+                compact_model,
+                tape,
+                context,
+                mint_ref,
+                custom_instructions,
+            )
+
+    async def _summarize(
+        self,
+        compact_model: Model,
+        tape: Sequence[TapeRecord],
+        context: Sequence[ModelContextEvent],
+        mint_ref: Callable[[], TapeRef],
+        custom_instructions: str | None,
+    ) -> ContextSplice:
+        """Summarize ``context`` with ``compact_model`` as it now stands."""
         # The barrier mask covers everything currently on the tape so
         # every alive splice gets absorbed; the new summary becomes the
         # sole live editor. ``full_tape_mask`` partitions by session_id
@@ -1036,3 +1062,33 @@ def _format_summary(raw: str, *, finished: bool) -> str | None:
     text = f"Summary:\n{m.group(1).strip()}"
     text = re.sub(r"\n\n+", "\n\n", text)
     return text.strip()
+
+
+def _ranks_below(effort: ThinkingEffort, other: ThinkingEffort) -> bool:
+    """Say whether ``effort`` is a lower thinking level than ``other``."""
+    ranked = get_args(ThinkingEffort.__value__)
+    return ranked.index(effort) < ranked.index(other)
+
+
+@contextmanager
+def _at_effort(model: Model, effort: ThinkingEffort | None) -> Generator[None]:
+    """Run the body with ``model`` at ``effort``, then put its own setting back."""
+    settings = model.settings
+    before = settings.thinking_effort
+    lowered = False
+    if effort is not None and _ranks_below(effort, before):
+        try:
+            settings.thinking_effort = effort
+        except ValueError:
+            logger.info(
+                "the model does not offer effort %r; keeping %r",
+                effort,
+                before,
+            )
+        else:
+            lowered = True
+    try:
+        yield
+    finally:
+        if lowered:
+            settings.thinking_effort = before
