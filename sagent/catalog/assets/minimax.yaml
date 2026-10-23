@@ -21,7 +21,7 @@ reference:
     output: [none, text]
 
 profiles:
-  minimax-3.0:
+  m3:
     context:
       max:
         max_request_tokens: 1_000_000
@@ -36,7 +36,7 @@ profiles:
 models:
 - model_id: minimax-3.0
   wire_model_id: MiniMax-M3
-  profile: minimax-3.0
+  profile: m3
   prices:
   - service_tier: auto
     request: 0.3
@@ -52,15 +52,15 @@ models:
     cache_write_1h: 0.0
     cache_read: 0.12
   - service_tier: priority
-    request: 0.44999999999999996
-    response: 1.7999999999999998
+    request: 0.45
+    response: 1.8
     cache_write: 0.0
     cache_write_1h: 0.0
     cache_read: 0.09
   - service_tier: priority
     effective_prompt_tokens: 512_000
-    request: 0.8999999999999999
-    response: 3.5999999999999996
+    request: 0.9
+    response: 3.6
     cache_write: 0.0
     cache_write_1h: 0.0
     cache_read: 0.18

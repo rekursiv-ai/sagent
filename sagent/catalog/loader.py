@@ -18,13 +18,12 @@ from sagent.catalog.custom_typings import (
     ModelRow,
     ProviderName,
 )
-from sagent.catalog.table import ModelTable
+from sagent.catalog.table import EXACT_NAME, ModelTable
 from sagent.types.capability import ContextTag, ModelCapability, ModelLimits
 from sagent.types.cost import PriceCatalog, PriceKey, TokenPrice
 
 
 _THIS: Final = Path(__file__).resolve()
-_CWD: Final = _THIS.parent
 
 
 @cache
@@ -38,7 +37,9 @@ def load_catalog(path: Path) -> ModelTable:
     """Read a provider document using the schema in ``custom_typings``.
 
     Profile values are defaults for model fields, not recursive patches.
-    Unknown fields, duplicate keys, aliases, and invalid types are rejected.
+    Unknown fields, duplicate keys, aliases, and invalid types are rejected,
+    as are names other than ``family-major.minor``, families listed
+    oldest-first, and tiers that price no base card.
 
     Args:
       path: Provider YAML file.
@@ -50,6 +51,8 @@ def load_catalog(path: Path) -> ModelTable:
     text = path.read_text()
     _validate_yaml(yaml.compose(text, Loader=yaml.SafeLoader), seen=set())
     document = from_plain(yaml.safe_load(text), CatalogDocument)
+    for layer in (document.reference, *document.profiles.values()):
+        _require_whole_thinking(layer)
     from_plain(document.reference, CapabilityProfile)
     for profile in document.profiles.values():
         from_plain(document.reference | profile, CapabilityProfile)
@@ -57,17 +60,28 @@ def load_catalog(path: Path) -> ModelTable:
     return ModelTable(rows=rows, roles=document.roles)
 
 
+# Nested objects replace whole, so an omitted axis would become ``none`` rather than
+# inherit from the layer below.
+def _require_whole_thinking(layer: dict[str, object]) -> None:
+    """Reject a ``thinking`` override that omits an axis."""
+    thinking = layer.get("thinking")
+    if isinstance(thinking, dict) and thinking.keys() != {"effort", "budget", "output"}:
+        raise ValueError("Catalog thinking must state effort, budget, output")
+
+
 def _model(raw: dict[str, object], *, document: CatalogDocument) -> ModelCapability:
     values = dict(raw)
+    _require_whole_thinking(values)
     profile = from_plain(values.pop("profile", ""), str)
     if profile and profile not in document.profiles:
         raise ValueError(f"Unknown catalog profile {profile!r}")
     values = document.reference | document.profiles.get(profile, {}) | values
     row = from_plain(values, ModelRow)
+    if EXACT_NAME.fullmatch(row.model_id) is None:
+        raise ValueError(f"Model id {row.model_id!r} is not family-major.minor")
     context = _contexts(row)
     if (
-        not row.model_id
-        or not row.prices
+        not row.prices
         or not row.thinking.effort
         or not row.thinking.budget
         or not row.thinking.output
@@ -164,6 +178,14 @@ def _prices(row: ModelRow) -> PriceCatalog:
             cache_read=card.cache_read,
             tokens_per_unit=card.tokens_per_unit,
         )
+    # ``rate`` raises for a request no card covers; only an undated band-0 card
+    # covers every prompt on every day.
+    for tier in {key.service_tier for key in prices}:
+        if PriceKey(tier) not in prices:
+            raise ValueError(
+                f"Tier {tier!r} in {row.model_id!r} has no base card"
+                " (no prompt band, no effective date)",
+            )
     return PriceCatalog(prices)
 
 

@@ -248,7 +248,14 @@ class _OpenAIResponsesModel(ModelDefaults):
         tier = self._effective_service_tier()
         if tier is not None:
             body["service_tier"] = tier
+        if request.cache_key:
+            body["prompt_cache_key"] = request.cache_key
         return body
+
+    def _headers(self, request: ModelRequest) -> dict[str, str]:
+        """Return per-request HTTP headers; the API-key endpoint takes none."""
+        del request
+        return {}
 
     @override
     async def stream(
@@ -283,6 +290,7 @@ class _OpenAIResponsesModel(ModelDefaults):
         try:
             raw = await sdk.responses.with_raw_response.create(
                 **self._build_kwargs(request),  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
+                extra_headers=self._headers(request) or None,
             )
             self._last_usage = openai_usage(raw.headers)
             events = raw.parse(to=openai.AsyncStream[responses.ResponseStreamEvent])

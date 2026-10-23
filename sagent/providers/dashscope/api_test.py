@@ -8,8 +8,10 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 from sagent.agent.agent import Agent
+from sagent.catalog.loader import models
 from sagent.catalog.openai import compatible
 from sagent.catalog.table import ModelCatalog, ModelTable
+from sagent.providers.dashscope import api
 from sagent.providers.dashscope.api import DashScope, _DashScopeModel
 from sagent.types.capability import (
     ModelCapability,
@@ -225,6 +227,11 @@ def test_the_output_cap_uses_the_field_the_model_supports(
         field,
     }
     assert body[field] == 42
+
+
+def test_every_completion_cap_id_names_a_catalog_row() -> None:
+    """A renamed row would silently fall back to ``max_tokens``."""
+    assert set(models("dashscope")) >= api._COMPLETION_CAP
 
 
 def test_the_default_model_supports_effort_end_to_end() -> None:

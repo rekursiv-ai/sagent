@@ -42,8 +42,14 @@ __all__ = [
 ]
 
 
+# Per-model wire facts keyed by catalog name; ``openai_test`` checks every key
+# names a row, since a renamed row would silently fall back to the default.
+
 # "Input modalities: text" on each model page.
 _TEXT_ONLY: Final = frozenset({"o-mini-3.0", "gpt-4.0"})
+
+# The GPT-4 generation predates ``o200k_base``.
+_CL100K: Final = frozenset({"gpt-4.0", "gpt-turbo-4.0"})
 
 
 _ALL_TURNS: Final = frozenset(
@@ -199,9 +205,7 @@ def tokenizer(model_id: str) -> str | None:
     row = models("openai").exact(model_id)
     if row is None:
         return None
-    return (
-        "cl100k_base" if row.model_id in {"gpt-4.0", "gpt-turbo-4.0"} else "o200k_base"
-    )
+    return "cl100k_base" if row.model_id in _CL100K else "o200k_base"
 
 
 def keeps_reasoning_across_turns(model_id: str) -> bool:

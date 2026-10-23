@@ -111,6 +111,13 @@ class ModelRequest:
     stop_sequences: tuple[str, ...] = ()
     """Optional stop sequences; provider-specific support."""
 
+    cache_key: str = ""
+    """Groups requests that share a prompt prefix; empty sends none.
+
+    For providers that route their prefix cache by key (OpenAI). Providers
+    that cache at a marked message ignore it and read ``cache_point``.
+    """
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelResponse:

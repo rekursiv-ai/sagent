@@ -8300,6 +8300,17 @@ async def test_stream_rebuilds_system_per_request() -> None:
 
 
 @pytest.mark.asyncio
+async def test_every_request_carries_the_session_as_its_cache_key() -> None:
+    """A provider that routes its prefix cache by key reuses this session's turns."""
+    model = StubModel()
+    a = _build_agent(model=model)
+    for text in ("one", "two"):
+        async for _ in a.run(UserMessage(text=text)):
+            pass
+    assert [r.cache_key for r in model.received] == [a.session_id] * 2
+
+
+@pytest.mark.asyncio
 async def test_stream_forwards_publish_sink_to_inner_model() -> None:
     """``_AgentModel.stream`` forwards a ``publish`` sink to the inner model.
 

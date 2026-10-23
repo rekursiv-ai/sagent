@@ -1020,6 +1020,12 @@ class _OpenAISubModel(_OpenAIResponsesModel):
         return body
 
     @override
+    def _headers(self, request: ModelRequest) -> dict[str, str]:
+        # Codex routes its prefix cache by this header with the key, as the Codex
+        # CLI sends both; measured 2026-10-22, the key alone cached nothing.
+        return {"session_id": request.cache_key} if request.cache_key else {}
+
+    @override
     async def stream(
         self,
         request: ModelRequest,

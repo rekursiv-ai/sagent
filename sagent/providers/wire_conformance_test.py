@@ -239,6 +239,24 @@ def test_every_advertised_context_resolves(provider_name: str, model_id: str) ->
 
 
 @pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
+def test_max_and_min_select_the_widest_and_narrowest_window(
+    provider_name: str,
+    model_id: str,
+) -> None:
+    """``+max`` / ``+min`` name an offered window, never one of their own."""
+    make, _ = _WIRE_BUILDERS[provider_name]
+    provider = make()
+    capability, _ = provider.catalog.resolve(model_id)
+    windows = {
+        tag: limits.max_request_tokens for tag, limits in capability.context.items()
+    }
+    for alias, pick in (("+max", max), ("+min", min)):
+        _, settings = provider.catalog.resolve(model_id + alias)
+        assert settings.context in capability.context
+        assert windows[settings.context] == pick(windows.values())
+
+
+@pytest.mark.parametrize(("provider_name", "model_id"), _ROWS, ids=str)
 def test_an_unoffered_context_is_rejected(provider_name: str, model_id: str) -> None:
     """Serving the base window under a ``+1m`` id understates the budget 4x."""
     make, _ = _WIRE_BUILDERS[provider_name]

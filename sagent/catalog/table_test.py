@@ -207,6 +207,27 @@ def test_duplicate_ids_are_rejected() -> None:
         _ = ModelTable(rows=(_opus(), _opus()))
 
 
+@pytest.mark.parametrize(
+    "ids",
+    [
+        ("opus-4.8", "opus-5.0"),
+        ("opus-5.0", "sonnet-5.5", "opus-5.5"),
+        ("opus-5.9", "opus-5.10"),
+    ],
+)
+def test_rows_listed_oldest_first_are_rejected(ids: tuple[str, ...]) -> None:
+    """``opus`` would otherwise name the older row and misprice every request."""
+    with pytest.raises(ValueError, match="newest-first"):
+        _ = ModelTable(rows=tuple(_opus(i) for i in ids))
+
+
+def test_a_caller_supplied_unversioned_id_is_an_exact_name_only() -> None:
+    """A local endpoint's ``local-model`` has no family to order or prefix."""
+    table = ModelTable(rows=(_opus("local-model"), _opus("local-model-b")))
+    assert table["local-model"].model_id == "local-model"
+    assert table["local-model-b"].model_id == "local-model-b"
+
+
 def test_best_and_everyday_fall_back_to_default_when_undeclared() -> None:
     """A vendor with nothing above or below its default still answers both."""
     table = _table()

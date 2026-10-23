@@ -23,7 +23,7 @@ reference:
     output: [none, text]
 
 profiles:
-  kimi-3.0:
+  k3:
     effort_as_level: true
     context:
       max:
@@ -44,7 +44,7 @@ profiles:
 models:
 - model_id: kimi-3.0
   wire_model_id: kimi-k3
-  profile: kimi-3.0
+  profile: k3
   prices:
   - service_tier: auto
     request: 3.0

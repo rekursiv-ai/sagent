@@ -641,6 +641,28 @@ def test_a_request_with_no_tools_says_nothing_about_parallel_calls() -> None:
     assert "parallel_tool_calls" not in _create_kwargs_for()
 
 
+def test_a_cache_key_routes_by_key_and_session_header() -> None:
+    """Live 2026-10-22: Codex reused a shared prefix only with both sent.
+
+    Four sol requests sharing a 5k-token prefix, differing after it: neither,
+    or the key alone, cached 0 tokens on every call; key plus the
+    ``session_id`` header cached 4,864 on calls 2-4.
+    """
+    model = _make_provider().model("sol-5.6")
+    request = ModelRequest(messages=[UserMessage(text="hi")], cache_key="run-1")
+
+    assert model._build_kwargs(request)["prompt_cache_key"] == "run-1"
+    assert model._headers(request) == {"session_id": "run-1"}
+
+
+def test_no_cache_key_sends_no_routing_hints() -> None:
+    model = _make_provider().model("sol-5.6")
+    request = ModelRequest(messages=[UserMessage(text="hi")])
+
+    assert "prompt_cache_key" not in model._build_kwargs(request)
+    assert model._headers(request) == {}
+
+
 def test_a_subscription_request_keeps_its_response_cap() -> None:
     """Live 2026-10-18: Codex honors the cap; stripping it let a 300 cap ship 453.
 

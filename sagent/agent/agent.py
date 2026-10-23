@@ -3071,6 +3071,7 @@ class _AgentModel:
                     system=cached_system,
                     tools=rich_tools,
                     max_response_tokens=self._agent.max_response_tokens,
+                    cache_key=self._agent.session_id,
                 ),
                 tool_result_budget_tokens=self._agent.tool_results.message_budget_tokens,
             )

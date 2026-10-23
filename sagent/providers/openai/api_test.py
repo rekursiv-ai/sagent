@@ -25,6 +25,8 @@ from sagent.types.capability import (
     ThinkingCapability,
 )
 from sagent.types.cost import PriceCatalog, PriceKey, TokenPrice
+from sagent.types.model import ModelRequest
+from sagent.types.runtime import UserMessage
 
 
 @pytest.fixture(autouse=True)
@@ -184,6 +186,17 @@ def test_unoffered_effort_is_rejected() -> None:
     assert model.settings.thinking_effort == "low"
     with pytest.raises(ValueError, match="thinking_effort"):
         model.settings.thinking_effort = "none"
+
+
+def test_a_cache_key_reaches_the_api_as_prompt_cache_key() -> None:
+    model = OpenAI.from_key("k").model()
+    request = ModelRequest(messages=[UserMessage(text="hi")], cache_key="run-1")
+
+    assert model._build_kwargs(request)["prompt_cache_key"] == "run-1"
+    assert model._headers(request) == {}
+    assert "prompt_cache_key" not in model._build_kwargs(
+        ModelRequest(messages=[UserMessage(text="hi")]),
+    )
 
 
 def test_catalog_controls_effort_and_tier_selection() -> None:

@@ -22,7 +22,7 @@ reference:
     output: [none, text]
 
 profiles:
-  gemini-pro-3.1:
+  no_minimal:
     thinking:
       effort: [none, low, medium, high]
       budget: [none, auto, fixed]
@@ -38,8 +38,8 @@ profiles:
 models:
 - model_id: gemini-pro-3.1
   wire_model_id: gemini-3.1-pro-preview
+  profile: no_minimal
   knowledge_cutoff: January 2025
-  profile: gemini-pro-3.1
   prices:
   - service_tier: auto
     request: 2.0
@@ -76,7 +76,7 @@ models:
 
 - model_id: gemini-flash-3.8
   wire_model_id: gemini-3.8-flash
-  profile: gemini-pro-3.1
+  profile: no_minimal
   prices:
   - service_tier: auto
     request: 0.75
@@ -94,7 +94,7 @@ models:
 
 - model_id: gemini-flash-3.7
   wire_model_id: gemini-3.7-flash
-  profile: gemini-pro-3.1
+  profile: no_minimal
   prices:
   - service_tier: auto
     request: 0.75

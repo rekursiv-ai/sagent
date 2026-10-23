@@ -37,6 +37,8 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Final, cast, get_args, override
 
+import re
+
 from sagent.types.capability import (
     ContextTag,
     ModelCapability,
@@ -46,6 +48,7 @@ from sagent.types.capability import (
 
 __all__ = [
     "CONTEXT_TAGS",
+    "EXACT_NAME",
     "FALLBACK_ROLES",
     "ModelCatalog",
     "ModelTable",
@@ -66,6 +69,11 @@ CONTEXT_TAGS: Final[tuple[ContextTag, ...]] = tuple(
 
 FALLBACK_ROLES: Final = ("best", "everyday")
 """Roles that mean ``default`` in a table that does not name them."""
+
+EXACT_NAME: Final = re.compile(
+    r"(?P<family>[a-z0-9]+(?:-[a-z0-9]+)*)-(?P<major>\d+)\.(?P<minor>\d+)",
+)
+"""A catalog name, ``family-major.minor``; the family carries no dots or case."""
 
 
 class UnknownModelError(ValueError):
@@ -128,12 +136,25 @@ class ModelTable(Mapping[str, ModelCapability]):
     _by_id: Mapping[str, ModelCapability] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        """Index rows and check every role names a row."""
+        """Index rows; check family order and that every role names a row."""
         by_id: dict[str, ModelCapability] = {}
+        newest: dict[str, tuple[int, int]] = {}
         for row in self.rows:
             if row.model_id in by_id:
                 raise ValueError(f"duplicate model id {row.model_id!r}")
             by_id[row.model_id] = row
+            # A caller-supplied id (``local-model``) has no version to order by.
+            match = EXACT_NAME.fullmatch(row.model_id)
+            if match is None:
+                continue
+            family = match["family"]
+            version = (int(match["major"]), int(match["minor"]))
+            if family in newest and version >= newest[family]:
+                raise ValueError(
+                    f"family {family!r} must list rows newest-first;"
+                    f" {row.model_id!r} follows an older row",
+                )
+            newest[family] = version
         object.__setattr__(self, "_by_id", MappingProxyType(by_id))
         roles = dict(self.roles)
         if "default" in roles:

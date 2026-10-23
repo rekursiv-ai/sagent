@@ -23,7 +23,7 @@ reference:
     output: [none, text]
 
 profiles:
-  qwen-max-3.8:
+  levels_1m:
     effort_as_level: true
     thinking:
       effort: [none, low, medium, xhigh]
@@ -87,7 +87,7 @@ profiles:
 models:
 - model_id: qwen-max-3.8
   wire_model_id: qwen3.8-max
-  profile: qwen-max-3.8
+  profile: levels_1m
   prices:
   - service_tier: auto
     request: 2.0
@@ -98,7 +98,7 @@ models:
 
 - model_id: qwen-flash-3.8
   wire_model_id: qwen3.8-flash
-  profile: qwen-max-3.8
+  profile: levels_1m
   prices:
   - service_tier: auto
     request: 0.15
@@ -147,7 +147,7 @@ models:
     response: 1.6
     cache_write: 0.4
     cache_write_1h: 0.0
-    cache_read: 0.08000000000000002
+    cache_read: 0.08
   - service_tier: auto
     effective_prompt_tokens: 256_000
     request: 1.2
@@ -171,14 +171,14 @@ models:
     response: 0.4
     cache_write: 0.1
     cache_write_1h: 0.0
-    cache_read: 0.020000000000000004
+    cache_read: 0.02
   - service_tier: auto
     effective_prompt_tokens: 256_000
     request: 0.2
     response: 0.8
     cache_write: 0.2
     cache_write_1h: 0.0
-    cache_read: 0.04000000000000001
+    cache_read: 0.04
 
 - model_id: qwen-max-3.6
   wire_model_id: qwen3.6-max-preview
@@ -310,7 +310,7 @@ models:
     response: 1.2
     cache_write: 0.4
     cache_write_1h: 0.0
-    cache_read: 0.08000000000000002
+    cache_read: 0.08
   - service_tier: auto
     effective_prompt_tokens: 256_000
     request: 1.2
@@ -328,4 +328,4 @@ models:
     response: 0.2
     cache_write: 0.05
     cache_write_1h: 0.0
-    cache_read: 0.010000000000000002
+    cache_read: 0.01

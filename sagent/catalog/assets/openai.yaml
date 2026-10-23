@@ -28,13 +28,13 @@ reference:
     output: [none]
 
 profiles:
-  astra-6.0:
+  reasoning_only:
     thinking:
       effort: [low, medium, high, xhigh, max]
       budget: [none, auto]
       output: [none, text]
 
-  sol-6-0:
+  gpt_6:
     context:
       max:
         max_request_tokens: 922_000
@@ -49,13 +49,13 @@ profiles:
       budget: [none, auto]
       output: [none, text]
 
-  sol-5-6:
+  gpt_5_6:
     thinking:
       effort: [none, low, medium, high, xhigh, max]
       budget: [none, auto]
       output: [none, text]
 
-  gpt-5-5:
+  gpt_5_5:
     context:
       max:
         max_request_tokens: 1_050_000
@@ -72,7 +72,7 @@ profiles:
       budget: [none, auto]
       output: [none, text]
 
-  gpt-pro-5-5:
+  gpt_pro_1m:
     context:
       max:
         max_request_tokens: 1_050_000
@@ -87,7 +87,7 @@ profiles:
       budget: [none, auto]
       output: [none, text]
 
-  gpt-5-4:
+  gpt_5_4:
     context:
       max:
         max_request_tokens: 1_050_000
@@ -104,7 +104,7 @@ profiles:
       budget: [none, auto]
       output: [none, text]
 
-  gpt-mini-5-4:
+  gpt_mini_5_4:
     context:
       max:
         max_request_tokens: 272_000
@@ -116,7 +116,7 @@ profiles:
       budget: [none, auto]
       output: [none, text]
 
-  gpt-5-2:
+  gpt_5_2:
     context:
       max:
         max_request_tokens: 400_000
@@ -128,7 +128,7 @@ profiles:
       budget: [none, auto]
       output: [none, text]
 
-  gpt-pro-5-2:
+  gpt_pro_400k:
     context:
       max:
         max_request_tokens: 400_000
@@ -139,7 +139,7 @@ profiles:
       budget: [none, auto]
       output: [none, text]
 
-  gpt-5-1:
+  gpt_5_1:
     context:
       max:
         max_request_tokens: 400_000
@@ -151,7 +151,7 @@ profiles:
       budget: [none, auto]
       output: [none, text]
 
-  o-1-0:
+  o_series:
     context:
       max:
         max_request_tokens: 200_000
@@ -163,7 +163,7 @@ profiles:
       budget: [none, auto]
       output: [none, text]
 
-  o-mini-3-0:
+  o_series_text:
     context:
       max:
         max_request_tokens: 200_000
@@ -174,7 +174,7 @@ profiles:
       budget: [none, auto]
       output: [none, text]
 
-  gpt-4-1:
+  gpt_4_1:
     context:
       max:
         max_request_tokens: 1_047_576
@@ -182,7 +182,7 @@ profiles:
         max_request_bytes: 536_870_912
         max_image_edge_px: 2_048
 
-  gpt-omni-4-0:
+  gpt_omni:
     context:
       max:
         max_request_tokens: 128_000
@@ -190,7 +190,7 @@ profiles:
         max_request_bytes: 536_870_912
         max_image_edge_px: 2_048
 
-  gpt-turbo-4-0:
+  gpt_turbo:
     context:
       max:
         max_request_tokens: 128_000
@@ -198,7 +198,7 @@ profiles:
         max_request_bytes: 536_870_912
         max_image_edge_px: 2_048
 
-  gpt-4-0:
+  gpt_4:
     context:
       max:
         max_request_tokens: 8_192
@@ -208,8 +208,8 @@ profiles:
 models:
 - model_id: astra-6.0
   wire_model_id: gpt-6-astra
+  profile: reasoning_only
   knowledge_cutoff: April 30, 2026
-  profile: astra-6.0
   prices:
   - service_tier: auto
     request: 10.0
@@ -266,8 +266,8 @@ models:
 
 - model_id: sol-6.1
   wire_model_id: gpt-6.1-sol
+  profile: reasoning_only
   knowledge_cutoff: April 30, 2026
-  profile: astra-6.0
   prices:
   - service_tier: auto
     request: 2.0
@@ -311,7 +311,7 @@ models:
 
 - model_id: sol-6.0
   wire_model_id: gpt-6-sol
-  profile: sol-6-0
+  profile: gpt_6
   knowledge_cutoff: April 20, 2026
   prices:
   - service_tier: auto
@@ -356,7 +356,7 @@ models:
 
 - model_id: luna-6.0
   wire_model_id: gpt-6-luna
-  profile: sol-6-0
+  profile: gpt_6
   knowledge_cutoff: May 18, 2026
   prices:
   - service_tier: auto
@@ -401,7 +401,7 @@ models:
 
 - model_id: sol-5.6
   wire_model_id: gpt-5.6-sol
-  profile: sol-5-6
+  profile: gpt_5_6
   knowledge_cutoff: February 16, 2026
   prices:
   - service_tier: auto
@@ -446,7 +446,7 @@ models:
 
 - model_id: gpt-5.6
   wire_model_id: gpt-5.6
-  profile: sol-5-6
+  profile: gpt_5_6
   knowledge_cutoff: February 16, 2026
   prices:
   - service_tier: auto
@@ -491,7 +491,7 @@ models:
 
 - model_id: luna-5.6
   wire_model_id: gpt-5.6-luna
-  profile: sol-5-6
+  profile: gpt_5_6
   knowledge_cutoff: February 16, 2026
   prices:
   - service_tier: auto
@@ -503,7 +503,7 @@ models:
   - service_tier: auto
     effective_prompt_tokens: 272_000
     request: 0.4
-    response: 1.7999999999999998
+    response: 1.8
     cache_write: 0.5
     cache_write_1h: 0.0
     cache_read: 0.04
@@ -516,7 +516,7 @@ models:
   - service_tier: flex
     effective_prompt_tokens: 272_000
     request: 0.2
-    response: 0.8999999999999999
+    response: 0.9
     cache_write: 0.25
     cache_write_1h: 0.0
     cache_read: 0.02
@@ -529,14 +529,14 @@ models:
   - service_tier: priority
     effective_prompt_tokens: 272_000
     request: 0.8
-    response: 3.5999999999999996
+    response: 3.6
     cache_write: 1.0
     cache_write_1h: 0.0
     cache_read: 0.08
 
 - model_id: terra-5.6
   wire_model_id: gpt-5.6-terra
-  profile: sol-5-6
+  profile: gpt_5_6
   knowledge_cutoff: February 16, 2026
   prices:
   - service_tier: auto
@@ -581,7 +581,7 @@ models:
 
 - model_id: gpt-5.5
   wire_model_id: gpt-5.5
-  profile: gpt-5-5
+  profile: gpt_5_5
   knowledge_cutoff: December 1, 2025
   prices:
   - service_tier: auto
@@ -619,7 +619,7 @@ models:
 
 - model_id: gpt-pro-5.5
   wire_model_id: gpt-5.5-pro
-  profile: gpt-pro-5-5
+  profile: gpt_pro_1m
   knowledge_cutoff: December 1, 2025
   prices:
   - service_tier: auto
@@ -644,7 +644,7 @@ models:
 
 - model_id: gpt-5.4
   wire_model_id: gpt-5.4
-  profile: gpt-5-4
+  profile: gpt_5_4
   knowledge_cutoff: August 31, 2025
   prices:
   - service_tier: auto
@@ -682,7 +682,7 @@ models:
 
 - model_id: gpt-pro-5.4
   wire_model_id: gpt-5.4-pro
-  profile: gpt-pro-5-5
+  profile: gpt_pro_1m
   knowledge_cutoff: August 31, 2025
   prices:
   - service_tier: auto
@@ -714,7 +714,7 @@ models:
 
 - model_id: gpt-mini-5.4
   wire_model_id: gpt-5.4-mini
-  profile: gpt-mini-5-4
+  profile: gpt_mini_5_4
   knowledge_cutoff: August 31, 2025
   prices:
   - service_tier: auto
@@ -738,7 +738,7 @@ models:
 
 - model_id: gpt-nano-5.4
   wire_model_id: gpt-5.4-nano
-  profile: gpt-mini-5-4
+  profile: gpt_mini_5_4
   knowledge_cutoff: August 31, 2025
   prices:
   - service_tier: auto
@@ -756,7 +756,7 @@ models:
 
 - model_id: gpt-5.2
   wire_model_id: gpt-5.2
-  profile: gpt-5-2
+  profile: gpt_5_2
   knowledge_cutoff: August 31, 2025
   prices:
   - service_tier: auto
@@ -780,7 +780,7 @@ models:
 
 - model_id: gpt-pro-5.2
   wire_model_id: gpt-5.2-pro
-  profile: gpt-pro-5-2
+  profile: gpt_pro_400k
   knowledge_cutoff: August 31, 2025
   prices:
   - service_tier: auto
@@ -792,7 +792,7 @@ models:
 
 - model_id: gpt-5.1
   wire_model_id: gpt-5.1
-  profile: gpt-5-1
+  profile: gpt_5_1
   knowledge_cutoff: September 30, 2024
   prices:
   - service_tier: auto
@@ -816,7 +816,7 @@ models:
 
 - model_id: o-1.0
   wire_model_id: o1
-  profile: o-1-0
+  profile: o_series
   knowledge_cutoff: October 1, 2023
   prices:
   - service_tier: auto
@@ -828,7 +828,7 @@ models:
 
 - model_id: o-mini-3.0
   wire_model_id: o3-mini
-  profile: o-mini-3-0
+  profile: o_series_text
   knowledge_cutoff: October 1, 2023
   prices:
   - service_tier: auto
@@ -840,7 +840,7 @@ models:
 
 - model_id: gpt-4.1
   wire_model_id: gpt-4.1
-  profile: gpt-4-1
+  profile: gpt_4_1
   knowledge_cutoff: June 1, 2024
   prices:
   - service_tier: auto
@@ -858,7 +858,7 @@ models:
 
 - model_id: gpt-mini-4.1
   wire_model_id: gpt-4.1-mini
-  profile: gpt-4-1
+  profile: gpt_4_1
   knowledge_cutoff: June 1, 2024
   prices:
   - service_tier: auto
@@ -876,7 +876,7 @@ models:
 
 - model_id: gpt-nano-4.1
   wire_model_id: gpt-4.1-nano
-  profile: gpt-4-1
+  profile: gpt_4_1
   knowledge_cutoff: June 1, 2024
   prices:
   - service_tier: auto
@@ -894,7 +894,7 @@ models:
 
 - model_id: gpt-omni-4.0
   wire_model_id: gpt-4o
-  profile: gpt-omni-4-0
+  profile: gpt_omni
   knowledge_cutoff: October 1, 2023
   prices:
   - service_tier: auto
@@ -912,7 +912,7 @@ models:
 
 - model_id: gpt-omni-mini-4.0
   wire_model_id: gpt-4o-mini
-  profile: gpt-omni-4-0
+  profile: gpt_omni
   knowledge_cutoff: October 1, 2023
   prices:
   - service_tier: auto
@@ -930,7 +930,7 @@ models:
 
 - model_id: gpt-turbo-4.0
   wire_model_id: gpt-4-turbo
-  profile: gpt-turbo-4-0
+  profile: gpt_turbo
   knowledge_cutoff: December 1, 2023
   prices:
   - service_tier: auto
@@ -942,7 +942,7 @@ models:
 
 - model_id: gpt-4.0
   wire_model_id: gpt-4
-  profile: gpt-4-0
+  profile: gpt_4
   knowledge_cutoff: December 1, 2023
   prices:
   - service_tier: auto

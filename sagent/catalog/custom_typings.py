@@ -1,9 +1,11 @@
 """Typed YAML document schema for provider catalogs.
 
 The reference row supplies defaults; an optional profile overrides it, then
-model fields override the result. Nested objects replace whole objects. Context
-presets are max/min; default_context selects the unqualified model, normally max.
-Prices are explicit per model and require all five meters, including zeros.
+model fields override the result. Nested objects replace whole objects, so a
+``thinking`` override states all three axes. Context presets are max/min;
+default_context selects the unqualified model, normally max. Prices are explicit
+per model, require all five meters including zeros, and every priced tier has
+a base card (no prompt band, no effective date).
 """
 
 from dataclasses import dataclass, field
