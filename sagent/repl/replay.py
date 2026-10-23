@@ -158,11 +158,8 @@ def _render_entry(
 ) -> int:
     """Render one tape event; return 1 if it counts as a message, else 0."""
     match entry:
-        case UserMessage(text=text):
-            printer.write_user_bar(text)
-            return 1
-        case AgentSendMessage(source=source, text=text):
-            printer.write_agent_bar(source, text)
+        case UserMessage() | AgentSendMessage():
+            render_event(entry)
             return 1
         case AssistantMessage(
             text=text,

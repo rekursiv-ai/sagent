@@ -67,6 +67,7 @@ from sagent.types.runtime import (
     ToolResult,
     UserMessage,
     labeled_agent_send_text,
+    merge_user_message_parts,
 )
 
 
@@ -829,6 +830,7 @@ def _merge_user(
     """Merge two adjacent user-side entries per the canonical source policy."""
     attachments = (*prior.attachments, *entry.attachments)
     hidden = prior.hidden and entry.hidden
+    parts = merge_user_message_parts(prior, entry)
     same_source = (
         isinstance(prior, AgentSendMessage)
         and isinstance(entry, AgentSendMessage)
@@ -843,9 +845,16 @@ def _merge_user(
             text=text,
             hidden=hidden,
             attachments=attachments,
+            parts=parts,
         )
     text = f"{_labeled_text(prior)}\n\n{_labeled_text(entry)}"
-    return UserMessage(id=merged_id, text=text, attachments=attachments, hidden=hidden)
+    return UserMessage(
+        id=merged_id,
+        text=text,
+        attachments=attachments,
+        hidden=hidden,
+        parts=parts,
+    )
 
 
 # Joins text and concatenates ``tool_calls``, dropping any ``entry`` call whose id
