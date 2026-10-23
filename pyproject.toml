@@ -23,7 +23,7 @@ classifiers = [
 ]
 dependencies = [
     # Prefer https://awesome-python.com deps over alternatives.
-    "treekle>=0.3.0",
+    "treekle>=0.3.1",
     # media
     "imagesize>=1.4",
     "pillow",
@@ -788,6 +788,5 @@ url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
-treekle = { git = "https://github.com/rekursiv-ai/treekle", branch = "main" }
 rekursiv-ai-typings = { git = "https://github.com/rekursiv-ai/typings", branch = "main" }
 wesearch = { git = "https://github.com/rekursiv-ai/wesearch", branch = "main" }
