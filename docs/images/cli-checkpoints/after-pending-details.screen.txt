@@ -1,0 +1,34 @@
+  AgentSelf status=Verify local fixture receipts
+  Bash Run initial local fixture receipt
+  ⎿  python3 receipt.py --initial
+     INITIAL_RECEIPT_OK
+  Bash Run delayed local fixture receipt
+  ⎿  python3 receipt.py
+  AgentSelf checkpoint
+Checkpoint (agent report)
+Progress: Initial fixture receipt verified
+Pending: Delayed local fixture receipt
+User action: None reported.
+
+Initial fixture receipt verified. Pending: delayed local fixture receipt.
+     FINAL_RECEIPT_OK
+  AgentSelf checkpoint
+Checkpoint (agent report)
+Progress: Both fixture receipts verified
+Pending: Fixture approval
+User action: Type fixture-approved.
+
+Both fixture receipts verified. Pending: fixture approval.
+
+Type fixture-approved.
+pending-demo | reported 2026-10-11T02:52:36.812145+00:00
+Checkpoint (agent report)
+Progress: Both fixture receipts verified
+Pending: Fixture approval
+User action: Type fixture-approved.
+>
+[19s 18K↑ 190↓ 0↟ 0↡ $0.04]
+/pending (1) | Agent report: pending-demo
+Progress: Both fixture receipts verified
+Pending: Fixture approval
+User action: Type fixture-approved.

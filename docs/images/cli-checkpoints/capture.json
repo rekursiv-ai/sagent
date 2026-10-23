@@ -1,0 +1,166 @@
+{
+  "capture_date": "2026-10-11",
+  "capture_type": "PNG renderings of terminal cells captured from live PTYs, not native macOS screenshots",
+  "provider": "OpenAISubscription",
+  "model": "sol-6.1",
+  "effort": "high",
+  "same_prompt": true,
+  "prompt": "Run this harmless local UI fixture. First use Bash to run 'python3 receipt.py --initial' and verify INITIAL_RECEIPT_OK. Then run 'python3 receipt.py' with background=true exactly once. While its final receipt is pending, report progress='Initial fixture receipt verified', pending='Delayed local fixture receipt', user_action=''. Use AgentSelf checkpoint if that field is present in its schema; otherwise report those three fields in a short reply. When FINAL_RECEIPT_OK arrives, report progress='Both fixture receipts verified', pending='Fixture approval', user_action='Type fixture-approved.'. Use the same available reporting mechanism. End each turn after reporting. Do not poll, edit files, spawn workers or claim this fixture is an external evaluation.",
+  "before_commit": "f4db9bf079159df5ad8eedd704101ff256a99216",
+  "after_runtime_commit": "6d88005a33489ae916488ff9848289f538561c07",
+  "screens": [
+    {
+      "variant": "before",
+      "stage": "waiting",
+      "process_alive": true,
+      "pid": 96779,
+      "captured_unix": 1791687134.446424,
+      "columns": 100,
+      "rows": 34,
+      "image": "before-waiting.png",
+      "image_sha256": "f4f8130933ba5c3fff21636bad3367c0454c5c3566205dec2a131f51212e571e",
+      "event_count": 49,
+      "source_commit": "f4db9bf079159df5ad8eedd704101ff256a99216",
+      "type": "Exact terminal cells rasterized from a live PTY; not a native Terminal screenshot",
+      "screen_text": "before-waiting.screen.txt",
+      "screen_text_sha256": "e4f8b5b242a6464ff7e6a6966ddebda2662a566e19afa4e4bfc137e35a099938",
+      "ansi": "before-waiting.ansi.gz",
+      "ansi_uncompressed_sha256": "dfe139bb847da0faf4eab121f64a10f9ce745ffbad336549b182d373bf66ccc8"
+    },
+    {
+      "variant": "before",
+      "stage": "action-needed",
+      "process_alive": true,
+      "pid": 96779,
+      "captured_unix": 1791687137.747496,
+      "columns": 100,
+      "rows": 34,
+      "image": "before-action-needed.png",
+      "image_sha256": "f39475de36a99bb8979aacc7a00c11c8abd187107d3de514baaf3622c9e2fa45",
+      "event_count": 86,
+      "source_commit": "f4db9bf079159df5ad8eedd704101ff256a99216",
+      "type": "Exact terminal cells rasterized from a live PTY; not a native Terminal screenshot",
+      "screen_text": "before-action-needed.screen.txt",
+      "screen_text_sha256": "e5c8e38f84c3e639b9f320f19201e7a738911eadf62054e31f468f15864ad85c",
+      "ansi": "before-action-needed.ansi.gz",
+      "ansi_uncompressed_sha256": "6ba149459f5c0464555ad8228545a1a551ae4e08815a30a2ac6972288b38a945"
+    },
+    {
+      "variant": "after",
+      "stage": "waiting",
+      "process_alive": true,
+      "pid": 96804,
+      "captured_unix": 1791687154.296295,
+      "columns": 100,
+      "rows": 34,
+      "image": "after-waiting.png",
+      "image_sha256": "298311ebeeba108ed17b7660d692308c0f29deca99d999d7cbd2f9da87644161",
+      "event_count": 64,
+      "source_commit": "6d88005a33489ae916488ff9848289f538561c07",
+      "type": "Exact terminal cells rasterized from a live PTY; not a native Terminal screenshot",
+      "screen_text": "after-waiting.screen.txt",
+      "screen_text_sha256": "99550a166cc866071b365dd7adad9318c9539993e0ffecd97a9ee77707516bb9",
+      "ansi": "after-waiting.ansi.gz",
+      "ansi_uncompressed_sha256": "fa52bbf079ec6b0037b5471ed4f183a7a71d984f9d0da82c459b727f03082b62"
+    },
+    {
+      "variant": "after",
+      "stage": "action-needed",
+      "process_alive": true,
+      "pid": 96804,
+      "captured_unix": 1791687160.8194911,
+      "columns": 100,
+      "rows": 34,
+      "image": "after-action-needed.png",
+      "image_sha256": "57a47897818268e1f104ffcd7e858a3636f3d5e11e97b62de42c60eb05073a0f",
+      "event_count": 103,
+      "source_commit": "6d88005a33489ae916488ff9848289f538561c07",
+      "type": "Exact terminal cells rasterized from a live PTY; not a native Terminal screenshot",
+      "screen_text": "after-action-needed.screen.txt",
+      "screen_text_sha256": "8d7d8d84487f0d60b2c6445425f82e963a8c073a4a749eec114031363874328d",
+      "ansi": "after-action-needed.ansi.gz",
+      "ansi_uncompressed_sha256": "60b8d98d5be742b46ba073a268f89c052443878dbe4fad7e23ab263c7ebae19b"
+    },
+    {
+      "variant": "after",
+      "stage": "pending-details",
+      "process_alive": true,
+      "pid": 96804,
+      "captured_unix": 1791687162.955544,
+      "columns": 100,
+      "rows": 34,
+      "image": "after-pending-details.png",
+      "image_sha256": "6c326088704f72066c76dce9c389b23d3246863ead2273303b95b2c2ca1b96d5",
+      "event_count": 103,
+      "source_commit": "6d88005a33489ae916488ff9848289f538561c07",
+      "type": "Exact terminal cells rasterized from a live PTY; not a native Terminal screenshot",
+      "screen_text": "after-pending-details.screen.txt",
+      "screen_text_sha256": "c04d851d39c92949c678025390a5f00651bf6b49161ff29635270708ef755b02",
+      "ansi": "after-pending-details.ansi.gz",
+      "ansi_uncompressed_sha256": "3cbe4ed3d7f1d33095b8fcfd119b5be1f7f714ade376fc804a091b1a70922fa5"
+    }
+  ],
+  "verified": {
+    "before_exit_status": 0,
+    "after_exit_status": 0,
+    "after_checkpoint_transitions": 2,
+    "first_checkpoint_overlaps_real_background_command": true,
+    "pending_details_added_model_events": 0,
+    "source_hashes_match_reviewed_source": true,
+    "resume": {
+      "saved_report_marked_not_rechecked": true,
+      "pending_does_not_call_model": true,
+      "session_unchanged": true,
+      "terminal_widths_checked": [
+        40,
+        80,
+        120
+      ],
+      "exit_status": 0
+    }
+  },
+  "source_hashes": {
+    "before": {
+      "sagent/tools/agent_self.py": "e2c7e1cb8d97f532cca71ac23a9670f3b5ebfd7533a6c0d3044347d7ac8bd839",
+      "sagent/repl/render.py": "f33454873334d83d669d756a232d1e1a340dabcfc3413c051bb880cb1ea914e9",
+      "sagent/repl/checkpoints.py": null,
+      "sagent/repl/run_repl.py": "374b4ed1358abd14ea25fae60191f3c39cd29a1b0878eb1bb673c222f818948f",
+      "sagent/agent/session_io.py": "987ffd38e97718f95f08ce99fec88a1c0c841663b66e16640b5d07f879782e1d",
+      "sagent/agent/agent.py": "e10544dc7f07ee7e3893f986a395aa2fd046f3782d424d8fd7e36ff28a8a82d1"
+    },
+    "after": {
+      "sagent/tools/agent_self.py": "c5c365fb62016c808812e479d0dddda59579fac6964b77c6ae1076125ee42638",
+      "sagent/repl/render.py": "0729fbb9b2287ddd851cc98bc73d07f69723aa5f98b0b50674e60959f897bfa4",
+      "sagent/repl/checkpoints.py": "0743d7f28eee65b9adde69ec6e3d26a527a890c9029ba0809164e27b1609a5ea",
+      "sagent/repl/run_repl.py": "1a67425bc5bed1e16b7ec73d9b727401ef691e4869c85bf83ebec5b9bbc717cb",
+      "sagent/agent/session_io.py": "bdb72911ae0ccc37bd31d96e3d0b7a2d13a9cf4108b5db5020b73b196b2b46bc",
+      "sagent/agent/agent.py": "04f5c1cbaf10df239517bede0e080f1df064a838629dd4011ec7b6e6c2cceed2"
+    }
+  },
+  "capture_script_sha256": "900c6881272275e7f228c6cf4cefe85889731ec574841644eb199d4541dce548",
+  "raster": {
+    "fonts": [
+      "Menlo 18px",
+      "Apple Symbols 22px for gutter glyphs"
+    ],
+    "columns": 100,
+    "rows": 34,
+    "cell_width": 11,
+    "cell_height": 26,
+    "padding": 18,
+    "text_grid_checked_against_saved_screen": true,
+    "native_terminal_screenshot": false
+  },
+  "fresh_tests": {
+    "command": "pytest -n 2 -q --tb=short sagent/repl/checkpoints_test.py sagent/tools/agent_self_test.py sagent/agent/session_io_test.py sagent/repl/slash_test.py sagent/repl/render_test.py sagent/repl/replay_test.py",
+    "passed": 357
+  },
+  "limits": [
+    "The prompt asks for the available reporting mechanism. This checks the UI, not autonomous checkpoint adoption or elimination of waiting prose.",
+    "Independent live calls differ in wording and timing.",
+    "Computer Use denied Terminal access for safety reasons. These are PTY cell images, not native macOS screenshots."
+  ],
+  "packaging_script_sha256": "24250b7a060f9cf03f907af53627623002d214de39e9496784267bf52f72c78c",
+  "ansi_verification": "Snapshot text had normalized CR/CRLF; exact byte prefixes were recovered from the original continuous PTY logs and checked against every saved screen text cell.",
+  "screen_text_format": "Trailing blank padding omitted; the compressed ANSI preserves exact output."
+}

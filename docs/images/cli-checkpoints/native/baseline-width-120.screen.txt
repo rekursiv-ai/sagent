@@ -1,0 +1,32 @@
+> Run this harmless local UI fixture. Fi
+  y INITIAL_RECEIPT_OK. Then run 'python
+  inal receipt is pending, report progre
+  l fixture receipt', user_action=''. Us
+  a; otherwise report those three fields
+  gress='Both fixture receipts verified'
+  oved.'. Use the same available reporti
+  it files, spawn workers or claim this
+  Bash Run initial local fixture receipt
+  ⎿  python3 receipt.py --initial
+     INITIAL_RECEIPT_OK
+  Bash Run delayed local fixture receipt
+  ⎿  python3 receipt.py
+
+progress='Initial fixture receipt verifi
+> [detached tool call_aa792e911d9a43aa8f
+  DetachedArrived
+
+progress='Both fixture receipts verified
+fixture-approved.'
+── resumed · 10 messages · $0.02 · OpenA
+>
+
+
+
+
+
+
+
+
+
+[11s 7200↑ 108↓ 0↟ 1664↡ $0.02]
