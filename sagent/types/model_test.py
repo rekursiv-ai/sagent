@@ -4,10 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.catalog.anthropic import models
-from sagent.types.capability import (
-    ModelCapability,
-)
 from sagent.types.cost import (
     TokenCount,
 )
@@ -194,50 +190,6 @@ def test_stream_interrupted_message_embeds_response_counts() -> None:
     assert "input_tokens=42" in text
     assert "output_tokens=7" in text
     assert "tool_use" in text
-
-
-# ---- catalog facts ---------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("model_id", "priority"),
-    [
-        ("opus-5.0", True),
-        ("opus-4.8", True),
-        # Fast mode was removed from 4-7 on 2026-07-24 and never shipped on
-        # 4-6: a fast request there is served at standard speed and billed at
-        # standard rates, so a fast price row overstates the cost.
-        ("opus-4.7", False),
-        ("opus-4.6", False),
-    ],
-)
-def test_only_documented_models_offer_the_priority_tier(
-    model_id: str,
-    priority: bool,
-) -> None:
-    """Fast mode is Opus 5 and Opus 4.8 only.
-
-    https://code.claude.com/docs/en/fast-mode
-    """
-    row = models()[model_id]
-    assert ("priority" in row.service_tier) is priority
-
-
-@pytest.mark.parametrize(
-    ("model_id", "divisor"),
-    [
-        ("opus-5.0", 2.38),
-        ("opus-4.8", 2.38),
-        ("opus-4.6", 3.12),
-        ("haiku-4.5", 3.12),
-    ],
-)
-def test_approx_chars_per_token_is_model_metadata(
-    model_id: str,
-    divisor: float,
-) -> None:
-    assert models()[model_id].approx_chars_per_token == divisor
-    assert "approx_chars_per_token" in ModelCapability.__dataclass_fields__
 
 
 if __name__ == "__main__":

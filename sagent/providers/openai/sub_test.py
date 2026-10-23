@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,7 +18,9 @@ import httpx2
 import openai
 import pytest
 
-from sagent.catalog.openai import models, reasoning_effort, subscription_models
+from sagent.catalog import openai as catalog_openai
+from sagent.catalog.openai import reasoning_effort
+from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.providers import OpenAI
 from sagent.providers.lib.errors import (
     PER_ITEM_STRING_CAP_BODY,
@@ -35,7 +38,10 @@ from sagent.providers.openai.sub import (
 )
 from sagent.tools import tool
 from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
     ModelSettings,
+    ThinkingCapability,
     ThinkingEffort,
 )
 from sagent.types.exceptions import AuthRefreshError
@@ -48,7 +54,7 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Iterator
     from pathlib import Path
 
     from sagent.types.tools import Tool
@@ -64,37 +70,63 @@ def isolate_codex_home(
     monkeypatch.setenv("HOME", str(tmp_path_factory.mktemp("home")))
 
 
-def test_subscription_context_clamps_request_tokens() -> None:
-    clamped = subscription_models()["astra-6.0"].context[""]
-    assert clamped.max_request_tokens == 272_000
-    assert clamped.max_response_tokens == 32_000
+@pytest.fixture(autouse=True)
+def synthetic_catalog(monkeypatch: pytest.MonkeyPatch) -> Iterator[ModelTable]:
+    """Exercise subscription wiring without mirroring provider assets."""
+    row = ModelCapability(
+        model_id="example-1.0",
+        context={
+            "": ModelLimits(max_request_tokens=700_000, max_response_tokens=60_000),
+            "+272k": ModelLimits(
+                max_request_tokens=272_000,
+                max_response_tokens=30_000,
+            ),
+        },
+        thinking=ThinkingCapability(
+            effort=frozenset({"none", "low", "medium", "high", "xhigh", "max"}),
+            budget=frozenset({"none", "auto"}),
+            output=frozenset({"none", "text"}),
+        ),
+        service_tier=frozenset({"auto", "default", "flex", "priority"}),
+    )
+    table = ModelTable(
+        rows=(
+            row,
+            *(
+                replace(row, model_id=name, wire_model_id=wire)
+                for name, wire in (
+                    ("gpt-5.5", "gpt-5.5"),
+                    ("sol-5.6", "gpt-5.6-sol"),
+                    ("o-1.0", "o1"),
+                    ("o-mini-3.0", "o3-mini"),
+                    ("utility-example-1.0", "wire-utility"),
+                )
+            ),
+        ),
+        roles={"default": "example", "utility": "utility-example"},
+    )
 
+    def lookup(provider: str) -> ModelTable:
+        assert provider == "openai"
+        return table
 
-def test_subscription_context_keeps_small_windows() -> None:
-    clamped = subscription_models()["gpt-4.0"].context[""]
-    assert clamped.max_request_tokens == 8_192
-    assert clamped.max_response_tokens == 8_192
-
-
-def test_subscription_context_drops_the_long_window_tag() -> None:
-    """``+1m`` clamps to exactly the base id, so offering it would mislead."""
-    rows = subscription_models()
-    assert all(capability.context.keys() == {""} for capability in rows.values())
-
-
-def test_subscription_context_inherits_size_caps_from_parent() -> None:
-    # Only the token windows are subscription-specific; the image/wire byte
-    # caps are a property of the underlying model and must flow through
-    # unchanged, not be overwritten by a stale local constant. A divergent
-    # parent capability proves inheritance rather than a hardcoded match.
-    api = models()["astra-6.0"].context[""]
-    clamped = subscription_models()["astra-6.0"].context[""]
-    assert clamped.max_image_edge_px == api.max_image_edge_px
-    assert clamped.max_image_bytes == api.max_image_bytes
-    assert clamped.max_request_bytes == api.max_request_bytes
-
-
-# 1×1 transparent PNG -- smallest valid PNG ``image_lib.resize`` will accept.
+    monkeypatch.setattr(catalog_openai, "models", lookup)
+    catalog_openai.subscription_models.cache_clear()
+    monkeypatch.setattr(
+        OpenAI,
+        "catalog",
+        ModelCatalog(models=table, transport=catalog_openai.api()),
+    )
+    monkeypatch.setattr(
+        OpenAISubscription,
+        "catalog",
+        ModelCatalog(
+            models=catalog_openai.subscription_models(),
+            transport=catalog_openai.subscription(),
+        ),
+    )
+    yield table
+    catalog_openai.subscription_models.cache_clear()
 
 
 def _make_jwt(payload: dict[str, object]) -> str:
@@ -398,12 +430,15 @@ def test_subscription_model_uses_default_when_unset() -> None:
     )
 
 
-def test_subscription_default_model_is_openai_default_without_1m() -> None:
-    """Sub default = the API default's base id (``+1m`` is not in the catalog)."""
-    assert OpenAISubscription.catalog.resolve("default")[0].model_id == "sol-6.1"
-    assert OpenAI.catalog.resolve("default")[0].model_id == "sol-6.1"
-    # The narrowed default must resolve against the narrowed catalog.
-    assert "default" in OpenAISubscription.catalog.models
+def test_subscription_default_model_inherits_the_api_role(
+    synthetic_catalog: ModelTable,
+) -> None:
+    assert OpenAISubscription.catalog.resolve("default")[0].model_id == (
+        synthetic_catalog["default"].model_id
+    )
+    assert OpenAI.catalog.resolve("default")[0].model_id == (
+        synthetic_catalog["default"].model_id
+    )
 
 
 def test_subscription_default_utility_model_inherits_from_openai() -> None:
@@ -413,14 +448,15 @@ def test_subscription_default_utility_model_inherits_from_openai() -> None:
     )
 
 
-def test_subscription_utility_model_uses_utility_default() -> None:
-    m = _make_provider().model("utility")
-    assert m.capability.model_id == "luna-6.0"
+def test_subscription_utility_model_uses_utility_default(
+    synthetic_catalog: ModelTable,
+) -> None:
+    model = _make_provider().model("utility")
+    assert model.capability.model_id == synthetic_catalog["utility"].model_id
 
 
 def test_subscription_model_clamps_against_wire_contract() -> None:
     m = _make_provider().model("gpt-5.5")
-    # KNOWN_MODELS is clamped via ``_subscription_profile``.
     assert m.limits.max_request_tokens == 272_000
     assert m.limits.max_response_tokens == 32_000
 

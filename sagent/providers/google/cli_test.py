@@ -209,19 +209,20 @@ def test_model_capabilities() -> None:
     """The CLI transport narrows the row it inherits from the API."""
     provider = GoogleCLI()
     model = provider.model("gemini-2.5-flash")
-    assert model.capability.thinking.budget != frozenset({"none"})
+    assert (
+        model.capability.thinking.budget
+        == provider.catalog.models["gemini-2.5-flash"].thinking.budget
+    )
     assert model.capability.thinking.effort == frozenset({"none"})
     assert model.capability.cache_ttl_sec == frozenset({0.0})
     assert model.capability.manage_context_server_side == frozenset({True})
     assert model.capability.account_auth is True
 
 
-def test_max_image_limits() -> None:
-    """Gemini has no per-image pixel/byte cap; only the 100 MB total applies."""
-    model = GoogleCLI().model("gemini-2.5-flash")
-    assert model.limits.max_image_edge_px == 0
-    assert model.limits.max_image_bytes == 0
-    assert model.limits.max_request_bytes == 100 * 1024 * 1024
+def test_limits_come_from_catalog() -> None:
+    provider = GoogleCLI()
+    model = provider.model()
+    assert model.limits == provider.catalog.models["default"].context[""]
 
 
 def test_is_context_overflow_text_markers() -> None:
@@ -335,8 +336,9 @@ def test_approx_request_tokens_sums_user_and_assistant() -> None:
         ],
     )
     estimate = model.approx_request_tokens(request)
-    # ``len("a"*16) // 4 = 4`` + ``4 // 4 = 1`` + ``4 // 4 = 1`` = 6.
-    assert estimate == 6
+    assert estimate == sum(
+        model.approx_text_tokens(text) for text in ("a" * 16, "bbbb", "cccc")
+    )
 
 
 def test_read_expiry_handles_missing_and_invalid(tmp_path: Path) -> None:
@@ -999,8 +1001,8 @@ def test_build_response_estimates_tokens_and_cost() -> None:
     )
     assert response.message.text == "hello"
     assert response.stop_reason == "model_finished"
-    assert response.tokens.request == 4
-    assert response.tokens.response == 1
+    assert response.tokens.request == model.approx_text_tokens("a" * 16)
+    assert response.tokens.response == model.approx_text_tokens("hello")
     assert response.total_cost >= 0.0
     assert len(response.message.thinking_blocks) == 1
 

@@ -2,18 +2,44 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from sagent.catalog.minimax import api
+from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.providers.minimax.api import MiniMax, _MiniMaxModel
-from sagent.types.capability import ModelSettings, ThinkingBudget
-from sagent.types.cost import PriceKey
+from sagent.types.capability import (
+    ModelCapability,
+    ModelSettings,
+    ThinkingBudget,
+    ThinkingCapability,
+)
 from sagent.types.model import ModelRequest
 
 
 if TYPE_CHECKING:
     from treekle import MutablePlainTree
+
+
+@pytest.fixture(autouse=True)
+def synthetic_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = ModelCapability(
+        model_id="always-1.0",
+        thinking=ThinkingCapability(output=frozenset({"none", "text"})),
+    )
+    switched = replace(
+        row,
+        model_id="switch-1.0",
+        thinking=ThinkingCapability(
+            budget=frozenset({"none", "auto"}),
+            output=frozenset({"none", "text"}),
+        ),
+        service_tier=frozenset({"auto", "priority"}),
+    )
+    table = ModelTable(rows=(row, switched), roles={"default": "switch"})
+    monkeypatch.setattr(MiniMax, "catalog", ModelCatalog(models=table, transport=api()))
 
 
 def test_minimax_from_key() -> None:
@@ -47,16 +73,8 @@ def test_minimax_unknown_model_raises() -> None:
 
 
 def test_minimax_model_supports_thinking_via_reasoning_field() -> None:
-    m = MiniMax.from_key("k").model("minimax-2.7")
+    m = MiniMax.from_key("k").model("always-1.0")
     assert m.capability.thinking.output == frozenset({"none", "text"})
-
-
-def test_minimax_known_models_have_pricing() -> None:
-    p = MiniMax.from_key("k")
-    for mid in MiniMax.catalog.models:
-        m = p.model(mid)
-        assert m.capability.prices[PriceKey("auto")].request > 0
-        assert m.capability.prices[PriceKey("auto")].response > 0
 
 
 def test_minimax_base_url_override_via_from_key() -> None:
@@ -78,7 +96,7 @@ def _body(
 
 def test_every_request_splits_reasoning_out_of_content() -> None:
     """Without it, thinking arrives inside ``content`` as ``<think>`` tags."""
-    assert _body("minimax-2.7")["reasoning_split"] is True
+    assert _body("always-1.0")["reasoning_split"] is True
 
 
 @pytest.mark.parametrize(
@@ -86,15 +104,15 @@ def test_every_request_splits_reasoning_out_of_content() -> None:
     [("none", "disabled"), ("auto", "adaptive")],
 )
 def test_m3_sends_its_thinking_switch(budget: ThinkingBudget, wire: str) -> None:
-    assert _body("minimax-3.0", budget)["thinking"] == {"type": wire}
+    assert _body("switch-1.0", budget)["thinking"] == {"type": wire}
 
 
 def test_m2_sends_no_thinking_switch_it_would_ignore() -> None:
-    assert "thinking" not in _body("minimax-2.7")
+    assert "thinking" not in _body("always-1.0")
 
 
 def test_m3_priority_tier_survives_the_transport() -> None:
-    m = MiniMax.from_key("k").model("minimax-3.0")
+    m = MiniMax.from_key("k").model("switch-1.0")
     assert "priority" in m.capability.service_tier
     m.settings.service_tier = "priority"
 

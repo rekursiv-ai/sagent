@@ -41,7 +41,8 @@ else:
 
 from treekle import MutablePlainTree, from_plain, mutable
 
-from sagent.catalog.google import api, models, thinking_config
+from sagent.catalog.google import api, thinking_config
+from sagent.catalog.loader import models
 from sagent.catalog.table import ModelCatalog
 from sagent.providers.lib.errors import (
     error_status_code,
@@ -90,7 +91,7 @@ _API_BASE: Final = "https://generativelanguage.googleapis.com/v1beta"
 class Google:
     """Google provider - creates Gemini model backends."""
 
-    catalog = ModelCatalog(models=models(), transport=api())
+    catalog = ModelCatalog(models=models("google"), transport=api())
 
     def __init__(self, *, api_key: str) -> None:
         self.api_key = api_key

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, override
 
-from sagent.catalog.moonshot import models
+from sagent.catalog.loader import models
 from sagent.catalog.openai import compatible
 from sagent.catalog.table import ModelCatalog
 from sagent.providers.openai.compat import (
@@ -73,6 +73,6 @@ class Moonshot(OpenAICompat):
     ENV_VAR: ClassVar[str] = "MOONSHOT_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.moonshot.ai/v1"
 
-    catalog = ModelCatalog(models=models(), transport=compatible())
+    catalog = ModelCatalog(models=models("moonshot"), transport=compatible())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MoonshotModel

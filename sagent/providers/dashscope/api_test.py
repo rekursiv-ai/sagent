@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from sagent.agent.agent import Agent
+from sagent.catalog.openai import compatible
+from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.providers.dashscope.api import DashScope, _DashScopeModel
 from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
     ModelSettings,
     ThinkingBudget,
+    ThinkingCapability,
     ThinkingEffort,
 )
 from sagent.types.model import ModelRequest
@@ -19,6 +25,50 @@ from sagent.types.runtime import UserMessage
 
 if TYPE_CHECKING:
     from treekle import MutablePlainTree
+
+
+@pytest.fixture(autouse=True)
+def synthetic_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = ModelCapability(
+        model_id="budget-1.0",
+        context={"": ModelLimits(max_request_tokens=9000, max_response_tokens=500)},
+        thinking=ThinkingCapability(
+            effort=frozenset({"none", "low", "medium", "high", "xhigh", "max"}),
+            budget=frozenset({"none", "auto", "fixed"}),
+        ),
+    )
+    table = ModelTable(
+        rows=(
+            row,
+            replace(row, model_id="level-1.0", effort_as_level=True),
+            replace(row, model_id="plain-1.0", thinking=ThinkingCapability()),
+            replace(
+                row,
+                model_id="always-1.0",
+                thinking=replace(row.thinking, budget=frozenset({"auto", "fixed"})),
+            ),
+            *(
+                replace(row, model_id=name)
+                for name in (
+                    "qwen-max-3.8",
+                    "qwen-flash-3.8",
+                    "qwen-plus-3.7",
+                    "qwen-flash-3.6",
+                    "qwen-27b-3.8",
+                    "qwen-max-3.6",
+                    "qwen-turbo-3.0",
+                    "qwen-32b-3.0",
+                    "qwen-235b-a22b-instruct-3.0",
+                )
+            ),
+        ),
+        roles={"default": "budget"},
+    )
+    monkeypatch.setattr(
+        DashScope,
+        "catalog",
+        ModelCatalog(models=table, transport=compatible()),
+    )
 
 
 def test_dashscope_from_key() -> None:
@@ -74,7 +124,7 @@ def _body(
 
 
 def test_a_fixed_budget_caps_reasoning_with_thinking_budget() -> None:
-    m = _model("qwen-plus-3.7", budget="fixed", effort="low")
+    m = _model("budget", budget="fixed", effort="low")
     out = _body(m, {"model": "qwen3.7-plus", "reasoning_effort": "low"})
     assert "reasoning_effort" not in out
     assert out["enable_thinking"] is True
@@ -82,43 +132,43 @@ def test_a_fixed_budget_caps_reasoning_with_thinking_budget() -> None:
 
 
 def test_effort_levels_map_to_distinct_budgets() -> None:
-    high = _body(_model("qwen-32b-3.0", budget="fixed", effort="high"))
-    maxi = _body(_model("qwen-32b-3.0", budget="fixed", effort="max"))
+    high = _body(_model("budget", budget="fixed", effort="high"))
+    maxi = _body(_model("budget", budget="fixed", effort="max"))
     assert high["thinking_budget"] == 16_384
     assert maxi["thinking_budget"] == 24_576
 
 
 def test_an_auto_budget_thinks_at_the_model_default() -> None:
-    out = _body(_model("qwen-plus-3.7", budget="auto", effort="high"))
+    out = _body(_model("budget", budget="auto", effort="high"))
     assert out == {"enable_thinking": True}
 
 
 def test_a_none_budget_disables_thinking() -> None:
-    out = _body(_model("qwen-plus-3.7"), {"reasoning_effort": "minimal"})
+    out = _body(_model("budget"), {"reasoning_effort": "minimal"})
     assert out == {"enable_thinking": False}
 
 
 def test_a_level_row_sends_reasoning_effort_and_never_a_budget() -> None:
     """Qwen 3.8 errors when ``reasoning_effort`` and ``thinking_budget`` co-occur."""
-    out = _body(_model("qwen-max-3.8", budget="auto", effort="xhigh"))
+    out = _body(_model("level", budget="auto", effort="xhigh"))
     assert out == {"enable_thinking": True, "reasoning_effort": "xhigh"}
 
 
 def test_a_level_row_with_no_effort_leaves_the_server_default() -> None:
-    out = _body(_model("qwen-flash-3.8", budget="auto"))
+    out = _body(_model("level", budget="auto"))
     assert out == {"enable_thinking": True}
 
 
 def test_an_instruct_row_shares_the_qwen3_prefix_yet_gets_no_knob() -> None:
     """An id-prefix rule once sent ``enable_thinking`` to every ``qwen3*`` id."""
-    m = _model("qwen-235b-a22b-instruct-3.0")
+    m = _model("plain")
     assert m.capability.thinking.budget == frozenset({"none"})
     assert _body(m) == {}
 
 
 def test_a_thinking_only_row_never_disables_thinking() -> None:
     """Model Studio rejects ``enable_thinking=false`` on ``*-thinking-2507``."""
-    m = _model("qwen-235b-a22b-thinking-3.0", effort="low")
+    m = _model("always", effort="low")
     assert "none" not in m.capability.thinking.budget
     assert _body(m)["enable_thinking"] is True
     with pytest.raises(ValueError, match="thinking_budget"):
@@ -127,7 +177,7 @@ def test_a_thinking_only_row_never_disables_thinking() -> None:
 
 @pytest.mark.parametrize(
     "model_id",
-    ["qwen-235b-a22b-instruct-3.0", "qwen-coder-480b-a35b-3.0"],
+    ["plain"],
 )
 def test_a_non_reasoning_row_gets_no_thinking_knobs(model_id: str) -> None:
     m = _model(model_id)
@@ -137,7 +187,7 @@ def test_a_non_reasoning_row_gets_no_thinking_knobs(model_id: str) -> None:
     assert "thinking_budget" not in out
 
 
-@pytest.mark.parametrize("model_id", sorted(DashScope.catalog.models))
+@pytest.mark.parametrize("model_id", ["budget", "level", "plain", "always"])
 def test_the_wire_follows_the_row_not_the_id(model_id: str) -> None:
     """A row offering a budget sends the toggle; one that does not, never does."""
     m = _model(model_id)

@@ -85,9 +85,8 @@ def test_llamacpp_from_env_uses_env_var(monkeypatch: pytest.MonkeyPatch) -> None
     assert p.api_key == "env-key"
 
 
-def test_llamacpp_known_models_include_local() -> None:
-    assert LlamaCpp.catalog.models["local"].model_id == "local-0.0"
-    assert LlamaCpp.catalog.models["qwen3.6-27b-12gb"].model_id == "qwen-27b-12gb-3.6"
+def test_llamacpp_catalog_uses_shared_models() -> None:
+    assert LlamaCpp.catalog.models is server.models("llamacpp")
 
 
 def test_llamacpp_close_idempotent() -> None:

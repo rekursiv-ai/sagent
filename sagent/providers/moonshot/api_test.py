@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from sagent.catalog.openai import compatible
+from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.providers.moonshot.api import Moonshot, _MoonshotModel
 from sagent.types.capability import (
+    ModelCapability,
     ModelSettings,
     ThinkingBudget,
+    ThinkingCapability,
     ThinkingEffort,
 )
 from sagent.types.model import ModelRequest
@@ -18,6 +23,38 @@ from sagent.types.runtime import UserMessage
 
 if TYPE_CHECKING:
     from treekle import MutablePlainTree
+
+
+@pytest.fixture(autouse=True)
+def synthetic_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    row = ModelCapability(
+        model_id="level-1.0",
+        wire_model_id="wire-level",
+        effort_as_level=True,
+        thinking=ThinkingCapability(
+            effort=frozenset({"none", "max"}),
+            output=frozenset({"none", "text"}),
+        ),
+    )
+    switched = replace(
+        row,
+        model_id="switch-1.0",
+        effort_as_level=False,
+        thinking=ThinkingCapability(budget=frozenset({"none", "auto"})),
+    )
+    plain = replace(
+        row,
+        model_id="plain-1.0",
+        wire_model_id="wire-plain",
+        effort_as_level=False,
+        thinking=ThinkingCapability(),
+    )
+    table = ModelTable(rows=(row, switched, plain), roles={"default": "level"})
+    monkeypatch.setattr(
+        Moonshot,
+        "catalog",
+        ModelCatalog(models=table, transport=compatible()),
+    )
 
 
 def test_moonshot_from_key() -> None:
@@ -51,21 +88,13 @@ def test_moonshot_unknown_model_raises() -> None:
         _ = p.model("not-kimi")
 
 
-def test_moonshot_known_models_have_pricing_and_limits() -> None:
-    p = Moonshot.from_key("k")
-    for mid in Moonshot.catalog.models:
-        m = p.model(mid)
-        assert m.limits.max_request_tokens > 0
-        assert m.limits.max_response_tokens > 0
-
-
 def test_moonshot_base_url_override_via_from_key() -> None:
     p = Moonshot.from_key("k", base_url="http://localhost:8000/v1")
     assert p.base_url == "http://localhost:8000/v1"
 
 
 def test_moonshot_offers_no_prompt_cache() -> None:
-    m = Moonshot.from_key("k").model("kimi-2.6")
+    m = Moonshot.from_key("k").model("switch-1.0")
     assert m.capability.cache_ttl_sec == frozenset({0.0})
 
 
@@ -85,17 +114,17 @@ def _body(
     return m._build_body(ModelRequest(messages=[UserMessage(text="x")]), stream=False)
 
 
-@pytest.mark.parametrize("model_id", sorted(Moonshot.catalog.models))
+@pytest.mark.parametrize("model_id", ["level", "switch", "plain"])
 def test_no_request_carries_the_fixed_temperature(model_id: str) -> None:
     assert "temperature" not in _body(model_id)
 
 
 def test_k3_sends_max_verbatim_rather_than_openais_high() -> None:
-    assert _body("kimi-3.0", effort="max")["reasoning_effort"] == "max"
+    assert _body("level-1.0", effort="max")["reasoning_effort"] == "max"
 
 
 def test_k3_with_no_effort_leaves_the_server_default() -> None:
-    body = _body("kimi-3.0")
+    body = _body("level-1.0")
     assert "reasoning_effort" not in body
     assert "thinking" not in body
 
@@ -105,15 +134,15 @@ def test_k3_with_no_effort_leaves_the_server_default() -> None:
     [("none", "disabled"), ("auto", "enabled")],
 )
 def test_k2_6_sends_its_thinking_switch(budget: ThinkingBudget, wire: str) -> None:
-    assert _body("kimi-2.6", budget=budget)["thinking"] == {"type": wire}
+    assert _body("switch-1.0", budget=budget)["thinking"] == {"type": wire}
 
 
 def test_k2_7_code_is_never_sent_the_thinking_parameter() -> None:
-    assert "thinking" not in _body("kimi-code-2.7")
+    assert "thinking" not in _body("plain-1.0")
 
 
 def test_the_wire_carries_the_vendor_id() -> None:
-    assert _body("kimi-code-highspeed-2.7")["model"] == "kimi-k2.7-code-highspeed"
+    assert _body("plain-1.0")["model"] == "wire-plain"
 
 
 if __name__ == "__main__":

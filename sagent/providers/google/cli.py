@@ -38,7 +38,8 @@ from treekle import MutablePlainTree, PlainTree, from_plain
 
 import fastjsonschema
 
-from sagent.catalog.google import cli, models
+from sagent.catalog.google import cli
+from sagent.catalog.loader import models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.providers.google.api import Google, gemini_image_tokens
@@ -128,7 +129,7 @@ class GoogleCLI:
     does not surface per-turn usage on ``session/prompt`` responses.
     """
 
-    catalog = ModelCatalog(models=models(), transport=cli())
+    catalog = ModelCatalog(models=models("google"), transport=cli())
 
     def __init__(self, *, account: str | None = None) -> None:
         self._account = account

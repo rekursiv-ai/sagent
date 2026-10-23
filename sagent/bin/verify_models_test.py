@@ -12,6 +12,7 @@ import httpx2
 import pytest
 
 from sagent.bin import verify_models
+from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.google.api import Google
 from sagent.providers.openai.api import OpenAI
@@ -218,29 +219,46 @@ class TestFetchAnthropic:
         assert "ConnectError" in out
 
 
-class TestCanonicalModels:
-    def test_keys_rows_by_vendor_wire_id(self) -> None:
-        known = verify_models._canonical_models(Anthropic.catalog)
-        assert "claude-opus-5-5" in known
-        assert "opus-5.5" not in known
-        assert known["claude-opus-5-5"].model_id == "opus-5.5"
+@pytest.fixture
+def synthetic_catalog() -> ModelCatalog:
+    return ModelCatalog(
+        models=ModelTable(
+            rows=(
+                ModelCapability(model_id="example-1.0", wire_model_id="wire-example"),
+                ModelCapability(model_id="plain-1.0"),
+            ),
+        ),
+        transport=ModelCapability(),
+    )
 
-    def test_falls_back_to_model_id_without_a_wire_id(self) -> None:
-        known = verify_models._canonical_models(OpenAI.catalog)
-        assert all(cap.wire_model_id in {mid, ""} for mid, cap in known.items())
-        assert len(known) == len(OpenAI.catalog.models)
+
+class TestCanonicalModels:
+    def test_keys_rows_by_vendor_wire_id(self, synthetic_catalog: ModelCatalog) -> None:
+        known = verify_models._canonical_models(synthetic_catalog)
+        assert "wire-example" in known
+        assert "example-1.0" not in known
+        assert known["wire-example"].model_id == "example-1.0"
+
+    def test_falls_back_to_model_id_without_a_wire_id(
+        self,
+        synthetic_catalog: ModelCatalog,
+    ) -> None:
+        known = verify_models._canonical_models(synthetic_catalog)
+        assert known["plain-1.0"].wire_model_id == ""
+        assert len(known) == len(synthetic_catalog.models)
 
     @pytest.mark.anyio
     async def test_anthropic_is_queried_by_wire_id(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        synthetic_catalog: ModelCatalog,
     ) -> None:
         seen = _serve(monkeypatch, lambda _: httpx2.Response(404))
-        known = verify_models._canonical_models(Anthropic.catalog)
+        known = verify_models._canonical_models(synthetic_catalog)
         await verify_models.fetch_anthropic("key", list(known))
         paths = {request.url.path for request in seen}
-        assert "/v1/models/claude-opus-5-5" in paths
-        assert "/v1/models/opus-5.5" not in paths
+        assert "/v1/models/wire-example" in paths
+        assert "/v1/models/example-1.0" not in paths
 
 
 class TestCompare:
@@ -517,7 +535,7 @@ class TestMain:
 
         monkeypatch.setattr(verify_models, "fetch_anthropic", fake_fetch_anthropic)
         assert await verify_models._run() == 1
-        assert "claude-opus-5-5" in queried
+        assert queried == list(verify_models._canonical_models(Anthropic.catalog))
 
 
 if __name__ == "__main__":

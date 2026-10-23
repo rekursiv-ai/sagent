@@ -245,7 +245,7 @@ def test_an_unoffered_context_is_rejected(provider_name: str, model_id: str) -> 
     provider = make()
     capability, _ = provider.catalog.resolve(model_id)
     for tag in get_args(ContextTag.__value__):
-        if not tag or tag in capability.context:
+        if tag in ("", "+max", "+min") or tag in capability.context:
             continue
         if tag == "+1m" and capability.context[""].max_request_tokens >= 1_000_000:
             continue

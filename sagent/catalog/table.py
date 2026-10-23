@@ -245,6 +245,12 @@ class ModelCatalog:
                 f"Unknown model {model_id!r}. Known models: {known}",
             )
         capability = row & self.transport
+        if context in ("+max", "+min"):
+            select = max if context == "+max" else min
+            context = select(
+                capability.context,
+                key=lambda tag: capability.context[tag].max_request_tokens,
+            )
         # A window the default context already spans needs no row of its own.
         if (
             context == "+1m"

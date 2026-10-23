@@ -20,7 +20,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, override
 
-from sagent.catalog.minimax import api, models
+from sagent.catalog.loader import models
+from sagent.catalog.minimax import api
 from sagent.catalog.table import ModelCatalog
 from sagent.providers.openai.compat import (
     OpenAICompat,
@@ -68,6 +69,6 @@ class MiniMax(OpenAICompat):
     ENV_VAR: ClassVar[str] = "MINIMAX_API_KEY"
     BASE_URL: ClassVar[str] = "https://api.minimax.io/v1"
 
-    catalog = ModelCatalog(models=models(), transport=api())
+    catalog = ModelCatalog(models=models("minimax"), transport=api())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MiniMaxModel

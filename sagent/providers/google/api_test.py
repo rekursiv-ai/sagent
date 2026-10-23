@@ -13,6 +13,8 @@ from treekle import MutablePlainTree, PlainTree, from_plain, json_loads
 import httpx2
 import pytest
 
+from sagent.catalog.google import api
+from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.providers.google.api import (
     Google,
     _build_request,
@@ -21,8 +23,10 @@ from sagent.providers.google.api import (
 )
 from sagent.types.capability import (
     ModelCapability,
+    ModelLimits,
     ModelSettings,
     ThinkingBudget,
+    ThinkingCapability,
     ThinkingEffort,
     ThinkingOutput,
 )
@@ -51,6 +55,38 @@ from sagent.types.runtime import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+@pytest.fixture(autouse=True)
+def synthetic_catalog(monkeypatch: pytest.MonkeyPatch) -> ModelTable:
+    row = ModelCapability(
+        model_id="example-1.0",
+        wire_model_id="wire-example",
+        approx_chars_per_token=2.5,
+        prices=PriceCatalog(
+            {
+                PriceKey("auto"): TokenPrice(
+                    request=3.0,
+                    response=7.0,
+                    cache_write=2.0,
+                    cache_write_1h=4.0,
+                    cache_read=0.5,
+                ),
+            },
+        ),
+        context={"": ModelLimits(max_request_tokens=432_100, max_response_tokens=7654)},
+        thinking=ThinkingCapability(
+            effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
+            budget=frozenset({"none", "auto", "fixed"}),
+            output=frozenset({"none", "text"}),
+        ),
+    )
+    table = ModelTable(
+        rows=(row, replace(row, model_id="utility-example-1.0")),
+        roles={"default": "example", "utility": "utility-example"},
+    )
+    monkeypatch.setattr(Google, "catalog", ModelCatalog(models=table, transport=api()))
+    return table
 
 
 def test_strip_additional_properties_removes_top_level_key() -> None:
@@ -98,7 +134,7 @@ def _make_request(messages: list[ModelContextEvent], **kw: object) -> ModelReque
 
 def _thinking_capability() -> ModelCapability:
     """Return the catalog row every wire test builds against."""
-    return Google.from_key("k").model("gemini-2.5-pro").capability
+    return Google.from_key("k").model("example-1.0").capability
 
 
 # Bound rather than bare: every axis validates on assignment, so a default-capability
@@ -241,7 +277,7 @@ async def test_google_stream_parses_text_tool_call_and_finish_reason() -> None:
 
     transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     m._client = httpx2.AsyncClient(transport=transport)
     resp = await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
     assert resp.message.text == "calling"
@@ -280,7 +316,7 @@ async def test_google_stream_routes_thought_parts_to_thinking() -> None:
 
     transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     m._client = httpx2.AsyncClient(transport=transport)
     resp = await m.stream(
         ModelRequest(messages=[UserMessage(text="x")]),
@@ -312,7 +348,7 @@ async def test_google_stream_logs_and_skips_malformed_json_chunk(
 
     transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     m._client = httpx2.AsyncClient(transport=transport)
     with (
         caplog.at_level(
@@ -340,7 +376,7 @@ async def test_google_stream_eof_without_finish_reason_raises_interrupted() -> N
 
     transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(StreamInterruptedError) as raised:
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
@@ -361,7 +397,7 @@ async def test_google_stream_raises_when_all_json_chunks_are_malformed() -> None
 
     transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(ValueError, match="only malformed JSON chunks"):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
@@ -385,7 +421,7 @@ async def test_google_stream_max_tokens_finish_reason() -> None:
 
     transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     m._client = httpx2.AsyncClient(transport=transport)
     resp = await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
     assert resp.stop_reason == "max_tokens"
@@ -393,7 +429,7 @@ async def test_google_stream_max_tokens_finish_reason() -> None:
 
 def test_google_build_response_cache_tokens_split_input_cost() -> None:
     """``cache_read`` is subtracted from input before the request-rate charge."""
-    model = Google.from_key("k").model("gemini-2.5-pro")
+    model = Google.from_key("k").model("example-1.0")
     model._capability = replace(
         model.capability,
         prices=PriceCatalog(
@@ -459,30 +495,24 @@ def test_google_model_default_uses_default_model() -> None:
     assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
 
 
-def test_google_utility_model_uses_flash_lite() -> None:
-    """Utility resolves to the Flash-Lite Google names for new projects."""
+def test_google_utility_model_uses_role(synthetic_catalog: ModelTable) -> None:
     p = Google.from_key("k")
     m = p.model("utility")
-    assert m.capability.model_id == "gemini-flash-lite-3.5"
+    assert m.capability.model_id == synthetic_catalog["utility"].model_id
 
 
-def test_google_model_properties() -> None:
+def test_google_model_properties(synthetic_catalog: ModelTable) -> None:
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-pro")
-    assert m.limits.max_request_tokens == 1_048_576
-    assert m.capability.thinking.budget != frozenset({"none"})
-    assert m.capability.thinking.effort != frozenset({"none"})
-    assert m.capability.cache_ttl_sec == frozenset({0.0})
-    # Gemini publishes no per-image pixel or byte cap (images are tiled
-    # server-side); the only documented limit is the 100 MB total request size.
-    assert m.limits.max_image_edge_px == 0
-    assert m.limits.max_image_bytes == 0
-    assert m.limits.max_request_bytes == 100 * 1024 * 1024
+    m = p.model("example-1.0")
+    expected = synthetic_catalog["example"] & api()
+    assert m.limits == expected.context[""]
+    assert m.capability.thinking == expected.thinking
+    assert m.capability.cache_ttl_sec == expected.cache_ttl_sec
 
 
-def _level_wire(model_id: str, effort: ThinkingEffort) -> object:
-    """Return the ``thinkingConfig`` a fixed ``effort`` sends on ``model_id``."""
-    capability = Google.from_key("k").model(model_id).capability
+def _level_wire(effort: ThinkingEffort, *, effort_as_level: bool = True) -> object:
+    """Return the ``thinkingConfig`` a fixed effort sends."""
+    capability = replace(_thinking_capability(), effort_as_level=effort_as_level)
     settings = ModelSettings(
         capability=capability,
         thinking_effort=effort,
@@ -509,7 +539,7 @@ def test_gemini_3_sends_a_thinking_level_not_a_budget(
     level: str,
 ) -> None:
     """Gemini 3 takes ``thinkingLevel``; ``thinkingBudget`` is backward-compat only."""
-    assert _level_wire("gemini-3.6-flash", effort) == {
+    assert _level_wire(effort) == {
         "includeThoughts": True,
         "thinkingLevel": level,
     }
@@ -517,18 +547,21 @@ def test_gemini_3_sends_a_thinking_level_not_a_budget(
 
 def test_gemini_3_effort_none_sends_no_level() -> None:
     """``none`` lets the model's default level apply; it never asks for "off"."""
-    assert _level_wire("gemini-3.1-pro-preview", "none") == {"includeThoughts": True}
+    assert _level_wire("none") == {"includeThoughts": True}
 
 
-def test_gemini_3_8_cannot_select_the_minimal_level() -> None:
-    """3.8 Flash answers ``minimal`` with an error, so the row withholds it."""
+def test_unoffered_effort_is_rejected() -> None:
+    capability = replace(
+        _thinking_capability(),
+        thinking=ThinkingCapability(effort=frozenset({"none", "high"})),
+    )
     with pytest.raises(ValueError, match="thinking_effort='min'"):
-        _level_wire("gemini-3.8-flash", "min")
+        ModelSettings(capability=capability, thinking_effort="min")
 
 
 def test_gemini_2_5_fixed_effort_none_sends_no_budget() -> None:
     """No effort, no cap: 2.5 then thinks at its own default."""
-    assert _level_wire("gemini-2.5-flash", "none") == {"includeThoughts": True}
+    assert _level_wire("none", effort_as_level=False) == {"includeThoughts": True}
 
 
 def test_build_request_adaptive_thinking_uses_dynamic_budget() -> None:
@@ -619,7 +652,7 @@ def test_build_request_without_thinking_keeps_temperature() -> None:
 @pytest.mark.asyncio
 async def test_google_model_close_closes_reusable_http_client() -> None:
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     client = httpx2.AsyncClient()
     m._client = client
     await m.close()
@@ -629,7 +662,7 @@ async def test_google_model_close_closes_reusable_http_client() -> None:
 
 def test_google_model_context_overflow_detection() -> None:
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-pro")
+    m = p.model("example-1.0")
     assert m.is_context_overflow(RuntimeError("Input too large for the model"))
     assert m.is_context_overflow(RuntimeError("exceeds the maximum context"))
     assert not m.is_context_overflow(RuntimeError("other error"))
@@ -637,14 +670,14 @@ def test_google_model_context_overflow_detection() -> None:
 
 def test_google_model_is_retryable_provider_error_false() -> None:
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-pro")
+    m = p.model("example-1.0")
     assert not m.is_retryable_provider_error(RuntimeError("anything"))
 
 
 def test_google_model_text_token_estimate_floor_division() -> None:
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-pro")
-    assert m.approx_text_tokens("a" * 16) == 4
+    m = p.model("example-1.0")
+    assert m.approx_text_tokens("a" * 16) == 6
 
 
 @pytest.mark.asyncio
@@ -662,7 +695,7 @@ async def test_google_stream_413_token_body_raises_prompt_too_long() -> None:
 
     transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(PromptTooLongError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
@@ -682,7 +715,7 @@ async def test_google_stream_413_byte_body_raises_request_too_large() -> None:
 
     transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(RequestTooLargeError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
@@ -701,7 +734,7 @@ async def test_google_stream_400_exceeds_maximum_normalizes() -> None:
 
     transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(PromptTooLongError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
@@ -718,7 +751,7 @@ async def test_google_stream_400_too_long_raises_prompt_too_long() -> None:
 
     transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     m._client = httpx2.AsyncClient(transport=transport)
     del sse_body  # Only error path exercised.
     with pytest.raises(PromptTooLongError):
@@ -737,7 +770,7 @@ async def test_google_stream_500_with_overflow_keyword_is_http_error_not_overflo
 
     transport = httpx2.MockTransport(handle)
     p = Google.from_key("k")
-    m = p.model("gemini-2.5-flash")
+    m = p.model("example-1.0")
     m._client = httpx2.AsyncClient(transport=transport)
     with pytest.raises(httpx2.HTTPStatusError):
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
@@ -752,7 +785,7 @@ async def test_google_actual_request_tokens_wraps_generate_request() -> None:
         seen.append(request)
         return httpx2.Response(200, json={"totalTokens": 314})
 
-    m = Google.from_key("k").model("gemini-2.5-flash")
+    m = Google.from_key("k").model("example-1.0")
     m._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
     n = await m.actual_request_tokens(
         ModelRequest(messages=[UserMessage(text="ping")], system="sys"),
@@ -773,7 +806,7 @@ async def test_google_stream_400_other_raises_http_status_error() -> None:
         del request
         return httpx2.Response(400, text="malformed request body")
 
-    m = Google.from_key("k").model("gemini-2.5-flash")
+    m = Google.from_key("k").model("example-1.0")
     m._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
     with pytest.raises(httpx2.HTTPStatusError) as raised:
         await m.stream(ModelRequest(messages=[UserMessage(text="x")]))
@@ -789,7 +822,7 @@ async def test_google_tool_schema_too_long_is_not_overflow(path: str) -> None:
         del request
         return httpx2.Response(400, text="Function name is too long.")
 
-    m = Google.from_key("k").model("gemini-2.5-flash")
+    m = Google.from_key("k").model("example-1.0")
     m._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
     request = ModelRequest(messages=[UserMessage(text="x")])
     call = m.stream if path == "stream" else m.actual_request_tokens

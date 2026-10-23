@@ -36,7 +36,8 @@ from treekle import MutablePlainTree, PlainTree, ReadError, from_plain, json_loa
 
 import fastjsonschema
 
-from sagent.catalog.anthropic import cli, models
+from sagent.catalog.anthropic import cli
+from sagent.catalog.loader import models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.providers.anthropic.api import Anthropic
@@ -340,7 +341,7 @@ class AnthropicCLI:
     the CLI emits on the terminal ``result`` event.
     """
 
-    catalog = ModelCatalog(models=models(), transport=cli())
+    catalog = ModelCatalog(models=models("anthropic"), transport=cli())
 
     supported_options: ClassVar[frozenset[str]] = frozenset[str]()
     """``from_credentials`` (the CLI wrapper) takes no construction options.

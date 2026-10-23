@@ -125,7 +125,7 @@ def test_an_exact_name_outranks_a_role_of_the_same_spelling() -> None:
 
 
 def test_context_tags_are_the_alias_members_without_the_default() -> None:
-    assert CONTEXT_TAGS == ("+200k", "+272k", "+1m")
+    assert CONTEXT_TAGS == ("+200k", "+272k", "+1m", "+max", "+min")
 
 
 def test_a_prefix_stops_at_a_separator() -> None:
@@ -263,7 +263,61 @@ def test_split_model_id(model_id: str, base: str, tags: frozenset[ContextTag]) -
 
 def test_context_tags_derive_from_the_literal() -> None:
     """A tag the type admits but the tuple omits would be unparseable."""
-    assert set(CONTEXT_TAGS) == {"+1m", "+272k", "+200k"}
+    assert set(CONTEXT_TAGS) == {"+1m", "+272k", "+200k", "+max", "+min"}
+
+
+@pytest.mark.parametrize("alias", ["+max", "+min", "+MAX", "+MIN"])
+def test_split_context_extreme_aliases(alias: str) -> None:
+    assert split_model_id("opus-4.8" + alias) == (
+        "opus-4.8",
+        frozenset({alias.lower()}),
+    )
+
+
+@pytest.mark.parametrize(
+    ("alias", "default_tokens", "tagged_tokens", "expected"),
+    [
+        ("+max", 200_000, 1_000_000, "+1m"),
+        ("+min", 200_000, 1_000_000, ""),
+        ("+max", 1_000_000, 200_000, ""),
+        ("+min", 1_000_000, 200_000, "+1m"),
+        ("+max", 200_000, 200_000, "+1m"),
+        ("+min", 200_000, 200_000, "+1m"),
+    ],
+)
+def test_extreme_alias_selects_existing_context_by_token_limit(
+    alias: str,
+    default_tokens: int,
+    tagged_tokens: int,
+    expected: ContextTag,
+) -> None:
+    row = replace(
+        _opus(),
+        context=MappingProxyType(
+            {
+                "+1m": ModelLimits(max_request_tokens=tagged_tokens),
+                "": ModelLimits(max_request_tokens=default_tokens),
+            },
+        ),
+    )
+    capability, settings = _resolve("opus-4.8" + alias, rows=(row,))
+    assert settings.context == expected
+    assert settings.limits == row.context[expected]
+    assert tuple(capability.context.items()) == tuple(row.context.items())
+
+
+@pytest.mark.parametrize("alias", ["+max", "+min"])
+def test_extreme_alias_selects_sole_context(alias: str) -> None:
+    row = replace(_opus(), context=MappingProxyType({"": ModelLimits()}))
+    capability, settings = _resolve("opus-4.8" + alias, rows=(row,))
+    assert settings.context == ""
+    assert tuple(capability.context.items()) == tuple(row.context.items())
+
+
+@pytest.mark.parametrize("suffix", ["+max+min", "+max+1m", "+200k+min"])
+def test_extreme_alias_conflicts_with_other_context_tags(suffix: str) -> None:
+    with pytest.raises(UnsupportedTagError, match="conflicting contexts"):
+        _resolve("opus-4.8" + suffix)
 
 
 # ---- ModelCatalog.resolve --------------------------------------------------

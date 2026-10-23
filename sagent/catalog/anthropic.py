@@ -1,38 +1,18 @@
-"""Anthropic model catalog, expressed as ``ModelCapability`` rows.
+"""Anthropic transport restrictions and Messages API usage accounting.
 
-Sources:
-  - Limits, cutoffs: https://docs.anthropic.com/en/docs/about-claude/models
-  - Pricing: https://docs.anthropic.com/en/docs/about-claude/pricing
-  - Fast mode: https://docs.anthropic.com/en/docs/build-with-claude/fast-mode
-  - Vision: https://platform.claude.com/docs/en/build-with-claude/vision
-  - Request size: https://platform.claude.com/docs/en/api/overview
-
-:func:`models` is the API-key view. Other transports narrow it with ``&``
-(see :func:`cli`), which can only remove.
+Load model facts with ``sagent.catalog.models("anthropic")``.
+Transport capabilities narrow those rows with ``&``.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 
 from treekle import from_plain
 
-from sagent.catalog.table import ModelTable
-from sagent.types.capability import (
-    ContextTag,
-    ModelCapability,
-    ModelLimits,
-    ThinkingCapability,
-)
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceKey,
-    TokenCount,
-    TokenPrice,
-)
+from sagent.types.capability import ModelCapability, ThinkingCapability
+from sagent.types.cost import TokenCount
 
 
 if TYPE_CHECKING:
@@ -45,7 +25,6 @@ __all__ = [
     "CACHE_TTL_SEC",
     "api",
     "cli",
-    "models",
     "subscription",
     "usage_tokens",
 ]
@@ -56,345 +35,16 @@ __all__ = [
 CACHE_TTL_SEC: Final = frozenset({300.0, 3600.0})
 
 
-# Thinking capability per https://platform.claude.com/docs/en/build-with-claude/thinking
-# (verified 2026-10-03). ``auto`` is ``thinking.type=adaptive`` (no budget);
-# ``fixed`` is ``enabled`` + ``budget_tokens``. Output ``text`` sends
-# ``display: "summarized"`` and ``redacted`` sends ``"omitted"``; every row
-# offers both, because 4.7-and-later default to ``omitted`` but accept an
-# explicit ``summarized``.
-#
-# Every row states ``none`` in each thinking set: a model that CAN think can
-# also omit an explicit thinking request, and the axis is total, so omitting it
-# would make the provider default unselectable.
-#
-# Knowledge cutoffs are the vendor's "reliable knowledge cutoff", and prices
-# its published table (input, output, 5m/1h cache write, cache hit), both
-# verified on 2026-10-21.
-def models() -> ModelTable:
-    """Return every Anthropic model, as the API-key transport sees it.
-
-    Returns:
-      models: Capability per base model id.
-
-    """
-    # The reference row: every other model states only how it differs from it.
-    default = ModelCapability(
-        model_id="opus-5.5",
-        wire_model_id="claude-opus-5-5",
-        knowledge_cutoff="June 2026",
-        approx_chars_per_token=2.38,
-        context=_limits(),
-        prices=_prices(
-            _card(
-                request=4.0,
-                response=20.0,
-                cache_write=5.0,
-                cache_write_1h=8.0,
-                cache_read=0.2,
-            ),
-            fast_request=8.0,
-            fast_response=40.0,
-        ),
-        thinking=ThinkingCapability(
-            effort=frozenset({"none", "low", "medium", "high", "xhigh", "max"}),
-            budget=frozenset({"none", "auto"}),
-            output=frozenset({"none", "text", "redacted"}),
-        ),
-    )
-    # The 4.6-and-earlier reasoning contract: a fixed budget alongside adaptive.
-    extended = replace(
-        default.thinking,
-        budget=frozenset({"none", "auto", "fixed"}),
-    )
-    fable_5_1 = replace(
-        default,
-        model_id="fable-5.1",
-        wire_model_id="claude-fable-5-1",
-        prices=_prices(
-            _card(
-                request=10.0,
-                response=50.0,
-                cache_write=12.5,
-                cache_write_1h=20.0,
-                cache_read=0.25,
-            ),
-        ),
-    )
-    fable_5_0 = replace(
-        default,
-        model_id="fable-5.0",
-        wire_model_id="claude-fable-5",
-        knowledge_cutoff="January 2026",
-        prices=_prices(
-            _card(
-                request=10.0,
-                response=50.0,
-                cache_write=12.5,
-                cache_write_1h=20.0,
-                cache_read=1.0,
-            ),
-        ),
-    )
-    sonnet_5_5 = _card(
-        request=2.0,
-        response=10.0,
-        cache_write=2.5,
-        cache_write_1h=4.0,
-        cache_read=0.2,
-    )
-    rows = (
-        fable_5_1,
-        fable_5_0,
-        # Invitation-only (Project Glasswing); same specs and prices as Fable.
-        replace(fable_5_1, model_id="mythos-5.1", wire_model_id="claude-mythos-5-1"),
-        replace(fable_5_0, model_id="mythos-5.0", wire_model_id="claude-mythos-5"),
-        default,
-        replace(
-            default,
-            model_id="opus-5.0",
-            wire_model_id="claude-opus-5",
-            knowledge_cutoff="May 2026",
-            prices=_prices(
-                _card(
-                    request=5.0,
-                    response=25.0,
-                    cache_write=6.25,
-                    cache_write_1h=10.0,
-                    cache_read=0.5,
-                ),
-                fast_request=10.0,
-                fast_response=50.0,
-            ),
-        ),
-        replace(
-            default,
-            model_id="opus-4.8",
-            wire_model_id="claude-opus-4-8",
-            knowledge_cutoff="January 2026",
-            prices=_prices(
-                _card(
-                    request=5.0,
-                    response=25.0,
-                    cache_write=6.25,
-                    cache_write_1h=10.0,
-                    cache_read=0.5,
-                ),
-                fast_request=10.0,
-                fast_response=50.0,
-            ),
-        ),
-        # No fast price row on 4-7 or 4-6: 4-7 lost fast mode on 2026-07-24 and
-        # the API now rejects ``speed="fast"``; 4-6 never shipped it and bills
-        # standard, so a fast row would misprice both.
-        replace(
-            default,
-            model_id="opus-4.7",
-            wire_model_id="claude-opus-4-7",
-            knowledge_cutoff="January 2026",
-            prices=_prices(
-                _card(
-                    request=5.0,
-                    response=25.0,
-                    cache_write=6.25,
-                    cache_write_1h=10.0,
-                    cache_read=0.5,
-                ),
-            ),
-        ),
-        replace(
-            default,
-            model_id="opus-4.6",
-            wire_model_id="claude-opus-4-6",
-            knowledge_cutoff="May 2025",
-            approx_chars_per_token=3.12,
-            context=_limits(image_edge_px=1568),
-            prices=_prices(
-                _card(
-                    request=5.0,
-                    response=25.0,
-                    cache_write=6.25,
-                    cache_write_1h=10.0,
-                    cache_read=0.5,
-                ),
-            ),
-            thinking=replace(
-                extended,
-                effort=frozenset({"none", "low", "medium", "high", "max"}),
-            ),
-        ),
-        replace(
-            default,
-            model_id="opus-4.5",
-            wire_model_id="claude-opus-4-5",
-            knowledge_cutoff="May 2025",
-            approx_chars_per_token=3.12,
-            context=_limits(
-                max_tokens=200_000,
-                output_tokens=64_000,
-                image_edge_px=1568,
-            ),
-            prices=_prices(
-                _card(
-                    request=5.0,
-                    response=25.0,
-                    cache_write=6.25,
-                    cache_write_1h=10.0,
-                    cache_read=0.5,
-                ),
-            ),
-            thinking=replace(
-                extended,
-                effort=frozenset({"none", "low", "medium", "high"}),
-                budget=frozenset({"none", "fixed"}),
-            ),
-        ),
-        replace(
-            default,
-            model_id="sonnet-5.5",
-            wire_model_id="claude-sonnet-5-5",
-            prices=_prices(
-                sonnet_5_5,
-                repriced=(date(2026, 10, 7), replace(sonnet_5_5, cache_read=0.1)),
-            ),
-        ),
-        replace(
-            default,
-            model_id="sonnet-5.0",
-            wire_model_id="claude-sonnet-5",
-            knowledge_cutoff="January 2026",
-            prices=_prices(
-                _card(
-                    request=2.0,
-                    response=10.0,
-                    cache_write=2.5,
-                    cache_write_1h=4.0,
-                    cache_read=0.2,
-                ),
-            ),
-        ),
-        replace(
-            default,
-            model_id="sonnet-4.6",
-            wire_model_id="claude-sonnet-4-6",
-            knowledge_cutoff="August 2025",
-            approx_chars_per_token=3.12,
-            context=_limits(image_edge_px=1568),
-            prices=_prices(
-                _card(
-                    request=3.0,
-                    response=15.0,
-                    cache_write=3.75,
-                    cache_write_1h=6.0,
-                    cache_read=0.3,
-                ),
-            ),
-            thinking=replace(
-                extended,
-                effort=frozenset({"none", "low", "medium", "high", "max"}),
-            ),
-        ),
-        replace(
-            default,
-            model_id="sonnet-4.5",
-            wire_model_id="claude-sonnet-4-5",
-            knowledge_cutoff="January 2025",
-            approx_chars_per_token=3.12,
-            context=_limits(
-                max_tokens=200_000,
-                output_tokens=64_000,
-                image_edge_px=1568,
-            ),
-            prices=_prices(
-                _card(
-                    request=3.0,
-                    response=15.0,
-                    cache_write=3.75,
-                    cache_write_1h=6.0,
-                    cache_read=0.3,
-                ),
-            ),
-            thinking=replace(
-                extended,
-                effort=frozenset({"none"}),
-                budget=frozenset({"none", "fixed"}),
-            ),
-        ),
-        # A prompt over 100k tokens, cache reads and writes included, bills the
-        # whole request at the higher card.
-        replace(
-            default,
-            model_id="haiku-5.5",
-            wire_model_id="claude-haiku-5-5",
-            prices=_prices(
-                _card(
-                    request=0.1,
-                    response=0.5,
-                    cache_write=0.125,
-                    cache_write_1h=0.2,
-                    cache_read=0.01,
-                ),
-                over_100k=_card(
-                    request=0.5,
-                    response=2.5,
-                    cache_write=0.625,
-                    cache_write_1h=1.0,
-                    cache_read=0.05,
-                ),
-            ),
-        ),
-        replace(
-            default,
-            model_id="haiku-4.5",
-            wire_model_id="claude-haiku-4-5",
-            knowledge_cutoff="February 2025",
-            approx_chars_per_token=3.12,
-            context=_limits(
-                max_tokens=200_000,
-                output_tokens=64_000,
-                image_edge_px=1568,
-            ),
-            prices=_prices(
-                _card(
-                    request=1.0,
-                    response=5.0,
-                    cache_write=1.25,
-                    cache_write_1h=2.0,
-                    cache_read=0.1,
-                ),
-            ),
-            thinking=replace(
-                extended,
-                effort=frozenset({"none"}),
-                budget=frozenset({"none", "fixed"}),
-            ),
-        ),
-    )
-    # A tier is offered exactly when it is priced.
-    rows = tuple(replace(row, service_tier=row.prices.service_tiers) for row in rows)
-    return ModelTable(
-        rows=rows,
-        roles={
-            "best": "fable",
-            "default": "opus",
-            "everyday": "sonnet",
-            "utility": "haiku",
-        },
-    )
-
-
-# A row carries only what the MODEL can do; caching, retry, and auth mode are
-# transport facts. ``&`` can only remove, so a row asserting ``False`` would
-# pin every transport -- these declare it per transport instead.
-
-
 def api() -> ModelCapability:
     """Return what the Messages API adds on top of a model row.
 
     One model, three ways in::
 
-        models()["opus-5.0"] & api()          # API key: full tiers, cache
-        models()["opus-5.0"] & subscription() # same wire, OAuth-billed
-        models()["opus-5.0"] & cli()          # subprocess: no effort/tier
+        from sagent.catalog import models
+
+        models("anthropic")["opus-5.0"] & api()          # API key: full tiers, cache
+        models("anthropic")["opus-5.0"] & subscription() # same wire, OAuth-billed
+        models("anthropic")["opus-5.0"] & cli()          # subprocess: no effort/tier
 
     Returns:
       capability: The API transport's restrictions.
@@ -421,9 +71,11 @@ def cli() -> ModelCapability:
 
     One model, three ways in::
 
-        models()["opus-5.0"] & api()          # API key: full tiers, cache
-        models()["opus-5.0"] & subscription() # same wire, OAuth-billed
-        models()["opus-5.0"] & cli()          # subprocess: no effort/tier
+        from sagent.catalog import models
+
+        models("anthropic")["opus-5.0"] & api()          # API key: full tiers, cache
+        models("anthropic")["opus-5.0"] & subscription() # same wire, OAuth-billed
+        models("anthropic")["opus-5.0"] & cli()          # subprocess: no effort/tier
 
     Returns:
       capability: The CLI transport's restrictions.
@@ -444,9 +96,11 @@ def subscription() -> ModelCapability:
 
     One model, three ways in::
 
-        models()["opus-5.0"] & api()          # API key: full tiers, cache
-        models()["opus-5.0"] & subscription() # same wire, OAuth-billed
-        models()["opus-5.0"] & cli()          # subprocess: no effort/tier
+        from sagent.catalog import models
+
+        models("anthropic")["opus-5.0"] & api()          # API key: full tiers, cache
+        models("anthropic")["opus-5.0"] & subscription() # same wire, OAuth-billed
+        models("anthropic")["opus-5.0"] & cli()          # subprocess: no effort/tier
 
     Returns:
       capability: The subscription transport's restrictions.
@@ -483,71 +137,3 @@ def usage_tokens(usage: Mapping[str, object], *, cache_ttl_sec: float) -> TokenC
         cache_write_1h=written_1h,
         cache_read=from_plain(usage.get("cache_read_input_tokens"), int, default=0),
     )
-
-
-def _card(
-    *,
-    request: float,
-    response: float,
-    cache_write: float,
-    cache_write_1h: float,
-    cache_read: float,
-) -> TokenPrice:
-    """Return one published price-table row: input, output, 5m/1h writes, hits."""
-    return TokenPrice(
-        request=request,
-        response=response,
-        cache_write=cache_write,
-        cache_write_1h=cache_write_1h,
-        cache_read=cache_read,
-    )
-
-
-# Fast mode publishes only input and output; "prompt caching multipliers apply
-# on top of fast mode pricing", so each cache rate keeps its ratio to input.
-def _prices(
-    standard: TokenPrice,
-    *,
-    fast_request: float = 0.0,
-    fast_response: float = 0.0,
-    over_100k: TokenPrice | None = None,
-    repriced: tuple[date, TokenPrice] | None = None,
-) -> PriceCatalog:
-    """Return the standard card, plus any fast, >100k-prompt, or later card."""
-    cards = {PriceKey("auto"): standard}
-    if over_100k is not None:
-        cards[PriceKey("auto", 100_000)] = over_100k
-    if repriced is not None:
-        cards[PriceKey("auto", effective_date=repriced[0])] = repriced[1]
-    if fast_request:
-        scale = fast_request / standard.request
-        cards[PriceKey("priority")] = _card(
-            request=fast_request,
-            response=fast_response,
-            cache_write=standard.cache_write * scale,
-            cache_write_1h=standard.cache_write_1h * scale,
-            cache_read=standard.cache_read * scale,
-        )
-    return PriceCatalog(cards)
-
-
-def _limits(
-    *,
-    max_tokens: int = 1_000_000,
-    output_tokens: int = 128_000,
-    image_edge_px: int = 2576,
-) -> Mapping[ContextTag, ModelLimits]:
-    """Serve ``max_tokens`` by default; ``+200k`` selects 200k when it is larger."""
-    limits = ModelLimits(
-        max_request_tokens=max_tokens,
-        max_response_tokens=output_tokens,
-        max_request_bytes=32 * 1024 * 1024,
-        max_image_edge_px=image_edge_px,
-        # The vision page caps 10 MB *base64-encoded*; this cap is applied to raw
-        # bytes before encoding, which inflates them by 4/3.
-        max_image_bytes=10 * 1000 * 1000 * 3 // 4,
-    )
-    context: dict[ContextTag, ModelLimits] = {"": limits}
-    if max_tokens > 200_000:
-        context["+200k"] = replace(limits, max_request_tokens=200_000)
-    return MappingProxyType(context)

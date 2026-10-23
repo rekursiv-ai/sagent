@@ -45,7 +45,7 @@ type ThinkingBudget = Literal["none", "auto", "fixed"]
 
 type ThinkingOutput = Literal["none", "text", "redacted"]
 
-type ContextTag = Literal["", "+200k", "+272k", "+1m"]
+type ContextTag = Literal["", "+200k", "+272k", "+1m", "+max", "+min"]
 
 type SummaryKind = Literal["none", "auto", "concise", "detailed"]
 

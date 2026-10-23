@@ -1,0 +1,295 @@
+sources:
+  models: https://docs.anthropic.com/en/docs/about-claude/models
+  pricing: https://docs.anthropic.com/en/docs/about-claude/pricing
+  fast_mode: https://docs.anthropic.com/en/docs/build-with-claude/fast-mode
+  vision: https://platform.claude.com/docs/en/build-with-claude/vision
+  overview: https://platform.claude.com/docs/en/api/overview
+
+roles:
+  best: fable
+  default: opus
+  everyday: sonnet
+  utility: haiku
+
+reference:
+  approx_chars_per_token: 2.38
+  context:
+    max:
+      max_request_tokens: 1_000_000
+      max_response_tokens: 128_000
+      max_request_bytes: 33_554_432
+      max_image_edge_px: 2_576
+      max_image_bytes: 7_500_000
+    min:
+      max_request_tokens: 200_000
+      max_response_tokens: 128_000
+      max_request_bytes: 33_554_432
+      max_image_edge_px: 2_576
+      max_image_bytes: 7_500_000
+  thinking:
+    effort: [none, low, medium, high, xhigh, max]
+    budget: [none, auto]
+    output: [none, text, redacted]
+
+profiles:
+  extended:
+    approx_chars_per_token: 3.12
+    context:
+      max:
+        max_request_tokens: 1_000_000
+        max_response_tokens: 128_000
+        max_request_bytes: 33_554_432
+        max_image_edge_px: 1_568
+        max_image_bytes: 7_500_000
+      min:
+        max_request_tokens: 200_000
+        max_response_tokens: 128_000
+        max_request_bytes: 33_554_432
+        max_image_edge_px: 1_568
+        max_image_bytes: 7_500_000
+    thinking:
+      effort: [none, low, medium, high, max]
+      budget: [none, auto, fixed]
+      output: [none, text, redacted]
+
+  extended_200k:
+    approx_chars_per_token: 3.12
+    context:
+      max:
+        max_request_tokens: 200_000
+        max_response_tokens: 64_000
+        max_request_bytes: 33_554_432
+        max_image_edge_px: 1_568
+        max_image_bytes: 7_500_000
+    thinking:
+      effort: [none, low, medium, high]
+      budget: [none, fixed]
+      output: [none, text, redacted]
+
+  fixed:
+    approx_chars_per_token: 3.12
+    context:
+      max:
+        max_request_tokens: 200_000
+        max_response_tokens: 64_000
+        max_request_bytes: 33_554_432
+        max_image_edge_px: 1_568
+        max_image_bytes: 7_500_000
+    thinking:
+      effort: [none]
+      budget: [none, fixed]
+      output: [none, text, redacted]
+
+models:
+- model_id: fable-5.1
+  wire_model_id: claude-fable-5-1
+  knowledge_cutoff: June 2026
+  prices:
+  - service_tier: auto
+    request: 10.0
+    response: 50.0
+    cache_write: 12.5
+    cache_write_1h: 20.0
+    cache_read: 0.25
+
+- model_id: fable-5.0
+  wire_model_id: claude-fable-5
+  knowledge_cutoff: January 2026
+  prices:
+  - service_tier: auto
+    request: 10.0
+    response: 50.0
+    cache_write: 12.5
+    cache_write_1h: 20.0
+    cache_read: 1.0
+
+- model_id: mythos-5.1
+  wire_model_id: claude-mythos-5-1
+  knowledge_cutoff: June 2026
+  prices:
+  - service_tier: auto
+    request: 10.0
+    response: 50.0
+    cache_write: 12.5
+    cache_write_1h: 20.0
+    cache_read: 0.25
+
+- model_id: mythos-5.0
+  wire_model_id: claude-mythos-5
+  knowledge_cutoff: January 2026
+  prices:
+  - service_tier: auto
+    request: 10.0
+    response: 50.0
+    cache_write: 12.5
+    cache_write_1h: 20.0
+    cache_read: 1.0
+
+- model_id: opus-5.5
+  wire_model_id: claude-opus-5-5
+  knowledge_cutoff: June 2026
+  prices:
+  - service_tier: auto
+    request: 4.0
+    response: 20.0
+    cache_write: 5.0
+    cache_write_1h: 8.0
+    cache_read: 0.2
+  - service_tier: priority
+    request: 8.0
+    response: 40.0
+    cache_write: 10.0
+    cache_write_1h: 16.0
+    cache_read: 0.4
+
+- model_id: opus-5.0
+  wire_model_id: claude-opus-5
+  knowledge_cutoff: May 2026
+  prices:
+  - service_tier: auto
+    request: 5.0
+    response: 25.0
+    cache_write: 6.25
+    cache_write_1h: 10.0
+    cache_read: 0.5
+  - service_tier: priority
+    request: 10.0
+    response: 50.0
+    cache_write: 12.5
+    cache_write_1h: 20.0
+    cache_read: 1.0
+
+- model_id: opus-4.8
+  wire_model_id: claude-opus-4-8
+  knowledge_cutoff: January 2026
+  prices:
+  - service_tier: auto
+    request: 5.0
+    response: 25.0
+    cache_write: 6.25
+    cache_write_1h: 10.0
+    cache_read: 0.5
+  - service_tier: priority
+    request: 10.0
+    response: 50.0
+    cache_write: 12.5
+    cache_write_1h: 20.0
+    cache_read: 1.0
+
+- model_id: opus-4.7
+  wire_model_id: claude-opus-4-7
+  knowledge_cutoff: January 2026
+  prices:
+  - service_tier: auto
+    request: 5.0
+    response: 25.0
+    cache_write: 6.25
+    cache_write_1h: 10.0
+    cache_read: 0.5
+
+- model_id: opus-4.6
+  wire_model_id: claude-opus-4-6
+  profile: extended
+  knowledge_cutoff: May 2025
+  prices:
+  - service_tier: auto
+    request: 5.0
+    response: 25.0
+    cache_write: 6.25
+    cache_write_1h: 10.0
+    cache_read: 0.5
+
+- model_id: opus-4.5
+  wire_model_id: claude-opus-4-5
+  profile: extended_200k
+  knowledge_cutoff: May 2025
+  prices:
+  - service_tier: auto
+    request: 5.0
+    response: 25.0
+    cache_write: 6.25
+    cache_write_1h: 10.0
+    cache_read: 0.5
+
+- model_id: sonnet-5.5
+  wire_model_id: claude-sonnet-5-5
+  knowledge_cutoff: June 2026
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 10.0
+    cache_write: 2.5
+    cache_write_1h: 4.0
+    cache_read: 0.2
+  - service_tier: auto
+    effective_date: '2026-10-07'
+    request: 2.0
+    response: 10.0
+    cache_write: 2.5
+    cache_write_1h: 4.0
+    cache_read: 0.1
+
+- model_id: sonnet-5.0
+  wire_model_id: claude-sonnet-5
+  knowledge_cutoff: January 2026
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 10.0
+    cache_write: 2.5
+    cache_write_1h: 4.0
+    cache_read: 0.2
+
+- model_id: sonnet-4.6
+  wire_model_id: claude-sonnet-4-6
+  profile: extended
+  knowledge_cutoff: August 2025
+  prices:
+  - service_tier: auto
+    request: 3.0
+    response: 15.0
+    cache_write: 3.75
+    cache_write_1h: 6.0
+    cache_read: 0.3
+
+- model_id: sonnet-4.5
+  wire_model_id: claude-sonnet-4-5
+  profile: fixed
+  knowledge_cutoff: January 2025
+  prices:
+  - service_tier: auto
+    request: 3.0
+    response: 15.0
+    cache_write: 3.75
+    cache_write_1h: 6.0
+    cache_read: 0.3
+
+- model_id: haiku-5.5
+  wire_model_id: claude-haiku-5-5
+  knowledge_cutoff: June 2026
+  prices:
+  - service_tier: auto
+    request: 0.1
+    response: 0.5
+    cache_write: 0.125
+    cache_write_1h: 0.2
+    cache_read: 0.01
+  - service_tier: auto
+    effective_prompt_tokens: 100_000
+    request: 0.5
+    response: 2.5
+    cache_write: 0.625
+    cache_write_1h: 1.0
+    cache_read: 0.05
+
+- model_id: haiku-4.5
+  wire_model_id: claude-haiku-4-5
+  profile: fixed
+  knowledge_cutoff: February 2025
+  prices:
+  - service_tier: auto
+    request: 1.0
+    response: 5.0
+    cache_write: 1.25
+    cache_write_1h: 2.0
+    cache_read: 0.1

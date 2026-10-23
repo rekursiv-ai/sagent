@@ -1,7 +1,8 @@
-"""Tests for ``providers.openai``: API-key dispatch + effort-model gating."""
+"""OpenAI API-key dispatch and catalog-to-backend wiring."""
 
 from __future__ import annotations
 
+from dataclasses import replace
 from io import BytesIO
 
 import asyncio
@@ -13,9 +14,78 @@ import httpx2
 import pytest
 import tiktoken
 
-from sagent.catalog.openai import models, reasoning_effort
+from sagent.catalog import openai
+from sagent.catalog.loader import models
+from sagent.catalog.openai import api
+from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.providers.openai.api import OpenAI
-from sagent.types.cost import PriceKey
+from sagent.types.capability import (
+    ModelCapability,
+    ModelLimits,
+    ThinkingCapability,
+)
+from sagent.types.cost import PriceCatalog, PriceKey, TokenPrice
+
+
+@pytest.fixture(autouse=True)
+def synthetic_catalog(monkeypatch: pytest.MonkeyPatch) -> ModelTable:
+    """Keep dispatch tests independent of live catalog facts."""
+    row = ModelCapability(
+        model_id="example-1.0",
+        wire_model_id="wire-example",
+        context={
+            "": ModelLimits(max_request_tokens=600_000, max_response_tokens=50_000),
+            "+272k": ModelLimits(
+                max_request_tokens=272_000,
+                max_response_tokens=20_000,
+            ),
+        },
+        thinking=ThinkingCapability(
+            effort=frozenset({"low", "high"}),
+            budget=frozenset({"none", "auto"}),
+            output=frozenset({"none", "text"}),
+        ),
+        service_tier=frozenset({"auto", "priority"}),
+        prices=PriceCatalog(
+            {
+                PriceKey("auto"): TokenPrice(
+                    request=3.0,
+                    response=7.0,
+                    cache_write=2.0,
+                    cache_write_1h=4.0,
+                    cache_read=0.5,
+                ),
+            },
+        ),
+    )
+    utility = replace(
+        row,
+        model_id="utility-example-1.0",
+        wire_model_id="wire-utility",
+        thinking=ThinkingCapability(),
+    )
+    table = ModelTable(
+        rows=(
+            row,
+            utility,
+            *(
+                replace(row, model_id=name, wire_model_id=wire)
+                for name, wire in (
+                    ("sol-5.6", "gpt-5.6-sol"),
+                    ("astra-6.0", "gpt-6-astra"),
+                )
+            ),
+        ),
+        roles={"default": "example", "utility": "utility-example"},
+    )
+
+    def lookup(provider: str) -> ModelTable:
+        assert provider == "openai"
+        return table
+
+    monkeypatch.setattr(openai, "models", lookup)
+    monkeypatch.setattr(OpenAI, "catalog", ModelCatalog(models=table, transport=api()))
+    return table
 
 
 @pytest.mark.network_openai
@@ -25,12 +95,8 @@ async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
     key = os.environ.get("OPENAI_API_KEY", "")
     if not key:
         pytest.skip("OPENAI_API_KEY not set")
-
-    # Bounded concurrency: firing one connection per row made the slowest
-    # response the whole test's fate, and `ReadTimeout` under that fan-out was
-    # the observed failure rather than any catalog defect.
     model_ids = tuple(
-        row.wire_model_id or model_id for model_id, row in models().items()
+        row.wire_model_id or name for name, row in models("openai").items()
     )
     gate = asyncio.Semaphore(8)
 
@@ -43,6 +109,128 @@ async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
             *(_probe(client, model_id) for model_id in model_ids),
         )
     assert all(verdicts), "some catalog probes never completed successfully"
+
+
+def test_openai_from_key_constructs() -> None:
+    provider = OpenAI.from_key("sk-test")
+    assert provider.api_key == "sk-test"
+    assert provider.base_url == "https://api.openai.com/v1"
+
+
+@pytest.mark.asyncio
+async def test_openai_sdk_connect_timeout_outlasts_a_network_stall() -> None:
+    provider = OpenAI.from_key("k")
+    sdk = await provider.get_sdk()
+    timeout = sdk.timeout
+    assert isinstance(timeout, httpx2.Timeout)
+    assert (timeout.connect, timeout.read) == (30.0, 600.0)
+    await provider.close_sdk()
+    assert sdk.is_closed()
+
+
+def test_openai_from_env_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(RuntimeError, match="API key not configured"):
+        OpenAI.from_env()
+
+
+def test_openai_from_env_reads_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+    assert OpenAI.from_env().api_key == "sk-env"
+
+
+@pytest.mark.parametrize("role", ["default", "utility"])
+def test_roles_select_catalog_rows(role: str, synthetic_catalog: ModelTable) -> None:
+    model = OpenAI.from_key("k").model(role)
+    assert model.capability == synthetic_catalog[role] & api()
+    assert model.limits == synthetic_catalog[role].context[""]
+
+
+def test_omitted_model_selects_the_default(synthetic_catalog: ModelTable) -> None:
+    model = OpenAI.from_key("k").model()
+    assert model.capability.model_id == synthetic_catalog["default"].model_id
+
+
+@pytest.mark.parametrize("name", ["example-1.0", "wire-example", "example"])
+def test_known_names_dispatch_to_the_same_backend(name: str) -> None:
+    model = OpenAI.from_key("k").model(name)
+    assert model.capability.model_id == "example-1.0"
+    assert model._wire_model_id == "wire-example"
+
+
+def test_unknown_model_raises() -> None:
+    with pytest.raises(ValueError, match="Unknown model"):
+        OpenAI.from_key("k").model("not-a-real-model")
+
+
+def test_context_selection_preserves_prices(synthetic_catalog: ModelTable) -> None:
+    provider = OpenAI.from_key("k")
+    full = provider.model()
+    small = provider.model("example+272k")
+    assert full.limits == synthetic_catalog["example"].context[""]
+    assert small.limits == synthetic_catalog["example"].context["+272k"]
+    assert small.tagged_model_id == "example-1.0+272k"
+    assert small.capability.prices is synthetic_catalog["example"].prices
+    assert full.capability.prices is small.capability.prices
+
+
+def test_unoffered_context_is_rejected() -> None:
+    with pytest.raises(ValueError, match=r"has no \+1m context"):
+        OpenAI.from_key("k").model("example+1m")
+
+
+def test_unoffered_effort_is_rejected() -> None:
+    model = OpenAI.from_key("k").model()
+    assert model.settings.thinking_effort == "low"
+    with pytest.raises(ValueError, match="thinking_effort"):
+        model.settings.thinking_effort = "none"
+
+
+def test_catalog_controls_effort_and_tier_selection() -> None:
+    provider = OpenAI.from_key("k")
+    reasoning = provider.model("example")
+    utility = provider.model("utility")
+    assert reasoning.capability.thinking.effort == {"low", "high"}
+    assert utility.capability.thinking.effort == {"none"}
+    reasoning.settings.service_tier = "priority"
+    assert reasoning._effective_service_tier() == "priority"
+    with pytest.raises(ValueError, match="service_tier"):
+        reasoning.settings.service_tier = "flex"
+
+
+@pytest.mark.parametrize(
+    ("model_id", "width", "height", "tokens"),
+    [
+        ("sol-5.6", 1, 1, 2),
+        ("sol-5.6", 1024, 1024, 1229),
+        ("sol-5.6", 33, 65, 8),
+        ("gpt-6-astra", 96, 96, 11),
+        ("gpt-6-astra", 512, 512, 308),
+        ("gpt-6-astra", 100, 200, 34),
+        ("gpt-6-astra", 2048, 1024, 2458),
+    ],
+)
+def test_image_token_estimation_reaches_the_model_formula(
+    model_id: str,
+    width: int,
+    height: int,
+    tokens: int,
+) -> None:
+    buffer = BytesIO()
+    Image.new("RGB", (width, height)).save(buffer, format="PNG")
+    model = OpenAI.from_key("k").model(model_id)
+    assert model.approx_image_tokens(buffer.getvalue()) == tokens
+
+
+@pytest.mark.anyio
+@pytest.mark.compute_large_fixture
+@pytest.mark.parametrize("name", ["sol-5.6", "gpt-6-astra"])
+async def test_text_counting_reaches_the_model_tokenizer(name: str) -> None:
+    model = OpenAI.from_key("k").model(name)
+    text = "Token counting: 東京 and function_call(arg=42)"
+    assert await model.actual_text_tokens(text) == len(
+        tiktoken.get_encoding("o200k_base").encode(text),
+    )
 
 
 async def _is_served(client: httpx2.AsyncClient, *, model_id: str, key: str) -> bool:
@@ -67,305 +255,6 @@ async def _is_served(client: httpx2.AsyncClient, *, model_id: str, key: str) -> 
             continue
         response.raise_for_status()
     return False
-
-
-def test_openai_from_key_constructs() -> None:
-    p = OpenAI.from_key("sk-test")
-    assert p.api_key == "sk-test"
-    assert p.base_url == "https://api.openai.com/v1"
-
-
-@pytest.mark.asyncio
-async def test_openai_sdk_connect_timeout_outlasts_a_network_stall() -> None:
-    """The SDK default connect timeout is 5s; a Wi-Fi stall outlasted it."""
-    provider = OpenAI.from_key("k")
-    sdk = await provider.get_sdk()
-    timeout = sdk.timeout
-    assert isinstance(timeout, httpx2.Timeout)
-    assert (timeout.connect, timeout.read) == (30.0, 600.0)
-    await provider.close_sdk()
-    assert sdk.is_closed()
-
-
-def test_openai_from_env_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="API key not configured"):
-        OpenAI.from_env()
-
-
-def test_openai_from_env_reads_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
-    p = OpenAI.from_env()
-    assert p.api_key == "sk-env"
-
-
-def test_openai_default_model_known() -> None:
-    p = OpenAI.from_key("k")
-    m = p.model()
-    assert m.tagged_model_id == p.catalog.resolve("default")[0].model_id
-
-
-def test_openai_default_models_are_latest_sol_and_luna() -> None:
-    """The newest Sol for reasoning, Luna for utility."""
-    assert OpenAI.catalog.resolve("default")[0].model_id == "sol-6.1"
-    assert OpenAI.catalog.resolve("utility")[0].model_id == "luna-6.0"
-
-
-def test_normalized_openai_id_uses_vendor_id_on_the_wire() -> None:
-    model = OpenAI.from_key("k").model("astra-6.0")
-    assert model._wire_model_id == "gpt-6-astra"
-
-
-def test_openai_known_model_returns_backend() -> None:
-    p = OpenAI.from_key("k")
-    m = p.model("gpt-4o")
-    assert m.capability.model_id == "gpt-omni-4.0"
-    assert m.limits.max_request_tokens == 128_000
-
-
-def test_openai_unknown_model_raises() -> None:
-    p = OpenAI.from_key("k")
-    with pytest.raises(ValueError, match="Unknown model"):
-        _ = p.model("not-a-real-model")
-
-
-@pytest.mark.parametrize(
-    ("base_id", "full_tokens"),
-    [
-        ("sol-5.6", 922_000),
-        ("gpt-5.6", 922_000),
-        ("terra-5.6", 922_000),
-        ("luna-5.6", 922_000),
-        ("gpt-5.5", 1_050_000),
-        ("gpt-5.5-pro", 1_050_000),
-        ("gpt-5.4", 1_050_000),
-        ("gpt-5.4-pro", 1_050_000),
-    ],
-)
-def test_openai_two_tier_defaults_to_full_window(
-    base_id: str,
-    full_tokens: int,
-) -> None:
-    p = OpenAI.from_key("k")
-    full = p.model(base_id)
-    small = p.model(f"{base_id}+272k")
-    assert full.limits.max_request_tokens == full_tokens
-    assert small.limits.max_request_tokens == 272_000
-    assert small.tagged_model_id.endswith("+272k")
-    assert (
-        full.capability.prices[PriceKey("auto")]
-        == small.capability.prices[PriceKey("auto")]
-    )
-    assert full.limits.max_request_bytes == small.limits.max_request_bytes
-
-
-def test_openai_gpt_6_astra_profile() -> None:
-    """Measured against the live API 2026-09-04.
-
-    ``reasoning.effort`` 400s on ``none``/``minimal`` and takes low..max;
-    ``service_tier`` takes auto/default/flex/priority (``batch`` 400s);
-    the untagged window is the 922K input cap and ``+272k`` the smaller one.
-    """
-    m = OpenAI.from_key("k").model("astra-6.0")
-    assert m.limits.max_request_tokens == 922_000
-    assert m.limits.max_response_tokens == 128_000
-    assert m.capability.prices[PriceKey("auto")].request == 10.0
-    assert m.capability.prices[PriceKey("auto")].response == 50.0
-    assert m.capability.prices[PriceKey("auto")].cache_write == 12.5
-    assert m.capability.prices[PriceKey("auto")].cache_read == 1.0
-    assert m.capability.service_tier == frozenset(
-        {"auto", "default", "flex", "priority", "ultrafast"},
-    )
-
-
-def test_openai_gpt_6_astra_cannot_be_asked_not_to_think() -> None:
-    """Astra withholds ``none``.
-
-    The API rejects both ``none`` and ``minimal`` outright, so offering
-    them would let a caller select a value the wire refuses.
-    """
-    m = OpenAI.from_key("k").model("astra-6.0")
-    assert m.capability.thinking.effort == frozenset(
-        {"low", "medium", "high", "xhigh", "max"},
-    )
-    with pytest.raises(ValueError, match="thinking_effort"):
-        m.settings.thinking_effort = "none"
-
-
-def test_openai_gpt_6_keeps_the_native_effort_ladder() -> None:
-    """GPT-6 spells ``xhigh``/``max`` literally, as 5.6 does.
-
-    Falling back to the pre-5.6 ladder would silently downgrade ``max``
-    to ``high`` and lose the top rung the model actually serves.
-    """
-    assert reasoning_effort("max") == "max"
-    assert reasoning_effort("xhigh") == "xhigh"
-
-
-def test_openai_default_model_opts_into_full_window() -> None:
-    # The untagged default is the full window.
-    p = OpenAI.from_key("k")
-    m = p.model()
-    assert m.tagged_model_id == "sol-6.1"
-    assert m.limits.max_request_tokens == 922_000
-
-
-@pytest.mark.parametrize(
-    ("model_id", "request_price", "response_price", "cache_write_price"),
-    [
-        ("sol-5.6", 4.0, 20.0, 5.0),
-        ("gpt-5.6", 4.0, 20.0, 5.0),
-        ("gpt-5.6-terra", 2.0, 12.0, 2.5),
-        ("luna-5.6", 0.2, 1.2, 0.25),
-    ],
-)
-def test_openai_gpt_56_profiles(
-    model_id: str,
-    request_price: float,
-    response_price: float,
-    cache_write_price: float,
-) -> None:
-    m = OpenAI.from_key("k").model(model_id)
-    assert m.limits.max_request_tokens == 922_000
-    assert m.limits.max_response_tokens == 128_000
-    assert m.capability.prices[PriceKey("auto")].request == request_price
-    assert m.capability.prices[PriceKey("auto")].response == response_price
-    assert m.capability.prices[PriceKey("auto")].cache_write == cache_write_price
-    assert m.capability.prices[PriceKey("auto")].cache_read == request_price / 10
-    # The >272K surcharge is a second catalog row, not a multiplier field:
-    # 2x on every input pool, 1.5x on the response.
-    tier = m.capability.prices[PriceKey("auto", 272_000)]
-    assert tier.request == request_price * 2.0
-    assert tier.cache_write == cache_write_price * 2.0
-    assert tier.cache_read == request_price / 10 * 2.0
-    assert tier.response == response_price * 1.5
-    assert m.limits.max_image_edge_px == 65_535
-    assert m.limits.max_image_bytes == 0
-    assert m.limits.max_request_bytes == 512 * 1024 * 1024
-
-
-def _png(width: int, height: int) -> bytes:
-    buf = BytesIO()
-    Image.new("RGB", (width, height)).save(buf, format="PNG")
-    return buf.getvalue()
-
-
-@pytest.mark.parametrize(
-    ("width", "height", "tokens"),
-    [(1, 1, 2), (1024, 1024, 1229), (33, 65, 8)],
-)
-def test_openai_gpt_56_image_tokens_use_32px_patches(
-    width: int,
-    height: int,
-    tokens: int,
-) -> None:
-    model = OpenAI.from_key("k").model("sol-5.6")
-    assert model.approx_image_tokens(_png(width, height)) == tokens
-
-
-@pytest.mark.parametrize(
-    ("width", "height", "tokens"),
-    [(1, 1, 2), (96, 96, 11), (512, 512, 308), (100, 200, 34), (2048, 1024, 2458)],
-)
-def test_openai_gpt_6_image_tokens_scale_the_patch_grid(
-    width: int,
-    height: int,
-    tokens: int,
-) -> None:
-    """Astra bills ``ceil(1.2 * patches)``, the images-vision patch formula.
-
-    Every expectation is a server-reported ``usage.input_tokens`` delta
-    measured on 2026-09-04, with the text-only envelope differenced out.
-    Reusing the 5.6 formula under-counts each of these by ~20%.
-    """
-    model = OpenAI.from_key("k").model("gpt-6-astra")
-    assert model.approx_image_tokens(_png(width, height)) == tokens
-
-
-@pytest.mark.anyio
-@pytest.mark.compute_large_fixture
-async def test_openai_gpt_56_uses_o200k_tokenizer() -> None:
-    model = OpenAI.from_key("k").model("sol-5.6")
-    text = "GPT-5.6 token counting: 東京 and function_call(arg=42)"
-    expected = len(tiktoken.get_encoding("o200k_base").encode(text))
-    assert await model.actual_text_tokens(text) == expected
-
-
-@pytest.mark.anyio
-@pytest.mark.compute_large_fixture
-async def test_openai_gpt_6_uses_o200k_tokenizer() -> None:
-    """Tiktoken's registry predates ``gpt-6``, so the fallback must catch it.
-
-    Without the generation mapping the model silently degrades to the
-    chars/4 heuristic. Server counts tracked ``o200k_base`` within 1.2%
-    over 2.9k chars of mixed code, prose, and CJK (measured 2026-09-04).
-    """
-    model = OpenAI.from_key("k").model("gpt-6-astra")
-    text = "GPT-6 token counting: 東京 and function_call(arg=42)"
-    expected = len(tiktoken.get_encoding("o200k_base").encode(text))
-    assert await model.actual_text_tokens(text) == expected
-
-
-@pytest.mark.parametrize("base_id", ["gpt-4.1", "gpt-4.1-mini", "gpt-4.1-nano"])
-def test_openai_no_cliff_model_defaults_to_full_window(base_id: str) -> None:
-    p = OpenAI.from_key("k")
-    model = p.model(base_id)
-    assert model.limits.max_request_tokens == 1_047_576
-    assert set(model.capability.context) == {""}
-
-
-@pytest.mark.parametrize(
-    "model_id",
-    ["gpt-5.4-mini+1m", "gpt-5.2+1m"],
-)
-def test_openai_400k_model_has_no_plus1m(model_id: str) -> None:
-    # 400K-window models have no long-context mode; ``+1m`` must not resolve.
-    p = OpenAI.from_key("k")
-    with pytest.raises(ValueError, match=r"has no \+1m context"):
-        _ = p.model(model_id)
-
-
-def test_openai_utility_model_default() -> None:
-    p = OpenAI.from_key("k")
-    m = p.model("utility")
-    assert m.capability.model_id == "luna-6.0"
-
-
-@pytest.mark.parametrize(
-    ("model_id", "expected"),
-    [
-        ("o3-mini", True),
-        ("gpt-5.5", True),
-        ("gpt-5.4-mini", True),
-        ("gpt-4o", False),
-        ("gpt-4.1", False),
-    ],
-)
-def test_openai_effort_gating(model_id: str, expected: bool) -> None:
-    """Effort support is catalog data, not an id-prefix guess.
-
-    The prefix predicate it replaced answered ``True`` for any unknown
-    ``o4-*`` id; the catalog answers only for models it actually declares
-    a reasoning-effort table for.
-    """
-    m = OpenAI.from_key("k").model(model_id)
-    assert (m.capability.thinking.effort != frozenset({"none"})) is expected
-
-
-def test_openai_pricing_attached_to_model() -> None:
-    p = OpenAI.from_key("k")
-    m = p.model("gpt-5.5")
-    price = m.capability.prices[PriceKey("auto")]
-    assert price.request > 0
-    assert price.response > 0
-
-
-def test_openai_valid_service_tiers() -> None:
-    p = OpenAI.from_key("k")
-    m = p.model("gpt-5.5")
-    assert m.capability.service_tier == frozenset(
-        {"auto", "default", "flex", "priority"},
-    )
 
 
 if __name__ == "__main__":

@@ -22,7 +22,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, Final, override
 
-from sagent.catalog.dashscope import models, thinking_budget
+from sagent.catalog.dashscope import thinking_budget
+from sagent.catalog.loader import models
 from sagent.catalog.openai import compatible
 from sagent.catalog.table import ModelCatalog
 from sagent.providers.openai.compat import (
@@ -110,6 +111,6 @@ class DashScope(OpenAICompat):
     # dashscope.aliyuncs.com via the ``base_url=`` override.
     BASE_URL: ClassVar[str] = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
 
-    catalog = ModelCatalog(models=models(), transport=compatible())
+    catalog = ModelCatalog(models=models("dashscope"), transport=compatible())
 
     MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _DashScopeModel

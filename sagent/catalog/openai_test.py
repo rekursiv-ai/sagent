@@ -1,30 +1,20 @@
-"""OpenAI catalog rows, transports, and wire mappings."""
+"""OpenAI transport, subscription projection, and wire behavior."""
 
-from __future__ import annotations
-
+from collections.abc import Iterator
 from dataclasses import replace
-from datetime import date
-from typing import TYPE_CHECKING
 
 import pytest
 
 from sagent.catalog import openai
+from sagent.catalog.table import ModelTable
 from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
     ThinkingCapability,
     ThinkingEffort,
 )
-from sagent.types.cost import PriceKey, ServiceTier, TokenPrice
+from sagent.types.cost import PriceCatalog, PriceKey, ServiceTier, TokenPrice
 
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from sagent.catalog.table import ModelTable
-
-
-_TODAY = date(2026, 9, 24)
 
 _TRANSPORT_THINKING = ThinkingCapability(
     effort=frozenset({"none", "min", "low", "medium", "high", "xhigh", "max"}),
@@ -34,79 +24,35 @@ _TRANSPORT_THINKING = ThinkingCapability(
 
 
 @pytest.fixture(autouse=True)
-def rebuild_catalog() -> None:
-    """Build rows per test; a cached catalog hides edits to its row helpers."""
-    openai.models.cache_clear()
+def synthetic_catalog(monkeypatch: pytest.MonkeyPatch) -> Iterator[ModelTable]:
+    """Resolve behavioral model keys without reading provider assets."""
+    table = ModelTable(
+        rows=tuple(
+            ModelCapability(model_id=name, wire_model_id=f"wire-{name}")
+            for name in (
+                "astra-6.0",
+                "sol-5.6",
+                "gpt-5.5",
+                "gpt-5.1",
+                "gpt-omni-4.0",
+                "o-mini-3.0",
+                "gpt-4.0",
+                "gpt-pro-5.5",
+                "gpt-turbo-4.0",
+                "sol-6.1",
+                "luna-5.6",
+            )
+        ),
+    )
+
+    def lookup(provider: str) -> ModelTable:
+        assert provider == "openai"
+        return table
+
+    monkeypatch.setattr(openai, "models", lookup)
     openai.subscription_models.cache_clear()
-
-
-def test_openai_metadata_does_not_leak_from_new_models_to_legacy_rows() -> None:
-    models = openai.models()
-    assert models["astra-6.0"].approx_chars_per_token == 3.71
-    assert models["gpt-4"].knowledge_cutoff == "December 1, 2023"
-
-
-# (tier, input, cached input, cache write, output), from the standard / flex /
-# fast tabs of https://developers.openai.com/api/docs/pricing, 2026-09-24.
-@pytest.mark.parametrize(
-    ("model_id", "tier", "published"),
-    [
-        ("astra-6.0", "auto", (10.0, 1.0, 12.5, 50.0)),
-        ("astra-6.0", "flex", (5.0, 0.5, 6.25, 25.0)),
-        ("astra-6.0", "priority", (20.0, 2.0, 25.0, 100.0)),
-        ("luna-6.0", "flex", (0.05, 0.005, 0.0625, 0.25)),
-        ("luna-6.0", "priority", (0.2, 0.02, 0.25, 1.0)),
-        ("terra-5.6", "flex", (1.0, 0.1, 1.25, 6.0)),
-        ("gpt-5.4", "flex", (1.25, 0.13, 0.0, 7.5)),
-        ("gpt-4o", "priority", (4.25, 2.125, 0.0, 17.0)),
-        ("gpt-5.2", "priority", (3.5, 0.35, 0.0, 28.0)),
-    ],
-)
-def test_openai_tiers_bill_the_published_rate(
-    model_id: str,
-    tier: ServiceTier,
-    published: tuple[float, float, float, float],
-) -> None:
-    price = openai.models()[model_id].prices[PriceKey(tier)]
-    assert (price.request, price.cache_read, price.cache_write, price.response) == (
-        published
-    )
-
-
-@pytest.mark.parametrize(
-    ("model_id", "offered"),
-    [
-        ("astra-6.0", {"auto", "default", "flex", "priority", "ultrafast"}),
-        ("gpt-5.5-pro", {"auto", "default", "flex"}),
-        ("gpt-4.1", {"auto", "default", "priority"}),
-        ("o1", {"auto", "default"}),
-    ],
-)
-def test_openai_offers_only_the_published_tiers(
-    model_id: str,
-    offered: set[str],
-) -> None:
-    """A model absent from a tier's pricing tab cannot be billed at it."""
-    assert openai.models()[model_id].service_tier == offered
-
-
-def test_openai_long_prompts_bill_the_published_long_context_rate() -> None:
-    """GPT-6 publishes its >272K column; 2x input / 1.5x output reproduces it."""
-    prices = openai.models()["luna-6.0"].prices
-    short = prices.rate(service_tier="auto", prompt_tokens=272_000, at=_TODAY)
-    long = prices.rate(service_tier="auto", prompt_tokens=272_001, at=_TODAY)
-    assert (short.request, short.response) == (0.1, 0.5)
-    assert (long.request, long.cache_read, long.cache_write, long.response) == (
-        pytest.approx(0.2),
-        pytest.approx(0.02),
-        pytest.approx(0.25),
-        pytest.approx(0.75),
-    )
-    fast_long = prices.rate(service_tier="priority", prompt_tokens=300_000, at=_TODAY)
-    assert (fast_long.request, fast_long.response) == (
-        pytest.approx(0.4),
-        pytest.approx(1.5),
-    )
+    yield table
+    openai.subscription_models.cache_clear()
 
 
 @pytest.mark.parametrize(
@@ -119,7 +65,6 @@ def test_openai_long_prompts_bill_the_published_long_context_rate() -> None:
         ("priority", "priority"),
         ("fast", "priority"),
         ("ultrafast", "ultrafast"),
-        # Scale Tier is prepaid capacity billed at the standard card.
         ("scale", "auto"),
     ],
 )
@@ -131,28 +76,7 @@ def test_openai_bills_the_tier_it_reports_serving(
 
 
 def test_an_unknown_reported_tier_is_unknown_not_an_error() -> None:
-    """The response is already paid for; the caller picks the fallback rate."""
     assert openai.served_tier("hyperfast") is None
-
-
-def test_astra_bills_the_published_ultrafast_card() -> None:
-    """Ultrafast tab, 2026-10-05: $60 / $6 / $75 / $300; long $120 / $12 / $150 / $450."""
-    prices = openai.models()["astra-6.0"].prices
-    short = prices.rate(service_tier="ultrafast", prompt_tokens=1, at=_TODAY)
-    long = prices.rate(service_tier="ultrafast", prompt_tokens=300_000, at=_TODAY)
-    assert (short.request, short.cache_read, short.cache_write, short.response) == (
-        60.0,
-        6.0,
-        75.0,
-        300.0,
-    )
-    assert (long.request, long.cache_read, long.cache_write, long.response) == (
-        120.0,
-        12.0,
-        150.0,
-        450.0,
-    )
-    assert "ultrafast" not in openai.models()["sol-6.1"].prices.service_tiers
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
@@ -166,14 +90,8 @@ def test_reasoning_effort_sends_the_selected_level_verbatim(
 def test_reasoning_effort_has_no_spelling_for_sending_no_knob(
     effort: ThinkingEffort,
 ) -> None:
-    """``none`` omits ``reasoning`` and no row offers ``min``; neither is a level."""
     with pytest.raises(ValueError, match=rf"^effort {effort!r} is not sent"):
-        _ = openai.reasoning_effort(effort)
-
-
-def test_no_openai_row_offers_min() -> None:
-    """No model page lists ``minimal``, so no row may let a caller select it."""
-    assert all("min" not in row.thinking.effort for row in openai.models().values())
+        openai.reasoning_effort(effort)
 
 
 def test_subscription_offers_only_auto_and_priority_over_account_auth() -> None:
@@ -192,23 +110,6 @@ def test_compatible_offers_only_the_standard_tier_without_server_context() -> No
     )
 
 
-def test_only_long_context_rows_price_a_band_above_272k() -> None:
-    models = openai.models()
-    assert PriceKey("auto", 272_000) in models["luna-6.0"].prices
-    assert PriceKey("auto", 272_000) not in models["gpt-4"].prices
-
-
-def test_cards_carry_every_published_column() -> None:
-    price = openai.models()["astra-6.0"].prices[PriceKey("auto")]
-    assert price == TokenPrice(
-        request=10.0,
-        response=50.0,
-        cache_write=12.5,
-        cache_write_1h=0.0,
-        cache_read=1.0,
-    )
-
-
 def test_api_offers_every_tier_over_key_auth() -> None:
     assert openai.api() == ModelCapability(
         thinking=_TRANSPORT_THINKING,
@@ -216,109 +117,98 @@ def test_api_offers_every_tier_over_key_auth() -> None:
     )
 
 
-def test_subscription_models_clamp_to_the_chatgpt_backend() -> None:
-    row = openai.subscription_models()["astra-6.0"]
-    assert set(row.context) == {""}
-    assert row.context[""].max_request_tokens == 272_000
-    assert row.context[""].max_response_tokens == 32_000
-
-
-def test_default_limits_serve_the_published_input_cap_and_a_272k_cap() -> None:
-    """Serve the published "Maximum input tokens: 922,000" under a 1,050,000 window."""
-    limits = ModelLimits(
-        max_request_tokens=922_000,
-        max_response_tokens=128_000,
-        max_request_bytes=512 * 1024 * 1024,
-        max_image_edge_px=65_535,
-    )
-    assert openai.models()["astra-6.0"].context == {
-        "": limits,
-        "+272k": replace(limits, max_request_tokens=272_000),
-    }
-
-
-def test_tiled_image_limits_cap_the_body_and_image_edge() -> None:
-    assert openai.models()["gpt-4o"].context == {
-        "": ModelLimits(
-            max_request_tokens=128_000,
-            max_response_tokens=16_384,
-            max_request_bytes=512 * 1024 * 1024,
-            max_image_edge_px=2048,
-        ),
-    }
-
-
-def test_sol_6_1_bills_its_published_card_and_is_the_default() -> None:
-    """Cached input is 5% of input on 6.1 Sol, half of every other GPT-6 card."""
-    sol = openai.models()["sol-6.1"]
-    assert sol.wire_model_id == "gpt-6.1-sol"
-    assert sol.knowledge_cutoff == "April 30, 2026"
-    assert sol.prices[PriceKey("auto")] == TokenPrice(
-        request=2.0,
-        response=10.0,
-        cache_write=2.5,
-        cache_write_1h=0.0,
-        cache_read=0.1,
-    )
-    assert sol.prices[PriceKey("flex")].cache_read == 0.05
-    assert sol.prices[PriceKey("priority")].cache_read == 0.2
-    assert sol.thinking.effort == frozenset({"low", "medium", "high", "xhigh", "max"})
-    assert openai.models()["default"] is sol
-
-
-@pytest.mark.parametrize("table", [openai.models, openai.subscription_models])
 @pytest.mark.parametrize(
-    ("role", "model_id"),
+    ("prompt_tokens", "response", "expected_request", "expected_response"),
     [
-        ("best", "astra-6.0"),
-        ("default", "sol-6.1"),
-        ("everyday", "sol-6.1"),
-        ("utility", "luna-6.0"),
+        (10_000, 1_000, 10_000, 1_000),
+        (272_000, 32_000, 272_000, 32_000),
+        (900_000, 100_000, 272_000, 32_000),
+        (10_000, 100_000, 10_000, 32_000),
+        (900_000, 1_000, 272_000, 1_000),
     ],
 )
-def test_roles_resolve_the_selected_model(
-    table: Callable[[], ModelTable],
-    role: str,
-    model_id: str,
+def test_subscription_clamps_windows_and_preserves_other_facts(
+    monkeypatch: pytest.MonkeyPatch,
+    prompt_tokens: int,
+    response: int,
+    expected_request: int,
+    expected_response: int,
 ) -> None:
-    assert table()[role].model_id == model_id
+    limits = ModelLimits(
+        max_request_tokens=prompt_tokens,
+        max_response_tokens=response,
+        max_request_bytes=123_456,
+        max_image_edge_px=789,
+        max_image_bytes=12_345,
+    )
+    source = ModelCapability(
+        model_id="example-1.0",
+        wire_model_id="example-wire",
+        knowledge_cutoff="fixture cutoff",
+        approx_chars_per_token=2.5,
+        effort_as_level=True,
+        thinking=_TRANSPORT_THINKING,
+        context={"": limits, "+272k": replace(limits, max_request_tokens=42)},
+        prices=PriceCatalog(
+            {
+                PriceKey("auto"): TokenPrice(
+                    request=1.0,
+                    response=2.0,
+                    cache_write=3.0,
+                    cache_write_1h=4.0,
+                    cache_read=5.0,
+                ),
+            },
+        ),
+    )
+    other = replace(source, model_id="other-1.0", wire_model_id="other-wire")
+    table = ModelTable(
+        rows=(source, other),
+        roles={"default": "example", "utility": "other"},
+    )
 
+    def lookup(provider: str) -> ModelTable:
+        assert provider == "openai"
+        return table
 
-@pytest.mark.parametrize(
-    ("model_id", "tier"),
-    [("gpt-5.5", "priority"), ("gpt-5.4", "priority"), ("gpt-5.5-pro", "flex")],
-)
-def test_a_tier_the_table_leaves_unbanded_has_no_long_card(
-    model_id: str,
-    tier: ServiceTier,
-) -> None:
-    """The pricing table prints "-" for these long columns."""
-    assert PriceKey(tier, 272_000) not in openai.models()[model_id].prices
+    monkeypatch.setattr(openai, "models", lookup)
 
+    projected = openai.subscription_models()
 
-def test_a_published_long_card_overrides_the_ratio() -> None:
-    """gpt-5.4 flex long cached is $0.25, not 2x the rounded $0.13."""
-    long = openai.models()["gpt-5.4"].prices[PriceKey("flex", 272_000)]
-    assert (long.request, long.cache_read, long.response) == (2.5, 0.25, 11.25)
+    assert projected.rows == tuple(
+        replace(
+            row,
+            context={
+                "": replace(
+                    limits,
+                    max_request_tokens=expected_request,
+                    max_response_tokens=expected_response,
+                ),
+            },
+        )
+        for row in table.rows
+    )
+    assert projected.roles == table.roles
+    assert projected["default"].prices is source.prices
+    assert table["default"] is source
+    assert source.context[""].max_request_tokens == prompt_tokens
+    assert "+272k" in source.context
+    assert openai.subscription_models() is projected
 
 
 @pytest.mark.parametrize(
     ("model_id", "width", "height", "tokens"),
     [
-        # images-vision worked examples for gpt-6-astra.
-        ("gpt-6-astra", 1024, 1024, 1229),
-        ("gpt-6-astra", 4096, 512, 2458),
+        ("astra-6.0", 1024, 1024, 1229),
+        ("wire-astra-6.0", 4096, 512, 2458),
         ("sol-5.6", 33, 65, 8),
-        # 8000x8000 shrinks into gpt-5.5's 10,000-patch budget.
         ("gpt-5.5", 8000, 8000, 12_000),
-        ("gpt-4o", 33, 65, 255),
+        ("gpt-omni-4.0", 33, 65, 255),
         ("gpt-5.1", 1024, 1024, 70 + 140 * 4),
-        # Text-only rows bill no image.
-        ("o3-mini", 33, 65, 0),
-        ("gpt-4", 33, 65, 0),
-        # Image input but no published formula: the 512px-tile estimate.
-        ("gpt-5.5-pro", 33, 65, 85 + 170),
-        ("gpt-4-turbo", 33, 65, 85 + 170),
+        ("o-mini-3.0", 33, 65, 0),
+        ("gpt-4.0", 33, 65, 0),
+        ("gpt-pro-5.5", 33, 65, 85 + 170),
+        ("gpt-turbo-4.0", 33, 65, 85 + 170),
         ("unlisted-vendor", 33, 65, 85 + 170),
     ],
 )
@@ -334,22 +224,30 @@ def test_image_tokens_follow_the_published_formula(
 @pytest.mark.parametrize(
     ("model_id", "encoding"),
     [
-        ("gpt-6-astra", "o200k_base"),
-        ("gpt-4o", "o200k_base"),
-        ("gpt-4", "cl100k_base"),
-        ("gpt-4-turbo", "cl100k_base"),
-        ("kimi-k3", None),
+        ("astra-6.0", "o200k_base"),
+        ("wire-gpt-omni-4.0", "o200k_base"),
+        ("gpt-4.0", "cl100k_base"),
+        ("gpt-turbo-4.0", "cl100k_base"),
+        ("unknown", None),
     ],
 )
-def test_tokenizer_is_catalog_data(model_id: str, encoding: str | None) -> None:
+def test_tokenizer_selects_encoding_from_the_resolved_row(
+    model_id: str,
+    encoding: str | None,
+) -> None:
     assert openai.tokenizer(model_id) == encoding
 
 
 @pytest.mark.parametrize(
     ("model_id", "all_turns"),
-    [("gpt-6.1-sol", True), ("gpt-5.6-luna", True), ("gpt-5.5", False)],
+    [
+        ("wire-sol-6.1", True),
+        ("luna-5.6", True),
+        ("gpt-5.5", False),
+        ("unknown", False),
+    ],
 )
-def test_reasoning_context_spans_turns_only_on_5_6_and_later(
+def test_reasoning_context_uses_the_resolved_behavior_key(
     model_id: str,
     all_turns: bool,
 ) -> None:

@@ -58,7 +58,8 @@ else:
 
 from treekle import MutablePlainTree, from_plain, mutable
 
-from sagent.catalog.anthropic import api, models, usage_tokens
+from sagent.catalog.anthropic import api, usage_tokens
+from sagent.catalog.loader import models
 from sagent.catalog.table import ModelCatalog
 from sagent.lib import debug_log
 from sagent.providers.lib.errors import (
@@ -200,7 +201,7 @@ class Anthropic:
     ``handle_auth_error``, ``subscription``.
     """
 
-    catalog = ModelCatalog(models=models(), transport=api())
+    catalog = ModelCatalog(models=models("anthropic"), transport=api())
 
     def __init__(
         self,
