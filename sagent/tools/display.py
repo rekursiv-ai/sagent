@@ -17,6 +17,7 @@ them back into an :class:`OutputSpec` for the renderer.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
@@ -37,6 +38,7 @@ __all__ = [
     "ToolDisplay",
     "Wrap",
     "format_output",
+    "format_preview",
     "row_spec",
 ]
 
@@ -243,3 +245,32 @@ def _fit(line: str, width: int, wrap: Wrap) -> list[str]:
     # indistinguishable from a short one, which is the whole failure
     # mode this width cap is supposed to make visible.
     return [(chop_cells(line, max(1, width - 1)) or [""])[0] + "\u2026"]
+
+
+def format_preview(text: str, spec: OutputSpec, *, width: int) -> list[str]:
+    """Bound visible rows after wrapping; the original stays inspectable.
+
+    This is separate from logical-line output pagination. Its omission
+    marker explicitly counts display rows, including wrapped fragments.
+    """
+    if not spec.show or not text.strip():
+        return []
+    usable = min(spec.max_width, width) if spec.max_width else width
+    usable = max(1, usable)
+    budget = spec.head_rows + spec.tail_rows
+    if not spec.unbounded and budget == 0:
+        return []
+    head: list[str] = []
+    tail: deque[str] = deque(maxlen=spec.tail_rows)
+    count = 0
+    for line in text.rstrip("\n").split("\n"):
+        for row in _fit(line, usable, spec.wrap):
+            if spec.unbounded or count < spec.head_rows:
+                head.append(row)
+            else:
+                tail.append(row)
+            count += 1
+    hidden = count - len(head) - len(tail)
+    if hidden > 0:
+        return [*head, f"… {hidden} rows omitted …", *tail]
+    return [*head, *tail]

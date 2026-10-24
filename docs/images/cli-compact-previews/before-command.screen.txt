@@ -1,0 +1,40 @@
+[OpenAISubscription] sol-6.1
+> Read task.txt and follow its isolated CLI test instructions exactly.
+  Read task.txt
+  Read example.txt
+  Bash
+  ⎿  python3 -c "from pathlib import Path; import time; marker='preview_marker_preview_marker_previe
+     w_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_mar
+     ker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_p
+     review_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_previe
+     w_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_mar
+     ker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_p
+     review_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_previe
+     w_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_mar
+     ker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_p
+     review_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_previe
+     w_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_mar
+     ker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_p
+     review_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_previe
+     w_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_mar
+     ker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_p
+     review_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_previe
+     w_marker_preview_marker_preview_marker_'; p=Path('run_count.txt'); p.write_text(str(int(p.read_
+     text())+1)); Path('started.txt').write_text('started'); time.sleep(5); print('BASH_LIVE_OK')"
+>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+⠇ [30s 5439↑ 316↓ 0↟ 0↡ $0.01]
