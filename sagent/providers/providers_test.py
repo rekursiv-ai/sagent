@@ -46,7 +46,7 @@ def test_provider_names_includes_self_hosted_and_compat() -> None:
         ("claude-sonnet-4-6", "Anthropic"),
         ("gemini-3-flash-preview", "Google"),
         ("gpt-5.5", "OpenAI"),
-        ("o3-mini", "OpenAI"),
+        ("gpt-4o", "OpenAI"),
         ("kimi-k2.6", "Moonshot"),
         ("qwen3.6-plus", "DashScope"),
         ("MiniMax-M2.7", "MiniMax"),

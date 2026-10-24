@@ -37,11 +37,8 @@ def synthetic_catalog(monkeypatch: pytest.MonkeyPatch) -> Iterator[ModelTable]:
                 "luna-5.6",
                 "gpt-5.5",
                 "gpt-5.1",
-                "gpt-4.0",
                 "gpt-omni-4.0",
-                "o-mini-3.0",
                 "gpt-pro-5.5",
-                "gpt-turbo-4.0",
             )
         ),
     )
@@ -206,10 +203,7 @@ def test_subscription_clamps_windows_and_preserves_other_facts(
         ("gpt-5.5", 8000, 8000, 12_000),
         ("gpt-omni-4.0", 33, 65, 255),
         ("gpt-5.1", 1024, 1024, 70 + 140 * 4),
-        ("o-mini-3.0", 33, 65, 0),
-        ("gpt-4.0", 33, 65, 0),
         ("gpt-pro-5.5", 33, 65, 85 + 170),
-        ("gpt-turbo-4.0", 33, 65, 85 + 170),
         ("unlisted-vendor", 33, 65, 85 + 170),
     ],
 )
@@ -227,8 +221,6 @@ def test_image_tokens_follow_the_published_formula(
     [
         ("astra-6.0", "o200k_base"),
         ("wire-gpt-omni-4.0", "o200k_base"),
-        ("gpt-4.0", "cl100k_base"),
-        ("gpt-turbo-4.0", "cl100k_base"),
         ("unknown", None),
     ],
 )
@@ -266,9 +258,7 @@ def test_every_per_model_table_names_a_catalog_row() -> None:
     """A renamed row would silently fall back to the default image/turn rules."""
     names = set(loader.models("openai"))
     assert openai._VISION.keys() <= names
-    assert names >= openai._TEXT_ONLY
     assert names >= openai._ALL_TURNS
-    assert names >= openai._CL100K
 
 
 # (input, cached input, cache write, output) from the standard / flex / fast
@@ -349,7 +339,6 @@ def test_a_tier_the_table_leaves_unbanded_has_no_long_card(
         ("gpt-5.5", {"auto", "default", "flex", "priority"}),
         ("gpt-pro-5.5", {"auto", "default", "flex"}),
         ("gpt-4.1", {"auto", "default", "priority"}),
-        ("o-1.0", {"auto", "default"}),
     ],
 )
 def test_only_the_published_tiers_are_offered(
@@ -392,7 +381,6 @@ def test_long_context_rows_default_to_the_full_window(
         ("gpt-mini-5.4", (272_000, 128_000), 2048),
         ("gpt-4.1", (1_047_576, 32_768), 2048),
         ("gpt-omni-4.0", (128_000, 16_384), 2048),
-        ("gpt-4.0", (8_192, 8_192), 0),
     ],
 )
 def test_rows_carry_the_published_limits(
@@ -415,7 +403,6 @@ def test_rows_carry_the_published_limits(
         ("gpt-5.5", {"none", "low", "medium", "high", "xhigh"}),
         ("gpt-pro-5.5", {"medium", "high", "xhigh"}),
         ("gpt-5.1", {"none", "low", "medium", "high"}),
-        ("o-mini-3.0", {"low", "medium", "high"}),
         ("gpt-omni-4.0", {"none"}),
         ("gpt-4.1", {"none"}),
     ],
@@ -443,9 +430,7 @@ def test_no_row_offers_min() -> None:
         ("luna-6.0", "gpt-6-luna", "May 18, 2026"),
         ("terra-5.6", "gpt-5.6-terra", "February 16, 2026"),
         ("gpt-pro-5.5", "gpt-5.5-pro", "December 1, 2025"),
-        ("o-mini-3.0", "o3-mini", "October 1, 2023"),
         ("gpt-omni-4.0", "gpt-4o", "October 1, 2023"),
-        ("gpt-4.0", "gpt-4", "December 1, 2023"),
     ],
 )
 def test_rows_name_their_wire_id_and_cutoff(

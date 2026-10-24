@@ -151,29 +151,6 @@ profiles:
       budget: [none, auto]
       output: [none, text]
 
-  o_series:
-    context:
-      max:
-        max_request_tokens: 200_000
-        max_response_tokens: 100_000
-        max_request_bytes: 536_870_912
-        max_image_edge_px: 2_048
-    thinking:
-      effort: [low, medium, high]
-      budget: [none, auto]
-      output: [none, text]
-
-  o_series_text:
-    context:
-      max:
-        max_request_tokens: 200_000
-        max_response_tokens: 100_000
-        max_request_bytes: 536_870_912
-    thinking:
-      effort: [low, medium, high]
-      budget: [none, auto]
-      output: [none, text]
-
   gpt_4_1:
     context:
       max:
@@ -189,21 +166,6 @@ profiles:
         max_response_tokens: 16_384
         max_request_bytes: 536_870_912
         max_image_edge_px: 2_048
-
-  gpt_turbo:
-    context:
-      max:
-        max_request_tokens: 128_000
-        max_response_tokens: 4_096
-        max_request_bytes: 536_870_912
-        max_image_edge_px: 2_048
-
-  gpt_4:
-    context:
-      max:
-        max_request_tokens: 8_192
-        max_response_tokens: 8_192
-        max_request_bytes: 536_870_912
 
 models:
 - model_id: astra-6.0
@@ -814,30 +776,6 @@ models:
     cache_write_1h: 0.0
     cache_read: 0.25
 
-- model_id: o-1.0
-  wire_model_id: o1
-  profile: o_series
-  knowledge_cutoff: October 1, 2023
-  prices:
-  - service_tier: auto
-    request: 15.0
-    response: 60.0
-    cache_write: 0.0
-    cache_write_1h: 0.0
-    cache_read: 7.5
-
-- model_id: o-mini-3.0
-  wire_model_id: o3-mini
-  profile: o_series_text
-  knowledge_cutoff: October 1, 2023
-  prices:
-  - service_tier: auto
-    request: 1.1
-    response: 4.4
-    cache_write: 0.0
-    cache_write_1h: 0.0
-    cache_read: 0.55
-
 - model_id: gpt-4.1
   wire_model_id: gpt-4.1
   profile: gpt_4_1
@@ -874,24 +812,6 @@ models:
     cache_write_1h: 0.0
     cache_read: 0.175
 
-- model_id: gpt-nano-4.1
-  wire_model_id: gpt-4.1-nano
-  profile: gpt_4_1
-  knowledge_cutoff: June 1, 2024
-  prices:
-  - service_tier: auto
-    request: 0.1
-    response: 0.4
-    cache_write: 0.0
-    cache_write_1h: 0.0
-    cache_read: 0.025
-  - service_tier: priority
-    request: 0.2
-    response: 0.8
-    cache_write: 0.0
-    cache_write_1h: 0.0
-    cache_read: 0.05
-
 - model_id: gpt-omni-4.0
   wire_model_id: gpt-4o
   profile: gpt_omni
@@ -927,27 +847,3 @@ models:
     cache_write: 0.0
     cache_write_1h: 0.0
     cache_read: 0.125
-
-- model_id: gpt-turbo-4.0
-  wire_model_id: gpt-4-turbo
-  profile: gpt_turbo
-  knowledge_cutoff: December 1, 2023
-  prices:
-  - service_tier: auto
-    request: 10.0
-    response: 30.0
-    cache_write: 0.0
-    cache_write_1h: 0.0
-    cache_read: 0.0
-
-- model_id: gpt-4.0
-  wire_model_id: gpt-4
-  profile: gpt_4
-  knowledge_cutoff: December 1, 2023
-  prices:
-  - service_tier: auto
-    request: 30.0
-    response: 60.0
-    cache_write: 0.0
-    cache_write_1h: 0.0
-    cache_read: 0.0

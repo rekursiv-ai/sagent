@@ -44,14 +44,6 @@ __all__ = [
 
 # Per-model wire facts keyed by catalog name; ``openai_test`` checks every key
 # names a row, since a renamed row would silently fall back to the default.
-
-# "Input modalities: text" on each model page.
-_TEXT_ONLY: Final = frozenset({"o-mini-3.0", "gpt-4.0"})
-
-# The GPT-4 generation predates ``o200k_base``.
-_CL100K: Final = frozenset({"gpt-4.0", "gpt-turbo-4.0"})
-
-
 _ALL_TURNS: Final = frozenset(
     {
         "astra-6.0",
@@ -107,12 +99,10 @@ _VISION: Final[Mapping[str, _Patches | _Tiles]] = MappingProxyType(
         "gpt-nano-5.4": _Patches(multiplier=1.2, budget=2_500),
         "gpt-5.2": _Patches(multiplier=1.2, budget=6_144),
         "gpt-mini-4.1": _Patches(multiplier=1.62, budget=6_144),
-        "gpt-nano-4.1": _Patches(multiplier=2.46, budget=6_144),
         "gpt-5.1": _Tiles(base=70, tile=140),
         "gpt-4.1": _Tiles(base=85, tile=170),
         "gpt-omni-4.0": _Tiles(base=85, tile=170),
         "gpt-omni-mini-4.0": _Tiles(base=2833, tile=5667),
-        "o-1.0": _Tiles(base=75, tile=150),
     },
 )
 
@@ -171,8 +161,7 @@ def image_tokens(model_id: str, width: int, height: int) -> int:
 
     Returns:
       tokens: The published formula's count; the GPT-4o tile estimate for a
-        model that takes images but has no published formula (the Pro models,
-        ``gpt-4-turbo``, other vendors' ids); ``0`` for a text-only row.
+        model with no published formula (the Pro models, other vendors' ids).
 
     References:
       https://developers.openai.com/api/docs/guides/images-vision
@@ -180,8 +169,6 @@ def image_tokens(model_id: str, width: int, height: int) -> int:
     """
     row = models("openai").exact(model_id)
     name = row.model_id if row is not None else ""
-    if name in _TEXT_ONLY:
-        return 0
     match _VISION.get(name, _Tiles(base=85, tile=170)):
         case _Patches(multiplier=multiplier, budget=budget):
             width, height = _fit_patch_budget(width, height, budget)
@@ -198,14 +185,11 @@ def tokenizer(model_id: str) -> str | None:
       model_id: Catalog name or wire id.
 
     Returns:
-      encoding: ``o200k_base`` for GPT-4o and later, ``cl100k_base`` for the
-        GPT-4 generation, ``None`` for an id no row carries.
+      encoding: ``o200k_base``, which every served row tokenizes with;
+        ``None`` for an id no row carries.
 
     """
-    row = models("openai").exact(model_id)
-    if row is None:
-        return None
-    return "cl100k_base" if row.model_id in _CL100K else "o200k_base"
+    return None if models("openai").exact(model_id) is None else "o200k_base"
 
 
 def keeps_reasoning_across_turns(model_id: str) -> bool:
