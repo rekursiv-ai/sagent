@@ -492,8 +492,8 @@ def _build_request(
         "contents": [*contents],
         "generationConfig": gen_config,
     }
-    if request.system:
-        body["systemInstruction"] = {"parts": [{"text": request.system}]}
+    if request.system_text:
+        body["systemInstruction"] = {"parts": [{"text": request.system_text}]}
     if request.tools:
         body["tools"] = [
             {

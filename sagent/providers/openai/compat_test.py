@@ -49,13 +49,13 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
-    ModelContextEvent,
     ModelResponsePartial,
     ModelResponseThinking,
     RuntimeEvent,
     ToolCall,
     ToolResult,
     UserMessage,
+    WireMessage,
 )
 
 
@@ -128,10 +128,10 @@ def _tiktoken_model() -> OpenAICompatModel:
 
 def _make_request(
     *,
-    messages: list[ModelContextEvent],
+    messages: list[WireMessage],
     system: str = "",
 ) -> ModelRequest:
-    return ModelRequest(messages=messages, system=system)
+    return ModelRequest(messages=messages, system=(system,))
 
 
 def test_build_messages_system_prepended() -> None:

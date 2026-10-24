@@ -1,5 +1,6 @@
-# Bare prompt recipe: only ``--system`` text is sent.
-# No static prompt, no environment, no AGENTS.md walk, no memory.
+# Bare prompt recipe: only ``--system-prompt`` / ``--append-system-prompt`` text and
+# the tools' own prompts are sent. No static prompt, no environment, no AGENTS.md
+# walk, no memory: the one listed section names none of them, so none is enabled.
 # Use for benchmarks / minimal-input runs.
 
 system_prompt:

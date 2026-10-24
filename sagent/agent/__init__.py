@@ -36,7 +36,6 @@ from sagent.agent.agent import (
     ERROR_MAX_TOOL_CALL_ROUNDS,
     ActivityTracker,
     Agent,
-    SystemPromptArg,
 )
 from sagent.agent.background import BackgroundTaskEntry
 from sagent.agent.compaction import CompactionState
@@ -48,5 +47,4 @@ __all__ = [
     "Agent",
     "BackgroundTaskEntry",
     "CompactionState",
-    "SystemPromptArg",
 ]

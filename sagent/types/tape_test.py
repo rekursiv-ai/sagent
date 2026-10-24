@@ -15,6 +15,7 @@ from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
     ModelContextEvent,
+    SystemMessage,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -93,6 +94,52 @@ def test_coalesce_roles_drops_signed_thinking_on_assistant_merge() -> None:
     assert signed == [], f"merged AM kept cross-turn signed thinking: {signed}"
 
 
+def test_coalesce_roles_merges_user_turns_across_a_system_message() -> None:
+    """A system message is the harness's, not a turn: the human's lines either side are one."""
+    note = SystemMessage(text="cwd: /x")
+    merged = coalesce_roles(
+        (UserMessage(text="a"), note, UserMessage(text="b")),
+    )
+    assert [type(e) for e in merged] == [UserMessage, SystemMessage]
+    first = merged[0]
+    assert isinstance(first, UserMessage)
+    assert first.text == "a\n\nb"
+    assert merged[1] is note
+
+
+@pytest.mark.parametrize("sender", ["", "A"])
+def test_a_merged_turn_keeps_the_cache_point_either_half_asked_for(sender: str) -> None:
+    """The provider caches at a marked message; a merge that drops the mark caches nothing."""
+    prior = (
+        AgentSendMessage(source=sender, text="a") if sender else UserMessage(text="a")
+    )
+    [merged] = coalesce_roles((prior, UserMessage(text="doc", cache_point=True)))
+    assert isinstance(merged, UserMessage)
+    assert merged.cache_point
+
+
+def test_a_payload_holding_system_messages_is_splice_valid() -> None:
+    """System messages are neutral to alternation and pairing wherever they sit."""
+    call = ToolCall(id="c1", name="Read", args={})
+    payload = (
+        UserMessage(text="q"),
+        SystemMessage(text="cwd: /x"),
+        AssistantMessage(tool_calls=(call,)),
+        ToolResult(call_id="c1", content="r"),
+        SystemMessage(text="Tools available now: Read.", offered_tools=("Read",)),
+        AssistantMessage(text="done"),
+    )
+    splice = ContextSplice(
+        ref=TapeRef(session_id="s", ordinal=0),
+        mask=(),
+        insert_after=None,
+        payload=payload,
+        strategy="test",
+    )
+    assert splice.payload == payload
+    assert unpaired_call_ids(payload) == frozenset()
+
+
 def test_coalesce_roles_merges_across_hidden_boundary_visible_wins() -> None:
     """A hidden/visible adjacency merges losslessly; visible wins the bit.
 
@@ -149,6 +196,16 @@ def test_repair_leaves_an_externally_paired_call_open() -> None:
         f"synthesized a result for an external pair; got {repaired}"
     )
     assert unpaired_call_ids(repaired) == frozenset({"live-1"})
+
+
+def test_unpaired_call_ids_reports_both_sides_past_a_system_message() -> None:
+    """A system message is skipped, not a stop: pairs after it still count."""
+    payload = (
+        ToolResult(call_id="tr-only", content="r"),
+        SystemMessage(text="cwd: /x"),
+        AssistantMessage(tool_calls=(ToolCall(id="am-only", name="Bash", args={}),)),
+    )
+    assert unpaired_call_ids(payload) == frozenset({"tr-only", "am-only"})
 
 
 def test_pair_and_dedup_keeps_peer_messages_in_arrival_order() -> None:

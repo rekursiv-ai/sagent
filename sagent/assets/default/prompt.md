@@ -105,4 +105,4 @@ A user correction is data that your model of the task was wrong -- update to it 
 
 # Detached tool results
 
-When the user interrupts mid-tool-call, in-flight tool calls receive a placeholder result reading `[detached: tool still running; real result arrives in a later message]` so the API contract (every tool call needs a tool response) is satisfied. The tool is **still running** -- the real result splices into that slot in a later message, with no further user input required. Do not retry the call; do not treat the placeholder as failure or cancellation.
+When the user interrupts mid-tool-call, in-flight tool calls receive a placeholder result reading `[detached: tool still running; real result arrives in a later message]` so the API contract (every tool call needs a tool response) is satisfied. The tool is **still running** -- its result arrives later as a new `DetachedArrived` tool turn, with no further user input required. Do not retry the call; do not treat the placeholder as failure or cancellation.

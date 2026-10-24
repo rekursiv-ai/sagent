@@ -14,7 +14,7 @@ A tool exposes:
 - `directive_schema`: JSON Schema for input directives.
 - `supports_microcompaction`: whether old results may be shortened.
 - `summary(msg)`: short label for UI/status output.
-- `prompt()`: optional per-request system prompt section.
+- `prompt()`: optional system prompt section, read when the system blocks are built: at the start of a context (clear, compaction, resume), and when `replace_tool` swaps in a tool with a different one.
 - `run(msg)`: async execution.
 
 Batch tools return one `Message`. Streaming tools set `streaming = True` and make `run(msg)` an async generator; yielded messages before the last are intermediate events, and the last yield is the final tool result.
@@ -92,6 +92,7 @@ class EchoTool:
 | `PaperDetails` | Paper metadata, references, citations. | `id`; optional `operation`. |
 | `PaperAuthor` | Author search and author papers. | `query` or `id`; optional `operation="papers"`. |
 | `PaperFetch` | Download paper PDFs. | `id`. |
+| `Memory` | Save or forget a project memory, keeping `MEMORY.md` in step. | `action`, `name`; a save also `type`, `description`, `content`. |
 | `AgentSelf` | Let an agent inspect/mutate itself. | Flat patch object; all fields optional. |
 | `AgentSpawn` | Run child agents. | `prompt`; optional model/tools/depth/session controls. |
 | `AgentSend` | Send to a live named agent inbox. | `to`, `content`; optional `delay`. |
@@ -199,7 +200,7 @@ Paper tools use Semantic Scholar, OpenAlex, arXiv, and open-access PDF metadata.
 
 `AgentSpawn` creates child agents. Children can inherit the parent model/tools or override provider, auth, model ID, account, tools, max tool-call rounds, and max depth. With `persistent=true`, a child stays alive and can receive messages through `AgentSend`.
 
-By default (`hot=false`, "cold"), a child rebuilds its own system prompt from its own tools each request -- it auto-gains `BackgroundTask` alongside `AgentSpawn` and shows its own spawn-depth text, both of which differ from the parent's prompt from the first request and defeat provider prompt caching. Pass `hot=true` to instead freeze the child's system prompt to a byte-identical snapshot of the parent's current one, letting the child's first request land on the same cached prefix the parent already warmed. Trade-off: a hot child's prompt won't reflect its own live depth budget or a freshly bundled tool. Prefer hot for cheap, frequent, or parallel children (lookups, reviews) that don't need that dynamism.
+A child with its parent's tools builds its system blocks from its parent's settings, so its first request reads the prefix the parent already cached -- unless what the blocks render changed since the parent last built them (its directory, an `AGENTS.md`, a saved memory). What differs per agent -- its spawn depth, its label, the agents it can message, a persistent child's reply rule -- is told as a reminder with its first turn and retold when it changes, never in the system blocks.
 
 Persistent subagents have a durable lifecycle. The parent session
 records each child's `kind=persistent_subagent` entry with a stable

@@ -8,18 +8,15 @@ lets ``*`` skip ``.env`` while ``.*`` finds it.
 
 from __future__ import annotations
 
+from pathlib import Path
 from stat import S_ISDIR
-from typing import TYPE_CHECKING, Final
+from typing import Final
 
 import re
 import shutil
 import subprocess
 
 import rignore
-
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 # Raising this is not the free win it looks like: the walk that reaches the cap
@@ -37,8 +34,11 @@ def glob(root: Path, pattern: str, /) -> list[Path]:
     """Return the files under ``root`` that ``pattern`` names, sorted.
 
     Args:
-      root: Directory the pattern is relative to; a non-directory matches nothing.
-      pattern: Glob anchored at ``root``, such as ``**/*.py``.
+      root: Directory a relative pattern is anchored at; a non-directory matches
+        nothing.
+      pattern: Glob anchored at ``root``, such as ``**/*.py``. An absolute one is
+        anchored at its own literal directory, which, as ``root`` is, is entered
+        without asking the ignore rules.
 
     Returns:
       paths: Each matching file ripgrep would search, under ``root``.
@@ -47,14 +47,18 @@ def glob(root: Path, pattern: str, /) -> list[Path]:
       GlobError: The pattern is one fd would refuse to parse.
 
     """
-    if not root.is_dir():
-        return []
     parts = [part for part in pattern.split("/") if part != "."]
     hidden = any(part.startswith(".") and part != ".." for part in parts)
     fixed = next(
         (i for i, part in enumerate(parts[:-1]) if re.search(r"[*?\[{]", part)),
         len(parts) - 1,
     )
+    # Judging each named directory would list every sibling: all of ``/tmp`` to
+    # find one entry in it.
+    if pattern.startswith("/"):
+        root, parts, fixed = Path("/", *parts[:fixed]), parts[fixed:], 0
+    if not root.is_dir():
+        return []
     start = _kept_directory(root, parts[:fixed], hidden=hidden)
     if start is None:
         return []

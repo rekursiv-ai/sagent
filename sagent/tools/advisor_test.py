@@ -102,7 +102,7 @@ async def test_run_forwards_prompt_and_system() -> None:
     inner = StubProviderModel(text="bridged")
     result = await Advisor(model=inner, system="be brief").run({"prompt": "q"})
     assert result.content == "bridged"
-    assert inner.received[0].system == "be brief"
+    assert inner.received[0].system_text == "be brief"
     (message,) = inner.received[0].messages
     assert isinstance(message, UserMessage)
     assert message.text == "q"
@@ -224,7 +224,7 @@ async def test_a_consult_that_exhausts_its_retries_is_a_tool_error() -> None:
 async def test_run_blank_system_is_empty() -> None:
     inner = StubProviderModel(text="ok")
     _ = await Advisor(model=inner, system="").run({"prompt": "p"})
-    assert inner.received[0].system == ""
+    assert inner.received[0].system_text == ""
 
 
 if __name__ == "__main__":

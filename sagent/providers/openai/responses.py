@@ -226,7 +226,7 @@ class _OpenAIResponsesModel(ModelDefaults):
                 max_image_dim=self.limits.max_image_edge_px,
                 max_image_bytes=self.limits.max_image_bytes,
             ),
-            "instructions": request.system,
+            "instructions": request.system_text,
             "stream": True,
             "store": False,
         }
@@ -235,6 +235,22 @@ class _OpenAIResponsesModel(ModelDefaults):
             # Independent reads and searches go out together in one round; the agent
             # runtime already runs a response's independent tool calls concurrently.
             body["parallel_tool_calls"] = True
+            # The gate names what may be called; every schema still ships, so the
+            # prefix the server cached is the same whatever the gate.
+            allowed = request.allowed_tools
+            if allowed is not None:
+                # A gate naming no tool the request carries allows none; an empty
+                # ``allowed_tools`` list is not a request the API accepts.
+                names = [t.name for t in request.tools if t.name in allowed]
+                body["tool_choice"] = (
+                    {
+                        "type": "allowed_tools",
+                        "mode": "auto",
+                        "tools": [{"type": "function", "name": n} for n in names],
+                    }
+                    if names
+                    else "none"
+                )
         effort = self._reasoning_effort()
         if effort is not None:
             body["reasoning"] = {"effort": effort, "summary": "auto"}

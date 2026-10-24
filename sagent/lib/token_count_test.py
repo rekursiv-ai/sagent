@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, override
 
-from sagent.lib.token_count import approx_request_tokens
+from sagent.lib.token_count import approx_request_tokens, entry_tokens
+from sagent.request_materialization import materialize_messages
 
 
 if TYPE_CHECKING:
@@ -23,10 +24,11 @@ from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
-    ModelContextEvent,
+    SystemMessage,
     ToolCall,
     ToolResult,
     UserMessage,
+    WireMessage,
 )
 
 
@@ -76,12 +78,12 @@ class _StubTool:
 
 
 def _req(
-    messages: list[ModelContextEvent],
+    messages: list[WireMessage],
     *,
     system: str = "",
     tools: Sequence[Tool] = (),
 ) -> ModelRequest:
-    return ModelRequest(messages=messages, system=system, tools=tools)
+    return ModelRequest(messages=messages, system=(system,), tools=tools)
 
 
 def test_user_message_text() -> None:
@@ -91,6 +93,15 @@ def test_user_message_text() -> None:
     )
     # ``"sys"`` → 0 (3 chars // 4); ``"abcdefgh"`` → 2.
     assert n == 0 + 2
+
+
+def test_a_system_message_costs_what_the_wire_sends() -> None:
+    """A system message reaches the wire as user text inside its reminder tags."""
+    [wire] = materialize_messages([SystemMessage(text="abcdefgh")])
+    assert isinstance(wire, UserMessage)
+    model = _TokenModel()
+    expected = model.approx_text_tokens(wire.text)
+    assert entry_tokens(SystemMessage(text="abcdefgh"), model) == expected > 2
 
 
 def test_user_with_image_attachment() -> None:

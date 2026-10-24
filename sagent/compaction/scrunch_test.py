@@ -31,9 +31,11 @@ from sagent.types.model import Model, ModelRequest
 from sagent.types.runtime import (
     AssistantMessage,
     ModelContextEvent,
+    SystemMessage,
     ToolCall,
     ToolResult,
     UserMessage,
+    WireMessage,
 )
 from sagent.types.tape import (
     ContextSplice,
@@ -70,6 +72,11 @@ def _assistant(
 
 def _tool_result(call_id: str, content: str) -> ToolResult:
     return ToolResult(call_id=call_id, content=content)
+
+
+def _wire(view: Sequence[ModelContextEvent]) -> list[WireMessage]:
+    """Return ``view`` as a request's messages; these contexts hold no system messages."""
+    return [entry for entry in view if not isinstance(entry, SystemMessage)]
 
 
 def _tape_from(history: list[ModelContextEvent]) -> list[TapeRecord]:
@@ -368,7 +375,7 @@ async def test_scrunch_folds_a_summary_larger_than_its_estimate() -> None:
     )
     assert (
         _stub_model().approx_request_tokens(
-            ModelRequest(messages=list(result.view)),
+            ModelRequest(messages=_wire(result.view)),
         )
         <= 100
     )
@@ -421,7 +428,7 @@ async def test_one_rejected_pass_is_retried_and_the_fold_still_fits() -> None:
     assert result.stopped == ""
     assert (
         _stub_model().approx_request_tokens(
-            ModelRequest(messages=list(result.view)),
+            ModelRequest(messages=_wire(result.view)),
         )
         <= 100
     )

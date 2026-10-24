@@ -44,7 +44,8 @@ sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
 | `--auth METHOD` | Calls `Provider.from_<METHOD>()`; an explicit API-key provider defaults to `env`, while subscription providers default to `credentials`. |
 | `--account NAME` | Optional named credential slot for providers that support one. |
 | `--model ID` | Catalog model ID. Bare IDs select the largest context window. Models with smaller profiles accept `+200k` or `+272k`; an explicit `+1m` remains valid when the bare profile is already at least one million tokens. SelfHosted IDs may include `+cuda`, `+bfloat16`, or `+compile`. |
-| `--system TEXT` | Extra system prompt instructions appended to Sagent's default prompt. |
+| `--system-prompt TEXT` | System prompt replacing Sagent's default prompt. |
+| `--append-system-prompt TEXT` | Instructions added after the system prompt. |
 | `--effort LEVEL` | Reasoning effort: `none`, `min`, `low`, `medium`, `high`, `xhigh`, or `max`. Each model accepts a subset (GPT-5.6 takes all seven; GPT-6 Astra has no `none`), and an unsupported value raises. |
 | `--max-response-tokens N` | Limit response tokens for each model call. |
 | `--log-level LEVEL` | Enable stderr diagnostics. Same values as Python logging levels. |
@@ -88,8 +89,11 @@ sagent --tools Read Bash BackgroundTask
 `--tools` accepts exact class names exported from `sagent.tools`. The default terminal tool set is:
 
 ```text
-AgentSpawn AgentSend AgentSelf Bash Read Write Edit Grep Glob List WebSearch WebFetch PaperSearch PaperDetails PaperAuthor PaperFetch PlayAudio Skill
+AgentSpawn AgentSend AgentSelf Bash Read Write Edit Grep Glob List WebSearch WebFetch PaperSearch PaperDetails PaperAuthor PaperFetch Memory PlayAudio Skill
 ```
+
+`Memory` is left out where the model is shown no memory index: under
+`--ephemeral`, or a recipe without the `memory` section.
 
 `Wiki` is available only when requested explicitly, for example
 `--tools Read Grep Wiki`.

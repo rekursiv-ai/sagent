@@ -26,6 +26,7 @@ from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
     ModelContextEvent,
+    SystemMessage,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -660,6 +661,33 @@ def test_detached_splice_keeps_tool_pairing_valid() -> None:
 def test_resolved_context_is_a_resolved_context_instance() -> None:
     """Sanity: ``resolve_context`` returns a ``ResolvedContext``."""
     resolve_context([])
+
+
+def test_system_messages_are_neutral_to_role_alternation_and_tool_pairing() -> None:
+    call = ToolCall(id="c1", name="Read", args={})
+    validate_context(
+        [
+            UserMessage(text="q"),
+            SystemMessage(text="cwd: /x"),
+            AssistantMessage(tool_calls=(call,)),
+            ToolResult(call_id="c1", content="r"),
+            SystemMessage(text="Tools available now: Read."),
+            AssistantMessage(text="done"),
+        ],
+    )
+    # Neutral, not a turn: the human's lines either side of one still collide.
+    with pytest.raises(InvalidContextError, match="alternation"):
+        validate_context(
+            [UserMessage(text="a"), SystemMessage(text="n"), UserMessage(text="b")],
+        )
+
+
+def test_resolve_context_renders_a_system_message() -> None:
+    note = SystemMessage(text="cwd: /x")
+    tape: list[TapeRecord] = [
+        ReferrableTapeEvent(ref=TapeRef(session_id="s", ordinal=0), event=note),
+    ]
+    assert resolve_context(tape).messages == [note]
 
 
 if __name__ == "__main__":

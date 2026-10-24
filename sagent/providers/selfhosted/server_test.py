@@ -170,7 +170,7 @@ def test_build_chat_messages_user_only() -> None:
 
 
 def test_build_chat_messages_with_system() -> None:
-    req = ModelRequest(messages=[UserMessage(text="hi")], system="be brief")
+    req = ModelRequest(messages=[UserMessage(text="hi")], system=("be brief",))
     msgs = _build_chat_messages(req)
     assert msgs[0] == {"role": "system", "content": "be brief"}
     assert msgs[1] == {"role": "user", "content": "hi"}

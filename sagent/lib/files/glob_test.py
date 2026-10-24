@@ -138,6 +138,36 @@ def test_a_symlinked_prefix_is_never_descended(tmp_path: Path) -> None:
     assert glob(tmp_path, "real/*") == [tmp_path / "real" / "x.py"]
 
 
+@_BOTH
+@pytest.mark.parametrize(
+    ("pattern", "expected"),
+    [
+        ("build/*", ["build/gen.py"]),
+        ("build/**/*.py", ["build/gen.py"]),
+        ("linked/*.py", ["linked/c.py"]),
+        (".venv/*.py", [".venv/site.py"]),
+        ("*.py", ["a.py", "link.py"]),
+        ("nosuch/*", []),
+    ],
+    ids=["ignored", "ignored-deep", "symlinked", "hidden", "the-root", "missing"],
+)
+def test_an_absolute_pattern_enters_its_directory_as_a_root_is_entered(
+    tmp_path: Path,
+    pattern: str,
+    expected: list[str],
+) -> None:
+    """The directory it spells out is named, as ``root`` is, not judged as a prefix.
+
+    The ``root`` given is passed over, even one that does not exist.
+    """
+    (tmp_path / "repo").mkdir()
+    root = _tree(tmp_path / "repo")
+    (root / "linked").symlink_to(root / "sub")
+    assert glob(tmp_path / "nowhere", f"{root}/{pattern}") == [
+        root / name for name in expected
+    ]
+
+
 def test_a_prefix_is_not_satisfied_by_a_root_sharing_its_name(
     tmp_path: Path,
 ) -> None:

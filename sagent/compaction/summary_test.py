@@ -21,6 +21,7 @@ from sagent.compaction.summary import (
     _format_summary,
     _request_entries,
     _strip_attachments,
+    _trailing_user_tail_len,
     build_continuation,
 )
 from sagent.testing import MockModelCaps
@@ -37,6 +38,7 @@ from sagent.types.runtime import (
     BytesMessage,
     ModelContextEvent,
     RuntimeEvent,
+    SystemMessage,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -804,6 +806,31 @@ async def test_compact_preserves_single_current_user_turn() -> None:
     assert "continue the task" in result[0].text
 
 
+def test_the_summary_is_not_asked_to_summarize_the_harnesss_notes() -> None:
+    """A system message is retold once compaction drops it; a summary of it is noise."""
+    result = _request_entries(
+        [
+            [
+                UserMessage(text="q"),
+                SystemMessage(text="cwd: /x"),
+                AssistantMessage(text="a"),
+            ],
+        ],
+    )
+    assert [type(e) for e in result] == [UserMessage, AssistantMessage]
+
+
+def test_the_kept_tail_reaches_past_trailing_notes() -> None:
+    """The unanswered line before a round's system message is the tail compaction keeps."""
+    history: list[ModelContextEvent] = [
+        UserMessage(text="old"),
+        AssistantMessage(text="a"),
+        UserMessage(text="new"),
+        SystemMessage(text="cwd: /x"),
+    ]
+    assert _trailing_user_tail_len(history) == 2
+
+
 @pytest.mark.asyncio
 async def test_request_entries_drop_invalid_tool_ordering() -> None:
     call = ToolCall(id="call_1", name="Bash", args={})
@@ -1266,7 +1293,7 @@ async def test_compactor_summary_request_sees_canonical_tool_result() -> None:
     assert len(results) == 1
     # The result reaches the compactor CAPPED, not whole. Shipping it
     # whole is what wedged session ``190b6baec7ed``: the compactor builds
-    # its request directly rather than through ``materialize_request``, so
+    # its request directly rather than through ``materialize_messages``, so
     # an 11.1M-character result crossed the wire intact and blew OpenAI's
     # per-item cap -- on the very call that was supposed to shed it, and
     # therefore on every retry and every later turn.

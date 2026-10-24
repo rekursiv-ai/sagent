@@ -24,6 +24,7 @@ from sagent.types.runtime import (
     AssistantMessage,
     CompactComplete,
     CompactStarted,
+    SystemMessage,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -158,6 +159,19 @@ def test_replay_user_message() -> None:
     assert p.user_bars == ["hello"]
     # Footer always emitted when history is non-empty.
     assert any("resumed" in line for line in p.lines)
+
+
+def test_replay_shows_no_system_message() -> None:
+    """The harness told the model; the human never typed it, so it shows nothing."""
+    history: list[TapeEvent] = [
+        UserMessage(text="hello"),
+        SystemMessage(text="cwd: /x"),
+        AssistantMessage(text="hi"),
+    ]
+    p = RecordingPrinter()
+    replay_messages(_agent(history=history), p)
+    assert p.user_bars == ["hello"]
+    assert all("cwd" not in line for line in p.lines)
 
 
 def test_replay_assistant_text_block() -> None:

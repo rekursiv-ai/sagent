@@ -476,8 +476,8 @@ def build_messages(
     ids = IdRemapper("call_")
     messages: list[dict[str, MutablePlainTree]] = []
     pending_images: list[dict[str, MutablePlainTree]] = []
-    if request.system:
-        messages.append({"role": "system", "content": request.system})
+    if request.system_text:
+        messages.append({"role": "system", "content": request.system_text})
     for entry in request.messages:
         if isinstance(entry, (AgentSendMessage, UserMessage)):
             _flush_images(messages, pending_images)

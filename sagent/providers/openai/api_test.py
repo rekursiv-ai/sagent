@@ -19,6 +19,7 @@ from sagent.catalog.loader import models
 from sagent.catalog.openai import api
 from sagent.catalog.table import ModelCatalog, ModelTable
 from sagent.providers.openai.api import OpenAI
+from sagent.tools import tool
 from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
@@ -197,6 +198,44 @@ def test_a_cache_key_reaches_the_api_as_prompt_cache_key() -> None:
     assert "prompt_cache_key" not in model._build_kwargs(
         ModelRequest(messages=[UserMessage(text="hi")]),
     )
+
+
+def _look(topic: str) -> str:
+    """Look a topic up."""
+    return topic
+
+
+def _peek(topic: str) -> str:
+    """Peek at a topic."""
+    return topic
+
+
+def _offering(*offers: tuple[str, ...] | None) -> ModelRequest:
+    """Return a request of Look and Peek, one user turn per tool offer."""
+    return ModelRequest(
+        messages=[UserMessage(text="hi", offered_tools=offer) for offer in offers],
+        tools=[tool(_look, name="Look"), tool(_peek, name="Peek")],
+    )
+
+
+def test_a_tool_gate_reaches_the_api_as_allowed_tools_with_every_schema() -> None:
+    """Every schema ships so the prefix caches; the gate says which may be called."""
+    model = OpenAI.from_key("k").model()
+    peek_only = {
+        "type": "allowed_tools",
+        "mode": "auto",
+        "tools": [{"type": "function", "name": "Peek"}],
+    }
+    gated = model._build_kwargs(_offering(("Peek",)))
+    assert [t.get("name") for t in gated["tools"]] == ["Look", "Peek"]
+    assert gated["tool_choice"] == peek_only
+    assert model._build_kwargs(_offering(()))["tool_choice"] == "none"
+    assert "tool_choice" not in model._build_kwargs(_offering(None))
+    # The latest offer is the gate in force; one naming every tool lifts it.
+    lifted = model._build_kwargs(_offering(("Peek",), ("Look", "Peek")))
+    assert "tool_choice" not in lifted
+    assert model._build_kwargs(_offering(("Peek",), None))["tool_choice"] == peek_only
+    assert model._build_kwargs(_offering(("Nope",)))["tool_choice"] == "none"
 
 
 def test_catalog_controls_effort_and_tier_selection() -> None:

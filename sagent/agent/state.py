@@ -93,6 +93,10 @@ class ToolState:
     """Current bash working directory (mutated by ``cd``). Defaults to
     ``start_cwd`` when left empty at construction."""
 
+    project_cwd: str = ""
+    """The directory whose AGENTS.md and memory index the agent's system blocks
+    show; set when they are built. Empty before the first request."""
+
     additional_dirs: list[str] = dataclasses.field(default_factory=list)
     """Extra dirs whose ``AGENTS.md`` files are walked."""
 
@@ -678,16 +682,16 @@ class PersistableAgent(Protocol):
     def activity(self) -> _ActivityLike: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
-    def base_system_spec(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+    def system(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
+
+    @property
+    def append_system(self) -> str: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
     def compaction_state(self) -> _CompactionStateLike: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
     def cost_tracker(self) -> CostTracker: ...  # noqa: D102 -- Protocol member declaration.
-
-    @property
-    def frozen_system(self) -> bool: ...  # noqa: D102 -- Protocol member declaration.
 
     @property
     def max_budget_usd(self) -> float | None: ...  # noqa: D102 -- Protocol member declaration.

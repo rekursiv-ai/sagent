@@ -27,6 +27,7 @@ from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
     CompactStarted,
+    SystemMessage,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -102,7 +103,13 @@ def replay_messages(agent: Agent, printer: Printer) -> None:
             # content.
             if not isinstance(
                 record.event,
-                (UserMessage, AgentSendMessage, AssistantMessage, ToolResult),
+                (
+                    UserMessage,
+                    AgentSendMessage,
+                    AssistantMessage,
+                    ToolResult,
+                    SystemMessage,
+                ),
             ):
                 render_event(record.event)
             continue
@@ -161,6 +168,9 @@ def _render_entry(
         case UserMessage(text=text):
             printer.write_user_bar(text)
             return 1
+        # The harness told the model; no one typed it, so it shows nothing.
+        case SystemMessage():
+            return 0
         case AgentSendMessage(source=source, text=text):
             printer.write_agent_bar(source, text)
             return 1

@@ -63,6 +63,7 @@ from sagent.types.runtime import (
     RuntimeEvent,
     SaveSession,
     ServiceErrorSnapshot,
+    SystemMessage,
     ToolCall,
     ToolResult,
     ToolResultKind,
@@ -194,6 +195,89 @@ def test_hidden_flag_round_trips(tmp_path: Path) -> None:
     hidden = _round_trip(UserMessage(text="reminder", hidden=True), tmp_path / "b")
     assert isinstance(hidden, UserMessage)
     assert hidden.hidden is True
+
+
+def test_a_cache_point_round_trips(tmp_path: Path) -> None:
+    """A resumed request marks the caches the original did."""
+    user = _round_trip(UserMessage(text="doc", cache_point=True), tmp_path / "a")
+    assert isinstance(user, UserMessage)
+    assert user.cache_point is True
+    plain = _round_trip(UserMessage(text="plain"), tmp_path / "b")
+    assert isinstance(plain, UserMessage)
+    assert plain.cache_point is False
+
+
+def test_a_system_message_round_trips_with_its_tool_offer(tmp_path: Path) -> None:
+    """A resumed request offers the tools the original did."""
+    note = _round_trip(
+        SystemMessage(text="Tools available now: Read.", offered_tools=("Read",)),
+        tmp_path / "a",
+    )
+    assert isinstance(note, SystemMessage)
+    assert (note.text, note.offered_tools) == ("Tools available now: Read.", ("Read",))
+    plain = _round_trip(SystemMessage(text="cwd: /x"), tmp_path / "b")
+    assert isinstance(plain, SystemMessage)
+    assert plain.offered_tools is None
+
+
+def test_a_malformed_tool_offer_still_loads_its_note() -> None:
+    """The agent offers its gate again when the history holds none."""
+    entry = _entry_from_json(
+        {"type": "system_message", "text": "x", "offered_tools": [1]},
+    )
+    assert isinstance(entry, SystemMessage)
+    assert (entry.text, entry.offered_tools) == ("x", None)
+
+
+def _saved(directory: Path, *events: ModelContextEvent) -> list[TapeRecord]:
+    """Return ``events`` as one session's tape, saved to ``directory``."""
+    tape: list[TapeRecord] = [
+        ReferrableTapeEvent(ref=TapeRef(session_id="s", ordinal=i), event=event)
+        for i, event in enumerate(events)
+    ]
+    append_session(
+        directory / "session.jsonl",
+        meta=SessionMeta(session_id="s", model_id="m").serialize(),
+        tape_delta=tape,
+    )
+    return tape
+
+
+def test_a_system_message_a_compaction_kept_survives_a_reload(tmp_path: Path) -> None:
+    """The resumed context holds the reminders and the offer the live one did."""
+    note = SystemMessage(text="Working directory: /w", offered_tools=("Read",))
+    [old] = _saved(tmp_path, UserMessage(text="old"))
+    append_session(
+        tmp_path / "session.jsonl",
+        tape_delta=[
+            ContextSplice(
+                ref=TapeRef(session_id="s", ordinal=1),
+                mask=(MaskRange.between(old.ref, old.ref),),
+                insert_after=None,
+                payload=(UserMessage(text="summary"), note),
+                strategy="summary",
+            ),
+        ],
+    )
+
+    loaded = load_session(tmp_path)
+
+    assert loaded is not None
+    *_, kept = resolve_context(loaded[1]).messages
+    assert isinstance(kept, SystemMessage)
+    assert (kept.text, kept.offered_tools) == (note.text, note.offered_tools)
+
+
+def test_a_resume_mints_ids_past_its_system_messages(tmp_path: Path) -> None:
+    """An id minted twice gave two messages one Anthropic cache mark between them."""
+    user = UserMessage(text="go")
+    # As a fresh process sees it: the saved ids are past every id minted here.
+    note = SystemMessage(id=user.id + 1_000_000, text="Working directory: /w")
+    _saved(tmp_path, user, note)
+
+    assert load_session(tmp_path) is not None
+
+    assert UserMessage(text="next").id > note.id
 
 
 def test_agent_send_message_round_trip(tmp_path: Path) -> None:
@@ -2229,16 +2313,16 @@ def test_append_session_writes_persistent_agent_lifecycle(tmp_path: Path) -> Non
         "service_tier": "auto",
         "max_budget_usd": None,
         "persistent_retry": False,
-        "frozen_system": False,
+        "append_system": "",
         "timestamp": record["timestamp"],
     }
 
 
-def test_persistent_agent_record_round_trips_frozen_system(tmp_path: Path) -> None:
-    """A hot child's frozen flag must survive the parent's session.jsonl."""
+def test_persistent_agent_record_round_trips_append_system(tmp_path: Path) -> None:
+    """A child's appended instructions must survive the parent's session.jsonl."""
     session_file = tmp_path / "session.jsonl"
-    hot = PersistentAgentRecord(
-        label="hot-child",
+    child = PersistentAgentRecord(
+        label="child",
         run_id="run-1",
         session_dir=str(tmp_path / "children" / "run-1"),
         state="running",
@@ -2249,10 +2333,10 @@ def test_persistent_agent_record_round_trips_frozen_system(tmp_path: Path) -> No
         tools=("Read",),
         system="rendered parent prompt",
         notify_on_asleep=True,
-        frozen_system=True,
+        append_system="Be brief.",
     )
-    append_session(session_file, persistent_agents=[hot])
-    assert load_persistent_agents(tmp_path) == [hot]
+    append_session(session_file, persistent_agents=[child])
+    assert load_persistent_agents(tmp_path) == [child]
 
 
 def test_load_persistent_agents_returns_latest_running_records(tmp_path: Path) -> None:

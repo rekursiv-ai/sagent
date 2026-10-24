@@ -55,7 +55,7 @@ sagent --resume-all
 sagent --ephemeral
 ```
 
-Use this for prompts that should not write conversation state or auto-memory to disk. Library users can omit `session_dir` for in-memory runs and pass `include_memory=False` to `build_system_dict` when persistent memory should be disabled too.
+Use this for prompts that should not write conversation state or auto-memory to disk. Library users can omit `session_dir` for in-memory runs and pass `prompt_context=SagentContext(include_memory=False)` to `Agent` when persistent memory should be disabled too.
 
 No-session runs may still persist oversized tool results temporarily under `/tmp/sagent_results` when needed to keep model requests within context budgets.
 

@@ -1,22 +1,17 @@
 """Auto-memory: persistent project-scoped memory across sessions.
 
 - Storage: ``data_dir() / "rekursiv-ai"/sagent/projects/<cwd-slug>/memory/``
-- Entrypoint: ``MEMORY.md`` - always loaded into the system prompt
+- Entrypoint: ``MEMORY.md`` - loaded into the system prompt's project block
   (truncated to 200 lines / 25 KB)
 - Per-memory files: ``<type>_<name>.md`` with YAML frontmatter
   (``name``, ``description``, ``type`` ∈ user/feedback/project/reference)
-- Behavioral instructions baked into the system prompt teach the
-  model when to save, when NOT to save, and how to write.
 
 Two integration points:
 
-1. ``build_system_section(cwd)`` → string for the system prompt.
-2. The ``sessions.cwd_slug`` helper keys the per-project directory
-   the same way session storage does.
-
-No dedicated Memory tool - writes go through the existing
-``Write``/``Edit`` tools. The system prompt carves out the expected
-directory layout.
+1. ``build_system_section(cwd)`` → the directory and index, for the system
+   prompt.
+2. ``tools.memory.Memory`` saves and forgets memories, keeping the index in
+   step; its description teaches when to save and what not to.
 """
 
 from __future__ import annotations
@@ -101,83 +96,17 @@ def build_system_section(cwd: str | Path, *, projects_dir: Path | None = None) -
       section: Memory section string (always non-empty).
 
     """
-    # The prompt template tells the model the directory exists; create
-    # it here so a Write to ``<memory_dir>/foo.md`` succeeds without an
-    # explicit mkdir step.
+    # The directory is created here so a Read of a memory the index names never
+    # fails on a missing directory; the Memory tool writes into it.
     mdir = ensure_memory_dir(cwd, projects_dir=projects_dir)
     index = load_index(cwd, projects_dir=projects_dir)
     index_block = index.strip() if index else "(no memories yet - MEMORY.md is empty)"
-    return f"""\
-# auto memory
-
-Persistent memory lives at `{mdir}/`. The directory exists; \
-use Write directly (no mkdir needed).
-
-Build this memory over time so future sessions have full context: \
-who the user is, how they work, what to avoid or repeat, and why.
-
-Save immediately when the user asks you to remember something. \
-Remove the entry when asked to forget.
-
-## Memory types
-
-Each memory file belongs to exactly one type:
-
-- **user** -- role, goals, preferences, expertise. \
-Save when you learn something about the person.
-- **feedback** -- corrections and confirmed approaches. \
-Save when the user corrects you or validates a non-obvious method. \
-Structure: rule, then **Why:** and **How to apply:** lines.
-- **project** -- decisions, ownership, timelines, incidents \
-not derivable from code or git. Save when you learn who/what/why/when. \
-Use absolute dates. Structure: fact, then **Why:** and **How to apply:**.
-- **reference** -- pointers to external systems (issue trackers, \
-dashboards, channels). Save when you learn where information lives.
-
-## What NOT to save
-
-Do not persist anything derivable from the current project state:
-
-- Code patterns, architecture, file layout -- read the code.
-- Git history, authorship -- use `git log` / `git blame`.
-- Bug fixes, debugging recipes -- the fix is in the code.
-- Content already in AGENTS.md files.
-- Ephemeral work: in-progress state, conversation context.
-
-## Saving a memory
-
-Two steps:
-
-**1.** Write a file (e.g. `user_role.md`, `feedback_testing.md`) \
-with frontmatter:
-
-```markdown
----
-name: {{short name}}
-description: {{one-line summary for relevance matching}}
-type: {{user | feedback | project | reference}}
----
-
-{{content}}
-```
-
-**2.** Add one index line to `MEMORY.md`:
-`- [Title](file.md) -- one-line hook` (keep each under 150 chars).
-
-`MEMORY.md` is an index only. Never put memory content in it.
-
-## Accessing memories
-
-- Read memories when they seem relevant or the user references prior work.
-- You MUST read memory when the user explicitly asks you to recall.
-- If the user says to *ignore* memory, do not apply or cite it.
-- Memories go stale. Before acting on a remembered function, file, \
-or flag, verify it still exists with Read or Grep.
-
-## MEMORY.md
-
-{index_block}
-"""
+    return (
+        "# auto memory\n\n"
+        f"This project's memories live at `{mdir}/`; read one when it seems"
+        " relevant.\n\n"
+        f"## MEMORY.md\n\n{index_block}\n"
+    )
 
 
 # Returns ``(truncated_text, warning_or_none)``. Byte truncation cuts at the last

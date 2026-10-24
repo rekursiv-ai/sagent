@@ -53,6 +53,7 @@ from sagent.types.runtime import (
     ToolCall,
     ToolResult,
     UserMessage,
+    WireMessage,
     wire_role,
 )
 from sagent.types.tape import (
@@ -115,10 +116,10 @@ def _agent_send_with_tool_call(draw: DrawFn) -> AssistantMessage:
 
 
 @composite
-def _message_history(draw: DrawFn) -> list[ModelContextEvent]:
+def _message_history(draw: DrawFn) -> list[WireMessage]:
     """Random history mixing user/agent/assistant; tool_results paired by call_id."""
     n = draw(integers(min_value=0, max_value=12))
-    history: list[ModelContextEvent] = []
+    history: list[WireMessage] = []
     pending: list[str] = []  # tool_call ids awaiting results.
     for _ in range(n):
         choice = draw(sampled_from(["user", "agent", "assistant", "tool_result"]))
@@ -144,7 +145,7 @@ def _message_history(draw: DrawFn) -> list[ModelContextEvent]:
 @settings(max_examples=100, deadline=None)
 @given(_message_history())
 def test_label_agent_sends_prefixes_and_preserves_non_agent_identity(
-    history: list[ModelContextEvent],
+    history: list[WireMessage],
 ) -> None:
     """Label AgentSends and preserve every non-AgentSend object."""
     labelled = list(_label_agent_sends(history))
@@ -165,7 +166,7 @@ def test_label_agent_sends_prefixes_and_preserves_non_agent_identity(
 
 @settings(max_examples=200, deadline=None)
 @given(_message_history())
-def test_coalesce_preserves_each_source(history: list[ModelContextEvent]) -> None:
+def test_coalesce_preserves_each_source(history: list[WireMessage]) -> None:
     """Every source that appears in the input also appears in the output.
 
     Catches bug H: pre-fix, adjacent AgentSends from different sources
@@ -194,7 +195,7 @@ def test_coalesce_preserves_each_source(history: list[ModelContextEvent]) -> Non
 @settings(max_examples=200, deadline=None)
 @given(_message_history())
 def test_coalesce_preserves_total_text_length(
-    history: list[ModelContextEvent],
+    history: list[WireMessage],
 ) -> None:
     r"""User-side text content is preserved (modulo ``\n\n`` join separators)."""
     coalesced = _coalesce_adjacent_users(history)
@@ -215,7 +216,7 @@ def test_coalesce_preserves_total_text_length(
 @settings(max_examples=100, deadline=None)
 @given(_message_history())
 def test_coalesce_does_not_reorder_non_user_entries(
-    history: list[ModelContextEvent],
+    history: list[WireMessage],
 ) -> None:
     """AssistantMessages and ToolResults stay in their original order."""
     coalesced = _coalesce_adjacent_users(history)
@@ -235,7 +236,7 @@ def test_coalesce_does_not_reorder_non_user_entries(
 
 @settings(max_examples=100, deadline=None)
 @given(_message_history())
-def test_materialize_is_idempotent(history: list[ModelContextEvent]) -> None:
+def test_materialize_is_idempotent(history: list[WireMessage]) -> None:
     """Materializing twice yields the same result as once.
 
     Catches the audit's bug6 hardening note: ``_label_agent_sends``
@@ -254,7 +255,7 @@ def test_materialize_is_idempotent(history: list[ModelContextEvent]) -> None:
 @settings(max_examples=100, deadline=None)
 @given(_message_history())
 def test_materialize_preserves_assistant_count_when_unbudgeted(
-    history: list[ModelContextEvent],
+    history: list[WireMessage],
 ) -> None:
     """Without a tool-result budget, materialization doesn't drop assistants."""
     materialized = materialize_messages(history)
@@ -272,7 +273,7 @@ def test_materialize_preserves_assistant_count_when_unbudgeted(
 @settings(max_examples=200, deadline=None)
 @given(_message_history())
 def test_last_assistant_result_returns_string(
-    history: list[ModelContextEvent],
+    history: list[WireMessage],
 ) -> None:
     """``_last_assistant_result`` always returns a ``ToolResult`` with a
     string ``content`` field; no crashes on any history shape.
@@ -284,7 +285,7 @@ def test_last_assistant_result_returns_string(
 @settings(max_examples=100, deadline=None)
 @given(_message_history())
 def test_last_assistant_result_returns_empty_when_no_assistant(
-    history: list[ModelContextEvent],
+    history: list[WireMessage],
 ) -> None:
     """When history has no ``AssistantMessage``, the result content is ``""``."""
     if not any(isinstance(m, AssistantMessage) for m in history):
@@ -364,10 +365,10 @@ def _tool_pairing_violation(entries: Sequence[ModelContextEvent]) -> str | None:
 # produces. Tool results, orphans, and unpaired calls are all still emitted (the rescue
 # path's job) -- only id-collision is excluded.
 @composite
-def _unique_id_history(draw: DrawFn) -> list[ModelContextEvent]:
+def _unique_id_history(draw: DrawFn) -> list[WireMessage]:
     """Random history with GLOBALLY-UNIQUE tool-call ids, like real tape."""
     counter = 0
-    history: list[ModelContextEvent] = []
+    history: list[WireMessage] = []
     pending: list[str] = []
     n = draw(integers(min_value=0, max_value=12))
     for _ in range(n):
@@ -400,10 +401,10 @@ def _unique_id_history(draw: DrawFn) -> list[ModelContextEvent]:
 # ``_sanitize_for_send`` on this input should produce fully
 # :func:`validate_context`-clean output, not merely pairing-clean output.
 @composite
-def _alternating_history(draw: DrawFn) -> list[ModelContextEvent]:
+def _alternating_history(draw: DrawFn) -> list[WireMessage]:
     """Random history that never emits two consecutive same-wire-role turns."""
     n = draw(integers(min_value=0, max_value=10))
-    history: list[ModelContextEvent] = []
+    history: list[WireMessage] = []
     prev_role: str | None = None
     counter = 0
     for _ in range(n):
@@ -441,7 +442,7 @@ def _alternating_history(draw: DrawFn) -> list[ModelContextEvent]:
 @settings(max_examples=300, deadline=None)
 @given(_unique_id_history())
 def test_sanitize_output_satisfies_tool_pairing(
-    history: list[ModelContextEvent],
+    history: list[WireMessage],
 ) -> None:
     """``_sanitize_for_send`` output is tool-pairing-correct for ANY input.
 
@@ -460,7 +461,7 @@ def test_sanitize_output_satisfies_tool_pairing(
 @settings(max_examples=300, deadline=None)
 @given(_message_history())
 def test_splice_safe_repair_output_always_constructs(
-    history: list[ModelContextEvent],
+    history: list[WireMessage],
 ) -> None:
     """``splice_safe_repair`` output is always a valid ``ContextSplice`` payload.
 
@@ -482,7 +483,7 @@ def test_splice_safe_repair_output_always_constructs(
 
 @settings(max_examples=300, deadline=None)
 @given(_unique_id_history())
-def test_sanitize_is_idempotent(history: list[ModelContextEvent]) -> None:
+def test_sanitize_is_idempotent(history: list[WireMessage]) -> None:
     """Sanitizing twice equals sanitizing once.
 
     A repair pass that is not a fixed point would keep mutating already-valid
@@ -497,7 +498,7 @@ def test_sanitize_is_idempotent(history: list[ModelContextEvent]) -> None:
 @settings(max_examples=300, deadline=None)
 @given(_unique_id_history())
 def test_sanitize_never_invents_call_ids(
-    history: list[ModelContextEvent],
+    history: list[WireMessage],
 ) -> None:
     """Every ToolResult in the output answers a call id present in the input.
 
@@ -519,7 +520,7 @@ def test_sanitize_never_invents_call_ids(
 @settings(max_examples=300, deadline=None)
 @given(_alternating_history())
 def test_sanitize_of_alternating_history_fully_validates(
-    history: list[ModelContextEvent],
+    history: list[WireMessage],
 ) -> None:
     """On wire-alternation-respecting input, output passes ``validate_context``.
 

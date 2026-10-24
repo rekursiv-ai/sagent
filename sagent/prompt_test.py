@@ -2,20 +2,28 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+import datetime
+import os
+import shutil
 import subprocess
 
 import pytest
 
 from sagent.prompt import (
-    _is_git_repo,
-    _is_git_worktree,
-    _load_static,
+    SagentContext,
+    _git_state,
     _shell_name,
-    build_system,
-    build_system_dict,
-    environment,
+    project_context,
+    render_environment,
+    static_prompt,
 )
 from sagent.types.capability import ModelCapability
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _model(model_id: str) -> ModelCapability:
@@ -26,15 +34,15 @@ def _model(model_id: str) -> ModelCapability:
 def stub_recipe_and_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     """Replace recipe + AGENTS.md + memory hooks with deterministic stubs.
 
-    Without this, ``prompt.build_system`` reads filesystem assets and
-    walks the cwd's AGENTS.md tree -- both flaky and slow inside a test
-    harness.
+    Without this, the sections read filesystem assets and walk the cwd's
+    AGENTS.md tree -- both flaky and slow inside a test harness.
     """
     sections: dict[str, str] = {
         "base": "BASE\n",
         "env": (
             "cwd={cwd} git={is_git} plat={platform} shell={shell_line}"
             " os={os_version} id={model_id}{knowledge_cutoff_line}{worktree_line}"
+            " now={now}"
         ),
     }
 
@@ -59,9 +67,9 @@ def stub_recipe_and_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_memory(*_args: object, **_kwargs: object) -> str:
         return "MEMORY_SECTION"
 
-    def not_git(cwd: str) -> bool:
+    def not_git(cwd: str) -> tuple[bool, bool]:
         del cwd
-        return False
+        return False, False
 
     monkeypatch.setattr("sagent.prompt.recipe_dict", fake_recipe_dict)
     monkeypatch.setattr("sagent.prompt.recipe_list", fake_recipe_list)
@@ -74,41 +82,44 @@ def stub_recipe_and_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
         "sagent.prompt.memory.build_system_section",
         fake_memory,
     )
-    monkeypatch.setattr("sagent.prompt._is_git_repo", not_git)
-    monkeypatch.setattr("sagent.prompt._is_git_worktree", not_git)
+    monkeypatch.setattr("sagent.prompt._git_state", not_git)
 
 
-def test_build_system_returns_concatenated_string() -> None:
-    out = build_system(_model("sonnet-4.6"), custom="custom note")
-    assert "static body" in out
-    assert "AGENTS_SECTION" in out
-    assert "MEMORY_SECTION" in out
-    assert "custom note" in out
-    # Section joiner.
-    assert "\n\n" in out
+def test_static_prompt_is_the_recipe_base() -> None:
+    assert static_prompt() == "static body {keep_recent}"
 
 
-def test_build_system_omits_memory_when_disabled() -> None:
-    out = build_system(_model("sonnet-4.6"), include_memory=False)
-    assert "MEMORY_SECTION" not in out
+def test_project_context_joins_agents_md_then_memory() -> None:
+    assert project_context("/p") == "AGENTS_SECTION\n\nMEMORY_SECTION"
 
 
-def test_build_system_dict_has_expected_keys() -> None:
-    d = build_system_dict(_model("sonnet-4.6"), custom="hi")
-    assert "static" in d
-    assert "environment" in d
-    assert "agents_md" in d
-    assert "memory" in d
-    assert "user_instructions" in d
+def test_project_context_leaves_out_what_is_not_asked_for() -> None:
+    assert project_context("/p", include_memory=False) == "AGENTS_SECTION"
+    assert project_context("/p", include_agents_md=False) == "MEMORY_SECTION"
 
 
-def test_build_system_dict_no_user_instructions_when_custom_empty() -> None:
-    d = build_system_dict(_model("sonnet-4.6"), custom="")
-    assert "user_instructions" not in d
+def test_sagent_context_renders_only_the_sections_it_includes() -> None:
+    context = SagentContext(include_agents_md=False, include_environment=False)
+    assert context.project("/p", additional_dirs=()) == "MEMORY_SECTION"
+    assert context.environment(_model("m"), cwd="/p", context="") == ""
+    assert "cwd=/p" in SagentContext().environment(_model("m"), cwd="/p", context="")
+
+
+def test_environment_names_the_hour_so_it_changes_once_an_hour() -> None:
+    at = datetime.datetime(2026, 10, 23, 14, 37, tzinfo=datetime.UTC)
+    assert "now=Fri, 2026-10-23 14:00 UTC" in render_environment(
+        _model("m"),
+        cwd="/p",
+        now=at,
+    )
 
 
 def test_environment_section_includes_the_model_id_verbatim() -> None:
-    assert "opus-4.8+1m" in environment(_model("opus-4.8"), context="+1m")
+    assert "opus-4.8+1m" in render_environment(
+        _model("opus-4.8"),
+        cwd="/p",
+        context="+1m",
+    )
 
 
 def test_environment_reads_knowledge_cutoff_from_the_model_spec() -> None:
@@ -116,11 +127,11 @@ def test_environment_reads_knowledge_cutoff_from_the_model_spec() -> None:
         model_id="opus-5.5",
         knowledge_cutoff="June 2026",
     )
-    assert "June 2026" in environment(model)
+    assert "June 2026" in render_environment(model, cwd="/p")
 
 
 def test_environment_omits_an_unspecified_knowledge_cutoff() -> None:
-    assert "Knowledge cutoff" not in environment(_model("local"))
+    assert "Knowledge cutoff" not in render_environment(_model("local"), cwd="/p")
 
 
 def test_shell_name_recognizes_bash() -> None:
@@ -128,80 +139,84 @@ def test_shell_name_recognizes_bash() -> None:
     assert _shell_name("/usr/local/bin/fish") == "/usr/local/bin/fish"
 
 
-def test_is_git_repo_true_on_zero_return(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-
-    monkeypatch.setattr("sagent.prompt.subprocess.run", fake_run)
-    assert _is_git_repo("/tmp/has-git")  # noqa: S108 -- Cwd token handed to a stubbed `subprocess.run`, never opened.
-
-
-def test_is_git_repo_false_on_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
-        raise OSError("not found")
-
-    monkeypatch.setattr("sagent.prompt.subprocess.run", fake_run)
-    assert not _is_git_repo("/tmp/no-git")  # noqa: S108 -- Cwd token handed to a stubbed `subprocess.run`, never opened.
+def _repo(root: Path, gitdir: str | None = None) -> Path:
+    """Make ``root`` a checkout, or with ``gitdir`` one whose ``.git`` file names it."""
+    root.mkdir(parents=True)
+    if gitdir is None:
+        (root / ".git").mkdir()
+        (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    else:
+        (root / gitdir).mkdir(parents=True)
+        (root / gitdir / "HEAD").write_text("ref: refs/heads/main\n")
+        (root / ".git").write_text(f"gitdir: {gitdir}\n")
+    (root / "src").mkdir()
+    return root / "src"
 
 
-def test_is_git_repo_reflects_runtime_change(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Cache used to freeze the first answer; ``git init`` must flip the result."""
-    returncode = [128]
+@pytest.mark.parametrize(
+    ("gitdir", "state"),
+    [
+        (None, (True, False)),
+        ("main/.git/worktrees/wt", (True, True)),
+        ("main/.git/modules/sub", (True, False)),
+    ],
+)
+def test_git_state_reads_the_nearest_dot_git(
+    tmp_path: Path,
+    gitdir: str | None,
+    state: tuple[bool, bool],
+) -> None:
+    """A linked worktree's ``.git`` names a gitdir under ``worktrees``; a submodule's does not."""
+    assert _git_state(str(_repo(tmp_path / "r", gitdir))) == state
 
-    def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            args=[],
-            returncode=returncode[0],
-            stdout="",
-            stderr="",
-        )
 
-    monkeypatch.setattr("sagent.prompt.subprocess.run", fake_run)
-    assert not _is_git_repo("/tmp/flips")  # noqa: S108 -- Cwd token handed to a stubbed `subprocess.run`, never opened.
-    returncode[0] = 0
-    assert _is_git_repo("/tmp/flips")  # noqa: S108 -- Cwd token handed to a stubbed `subprocess.run`, never opened.
+def test_git_state_passes_over_a_dot_git_that_is_no_repository(tmp_path: Path) -> None:
+    """Git looks past an empty ``.git`` directory, as one left in ``/tmp``."""
+    inner = _repo(tmp_path / "r", "main/.git/worktrees/wt") / "a"
+    (inner / ".git").mkdir(parents=True)
+    assert _git_state(str(inner)) == (True, True)
 
 
-def test_is_git_worktree_false_when_command_fails(
+def test_git_state_agrees_with_git(tmp_path: Path) -> None:
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("needs git")
+    env = {
+        "GIT_CONFIG_GLOBAL": str(tmp_path / "gitconfig"),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "PATH": os.environ.get("PATH", ""),
+    }
+    who = ["-c", "user.name=t", "-c", "user.email=t@t"]
+    for args in (
+        ["init", "-q", "main"],
+        ["-C", "main", *who, "commit", "-q", "--allow-empty", "-m", "c"],
+        ["-C", "main", "worktree", "add", "-q", "../wt"],
+    ):
+        _ = subprocess.run([git, *args], cwd=tmp_path, env=env, check=True)  # noqa: S603 -- fixed git arguments.
+    (tmp_path / "main" / "sub").mkdir()
+    for path, state in (
+        (tmp_path / "main" / "sub", (True, False)),
+        (tmp_path / "wt", (True, True)),
+    ):
+        assert _git_state(str(path)) == state
+
+
+def test_git_state_runs_no_process(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            args=[],
-            returncode=128,
-            stdout="",
-            stderr="",
-        )
+    """It runs on the event loop every model round; a hung ``git`` stalled the agent."""
 
-    monkeypatch.setattr("sagent.prompt.subprocess.run", fake_run)
-    assert not _is_git_worktree("/tmp/fail-worktree")  # noqa: S108 -- Cwd token handed to a stubbed `subprocess.run`, never opened.
+    def refuse(*_args: object, **_kw: object) -> None:
+        raise AssertionError("spawned a process")
+
+    monkeypatch.setattr("subprocess.run", refuse)
+    monkeypatch.setattr("subprocess.Popen", refuse)
+    assert _git_state(str(_repo(tmp_path / "r"))) == (True, False)
 
 
-def test_is_git_worktree_false_on_oserror(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
-        raise OSError("missing git")
-
-    monkeypatch.setattr("sagent.prompt.subprocess.run", fake_run)
-    assert not _is_git_worktree("/tmp/oserror")  # noqa: S108 -- Cwd token handed to a stubbed `subprocess.run`, never opened.
-
-
-def test_is_git_worktree_false_on_unexpected_output(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_run(*_args: object, **_kw: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="only-one-line",
-            stderr="",
-        )
-
-    monkeypatch.setattr("sagent.prompt.subprocess.run", fake_run)
-    assert not _is_git_worktree("/tmp/single-line")  # noqa: S108 -- Cwd token handed to a stubbed `subprocess.run`, never opened.
-
-
-def test_load_static_reflects_recipe_change(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ``set_recipe`` swap must be visible on the next ``_load_static`` call."""
+def test_static_prompt_reflects_recipe_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``set_recipe`` swap must be visible on the next ``static_prompt`` call."""
     current = {"base": "A\n"}
 
     def fake_recipe_dict(key: str) -> dict[str, str]:
@@ -212,22 +227,9 @@ def test_load_static_reflects_recipe_change(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr("sagent.prompt.recipe_dict", fake_recipe_dict)
     monkeypatch.setattr("sagent.prompt.read_asset", fake_read_asset)
-    assert _load_static() == "BODY-A"
+    assert static_prompt() == "BODY-A"
     current["base"] = "B\n"
-    assert _load_static() == "BODY-B"
-
-
-def test_build_system_dict_environment_is_lazy() -> None:
-    d = build_system_dict(_model("opus-4.7"))
-    env_section = d["environment"]
-    # Environment is a callable so it re-evaluates per call.
-    assert "opus-4.7" in env_section()
-
-
-def test_build_system_dict_all_values_callable() -> None:
-    """All sections expose the same shape (callable) so callers don't branch."""
-    d = build_system_dict(_model("opus-4.7"), custom="ci")
-    assert all(callable(v) for v in d.values())
+    assert static_prompt() == "BODY-B"
 
 
 @pytest.mark.parametrize(
@@ -255,8 +257,8 @@ def test_include_memory_vs_recipe_sections(
         return sections or []
 
     monkeypatch.setattr("sagent.prompt.recipe_list", fake_recipe_list)
-    d = build_system_dict(_model("opus-4.7"), include_memory=include_memory)
-    assert ("memory" in d) is expect_memory
+    context = project_context("/p", include_memory=include_memory)
+    assert ("MEMORY_SECTION" in context) is expect_memory
 
 
 if __name__ == "__main__":

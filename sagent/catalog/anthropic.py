@@ -16,9 +16,7 @@ from sagent.types.cost import TokenCount
 
 
 if TYPE_CHECKING:
-    from collections.abc import (
-        Mapping,
-    )
+    from collections.abc import Mapping
 
 
 __all__ = [

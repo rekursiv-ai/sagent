@@ -46,6 +46,7 @@ from sagent.tools.glob_tool import Glob
 from sagent.tools.grep import Grep
 from sagent.tools.linear import Linear
 from sagent.tools.list import List
+from sagent.tools.memory import Memory
 from sagent.tools.paper_author import PaperAuthor
 from sagent.tools.paper_details import PaperDetails
 from sagent.tools.paper_fetch import PaperFetch
@@ -71,6 +72,7 @@ __all__ = (
     "Grep",
     "Linear",
     "List",
+    "Memory",
     "PaperAuthor",
     "PaperDetails",
     "PaperFetch",

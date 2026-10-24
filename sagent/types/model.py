@@ -14,7 +14,8 @@ from sagent.types.cost import TokenCost, TokenCount
 from sagent.types.exceptions import UserFacingError
 from sagent.types.runtime import (
     AssistantMessage,
-    ModelContextEvent,
+    UserMessage,
+    WireMessage,
 )
 from sagent.types.tools import Tool
 
@@ -91,11 +92,16 @@ class ModelRequest:
     where its capability can validate it.
     """
 
-    messages: list[ModelContextEvent]
-    """Conversation history sent to the model."""
+    messages: list[WireMessage]
+    """Conversation history sent to the model, system messages folded in: see
+    :func:`request_materialization.materialize_messages`."""
 
-    system: str = ""
-    """System prompt; empty omits it from the request."""
+    system: tuple[str, ...] = ()
+    """System prompt blocks, most stable first; empty omits it from the request.
+
+    A provider that caches at marked blocks marks the end of each, so a
+    request that shares the leading blocks with another reuses them.
+    """
 
     tools: Sequence[Tool] = ()
     """Tools advertised to the model; empty sends no tool schema."""
@@ -117,6 +123,33 @@ class ModelRequest:
     For providers that route their prefix cache by key (OpenAI). Providers
     that cache at a marked message ignore it and read ``cache_point``.
     """
+
+    @property
+    def system_text(self) -> str:
+        """The system blocks as one prompt, for providers that take a single string."""
+        return "\n\n".join(block for block in self.system if block)
+
+    # Read off the messages, the one record of the gate: a provider that withdraws
+    # tools at the offering turn and one that names them per request cannot disagree.
+    @property
+    def allowed_tools(self) -> frozenset[str] | None:
+        """Names of the ``tools`` the model may call now; ``None`` allows all.
+
+        Every schema still ships, so the request's opening bytes stay the same
+        while the callable set changes. The gate is the latest offer a message
+        carries; an offer naming every tool, or no offer at all, allows all.
+        """
+        offer = next(
+            (
+                m.offered_tools
+                for m in reversed(self.messages)
+                if isinstance(m, UserMessage) and m.offered_tools is not None
+            ),
+            None,
+        )
+        if offer is None or {t.name for t in self.tools} <= set(offer):
+            return None
+        return frozenset(offer)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

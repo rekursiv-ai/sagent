@@ -42,10 +42,10 @@ from sagent.tools.agent_spawn import (
     _pick_field,
 )
 from sagent.tools.background_task import BackgroundTask
+from sagent.tools.core import tool
 from sagent.types.capability import ModelCapability, ThinkingEffort
 from sagent.types.cost import TokenCost
 from sagent.types.model import (
-    Model,
     ModelRecipe,
     ModelRequest,
     ModelResponse,
@@ -62,6 +62,7 @@ from sagent.types.runtime import (
     NoticeMessage,
     RuntimeEvent,
     ServiceErrorSnapshot,
+    SystemMessage,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -70,11 +71,10 @@ from sagent.types.tools import ToolResultPolicy
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Mapping
+    from collections.abc import Callable, Generator, Sequence
     from pathlib import Path
 
     from sagent.types.providers import Provider
-    from sagent.types.tools import Tool
 
 
 _AGENT_SPAWN_LOGGER = agent_spawn.__name__
@@ -115,6 +115,23 @@ class StubProviderModel(MockModelCaps):
             else AssistantMessage(text="ok")
         )
         return ModelResponse(message=msg)
+
+
+async def _first_turn_text(child: Agent) -> str:
+    """Wait for ``child`` to answer its first turn; return what it was told with it."""
+    answered = asyncio.Event()
+
+    def check(event: RuntimeEvent) -> None:
+        del event
+        if any(isinstance(e, AssistantMessage) for e in child.history):
+            answered.set()
+
+    child.runtime.observers.append(check)
+    check(AgentIdle())
+    await asyncio.wait_for(answered.wait(), timeout=2.0)
+    return "\n".join(
+        e.text for e in child.history if isinstance(e, (UserMessage, SystemMessage))
+    )
 
 
 def _make_parent(model: StubProviderModel | None = None) -> Agent:
@@ -252,20 +269,20 @@ def test_summary_short_and_long() -> None:
     assert t.summary({}) == "AgentSpawn"
 
 
-def test_prompt_no_cap() -> None:
+def test_reminder_no_cap() -> None:
     t = AgentSpawn()
     token = max_depth_var.set(None)
     try:
-        assert t.prompt() == ""
+        assert t.reminder() == ""
     finally:
         max_depth_var.reset(token)
 
 
-def test_prompt_with_remaining_budget() -> None:
+def test_reminder_with_remaining_budget() -> None:
     t = AgentSpawn()
     token = max_depth_var.set(3)
     try:
-        p = t.prompt()
+        p = t.reminder()
     finally:
         max_depth_var.reset(token)
     assert "depth 0/3" in p
@@ -273,14 +290,32 @@ def test_prompt_with_remaining_budget() -> None:
     assert "3 generations" in p
 
 
-def test_prompt_leaf_at_cap() -> None:
+def test_reminder_leaf_at_cap() -> None:
     t = AgentSpawn()
     token = max_depth_var.set(0)
     try:
-        p = t.prompt()
+        p = t.reminder()
     finally:
         max_depth_var.reset(token)
-    assert "leaf agent" in p
+    assert p == (
+        "Spawn budget: depth 0/0 -- you are a leaf agent. "
+        "Do not call AgentSpawn; it will fail. Do the work directly."
+    )
+
+
+@pytest.mark.parametrize(
+    ("cap", "expected"),
+    [
+        (1, "Spawn budget: depth 0/1 -- 1 generation of sub-spawning available."),
+        (2, "Spawn budget: depth 0/2 -- 2 generations of sub-spawning available."),
+    ],
+)
+def test_reminder_counts_generations_left(cap: int, expected: str) -> None:
+    token = max_depth_var.set(cap)
+    try:
+        assert AgentSpawn().reminder() == expected
+    finally:
+        max_depth_var.reset(token)
 
 
 @contextmanager
@@ -562,6 +597,30 @@ def test_resolve_tools_auto_bundles_background_task_with_agent_spawn() -> None:
     assert {t.name for t in out} == {"AgentSpawn", "BackgroundTask"}
 
 
+def _shell(command: str) -> str:
+    """Run a command."""
+    return command
+
+
+def test_a_child_gets_none_of_the_tools_its_parents_gate_withholds() -> None:
+    """A child the model spawns cannot do what the model itself was refused."""
+    spawn = AgentSpawn()
+    parent = Agent(
+        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        tools=[spawn, tool(_shell, name="Shell")],
+    )
+    parent.tool_gate = frozenset({"AgentSpawn"})
+    parent.retell_context()
+
+    inherited = spawn._resolve_tools(None, parent)
+    named = spawn._resolve_tools(["Shell"], parent)
+
+    assert isinstance(inherited, list)
+    assert "Shell" not in {t.name for t in inherited}
+    assert isinstance(named, ToolResult)
+    assert named.is_error
+
+
 def test_resolve_tools_no_bundle_when_agent_spawn_absent() -> None:
     """Without AgentSpawn, no need to bundle BackgroundTask."""
     spawn = AgentSpawn()
@@ -598,50 +657,34 @@ def test_resolve_tools_bundle_when_parent_lacks_background_task() -> None:
     assert {t.name for t in out} == {"AgentSpawn", "BackgroundTask"}
 
 
-def test_build_child_hot_freezes_system_to_parent_snapshot() -> None:
-    """``hot=True`` yields a child whose rendered prompt is byte-identical to
-    the parent's -- the fix for #361.
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Context:
+    """A prompt context whose project block names the directory."""
 
-    Deliberately does NOT skip ``BackgroundTask`` auto-bundling here: a hot
-    child still gets it (same as cold), because ``frozen_system`` short-
-    circuits ``_build_system`` before it ever looks at the child's own tool
-    list (see ``Agent._build_system``). Bundling costs nothing on the cache
-    side and keeps the cancel-capability guarantee intact for a hot child
-    that itself has ``AgentSpawn``.
-    """
+    def project(self, cwd: str, *, additional_dirs: Sequence[str]) -> str:
+        del additional_dirs
+        return f"project at {cwd}"
+
+    def environment(
+        self,
+        capability: ModelCapability,
+        *,
+        cwd: str,
+        context: str,
+    ) -> str:
+        del capability, cwd, context
+        return ""
+
+
+def test_a_child_with_its_parents_tools_sends_its_parents_system_blocks() -> None:
+    """Identical blocks are what let a child read its parent's cached prefix."""
     spawn = AgentSpawn()
     parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
+        model=StubProviderModel(),
         system="You are the root agent.",
-        tools=[spawn],
-    )
-    child_tools = spawn._resolve_tools(None, parent)
-    assert isinstance(child_tools, list)
-    assert {t.name for t in child_tools} == {"AgentSpawn", "BackgroundTask"}
-    child = spawn._build_child(
-        system=None,
-        child_model=StubProviderModel(),
-        child_spec=None,
-        child_tools=child_tools,
-        max_rounds=None,
-        model_options={},
-        parent_agent=parent,
-        hot=True,
-    )
-    assert child.system == parent.system
-
-
-def test_build_child_cold_diverges_from_parent_via_bundled_tool() -> None:
-    """Regression pin for the DEFAULT (``hot=False``) path: a cold child still
-    gets the auto-bundled ``BackgroundTask``, so it diverges from the
-    parent's prompt right after the shared base -- the #361 failure mode,
-    kept intentionally on cold spawns for backward compatibility.
-    """
-    spawn = AgentSpawn()
-    parent = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="root")]),
-        system="You are the root agent.",
-        tools=[spawn],
+        append_system="Be brief.",
+        prompt_context=_Context(),
+        tools=[spawn, BackgroundTask()],
     )
     child_tools = spawn._resolve_tools(None, parent)
     assert isinstance(child_tools, list)
@@ -653,10 +696,9 @@ def test_build_child_cold_diverges_from_parent_via_bundled_tool() -> None:
         max_rounds=None,
         model_options={},
         parent_agent=parent,
-        hot=False,
     )
-    assert child.system != parent.system
-    assert child.system.startswith(parent.system)
+    assert child.system_blocks() == parent.system_blocks()
+    assert child.system_blocks()[-1].startswith("project at")
 
 
 def test_build_child_starts_where_the_parents_shell_is() -> None:
@@ -706,81 +748,6 @@ def test_a_child_inherits_the_factory_compactor_then_the_parents_then_none() -> 
     assert AgentSpawn(compactor=factory)._inherit_compactor(parent) is factory
     assert AgentSpawn()._inherit_compactor(parent) is inherited
     assert AgentSpawn()._inherit_compactor(None) is None
-
-
-def test_build_child_hot_materializes_callable_factory_system_once() -> None:
-    """Hot mode commits a callable factory ``system`` to ONE evaluation.
-
-    Re-invoking it per request (the normal, live behavior) would reopen
-    the exact drift hot mode exists to close -- e.g. a factory reading
-    mutable cwd/env state would render differently each time.
-    """
-    calls = 0
-
-    def factory() -> str:
-        nonlocal calls
-        calls += 1
-        return f"call-{calls}"
-
-    spawn = AgentSpawn(system=factory)
-    parent = _make_parent()
-    child = spawn._build_child(
-        system=None,
-        child_model=StubProviderModel(),
-        child_spec=None,
-        child_tools=[],
-        max_rounds=None,
-        model_options={},
-        parent_agent=parent,
-        hot=True,
-    )
-    assert calls == 1
-    assert child.system == "call-1"
-    assert child.system_prompt() == "call-1"
-    assert calls == 1
-
-
-@pytest.mark.asyncio
-async def test_run_threads_hot_flag_into_build_child() -> None:
-    """The ``hot`` directive field parses and reaches ``_build_child``."""
-    parent = _make_parent()
-    original = AgentSpawn._build_child
-    captured: dict[str, object] = {}
-
-    def spy(
-        self: AgentSpawn,
-        *,
-        system: str | None,
-        child_model: Model,
-        child_spec: ModelRecipe | None,
-        owned_provider: Provider | None = None,
-        child_tools: list[Tool],
-        max_rounds: int | None,
-        model_options: Mapping[str, object],
-        parent_agent: Agent | None,
-        hot: bool = False,
-    ) -> Agent:
-        captured["hot"] = hot
-        return original(
-            self,
-            system=system,
-            child_model=child_model,
-            child_spec=child_spec,
-            owned_provider=owned_provider,
-            child_tools=child_tools,
-            max_rounds=max_rounds,
-            model_options=model_options,
-            parent_agent=parent_agent,
-            hot=hot,
-        )
-
-    with (
-        _parent_context(parent),
-        patch.object(AgentSpawn, "_build_child", spy),
-    ):
-        result = await AgentSpawn().run({"prompt": "p", "hot": True})
-    assert captured.get("hot") is True
-    assert not result.is_error
 
 
 def test_resolve_system_llm_wins() -> None:
@@ -1839,7 +1806,8 @@ async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -
         assert record["account"] == "default"
         assert record["model_id"] == "gpt-5.5"
         assert record["tools"] == []
-        assert record["system"] == child.base_system_spec
+        assert record["system"] == child.system
+        assert record["append_system"] == child.append_system
         assert record["notify_on_asleep"] is False
         assert record["session_dir"] == str(child.session_dir or "")
     finally:
@@ -1906,49 +1874,6 @@ async def test_persistent_spawn_model_error_reaches_parent_inbox() -> None:
         )
 
         child.shutdown(force=True)
-        try:
-            await asyncio.wait_for(task, timeout=2.0)
-        except (TimeoutError, Exception):  # noqa: BLE001 -- Tear-down must swallow whatever the child task raised; the assertions above are the verdict.
-            _ = task.cancel()
-
-
-@pytest.mark.asyncio
-async def test_spawn_serviced_hot_child_keeps_frozen_system_after_ipc_augment() -> None:
-    """Persistent spawn (no ``session_root_dir``) mutates ``_system_spec``
-    directly to add the serviced-agent IPC rule. A hot child's frozen
-    prompt must end up as parent-prefix + IPC rule, not silently un-frozen
-    or dropped -- this path is separate from ``_build_child`` and wasn't
-    exercised by the hot/cold tests there.
-    """
-    parent = _make_parent()
-    child = Agent(
-        model=StubProviderModel(responses=[AssistantMessage(text="done")]),
-        name="child",
-        system="You are the root agent.",
-        tools=[],
-        frozen_system=True,
-    )
-    t = AgentSpawn()
-    with _parent_context(parent, label="Root"):
-        result = t._spawn_serviced(
-            child,
-            "hot-persist-1",
-            "do work",
-            notify_on_asleep=False,
-            **_ROOT_SCOPE,
-        )
-    assert not result.is_error
-    assert child._frozen_system is True
-    assert child.system_prompt() == (
-        "You are the root agent.\n\n"
-        "You are a persistent agent whose output is only known to your"
-        " creator via AgentSend(to='Root', ...). Any other output is"
-        " invisible to the parent and unless you AgentSend them, they will"
-        " be stuck indefinitely."
-    )
-    task = _persistent_tasks.get("hot-persist-1")
-    child.shutdown(force=True)
-    if task is not None:
         try:
             await asyncio.wait_for(task, timeout=2.0)
         except (TimeoutError, Exception):  # noqa: BLE001 -- Tear-down must swallow whatever the child task raised; the assertions above are the verdict.
@@ -2057,10 +1982,10 @@ async def test_persistent_spawn_notify_on_asleep_false_stays_silent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_persistent_spawn_augments_child_system_prompt() -> None:
-    """Persistent children get an IPC rule appended to their system prompt
-    so the child's LLM knows raw assistant text is invisible to the parent
-    and that ``AgentSend(to=<parent>)`` is the only reliable reply path.
+async def test_persistent_spawn_tells_the_child_its_reply_path() -> None:
+    """Persistent children are told, with their first turn, that raw assistant
+    text is invisible to the parent and that ``AgentSend(to=<parent>)`` is the
+    only reliable reply path. Their system prompt stays the shared one.
     """
     parent = _make_parent()
     child = Agent(
@@ -2076,11 +2001,14 @@ async def test_persistent_spawn_augments_child_system_prompt() -> None:
         task = _persistent_tasks.get("augmented-child")
         assert task is not None
 
-        prompt = child.system
-        assert "base system prompt" in prompt
-        assert "persistent agent" in prompt
-        assert "AgentSend(to='parent-label'" in prompt
-        assert "invisible" in prompt
+        assert child.system_blocks() == ("base system prompt",)
+        # A standing reminder, so a compaction or ``/clear`` that drops the
+        # turn it rode does not leave the child replying where no one reads.
+        assert "AgentSend(to='parent-label'" in child.reminders["persistent"]
+        told = await _first_turn_text(child)
+        assert "do work" in told
+        assert "AgentSend(to='parent-label'" in told
+        assert "invisible" in told
 
         child.shutdown(force=True)
         try:
@@ -2314,7 +2242,8 @@ async def test_resumed_serviced_child_shares_spawn_lifecycle(tmp_path: Path) -> 
     assert agent_registry["resumed"] is child
     assert child.is_serviced
     assert child.is_subagent
-    assert "AgentSend(to='boss'" in child.system
+    child.inbox.push_back(UserMessage(text="next"))
+    assert "AgentSend(to='boss'" in await _first_turn_text(child)
     job = parent.background["persistent:resumed"]
     assert job.persistent_run_id == "run-7"
     child.shutdown(force=True)
@@ -2348,15 +2277,15 @@ def test_resume_serviced_child_rejects_taken_label() -> None:
 
 @pytest.mark.parametrize(("depth", "cap"), [(0, 0), (2, 2), (3, 2)])
 @pytest.mark.asyncio
-async def test_prompt_and_run_agree_on_leaf(depth: int, cap: int) -> None:
-    """An agent ``prompt()`` calls a leaf is refused by ``run()``."""
+async def test_reminder_and_run_agree_on_leaf(depth: int, cap: int) -> None:
+    """An agent ``reminder()`` calls a leaf is refused by ``run()``."""
     parent = _make_parent()
     parent.tool_state.depth = depth
     token = max_depth_var.set(cap)
     try:
         with _parent_context(parent):
             t = AgentSpawn()
-            text = t.prompt()
+            text = t.reminder()
             result = await t.run({"prompt": "task"})
     finally:
         max_depth_var.reset(token)

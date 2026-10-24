@@ -32,6 +32,7 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
+from sagent.tools.core import tool
 from sagent.types.model import ModelRequest, ModelTerminationError
 from sagent.types.runtime import (
     AssistantMessage,
@@ -55,6 +56,37 @@ _CRED_PAYLOAD: dict[str, object] = {
     "refresh_token": "test-rt",
     "expiry_date": (time.time() + 3600) * 1000.0,
 }
+
+
+class _Peeks:
+    """Records each topic its tool was asked to peek at."""
+
+    def __init__(self) -> None:
+        self.topics: list[str] = []
+
+    def peek(self, topic: str) -> str:
+        """Peek at a topic."""
+        self.topics.append(topic)
+        return topic
+
+
+@pytest.mark.asyncio
+async def test_the_bridge_refuses_a_tool_the_request_withholds() -> None:
+    """The CLI runs tools through the bridge, where the runtime cannot refuse them."""
+    peeks = _Peeks()
+    model = GoogleCLI().model("gemini-2.5-flash")
+    model._tools_bridge = ToolsBridge([])
+    model._sync_tools_bridge(
+        ModelRequest(
+            messages=[UserMessage(text="hi", offered_tools=("Look",))],
+            tools=[tool(peeks.peek, name="Look"), tool(peeks.peek, name="Peek")],
+        ),
+    )
+
+    _ = await model._tools_bridge._call_tool("Peek", {"topic": "withheld"})
+    _ = await model._tools_bridge._call_tool("Look", {"topic": "offered"})
+
+    assert peeks.topics == ["offered"]
 
 
 def _write_creds(tmp_path: Path) -> Path:
@@ -554,9 +586,13 @@ async def test_stream_system_change_discards_warmed_old_system_spare(
     monkeypatch.setattr(model, "_send_prompt", send_prompt)
     model._hot_spare = HotSpare(spawn_initialized)
 
-    _ = await model.stream(ModelRequest(messages=[UserMessage(text="a")], system="A"))
+    _ = await model.stream(
+        ModelRequest(messages=[UserMessage(text="a")], system=("A",)),
+    )
     await warmed.wait()
-    _ = await model.stream(ModelRequest(messages=[UserMessage(text="b")], system="B"))
+    _ = await model.stream(
+        ModelRequest(messages=[UserMessage(text="b")], system=("B",)),
+    )
 
     assert used_systems == [hash_system("A"), hash_system("B")]
     assert spawned_systems == ["A", "A", "B"]

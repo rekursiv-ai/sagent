@@ -25,4 +25,4 @@ Sources:
   - `science` -- papers with authors/DOI/citations. Prefer the `PaperSearch` tool for scholarly work (citation graph, fetch-by-id); use this only for a quick web-style lookup.
   - `files` -- files (filename/size/type) and torrents (size, seed/leech, magnet).
   - `social media` -- posts from Mastodon/Lemmy (web results).
-- Current time: {{NOW}}. Resolve relative terms to absolute dates; include the current year for "latest" queries.
+- Resolve relative terms to absolute dates from the current time in your environment; include the current year for "latest" queries.

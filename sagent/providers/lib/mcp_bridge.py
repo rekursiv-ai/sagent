@@ -76,6 +76,7 @@ from sagent.agent.background import (
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.types.exceptions import describe, log_task_exception
 from sagent.types.runtime import RuntimeEvent, ToolLabel, ToolResult
+from sagent.types.tools import gate_refusal
 
 
 __all__ = ["ToolsBridge"]
@@ -241,6 +242,7 @@ class ToolsBridge:
 
     def __init__(self, tools: list[Tool]) -> None:
         self._tools: dict[str, Tool] = {t.name: t for t in tools}
+        self._allowed: frozenset[str] | None = None
         self._server: Server | None = None
         # Unique path token under which this bridge mounts its MCP route
         # on the process-global :data:`_SHARED_SERVER`. The bridge's URL
@@ -366,14 +368,25 @@ class ToolsBridge:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 -- Shutdown must contain any manager cancellation failure.
                 logger.debug("MCP bridge stop: manager raised on cancel: %s", exc)
 
-    def update_tools(self, tools: list[Tool]) -> None:
-        """Replace the live tool registry.
+    def update_tools(
+        self,
+        tools: list[Tool],
+        *,
+        allowed: frozenset[str] | None,
+    ) -> None:
+        """Replace the live tool registry and the gate its calls run under.
+
+        The gate is required rather than defaulted: the CLI's model is listed
+        every schema, so a refresh that forgot it would open every tool.
 
         Args:
           tools: New list of rich tools; same-name entries supersede prior ones.
+          allowed: The tools the request offered, as ``ModelRequest.allowed_tools``;
+            ``None`` offered all.
 
         """
         self._tools = {t.name: t for t in tools}
+        self._allowed = allowed
 
     def set_publish(self, publish: Callable[[RuntimeEvent], None] | None) -> None:
         """Set (or clear) the runtime event sink for the active turn.
@@ -467,6 +480,8 @@ class ToolsBridge:
                     text=f"[Error] unknown tool: {name!r}",
                 ),
             ]
+        if refusal := gate_refusal(name, self._allowed):
+            return [mcp_types.TextContent(type="text", text=f"[Error] {refusal}")]
         # Validate the RAW arguments against the bg-augmented schema --
         # the exact schema advertised to the model -- BEFORE splitting off
         # the control fields. Validating the stripped args instead would

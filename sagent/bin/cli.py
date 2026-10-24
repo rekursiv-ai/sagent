@@ -81,7 +81,7 @@ from sagent.agent.state import agent_registry, unique_registry_label
 from sagent.catalog.table import UnknownModelError, UnsupportedTagError
 from sagent.compaction.summary import SummaryCompactor
 from sagent.lib.userdirs import data_dir
-from sagent.prompt import build_system
+from sagent.prompt import SagentContext, static_prompt
 from sagent.providers import (
     PROVIDER_NAMES,
     default_auth_for_provider,
@@ -97,7 +97,10 @@ from sagent.thinking import (
     thinking_offered,
 )
 from sagent.tools.advisor import Advisor
-from sagent.tools.agent_spawn import resume_serviced_child
+from sagent.tools.agent_spawn import (
+    bundle_background_task,
+    resume_serviced_child,
+)
 from sagent.tools.core import set_recipe
 from sagent.tools.tool_spec import (
     ToolSpecError,
@@ -129,7 +132,7 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Mapping
+    from collections.abc import Callable, Coroutine, Iterable, Mapping
 
     from treekle import MutablePlainTree
 
@@ -160,6 +163,7 @@ DEFAULT_TOOLS: Final = [
     "PaperDetails",
     "PaperAuthor",
     "PaperFetch",
+    "Memory",
     "PlayAudio",
     "Skill",
 ]
@@ -188,7 +192,8 @@ def resolve_tools(
         ``__init__``, so the signature is the contract.
 
     Returns:
-      tools: Instantiated tool objects in the requested order.
+      tools: Instantiated tool objects in the requested order, then
+          ``BackgroundTask`` when ``AgentSpawn`` is among them, as a child gets.
 
     Raises:
       SystemExit: If a tool name is not found in the tools module, or an
@@ -243,7 +248,7 @@ def resolve_tools(
             resolved.append(bash)
         else:
             resolved.append(non_bash[name])
-    return resolved
+    return bundle_background_task(resolved)
 
 
 def parse_agent_args(
@@ -320,10 +325,19 @@ def parse_agent_args(
             " to set window."
         ),
     )
+    # Kept only to refuse it: ``--system`` once added to the prompt, and argparse
+    # would otherwise accept it as an abbreviation of ``--system-prompt``, which
+    # replaces the recipe's base prompt instead.
+    parser.add_argument("--system", dest="removed_system", help=argparse.SUPPRESS)
     parser.add_argument(
-        "--system",
+        "--system-prompt",
+        default=None,
+        help="System prompt replacing the recipe's base prompt.",
+    )
+    parser.add_argument(
+        "--append-system-prompt",
         default="",
-        help="Additional system prompt instructions.",
+        help="Instructions added after the system prompt.",
     )
     parser.add_argument(
         "--recipe",
@@ -428,6 +442,11 @@ def parse_agent_args(
         help="Maximum response tokens for one model call. Default: model limit.",
     )
     args, remaining = parser.parse_known_args(argv)
+    if args.removed_system is not None:
+        parser.error(
+            "--system was removed: use --append-system-prompt to add instructions,"
+            " or --system-prompt to replace the base prompt",
+        )
     args.provider_explicit = args.provider is not None
     args.auth_explicit = args.auth is not None
     args.account_explicit = args.account is not None
@@ -530,9 +549,9 @@ def main() -> int:
     if not headless:
         sys.stderr.write(f"[{args.provider}] {model.tagged_model_id}\n")
 
-    tool_names = args.tools or DEFAULT_TOOLS
+    context = _session_context(args)
     agent_tools = resolve_tools(
-        tool_names,
+        _session_tool_names(args, context),
         allow_providers=allow_providers,
         overrides=_parse_tool_flag(args.tool),
     )
@@ -544,22 +563,14 @@ def main() -> int:
         if not headless:
             sys.stderr.write(f"[advisor] {advisor_model.tagged_model_id}\n")
 
-    custom_system = args.system
-
-    def _system() -> str:
-        return build_system(
-            model.capability,
-            custom=custom_system,
-            context=model.settings.context,
-            include_memory=not args.ephemeral,
-        )
-
     agent = Agent(
         name=args.name,
         description="Interactive CLI agent.",
         model=model,
         model_recipe=model_recipe,
-        system=_system,
+        system=static_prompt() if args.system_prompt is None else args.system_prompt,
+        append_system=args.append_system_prompt,
+        prompt_context=context,
         tools=agent_tools,
         compactor=compactor,
         session_dir=session_dir,
@@ -614,6 +625,32 @@ def main() -> int:
             ),
         )
     return 0
+
+
+# An ephemeral session leaves nothing behind, its memories included.
+def _session_context(args: argparse.Namespace) -> SagentContext:
+    """Return the project context this session tells its agents."""
+    return SagentContext(include_memory=not args.ephemeral)
+
+
+# A Memory tool the user named explicitly is refused rather than dropped, which would
+# let them believe their memories were being saved.
+def _session_tool_names(
+    args: argparse.Namespace,
+    context: SagentContext,
+) -> list[str]:
+    """Return the tools this session loads, per ``--tools`` and its ``context``."""
+    if args.tools and "Memory" in args.tools and not context.shows_memory:
+        why = "--ephemeral saves" if args.ephemeral else "this recipe shows"
+        raise SystemExit(f"{why} no memories; drop Memory from --tools.")
+    return _memory_shown(args.tools or DEFAULT_TOOLS, context)
+
+
+# A save lands in the index the model reads next context; where it reads none, the
+# memory is written for nobody.
+def _memory_shown(names: Iterable[str], context: SagentContext) -> list[str]:
+    """Return ``names``, less Memory unless ``context`` shows the index it writes."""
+    return [name for name in names if name != "Memory" or context.shows_memory]
 
 
 def _do_login(args: argparse.Namespace) -> None:
@@ -1283,14 +1320,17 @@ async def _resume_persistent_agents(
         )
 
 
-# ``system`` is the record's base prompt; ``resume_serviced_child`` adds the
-# persistent-agent IPC rule, so the next lifecycle record persists the base again.
+# ``system`` is the record's base prompt; ``resume_serviced_child`` gives the child its
+# persistent-agent IPC rule as a standing reminder, never in the prompt it persists.
 def _build_persistent_child(
     record: PersistentAgentRecord,
     *,
     allow_providers: tuple[str, ...],
 ) -> Agent:
     """Construct a persistent child from its lifecycle record."""
+    if record.frozen_system:
+        msg = "a hot spawn saved its parent's rendered prompt, not its own"
+        raise ValueError(msg)
     provider, account = build_provider_with_account_fallback(
         record.provider,
         record.auth,
@@ -1298,6 +1338,7 @@ def _build_persistent_child(
         fallback_to_default=True,
     )
     model = provider.model(record.model_id)
+    context = SagentContext()
     # ``take`` rather than assignment: a record written against a wider
     # model must not fail the resume on a knob this one withholds.
     model.settings.take(
@@ -1317,12 +1358,16 @@ def _build_persistent_child(
             account=account,
         ),
         system=record.system,
-        tools=resolve_tools(list(record.tools), allow_providers=allow_providers),
+        append_system=record.append_system,
+        prompt_context=context,
+        tools=resolve_tools(
+            _memory_shown(record.tools, context),
+            allow_providers=allow_providers,
+        ),
         session_dir=record.session_dir,
         max_tool_call_rounds=record.max_tool_call_rounds,
         max_budget_usd=record.max_budget_usd,
         persistent_retry=record.persistent_retry,
-        frozen_system=record.frozen_system,
     )
     if record.max_request_tokens is not None:
         agent.max_request_tokens = record.max_request_tokens

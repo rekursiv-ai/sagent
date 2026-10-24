@@ -5,3 +5,4 @@ Platform: {platform}
 Shell: {shell_line}
 OS: {os_version}
 Model: {model_id}.{knowledge_cutoff_line}
+Current time: {now}.

@@ -41,8 +41,10 @@ from sagent.types.runtime import (
     AssistantMessage,
     BytesMessage,
     ModelContextEvent,
+    SystemMessage,
     ToolResult,
     UserMessage,
+    WireMessage,
 )
 from sagent.types.tape import (
     ContextSplice,
@@ -552,7 +554,7 @@ class SummaryCompactor:
             entries = _request_entries(groups, tool_result_cap_chars=cap)
             request = ModelRequest(
                 messages=[*entries, UserMessage(text=instruction)],
-                system=read_asset(recipe_dict("compactor")["system"]).strip(),
+                system=(read_asset(recipe_dict("compactor")["system"]).strip(),),
             )
             try:
                 response = await send_with_retry(
@@ -717,11 +719,13 @@ def _group_history_by_round(
     return groups
 
 
+# A round's system messages follow the line that started it, so a tail of user lines read past
+# them: the system messages are kept with the lines, and are no one's turn to stop the count.
 def _trailing_user_tail_len(history: list[ModelContextEvent]) -> int:
-    """Count consecutive user messages at the end of ``history``."""
+    """Count consecutive user messages, and system messages among them, at the end of ``history``."""
     count = 0
     for entry in reversed(history):
-        if not isinstance(entry, (AgentSendMessage, UserMessage)):
+        if not isinstance(entry, (AgentSendMessage, UserMessage, SystemMessage)):
             break
         count += 1
     return count
@@ -886,7 +890,7 @@ def _build_fallback_splice(
 
 
 # Caps oversized tool results up front rather than waiting for the provider to reject
-# them. The main model path budgets via ``materialize_request``; the compactor builds
+# them. The main model path budgets via ``materialize_messages``; the compactor builds
 # its ``ModelRequest`` directly, so before this cap an 11.1M-character result reached
 # the wire intact -- and because compaction is what should have SHED it, the failure
 # recurred on every retry and every later turn (session ``190b6baec7ed``).
@@ -894,9 +898,16 @@ def _request_entries(
     groups: list[list[ModelContextEvent]],
     *,
     tool_result_cap_chars: int = 0,
-) -> list[ModelContextEvent]:
+) -> list[WireMessage]:
     """Flatten request groups and normalize provider-facing shape."""
-    entries = [entry for group in groups for entry in group]
+    # A system message is the harness's, retold once compaction drops it; summarizing it only
+    # repeats what the next round tells the model anyway.
+    entries: list[WireMessage] = [
+        entry
+        for group in groups
+        for entry in group
+        if not isinstance(entry, SystemMessage)
+    ]
     entries = _elide_skill_results(entries)
     entries = _drop_orphan_tool_results(entries)
     entries = [
@@ -929,8 +940,8 @@ def _exceeds_cap(entry: ToolResult, cap_chars: int) -> bool:
 # walk: AM tool_calls determine the owning tool name; only matching ``ToolResult``
 # entries are rewritten.
 def _elide_skill_results(
-    entries: list[ModelContextEvent],
-) -> list[ModelContextEvent]:
+    entries: list[WireMessage],
+) -> list[WireMessage]:
     """Replace ``Skill`` tool-result bodies with a stable notice."""
     skill_call_ids: set[str] = set()
     for entry in entries:
@@ -941,7 +952,7 @@ def _elide_skill_results(
                 skill_call_ids.add(tc.id)
     if not skill_call_ids:
         return entries
-    out: list[ModelContextEvent] = []
+    out: list[WireMessage] = []
     for entry in entries:
         if (
             isinstance(entry, ToolResult)
@@ -969,14 +980,14 @@ def _elide_skill_results(
 # ``[interrupted]`` to keep the turn. Same input domain, opposite policy -- one function
 # would need a mode flag.
 def _drop_orphan_tool_results(
-    entries: list[ModelContextEvent],
-) -> list[ModelContextEvent]:
+    entries: list[WireMessage],
+) -> list[WireMessage]:
     """Filter entries that would violate tool-call/result ordering."""
     seen_results: set[str] = set()
-    out: list[ModelContextEvent] = []
+    out: list[WireMessage] = []
     pending_assistant: AssistantMessage | None = None
     pending_results: list[ToolResult] = []
-    deferred_interleaved: list[ModelContextEvent] = []
+    deferred_interleaved: list[WireMessage] = []
     for entry in entries:
         if isinstance(entry, AssistantMessage):
             _flush_answered_tool_turn(out, pending_assistant, pending_results)
@@ -1014,7 +1025,7 @@ def _drop_orphan_tool_results(
 
 
 def _flush_answered_tool_turn(
-    out: list[ModelContextEvent],
+    out: list[WireMessage],
     assistant: AssistantMessage | None,
     results: list[ToolResult],
 ) -> None:

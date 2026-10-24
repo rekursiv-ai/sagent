@@ -47,6 +47,7 @@ from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
     ModelContextEvent,
+    SystemMessage,
     ToolResult,
     UserMessage,
     wire_role,
@@ -186,7 +187,13 @@ def resolve_context(tape: Sequence[TapeRecord]) -> ResolvedContext:
                 if record.ref in masked
                 or not isinstance(
                     event,
-                    (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
+                    (
+                        AgentSendMessage,
+                        UserMessage,
+                        AssistantMessage,
+                        ToolResult,
+                        SystemMessage,
+                    ),
                 )
                 else [event]
             )
@@ -232,6 +239,8 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
       3. No ``ToolResult`` ``call_id`` appears twice.
       4. No ``UserMessage`` may appear while tool calls are pending.
 
+    A ``SystemMessage`` is no one's turn: every rule skips it.
+
     Args:
       messages: Provider-facing message sequence to validate.
 
@@ -243,6 +252,8 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
     seen_results: set[str] = set()
     prev_role: str | None = None
     for entry in messages:
+        if isinstance(entry, SystemMessage):
+            continue
         role = wire_role(entry)
         if role == "assistant":
             assert isinstance(entry, AssistantMessage)

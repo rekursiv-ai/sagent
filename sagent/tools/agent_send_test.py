@@ -35,14 +35,14 @@ def test_summary_without_to() -> None:
     assert t.summary({}) == "AgentSend"
 
 
-def test_prompt_lists_other_agents() -> None:
+def test_reminder_lists_other_agents() -> None:
     t = AgentSend()
     token_self = agent_label_var.set("Me")
     agent_registry["Me"] = FakeAgent()
     agent_registry["Bob"] = FakeAgent()
     agent_registry["Alice"] = FakeAgent()
     try:
-        p = t.prompt()
+        p = t.reminder()
     finally:
         agent_registry.pop("Me", None)
         agent_registry.pop("Bob", None)
@@ -56,12 +56,12 @@ def test_prompt_lists_other_agents() -> None:
     assert "Active agents you can message: Alice, Bob" in p
 
 
-def test_prompt_self_only_returns_identity() -> None:
+def test_reminder_self_only_returns_identity() -> None:
     t = AgentSend()
     token = agent_label_var.set("Me")
     agent_registry["Me"] = FakeAgent()
     try:
-        p = t.prompt()
+        p = t.reminder()
     finally:
         agent_registry.pop("Me", None)
         agent_label_var.reset(token)

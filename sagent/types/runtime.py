@@ -118,6 +118,7 @@ __all__ = [
     "ServiceErrorSnapshot",
     "SessionMessage",
     "StatusChanged",
+    "SystemMessage",
     "ToolCall",
     "ToolLabel",
     "ToolResult",
@@ -127,7 +128,9 @@ __all__ = [
     "UserDeferredMessage",
     "UserMessage",
     "UserQueuedMessage",
+    "WireMessage",
     "labeled_agent_send_text",
+    "reminder_text",
     "reset_id_counter",
     "wire_role",
 ]
@@ -239,6 +242,16 @@ class UserMessage(SessionMessage):
     questions. Providers that cache prefixes automatically ignore it.
     """
 
+    offered_tools: tuple[str, ...] | None = None
+    """On the wire only: the tools the model may call from here on, when changed.
+
+    Request materialization sets it where it folds in the :class:`SystemMessage`
+    that changed them; a message in history never carries it. ``None`` changes
+    nothing. Every schema ships on every request, so a provider that can
+    withdraw a tool mid-conversation (Anthropic) does it at this message, and
+    the history before it stays cached.
+    """
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentSendMessage(SessionMessage):
@@ -252,6 +265,42 @@ class AgentSendMessage(SessionMessage):
 
     attachments: tuple[BytesMessage, ...] = ()
     """Image/PDF payloads sent alongside the text."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SystemMessage(SessionMessage):
+    """Context the agent's harness tells its model: never a party's words.
+
+    The environment, a tool's per-agent context, a host's standing reminder, or
+    a change of the tools the model may call. A turn of no one's: it neither
+    takes a side in the user/assistant alternation nor closes a tool pair, and a
+    system message alone never calls the model. On the wire it is a ``<system-reminder>``
+    in the user turn it follows, as request materialization folds it.
+    """
+
+    text: str
+    """What the model is told."""
+
+    offered_tools: tuple[str, ...] | None = None
+    """The tools the model may call from here on, when this system message changes them.
+
+    ``None`` changes nothing. Every schema ships on every request, so a
+    provider that can withdraw a tool mid-conversation (Anthropic) does it here,
+    and the history before it stays cached.
+    """
+
+
+def reminder_text(entry: SystemMessage) -> str:
+    """Return ``entry.text`` as the wire sends it, inside ``<system-reminder>`` tags.
+
+    Args:
+      entry: The system message to send.
+
+    Returns:
+      text: The tagged text, shared by request materialization and token counting.
+
+    """
+    return f"<system-reminder>\n{entry.text}\n</system-reminder>"
 
 
 def labeled_agent_send_text(entry: AgentSendMessage) -> str:
@@ -862,16 +911,17 @@ class LazyEvent:
     next event that genuinely drives a model round, rather than firing a
     round for the payload alone. Used e.g. to ride a system reminder on the
     next user message or tool completion instead of waking the model just to
-    say it. ``payload.hidden`` controls whether the human sees it.
+    say it.
 
-    The payload is a ``UserMessage`` (injected context the model reads) or a
-    ``ToolResult`` (a deferred pairing for a tool call -- e.g. the error reply
+    The payload is a ``SystemMessage`` (context the harness tells the model,
+    which joins history as its own entry, never merged into a human's turn) or
+    a ``ToolResult`` (a deferred pairing for a tool call -- e.g. the error reply
     to a mimicked ``DetachedArrived`` call, held so it pairs on the next real
     turn without firing a round of its own). (Widen :data:`Payload` later if a
     use case needs attributed lazy delivery, e.g. ``AgentSendMessage``.)
     """
 
-    type Payload = UserMessage | ToolResult
+    type Payload = SystemMessage | ToolResult
     """The single source of truth for what a ``LazyEvent`` may carry."""
 
     payload: Payload
@@ -963,7 +1013,14 @@ class ChildDoneEvent:
     """Total USD cost attributable to the child."""
 
 
-type ModelContextEvent = UserMessage | AgentSendMessage | AssistantMessage | ToolResult
+type WireMessage = UserMessage | AgentSendMessage | AssistantMessage | ToolResult
+"""What a provider is sent: every history entry but a ``SystemMessage``.
+
+Request materialization folds each system message into the user turn it follows, so a
+provider never has to know system messages exist."""
+
+type ModelContextEvent = WireMessage | SystemMessage
+"""One entry of the conversation history."""
 
 
 def wire_role(entry: ModelContextEvent) -> str | None:
@@ -982,7 +1039,8 @@ def wire_role(entry: ModelContextEvent) -> str | None:
     Returns:
       role: ``"user"`` for ``UserMessage``/``AgentSendMessage``,
           ``"assistant"`` for ``AssistantMessage``, ``None`` for
-          ``ToolResult`` (which has its own pairing rules).
+          ``ToolResult`` (which has its own pairing rules) and for
+          ``SystemMessage`` (a turn of no one's).
 
     """
     if isinstance(entry, (UserMessage, AgentSendMessage)):

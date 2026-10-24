@@ -116,8 +116,9 @@ logger = logging.getLogger(__name__)
 # recent messages, so the tail is what matters; the cache is a lookup
 # table, not a transcript.
 
+# A child is told no project context, so it reads no memory index a save would land in.
 _AGENT_TOOL_NAMES = [
-    name for name in DEFAULT_TOOLS if name not in ("AgentSpawn", "AgentSend")
+    name for name in DEFAULT_TOOLS if name not in ("AgentSpawn", "AgentSend", "Memory")
 ]
 
 
@@ -936,11 +937,20 @@ def _list_personas(persona_dir: Path) -> list[str]:
 
 
 class _AgentSlack(Slack):
-    """Slack tool that advertises active peer agents in its prompt."""
+    """Slack tool that tells its agent the peers it can @-mention."""
 
     @override
     def prompt(self) -> str:
-        """Return tool-prompt text listing peer agents this one can @-mention."""
+        """Return no fixed guidance; the peers change, so they are a reminder."""
+        return ""
+
+    def reminder(self) -> str:
+        """Return the peer agents this one can @-mention, or ``""`` when alone.
+
+        Returns:
+          reminder: The names of the other active agents, or ``""``.
+
+        """
         others = sorted(k for k in agent_registry if k != self._username)
         if not others:
             return ""
@@ -1008,7 +1018,8 @@ def _make_log_forwarder(
 def _render_event(event: RuntimeEvent) -> str | None:
     """Convert a ``RuntimeEvent`` to a log-friendly line, or ``None`` to skip."""
     if isinstance(event, UserMessage):
-        text = event.text.strip()
+        # A hidden message is for the model alone; the log shows what people said.
+        text = "" if event.hidden else event.text.strip()
         return f"━━ input ━━\n{text}" if text else None
 
     if isinstance(event, AssistantMessage):

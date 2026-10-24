@@ -63,6 +63,7 @@ from sagent.types.runtime import (
     Quit,
     Recompact,
     RuntimeEvent,
+    SystemMessage,
     ToolCall,
     ToolResult,
     ToolResultKind,
@@ -80,6 +81,7 @@ from sagent.types.tape import (
     ReferrableTapeEvent,
     TapeRecord,
     TapeRef,
+    full_tape_mask,
     mask_contains_ref,
 )
 
@@ -280,9 +282,7 @@ def _assistant_texts(agent: runtime.AgentRuntime) -> list[str]:
 async def test_lazy_event_does_not_trigger_a_round_alone() -> None:
     """A ``LazyEvent`` alone fires no model round; it waits for a real turn."""
     agent, _ = make_agent([AssistantMessage(text="should not fire")])
-    agent.inbox.push_back(
-        LazyEvent(payload=UserMessage(text="<system-reminder>x</system-reminder>")),
-    )
+    agent.inbox.push_back(LazyEvent(payload=SystemMessage(text="x")))
     agent.inbox.push_back(Quit())
     await run_until_quit(agent, timeout_sec=2.0)
 
@@ -295,27 +295,18 @@ async def test_lazy_event_does_not_trigger_a_round_alone() -> None:
 
 
 @pytest.mark.asyncio
-async def test_lazy_event_rides_next_real_turn() -> None:
-    """A pending ``LazyEvent`` payload commits alongside the next real event."""
+async def test_lazy_event_rides_next_real_turn_as_the_harnesss_not_the_humans() -> None:
+    """A deferred reminder rides the next turn and never becomes the human's words."""
     agent, _ = make_agent([AssistantMessage(text="answer")])
-    agent.inbox.push_back(
-        LazyEvent(payload=UserMessage(text="<system-reminder>nudge</system-reminder>")),
-    )
+    agent.inbox.push_back(LazyEvent(payload=SystemMessage(text="nudge")))
     agent.inbox.push_back(UserMessage(text="hello"))
 
     await run_with_quit(agent, timeout_sec=2.0)
 
-    # The reminder rode the real turn: its text is in context (possibly
-    # coalesced with the user message) and the model ran once.
-    all_user_text = " ".join(
-        m.text for m in agent.context().messages if isinstance(m, UserMessage)
-    )
-    assert "<system-reminder>nudge</system-reminder>" in all_user_text
-    assert "hello" in all_user_text
-    assert any(
-        isinstance(m, AssistantMessage) and m.text == "answer"
-        for m in agent.context().messages
-    )
+    history = agent.context().messages
+    assert [m.text for m in history if isinstance(m, UserMessage)] == ["hello"]
+    assert [m.text for m in history if isinstance(m, SystemMessage)] == ["nudge"]
+    assert any(isinstance(m, AssistantMessage) and m.text == "answer" for m in history)
     assert not agent._pending_commits
 
 
@@ -339,8 +330,9 @@ async def test_agent_send_queued_message_coalesces_with_user_message() -> None:
     """AgentSend + User adjacents merge into one user-role wire entry.
 
     Both serialize as user role on the wire; back-to-back user-role
-    turns violate Anthropic-style alternation. The merged entry adopts
-    the agent type so the ``source`` attribution survives.
+    turns violate Anthropic-style alternation. Each part keeps its own
+    sender: a ``source`` on the merge would name the reviewer as the
+    author of the human's reply.
     """
     agent, collector = make_agent([AssistantMessage(text="reply")])
     agent.inbox.push_back(AgentSendQueuedMessage(source="reviewer", text="finding"))
@@ -350,13 +342,11 @@ async def test_agent_send_queued_message_coalesces_with_user_message() -> None:
 
     messages = agent.context().messages
     assert [type(message) for message in messages[:2]] == [
-        AgentSendMessage,
+        UserMessage,
         AssistantMessage,
     ]
-    assert isinstance(messages[0], AgentSendMessage)
-    assert messages[0].source == "reviewer"
-    assert "finding" in messages[0].text
-    assert "my reply" in messages[0].text
+    assert isinstance(messages[0], UserMessage)
+    assert messages[0].text == "[from reviewer]: finding\n\nmy reply"
     assert collector.has(ModelIdle)
 
 
@@ -392,18 +382,16 @@ async def test_deferred_messages_wait_until_model_idle() -> None:
     messages = agent.context().messages
     # ``later`` (UserDeferredMessage) and ``agent later``
     # (AgentSendDeferredMessage) coalesce into a single wire user-role
-    # turn; the merged entry adopts the agent type to preserve source.
+    # turn; each part keeps its own sender.
     assert [type(message) for message in messages] == [
         UserMessage,
         AssistantMessage,
-        AgentSendMessage,
+        UserMessage,
         AssistantMessage,
     ]
     merged = messages[2]
-    assert isinstance(merged, AgentSendMessage)
-    assert merged.source == "reviewer"
-    assert "later" in merged.text
-    assert "agent later" in merged.text
+    assert isinstance(merged, UserMessage)
+    assert merged.text == "later\n\n[from reviewer]: agent later"
     assert collector.has(ModelIdle)
 
 
@@ -5246,6 +5234,73 @@ class TestUserMessageAlternation:
         """An empty run has no entry to stand for it, which the error says."""
         with pytest.raises(ValueError, match=r"^Expected len\(merged\) == 1\.$"):
             _ = runtime._coalesce_user_side([])
+
+    def test_a_visible_message_merged_onto_a_hidden_tail_stays_visible(self) -> None:
+        """The human's line onto an agent's reminder: what they typed still shows."""
+        agent = _runtime_for_alternation_tests()
+        agent.append_history(UserMessage(text="<system-reminder>", hidden=True))
+        typed = agent._append_or_coalesce_user(UserMessage(text="hi"))
+        assert typed.hidden is False
+        reminder = agent._append_or_coalesce_user(
+            UserMessage(text="<system-reminder>", hidden=True),
+        )
+        assert reminder.hidden is False
+
+    @pytest.mark.parametrize("peer_first", [True, False])
+    def test_a_merge_across_senders_keeps_each_part_attributed(
+        self,
+        *,
+        peer_first: bool,
+    ) -> None:
+        """One ``[from A]`` label over the whole merge put A's name on the human's words."""
+        agent = _runtime_for_alternation_tests()
+        peer = AgentSendMessage(source="A", text="a")
+        human = UserMessage(text="u")
+        first, second = (peer, human) if peer_first else (human, peer)
+        agent.append_history(first)
+        merged = agent._append_or_coalesce_user(second)
+        assert isinstance(merged, UserMessage)
+        assert merged.text == ("[from A]: a\n\nu" if peer_first else "u\n\n[from A]: a")
+        assert agent.context().messages == [merged]
+
+    def test_a_line_after_a_system_message_joins_the_turn_the_note_follows(
+        self,
+    ) -> None:
+        """A halted round leaves its system message last; the human's next line is still one turn."""
+        agent = _runtime_for_alternation_tests()
+        agent.append_history(UserMessage(text="first"))
+        note = SystemMessage(text="cwd: /x")
+        agent.append_history(note)
+        merged = agent._append_or_coalesce_user(UserMessage(text="second"))
+        assert agent.context().messages == [merged, note]
+        assert isinstance(merged, UserMessage)
+        assert merged.text == "first\n\nsecond"
+
+    def test_a_line_joins_a_turn_whose_note_rides_in_a_splice(self) -> None:
+        """A compaction keeps the tail turn and its system message in one payload."""
+        agent = _runtime_for_alternation_tests()
+        agent.append_history(UserMessage(text="old"))
+        note = SystemMessage(text="cwd: /x")
+        agent.append_splice(
+            mask=full_tape_mask(agent.tape),
+            payload=(UserMessage(text="summary\n\nfirst"), note),
+            strategy="summary",
+            discards_content=True,
+        )
+        merged = agent._append_or_coalesce_user(UserMessage(text="second"))
+        assert agent.context().messages == [merged, note]
+        assert isinstance(merged, UserMessage)
+        assert merged.text == "summary\n\nfirst\n\nsecond"
+
+    def test_a_system_message_alone_does_not_call_the_model(self) -> None:
+        """It rides a round real content drives; after an answer it drives none."""
+        agent = _runtime_for_alternation_tests()
+        agent.append_history(UserMessage(text="q"))
+        agent.append_history(SystemMessage(text="n"))
+        assert agent._should_call_model()
+        agent.append_history(AssistantMessage(text="a"))
+        agent.append_history(SystemMessage(text="n2"))
+        assert not agent._should_call_model()
 
     def test_append_or_coalesce_user_merges_cross_type(self) -> None:
         """UserMessage tail + AgentSend incoming merge into a single user turn."""

@@ -27,10 +27,12 @@ __all__ = [
     "DEFAULT_MAX_RESULT_CHARS",
     "MAX_RESULT_TOKENS",
     "MAX_ROUND_RESULT_CHARS",
+    "Reminding",
     "ResultBounded",
     "Tool",
     "ToolResultClearable",
     "ToolResultPolicy",
+    "gate_refusal",
 ]
 
 
@@ -115,6 +117,21 @@ class ResultBounded(Protocol):
         ...
 
 
+@runtime_checkable
+class Reminding(Protocol):
+    """A tool with context that differs per agent or changes mid-session.
+
+    Its ``prompt()`` is fixed text in the system blocks, built once per context
+    so agents share a cached prefix; what is this agent's alone (its label, its
+    spawn depth) or changes (the agents it can message) belongs here instead,
+    told in a reminder and retold whenever it changes.
+    """
+
+    def reminder(self) -> str:
+        """Return the context to tell the model now; ``""`` for none."""
+        ...
+
+
 class ToolResultClearable(Protocol):
     """What a provider reads to decide whose RESULTS its server may drop.
 
@@ -196,12 +213,14 @@ class Tool(Protocol):
         ...
 
     def prompt(self) -> str | None:
-        """Per-request system-prompt contribution for this tool.
+        """System-prompt contribution for this tool.
+
+        Read once per context, when the agent builds its system blocks, so it
+        must not change per agent or per turn; that is a ``Reminding`` tool's
+        ``reminder``.
 
         Returns:
-          contribution: Prompt fragment, ``""`` for no contribution this
-              round, or ``None`` to signal "no change since last call"
-              so per-section caches can stay byte-identical.
+          contribution: Prompt fragment; ``""`` or ``None`` contributes nothing.
 
         """
         ...
@@ -238,3 +257,24 @@ class Tool(Protocol):
 
         """
         ...
+
+
+# Every schema ships so the cached prefix survives a gate change, so a model can name a
+# tool its request withheld; whatever runs the call must refuse it with these words.
+def gate_refusal(name: str, allowed: frozenset[str] | None) -> str:
+    """Return why a call to ``name`` must not run under ``allowed``; empty if it may.
+
+    Args:
+      name: The tool the model called.
+      allowed: The tools the call's request offered; ``None`` offered all.
+
+    Returns:
+      refusal: The refusal the model reads, or ``""`` when the call may run.
+
+    """
+    if allowed is None or name in allowed:
+        return ""
+    return (
+        f"Not run: {name} is not available now."
+        f" Available: {', '.join(sorted(allowed)) or 'none'}."
+    )

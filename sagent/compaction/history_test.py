@@ -23,6 +23,7 @@ from sagent.types.runtime import (
     ToolCall,
     ToolResult,
     UserMessage,
+    WireMessage,
 )
 
 
@@ -138,7 +139,7 @@ def test_estimate_entry_tokens_counts_every_wire_surface() -> None:
     both compaction sizing and request building.
     """
     model = cast(Model, MockModelCaps())
-    entries: list[ModelContextEvent] = [
+    entries: list[WireMessage] = [
         UserMessage(text="hello"),
         AssistantMessage(
             text="reasoning",

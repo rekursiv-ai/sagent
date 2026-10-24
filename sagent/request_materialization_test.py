@@ -10,12 +10,11 @@ from sagent.request_materialization import (
     ELIDED_TOOL_RESULT_TAG,
     _defer_user_between_tool_pair,
     materialize_messages,
-    materialize_request,
 )
-from sagent.types.model import ModelRequest
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    SystemMessage,
     ToolCall,
     ToolResult,
     UserMessage,
@@ -399,25 +398,6 @@ def test_materialize_messages_counts_only_kept_results_against_budget() -> None:
     validate_context(materialized)
 
 
-def test_materialize_request_reuses_message_materialization() -> None:
-    call = ToolCall(id="call_1", name="Bash", args={})
-    request = ModelRequest(
-        messages=[
-            UserMessage(text="start"),
-            AssistantMessage(tool_calls=(call,)),
-            ToolResult(call_id="call_1", content="x" * 1_000),
-        ],
-        system="sys",
-    )
-
-    materialized = materialize_request(request, tool_result_budget_tokens=2)
-
-    result = materialized.messages[2]
-    assert isinstance(result, ToolResult)
-    assert ELIDED_TOOL_RESULT_TAG in result.content
-    assert materialized.system == "sys"
-
-
 def test_agent_send_message_receives_from_prefix() -> None:
     """AgentSendMessage.text is prefixed with ``[from <source>]: `` in provider view."""
     messages = [AgentSendMessage(source="Alice", text="hello")]
@@ -656,6 +636,54 @@ def test_user_with_agent_send_merge_does_not_re_attribute_user_text() -> None:
         assert merged.source != "alice" or "user said" not in merged.text
     assert "user said" in merged.text
     assert "alice said" in merged.text
+
+
+def test_a_system_message_reaches_the_wire_as_a_reminder_in_the_user_turn() -> None:
+    """Every provider reads the system message as the text it read before system messages existed."""
+    call = ToolCall(id="c1", name="Read", args={})
+    wire = materialize_messages(
+        [
+            UserMessage(text="q"),
+            SystemMessage(text="cwd: /x"),
+            AssistantMessage(tool_calls=(call,)),
+            ToolResult(call_id="c1", content="r"),
+            SystemMessage(text="Tools available now: Read.", offered_tools=("Read",)),
+        ],
+    )
+    first, _, result, after = wire
+    assert isinstance(first, UserMessage)
+    assert first.text == "q\n\n<system-reminder>\ncwd: /x\n</system-reminder>"
+    assert isinstance(result, ToolResult)
+    assert isinstance(after, UserMessage)
+    assert after.text == (
+        "<system-reminder>\nTools available now: Read.\n</system-reminder>"
+    )
+    # The provider that withdraws tools does it at the message the system message became.
+    assert after.offered_tools == ("Read",)
+    validate_context(wire)
+
+
+def test_a_note_folded_into_a_peers_turn_keeps_the_tool_offer() -> None:
+    wire = materialize_messages(
+        [
+            AgentSendMessage(source="A", text="a"),
+            SystemMessage(text="n", offered_tools=()),
+        ],
+    )
+    [turn] = wire
+    assert isinstance(turn, UserMessage)
+    assert turn.text == "[from A]: a\n\n<system-reminder>\nn\n</system-reminder>"
+    assert turn.offered_tools == ()
+
+
+def test_a_note_ahead_of_a_marked_turn_leaves_the_cache_point_on_it() -> None:
+    """The provider caches at a marked message; a merge that drops the mark caches nothing."""
+    for prior in (SystemMessage(text="n"), AgentSendMessage(source="A", text="a")):
+        [turn] = materialize_messages(
+            [prior, UserMessage(text="doc", cache_point=True)],
+        )
+        assert isinstance(turn, UserMessage)
+        assert turn.cache_point
 
 
 if __name__ == "__main__":

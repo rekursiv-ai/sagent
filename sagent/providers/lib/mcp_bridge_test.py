@@ -223,10 +223,30 @@ async def test_update_tools_replaces_registry() -> None:
     await bridge.start()
     try:
         assert "Echo" in bridge._tools
-        bridge.update_tools([])
+        bridge.update_tools([], allowed=None)
         assert bridge._tools == {}
     finally:
         await bridge.stop()
+
+
+@pytest.mark.asyncio
+async def test_a_call_outside_the_gate_is_refused_not_run() -> None:
+    """Every schema ships, so a CLI's model can name a tool its request withheld."""
+    strict = _StrictTool()
+    bridge = ToolsBridge([])
+    bridge.update_tools(
+        [cast(Tool, _EchoTool()), cast(Tool, strict)],
+        allowed=frozenset({"Echo"}),
+    )
+
+    refused = await bridge._call_tool("Strict", {"text": "hi"})
+    offered = await bridge._call_tool("Echo", {"text": "hi"})
+
+    assert strict.seen_args is None
+    assert isinstance(refused[0], TextContent)
+    assert "Not run: Strict is not available now. Available: Echo." in refused[0].text
+    assert isinstance(offered[0], TextContent)
+    assert offered[0].text == "echo: hi"
 
 
 @pytest.mark.asyncio

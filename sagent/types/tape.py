@@ -64,6 +64,7 @@ from sagent.types.runtime import (
     CompactFailed,
     CompactStarted,
     ModelContextEvent,
+    SystemMessage,
     ToolResult,
     UserMessage,
     labeled_agent_send_text,
@@ -85,10 +86,12 @@ __all__ = [
     "TapeRef",
     "coalesce_roles",
     "full_tape_mask",
+    "last_turn",
     "mask_contains_ref",
     "mask_ranges_overlap",
     "merge_mask_ranges",
     "pair_and_dedup_tool_calls",
+    "same_sender",
     "splice_safe_repair",
     "unpaired_call_ids",
 ]
@@ -469,9 +472,10 @@ def pair_and_dedup_tool_calls(
        are deterministic). An orphan ``ToolResult`` (no open call) is dropped.
     4. **Interrupt vs interleave.** A ``UserMessage`` is a hard interrupt: it
        closes any open tool turn (synthesizing ``[interrupted]``). An
-       ``AgentSendMessage`` is *not* an interrupt -- a peer's send interleaves
-       with an in-flight tool turn, so it is deferred past the open pair, else
-       a real ``ToolResult`` arriving after it would be dropped as an orphan.
+       ``AgentSendMessage`` or a ``SystemMessage`` is *not* an interrupt -- a
+       peer's send or the harness's note interleaves with an in-flight tool
+       turn, so it is deferred past the open pair, else a real ``ToolResult``
+       arriving after it would be dropped as an orphan.
        (The defer-vs-interrupt policy matches
        :func:`summary._drop_orphan_tool_results`; the open-call *outcome*
        diverges -- this synthesizes ``[interrupted]``, summary drops the turn.)
@@ -502,7 +506,7 @@ def pair_and_dedup_tool_calls(
 
     for entry in payload:
         if isinstance(entry, AssistantMessage):
-            _flush_interrupted(pending, paired_externally, seen, out, deferred)
+            _flush_interrupted(pending, paired_externally, out, deferred)
             kept = tuple(tc for tc in entry.tool_calls if tc.id not in seen)
             if not kept and not entry.text and not entry.thinking_blocks:
                 continue
@@ -522,15 +526,15 @@ def pair_and_dedup_tool_calls(
                     # back with its replies inverted.
                     _flush_deferred(out, deferred)
         elif isinstance(entry, UserMessage):
-            _flush_interrupted(pending, paired_externally, seen, out, deferred)
+            _flush_interrupted(pending, paired_externally, out, deferred)
             out.append(entry)
         elif pending:
-            # A peer ``AgentSendMessage`` interleaving an open tool turn: not an
-            # interrupt. Defer past the pair so a real result still lands.
+            # A peer's send or a system message interleaving an open tool turn: not
+            # an interrupt. Defer past the pair so a real result still lands.
             deferred.append(entry)
         else:
             out.append(entry)
-    _flush_interrupted(pending, paired_externally, seen, out, deferred)
+    _flush_interrupted(pending, paired_externally, out, deferred)
     return out
 
 
@@ -604,20 +608,45 @@ def coalesce_roles(
     """
     out: list[ModelContextEvent] = []
     for entry in payload:
-        prior = out[-1] if out else None
-        if isinstance(entry, (UserMessage, AgentSendMessage)) and isinstance(
-            prior,
-            (UserMessage, AgentSendMessage),
+        # A system message is no one's turn, so the turn before it is the one ``entry``
+        # meets: the merge lands there, and the system messages after it stay after it.
+        at = last_turn(out)
+        prior = None if at is None else out[at]
+        if (
+            at is not None
+            and isinstance(entry, (UserMessage, AgentSendMessage))
+            and isinstance(prior, (UserMessage, AgentSendMessage))
         ):
-            out[-1] = _merge_user(prior, entry)
-        elif isinstance(entry, AssistantMessage) and isinstance(
-            prior,
-            AssistantMessage,
+            out[at] = _merge_user(prior, entry)
+        elif (
+            at is not None
+            and isinstance(entry, AssistantMessage)
+            and isinstance(prior, AssistantMessage)
         ):
-            out[-1] = _merge_assistant(prior, entry)
+            out[at] = _merge_assistant(prior, entry)
         else:
             out.append(entry)
     return tuple(out)
+
+
+def last_turn(messages: Sequence[ModelContextEvent]) -> int | None:
+    """Return the index of the last entry that is someone's turn, not a system message.
+
+    Args:
+      messages: Context entries to scan from the end.
+
+    Returns:
+      index: Position of the last non-system entry, or ``None`` if there is none.
+
+    """
+    return next(
+        (
+            i
+            for i in range(len(messages) - 1, -1, -1)
+            if not isinstance(messages[i], SystemMessage)
+        ),
+        None,
+    )
 
 
 def _field_default(f: Field[object]) -> object:
@@ -676,6 +705,8 @@ def unpaired_call_ids(
     am_only_local: set[str] = set()
     tr_only_local: set[str] = set()
     for entry in payload:
+        if isinstance(entry, SystemMessage):
+            continue
         if isinstance(entry, AssistantMessage):
             am_only_local.update(pending)
             pending = {tc.id for tc in entry.tool_calls}
@@ -707,6 +738,7 @@ def unpaired_call_ids(
 # ``AssistantMessage.tool_calls`` id appears twice across all AssistantMessages in
 # ``payload``. 5. Wire role alternation: never two consecutive user-side or assistant-
 # side entries (a ``ToolResult`` closes the assistant turn and resets the role tracker).
+# A ``SystemMessage`` is no one's turn and is skipped by every rule.
 def _validate_payload(
     payload: tuple[ModelContextEvent, ...],
     paired_externally: frozenset[str],
@@ -723,6 +755,8 @@ def _validate_payload(
     externally_consumed_by_tr: set[str] = set()
     prev_role: str | None = None
     for entry in payload:
+        if isinstance(entry, SystemMessage):
+            continue
         if isinstance(entry, AssistantMessage):
             if pending:
                 raise InvalidPayloadError(
@@ -800,15 +834,23 @@ def _validate_payload(
 type TapeRecord = ReferrableTapeEvent | ContextSplice
 
 
-# ``UserMessage`` is the human and carries no label. An ``AgentSendMessage`` is prefixed
-# via the shared :func:`labeled_agent_send_text` so attribution survives demotion to a
-# plain ``UserMessage`` (the structured ``source`` is then gone) and the label format
-# stays identical to the wire path.
-def _labeled_text(entry: UserMessage | AgentSendMessage) -> str:
-    """Return ``entry`` text, labeling an ``AgentSendMessage`` with its source."""
-    if isinstance(entry, UserMessage):
-        return entry.text
-    return labeled_agent_send_text(entry)
+def same_sender(
+    prior: UserMessage | AgentSendMessage,
+    entry: UserMessage | AgentSendMessage,
+) -> bool:
+    """Return True for two ``UserMessage``, or two ``AgentSendMessage`` of one source.
+
+    Args:
+      prior: The earlier user-side entry.
+      entry: The later one.
+
+    Returns:
+      same: Whether one sender wrote both, so a merge needs no per-part labels.
+
+    """
+    if isinstance(prior, AgentSendMessage) and isinstance(entry, AgentSendMessage):
+        return prior.source == entry.source
+    return isinstance(prior, UserMessage) and isinstance(entry, UserMessage)
 
 
 # Same-source pairs (two ``UserMessage``; two ``AgentSendMessage`` sharing a ``source``)
@@ -829,13 +871,20 @@ def _merge_user(
     """Merge two adjacent user-side entries per the canonical source policy."""
     attachments = (*prior.attachments, *entry.attachments)
     hidden = prior.hidden and entry.hidden
-    same_source = (
-        isinstance(prior, AgentSendMessage)
-        and isinstance(entry, AgentSendMessage)
-        and prior.source == entry.source
-    ) or (isinstance(prior, UserMessage) and isinstance(entry, UserMessage))
     merged_id = max(prior.id, entry.id)
-    if same_source:
+    # The provider caches at a marked message, and the merged one ends where either did.
+    marked = any(isinstance(m, UserMessage) and m.cache_point for m in (prior, entry))
+    if isinstance(prior, UserMessage) and same_sender(prior, entry):
+        text = f"{prior.text}\n\n{entry.text}"
+        return replace(
+            prior,
+            id=merged_id,
+            text=text,
+            hidden=hidden,
+            attachments=attachments,
+            cache_point=marked,
+        )
+    if same_sender(prior, entry):
         text = f"{prior.text}\n\n{entry.text}"
         return replace(
             prior,
@@ -845,7 +894,13 @@ def _merge_user(
             attachments=attachments,
         )
     text = f"{_labeled_text(prior)}\n\n{_labeled_text(entry)}"
-    return UserMessage(id=merged_id, text=text, attachments=attachments, hidden=hidden)
+    return UserMessage(
+        id=merged_id,
+        text=text,
+        attachments=attachments,
+        hidden=hidden,
+        cache_point=marked,
+    )
 
 
 # Joins text and concatenates ``tool_calls``, dropping any ``entry`` call whose id
@@ -896,14 +951,14 @@ def _merge_assistant(
 def _flush_interrupted(
     pending: set[str],
     paired_externally: frozenset[str],
-    seen: set[str],
     out: list[ModelContextEvent],
     deferred: list[ModelContextEvent],
 ) -> None:
     """Emit interrupted results and deferred peers."""
-    for cid in sorted(pending - paired_externally):
-        seen.add(cid)
-        out.append(ToolResult(call_id=cid, content="[interrupted]", is_error=True))
+    out.extend(
+        ToolResult(call_id=cid, content="[interrupted]", is_error=True)
+        for cid in sorted(pending - paired_externally)
+    )
     pending.clear()
     _flush_deferred(out, deferred)
 
@@ -915,3 +970,14 @@ def _flush_deferred(
     """Emit peers held past an open pair, in arrival order."""
     out.extend(deferred)
     deferred.clear()
+
+
+# ``UserMessage`` is the human and carries no label. An ``AgentSendMessage`` is prefixed
+# via the shared :func:`labeled_agent_send_text` so attribution survives demotion to a
+# plain ``UserMessage`` (the structured ``source`` is then gone) and the label format
+# stays identical to the wire path.
+def _labeled_text(entry: UserMessage | AgentSendMessage) -> str:
+    """Return ``entry`` text, labeling an ``AgentSendMessage`` with its source."""
+    if isinstance(entry, UserMessage):
+        return entry.text
+    return labeled_agent_send_text(entry)

@@ -102,6 +102,11 @@ class TestBuildSystemSection:
         _ = memory.build_system_section("/some/cwd", projects_dir=projects)
         assert memory.memory_dir("/some/cwd", projects_dir=projects).is_dir()
 
+    def test_names_no_tool_an_agent_may_not_have(self, tmp_path: Path) -> None:
+        """The section is built without the toolset; saving is the tool's to teach."""
+        out = memory.build_system_section("/x", projects_dir=tmp_path / "projects")
+        assert "Memory tool" not in out
+
     def test_with_index(self, tmp_path: Path) -> None:
         d = memory.ensure_memory_dir("/x", projects_dir=tmp_path / "projects")
         _ = (d / "MEMORY.md").write_text("- [Entry](e.md) - hook\n")

@@ -48,7 +48,7 @@ sagent --ephemeral
 sagent --session /tmp/disposable-sagent-session
 ```
 
-`--ephemeral` also disables the auto-memory system prompt section, so existing project memories are not sent to providers and the model is not instructed to write new memories. Library users can leave `session_dir` unset for in-memory runs; call `build_system_dict(..., include_memory=False)` when persistent memory should be disabled too.
+`--ephemeral` also disables the auto-memory system prompt section, so existing project memories are not sent to providers and the model is not instructed to write new memories. Library users can leave `session_dir` unset for in-memory runs; pass `prompt_context=SagentContext(include_memory=False)` to `Agent` when persistent memory should be disabled too.
 
 Large tool outputs may be persisted separately to keep model requests within budget. Session runs store those under `session_dir/tool-results`; no-session runs use `/tmp/sagent_results`. Persisted files are written with owner-only permissions.
 

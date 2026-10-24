@@ -238,7 +238,7 @@ def _format_size(n: int) -> str:
 # internal cap" -- which became false when that cap was re-expressed in lines, leaving
 # the 11.1M-character result of session ``190b6baec7ed`` with no bound at all.
 #
-# Error results were too, but ``materialize_request`` elides any over-budget result
+# Error results were too, but ``materialize_messages`` elides any over-budget result
 # regardless, so the exemption did not keep a large traceback whole: it only ensured the
 # traceback was replaced by a placeholder with no path, while the identical body as a
 # SUCCESS was written to disk and stayed readable. Exactly backwards, since the failing

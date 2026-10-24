@@ -76,7 +76,9 @@ from sagent.types.runtime import (
     RuntimeEvent,
     SaveSession,
     ServiceErrorSnapshot,
+    SessionMessage,
     StatusChanged,
+    SystemMessage,
     ToolCall,
     ToolResult,
     ToolResultKind,
@@ -138,9 +140,10 @@ class PersistentAgentRecord:
     service_tier: str = "auto"
     max_budget_usd: float | None = None
     persistent_retry: bool = False
+    append_system: str = ""
     frozen_system: bool = False
-    """A hot child's ``system`` is already the parent's rendered prompt;
-    resuming it cold would re-append its own tools' contributions."""
+    """Read, never written: a hot spawn (gone now) saved its parent's whole rendered
+    prompt as ``system``, so a rebuild would repeat every block already inside it."""
 
 
 def serialize_tool_state(state: ToolState) -> dict[str, object]:
@@ -478,7 +481,7 @@ def append_persistent_agent_lifecycle(
                 account=spec.account if spec else None,
                 model_id=child.model.tagged_model_id,
                 tools=tuple(tool.name for tool in child.tools),
-                system=child.base_system_spec,
+                system=child.system,
                 notify_on_asleep=notify_on_asleep,
                 max_tool_call_rounds=child.max_tool_call_rounds,
                 max_request_tokens=child.settings.max_request_tokens,
@@ -491,7 +494,7 @@ def append_persistent_agent_lifecycle(
                 service_tier=settings.service_tier,
                 max_budget_usd=child.max_budget_usd,
                 persistent_retry=child.persistent_retry,
-                frozen_system=child.frozen_system,
+                append_system=child.append_system,
             ),
         ],
     )
@@ -1105,6 +1108,17 @@ def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
             "parent_id": entry.parent_id,
             "timestamp": entry.timestamp,
             "hidden": entry.hidden,
+            "cache_point": entry.cache_point,
+        }
+    if isinstance(entry, SystemMessage):
+        return {
+            "type": "system_message",
+            "text": entry.text,
+            "offered_tools": _offered_to_json(entry.offered_tools),
+            "id": entry.id,
+            "parent_id": entry.parent_id,
+            "timestamp": entry.timestamp,
+            "hidden": entry.hidden,
         }
     if isinstance(entry, AgentSendMessage):
         return {
@@ -1156,6 +1170,25 @@ def _entry_to_json(entry: TapeEvent) -> dict[str, object]:
         "timestamp": entry.timestamp,
         "hidden": entry.hidden,
     }
+
+
+def _offered_to_json(offered: tuple[str, ...] | None) -> list[str] | None:
+    """Encode a system message's tool offer; ``None`` (no change) stays ``null``."""
+    return None if offered is None else list(offered)
+
+
+# ``null`` and an absent key both mean the system message changed no offer. A malformed offer is
+# dropped like a malformed tool call: the system message still loads, and the agent offers its
+# gate again on the next round because the history no longer holds it.
+def _offered_from_json(raw: object) -> tuple[str, ...] | None:
+    """Decode a system message's tool offer."""
+    if raw is None:
+        return None
+    try:
+        return tuple(from_plain(raw, list[str]))
+    except ReadError:
+        logger.warning("Dropping malformed offered_tools: %r", raw)
+        return None
 
 
 def _ref_to_json(ref: TapeRef) -> dict[str, object]:
@@ -1265,23 +1298,6 @@ def _splice_from_json(
     mask = _mask_from_json(rec.get("mask"))
     raw_insert = rec.get("insert_after")
     insert_after = _ref_from_json(raw_insert) if raw_insert is not None else None
-    raw_payload = rec.get("payload")
-    payload: list[ModelContextEvent] = []
-    if isinstance(raw_payload, list):
-        for item in cast(list[object], raw_payload):
-            if isinstance(item, dict):
-                entry = _entry_from_json(cast(Mapping[str, object], item))
-                if isinstance(
-                    entry,
-                    (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
-                ):
-                    payload.append(entry)
-    raw_paired = rec.get("paired_externally")
-    paired: frozenset[str] = frozenset[str]()
-    if isinstance(raw_paired, list):
-        paired = frozenset(
-            item for item in cast(list[object], raw_paired) if isinstance(item, str)
-        )
     # ``replay()`` skips both mask-disjointness and payload-pairing
     # validation; legacy sessions converted to splice format may carry
     # masks the validator would reject.
@@ -1289,14 +1305,40 @@ def _splice_from_json(
         ref=ref,
         mask=mask,
         insert_after=insert_after,
-        payload=tuple(payload),
+        payload=_payload_from_json(rec.get("payload")),
         strategy=str(rec.get("strategy") or ""),
         token_before=_read(rec.get("token_before"), int, 0),
         token_after=_read(rec.get("token_after"), int, 0),
         fallback_reason=str(rec.get("fallback_reason") or ""),
         preserved_tail_count=_read(rec.get("preserved_tail_count"), int, 0),
-        paired_externally=paired,
+        paired_externally=_paired_from_json(rec.get("paired_externally")),
     )
+
+
+# A payload holds history entries only, the system messages among them: dropping those
+# resumed a context without the reminders and the tool offer the live one held.
+def _payload_from_json(raw: object) -> tuple[ModelContextEvent, ...]:
+    """Decode a splice payload's history entries."""
+    if not isinstance(raw, list):
+        return ()
+    entries = (
+        _entry_from_json(cast(Mapping[str, object], item))
+        for item in cast(list[object], raw)
+        if isinstance(item, dict)
+    )
+    return tuple(
+        entry
+        for entry in entries
+        if entry is not None
+        and not isinstance(entry, CompactStarted | CompactComplete | CompactFailed)
+    )
+
+
+def _paired_from_json(raw: object) -> frozenset[str]:
+    """Decode a splice's externally paired call ids."""
+    if not isinstance(raw, list):
+        return frozenset[str]()
+    return frozenset(item for item in cast(list[object], raw) if isinstance(item, str))
 
 
 # The conversion: - ``suppresses`` set → one mask range per contiguous ordinal run. -
@@ -1333,34 +1375,17 @@ def _legacy_override_to_splice(
         mask = (MaskRange(session_id=ref.session_id, lo=0, hi=max(0, ref.ordinal - 1)),)
     else:
         mask = ()
-    raw_payload = rec.get("payload")
-    payload: list[ModelContextEvent] = []
-    if isinstance(raw_payload, list):
-        for item in cast(list[object], raw_payload):
-            if isinstance(item, dict):
-                entry = _entry_from_json(cast(Mapping[str, object], item))
-                if isinstance(
-                    entry,
-                    (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
-                ):
-                    payload.append(entry)
-    raw_paired = rec.get("paired_externally")
-    paired: frozenset[str] = frozenset[str]()
-    if isinstance(raw_paired, list):
-        paired = frozenset(
-            item for item in cast(list[object], raw_paired) if isinstance(item, str)
-        )
     return ContextSplice.replay(
         ref=ref,
         mask=mask,
         insert_after=inject_after,
-        payload=tuple(payload),
+        payload=_payload_from_json(rec.get("payload")),
         strategy=str(rec.get("strategy") or ""),
         token_before=_read(rec.get("token_before"), int, 0),
         token_after=_read(rec.get("token_after"), int, 0),
         fallback_reason=str(rec.get("fallback_reason") or ""),
         preserved_tail_count=_read(rec.get("preserved_tail_count"), int, 0),
-        paired_externally=paired,
+        paired_externally=_paired_from_json(rec.get("paired_externally")),
     )
 
 
@@ -1432,6 +1457,16 @@ def _entry_from_json(d: Mapping[str, object]) -> TapeEvent | None:
         return UserMessage(
             text=str(d.get("text") or ""),
             attachments=_atts_from_json(d.get("attachments")),
+            id=entry_id,
+            parent_id=parent_id,
+            timestamp=timestamp,
+            hidden=hidden,
+            cache_point=_json_bool(d.get("cache_point")),
+        )
+    if t == "system_message":
+        return SystemMessage(
+            text=str(d.get("text") or ""),
+            offered_tools=_offered_from_json(d.get("offered_tools")),
             id=entry_id,
             parent_id=parent_id,
             timestamp=timestamp,
@@ -1678,6 +1713,7 @@ def _persistent_agent_from_json(
         service_tier=str(record.get("service_tier") or "auto"),
         max_budget_usd=_optional_float(record.get("max_budget_usd")),
         persistent_retry=_json_bool(record.get("persistent_retry")),
+        append_system=str(record.get("append_system") or ""),
         frozen_system=_json_bool(record.get("frozen_system")),
     )
 
@@ -1796,7 +1832,7 @@ def _persistent_agent_to_json(record: PersistentAgentRecord) -> dict[str, object
         "service_tier": record.service_tier,
         "max_budget_usd": record.max_budget_usd,
         "persistent_retry": record.persistent_retry,
-        "frozen_system": record.frozen_system,
+        "append_system": record.append_system,
         "timestamp": time.time(),
     }
 
@@ -2080,10 +2116,7 @@ def _seed_id_counter(tape: Sequence[TapeRecord]) -> None:
     for record in tape:
         if isinstance(record, ReferrableTapeEvent):
             event = record.event
-            if isinstance(
-                event,
-                (AgentSendMessage, UserMessage, AssistantMessage, ToolResult),
-            ):
+            if isinstance(event, SessionMessage):
                 max_id = max(max_id, event.id)
         else:
             for entry in record.payload:

@@ -69,7 +69,15 @@ class AgentSend:
         return f"{self.name} → {to}: {preview}" if to else self.name
 
     def prompt(self) -> str:
+        """Return no fixed guidance; who this agent is and can reach is a reminder."""
+        return ""
+
+    def reminder(self) -> str:
         """Return a self-identity + active-agents listing.
+
+        A reminder, not a prompt: the label is this agent's alone and the list
+        changes on every spawn, so in the system blocks either would cost the
+        agent its share of the cached prefix.
 
         Returns:
           contribution: ``Your agent label is X. Active agents you can

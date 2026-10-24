@@ -38,6 +38,7 @@ from sagent.providers.lib.errors import (
     StreamingResponseNotReadError,
 )
 from sagent.providers.lib.id_remap import IdRemapper
+from sagent.tools import tool
 from sagent.types.capability import (
     ModelCapability,
     ModelLimits,
@@ -59,10 +60,10 @@ from sagent.types.runtime import (
     DETACHED_PLACEHOLDER,
     AssistantMessage,
     BytesMessage,
-    ModelContextEvent,
     ToolCall,
     ToolResult,
     UserMessage,
+    WireMessage,
 )
 
 
@@ -183,7 +184,7 @@ def _fast_model() -> _AnthropicModel:
 
 
 def _make_request(
-    messages: list[ModelContextEvent],
+    messages: list[WireMessage],
 ) -> ModelRequest:
     return ModelRequest(messages=messages)
 
@@ -340,6 +341,90 @@ def test_build_messages_marks_a_cache_point_ahead_of_the_last_message() -> None:
     plain = _build_messages(_make_request([UserMessage(text="a"), question]))
     first = cast(list[dict[str, object]], plain[0]["content"])[0]
     assert "cache_control" not in first
+
+
+def _look(topic: str) -> str:
+    """Look a topic up."""
+    return topic
+
+
+def _peek(topic: str) -> str:
+    """Peek at a topic."""
+    return topic
+
+
+def test_a_tool_gate_change_withdraws_and_restores_tools_where_it_happened() -> None:
+    """Every schema stays in ``tools``; the gate changes as a system message.
+
+    The change sits after the message that made it, so the history before it
+    stays byte-identical and cached, and the last-message mark stays on the
+    user's turn, not on the change.
+    """
+    request = ModelRequest(
+        messages=[
+            UserMessage(text="a", offered_tools=("Look",)),
+            AssistantMessage(text="ok"),
+            UserMessage(text="b", offered_tools=("Look", "Peek")),
+        ],
+        tools=[tool(_look, name="Look"), tool(_peek, name="Peek")],
+    )
+    msgs = _build_messages(request)
+    assert [m["role"] for m in msgs] == [
+        "user",
+        "system",
+        "assistant",
+        "user",
+        "system",
+    ]
+    peek = {"type": "tool_reference", "name": "Peek"}
+    assert msgs[1]["content"] == [{"type": "tool_removal", "tool": peek}]
+    assert msgs[4]["content"] == [{"type": "tool_addition", "tool": peek}]
+    last_user = cast(list[dict[str, object]], msgs[3]["content"])
+    assert "cache_control" in last_user[-1]
+    model = Anthropic.from_key("k").model("example-1.0")
+    headers = cast(dict[str, str], model._build_kwargs(request, msgs)["extra_headers"])
+    assert "inline-tools-2026-09-15" in headers["anthropic-beta"]
+
+
+def test_an_unchanged_offer_sends_no_tool_change() -> None:
+    request = ModelRequest(
+        messages=[UserMessage(text="a", offered_tools=("Look", "Peek"))],
+        tools=[tool(_look, name="Look"), tool(_peek, name="Peek")],
+    )
+    msgs = _build_messages(request)
+    assert [m["role"] for m in msgs] == ["user"]
+    model = Anthropic.from_key("k").model("example-1.0")
+    headers = cast(
+        dict[str, str],
+        model._build_kwargs(request, msgs).get("extra_headers") or {},
+    )
+    assert "inline-tools" not in headers.get("anthropic-beta", "")
+
+
+def test_build_messages_keeps_cache_marks_within_anthropic_s_four() -> None:
+    """The API rejects a request with more than 4 ``cache_control`` blocks.
+
+    Each system block and the last message take one; the newest
+    ``cache_point``s keep what is left, as the ones nearest the reusable end.
+    """
+    docs = [UserMessage(text=f"doc {i}", cache_point=True) for i in range(3)]
+    cases: list[tuple[tuple[str, ...], list[str]]] = [
+        (("a", "b"), ["doc 2"]),
+        (("a", "", "c"), ["doc 2"]),
+        (("a",), ["doc 1", "doc 2"]),
+        (("a", "b", "c"), []),
+    ]
+    for system, kept in cases:
+        msgs = _build_messages(
+            ModelRequest(messages=[*docs, UserMessage(text="q")], system=system),
+        )
+        marked = [
+            b.get("text")
+            for m in msgs
+            for b in cast(list[dict[str, object]], m["content"])
+            if "cache_control" in b
+        ]
+        assert marked == [*kept, "q"]
 
 
 def test_build_messages_assistant_with_tool_call_remaps_id() -> None:
@@ -1590,7 +1675,7 @@ def test_build_kwargs_no_context_management_by_default() -> None:
     """
     p = Anthropic.from_key("k")
     model = p.model("wire-example")
-    req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
+    req = ModelRequest(messages=[UserMessage(text="hi")], system=("s",))
     msgs: list[MessageParam] = [
         {"role": "user", "content": [{"type": "text", "text": "hi"}]},
     ]
@@ -1605,7 +1690,7 @@ def test_build_kwargs_includes_context_management_when_opted_in() -> None:
     model = p.model("wire-example")
     req = ModelRequest(
         messages=[UserMessage(text="hi")],
-        system="s",
+        system=("s",),
         max_response_tokens=128_000,
     )
     msgs: list[MessageParam] = [
@@ -1637,7 +1722,7 @@ def test_context_management_unclearable_tool_is_excluded() -> None:
 def test_build_kwargs_context_management_trigger_scales_with_context_window() -> None:
     """``trigger`` is half of the model's context window."""
     p = Anthropic.from_key("k", server_side_context_management=True)
-    req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
+    req = ModelRequest(messages=[UserMessage(text="hi")], system=("s",))
     msgs: list[MessageParam] = [
         {"role": "user", "content": [{"type": "text", "text": "hi"}]},
     ]
@@ -1702,7 +1787,7 @@ def test_build_kwargs_preserves_provider_context_management() -> None:
     # test then proves the subclass policy wins over the base default.
     p = _CustomCmAnthropic.from_key("k", server_side_context_management=True)
     model = p.model("wire-example")
-    req = ModelRequest(messages=[UserMessage(text="hi")], system="s")
+    req = ModelRequest(messages=[UserMessage(text="hi")], system=("s",))
     msgs: list[MessageParam] = [
         {"role": "user", "content": [{"type": "text", "text": "hi"}]},
     ]
@@ -1720,16 +1805,48 @@ def test_build_kwargs_preserves_provider_context_management() -> None:
     assert trig["value"] == 180_000
 
 
-def test_anthropic_provider_build_system_passthrough() -> None:
+def test_anthropic_provider_build_system_marks_the_static_prefix() -> None:
+    """Requests sharing a system prompt but diverging after it reuse its cache.
+
+    Anthropic writes cache entries only at a breakpoint; a request whose only
+    mark is its last message never matches a sibling's differing tail.
+    """
     p = Anthropic.from_key("k")
-    assert p.build_system("hello") == "hello"
+    assert p.build_system(("hello",)) == [
+        {"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}},
+    ]
+    assert p.build_system(("hello",), cache_ttl="1h") == [
+        {
+            "type": "text",
+            "text": "hello",
+            "cache_control": {"type": "ephemeral", "ttl": "1h"},
+        },
+    ]
 
 
 def test_anthropic_provider_build_system_empty_returns_not_given() -> None:
     p = Anthropic.from_key("k")
-    out = p.build_system("")
+    out = p.build_system(())
     # ``anthropic.NOT_GIVEN`` is a sentinel; type is anthropic.NotGiven.
     assert out is anthropic_sdk.NOT_GIVEN
+
+
+def test_more_than_three_system_blocks_still_fit_the_four_cache_marks() -> None:
+    """The last message takes one mark; the system blocks may take only three."""
+    request = ModelRequest(
+        messages=[UserMessage(text="q")],
+        system=("a", "b", "c", "d"),
+    )
+    blocks = Anthropic.from_key("k").build_system(request.system)
+    assert isinstance(blocks, list)
+    assert ["cache_control" in b for b in blocks] == [False, True, True, True]
+    marked = [
+        b
+        for m in _build_messages(request)
+        for b in cast(list[dict[str, object]], m["content"])
+        if "cache_control" in b
+    ]
+    assert len(marked) == 1
 
 
 def test_anthropic_model_max_response_tokens_from_profile(

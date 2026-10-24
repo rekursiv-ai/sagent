@@ -894,8 +894,8 @@ def _build_chat_messages(request: ModelRequest) -> list[dict[str, MutablePlainTr
     """Translate history entries to HF chat-template format."""
     ids = IdRemapper("call_")
     messages: list[dict[str, MutablePlainTree]] = []
-    if request.system:
-        messages.append({"role": "system", "content": request.system})
+    if request.system_text:
+        messages.append({"role": "system", "content": request.system_text})
     for entry in request.messages:
         if isinstance(entry, (AgentSendMessage, UserMessage)):
             messages.append({"role": "user", "content": entry.text})

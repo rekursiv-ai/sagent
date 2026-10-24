@@ -44,12 +44,12 @@ from sagent.types.model import (
 from sagent.types.runtime import (
     DETACHED_PLACEHOLDER,
     AssistantMessage,
-    ModelContextEvent,
     ModelResponseThinking,
     RuntimeEvent,
     ToolCall,
     ToolResult,
     UserMessage,
+    WireMessage,
 )
 
 
@@ -125,10 +125,10 @@ def test_strip_additional_properties_scalar_passthrough() -> None:
     assert _strip_additional_properties(cast(MutablePlainTree, "x")) == "x"
 
 
-def _make_request(messages: list[ModelContextEvent], **kw: object) -> ModelRequest:
+def _make_request(messages: list[WireMessage], **kw: object) -> ModelRequest:
     # Use explicit kwargs to keep the type checker happy.
     if "system" in kw:
-        return ModelRequest(messages=messages, system=str(kw["system"]))
+        return ModelRequest(messages=messages, system=(str(kw["system"]),))
     return ModelRequest(messages=messages)
 
 
@@ -788,7 +788,7 @@ async def test_google_actual_request_tokens_wraps_generate_request() -> None:
     m = Google.from_key("k").model("example-1.0")
     m._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handle))
     n = await m.actual_request_tokens(
-        ModelRequest(messages=[UserMessage(text="ping")], system="sys"),
+        ModelRequest(messages=[UserMessage(text="ping")], system=("sys",)),
     )
     assert n == 314
     assert seen[0].url.path.endswith(":countTokens")

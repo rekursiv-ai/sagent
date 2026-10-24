@@ -10,8 +10,9 @@ an avoidable one (something -- e.g. a subagent spawn mutating the system
 prompt, see #361 -- perturbed the prefix bytes).
 
 This is detection only, mirroring Pi Agent's ``cache-stats.ts``: it reports
-waste after the fact rather than preventing it. Prevention lives in
-``tools.agent_spawn``'s hot/cold spawn flag.
+waste after the fact rather than preventing it. Prevention lives in the
+agent's request layout: system blocks built once per context and shared
+with children, with what changes told as appended reminders.
 """
 
 from __future__ import annotations

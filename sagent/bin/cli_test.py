@@ -58,10 +58,13 @@ from sagent.bin.cli import (
     _resume_label,
     _resume_persistent_agents,
     _run_headless,
+    _session_context,
+    _session_tool_names,
     parse_agent_args,
     resolve_tools,
 )
 from sagent.catalog.table import UnknownModelError
+from sagent.prompt import SagentContext
 from sagent.providers import PROVIDER_NAMES
 from sagent.sessions import SessionInfo, project_dir
 from sagent.testing import FakeAgent, MockModelCaps
@@ -151,7 +154,7 @@ class _PersistentAgentRecordFields(TypedDict, total=False, closed=True):
     """The ``PersistentAgentRecord`` fields a test overrides."""
 
     account: str | None
-    frozen_system: bool
+    append_system: str
     label: str
     max_request_tokens: int | None
     max_response_tokens: int | None
@@ -159,6 +162,7 @@ class _PersistentAgentRecordFields(TypedDict, total=False, closed=True):
     show_thinking: bool
     thinking_budget: str
     thinking_output: str
+    tools: tuple[str, ...]
 
 
 def _child_record(
@@ -267,6 +271,30 @@ async def test_resumed_child_exit_persists_terminal_state(
     assert "resumed-child" not in agent_registry
 
 
+@pytest.mark.asyncio
+async def test_resume_skips_a_hot_child_whose_prompt_it_cannot_rebuild(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A hot spawn saved its parent's whole prompt; rebuilt, every block doubles."""
+    _stub_build_provider(monkeypatch)
+    parent = Agent(model=cast(Model, _ChildStubModel()), tools=[], session_dir=tmp_path)
+    session_file = tmp_path / "session.jsonl"
+    append_session(
+        session_file,
+        persistent_agents=[_child_record(label="hot-child", session_dir="c")],
+    )
+    record = json.loads(session_file.read_text(encoding="utf-8"))
+    session_file.write_text(
+        json.dumps({**record, "frozen_system": True}) + "\n",
+        encoding="utf-8",
+    )
+    await _resume_persistent_agents(parent, tmp_path, allow_providers=("Anthropic",))
+    assert "hot-child" not in agent_registry
+    assert "skipping 'hot-child'" in capsys.readouterr().err
+
+
 def test_build_persistent_child_restores_thinking_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -282,18 +310,29 @@ def test_build_persistent_child_restores_thinking_state(
     assert child.model.settings.thinking_output == "text"
 
 
-def test_build_persistent_child_restores_frozen_system(
+def test_build_persistent_child_restores_its_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A hot child's persisted ``system`` is already fully rendered.
-
-    Resuming it cold would re-append its tools' prompt contributions on
-    top of that snapshot, so the resumed prompt must stay frozen.
-    """
+    """A resumed child gets back its own prompt, and the CLI's project context."""
     _stub_build_provider(monkeypatch)
-    record = _child_record(frozen_system=True)
+    record = _child_record(append_system="Be brief.")
     child = _build_persistent_child(record, allow_providers=())
-    assert child.frozen_system is True
+    assert child.system == record.system
+    assert child.append_system == "Be brief."
+    assert isinstance(child.prompt_context, SagentContext)
+
+
+def test_a_resumed_child_shown_no_memories_gets_no_memory_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The recipe can change between runs; the tool follows the index, not the record."""
+    _stub_build_provider(monkeypatch)
+    _recipe_without_memory(monkeypatch)
+    child = _build_persistent_child(
+        _child_record(tools=("Read", "Memory")),
+        allow_providers=(),
+    )
+    assert [tool.name for tool in child.tools] == ["Read"]
 
 
 def test_resumed_persistent_child_missing_account_falls_back_to_default(
@@ -1031,6 +1070,56 @@ def test_resolve_tools_unknown_raises() -> None:
         _ = resolve_tools(["NoSuchTool"])
 
 
+def test_the_removed_system_flag_is_an_error_not_a_replacement_prompt(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--system`` added to the prompt; as an abbreviation it would replace it."""
+    with pytest.raises(SystemExit):
+        _ = _parse(["--system", "Be brief."])
+    assert "--append-system-prompt" in capsys.readouterr().err
+
+
+def test_an_ephemeral_session_leaves_memory_out_of_its_default_tools() -> None:
+    args = _parse(["--ephemeral"])
+    assert "Memory" not in _session_tool_names(args, _session_context(args))
+    args = _parse([])
+    assert "Memory" in _session_tool_names(args, _session_context(args))
+
+
+def test_an_ephemeral_session_refuses_the_memory_tool_it_was_asked_for() -> None:
+    """Dropping it silently left the user believing their memories were saved."""
+    args = _parse(["--ephemeral", "--tools", "Read", "Memory"])
+    with pytest.raises(SystemExit, match="--ephemeral"):
+        _ = _session_tool_names(args, _session_context(args))
+
+
+def _recipe_without_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    def sections(section: str, key: str) -> list[str]:
+        del section, key
+        return ["static", "environment", "agents_md"]
+
+    monkeypatch.setattr("sagent.prompt.recipe_list", sections)
+
+
+def test_a_recipe_that_shows_no_memories_leaves_memory_out_of_its_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A save the model is never shown again is a memory it cannot use."""
+    _recipe_without_memory(monkeypatch)
+    args = _parse([])
+    assert "Memory" not in _session_tool_names(args, _session_context(args))
+    args = _parse(["--tools", "Read", "Memory"])
+    with pytest.raises(SystemExit, match="recipe"):
+        _ = _session_tool_names(args, _session_context(args))
+
+
+def test_the_root_gets_background_task_with_agent_spawn_as_a_child_does() -> None:
+    """A child bundles it; a root without it would differ in every schema."""
+    names = [tool.name for tool in resolve_tools(["AgentSpawn", "Read"])]
+    assert names == ["AgentSpawn", "Read", "BackgroundTask"]
+    assert [tool.name for tool in resolve_tools(["Read"])] == ["Read"]
+
+
 def test_resolve_tools_known_subset_includes_bash() -> None:
     tools = resolve_tools(["Read", "Bash"])
     assert len(tools) == 2
@@ -1575,7 +1664,7 @@ def test_abbreviated_provider_flag_counts_as_explicit() -> None:
 
 @pytest.mark.parametrize("flag", ["--provider", "--auth", "--account", "--model"])
 def test_flag_explicitness_ignores_unrelated_values(flag: str) -> None:
-    ns = _parse(["--system", f"{flag} appears in prose"])
+    ns = _parse(["--append-system-prompt", f"{flag} appears in prose"])
     assert getattr(ns, f"{flag.removeprefix('--')}_explicit") is False
 
 

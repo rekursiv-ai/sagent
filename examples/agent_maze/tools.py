@@ -211,10 +211,14 @@ class CommsTool:
         return "comms broadcast"
 
     def prompt(self) -> str:
-        """Return the tool prompt for the agent.
+        """Return no fixed guidance; teammates come and go, so they are a reminder."""
+        return ""
+
+    def reminder(self) -> str:
+        """Return who this agent is and which teammates it can reach.
 
         Returns:
-          prompt: Prompt describing the agent's reachable teammates.
+          reminder: The agent's label and its reachable teammates.
 
         """
         me = agent_label_var.get("")

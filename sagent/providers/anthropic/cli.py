@@ -679,8 +679,10 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
         # Tools the stateless ``stream`` stashes so ``_spawn_initialized``
         # can populate the bridge before launching ``claude`` (the CLI
         # lists tools right after launch). Empty in session mode, which
-        # syncs the bridge before its own spawn.
+        # syncs the bridge before its own spawn. The gate rides with them: a spare
+        # warmed mid-turn refreshes the bridge, and must not open what it withheld.
         self._pending_tools: list[Tool] = []
+        self._pending_allowed: frozenset[str] | None = None
         # Bridge ``list_tools`` count snapshotted per spawned proc (keyed
         # by ``id(proc)``); the turn's first ``_send_entry`` waits for the
         # count to exceed that proc's snapshot (proof THIS subprocess's MCP
@@ -831,7 +833,7 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
               ``result`` event, or the CLI surfaced an error result.
 
         """
-        self._pending_system = request.system
+        self._pending_system = request.system_text
         # Clear the bridge sink when the turn ends (any exit) so a
         # stale runtime publisher never lingers on the long-lived bridge
         # -- e.g. a detached background ``call_tool`` firing between
@@ -851,8 +853,9 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
             # ``_sync_tools_bridge`` below still refreshes the live
             # registry for the already-warm subprocess.
             self._pending_tools = list(request.tools)
+            self._pending_allowed = request.allowed_tools
             if self._should_respawn(request):
-                if hash_system(request.system) != self._system_hash:
+                if hash_system(request.system_text) != self._system_hash:
                     await self._hot_spare.discard_spare()
                 await self._hot_spare.respawn()
                 self._reset_active_state()
@@ -967,7 +970,7 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
             return False
         return self._respawn_due(
             request.messages,
-            system=request.system,
+            system=request.system_text,
             max_request_tokens=self.limits.max_request_tokens,
         )
 
@@ -981,7 +984,10 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
     ) -> None:
         """Refresh the MCP bridge's tool registry and runtime event sink."""
         if self._tools_bridge is not None:
-            self._tools_bridge.update_tools(list(request.tools))
+            self._tools_bridge.update_tools(
+                list(request.tools),
+                allowed=request.allowed_tools,
+            )
             self._tools_bridge.set_publish(publish)
 
     # The bridge runs background tool calls (those the model requested with
@@ -1187,7 +1193,10 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
         # own ``_sync_tools_bridge`` before the spawn, leaving
         # ``_pending_tools`` empty (a no-op refresh).
         if self._pending_tools:
-            self._tools_bridge.update_tools(list(self._pending_tools))
+            self._tools_bridge.update_tools(
+                list(self._pending_tools),
+                allowed=self._pending_allowed,
+            )
         spawn_owned_tmpdir: Path | None
         tmpdir: Path | None
         if self._persistent_tmpdir is not None:

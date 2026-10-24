@@ -29,10 +29,9 @@ session.jsonl append). Budget caps are enforced at their own gates:
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal, NoReturn
+from typing import TYPE_CHECKING, Final, Literal, NoReturn, Protocol
 
 import asyncio
 import contextlib
@@ -95,7 +94,7 @@ from sagent.lib import last_models
 from sagent.lib.tool_validation import validate_tool_input
 from sagent.providers import providers
 from sagent.providers.lib.errors import PolicyBlockedError
-from sagent.request_materialization import materialize_request
+from sagent.request_materialization import materialize_messages
 
 # The one module imported whole rather than by name: this file touches 36
 # of its symbols, and the flat list buried every other import here.
@@ -141,16 +140,21 @@ from sagent.types.tools import (
     DEFAULT_MAX_RESULT_CHARS,
     MAX_RESULT_TOKENS,
     MAX_ROUND_RESULT_CHARS,
+    Reminding,
     ResultBounded,
     Tool,
     ToolResultPolicy,
+    gate_refusal,
 )
 
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, Callable, Generator, Mapping, Sequence
+
     import contextvars
 
     from sagent.types.capability import (
+        ContextTag,
         ModelCapability,
         ModelLimits,
         ModelSettings,
@@ -161,10 +165,6 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
-
-SystemPromptArg = str | Callable[[], str]
-"""System-prompt spec. ``str`` is literal; ``Callable[[], str]`` is
-re-invoked per request so cwd-aware sections stay live after ``cd``."""
 
 ERROR_MAX_TOOL_CALL_ROUNDS: Final = "error:max_tool_call_rounds"
 REFUSED_RESULT: Final = "[withheld: the model refused the request carrying this result]"
@@ -223,14 +223,6 @@ def _settings_from_knobs(
     return budget
 
 
-def _reject_bad_system_arg(system: object) -> None:
-    """Reject non-system-prompt constructor values before runtime setup."""
-    if not isinstance(system, str) and not callable(system):
-        raise TypeError(
-            f"system must be str or Callable[[], str], got {type(system).__name__}",
-        )
-
-
 @dataclasses.dataclass(kw_only=True, slots=True)
 class ActivityTracker:
     """Lifecycle counters for the status pane."""
@@ -264,14 +256,39 @@ class ActivityTracker:
 _TOOL_REGISTRY_MAX: Final = 10_000
 
 
+class PromptContext(Protocol):
+    """Renders what an agent tells its model about the project and environment.
+
+    Injected so the agent layer does not depend on a host's prompt assets. The
+    sagent CLI's is ``prompt.SagentContext``.
+    """
+
+    def project(self, cwd: str, *, additional_dirs: Sequence[str]) -> str:
+        """Return the project instructions for ``cwd``; sent in the system blocks."""
+        ...
+
+    def environment(
+        self,
+        capability: ModelCapability,
+        *,
+        cwd: str,
+        context: ContextTag,
+    ) -> str:
+        """Return the environment; retold to the model whenever it changes."""
+        ...
+
+
 class Agent:
     """Conversation agent: composes :class:`AgentRuntime` with wrappers.
 
     Args:
       model: Rich provider model the agent calls.
       model_recipe: Optional spec recording how the model was built.
-      system: Static system prompt string or a no-arg factory rebuilt
-          each request.
+      system: Base system prompt; replaces nothing else the agent adds.
+      append_system: Text placed after ``system``, ahead of the tool prompts.
+      prompt_context: Renders the project instructions (a last system block)
+          and the environment (a reminder, retold when it changes); ``None``
+          sends neither.
       tools: Rich tools advertised to the model.
       compactor: Rich compactor used on ``types.runtime.Compact`` / ``types.runtime.Recompact`` and
           on overflow recovery.
@@ -288,14 +305,6 @@ class Agent:
           forces ``types.runtime.ModelResponseError``.
       max_budget_usd: Hard USD cap; ``record_response`` raises when hit.
       persistent_retry: Enable persistent-mode backoff for 429/529.
-      frozen_system: Skip per-tool prompt contributions and the detached-
-          activity note in :meth:`_build_system`, returning ``system``
-          verbatim instead. Trades the liveness ``_build_system`` normally
-          gives (fresh depth/budget reminders, newly-bundled tools, the
-          detached note) for a byte-stable prompt a provider's prefix cache
-          can reuse across otherwise-divergent agents. Set by ``AgentSpawn``
-          hot spawns (see ``tools.agent_spawn``); not meant to be toggled by
-          general callers mid-session.
       allow_background: Whether a tool call may carry ``background`` / ``delay``.
           A host whose turn must end with its reply sets it False: tools are
           then offered without those keys, and a call that sends them runs in
@@ -322,7 +331,9 @@ class Agent:
         *,
         model: Model,
         model_recipe: ModelRecipe | None = None,
-        system: SystemPromptArg = "",
+        system: str = "",
+        append_system: str = "",
+        prompt_context: PromptContext | None = None,
         tools: list[Tool] | None = None,
         compactor: Compactor | None = None,
         session_dir: str | Path | None = None,
@@ -333,12 +344,10 @@ class Agent:
         max_tool_call_rounds: int | None = None,
         max_budget_usd: float | None = None,
         persistent_retry: bool = False,
-        frozen_system: bool = False,
         allow_background: bool = True,
         tool_results: ToolResultPolicy | None = None,
         owned_provider: Provider | None = None,
     ) -> None:
-        _reject_bad_system_arg(system)
         budget = _settings_from_knobs(
             budget,
             max_attempts=max_attempts,
@@ -352,9 +361,29 @@ class Agent:
         self.model_recipe = model_recipe
         if model_recipe is not None:
             last_models.record(model_recipe.provider, model_recipe.model_id)
-        self._base_system_spec: SystemPromptArg = system
-        self._system_spec: SystemPromptArg = system
-        self._frozen_system = frozen_system
+        # What the system blocks are built from. Set before the first request;
+        # a later change shows only once the context is rebuilt (clear, compaction).
+        self.system = system
+        self.append_system = append_system
+        self.prompt_context = prompt_context
+        # Built once per context window: a provider caches the request up to
+        # each block's end, so a block rebuilt mid-session re-caches everything.
+        self._system_blocks: tuple[str, ...] | None = None
+        self.reminders: dict[str, str] = {}
+        """Standing context a host keeps in force, by name. Told with the next
+        round and retold whenever it changes or leaves the context (a
+        compaction, a ``/clear``, a refused turn); emptying or deleting one
+        tells the model it no longer holds."""
+        # The last text told for each piece of standing context -- the environment,
+        # each ``Reminding`` tool, each host reminder -- kept only while the context
+        # still holds it.
+        self._told: dict[tuple[str, str], str] = {}
+        # The gate the model was last offered, and the one each response's calls were
+        # offered, by call id. A call is checked against its own: a host narrowing
+        # ``tool_gate`` mid-round, or a backgrounded call starting after the next
+        # round's offer, must not refuse what the model was offered.
+        self._offered_gate: frozenset[str] | None = None
+        self._offered_by_call: dict[str, frozenset[str] | None] = {}
         self.allow_background = allow_background
         self._tools_list: list[Tool] = list(tools or [])
         self.compactor = compactor
@@ -437,8 +466,11 @@ class Agent:
         self._tools_version: int = 0
         self._live_tools_cache: tuple[int, list[Tool]] | None = None
         self.tool_gate: frozenset[str] | None = None
-        """Names of the only tools the next model requests offer; ``None`` offers all.
-        A host sets it for a call and clears it after; tool calls still run by name."""
+        """Names of the only tools the model is offered now; ``None`` offers all.
+        Every schema still ships, so the request's cached prefix survives a
+        change: the model is told of it, and the request names it for a
+        provider that can enforce it. A call outside the gate its request
+        offered is refused, whatever the provider enforced."""
         agent_tools: list[_AgentTool] = []
         for t in self._tools_list:
             self._tools_map[t.name] = t
@@ -462,6 +494,7 @@ class Agent:
         # infra (REPL pump, watchdogs) live indefinitely by design;
         # counting them would wedge a one-shot ``Agent.run`` forever.
         self.runtime.has_pending_background = self._has_pending_background
+        self.runtime.context_updates = self._context_updates
         for fn in (
             self._track_activity,
             self._track_tool_registry,
@@ -781,6 +814,24 @@ class Agent:
         """Rich tools in registration order (pre-wrap copies)."""
         return list(self._tools_map.values())
 
+    @property
+    def offered_gate(self) -> frozenset[str] | None:
+        """The tools the model's latest request offered; ``None`` offered them all."""
+        return self._offered_gate
+
+    def offered_to(self, call_id: str) -> frozenset[str] | None:
+        """Return the tools the request that made ``call_id`` offered.
+
+        Args:
+          call_id: The call; one no response made (a direct run) gets the
+            latest offer.
+
+        Returns:
+          offered: Those tools; ``None`` offered them all.
+
+        """
+        return self._offered_by_call.get(call_id, self._offered_gate)
+
     def live_tools(self) -> list[Tool]:
         """Return the provider-visible tool surface for model requests.
 
@@ -807,24 +858,7 @@ class Agent:
                 ],
             )
             self._live_tools_cache = cached
-        gate = self.tool_gate
-        return [tool for tool in cached[1] if gate is None or tool.name in gate]
-
-    @property
-    def system(self) -> str:
-        """Assembled system prompt (base + per-tool contributions unless frozen)."""
-        return self._build_system()
-
-    @property
-    def base_system_spec(self) -> str:
-        """Base system prompt before tool or persistent IPC augmentation."""
-        spec = self._base_system_spec
-        return spec if isinstance(spec, str) else spec()
-
-    @property
-    def frozen_system(self) -> bool:
-        """Whether :meth:`system_prompt` returns the spec verbatim (hot spawn)."""
-        return self._frozen_system
+        return list(cached[1])
 
     @property
     def max_attempts(self) -> int:
@@ -928,6 +962,10 @@ class Agent:
             raise ValueError(
                 f"tool.name={tool.name!r} does not match registry key {name!r}",
             )
+        # New guidance must reach the model, at the cost of the cache; the same
+        # guidance (a host rewrapping its tools each turn) costs nothing.
+        if (tool.prompt() or "") != (self._tools_map[name].prompt() or ""):
+            self._system_blocks = None
         self._tools_map[name] = tool
         self._tools_version += 1
         wrapper = self.runtime.tools_map.get(name)
@@ -1194,15 +1232,36 @@ class Agent:
         if self.runtime.model_call is not None:
             self.runtime.inbox.push_back(runtime.Halt())
 
-    def system_prompt(self) -> str:
-        """Assemble the full system prompt (system + tool contributions).
+    def system_blocks(self) -> tuple[str, ...]:
+        """Return the system blocks, most stable first, built once per context.
+
+        The blocks are the detached-results note and ``system``; then
+        ``append_system`` and every tool's prompt; then AGENTS.md and the memory
+        index. A provider marks the end of each, so agents that share the
+        leading blocks share their cache. They are rebuilt when the context is
+        (clear, compaction, resume) and when ``replace_tool`` changes a tool's prompt.
+        What the agent tells as reminders -- the environment, the tool and host
+        reminders, the tool gate -- reaches the model between rebuilds; a change
+        to ``system``, ``append_system`` or AGENTS.md waits for the next one.
 
         Returns:
-          prompt: System prompt rebuilt for the next request, or the
-              frozen spec verbatim when ``frozen_system`` is set.
+          blocks: The non-empty blocks, in order.
 
         """
-        return self._build_system()
+        if self._system_blocks is None:
+            # The Memory tool saves where this index was read, not where ``cd`` went.
+            self.tool_state.project_cwd = self.tool_state.bash_cwd
+            self._system_blocks = self._build_system_blocks()
+        return self._system_blocks
+
+    def system_prompt(self) -> str:
+        """Return the system blocks joined, as one prompt."""
+        return "\n\n".join(self.system_blocks())
+
+    def retell_context(self) -> None:
+        """Append, as a system message, what the model's context no longer says."""
+        for note in self._context_updates():
+            self.runtime.append_history(note)
 
     def resume(
         self,
@@ -1233,6 +1292,7 @@ class Agent:
             self.runtime.session_id = meta.session_id
         self.runtime.replay_tape(tape)
         self.tool_state = tool_state
+        self._reset_system()
         if meta.status:
             self._status = meta.status
         self.cost_tracker.restore_totals(spend=meta.spend, total=meta.tokens)
@@ -1766,56 +1826,116 @@ class Agent:
             if resolver in self.runtime.observers:
                 self.runtime.observers.remove(resolver)
 
-    # Intentionally rebuilt per request: ``_system_spec`` and each tool's ``prompt()``
-    # may be callable and capture mutable state (cwd, registered subagents, persistent
-    # IPC peers) that must stay live across ``cd`` and registry mutations. Caching here
-    # would freeze that state on the next provider call.
-    #
-    # Exception: ``self._frozen_system`` (set by a hot ``AgentSpawn``) opts OUT of that
-    # liveness on purpose -- ``_system_spec`` already holds a complete, pre-rendered
-    # snapshot (typically the parent's own ``system`` at spawn time), and re-appending
-    # this agent's own tools' ``prompt()`` contributions on top would immediately
-    # reintroduce the prefix drift hot spawning exists to avoid (see #361: a bundled
-    # ``BackgroundTask`` or a different spawn-depth line the parent never had). Returned
-    # verbatim, with no tool contributions or detached-note injection.
-    def _build_system(self) -> str:
-        """Assemble the system prompt from base spec + tool contributions."""
-        spec = self._system_spec
-        base = spec if isinstance(spec, str) else spec()
-        if self._frozen_system:
-            return base
-        parts: list[str] = [base] if base else []
-        gate = self.tool_gate
-        for tool in self._tools_map.values():
-            if gate is not None and tool.name not in gate:
-                continue
-            contribution = tool.prompt() or ""
-            if contribution:
-                parts.append(contribution)
-        # Teach the model that ``DetachedArrived`` history turns are runtime
-        # result deliveries, not a callable tool. Injected the moment any tool
-        # detaches -- before the first synthesized ``DetachedArrived`` pair
-        # lands -- so the prohibition precedes the imitable pattern rather than
-        # co-occurring with it (the reactive injection taught the model the
-        # exact shape it then copied). Prompts without detached activity stay
-        # lean. Paired with the runtime guard in ``_run_tool_and_post``.
-        if self._has_detached_activity():
-            parts.append(runtime.DETACHED_ARRIVED_SYSTEM_NOTE)
-        return "\n\n".join(parts)
-
-    # Proactive: a live ``runtime.detached`` task means a ``[detached]`` stub is already
-    # in context and a forward delivery is pending, so the note must appear now. The
-    # history check covers the window after the task completed but its synthesized pair
-    # still resolves into context.
-    def _has_detached_activity(self) -> bool:
-        """Return True when a tool is detached or a ``DetachedArrived`` turn is present."""
-        if self.runtime.detached:
-            return True
-        return any(
-            isinstance(entry, runtime.AssistantMessage)
-            and any(tc.name == runtime.DETACHED_ARRIVED_TOOL for tc in entry.tool_calls)
-            for entry in self.runtime.context().messages
+    # The detached note leads, ahead of ``system``, so a caller's replacement prompt
+    # cannot drop it: the model must know ``DetachedArrived`` turns are deliveries,
+    # not a callable tool, before the first one lands (it copied the pattern when the
+    # note arrived with it). Paired with the runtime guard in ``_run_tool_and_post``.
+    # An agent with no tools never detaches, so it goes without.
+    def _build_system_blocks(self) -> tuple[str, ...]:
+        """Render the system blocks from the current settings, tools, and directory."""
+        note = runtime.DETACHED_ARRIVED_SYSTEM_NOTE if self._tools_map else ""
+        tool_prompts = [tool.prompt() or "" for tool in self._tools_map.values()]
+        project = (
+            self.prompt_context.project(
+                self.tool_state.project_cwd,
+                additional_dirs=self.tool_state.additional_dirs,
+            )
+            if self.prompt_context is not None
+            else ""
         )
+        blocks = (
+            "\n\n".join(p for p in (note, self.system) if p),
+            "\n\n".join(p for p in (self.append_system, *tool_prompts) if p),
+            project,
+        )
+        return tuple(b for b in blocks if b)
+
+    # The system blocks are fixed between rebuilds, so whatever changes under them
+    # reaches the model here, appended to the next round's input; a reminder stays in
+    # history and is cached with it, where a rewritten block re-caches everything.
+    #
+    # What the model knows is what its context holds, and a compaction, a ``/clear``,
+    # a refused turn or a resume rewrites that without telling this agent. So a text
+    # counts as told only while the context still contains it, and the gate in force
+    # is the last one the context offered.
+    def _context_updates(self) -> list[runtime.SystemMessage]:
+        """Return a system message for each thing the model's context does not say."""
+        messages = self.runtime.context().messages
+        notes = [
+            runtime.SystemMessage(text=text)
+            for text in self._standing_updates(messages)
+        ]
+        gate = self._gate_update(messages)
+        return notes if gate is None else [*notes, gate]
+
+    # Each piece of standing context is a message of its own, told while one says it
+    # exactly: text found inside another (a peer list one name shorter) was never told.
+    # One that empties or goes is withdrawn, or the old text stays in force.
+    def _standing_updates(
+        self,
+        messages: Sequence[runtime.ModelContextEvent],
+    ) -> list[str]:
+        """Return the standing context the context lacks, and what it no longer has."""
+        said = {m.text for m in messages if isinstance(m, runtime.SystemMessage)}
+        told = {key: text for key, text in self._told.items() if text in said}
+        now = {key: text for key, text in self._standing_context().items() if text}
+        self._told = now
+        return [
+            *(
+                text
+                for key, text in now.items()
+                if (told[key] != text if key in told else text not in said)
+            ),
+            *(
+                f"No longer in force: {text}"
+                for key, text in told.items()
+                if key not in now
+            ),
+        ]
+
+    def _gate_update(
+        self,
+        messages: Sequence[runtime.ModelContextEvent],
+    ) -> runtime.SystemMessage | None:
+        """Return the offer of the gate in force, unless the context already makes it."""
+        names = tuple(self._tools_map)
+        gate = self.tool_gate
+        wanted = names if gate is None else tuple(n for n in names if n in gate)
+        self._offered_gate = None if gate is None else frozenset(wanted)
+        if set(_offer_in_force(messages, names)) == set(wanted):
+            return None
+        return runtime.SystemMessage(
+            text="All tools are available again."
+            if self._offered_gate is None
+            else f"Tools available now: {', '.join(sorted(wanted)) or 'none'}."
+            " Do not call any other tool.",
+            offered_tools=wanted,
+        )
+
+    def _standing_context(self) -> dict[tuple[str, str], str]:
+        """Return the environment, tool reminders and host reminders, keyed by source."""
+        environment = (
+            self.prompt_context.environment(
+                self.model.capability,
+                cwd=self.tool_state.bash_cwd,
+                context=self.model.settings.context,
+            )
+            if self.prompt_context is not None
+            else ""
+        )
+        return {
+            ("environment", ""): environment,
+            **{
+                ("tool", name): tool.reminder()
+                for name, tool in self._tools_map.items()
+                if isinstance(tool, Reminding)
+            },
+            **{("host", name): text for name, text in self.reminders.items()},
+        }
+
+    def _reset_system(self) -> None:
+        """Rebuild the system blocks on the next request."""
+        self._system_blocks = None
 
     # -- Observers ----------------------------------------------------
 
@@ -2101,6 +2221,7 @@ class Agent:
             now = time.time()
             for tc in event.message.tool_calls:
                 self._tool_registry[tc.id] = (tc.name, now)
+                self._offered_by_call[tc.id] = self._offered_gate
             if event.message.tool_calls:
                 self.activity.num_tool_call_rounds += 1
                 self._round_result_chars = 0
@@ -2123,10 +2244,16 @@ class Agent:
         )
         for _started, call_id in stale[: len(self._tool_registry) - _TOOL_REGISTRY_MAX]:
             _ = self._tool_registry.pop(call_id, None)
+            _ = self._offered_by_call.pop(call_id, None)
 
     def _track_compaction(self, event: runtime.RuntimeEvent) -> None:
         """Update compaction state after a barrier lands."""
+        # A new context window re-caches from scratch anyway, so it is when the
+        # system blocks catch up with what changed under them.
+        if isinstance(event, runtime.ClearComplete):
+            self._reset_system()
         if isinstance(event, runtime.CompactComplete) and event.records:
+            self._reset_system()
             self._last_input_tokens = 0
             self._last_measured_history = ()
             self.tool_state.reset_tool_recall()
@@ -2394,22 +2521,24 @@ class Agent:
             if not since:
                 return self._last_input_tokens
             return self._last_input_tokens + model.approx_request_tokens(
-                materialize_request(
-                    ModelRequest(messages=list(since)),
-                    tool_result_budget_tokens=budget,
+                ModelRequest(
+                    messages=materialize_messages(
+                        since,
+                        tool_result_budget_tokens=budget,
+                    ),
                 ),
             )
         # Estimated against ``live_tools()`` (``BackgroundAwareTool`` wrappers
         # applied) so the injected ``background`` / ``delay`` schema counts toward
         # the budget, matching what the next request will carry.
         return model.approx_request_tokens(
-            materialize_request(
-                ModelRequest(
-                    messages=list(history),
-                    system=self.system_prompt(),
-                    tools=self.live_tools(),
+            ModelRequest(
+                messages=materialize_messages(
+                    history,
+                    tool_result_budget_tokens=budget,
                 ),
-                tool_result_budget_tokens=budget,
+                system=self.system_blocks(),
+                tools=self.live_tools(),
             ),
         )
 
@@ -2422,7 +2551,7 @@ class Agent:
     # tool's rendered-byte cap.
     #
     # Measured over the materialized prefix so attachments on tool results that
-    # ``materialize_request`` drops are not counted, and via
+    # ``materialize_messages`` drops are not counted, and via
     # :func:`_wire_attachment_bytes` so the estimate matches the base64, post-resize
     # payload that actually ships.
     def _compactable_wire_bytes(
@@ -2435,12 +2564,12 @@ class Agent:
         if last_assistant is None:
             return 0
         prefix = history[: last_assistant + 1]
-        materialized = materialize_request(
-            ModelRequest(messages=list(prefix)),
+        materialized = materialize_messages(
+            prefix,
             tool_result_budget_tokens=self.tool_results.message_budget_tokens,
         )
         return _wire_attachment_bytes(
-            materialized.messages,
+            materialized,
             max_image_bytes=model.limits.max_image_bytes,
         )
 
@@ -2528,6 +2657,23 @@ class Agent:
         self._last_measured_history = ()
         self.compaction_state.compact_failures = 0
         return True
+
+
+# The context's own record of the gate: the last offer any system message made, or every tool
+# when none did, so a compaction or resume that drops the offer shows here.
+def _offer_in_force(
+    messages: Sequence[runtime.ModelContextEvent],
+    every: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return the tools ``messages`` last offered; ``every`` when none offered any."""
+    return next(
+        (
+            m.offered_tools
+            for m in reversed(messages)
+            if isinstance(m, runtime.SystemMessage) and m.offered_tools is not None
+        ),
+        every,
+    )
 
 
 def _latest_service_retry_at(
@@ -2649,11 +2795,11 @@ def _wire_attachment_bytes(
 # so the estimate stays a conservative LOWER bound that never false-rejects a request
 # the provider would accept.
 #
-# Callers must pass the MATERIALIZED messages (post :func:`materialize_request`), so
+# Callers must pass the MATERIALIZED messages (post :func:`materialize_messages`), so
 # elided tool results are sized at their wire placeholder rather than their pre-elision
 # length -- otherwise the guard over-counts bytes the request never carries.
 def _wire_request_bytes(
-    messages: Sequence[runtime.ModelContextEvent],
+    messages: Sequence[runtime.WireMessage],
     *,
     system: str,
     max_image_bytes: int,
@@ -2662,10 +2808,7 @@ def _wire_request_bytes(
     total = _wire_attachment_bytes(messages, max_image_bytes=max_image_bytes)
     total += len(system.encode("utf-8"))
     for entry in messages:
-        if isinstance(
-            entry,
-            (runtime.UserMessage, runtime.AgentSendMessage),
-        ):
+        if isinstance(entry, (runtime.UserMessage, runtime.AgentSendMessage)):
             total += len(entry.text.encode("utf-8"))
         elif isinstance(entry, runtime.AssistantMessage):
             total += len(entry.text.encode("utf-8"))
@@ -2962,9 +3105,8 @@ class _AgentModel:
         ``send_with_retry`` with persistent-mode + overflow recovery,
         records cost out-of-band, returns the final assistant message.
 
-        ``system`` and ``tools`` come from agent state (not the runtime)
-        so callable system specs (e.g. cwd-aware ``environment``) and
-        registry mutations stay live across the call.
+        ``system`` and ``tools`` come from agent state (not the runtime):
+        the blocks it built for this context and its registered tools.
 
         Args:
           history: Conversation history (resolved view passed by runtime).
@@ -2996,19 +3138,15 @@ class _AgentModel:
         # to the runtime tape; we refetch the resolved view below.
         if not await self._agent.compact_if_needed(history, self._inner):
             self._raise_compact_failure()
+        # The runtime told the context before this call; a summary just taken drops
+        # what it told, and this request would go without it.
+        self._agent.retell_context()
         # Compaction may have appended a barrier override; refetch the
         # resolved view so subsequent attempts in this call see it.
         history = self._agent.runtime.context().messages
 
-        # Compute the system prompt once per ``stream`` call. Each tool's
-        # ``prompt()`` may capture cwd / registry / persistent-IPC state,
-        # but none of that state changes between overflow-recovery
-        # attempts within a single stream call -- so rebuilding up to
-        # ``MAX_OVERFLOW_RECOVERY + 1`` times per call is wasted work.
-        # ``Agent.system_prompt()`` callers outside this loop continue to
-        # observe live state via ``_build_system`` on demand. Computed before
-        # the pre-send guard so the guard can count the system-prompt bytes.
-        cached_system = self._agent.system_prompt()
+        # Read after compaction, which rebuilds the blocks for the new context.
+        system = self._agent.system_blocks()
 
         # Pre-send byte guard: compaction has now shed every attachment it
         # can (the summarized region). If the request STILL exceeds the
@@ -3030,13 +3168,13 @@ class _AgentModel:
         # still hits the reactive 413.
         max_request_bytes = self._inner.limits.max_request_bytes
         if max_request_bytes > 0:
-            guard_messages = materialize_request(
-                ModelRequest(messages=list(history)),
+            guard_messages = materialize_messages(
+                history,
                 tool_result_budget_tokens=self._agent.tool_results.message_budget_tokens,
-            ).messages
+            )
             wire_bytes = _wire_request_bytes(
                 guard_messages,
-                system=cached_system,
+                system="\n\n".join(system),
                 max_image_bytes=self._inner.limits.max_image_bytes,
             )
             if wire_bytes > max_request_bytes:
@@ -3065,15 +3203,15 @@ class _AgentModel:
         observed_model = ObservedModel(self._inner, self._agent.record_response)
 
         for attempt in range(MAX_OVERFLOW_RECOVERY + 1):
-            request = materialize_request(
-                ModelRequest(
-                    messages=list(history),
-                    system=cached_system,
-                    tools=rich_tools,
-                    max_response_tokens=self._agent.max_response_tokens,
-                    cache_key=self._agent.session_id,
+            request = ModelRequest(
+                messages=materialize_messages(
+                    history,
+                    tool_result_budget_tokens=self._agent.tool_results.message_budget_tokens,
                 ),
-                tool_result_budget_tokens=self._agent.tool_results.message_budget_tokens,
+                system=system,
+                tools=rich_tools,
+                max_response_tokens=self._agent.max_response_tokens,
+                cache_key=self._agent.session_id,
             )
             # Hand the one-shot resume wait to THIS attempt only, then clear it
             # unconditionally -- before the send can raise. ``send_with_retry``
@@ -3145,6 +3283,7 @@ class _AgentModel:
                 # lines followed by a cryptic RuntimeError).
                 if not await self._agent.compact_now():
                     self._raise_compact_failure()
+                self._agent.retell_context()
                 # Refetch resolved view: ``compact_now`` appended a
                 # barrier override.
                 history = self._agent.runtime.context().messages
@@ -3247,6 +3386,13 @@ class _AgentTool:
         # ``ToolLabel`` / ``ToolResult`` records correlate to the
         # originating assistant tool_use.
         call_id = current_call_id_var.get("")
+        # Every schema ships, so a model can name a tool its request withheld; a
+        # provider that cannot enforce the gate would run it.
+        if refusal := gate_refusal(self._inner.name, self._agent.offered_to(call_id)):
+            self._agent.runtime.publish(
+                runtime.ToolLabel(call_id=call_id, text=self._inner.name),
+            )
+            return runtime.ToolResult(call_id=call_id, content=refusal, is_error=True)
         # The raw args are validated against the schema they were offered, control
         # keys included, so a mistyped ``delay`` is an input error rather than a
         # decode failure inside ``split_bg_args``. A tool that owns a control key
@@ -3538,7 +3684,7 @@ class _AgentCompactor:
         # Memoize system prompt + live tools for the two token-estimate
         # request builds below: agent state does not change inside one
         # ``compact`` call, so rebuilding both per estimate is wasted work.
-        cached_system = self._agent.system_prompt()
+        cached_system = self._agent.system_blocks()
         cached_tools = self._agent.live_tools()
 
         # Post-compact enrich operates on the override's mutable payload
@@ -3548,13 +3694,13 @@ class _AgentCompactor:
         # ``post_compact_enrich``.
         try:
             used = self._agent.model.approx_request_tokens(
-                materialize_request(
-                    ModelRequest(
-                        messages=payload,
-                        system=cached_system,
-                        tools=cached_tools,
+                ModelRequest(
+                    messages=materialize_messages(
+                        payload,
+                        tool_result_budget_tokens=self._agent.tool_results.message_budget_tokens,
                     ),
-                    tool_result_budget_tokens=self._agent.tool_results.message_budget_tokens,
+                    system=cached_system,
+                    tools=cached_tools,
                 ),
             )
         except Exception as exc:  # noqa: BLE001 -- The estimator invokes provider classification during recovery, so failures route to warning or exception handling.
@@ -3605,15 +3751,15 @@ class _AgentCompactor:
         if target > 0:
             try:
                 payload_tokens_for_scrunch = self._agent.model.approx_request_tokens(
-                    materialize_request(
-                        ModelRequest(
-                            messages=payload,
-                            system=cached_system,
-                            tools=cached_tools,
+                    ModelRequest(
+                        messages=materialize_messages(
+                            payload,
+                            tool_result_budget_tokens=(
+                                self._agent.tool_results.message_budget_tokens
+                            ),
                         ),
-                        tool_result_budget_tokens=(
-                            self._agent.tool_results.message_budget_tokens
-                        ),
+                        system=cached_system,
+                        tools=cached_tools,
                     ),
                 )
             except Exception as exc:  # noqa: BLE001 -- The estimator invokes provider classification during recovery.
@@ -3677,19 +3823,21 @@ class _AgentCompactor:
         payload_tokens: int | None = None
         try:
             payload_tokens = self._agent.model.approx_request_tokens(
-                materialize_request(
-                    ModelRequest(
-                        messages=payload,
-                        system=cached_system,
-                        tools=cached_tools,
+                ModelRequest(
+                    messages=materialize_messages(
+                        payload,
+                        tool_result_budget_tokens=self._agent.tool_results.message_budget_tokens,
                     ),
-                    tool_result_budget_tokens=self._agent.tool_results.message_budget_tokens,
+                    system=cached_system,
+                    tools=cached_tools,
                 ),
             )
             would_retrigger = self._inner.should_compact(
                 current_tokens=payload_tokens,
                 largest_context=self._inner.largest_context(self._agent.budget),
-                system_tokens=self._agent.model.approx_text_tokens(cached_system),
+                system_tokens=self._agent.model.approx_text_tokens(
+                    self._agent.system_prompt(),
+                ),
             )
             if would_retrigger:
                 msg = (

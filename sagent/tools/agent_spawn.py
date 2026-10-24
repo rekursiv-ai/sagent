@@ -29,8 +29,9 @@ import uuid
 
 from treekle import PlainTree, from_plain, immutable
 
-from sagent.agent.agent import Agent, SystemPromptArg
+from sagent.agent.agent import Agent
 from sagent.agent.background import BackgroundTaskEntry
+from sagent.agent.runtime import current_call_id_var
 from sagent.agent.session_io import (
     PersistentAgentState,
     append_persistent_agent_lifecycle,
@@ -145,7 +146,7 @@ class AgentSpawn:
         auth: str | None = None,
         model_id: str | None = None,
         account: str | None = None,
-        system: SystemPromptArg | None = None,
+        system: str | None = None,
         tools: list[Tool] | None = None,
         max_tool_call_rounds: int | None = None,
         max_depth: int | None = None,
@@ -300,14 +301,6 @@ class AgentSpawn:
                             " routing). Auto-generated if omitted."
                         ),
                     },
-                    "hot": {
-                        "type": "boolean",
-                        "description": (
-                            "Set true. Cuts cost and latency by reusing your"
-                            " cached prompt. Omit or set false only if this"
-                            " child must know its own live depth/tool state."
-                        ),
-                    },
                 },
                 "required": ["prompt"],
             },
@@ -331,7 +324,14 @@ class AgentSpawn:
         return f"{self.name} {preview}{suffix}" if preview else self.name
 
     def prompt(self) -> str:
-        """Return spawn-budget info for the system prompt.
+        """Return no fixed guidance; the spawn budget is a reminder."""
+        return ""
+
+    def reminder(self) -> str:
+        """Return spawn-budget info for this agent.
+
+        A reminder, not a prompt: a child is one level deeper than its parent,
+        so in the system blocks the budget would cost it the parent's cache.
 
         Returns:
           text: Depth/cap reminder text, or empty when no cap is active.
@@ -414,7 +414,6 @@ class AgentSpawn:
             )
         persistent = from_plain(args.get("persistent"), bool, default=False)
         notify_on_asleep = from_plain(args.get("notify_on_asleep"), bool, default=True)
-        hot = from_plain(args.get("hot"), bool, default=False)
         custom_label = opt_str(args, "label")
         parent_agent = _current_agent()
         if parent_agent is None:
@@ -494,7 +493,6 @@ class AgentSpawn:
             max_rounds=max_rounds,
             model_options=options,
             parent_agent=parent_agent,
-            hot=hot,
         )
 
         return await self._spawn_child(
@@ -522,12 +520,8 @@ class AgentSpawn:
         max_rounds: int | None,
         model_options: Mapping[str, object],
         parent_agent: Agent | None,
-        hot: bool = False,
     ) -> Agent:
         """Build a child Agent with inherited knobs and explicit options."""
-        child_system = self._resolve_system(system, parent_agent)
-        if hot and not isinstance(child_system, str):
-            child_system = child_system()
         child_max_rounds = (
             max_rounds if max_rounds is not None else self._max_tool_call_rounds
         )
@@ -548,14 +542,17 @@ class AgentSpawn:
             settings.cache_ttl_sec = cast(float, model_options["cache_ttl_sec"])
         if "service_tier" in model_options:
             settings.service_tier = cast(ServiceTier, model_options["service_tier"])
+        # The parent's prompt settings carry over whole, so a child with the same
+        # tools sends the same system blocks and reads the parent's cache.
         child = Agent(
             model=child_model,
             model_recipe=child_spec,
-            system=child_system,
+            system=self._resolve_system(system, parent_agent),
+            append_system=parent_agent.append_system if parent_agent else "",
+            prompt_context=parent_agent.prompt_context if parent_agent else None,
             tools=child_tools,
             compactor=self._inherit_compactor(parent_agent),
             max_tool_call_rounds=child_max_rounds,
-            frozen_system=hot,
             session_dir=self._child_session_dir(parent_agent),
             max_attempts=self._inherit_max_attempts(parent_agent),
             tool_results=self._tool_results,
@@ -706,8 +703,8 @@ class AgentSpawn:
     # ``cancel_persistent_subagent``. Returns the started handle naming the reply
     # channel.
     #
-    # Augments the child's system prompt with the serviced-agent IPC rule so the child's
-    # LLM knows its plain assistant text is invisible to the parent and that
+    # Gives the child the serviced-agent IPC rule as a standing reminder so its LLM
+    # knows its plain assistant text is invisible to the parent and that
     # ``AgentSend(to=<parent>)`` is the only reliable reply channel.
     #
     # ``child_path`` and ``eff_max_depth`` are installed around the child's own
@@ -816,7 +813,7 @@ class AgentSpawn:
         self,
         llm_arg: str | None,
         parent_agent: Agent | None,
-    ) -> SystemPromptArg:
+    ) -> str:
         """Resolve system prompt via LLM arg → factory → parent fallthrough."""
         if llm_arg is not None:
             return llm_arg
@@ -969,19 +966,17 @@ class AgentSpawn:
         )
         return _ChildModel(model=new_model, spec=new_spec, provider=built_provider)
 
-    # - ``names is None``: inherit. Use factory's ``self._tools`` if set, else parent's
-    # full toolset (including AgentSpawn, so children can spawn further subagents). -
-    # ``names == []``: explicit empty; child runs with no tools. Honored - don't
-    # silently upgrade to inherit. - ``names == ["Read", ...]``: subset by ``.name``;
-    # error on unknown.
+    # - ``names is None``: inherit. Use factory's ``self._tools`` if set, else the
+    # parent's tools that the spawning call was offered (including AgentSpawn, so
+    # children can spawn further subagents): a child holding a tool its parent's gate
+    # withheld would run it for the model that was refused it. - ``names == []``:
+    # explicit empty; child runs with no tools. Honored - don't silently upgrade to
+    # inherit. - ``names == ["Read", ...]``: subset by ``.name``; error on unknown.
     #
     # Bundling rule: ``BackgroundTask`` rides along whenever ``AgentSpawn`` is granted.
     # Any agent that can create persistent / background work must be able to list,
     # cancel, and foreground that work -- decoupling the two is how runaway children
-    # become uncancellable. This applies to hot spawns too: a hot child's rendered
-    # prompt never reflects its own tool list anyway (``frozen_system`` skips that loop
-    # entirely, see #361), so bundling ``BackgroundTask`` here costs nothing on the
-    # cache side while keeping the cancel-capability guarantee intact.
+    # become uncancellable.
     def _resolve_tools(
         self,
         names: list[str] | None,
@@ -992,12 +987,15 @@ class AgentSpawn:
         if self._tools is not None:
             available = list(self._tools)
         elif parent_agent is not None:
-            available = list(parent_agent.tools)
+            offered = parent_agent.offered_to(current_call_id_var.get(""))
+            available = [
+                t for t in parent_agent.tools if offered is None or t.name in offered
+            ]
         else:
             available = []
 
         if names is None:
-            return _bundle_background_task(available)
+            return bundle_background_task(available)
 
         by_name = {t.name: t for t in available}
         missing = [n for n in names if n not in by_name]
@@ -1009,7 +1007,7 @@ class AgentSpawn:
             )
         # A repeated name grants the tool once; the agent's registry rejects
         # duplicates outright.
-        return _bundle_background_task([by_name[n] for n in dict.fromkeys(names)])
+        return bundle_background_task([by_name[n] for n in dict.fromkeys(names)])
 
     # ``<parent_session_dir>/<child_uuid>/``; the parent's session dir already encodes
     # its identity in its path. Returns ``None`` when the parent has no session dir
@@ -1332,6 +1330,20 @@ def resume_serviced_child(
     )
 
 
+# Cancel/foreground are non-negotiable companion capabilities to spawn: every code path
+# that resolves a toolset runs through this gate, the root's included, so a child that
+# inherits its parent's tools sends the parent's schemas and reads the parent's cache.
+# The fresh ``BackgroundTask()`` is stateless -- safe to mint on demand when the parent
+# didn't carry one. Returns ``tools`` unchanged if either ``AgentSpawn`` is absent or
+# ``BackgroundTask`` is already present.
+def bundle_background_task(tools: list[Tool]) -> list[Tool]:
+    """Append ``BackgroundTask`` when ``AgentSpawn`` is present."""
+    names = {t.name for t in tools}
+    if "AgentSpawn" not in names or "BackgroundTask" in names:
+        return tools
+    return [*tools, BackgroundTask()]
+
+
 # The one serviced lifecycle shared by spawn and resume: mark the child serviced, add
 # the IPC rule, register it, attach the parent forwarder, launch ``_run_serviced``, and
 # expose it as the parent's background job. Callers own the ``running`` record and the
@@ -1352,10 +1364,12 @@ def _start_serviced(
     child._lifecycle = "serviced"  # noqa: SLF001 -- Cross-layer lifecycle flag.
     child._is_subagent = True  # noqa: SLF001 -- Cross-layer subagent flag.
     child.name = label
-    child._system_spec = _augment_system_for_persistent(  # noqa: SLF001 -- Spec mutation is intentional for the serviced IPC rule.
-        child._system_spec,  # noqa: SLF001 -- See above.
-        parent_label=parent_label,
-    )
+    # A standing reminder, not a system block: the rule names this child's parent, so
+    # in a system block it would cost the child the parent's cache. Standing, so a
+    # compaction or ``/clear`` that drops the turn it rode cannot leave the child
+    # replying where no one reads, and a resume that finds it in history does not
+    # tell it twice.
+    child.reminders["persistent"] = _persistent_rule(parent_label=parent_label)
     agent_registry[label] = child
     forwarder = _build_forwarder(
         label,
@@ -1549,29 +1563,16 @@ def _child_error_result(label: str, error: BaseException) -> ToolResult:
 
 # The persistent reply channel is asymmetric: a child's plain assistant text is
 # invisible to the parent's model. The only reliable way for the child to talk back is
-# to call ``AgentSend(to=<parent label>)``. Telling the child this in its system prompt
-# closes the loop -- without it, the child's LLM naturally responds with assistant text
-# and gets ghosted.
-def _augment_system_for_persistent(
-    spec: SystemPromptArg,
-    *,
-    parent_label: str,
-) -> SystemPromptArg:
-    """Append the persistent-agent IPC rule to a system-prompt spec."""
-    rule = (
+# to call ``AgentSend(to=<parent label>)``. Telling the child this closes the loop --
+# without it, the child's LLM naturally responds with assistant text and gets ghosted.
+def _persistent_rule(*, parent_label: str) -> str:
+    """Return the persistent-agent IPC rule."""
+    return (
         f"You are a persistent agent whose output is only known to"
         f" your creator via AgentSend(to={parent_label!r}, ...). Any"
         f" other output is invisible to the parent and unless you"
         f" AgentSend them, they will be stuck indefinitely."
     )
-    if isinstance(spec, str):
-        return f"{spec}\n\n{rule}" if spec else rule
-
-    def _composed() -> str:
-        base = spec()
-        return f"{base}\n\n{rule}" if base else rule
-
-    return _composed
 
 
 # ``current_agent_var`` is typed as the minimal ``AgentLike`` Protocol so ``tools.core``
@@ -1595,16 +1596,3 @@ def _pick_field(
     if fac_val is not None:
         return fac_val
     return spec_val
-
-
-# Cancel/foreground are non-negotiable companion capabilities to spawn: every code path
-# that resolves a non-empty child toolset runs through this gate. The fresh
-# ``BackgroundTask()`` is stateless -- safe to mint on demand when the parent didn't
-# carry one. Returns ``tools`` unchanged if either ``AgentSpawn`` is absent or
-# ``BackgroundTask`` is already present.
-def _bundle_background_task(tools: list[Tool]) -> list[Tool]:
-    """Append ``BackgroundTask`` when ``AgentSpawn`` is present."""
-    names = {t.name for t in tools}
-    if "AgentSpawn" not in names or "BackgroundTask" in names:
-        return tools
-    return [*tools, BackgroundTask()]

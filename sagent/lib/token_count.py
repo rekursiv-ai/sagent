@@ -20,8 +20,10 @@ from treekle import mutable
 from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
+    SystemMessage,
     ToolResult,
     UserMessage,
+    reminder_text,
 )
 
 
@@ -70,7 +72,7 @@ def approx_request_tokens(request: ModelRequest, model: TokenEstimator) -> int:
       tokens: Approximate total input token count.
 
     """
-    total = model.approx_text_tokens(request.system)
+    total = model.approx_text_tokens(request.system_text)
     for entry in request.messages:
         total += entry_tokens(entry, model)
     for tool in request.tools:
@@ -103,6 +105,8 @@ def entry_tokens(entry: TapeEvent, model: TokenEstimator) -> int:
         for att in entry.attachments:
             total += _attachment_tokens(att.descriptor, att.data, model)
         return total
+    if isinstance(entry, SystemMessage):
+        return model.approx_text_tokens(reminder_text(entry))
     if isinstance(entry, AssistantMessage):
         total = model.approx_text_tokens(entry.text)
         for tc in entry.tool_calls:

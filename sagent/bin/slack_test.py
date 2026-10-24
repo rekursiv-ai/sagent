@@ -33,6 +33,7 @@ pytest.importorskip("slack_sdk")
 from sagent.agent import Agent
 from sagent.agent.state import AgentLike, agent_registry
 from sagent.bin.slack import (
+    _AGENT_TOOL_NAMES,
     SlackAdapter,
     _AgentSlack,
     _extract_agent_mention,
@@ -210,6 +211,11 @@ def _reaction_event(
     return ev
 
 
+def test_a_child_gets_no_memory_tool_since_it_is_shown_no_memories() -> None:
+    """A child has no project context, so a save would land where it never reads."""
+    assert "Memory" not in _AGENT_TOOL_NAMES
+
+
 class TestExtractEvent:
     def test_valid_envelope(self) -> None:
         payload: dict[str, MutablePlainTree] = {
@@ -282,21 +288,23 @@ class TestListPersonas:
 
 
 class TestAgentSlack:
-    def test_prompt_lists_peers(self) -> None:
+    def test_peers_are_a_reminder_not_fixed_guidance(self) -> None:
+        """The system blocks are built once; peers that join later need retelling."""
         _ = _register("Sara", "Bob")
         tool = _AgentSlack(token="x", username="Sara")  # noqa: S106 -- Fixture credential in a test; never a real secret.
-        p = tool.prompt()
+        assert tool.prompt() == ""
+        p = tool.reminder()
         assert "Bob" in p
         assert "Sara" not in p
 
-    def test_prompt_empty_when_alone(self) -> None:
+    def test_reminder_empty_when_alone(self) -> None:
         _ = _register("Sara")
         tool = _AgentSlack(token="x", username="Sara")  # noqa: S106 -- Fixture credential in a test; never a real secret.
-        assert tool.prompt() == ""
+        assert tool.reminder() == ""
 
-    def test_prompt_empty_no_agents(self) -> None:
+    def test_reminder_empty_no_agents(self) -> None:
         tool = _AgentSlack(token="x", username="Sara")  # noqa: S106 -- Fixture credential in a test; never a real secret.
-        assert tool.prompt() == ""
+        assert tool.reminder() == ""
 
 
 class TestRouteHumanMessages:
@@ -760,6 +768,10 @@ class TestRenderEvent:
 
     def test_empty_user_message(self) -> None:
         assert _render_event(UserMessage(text="   ")) is None
+
+    def test_hidden_user_message(self) -> None:
+        """A reminder rides the model's input; no one typed it."""
+        assert _render_event(UserMessage(text="<system-reminder>", hidden=True)) is None
 
     def test_thinking(self) -> None:
         assert _render_event(ModelResponseThinking(text="pondering...")) == (

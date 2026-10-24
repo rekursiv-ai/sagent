@@ -194,6 +194,25 @@ def test_spawn_blocked_at_capacity() -> None:
         _clear(["a0"])
 
 
+def test_comms_tells_reachable_peers_as_a_reminder() -> None:
+    """The system blocks are built once; teammates spawned later need retelling."""
+    eng = _engine()
+    _ = _register(["a0", "a1"])
+    tok = agent_label_var.set("a0")
+    try:
+        mesh = CommsTool(eng, mesh=True)
+        assert mesh.prompt() == ""
+        assert mesh.reminder() == "You are 'a0'. Teammates currently reachable: ['a1']."
+        tree = CommsTool(eng, mesh=False, coordinator="lead")
+        assert (
+            tree.reminder()
+            == "You are 'a0'. You may only message the coordinator 'lead'."
+        )
+    finally:
+        agent_label_var.reset(tok)
+        _clear(["a0", "a1"])
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 

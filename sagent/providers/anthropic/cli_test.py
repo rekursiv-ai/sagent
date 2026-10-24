@@ -40,6 +40,7 @@ from sagent.providers.lib.subproc import (
     Subproc,
     SubprocessTransportError,
 )
+from sagent.tools.core import tool
 from sagent.types.model import ModelRequest, ModelResponse
 from sagent.types.runtime import (
     AgentSendMessage,
@@ -109,6 +110,37 @@ def _auth_status_logged_out(binary: str) -> bool | None:
     """Pretend the native CLI reports no active login."""
     del binary
     return False
+
+
+class _Peeks:
+    """Records each topic its tool was asked to peek at."""
+
+    def __init__(self) -> None:
+        self.topics: list[str] = []
+
+    def peek(self, topic: str) -> str:
+        """Peek at a topic."""
+        self.topics.append(topic)
+        return topic
+
+
+@pytest.mark.asyncio
+async def test_the_bridge_refuses_a_tool_the_request_withholds() -> None:
+    """The CLI runs tools through the bridge, where the runtime cannot refuse them."""
+    peeks = _Peeks()
+    model = AnthropicCLI().model("claude-haiku-4-5")
+    model._tools_bridge = ToolsBridge([])
+    model._sync_tools_bridge(
+        ModelRequest(
+            messages=[UserMessage(text="hi", offered_tools=("Look",))],
+            tools=[tool(peeks.peek, name="Look"), tool(peeks.peek, name="Peek")],
+        ),
+    )
+
+    _ = await model._tools_bridge._call_tool("Peek", {"topic": "withheld"})
+    _ = await model._tools_bridge._call_tool("Look", {"topic": "offered"})
+
+    assert peeks.topics == ["offered"]
 
 
 def test_cli_does_not_import_subscription_provider() -> None:
@@ -1161,7 +1193,7 @@ async def test_session_persistent_stream_returns_empty_when_history_cleared(
     # Stage 2: simulate post-``agent.clear()`` call: history is empty
     # but the provider's counters still think 2 messages were sent.
     request = ModelRequest(
-        system="terse",
+        system=("terse",),
         messages=[],
         tools=[],
     )
@@ -1610,7 +1642,7 @@ async def test_session_persistent_delivers_detached_result_as_trailing_entry(
     # ``request.messages`` carries only the already-sent history (no NEW
     # tape entry), but a detached result is pending.
     request = ModelRequest(
-        system="x",
+        system=("x",),
         messages=[UserMessage(text="old turn 1")],
         tools=[],
     )
@@ -1668,7 +1700,7 @@ async def test_stateless_exchange_delivers_pending_detached_result(
 
     # A real user turn plus a pending detached result.
     request = ModelRequest(
-        system="x",
+        system=("x",),
         messages=[UserMessage(text="hello")],
         tools=[],
     )
@@ -2374,7 +2406,7 @@ async def test_stream_failed_turn_keeps_proven_system_hash(
 
     with pytest.raises(SubprocessTransportError, match="boom"):
         _ = await model.stream(
-            ModelRequest(messages=[UserMessage(text="hi")], system=system),
+            ModelRequest(messages=[UserMessage(text="hi")], system=(system,)),
         )
 
     assert model._system_hash == hash_system("proven system")
@@ -2429,8 +2461,8 @@ async def test_stream_same_system_after_first_acquire_does_not_respawn(
 
     first = UserMessage(text="first")
     second = UserMessage(text="second")
-    _ = await model.stream(ModelRequest(messages=[first], system=system))
-    _ = await model.stream(ModelRequest(messages=[first, second], system=system))
+    _ = await model.stream(ModelRequest(messages=[first], system=(system,)))
+    _ = await model.stream(ModelRequest(messages=[first, second], system=(system,)))
 
     assert respawn_count == 0
     assert model._system_hash == hash_system(system)
@@ -2474,9 +2506,13 @@ async def test_stream_system_change_discards_warmed_old_system_spare(
     monkeypatch.setattr(model, "_send_entry", send_entry)
     monkeypatch.setattr(model, "_drain_until_result", drain_until_result)
 
-    _ = await model.stream(ModelRequest(messages=[UserMessage(text="a")], system="A"))
+    _ = await model.stream(
+        ModelRequest(messages=[UserMessage(text="a")], system=("A",)),
+    )
     await warmed.wait()
-    _ = await model.stream(ModelRequest(messages=[UserMessage(text="b")], system="B"))
+    _ = await model.stream(
+        ModelRequest(messages=[UserMessage(text="b")], system=("B",)),
+    )
 
     assert used_systems == ["A", "B"]
     assert spawned_systems == ["A", "A", "B"]

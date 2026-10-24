@@ -555,11 +555,11 @@ class _GoogleCLIModel(CLISubprocessModel, ModelDefaults):
               server returned a JSON-RPC ``error`` field.
 
         """
-        self._pending_system = request.system
+        self._pending_system = request.system_text
         if self._hot_spare.active is not None:
             self._promote_proc_state(self._hot_spare.active)
         if self._should_respawn(request):
-            if hash_system(request.system) != self._system_hash:
+            if hash_system(request.system_text) != self._system_hash:
                 await self._hot_spare.discard_spare()
             await self._hot_spare.respawn()
             self._reset_active_state()
@@ -599,14 +599,17 @@ class _GoogleCLIModel(CLISubprocessModel, ModelDefaults):
             return False
         return self._respawn_due(
             request.messages,
-            system=request.system,
+            system=request.system_text,
             max_request_tokens=self.limits.max_request_tokens,
         )
 
     def _sync_tools_bridge(self, request: ModelRequest) -> None:
-        """Refresh the MCP bridge's tool registry to match the request."""
+        """Refresh the MCP bridge's tool registry and gate to match the request."""
         if self._tools_bridge is not None:
-            self._tools_bridge.update_tools(list(request.tools))
+            self._tools_bridge.update_tools(
+                list(request.tools),
+                allowed=request.allowed_tools,
+            )
 
     def _promote_proc_state(self, proc: Subproc) -> None:
         """Copy state from the active subprocess wrapper onto model fields."""

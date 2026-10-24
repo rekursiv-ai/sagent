@@ -7,7 +7,6 @@ Before spawning, decide:
 - **Inputs** -- which files / sections the child may read.
 - **Return form** -- bullets, JSON, citations, etc.
 - **Non-goals** -- what the child must NOT do (edit files, spawn further, etc.).
-- **`hot`** -- set true. Omit/false only if this child must know its own live depth/tool state.
 
 A spawn prompt without the first four is under-specified and the child will drift.
 
@@ -28,6 +27,5 @@ Recycle before spawning fresh. Every spawn reloads a full system prompt (expensi
 - `persistent` -- long-running background agent. Drive via `AgentSend`; plain assistant text is invisible unless it `AgentSend`s back or `notify_on_asleep` fires.
 - `notify_on_asleep` (persistent, default true) -- edge-triggered idle ping: `[<label> is idle] <last text>`.
 - `label` -- explicit label; must be unique among live persistent agents.
-- `hot` -- see the decision checklist above. Freezes the child's system prompt to a byte-identical copy of your own current one instead of a dynamic rebuild.
 
 Errors (round cap, exceptions, sub-failures) bubble up. Parallel children share per-path file locks; if a file changes under you, a staleness reminder fires -- re-read before editing. Child usage rolls into root `CostLedger`.
