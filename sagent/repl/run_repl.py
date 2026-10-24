@@ -124,7 +124,11 @@ async def run_repl(
             enable_open_in_editor=False,
             style=style,
         )
-        printer = ConsolePrinter(console, show_thinking=show_thinking)
+        printer = ConsolePrinter(
+            console,
+            show_thinking=show_thinking,
+            thinking_line_buffered=True,
+        )
         render_observer = make_render_observer(
             printer,
             output_policy=lambda call_id: _tool_output_policy(agent, call_id),
