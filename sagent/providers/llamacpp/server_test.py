@@ -9,6 +9,7 @@ import shutil
 
 import pytest
 
+from sagent.catalog.loader import models
 from sagent.providers.llamacpp import server
 from sagent.providers.llamacpp.server import (
     LlamaCpp,
@@ -86,7 +87,7 @@ def test_llamacpp_from_env_uses_env_var(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_llamacpp_catalog_uses_shared_models() -> None:
-    assert LlamaCpp.catalog.models is server.models("llamacpp")
+    assert LlamaCpp.catalog.models is models("llamacpp")
 
 
 def test_llamacpp_close_idempotent() -> None:

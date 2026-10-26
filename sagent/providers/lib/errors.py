@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Final, cast
 import contextlib
 import json
 
+from treekle import json_loads
+
 from sagent.types.exceptions import UserFacingError
 from sagent.types.model import RequestTooLargeError
 
@@ -175,9 +177,9 @@ def is_context_overflow_text(body: str) -> bool:
     # A structured ``error.code`` is authoritative when present: it is the
     # vendor naming the condition, not prose that happens to contain a phrase.
     with contextlib.suppress(json.JSONDecodeError):
-        parsed = json.loads(body)
+        parsed = json_loads(body)
         if isinstance(parsed, Mapping):
-            error = cast(Mapping[str, object], parsed).get("error")
+            error = parsed.get("error")
             if isinstance(error, Mapping):
                 code = cast(Mapping[str, object], error).get("code")
                 # ``str`` before membership: ``code`` is whatever the

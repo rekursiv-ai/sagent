@@ -34,7 +34,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import cast
+from typing import Protocol, cast
 
 import argparse
 import base64
@@ -42,7 +42,7 @@ import json
 import logging
 import tempfile
 
-from treekle import ReadError, from_plain
+from treekle import ReadError, from_plain, json_loads
 
 
 logger = logging.getLogger(__name__)
@@ -63,13 +63,12 @@ def iter_v4_records(lines: Iterable[str]) -> Iterable[dict[str, object]]:
         if not line:
             continue
         try:
-            record = json.loads(line)
+            rec = json_loads(line, dict[str, object])
         except json.JSONDecodeError:
             logger.warning("Skipping malformed v3 line.")
             continue
-        if not isinstance(record, dict):
+        except ReadError:  # Valid JSON but not an object: nothing to translate.
             continue
-        rec = cast(Mapping[str, object], record)
         kind = rec.get("kind")
         if kind == "meta":
             yield _convert_meta(rec)
@@ -132,10 +131,10 @@ def main(argv: list[str] | None = None) -> int:
         description="Migrate v3 sagent session.jsonl files to v4.",
     )
     _add_arguments(parser)
-    args = parser.parse_args(argv)
+    args = cast(Flags, parser.parse_args(argv))
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
-    root: Path = cast(Path, args.path)
+    root = args.path
     if not root.exists():
         logger.error("path does not exist: %s", root)
         return 1
@@ -156,6 +155,14 @@ def main(argv: list[str] | None = None) -> int:
         logger.info("migrated %d records: %s -> %s", n, src, dst)
     logger.info("done: %d records across %d files", total, len(targets))
     return 0
+
+
+class Flags(Protocol):
+    """Parsed command-line flags."""
+
+    path: Path
+    suffix: str
+    overwrite: bool
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:

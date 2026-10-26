@@ -6,14 +6,18 @@ inbox), so these run fast and pin the topology rules the demo's contrast depends
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 
 from examples.agent_maze.engine import Engine
 from examples.agent_maze.tools import CommsTool, SpawnTool
 from examples.agent_maze.world import make_spawn_level
-from sagent.agent.state import agent_label_var, agent_registry
+from sagent.agent.state import (
+    AgentLike,
+    agent_label_var,
+    agent_registry,
+)
 
 
 if TYPE_CHECKING:
@@ -48,7 +52,7 @@ def _engine() -> Engine:
 def _register(labels: list[str]) -> dict[str, _FakeAgent]:
     fakes = {lbl: _FakeAgent() for lbl in labels}
     for lbl, fake in fakes.items():
-        agent_registry[lbl] = cast(Any, fake)  # stand-in for a runtime AgentLike.
+        agent_registry[lbl] = cast(AgentLike, fake)  # stand-in for a runtime AgentLike.
     return fakes
 
 
@@ -57,11 +61,11 @@ def _clear(labels: list[str]) -> None:
         agent_registry.pop(lbl, None)
 
 
-def _run(coro: Coroutine[Any, Any, ToolResult]) -> ToolResult:
+def _run(coro: Coroutine[object, None, ToolResult]) -> ToolResult:
     return asyncio.run(coro)
 
 
-def _msgs(eng: Engine) -> list[dict[str, Any]]:
+def _msgs(eng: Engine) -> list[dict[str, object]]:
     return [e for e in eng.events if e["kind"] == "message"]
 
 

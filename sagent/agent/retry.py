@@ -270,10 +270,10 @@ def extract_retry_after(error: Exception) -> float | None:
     retry_after_ms = getattr(error, "retry_after_ms", None)
     if isinstance(retry_after_ms, (int, float)) and retry_after_ms >= 0:
         return _clamp_retry_after(retry_after_ms / 1000.0)
-    response = getattr(error, "response", None)
+    response: object = getattr(error, "response", None)
     if response is None:
         return None
-    raw_headers = getattr(response, "headers", {}) or {}
+    raw_headers: object = getattr(response, "headers", None) or {}
     headers = _lower_headers(raw_headers)
     val = headers.get("retry-after")
     if val is not None:

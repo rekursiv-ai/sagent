@@ -17,9 +17,11 @@ actions no-op, so nothing lands in the event log after the win.
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import TypedDict
 
 import asyncio
+
+from treekle import from_plain
 
 from examples.agent_maze.world import PLATE_LETTERS, World
 
@@ -39,7 +41,7 @@ class Engine:
         self.world = World(rows, sight=sight)
         self.t = 0  # Logical interaction clock (advances one per decision)
         self.seq = 0  # `total` event order.
-        self.events: list[dict[str, Any]] = []
+        self.events: list[dict[str, object]] = []
         self.lock = (
             asyncio.Lock()
         )  # Serialize state mutations across concurrent agents.
@@ -57,13 +59,13 @@ class Engine:
         )
         self.seq += 1
 
-    def _build_scene(self, model: str) -> dict[str, Any]:
+    def _build_scene(self, model: str) -> Scene:
         """Return the static header the replay draws before any event."""
         w = self.world
         by_lock: dict[int, list[tuple[int, int]]] = {}
         for xy, li in w._plate_lock.items():  # noqa: SLF001 -- The example engine accesses the world’s private topology to enforce its puzzle protocol.
             by_lock.setdefault(li, []).append(xy)
-        plates: list[dict[str, Any]] = []
+        plates: list[ScenePlate] = []
         for li, tiles in sorted(by_lock.items()):
             stiles = sorted(tiles)
             for tile in stiles:
@@ -250,7 +252,7 @@ class Engine:
         w = self.world
         a = w.agents[aid]
         v = w.view(aid)
-        vis = cast(list[dict[str, Any]], v["visible_plates"])
+        vis = from_plain(v["visible_plates"], list[_SeenPlate])
         plates = (
             "; ".join(
                 f"'{p['lock']}'@({p['xy'][0]},{p['xy'][1]}){' OPEN' if p['open'] else ''}"
@@ -272,6 +274,33 @@ class Engine:
             f"{_local_map(w, aid)}\n"
             f"Plates in sight: {plates}"
         )
+
+
+class ScenePlate(TypedDict):
+    """One plate as the replay draws it."""
+
+    xy: list[int]
+    lock: int
+    letter: str
+    partner_xy: list[int] | None
+
+
+class Scene(TypedDict):
+    """The static header the replay draws before any event."""
+
+    grid: list[str]
+    width: int
+    height: int
+    plates: list[ScenePlate]
+    model: str
+
+
+class _SeenPlate(TypedDict):
+    """One plate in ``World.view``'s ``visible_plates``."""
+
+    xy: list[int]
+    lock: str
+    open: bool
 
 
 def _local_map(world: World, aid: str) -> str:

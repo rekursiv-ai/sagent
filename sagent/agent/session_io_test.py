@@ -13,6 +13,8 @@ import os
 import stat
 import threading
 
+from treekle import json_loads
+
 import pytest
 
 from sagent.agent import (
@@ -1908,7 +1910,7 @@ def test_a_short_write_cannot_interleave_another_append(tmp_path: Path) -> None:
     for line in session_file.read_text(encoding="utf-8").splitlines():
         if not line.strip():
             continue
-        _ = json.loads(line)
+        _ = json_loads(line)
 
 
 def test_new_session_dir_is_not_readable_by_other_users(tmp_path: Path) -> None:
@@ -2098,7 +2100,7 @@ def test_append_session_writes_meta_then_tape_delta(tmp_path: Path) -> None:
         tape_delta=_records_from([UserMessage(text="x")]),
     )
     lines = session_file.read_text(encoding="utf-8").splitlines()
-    parsed = [json.loads(line) for line in lines]
+    parsed = [json_loads(line, dict[str, object]) for line in lines]
     kinds = [r["kind"] for r in parsed]
     assert kinds == ["meta", "history"]
 
@@ -2127,7 +2129,7 @@ def test_append_session_writes_model_service_suspended_event(tmp_path: Path) -> 
     session_file = tmp_path / "session.jsonl"
     append_session(session_file, runtime_events=[_service_suspended()])
 
-    record = json.loads(session_file.read_text(encoding="utf-8"))
+    record = json_loads(session_file.read_text(encoding="utf-8"), dict[str, object])
     assert record == {
         "kind": "runtime_event",
         "type": "model_service_suspended",
@@ -2190,7 +2192,7 @@ def test_append_session_writes_notice_message_event(tmp_path: Path) -> None:
     session_file = tmp_path / "session.jsonl"
     append_session(session_file, runtime_events=[_notice()])
 
-    record = json.loads(session_file.read_text(encoding="utf-8"))
+    record = json_loads(session_file.read_text(encoding="utf-8"), dict[str, object])
     assert record == {
         "kind": "runtime_event",
         "type": "notice_message",
@@ -2288,7 +2290,7 @@ def test_append_session_writes_persistent_agent_lifecycle(tmp_path: Path) -> Non
         ],
     )
 
-    record = json.loads(session_file.read_text(encoding="utf-8"))
+    record = json_loads(session_file.read_text(encoding="utf-8"), dict[str, object])
     assert record == {
         "kind": "persistent_agent",
         "label": "fix-tools",

@@ -127,7 +127,7 @@ def patched_loop_time() -> Iterator[None]:
     """Patch ``asyncio.get_running_loop().time()`` to a deterministic value."""
     with patch("asyncio.get_running_loop") as mock_loop:
         loop = cast(MagicMock, mock_loop.return_value)
-        loop.time.return_value = 10.0
+        loop.time = MagicMock(return_value=10.0)
         yield
 
 

@@ -24,13 +24,15 @@ What they cover (the production-correctness gaps the unit suite leaves):
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import asyncio
 import json
 import shutil
 import subprocess
 import uuid as _uuid
+
+from treekle import json_loads
 
 import pytest
 
@@ -142,13 +144,13 @@ def _probe_claude_auth() -> str:
     if proc.returncode != 0 and _looks_like_auth_failure(proc.stdout + proc.stderr):
         return proc.stderr.strip()[:200] or "non-zero exit"
     try:
-        parsed: object = json.loads(proc.stdout or "{}")
+        parsed = json_loads(proc.stdout or "{}")
     except json.JSONDecodeError:
         return ""  # Unparseable but exit 0: let the real test surface it.
     if not isinstance(parsed, dict):
         return ""
-    result = cast(dict[str, object], parsed)
-    if result.get("is_error"):
+    result = parsed
+    if result.get("is_error") is True:
         detail = str(result.get("result", ""))
         if _looks_like_auth_failure(detail):
             return detail[:200]

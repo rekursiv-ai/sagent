@@ -25,7 +25,7 @@ Or with the offline echo for iteration without an API key::
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import asyncio
@@ -60,7 +60,7 @@ def main() -> int:
         description=__doc__.split("\n", 2)[2] if __doc__ else None,
     )
     _add_arguments(parser)
-    args = parser.parse_args()
+    args = cast(Flags, parser.parse_args())
 
     if args.offline:
         model = _OfflineEcho()
@@ -73,6 +73,16 @@ def main() -> int:
     agent = Agent(model=model)
     asyncio.run(run_repl(agent))
     return 0
+
+
+class Flags(Protocol):
+    """Parsed command-line flags."""
+
+    offline: bool
+    provider: str
+    auth: str
+    model: str | None
+    account: str | None
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:

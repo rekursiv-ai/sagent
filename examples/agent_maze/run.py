@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from http import server
 from pathlib import Path
-from typing import Final
+from typing import Final, Protocol, cast
 
 import argparse
 import asyncio
@@ -79,7 +79,7 @@ def main() -> int:
         description=__doc__.split("\n", 2)[2] if __doc__ else None,
     )
     _add_arguments(ap)
-    args = ap.parse_args()
+    args = cast(Flags, ap.parse_args())
 
     if args.live:
         asyncio.run(capture(num_locks=args.locks, k=args.k))
@@ -91,6 +91,17 @@ def main() -> int:
         return 0
     serve(args.port, args.host)
     return 0
+
+
+class Flags(Protocol):
+    """Parsed command-line flags."""
+
+    live: bool
+    locks: int
+    k: int
+    port: int
+    host: str
+    no_serve: bool
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:

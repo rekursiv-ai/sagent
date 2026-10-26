@@ -17,12 +17,12 @@ two writes racing on different provider keys would clobber each other.
 
 from __future__ import annotations
 
-from typing import cast
-
 import fcntl
 import json
 import logging
 import os
+
+from treekle import json_loads
 
 from sagent.lib.atomic_file import atomic_write_bytes
 from sagent.lib.userdirs import data_dir
@@ -46,7 +46,7 @@ def load() -> dict[str, str]:
     except (FileNotFoundError, OSError):
         return {}
     try:
-        data: object = json.loads(raw)
+        data = json_loads(raw)
     except json.JSONDecodeError:
         logger.warning(
             "Corrupt %s; treating as empty.",
@@ -55,11 +55,7 @@ def load() -> dict[str, str]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return {
-        key: value
-        for key, value in cast(dict[object, object], data).items()
-        if isinstance(key, str) and isinstance(value, str)
-    }
+    return {key: value for key, value in data.items() if isinstance(value, str)}
 
 
 def get(provider: str) -> str | None:

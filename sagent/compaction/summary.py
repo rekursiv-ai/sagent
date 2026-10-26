@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from html import escape
-from typing import TYPE_CHECKING, Final, Literal, get_args
+from typing import TYPE_CHECKING, Final, Literal, cast, get_args
 
 import dataclasses
 import logging
@@ -180,7 +180,7 @@ class SummaryCompactor:
         self._retry_tool_result_cap_chars = retry_tool_result_cap_chars
         self._reattach = reattach or ReattachPolicy()
         self._model = model
-        self._effort = effort
+        self._effort: ThinkingEffort | None = effort
 
     @property
     def reattach(self) -> ReattachPolicy:
@@ -1077,7 +1077,7 @@ def _format_summary(raw: str, *, finished: bool) -> str | None:
 
 def _ranks_below(effort: ThinkingEffort, other: ThinkingEffort) -> bool:
     """Say whether ``effort`` is a lower thinking level than ``other``."""
-    ranked = get_args(ThinkingEffort.__value__)
+    ranked = get_args(cast(object, ThinkingEffort.__value__))
     return ranked.index(effort) < ranked.index(other)
 
 

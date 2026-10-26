@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast, override
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import json
-import operator
 
 from treekle import from_plain
 
@@ -882,10 +881,15 @@ def test_anthropic_model_unknown_id_raises() -> None:
         _ = p.model("unknown-claude")
 
 
+def _call(fn: Callable[..., object], *args: object, **kwargs: object) -> object:
+    """Call ``fn`` past its signature, as a caller with a typo would."""
+    return fn(*args, **kwargs)
+
+
 def test_anthropic_model_rejects_unknown_provider_options() -> None:
     p = Anthropic.from_key("k")
     with pytest.raises(TypeError, match="typoo"):
-        _ = operator.methodcaller("model", "example", typoo=True)(p)
+        _ = _call(p.model, "example", typoo=True)
 
 
 def test_anthropic_model_strips_context_tag_for_profile_lookup() -> None:
@@ -945,7 +949,10 @@ async def test_anthropic_actual_request_tokens_calls_count_tokens() -> None:
     fake_sdk = MagicMock()
     fake_result = MagicMock()
     fake_result.input_tokens = 42
-    fake_sdk.messages.count_tokens = AsyncMock(return_value=fake_result)
+    count_tokens = AsyncMock(return_value=fake_result)
+    messages = MagicMock()
+    messages.count_tokens = count_tokens
+    fake_sdk.messages = messages
     with patch.object(p, "get_sdk", AsyncMock(return_value=fake_sdk)):
         n = await m.actual_request_tokens(
             ModelRequest(messages=[UserMessage(text="ping")]),
@@ -953,7 +960,7 @@ async def test_anthropic_actual_request_tokens_calls_count_tokens() -> None:
     assert n == 42
     # ``count_tokens`` rejects kwargs that ``create`` accepts -- verify
     # we stripped them before the call.
-    await_args = fake_sdk.messages.count_tokens.await_args
+    await_args = count_tokens.await_args
     assert await_args is not None
     kwargs = cast(dict[str, object], await_args.kwargs)
     assert "max_tokens" not in kwargs
@@ -1551,12 +1558,13 @@ async def test_anthropic_provider_close_sdk_closes_shared_sdk() -> None:
     """The provider owns the client, so the provider closes it."""
     p = Anthropic.from_key("k")
     fake_sdk = MagicMock()
-    fake_sdk.close = AsyncMock()
+    close = AsyncMock()
+    fake_sdk.close = close
     p._sdk = cast("anthropic_sdk.AsyncAnthropic", fake_sdk)
 
     await p.close_sdk()
 
-    fake_sdk.close.assert_awaited_once()
+    close.assert_awaited_once()
     assert p._sdk is None
 
 
@@ -1572,12 +1580,13 @@ async def test_closing_one_model_leaves_a_sibling_model_usable() -> None:
     model = p.model("wire-example")
     _advisor = p.model("utility-example")
     fake_sdk = MagicMock()
-    fake_sdk.close = AsyncMock()
+    close = AsyncMock()
+    fake_sdk.close = close
     p._sdk = cast("anthropic_sdk.AsyncAnthropic", fake_sdk)
 
     await model.close()
 
-    fake_sdk.close.assert_not_awaited()
+    close.assert_not_awaited()
     assert p._sdk is fake_sdk
 
 

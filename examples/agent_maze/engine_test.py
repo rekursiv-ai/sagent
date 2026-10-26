@@ -6,7 +6,7 @@ and the event-log/clock invariants the replay + metrics depend on.
 
 from __future__ import annotations
 
-from typing import cast
+from treekle import from_plain
 
 from examples.agent_maze.engine import PRESS_WINDOW, Engine
 from examples.agent_maze.world import make_spawn_level
@@ -15,11 +15,8 @@ from examples.agent_maze.world import make_spawn_level
 def _engine() -> tuple[Engine, tuple[int, int], tuple[int, int]]:
     rows, _meta = make_spawn_level(num_locks=2, decoys=2)
     eng = Engine(rows, model="test")
-    p = [pl for pl in eng.scene["plates"] if pl["lock"] == 0]
-    return cast(
-        tuple[Engine, tuple[int, int], tuple[int, int]],
-        (eng, tuple(p[0]["xy"]), tuple(p[1]["xy"])),
-    )
+    a, b = (pl["xy"] for pl in eng.scene["plates"] if pl["lock"] == 0)
+    return eng, (a[0], a[1]), (b[0], b[1])
 
 
 def test_mutual_partner_press_opens_lock() -> None:
@@ -32,7 +29,7 @@ def test_mutual_partner_press_opens_lock() -> None:
     assert eng.world.locks_open() == 1
     opens = [e for e in eng.events if e["kind"] == "lock_open"]
     assert len(opens) == 1
-    assert sorted(opens[0]["agents"]) == ["a0", "a1"]
+    assert sorted(from_plain(opens[0]["agents"], list[str])) == ["a0", "a1"]
 
 
 def test_solo_and_wrong_partner_do_not_open() -> None:
@@ -101,8 +98,8 @@ def test_frozen_after_solve_drops_post_win_actions() -> None:
         decoys=1,
     )  # One lock => solvable outright.
     eng = Engine(rows, model="test")
-    p = [pl for pl in eng.scene["plates"] if pl["lock"] == 0]
-    a_xy, b_xy = tuple(p[0]["xy"]), tuple(p[1]["xy"])
+    a, b = (pl["xy"] for pl in eng.scene["plates"] if pl["lock"] == 0)
+    a_xy, b_xy = (a[0], a[1]), (b[0], b[1])
     eng.add_agent("a0", a_xy)
     eng.add_agent("a1", b_xy)
     eng.press("a0", "a1")

@@ -9,7 +9,7 @@ clean run per cell; metrics are computed per arm from the event log.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Final, TypedDict
 
 import json
 
@@ -31,7 +31,22 @@ _CWD: Final = Path(__file__).resolve().parent
 MODEL = "sonnet-4.6"  # house-ignore[globals] -- Model choice, user retunes.
 
 
-def metrics(eng: Engine) -> dict[str, Any]:
+class Metrics(TypedDict):
+    """One run's summary, as :func:`metrics` computes it from the event log."""
+
+    solved: bool
+    locks_open: int
+    locks_total: int
+    team_size: int
+    messages: int
+    msgs_per_lock: float | None
+    presses: int
+    failed_press: int
+    interactions: int
+    termination: str
+
+
+def metrics(eng: Engine) -> Metrics:
     """Return metrics about the engine state.
 
     Args:
@@ -62,7 +77,7 @@ def metrics(eng: Engine) -> dict[str, Any]:
     }
 
 
-def arm_payload(eng: Engine) -> dict[str, Any]:
+def arm_payload(eng: Engine) -> dict[str, object]:
     """Return the serialized payload for one engine run.
 
     Args:
@@ -158,7 +173,7 @@ async def capture(
     max_agents: int = 8,
     rounds: int = 28,
     budget_t: int = 140,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Run all coordination modes and return captured results.
 
     Args:
@@ -175,7 +190,8 @@ async def capture(
 
     """
     rows, meta = make_spawn_level(num_locks=num_locks, decoys=decoys)
-    data: dict[str, Any] = {
+    modes: dict[str, dict[str, object]] = {}
+    data: dict[str, object] = {
         "meta": {
             "grid": rows,
             "width": len(rows[0]),
@@ -183,11 +199,11 @@ async def capture(
             "model": MODEL,
             "locks": num_locks,
         },
-        "modes": {},
+        "modes": modes,
     }
     for told in (True, False):
         label = "told" if told else "discover"
-        arms: dict[str, Any] = {}
+        arms: dict[str, object] = {}
         for arm, best in (("mesh", True), ("tree", False)):
             engs: list[Engine] = [
                 await run_arm(
@@ -209,7 +225,7 @@ async def capture(
                 f"interactions={_interactions(chosen)} (of {k} runs)",
                 flush=True,
             )
-        data["modes"][label] = arms
+        modes[label] = arms
     if write:
         out = _CWD / "web" / "data.js"
         out.parent.mkdir(exist_ok=True)
@@ -229,22 +245,34 @@ def _make_model() -> Model:
 
 def _lineage(eng: Engine) -> dict[str, str]:
     """Return agent parent-child relationships."""
-    return {
-        e["child"]: e["agent"]
-        for e in eng.events
-        if e["kind"] == "spawn" and e.get("child") and e["agent"] != e["child"]
-    }
+    lineage: dict[str, str] = {}
+    for e in eng.events:
+        child, parent = e.get("child"), e["agent"]
+        if (
+            e["kind"] == "spawn"
+            and isinstance(child, str)
+            and child
+            and isinstance(parent, str)
+            and parent != child
+        ):
+            lineage[child] = parent
+    return lineage
 
 
 def _roster(eng: Engine) -> list[str]:
     """Return the list of agent names."""
     roster: list[str] = []
     for e in eng.events:
-        if e["kind"] == "spawn" and e.get("child") and e["child"] not in roster:
-            roster.append(e["child"])
+        child = e.get("child")
+        if (
+            e["kind"] == "spawn"
+            and isinstance(child, str)
+            and child
+            and child not in roster
+        ):
+            roster.append(child)
     return roster
 
 
 def _interactions(eng: Engine) -> int:
-    m = metrics(eng)
-    return int(m["interactions"])
+    return metrics(eng)["interactions"]

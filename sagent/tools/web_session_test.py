@@ -144,7 +144,9 @@ def test_paper_fetch_forwards_its_session(tmp_path: Path) -> None:
     "cls",
     [WebSearch, PaperSearch, PaperDetails, PaperAuthor, PaperFetch],
 )
-def test_a_tool_built_alone_owns_a_session(cls: type) -> None:
+def test_a_tool_built_alone_owns_a_session(
+    cls: type[WebSearch | PaperSearch | PaperDetails | PaperAuthor | PaperFetch],
+) -> None:
     first, second = cls(), cls()
     assert isinstance(first.session, FetchSession)
     assert first.session is not second.session

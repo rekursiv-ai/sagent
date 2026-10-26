@@ -355,11 +355,17 @@ def _load_skill(skill_dir: Path, source: str) -> SkillInfo | None:
     except (OSError, UnicodeDecodeError):
         return None
     meta, body = parse_frontmatter(raw)
-    name = meta.get("name") or skill_dir.name
+    stated_name = meta.get("name")
+    name = (
+        stated_name if isinstance(stated_name, str) and stated_name else skill_dir.name
+    )
     if not re.fullmatch(r"^[a-z0-9][a-z0-9-]{0,63}$", name):
         logger.warning("Skipping skill with invalid name %r at %s.", name, md)
         return None
-    description = meta.get("description") or _first_nonempty_line(body)
+    stated = meta.get("description")
+    description = (
+        stated if isinstance(stated, str) and stated else _first_nonempty_line(body)
+    )
     return SkillInfo(
         name=name,
         description=description,

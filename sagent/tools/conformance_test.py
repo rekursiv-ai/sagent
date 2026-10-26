@@ -9,7 +9,7 @@ machinery. These tests cross that gap.
 
 from __future__ import annotations
 
-from typing import get_type_hints
+from typing import cast, get_type_hints
 
 import dataclasses
 import inspect
@@ -91,7 +91,7 @@ def test_every_settable_knob_round_trips_from_the_command_line(name: str) -> Non
     """
     cls = type(resolve_tools([name])[0])
     for key in _settable_keys(cls):
-        default = inspect.signature(cls.__init__).parameters[key].default
+        default = cast(object, inspect.signature(cls.__init__).parameters[key].default)
         coerced = coerce_kwargs(cls, {key: str(default)})
         assert coerced == {key: default}, f"{name}.{key} did not round-trip"
 

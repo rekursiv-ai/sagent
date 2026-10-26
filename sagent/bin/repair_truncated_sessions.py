@@ -24,7 +24,7 @@ Examples:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, cast
 
 import argparse
 import logging
@@ -216,7 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     _add_arguments(parser)
-    args = parser.parse_args(argv)
+    args = cast(Flags, parser.parse_args(argv))
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     roots = (
@@ -258,6 +258,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if damaged == 0:
         print(f"no truncated sessions among {len(candidates)} scanned")
     return 0
+
+
+class Flags(Protocol):
+    """Parsed command-line flags."""
+
+    session_dirs: list[str]
+    dry_run: bool
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:

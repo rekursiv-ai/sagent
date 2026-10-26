@@ -14,7 +14,7 @@ told   : the system prompt states the topology.   discover : it doesn't (illegal
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import asyncio
 import contextlib
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
     from examples.agent_maze.world import SpawnMeta
     from sagent.types.model import Model
+    from sagent.types.tools import Tool
 
 
 SEED = "a0"  # house-ignore[globals] -- Level/seed tuning dial, retuned per run.
@@ -78,8 +79,8 @@ class Arena:
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self._counter = 0
 
-    def _tools_for(self, label: str) -> list[Any]:
-        tools: list[Any] = [self.world, self.comms]
+    def _tools_for(self, label: str) -> list[Tool]:
+        tools: list[Tool] = [self.world, self.comms]
         if self.mesh or label == SEED:
             tools.append(self.spawn)
         return tools

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from http.client import HTTPResponse
+from typing import TYPE_CHECKING, cast
 from urllib import error, request
 
 import asyncio
@@ -316,9 +317,12 @@ def test_callback_without_a_code_is_an_error() -> None:
     listener = AuthCodeListener("expected")
     listener.start()
     with pytest.raises(error.HTTPError) as raised:
-        request.urlopen(  # noqa: S310 -- The test exercises the OAuth localhost callback transport, whose URL is fixed by the protocol and never user-controlled.
-            f"{listener.redirect_uri}?state=expected",
-            timeout=5,
+        cast(
+            HTTPResponse,
+            request.urlopen(  # noqa: S310 -- The test exercises the OAuth localhost callback transport, whose URL is fixed by the protocol and never user-controlled.
+                f"{listener.redirect_uri}?state=expected",
+                timeout=5,
+            ),
         ).close()
     assert raised.value.code == 400
     raised.value.close()

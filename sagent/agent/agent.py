@@ -1203,9 +1203,11 @@ class Agent:
         )
         if prov_cls is None:
             raise ValueError(f"unknown provider {spec.provider!r}")
-        login_fn = getattr(prov_cls, "login", None)
+        login_fn: object = getattr(prov_cls, "login", None)
         if login_fn is None:
             raise ValueError(f"provider {spec.provider!r} has no login method")
+        if not callable(login_fn):
+            raise TypeError(f"provider {spec.provider!r} login is not callable")
         # ``login`` blocks on a browser-callback wait (or ``input()`` in
         # manual mode) for up to several minutes. Running it inline would
         # freeze the single-threaded REPL event loop: the input pump

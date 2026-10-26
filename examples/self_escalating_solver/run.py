@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from http import server
 from pathlib import Path
-from typing import Any, Final
+from typing import Final, Literal, Protocol, cast
 
 import argparse
 import asyncio
@@ -37,6 +37,8 @@ import socketserver
 import subprocess
 import tempfile
 import webbrowser
+
+from treekle import json_loads
 
 from examples.self_escalating_solver import solver
 from sagent.lib.userdirs import config_dir
@@ -100,7 +102,7 @@ def build(provider_name: str, model_id: str) -> tuple[Model, ModelRecipe]:
     return model, spec
 
 
-def canonical_histograms() -> dict[str, Any]:
+def canonical_histograms() -> dict[str, object]:
     """Generate canonical histograms for visualization of sampler behavior.
 
     Returns:
@@ -159,13 +161,13 @@ print("HIST " + json.dumps({
         )
         for line in r.stdout.splitlines():
             if line.startswith("HIST "):
-                return json.loads(line[5:])
+                return json_loads(line[5:], dict[str, object])
         return {}
     finally:
         Path(path).unlink(missing_ok=True)
 
 
-async def run_live(config_name: str, trials: int) -> dict[str, Any]:
+async def run_live(config_name: str, trials: int) -> dict[str, object]:
     """Run the self-escalating solver experiment and capture results.
 
     Args:
@@ -195,7 +197,7 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
     # low-tier and high-tier get the IDENTICAL prompt (SYS_BASE); only the model differs.
     base_prompt = solver.system_for(allow_upgrade=False)
     print("• low-tier (cheap) …", flush=True)
-    low: dict[str, Any] = {}
+    low: solver.ConditionResult | None = None
     # The cheap-alone arm exists to show the weak model FAILing with real attempts.
     # Re-roll a 503 / ungraded run, and re-roll the occasional lucky pass, so the
     # captured low-tier actually ran code, got graded, and FAILed.
@@ -217,6 +219,8 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
             "    (low-tier happened to solve it -- re-rolling for the FAIL)",
             flush=True,
         )
+    if low is None:  # The loop above runs at least once.
+        raise ValueError("Expected low is not None.")
     print(
         f"    first={low['first_verdict']} final={low['final_verdict']} "
         f"correct={low['correct']} ${low['cost_usd']}",
@@ -239,7 +243,7 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
     # self-mutate starts cheap, carries a ModelRecipe, and upgrades to mut_id
     # (a DIFFERENT, cheaper provider/model than the high-tier baseline).
     mutate_prompt = solver.system_for(allow_upgrade=True, strong_model=mut_id)
-    self_runs: list[dict[str, Any]] = []
+    self_runs: list[solver.ConditionResult] = []
     # Run `trials` trials, but keep going (to a hard cap of trials + 4) until at
     # least one is a money-path (swap + fix) so the captured hero is always a real
     # cross-vendor swap -- the centerpiece of the demo.
@@ -277,7 +281,7 @@ async def run_live(config_name: str, trials: int) -> dict[str, Any]:
     print("• canonical histograms …", flush=True)
     hist = canonical_histograms()
 
-    data = {
+    data: dict[str, object] = {
         "meta": {
             "config": config_name,
             "cheap": cheap_id,
@@ -383,7 +387,7 @@ def main() -> int:
         "--live re-runs it for real, then serves the fresh result.",
     )
     _add_arguments(ap)
-    args = ap.parse_args()
+    args = cast(Flags, ap.parse_args())
 
     if args.live:
         provider = args.provider or _pick_provider()
@@ -398,6 +402,17 @@ def main() -> int:
         return 0
     serve(args.port, args.host)
     return 0
+
+
+class Flags(Protocol):
+    """Parsed command-line flags."""
+
+    live: bool
+    provider: Literal["cross", "google", "anthropic"] | None
+    trials: int
+    no_serve: bool
+    port: int
+    host: str
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:

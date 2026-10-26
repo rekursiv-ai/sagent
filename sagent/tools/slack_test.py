@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from typing import cast
 from unittest.mock import patch
 
 import asyncio
 import json
 import logging
 
+from treekle import from_plain
+from wesearch.fetch import RequestParams
 from wesearch.types.errors import FetchError
 
 import pytest
@@ -74,8 +77,9 @@ def test_send_success() -> None:
     assert not result.is_error
     assert "Sent." in result.content
     # Verify the POST mode + payload include username/icon_url/thread.
-    _, kwargs = mock_fetch.call_args
-    payload_json = kwargs["request"].content.json
+    request = cast(object, mock_fetch.call_args.kwargs["request"])
+    assert isinstance(request, RequestParams)
+    payload_json = from_plain(request.content.json, dict[str, object])
     assert payload_json["channel"] == "C1"
     assert payload_json["text"] == "hi"
     assert payload_json["thread_ts"] == "thr1"

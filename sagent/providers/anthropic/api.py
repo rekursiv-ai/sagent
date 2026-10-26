@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Protocol, cast, override
+from typing import TYPE_CHECKING, Final, Protocol, cast, override, runtime_checkable
 
 import asyncio
 import base64
@@ -56,7 +56,7 @@ else:
     image = lazy_import("sagent.lib.image")
 
 
-from treekle import MutablePlainTree, from_plain, mutable
+from treekle import MutablePlainTree, from_plain, json_loads, mutable
 
 from sagent.catalog.anthropic import api, usage_tokens
 from sagent.catalog.loader import models
@@ -604,20 +604,26 @@ def _tool_names_from_kwargs(kwargs: dict[str, object]) -> list[str | None]:
 
 def _request_id(e: BaseException) -> str:
     """Best-effort request-id extractor for an anthropic error; ``""`` if absent."""
-    rid = getattr(e, "request_id", None)
-    if rid:
-        return cast(str, rid)
-    resp = getattr(e, "response", None)
-    headers = getattr(resp, "headers", None)
-    if headers is not None:
+    rid: object = getattr(e, "request_id", None)
+    if isinstance(rid, str) and rid:
+        return rid
+    resp: object = getattr(e, "response", None)
+    headers: object = getattr(resp, "headers", None)
+    if isinstance(headers, _HeaderLookup):
         try:
-            return cast(
-                str,
-                headers.get("request-id") or headers.get("x-request-id") or "",
-            )
+            return headers.get("request-id") or headers.get("x-request-id") or ""
         except Exception:  # noqa: BLE001 -- best-effort extraction must not mask the original error.
             return ""
     return ""
+
+
+@runtime_checkable
+class _HeaderLookup(Protocol):
+    """Response headers, as the SDK's ``httpx`` response carries them."""
+
+    def get(self, key: str, /) -> str | None:
+        """Return the header's value, or ``None`` when absent."""
+        ...
 
 
 class _AnthropicModel(ModelDefaults):
@@ -1009,14 +1015,12 @@ async def _stream_impl(
                 watchdog.reschedule(
                     loop.time() + _STREAM_IDLE_TIMEOUT,
                 )
-                delta = getattr(event, "delta", None)
-                if delta is None:
+                if event.type != "content_block_delta" or publish is None:
                     continue
-                delta_type = getattr(delta, "type", "")
-                if delta_type == "text_delta" and publish is not None:
-                    publish(ModelResponsePartial(delta.text))
-                elif delta_type == "thinking_delta" and publish is not None:
-                    publish(ModelResponseThinking(delta.thinking))
+                if event.delta.type == "text_delta":
+                    publish(ModelResponsePartial(event.delta.text))
+                elif event.delta.type == "thinking_delta":
+                    publish(ModelResponseThinking(event.delta.thinking))
             return await s.get_final_message()
 
 
@@ -1088,7 +1092,7 @@ async def _raise_anthropic_status_error(
     body_text = (await response.aread()).decode(errors="replace")
     body: object = body_text
     with contextlib.suppress(json.JSONDecodeError):
-        body = json.loads(body_text)
+        body = json_loads(body_text)
     message = body_text or f"Error code: {response.status_code}"
     raise sdk._make_status_error(message, body=body, response=response)  # noqa: SLF001 -- provider must preserve the SDK's status exception taxonomy.
 

@@ -14,6 +14,8 @@ import json
 import logging
 import time
 
+from treekle import json_loads
+
 import pytest
 
 from sagent.agent.agent import Agent
@@ -808,7 +810,7 @@ def test_build_child_model_rebuilds_fresh_transport_when_spec_matches() -> None:
         model_recipe=spec,
     )
     fake_provider = MagicMock()
-    fake_provider.model.side_effect = _stub_provider_model
+    fake_provider.model = MagicMock(side_effect=_stub_provider_model)
     t = AgentSpawn()
     with patch(
         "sagent.providers.providers.build_provider",
@@ -842,7 +844,7 @@ def test_build_child_model_each_child_gets_distinct_transport() -> None:
         model_recipe=spec,
     )
     fake_provider = MagicMock()
-    fake_provider.model.side_effect = _stub_provider_model
+    fake_provider.model = MagicMock(side_effect=_stub_provider_model)
     t = AgentSpawn()
     models: list[object] = []
     with patch(
@@ -1036,7 +1038,9 @@ def test_build_child_model_provider_change_without_auth_uses_target_default() ->
         account="work",
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="gemini-3-pro")
+    fake_provider.model = MagicMock(
+        return_value=StubProviderModel(model_id="gemini-3-pro"),
+    )
     with patch(
         "sagent.providers.providers.build_provider",
         return_value=fake_provider,
@@ -1068,7 +1072,9 @@ def test_build_child_model_missing_inherited_account_falls_back() -> None:
         account="work",
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="target-model")
+    fake_provider.model = MagicMock(
+        return_value=StubProviderModel(model_id="target-model"),
+    )
     with (
         patch(
             "sagent.providers.providers.build_provider",
@@ -1140,7 +1146,7 @@ def test_build_child_model_infers_provider_from_bare_model_id() -> None:
         account=None,
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="luna-6.0")
+    fake_provider.model = MagicMock(return_value=StubProviderModel(model_id="luna-6.0"))
     with patch(
         "sagent.providers.providers.build_provider",
         return_value=fake_provider,
@@ -1172,7 +1178,7 @@ def test_build_child_model_inference_preserves_explicit_auth() -> None:
         account=None,
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="luna-6.0")
+    fake_provider.model = MagicMock(return_value=StubProviderModel(model_id="luna-6.0"))
     with patch(
         "sagent.providers.providers.build_provider",
         return_value=fake_provider,
@@ -1796,7 +1802,11 @@ async def test_persistent_spawn_writes_parent_lifecycle_record(tmp_path: Path) -
     try:
         assert not result.is_error
         lines = (tmp_path / "session.jsonl").read_text(encoding="utf-8").splitlines()
-        lifecycle = [json.loads(line) for line in lines if "persistent_agent" in line]
+        lifecycle = [
+            json_loads(line, dict[str, object])
+            for line in lines
+            if "persistent_agent" in line
+        ]
         assert len(lifecycle) == 1
         record = lifecycle[0]
         assert record["label"] == "fix-tools"
@@ -2129,7 +2139,7 @@ def test_build_child_model_parent_provider_always_allowed() -> None:
         model_recipe=spec,
     )
     fake_provider = MagicMock()
-    fake_provider.model.side_effect = _stub_provider_model
+    fake_provider.model = MagicMock(side_effect=_stub_provider_model)
     t = AgentSpawn(allow_providers=("OpenAISubscription",))
     with patch(
         "sagent.providers.providers.build_provider",
@@ -2249,7 +2259,7 @@ async def test_resumed_serviced_child_shares_spawn_lifecycle(tmp_path: Path) -> 
     child.shutdown(force=True)
     await job.task
     records = [
-        json.loads(line)
+        json_loads(line, dict[str, object])
         for line in (tmp_path / "session.jsonl").read_text().splitlines()
         if "persistent_agent" in line
     ]

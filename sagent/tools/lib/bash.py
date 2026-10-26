@@ -1018,7 +1018,7 @@ def _is_command_safe(node: Node) -> bool:
     # `$(rm foo)` carries a CommandsubstitutionNode under its parts.
     for p in node.parts:
         if p.kind == "word":
-            for sub in getattr(p, "parts", []) or []:
+            for sub in p.parts if hasattr(p, "parts") else ():
                 if not _is_node_safe(sub):
                     return False
 

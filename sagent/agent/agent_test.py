@@ -20,7 +20,7 @@ import re
 import threading
 import time
 
-from treekle import PlainTree
+from treekle import PlainTree, json_loads
 
 import httpx2
 import pytest
@@ -113,6 +113,7 @@ from sagent.types.runtime import (
     AgentSendMessage,
     AssistantMessage,
     BytesMessage,
+    ClearComplete,
     Compact,
     CompactComplete,
     CompactFailed,
@@ -2775,7 +2776,7 @@ def patched_build_provider() -> Iterator[Mapping[str, object]]:
         return StubModel(model_id=model_id)
 
     fake_provider = MagicMock()
-    fake_provider.model.side_effect = fake_model
+    fake_provider.model = MagicMock(side_effect=fake_model)
 
     # ``change_model`` calls ``build_provider`` through its defining module, so
     # the stub goes there rather than on the package facade.
@@ -2882,7 +2883,7 @@ def test_change_model_missing_inherited_account_falls_back_to_default() -> None:
         account="work",
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubModel(model_id="target-model")
+    fake_provider.model = MagicMock(return_value=StubModel(model_id="target-model"))
     calls: list[tuple[str, str, str | None]] = []
 
     def build(provider: str, auth: str, *, account: str | None) -> MagicMock:
@@ -8384,7 +8385,7 @@ async def test_a_call_runs_under_the_gate_it_was_offered_though_the_host_narrows
     a.tool_gate = frozenset({"Echo", "Other"})
 
     def narrow(event: RuntimeEvent) -> None:
-        if isinstance(event, runtime.ModelResponseComplete):
+        if isinstance(event, ModelResponseComplete):
             a.tool_gate = frozenset({"Echo"})
 
     a.runtime.observers.append(narrow)
@@ -8401,7 +8402,7 @@ async def test_a_call_that_starts_after_the_next_round_runs_under_its_own_offer(
     other = StubTool(name="Other")
     a = _build_agent(tools=[StubTool(), other])
     a.retell_context()
-    a.publish(runtime.ModelResponseComplete(message=_calling("Other")))
+    a.publish(ModelResponseComplete(message=_calling("Other")))
     a.tool_gate = frozenset({"Echo"})
     a.retell_context()
     token = runtime.current_call_id_var.set("c1")
@@ -8434,7 +8435,7 @@ def _compacted(a: Agent) -> None:
         strategy="summary",
         discards_content=True,
     )
-    a.runtime.publish(runtime.CompactComplete())
+    a.runtime.publish(CompactComplete())
 
 
 @pytest.mark.asyncio
@@ -8643,7 +8644,7 @@ async def test_clear_rebuilds_the_system_blocks_from_current_values() -> None:
     a.system = "S2"
     # What a ``Clear`` does: wipe the history, then say so.
     _ = a.runtime.append_clear()
-    a.runtime.publish(runtime.ClearComplete())
+    a.runtime.publish(ClearComplete())
     async for _ in a.run(UserMessage(text="two")):
         pass
     assert len(tool.asked) == 2
@@ -9812,7 +9813,7 @@ def test_agent_with_session_dir_auto_persists(tmp_path: Path) -> None:
     assert session_file.exists()
     lines = session_file.read_text(encoding="utf-8").splitlines()
     assert lines, "expected at least one record"
-    first = json.loads(lines[0])
+    first = json_loads(lines[0], dict[str, object])
     assert first["kind"] == "meta"
     assert first["status"] == "working"
 

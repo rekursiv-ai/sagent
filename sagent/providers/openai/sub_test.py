@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Self, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncio
@@ -13,6 +13,8 @@ import io
 import json
 import threading
 import time
+
+from treekle import from_plain, json_loads
 
 import httpx2
 import openai
@@ -54,7 +56,7 @@ from sagent.types.runtime import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Iterator
+    from collections.abc import AsyncGenerator, Iterator, Mapping
     from pathlib import Path
 
     from sagent.types.tools import Tool
@@ -155,11 +157,13 @@ def test_login_manual_advertises_localhost_redirect_uri(
     )
     token_resp = MagicMock()
     token_resp.status_code = 200
-    token_resp.json.return_value = {
-        "access_token": access,
-        "refresh_token": "refresh-xyz",
-        "expires_in": 3600,
-    }
+    token_resp.json = MagicMock(
+        return_value={
+            "access_token": access,
+            "refresh_token": "refresh-xyz",
+            "expires_in": 3600,
+        },
+    )
     captured: dict[str, object] = {}
 
     def _post(url: str, *, data: dict[str, str], **_kw: object) -> MagicMock:
@@ -167,9 +171,10 @@ def test_login_manual_advertises_localhost_redirect_uri(
         captured["redirect_uri"] = data["redirect_uri"]
         return token_resp
 
+    http_context = MagicMock()
+    http_context.post = MagicMock(side_effect=_post)
     http_client = MagicMock()
-    http_context = cast(MagicMock, http_client.__enter__.return_value)
-    http_context.post.side_effect = _post
+    http_client.__enter__ = MagicMock(return_value=http_context)
 
     out = io.StringIO()
     with (
@@ -333,12 +338,13 @@ def test_save_preserves_existing_fields(tmp_path: Path) -> None:
     _write_creds_file(target, {"keep_me": True, "tokens": {"old": "x"}})
     creds = _make_creds(_make_jwt({"exp": 0.0}))
     OpenAISubscription.save(creds, path=target)
-    on_disk = json.loads(target.read_text(encoding="utf-8"))
+    on_disk = json_loads(target.read_text(encoding="utf-8"), dict[str, object])
+    tokens = from_plain(on_disk["tokens"], dict[str, object])
     assert on_disk["keep_me"] is True
     assert on_disk["auth_mode"] == "chatgpt"
-    assert on_disk["tokens"]["access_token"] == creds["access_token"]
+    assert tokens["access_token"] == creds["access_token"]
     # Old fields under ``tokens`` survive.
-    assert on_disk["tokens"]["old"] == "x"
+    assert tokens["old"] == "x"
 
 
 def test_load_missing_file_raises(tmp_path: Path) -> None:
@@ -380,8 +386,8 @@ def test_save_writes_id_token_when_present(tmp_path: Path) -> None:
     sentinel = "fake-jwt-marker"
     creds["id_token"] = sentinel
     OpenAISubscription.save(creds, path=target)
-    on_disk = json.loads(target.read_text(encoding="utf-8"))
-    assert on_disk["tokens"]["id_token"] == sentinel
+    on_disk = json_loads(target.read_text(encoding="utf-8"), dict[str, object])
+    assert from_plain(on_disk["tokens"], dict[str, object])["id_token"] == sentinel
 
 
 # Test-only token values; not credentials. Held in module variables so the
@@ -507,15 +513,16 @@ async def test_subscription_provider_close_releases_sdk() -> None:
     provider = _make_provider()
     model = provider.model("gpt-5.5")
     sdk = MagicMock()
-    sdk.close = AsyncMock()
+    close = AsyncMock()
+    sdk.close = close
     provider._authed.set((cast(openai.AsyncOpenAI, sdk), "dummy-token"))
 
     await model.close()
-    sdk.close.assert_not_awaited()
+    close.assert_not_awaited()
     assert provider._authed.peek() == (sdk, "dummy-token")
 
     await provider.close_sdk()
-    sdk.close.assert_awaited_once()
+    close.assert_awaited_once()
     assert provider._authed.peek() is None
 
 
@@ -651,7 +658,7 @@ def test_a_cache_key_routes_by_key_and_session_header() -> None:
     model = _make_provider().model("sol-5.6")
     request = ModelRequest(messages=[UserMessage(text="hi")], cache_key="run-1")
 
-    assert model._build_kwargs(request)["prompt_cache_key"] == "run-1"
+    assert model._build_kwargs(request).get("prompt_cache_key") == "run-1"
     assert model._headers(request) == {"session_id": "run-1"}
 
 
@@ -1130,7 +1137,7 @@ class TestEnsureValidRace:
         assert provider._authed.peek() is None
 
 
-def _token_endpoint(access_token: str, *, expires_in: int = 3600) -> AsyncMock:
+def _token_endpoint(access_token: str, *, expires_in: int = 3600) -> _FakeAsyncClient:
     """Return a patched ``httpx2.AsyncClient`` whose POST issues ``access_token``."""
     response = MagicMock()
     response.status_code = 200
@@ -1141,11 +1148,21 @@ def _token_endpoint(access_token: str, *, expires_in: int = 3600) -> AsyncMock:
             "expires_in": expires_in,
         },
     )
-    http = AsyncMock()
-    http.post = AsyncMock(return_value=response)
-    http.__aenter__ = AsyncMock(return_value=http)
-    http.__aexit__ = AsyncMock(return_value=False)
-    return http
+    return _FakeAsyncClient(AsyncMock(return_value=response))
+
+
+class _FakeAsyncClient:
+    """An ``httpx2.AsyncClient`` stand-in: ``async with`` yields it; ``post`` records."""
+
+    def __init__(self, post: AsyncMock) -> None:
+        self.post = post
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *exc: object) -> bool:
+        del exc
+        return False
 
 
 class TestRefreshLifecycle:
@@ -1253,7 +1270,10 @@ class TestRefreshLifecycle:
             headers={"Content-Type": "application/json"},
             timeout=15.0,
         )
-        tokens = json.loads(slot.read_text(encoding="utf-8"))["tokens"]
+        tokens = from_plain(
+            json_loads(slot.read_text(encoding="utf-8"), dict[str, object])["tokens"],
+            dict[str, object],
+        )
         assert tokens == {
             "access_token": fresh,
             "refresh_token": _FRESH_REFRESH,
@@ -1339,17 +1359,25 @@ class TestRefreshLifecycle:
             await provider._refresh()
 
 
+def _sdk_raising(error: BaseException) -> tuple[MagicMock, AsyncMock]:
+    """Return an SDK whose ``responses.with_raw_response.create`` raises ``error``."""
+    create = AsyncMock(side_effect=error)
+    raw = MagicMock()
+    raw.create = create
+    responses = MagicMock()
+    responses.with_raw_response = raw
+    sdk = MagicMock()
+    sdk.responses = responses
+    return sdk, create
+
+
 class TestStreamResponseNotRead:
     """Unread SDK streaming errors must not leak raw httpx2 exceptions."""
 
     @pytest.mark.anyio
     async def test_create_response_not_read_is_user_facing(self) -> None:
         provider = _make_provider(expires_at=time.time() + 3600)
-        sdk = MagicMock()
-        sdk.responses = MagicMock()
-        sdk.responses.with_raw_response.create = AsyncMock(
-            side_effect=httpx2.ResponseNotRead(),
-        )
+        sdk, _ = _sdk_raising(httpx2.ResponseNotRead())
 
         with patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)):
             model = provider.model("gpt-5.5")
@@ -1362,11 +1390,9 @@ class TestStreamResponseNotRead:
     @pytest.mark.anyio
     async def test_wrapped_response_not_read_is_user_facing(self) -> None:
         provider = _make_provider(expires_at=time.time() + 3600)
-        sdk = MagicMock()
-        sdk.responses = MagicMock()
         err = RuntimeError("SDK failed")
         err.__cause__ = httpx2.ResponseNotRead()
-        sdk.responses.with_raw_response.create = AsyncMock(side_effect=err)
+        sdk, _ = _sdk_raising(err)
 
         with patch.object(provider, "get_sdk", AsyncMock(return_value=sdk)):
             model = provider.model("gpt-5.5")
@@ -1406,12 +1432,8 @@ class TestStreamAuthRetry:
         # Return DIFFERENT SDKs from get_sdk so the test can prove the
         # retry call landed on a freshly-built SDK (with a rotated
         # bearer baked into default_headers), not the cached one.
-        sdk_stale = MagicMock()
-        sdk_stale.responses = MagicMock()
-        sdk_stale.responses.with_raw_response.create = AsyncMock(side_effect=auth_err)
-        sdk_fresh = MagicMock()
-        sdk_fresh.responses = MagicMock()
-        sdk_fresh.responses.with_raw_response.create = AsyncMock(side_effect=auth_err)
+        sdk_stale, create_stale = _sdk_raising(auth_err)
+        sdk_fresh, create_fresh = _sdk_raising(auth_err)
         get_sdk = AsyncMock(side_effect=[sdk_stale, sdk_fresh])
         with (
             patch.object(provider, "get_sdk", get_sdk),
@@ -1424,8 +1446,8 @@ class TestStreamAuthRetry:
         ha.assert_awaited_once()
         # Each SDK saw exactly one create call: the original attempt on
         # the stale SDK, the retry on the freshly-fetched one.
-        assert sdk_stale.responses.with_raw_response.create.await_count == 1
-        assert sdk_fresh.responses.with_raw_response.create.await_count == 1
+        assert create_stale.await_count == 1
+        assert create_fresh.await_count == 1
         assert get_sdk.await_count == 2
 
 
@@ -1556,13 +1578,9 @@ class _Lease:
         )
 
 
-def _answers(*responses: httpx2.Response) -> AsyncMock:
+def _answers(*responses: httpx2.Response) -> _FakeAsyncClient:
     """Return a patched ``httpx2.AsyncClient`` whose POSTs answer ``responses``."""
-    http = AsyncMock()
-    http.post = AsyncMock(side_effect=list(responses))
-    http.__aenter__ = AsyncMock(return_value=http)
-    http.__aexit__ = AsyncMock(return_value=False)
-    return http
+    return _FakeAsyncClient(AsyncMock(side_effect=list(responses)))
 
 
 def _answer(status: int, body: dict[str, object]) -> httpx2.Response:
@@ -1639,12 +1657,14 @@ async def test_a_401_passes_the_rejected_token_to_the_lease() -> None:
     assert fresh.api_key == lease.fresh
 
 
-def _posted(http: AsyncMock) -> list[tuple[str, object]]:
+def _posted(http: _FakeAsyncClient) -> list[tuple[str, object]]:
     """Return each POST's URL and its JSON or form body, in order."""
-    return [
-        (str(call.args[0]), call.kwargs.get("json", call.kwargs.get("data")))
-        for call in http.post.await_args_list
-    ]
+    posted: list[tuple[str, object]] = []
+    for call in http.post.await_args_list:
+        url = cast(object, call.args[0])
+        body: Mapping[str, object] = call.kwargs
+        posted.append((str(url), body.get("json", body.get("data"))))
+    return posted
 
 
 @pytest.mark.anyio

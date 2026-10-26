@@ -16,12 +16,14 @@ from __future__ import annotations
 
 from fnmatch import fnmatch
 from pathlib import Path, PurePosixPath
-from typing import Final, cast, override
+from typing import Final, TypedDict, cast, override
 
 import configparser
 import re
 import tomllib
 import zipfile
+
+from treekle import from_plain
 
 import yaml
 
@@ -96,16 +98,12 @@ def expected_modules() -> frozenset[str]:
 
     """
     # TOML is UTF-8 by spec; bytes skip the locale.
-    config = tomllib.loads(Path("pyproject.toml").read_bytes().decode())
-    wheel = (
-        config.get("tool", {})
-        .get("hatch", {})
-        .get("build", {})
-        .get("targets", {})
-        .get("wheel", {})
-    )
-    packages = [str(v) for v in wheel.get("packages", [])]
-    excludes = [str(v) for v in wheel.get("exclude", [])]
+    table: object = tomllib.loads(Path("pyproject.toml").read_bytes().decode())
+    for key in ("tool", "hatch", "build", "targets", "wheel"):
+        table = from_plain(table, dict[str, object], default={}).get(key)
+    wheel = from_plain(table, _WheelTarget, default=_WheelTarget())
+    packages: list[str] = wheel.get("packages", [])
+    excludes: list[str] = wheel.get("exclude", [])
     expected: set[str] = set()
     for package in packages:
         for path in glob(Path(package), "**/*.py"):
@@ -113,6 +111,13 @@ def expected_modules() -> frozenset[str]:
             if not any(fnmatch(posix, pat) for pat in excludes):
                 expected.add(posix)
     return frozenset(expected)
+
+
+class _WheelTarget(TypedDict, total=False):
+    """``[tool.hatch.build.targets.wheel]``, the keys this check reads."""
+
+    packages: list[str]
+    exclude: list[str]
 
 
 def _console_scripts(entry_points: str) -> dict[str, str]:

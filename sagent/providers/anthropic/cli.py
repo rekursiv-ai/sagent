@@ -1800,12 +1800,12 @@ def _render_tool_args(raw_json: str) -> str:
     if not raw_json:
         return ""
     try:
-        args = json.loads(raw_json)
+        args = json_loads(raw_json)
     except (json.JSONDecodeError, ValueError):
         return f"({raw_json.replace(chr(10), ' ')})"
     if not isinstance(args, dict):
         return str(args)
-    arg_map = cast(dict[object, object], args)
+    arg_map = args
     for key in ("command", "file_path", "path", "pattern", "query", "to"):
         val = arg_map.get(key)
         if isinstance(val, str):

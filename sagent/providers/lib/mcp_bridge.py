@@ -213,7 +213,7 @@ class _BridgeServer:
             raise ValueError("Expected self._uvicorn_server is not None.")
         for srv in self._uvicorn_server.servers:
             for sock in srv.sockets:
-                return int(sock.getsockname()[1])
+                return cast(tuple[str, int], sock.getsockname())[1]
         raise RuntimeError("MCP bridge: uvicorn started without sockets")
 
 

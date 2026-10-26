@@ -16,7 +16,7 @@ the background after each swap.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import asyncio
 import logging
@@ -50,7 +50,7 @@ class HotSpare:
 
     def __init__(
         self,
-        factory: Callable[[], Coroutine[Any, Any, Subproc]],
+        factory: Callable[[], Coroutine[object, None, Subproc]],
         *,
         close_partial: Callable[[], Awaitable[None]] | None = None,
         max_consecutive_transport_failures: int = _MAX_CONSECUTIVE_TRANSPORT_FAILURES,

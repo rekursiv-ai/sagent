@@ -136,24 +136,52 @@ def _handler(kb: KeyBindings, keys: tuple[str, ...]) -> Callable[[KeyPressEvent]
     raise AssertionError(f"no binding for {keys!r}")
 
 
+@dataclass(slots=True, frozen=True, kw_only=True)
+class _FakeDocument:
+    text_before_cursor: str
+    text: str
+
+
+@dataclass(slots=True, frozen=True, kw_only=True)
+class _FakeHistory:
+    strings: list[str]
+
+    def get_strings(self) -> list[str]:
+        return self.strings
+
+
+class _FakeBuffer:
+    """A ``Buffer`` stand-in: exactly the members the key handlers touch."""
+
+    def __init__(self, text: str, cursor_position: int, history: Sequence[str]) -> None:
+        self.text = text
+        self.cursor_position = cursor_position
+        self.working_index = 0
+        self.document = _FakeDocument(
+            text_before_cursor=text[:cursor_position],
+            text=text,
+        )
+        self.history = _FakeHistory(strings=list(history))
+        self.reset = MagicMock()
+        self.validate_and_handle = MagicMock()
+        self.insert_text = MagicMock()
+        self.open_in_editor = MagicMock()
+        self.undo = MagicMock()
+        self.append_to_history = MagicMock()
+        self.history_forward = MagicMock()
+        self.history_backward = MagicMock()
+
+
 def _fake_buf(
     text: str = "",
     cursor: int | None = None,
     history: Sequence[str] = (),
-) -> MagicMock:
-    cursor_position = cursor if cursor is not None else len(text)
-    buf = MagicMock()
-    buf.text = text
-    buf.cursor_position = cursor_position
-    buf.working_index = 0
-    buf.document.text_before_cursor = text[:cursor_position]
-    buf.document.text = text
-    buf.history.get_strings.return_value = list(history)
-    return buf
+) -> _FakeBuffer:
+    return _FakeBuffer(text, cursor if cursor is not None else len(text), history)
 
 
 def _fake_event(
-    buf: MagicMock | None = None,
+    buf: _FakeBuffer | None = None,
     app: MagicMock | None = None,
 ) -> MagicMock:
     ev = MagicMock()
@@ -177,7 +205,7 @@ def _build(
 # The handlers set ``buf.text``; a real buffer would move the cursor and not auto-clear.
 # The MagicMock retains assignments, so a sequence of presses sees the prior text --
 # matching live behavior closely enough to pin the navigation contract.
-def _press(kb: KeyBindings, key: str, buf: MagicMock) -> None:
+def _press(kb: KeyBindings, key: str, buf: _FakeBuffer) -> None:
     """Press ``key`` against ``buf``; mirror prompt-toolkit's buffer mutation."""
     _handler(kb, (key,))(cast(KeyPressEvent, _fake_event(buf)))
 
@@ -726,9 +754,11 @@ def test_open_editor() -> None:
 
 def test_ctrl_z_suspends() -> None:
     kb = _build(_idle_agent())
+    suspend = MagicMock()
     app = MagicMock()
+    app.suspend_to_background = suspend
     _handler(kb, ("c-z",))(cast(KeyPressEvent, _fake_event(app=app)))
-    app.suspend_to_background.assert_called_once()
+    suspend.assert_called_once()
 
 
 def test_ctrl_underscore_undo() -> None:

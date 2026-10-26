@@ -130,8 +130,7 @@ def test_inject_background_status_no_jobs_is_noop() -> None:
     history: list[ModelContextEvent] = [orig]
     inject_background_status(history, {})
     assert history[0] is orig
-    after = history[0]
-    assert after.text == "hi"
+    assert orig.text == "hi"
 
 
 @pytest.mark.asyncio

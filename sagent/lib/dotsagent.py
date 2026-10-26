@@ -6,9 +6,11 @@ Used by both ``agents_md`` (AGENTS.md discovery) and ``tools.skill``
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 import re
+
+from treekle import ReadError, from_plain
 
 import yaml
 
@@ -34,7 +36,7 @@ def walk_up(cwd: Path) -> list[Path]:
     return parts
 
 
-def parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
+def parse_frontmatter(raw: str) -> tuple[dict[str, object], str]:
     """Strip YAML frontmatter, return (metadata_dict, body).
 
     Whenever the ``---``-delimited block is structurally present the
@@ -60,6 +62,7 @@ def parse_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
         parsed = yaml.safe_load(m.group(1))
     except yaml.YAMLError:
         return {}, body
-    if not isinstance(parsed, dict):
+    try:
+        return from_plain(parsed, dict[str, object], default={}), body
+    except ReadError:  # A list or scalar is not metadata.
         return {}, body
-    return cast(dict[str, Any], parsed), body

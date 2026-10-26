@@ -9,10 +9,11 @@ from unittest.mock import AsyncMock, MagicMock
 import asyncio
 import inspect
 import json
-import operator
 import os
 import re
 import tempfile
+
+from treekle import from_plain, json_loads
 
 import pytest
 
@@ -537,10 +538,15 @@ def test_model_unknown_raises() -> None:
         _ = provider.model("not-a-claude")
 
 
+def _call(fn: Callable[..., object], *args: object, **kwargs: object) -> object:
+    """Call ``fn`` past its signature, as a caller with a typo would."""
+    return fn(*args, **kwargs)
+
+
 def test_model_rejects_unknown_provider_options() -> None:
     provider = AnthropicCLI()
     with pytest.raises(TypeError, match="typoo"):
-        _ = operator.methodcaller("model", "opus-4.8", typoo=True)(provider)
+        _ = _call(provider.model, "opus-4.8", typoo=True)
 
 
 def test_model_resolves_context_tag_to_profile() -> None:
@@ -618,9 +624,10 @@ def test_argv_contains_required_flags() -> None:
     assert "--disable-slash-commands" in argv
     assert "bypassPermissions" in argv
     mcp_idx = argv.index("--mcp-config")
-    cfg = json.loads(argv[mcp_idx + 1])
-    assert cfg["mcpServers"]["sagent"]["type"] == "http"
-    assert cfg["mcpServers"]["sagent"]["url"].endswith("/mcp")
+    cfg = json_loads(argv[mcp_idx + 1], dict[str, object])
+    server = from_plain(cfg["mcpServers"], dict[str, dict[str, str]])["sagent"]
+    assert server["type"] == "http"
+    assert server["url"].endswith("/mcp")
 
 
 def test_argv_session_id_swaps_no_persistence_for_session_id_flag() -> None:
@@ -1241,7 +1248,8 @@ class _ScriptedClaude:
                 },
             )
             return
-        text = json.loads(line)["message"]["content"]
+        message = json_loads(line, dict[str, object])["message"]
+        text = from_plain(message, dict[str, object])["content"]
         self._pending.extend(
             [
                 {
@@ -2549,9 +2557,12 @@ async def test_exchange_turn_skips_assistant_replay() -> None:
         publish=None,
     )
 
-    payloads = [json.loads(line) for line in lines]
+    messages = [
+        from_plain(json_loads(line, dict[str, object])["message"], dict[str, object])
+        for line in lines
+    ]
     assert response.message.text == ""
-    assert [payload["message"]["content"] for payload in payloads] == [
+    assert [message["content"] for message in messages] == [
         "first\n\nsecond",
     ]
 

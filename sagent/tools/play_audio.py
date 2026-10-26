@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 import importlib
 import logging
@@ -34,7 +34,7 @@ from sagent.types.runtime import ToolResult
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
 
 
 logger = logging.getLogger(__name__)
@@ -139,16 +139,27 @@ def _play(path: Path) -> str | None:
     return _play_via_cmd(path, ["aplay", "-q"], ["paplay"], ["play", "-q"])
 
 
+@runtime_checkable
+class _WinSound(Protocol):
+    """The ``winsound`` members playback uses; the module exists only on Windows."""
+
+    SND_FILENAME: int
+    SND_NODEFAULT: int
+    PlaySound: Callable[[str, int], None]
+
+
 def _play_windows(path: Path) -> str | None:
     """Play ``path`` via ``winsound`` on Windows hosts."""
     # Imported lazily so the module still imports on POSIX hosts for
     # static analysis and cross-platform tests.
     try:
-        ws = importlib.import_module("winsound")
+        ws: object = importlib.import_module("winsound")
     except ImportError as e:
         return f"winsound unavailable: {e}"
+    if not isinstance(ws, _WinSound):
+        return "winsound unavailable: no PlaySound"
     try:
-        ws.PlaySound(str(path), ws.SND_FILENAME | ws.SND_NODEFAULT)  # ty: ignore[unresolved-attribute] -- The platform module is dynamically imported and lacks checker-visible attributes.
+        ws.PlaySound(str(path), ws.SND_FILENAME | ws.SND_NODEFAULT)
     except RuntimeError as e:
         return f"winsound.PlaySound failed: {e}"
     return None

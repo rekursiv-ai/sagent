@@ -288,7 +288,10 @@ def test_a_resume_offset_never_points_behind_what_was_shown(tmp_path: Path) -> N
                 },
             ),
         )
-    shown = re.findall(r"hit(\d+) ", result.content)
+    shown = [
+        m.group(0).removeprefix("hit").rstrip()
+        for m in re.finditer(r"hit\d+ ", result.content)
+    ]
     resume = re.search(r"offset=(\d+)", result.content)
     if resume is None:
         return  # Nothing was withheld, so there is no claim to check.

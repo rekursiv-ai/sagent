@@ -17,6 +17,7 @@ from typing import (
     Final,
     Literal,
     TypeAliasType,
+    cast,
     get_args,
     get_origin,
     get_type_hints,
@@ -102,7 +103,7 @@ def coerce_kwargs(cls: type, overrides: Mapping[str, str]) -> dict[str, object]:
         # ``include_extras`` keeps the ``Annotated`` wrapper carrying
         # ``CLI_SETTABLE``; without it the marker is stripped and nothing
         # reads as settable.
-        hints = get_type_hints(cls.__init__, include_extras=True)
+        hints = dict[str, object](get_type_hints(cls.__init__, include_extras=True))
     except (NameError, TypeError) as exc:  # Unresolvable forward ref.
         raise ToolSpecError(f"{cls.__name__}: cannot inspect settings: {exc}") from exc
     params = inspect.signature(cls.__init__).parameters
@@ -138,16 +139,16 @@ def coerce_kwargs(cls: type, overrides: Mapping[str, str]) -> dict[str, object]:
 def _unwrap(annotation: object) -> object:
     """Resolve wrappers until the coercible type is reached."""
     if get_origin(annotation) is Annotated:
-        return _unwrap(get_args(annotation)[0])
+        return _unwrap(tuple[object, ...](get_args(annotation))[0])
     if isinstance(annotation, TypeAliasType):
-        return _unwrap(annotation.__value__)
+        return _unwrap(cast(object, annotation.__value__))
     return annotation
 
 
 def _coerce(tool: str, key: str, annotation: object, raw: str) -> object:
     """Convert one raw value per its annotation."""
     if get_origin(annotation) is Literal:
-        choices = get_args(annotation)
+        choices = tuple[object, ...](get_args(annotation))
         if raw not in choices:
             valid = ", ".join(str(c) for c in choices)
             raise ToolSpecError(f"{tool}.{key}: invalid value {raw!r}. Valid: {valid}")

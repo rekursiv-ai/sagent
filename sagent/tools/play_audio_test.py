@@ -245,7 +245,7 @@ def test_play_windows_runtime_error() -> None:
     fake_ws = MagicMock()
     fake_ws.SND_FILENAME = 1
     fake_ws.SND_NODEFAULT = 2
-    fake_ws.PlaySound.side_effect = RuntimeError("hw fail")
+    fake_ws.PlaySound = MagicMock(side_effect=RuntimeError("hw fail"))
     with patch("importlib.import_module", return_value=fake_ws):
         out = play_audio._play_windows(Path("/x.wav"))
     assert out is not None
@@ -256,6 +256,7 @@ def test_play_windows_success() -> None:
     fake_ws = MagicMock()
     fake_ws.SND_FILENAME = 1
     fake_ws.SND_NODEFAULT = 2
+    fake_ws.PlaySound = MagicMock()
     with patch("importlib.import_module", return_value=fake_ws):
         assert play_audio._play_windows(Path("/x.wav")) is None
 

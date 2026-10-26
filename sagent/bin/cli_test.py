@@ -17,7 +17,7 @@ import os
 import subprocess
 import sys
 
-from treekle import ReadError
+from treekle import ReadError, json_loads
 from wesearch.fetch import FetchSession
 
 import pytest
@@ -88,14 +88,16 @@ from sagent.types.runtime import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
+    from sagent.bin.cli import Flags
+
 
 _CWD: Final = Path(__file__).resolve().parent
 
 
-def _parse(args: Sequence[str]) -> argparse.Namespace:
+def _parse(args: Sequence[str]) -> Flags:
     parser = argparse.ArgumentParser()
-    namespace, _ = _parse_cli_args(parser, list(args))
-    return namespace
+    flags, _ = _parse_cli_args(parser, list(args))
+    return flags
 
 
 def test_parse_cli_args_defaults() -> None:
@@ -285,7 +287,7 @@ async def test_resume_skips_a_hot_child_whose_prompt_it_cannot_rebuild(
         session_file,
         persistent_agents=[_child_record(label="hot-child", session_dir="c")],
     )
-    record = json.loads(session_file.read_text(encoding="utf-8"))
+    record = json_loads(session_file.read_text(encoding="utf-8"), dict[str, object])
     session_file.write_text(
         json.dumps({**record, "frozen_system": True}) + "\n",
         encoding="utf-8",
@@ -623,6 +625,9 @@ def test_resumed_missing_named_account_falls_back_to_default(
         def model(self, model_id: str | None = None) -> object:
             return argparse.Namespace(tagged_model_id=model_id or "gpt-5.5")
 
+        async def close_sdk(self) -> None:
+            """Hold no SDK."""
+
     monkeypatch.setattr(
         "sagent.providers.OpenAISubscription",
         _Provider,
@@ -796,11 +801,7 @@ def test_named_account_setup_commands_target_that_account() -> None:
 def test_anthropic_cli_login_command_points_to_native_cli(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    args = argparse.Namespace(
-        provider="AnthropicCLI",
-        account=None,
-        headless=False,
-    )
+    args = _parse(["--provider", "AnthropicCLI"])
 
     with pytest.raises(SystemExit) as exc:
         _do_login(args)
@@ -812,11 +813,7 @@ def test_anthropic_cli_login_command_points_to_native_cli(
 def test_anthropic_cli_named_account_login_does_not_target_default(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    args = argparse.Namespace(
-        provider="AnthropicCLI",
-        account="work",
-        headless=False,
-    )
+    args = _parse(["--provider", "AnthropicCLI", "--account", "work"])
 
     with pytest.raises(SystemExit) as exc:
         _do_login(args)
@@ -1757,6 +1754,9 @@ class _CustomAuthProvider:
 
     def model(self, model_id: str | None = None) -> object:
         return argparse.Namespace(tagged_model_id=model_id or "m")
+
+    async def close_sdk(self) -> None:
+        """Hold no SDK."""
 
 
 def test_resumed_auth_is_not_replaced_by_provider_default(

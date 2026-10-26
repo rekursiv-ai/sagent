@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import Mock, patch
 
 import sys
@@ -27,6 +28,10 @@ from sagent.providers.providers import (
 )
 from sagent.types.cost import PriceKey, TokenCount
 from sagent.types.providers import ModelResolver
+
+
+if TYPE_CHECKING:
+    from sagent.types.model import Model
 
 
 def test_provider_names_contains_core_providers() -> None:
@@ -183,6 +188,12 @@ def test_build_provider_account_kw_threaded_when_accepted(
         def from_credentials(cls, *, account: str | None = None) -> StubProv:
             calls.append({"account": account})
             return cls()
+
+        def model(self, model_id: str | None = None) -> Model:
+            raise AssertionError(f"not built in this test: {model_id!r}")
+
+        async def close_sdk(self) -> None:
+            """Hold no SDK."""
 
     providers_mod = sys.modules["sagent.providers"]
     monkeypatch.setattr(providers_mod, "StubProv", StubProv, raising=False)
@@ -351,7 +362,8 @@ def test_a_catalog_backed_provider_names_a_cheaper_utility_model(
     provider_name: str,
 ) -> None:
     """``utility`` must name a row, and a cheaper one than ``default``."""
-    cls = getattr(providers, provider_name)
+    cls = getattr(providers, provider_name, None)
+    assert isinstance(cls, ModelResolver)
     assert not hasattr(cls, "resolve_model")
     assert not hasattr(cls, "model_ids")
     default_row, _ = cls.catalog.resolve("default")

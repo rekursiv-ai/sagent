@@ -359,7 +359,7 @@ def _build_schema(
         description = ""
         origin = typing.get_origin(t)
         if origin is typing.Annotated:
-            args = typing.get_args(t)
+            args = tuple[object, ...](typing.get_args(t))
             t = args[0]
             for arg in args[1:]:
                 if isinstance(arg, str):
@@ -369,7 +369,7 @@ def _build_schema(
         if description:
             prop["description"] = description
         properties[name] = prop
-        if param.default is inspect.Parameter.empty:
+        if cast(object, param.default) is inspect.Parameter.empty:
             required.append(name)
     schema: dict[str, object] = {
         "type": "object",

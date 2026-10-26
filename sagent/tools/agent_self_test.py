@@ -725,7 +725,9 @@ async def test_provider_change_without_auth_uses_target_default() -> None:
         ),
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="gemini-3-pro")
+    fake_provider.model = MagicMock(
+        return_value=StubProviderModel(model_id="gemini-3-pro"),
+    )
     with patch(
         "sagent.providers.providers.build_provider",
         return_value=fake_provider,
@@ -748,7 +750,7 @@ async def test_provider_change_falls_back_when_inherited_account_is_missing() ->
         ),
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="gpt-5.5")
+    fake_provider.model = MagicMock(return_value=StubProviderModel(model_id="gpt-5.5"))
     calls: list[tuple[str, str, str | None]] = []
 
     def build(provider: str, auth: str, *, account: str | None) -> MagicMock:
@@ -829,7 +831,7 @@ async def test_account_default_string_is_preserved() -> None:
         ),
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="gpt-5")
+    fake_provider.model = MagicMock(return_value=StubProviderModel(model_id="gpt-5"))
     with patch(
         "sagent.providers.providers.build_provider",
         return_value=fake_provider,
@@ -852,7 +854,7 @@ async def test_explicit_current_provider_is_not_overridden_by_inference() -> Non
         spec=ModelRecipe(provider="Anthropic", auth="env", model_id="opus-4.8"),
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="gpt-5.5")
+    fake_provider.model = MagicMock(return_value=StubProviderModel(model_id="gpt-5.5"))
     with (
         patch(
             "sagent.providers.providers.build_provider",
@@ -962,7 +964,7 @@ async def test_a_valid_switch_applies_its_options_to_the_new_model() -> None:
     old_model = agent.model
     new_model = _EffortModel(model_id="stub-2")
     provider = MagicMock()
-    provider.model.return_value = new_model
+    provider.model = MagicMock(return_value=new_model)
     with (
         patch(
             "sagent.providers.providers.build_provider",
@@ -995,7 +997,7 @@ async def test_agent_self_lands_where_change_model_lands() -> None:
             spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1"),
         )
         provider = MagicMock()
-        provider.model.return_value = StubProviderModel(model_id="stub-2")
+        provider.model = MagicMock(return_value=StubProviderModel(model_id="stub-2"))
         with (
             patch(
                 "sagent.providers.providers.build_provider",
@@ -1036,9 +1038,11 @@ async def test_model_swap_shrinks_budget_to_new_model_window() -> None:
     # Agent's default budget tracks its current 100k-window model.
     assert agent.budget.max_request_tokens == 100_000
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(
-        model_id="small",
-        max_request_tokens=50_000,
+    fake_provider.model = MagicMock(
+        return_value=StubProviderModel(
+            model_id="small",
+            max_request_tokens=50_000,
+        ),
     )
     with patch(
         "sagent.providers.providers.build_provider",
@@ -1066,9 +1070,11 @@ async def test_model_swap_with_explicit_budget_lands_in_one_step() -> None:
         spec=ModelRecipe(provider="StubP", auth="env", model_id="big", account=""),
     )
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(
-        model_id="small",
-        max_request_tokens=50_000,
+    fake_provider.model = MagicMock(
+        return_value=StubProviderModel(
+            model_id="small",
+            max_request_tokens=50_000,
+        ),
     )
     with patch(
         "sagent.providers.providers.build_provider",
@@ -1113,7 +1119,9 @@ async def test_model_swap_clears_effort_and_reports_unset() -> None:
     # Target model lacks effort/thinking/service-tier (``MockModelCaps``
     # defaults). Swap must clear ``effort`` AND mention it in the result.
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="plain-stub")
+    fake_provider.model = MagicMock(
+        return_value=StubProviderModel(model_id="plain-stub"),
+    )
     with patch(
         "sagent.providers.providers.build_provider",
         return_value=fake_provider,
@@ -1234,7 +1242,9 @@ async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> No
     agent.model.settings.thinking_output = "text"
     agent.model.settings.service_tier = "priority"
     fake_provider = MagicMock()
-    fake_provider.model.return_value = StubProviderModel(model_id="plain-stub")
+    fake_provider.model = MagicMock(
+        return_value=StubProviderModel(model_id="plain-stub"),
+    )
     with patch(
         "sagent.providers.providers.build_provider",
         return_value=fake_provider,

@@ -1434,7 +1434,7 @@ async def test_a_drain_returns_the_output_of_a_process_that_ends_once_the_pipes_
 
     comm = asyncio.ensure_future(ends_with_its_pipes())
     stdout = MagicMock()
-    stdout.feed_eof.side_effect = ended.set
+    stdout.feed_eof = MagicMock(side_effect=ended.set)
     proc = MagicMock(stdout=stdout, stderr=None)
     drained = await _drain(cast(asyncio.subprocess.Process, proc), comm, grace_sec=0.01)
     assert drained == (b"out", b"err")

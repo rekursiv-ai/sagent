@@ -193,7 +193,7 @@ def test_a_cache_key_reaches_the_api_as_prompt_cache_key() -> None:
     model = OpenAI.from_key("k").model()
     request = ModelRequest(messages=[UserMessage(text="hi")], cache_key="run-1")
 
-    assert model._build_kwargs(request)["prompt_cache_key"] == "run-1"
+    assert model._build_kwargs(request).get("prompt_cache_key") == "run-1"
     assert model._headers(request) == {}
     assert "prompt_cache_key" not in model._build_kwargs(
         ModelRequest(messages=[UserMessage(text="hi")]),
@@ -227,15 +227,17 @@ def test_a_tool_gate_reaches_the_api_as_allowed_tools_with_every_schema() -> Non
         "tools": [{"type": "function", "name": "Peek"}],
     }
     gated = model._build_kwargs(_offering(("Peek",)))
-    assert [t.get("name") for t in gated["tools"]] == ["Look", "Peek"]
-    assert gated["tool_choice"] == peek_only
-    assert model._build_kwargs(_offering(()))["tool_choice"] == "none"
+    assert [t.get("name") for t in gated.get("tools", [])] == ["Look", "Peek"]
+    assert gated.get("tool_choice") == peek_only
+    assert model._build_kwargs(_offering(())).get("tool_choice") == "none"
     assert "tool_choice" not in model._build_kwargs(_offering(None))
     # The latest offer is the gate in force; one naming every tool lifts it.
     lifted = model._build_kwargs(_offering(("Peek",), ("Look", "Peek")))
     assert "tool_choice" not in lifted
-    assert model._build_kwargs(_offering(("Peek",), None))["tool_choice"] == peek_only
-    assert model._build_kwargs(_offering(("Nope",)))["tool_choice"] == "none"
+    assert (
+        model._build_kwargs(_offering(("Peek",), None)).get("tool_choice") == peek_only
+    )
+    assert model._build_kwargs(_offering(("Nope",))).get("tool_choice") == "none"
 
 
 def test_catalog_controls_effort_and_tier_selection() -> None:
@@ -298,12 +300,12 @@ async def _is_served(client: httpx2.AsyncClient, *, model_id: str, key: str) -> 
                 },
             )
         except httpx2.TransportError:
-            await asyncio.sleep(2**attempt)
+            await asyncio.sleep(1 << attempt)
             continue
         if response.status_code == 200:
             return True
         if response.status_code >= 500 or response.status_code == 429:
-            await asyncio.sleep(2**attempt)
+            await asyncio.sleep(1 << attempt)
             continue
         response.raise_for_status()
     return False

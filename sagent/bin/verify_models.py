@@ -32,7 +32,7 @@ Cross-reference: https://github.com/taylorwilsdon/llm-context-limits
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 
 import argparse
 import asyncio
@@ -305,38 +305,11 @@ def main() -> int:
     return asyncio.run(_run())
 
 
-def _out(msg: str) -> None:
-    sys.stdout.write(msg + "\n")
+class Flags(Protocol):
+    """Parsed command-line flags."""
 
-
-def _describe(e: httpx2.HTTPError) -> str:
-    """Name a request failure without echoing its URL."""
-    if isinstance(e, httpx2.HTTPStatusError):
-        return f"HTTP {e.response.status_code}"
-    return type(e).__name__
-
-
-# The input cap is "Maximum input tokens" where the page states one, else the context
-# window.
-def _parse_openai_page(page: str) -> LiveLimits | None:
-    """Extract the input cap and max output tokens from an OpenAI doc page."""
-    cleaned = re.sub(r"<!--.*?-->", " ", page, flags=re.DOTALL)
-    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
-    request = re.search(r"Maximum\s+input\s+tokens:?\s+([\d,]+)", cleaned) or (
-        re.search(r"([\d,]+)\s+context\s+window", cleaned)
-    )
-    out = re.search(r"([\d,]+)\s+max\s+output\s+tokens", cleaned)
-    if request and out:
-        return LiveLimits(
-            max_request_tokens=_num(request.group(1)),
-            max_response_tokens=_num(out.group(1)),
-        )
-    return None
-
-
-def _num(s: str) -> int:
-    """Parse a comma- or underscore-grouped integer literal."""
-    return int(s.replace(",", "").replace("_", ""))
+    provider: Literal["google", "openai", "anthropic", "all"]
+    offline: bool
 
 
 async def _run() -> int:
@@ -355,7 +328,7 @@ async def _run() -> int:
         action="store_true",
         help="Only run the offline catalog audit; skip every network query.",
     )
-    args = parser.parse_args()
+    args = cast(Flags, parser.parse_args())
     target = args.provider
     _out("Catalog audit (offline):")
     total_errors = audit_catalogs()
@@ -402,6 +375,40 @@ def _canonical_models(catalog: ModelCatalog) -> dict[str, ModelCapability]:
     """Return one resolved row per model, keyed by the id its vendor serves it as."""
     rows = (catalog.resolve(model_id)[0] for model_id in catalog.models)
     return {row.wire_model_id or row.model_id: row for row in rows}
+
+
+def _out(msg: str) -> None:
+    sys.stdout.write(msg + "\n")
+
+
+def _describe(e: httpx2.HTTPError) -> str:
+    """Name a request failure without echoing its URL."""
+    if isinstance(e, httpx2.HTTPStatusError):
+        return f"HTTP {e.response.status_code}"
+    return type(e).__name__
+
+
+# The input cap is "Maximum input tokens" where the page states one, else the context
+# window.
+def _parse_openai_page(page: str) -> LiveLimits | None:
+    """Extract the input cap and max output tokens from an OpenAI doc page."""
+    cleaned = re.sub(r"<!--.*?-->", " ", page, flags=re.DOTALL)
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    request = re.search(r"Maximum\s+input\s+tokens:?\s+([\d,]+)", cleaned) or (
+        re.search(r"([\d,]+)\s+context\s+window", cleaned)
+    )
+    out = re.search(r"([\d,]+)\s+max\s+output\s+tokens", cleaned)
+    if request and out:
+        return LiveLimits(
+            max_request_tokens=_num(request.group(1)),
+            max_response_tokens=_num(out.group(1)),
+        )
+    return None
+
+
+def _num(s: str) -> int:
+    """Parse a comma- or underscore-grouped integer literal."""
+    return int(s.replace(",", "").replace("_", ""))
 
 
 if __name__ == "__main__":

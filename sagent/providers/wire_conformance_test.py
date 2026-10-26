@@ -22,11 +22,11 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import replace
-from typing import TYPE_CHECKING, Protocol, get_args
+from typing import TYPE_CHECKING, Protocol
 
 import pytest
 
-from sagent.catalog.table import UnsupportedTagError
+from sagent.catalog.table import CONTEXT_TAGS, UnsupportedTagError
 from sagent.providers import PROVIDER_NAMES
 from sagent.providers.anthropic.api import Anthropic, _AnthropicModel
 from sagent.providers.dashscope.api import DashScope
@@ -37,7 +37,6 @@ from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.compat import OpenAICompatModel
 from sagent.providers.openai.responses import _OpenAIResponsesModel
 from sagent.types.capability import (
-    ContextTag,
     ModelCapability,
     ModelSettings,
     ThinkingBudget,
@@ -262,7 +261,7 @@ def test_an_unoffered_context_is_rejected(provider_name: str, model_id: str) -> 
     make, _ = _WIRE_BUILDERS[provider_name]
     provider = make()
     capability, _ = provider.catalog.resolve(model_id)
-    for tag in get_args(ContextTag.__value__):
+    for tag in CONTEXT_TAGS:
         if tag in ("", "+max", "+min") or tag in capability.context:
             continue
         if tag == "+1m" and capability.context[""].max_request_tokens >= 1_000_000:

@@ -694,13 +694,13 @@ class OpenAISubscription:
         p = path or credentials_path(_default_credentials_path(), account)
         if not p.exists():
             raise FileNotFoundError(f"No credentials at {p}")
-        decoded: object = json.loads(p.read_text(encoding="utf-8"))
+        decoded = json_loads(p.read_text(encoding="utf-8"))
         if not isinstance(decoded, dict):
             raise _CredentialFileError(
                 f"{p} must contain a JSON object with OpenAI subscription "
                 "OAuth credentials.",
             )
-        raw = cast(dict[str, MutablePlainTree], decoded)
+        raw = decoded
         raw_tokens = raw.get("tokens")
         if not isinstance(raw_tokens, dict):
             auth_mode = raw.get("auth_mode")
@@ -761,12 +761,12 @@ class OpenAISubscription:
         existing: dict[str, MutablePlainTree] = {}
         if p.exists():
             with contextlib.suppress(json.JSONDecodeError, OSError):
-                decoded: object = json.loads(p.read_text(encoding="utf-8"))
+                decoded = json_loads(p.read_text(encoding="utf-8"))
                 # Shape-checked, not just parse-checked: valid JSON of the
                 # wrong shape (a list, or ``tokens`` as a list) would raise
                 # below and leave the caller unable to persist a re-login.
                 if isinstance(decoded, dict):
-                    existing = cast(dict[str, MutablePlainTree], decoded)
+                    existing = decoded
         raw_tokens = existing.get("tokens")
         tokens = raw_tokens if isinstance(raw_tokens, dict) else {}
         tokens["access_token"] = creds["access_token"]

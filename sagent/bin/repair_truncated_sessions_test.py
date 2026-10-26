@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import contextlib
-import json
+
+from treekle import from_plain, json_loads
 
 from sagent.agent import session_io
 from sagent.agent.context import resolve_context, validate_context
@@ -264,11 +265,18 @@ def test_repair_does_not_reuse_an_ordinal_written_since_it_read(
     # Read the file, not the loader: the loader repairs a collision on the way
     # in, so asking it would grade the reader instead of the writer.
     refs = [
-        (rec["ref"]["session_id"], rec["ref"]["ordinal"])
+        (ref["session_id"], ref["ordinal"])
         for line in (tmp_path / "session.jsonl")
         .read_text(encoding="utf-8")
         .splitlines()
-        if isinstance((rec := json.loads(line)).get("ref"), dict)
+        if (
+            ref := from_plain(
+                json_loads(line, dict[str, object]).get("ref"),
+                dict[str, object],
+                default=None,
+            )
+        )
+        is not None
     ]
     assert len(set(refs)) == len(refs), f"repair collided with a live write; {refs}"
 

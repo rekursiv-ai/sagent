@@ -71,7 +71,7 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.aiohttp import SocketModeClient
 from slack_sdk.socket_mode.response import SocketModeResponse
 from slack_sdk.web.async_client import AsyncWebClient
-from treekle import MutablePlainTree, ReadError, from_plain
+from treekle import MutablePlainTree, ReadError, from_plain, json_loads
 
 import httpx2
 
@@ -79,6 +79,7 @@ from sagent.agent import Agent
 from sagent.agent.state import agent_registry
 from sagent.bin.cli import (
     DEFAULT_TOOLS,
+    AgentFlags,
     parse_agent_args,
     resolve_tools,
 )
@@ -86,7 +87,6 @@ from sagent.compaction.summary import SummaryCompactor
 from sagent.lib.userdirs import data_dir
 from sagent.providers import build_provider
 from sagent.tools.slack import Slack, SlackSender
-from sagent.types.capability import ThinkingEffort
 from sagent.types.exceptions import describe
 from sagent.types.model import ModelRecipe
 from sagent.types.runtime import (
@@ -756,7 +756,7 @@ async def log_tap(
 def parse_slack_args(
     parser: argparse.ArgumentParser,
     argv: list[str] | None = None,
-) -> tuple[argparse.Namespace, list[str]]:
+) -> tuple[SlackFlags, list[str]]:
     """Add shared Slack service flags and delegate to ``parse_agent_args``.
 
     These flags cover Slack tokens, persona, logging, session, and agent-model
@@ -814,7 +814,22 @@ def parse_slack_args(
         default=False,
         help="Resume agents from a previous session.",
     )
-    return parse_agent_args(parser, argv)
+    args, remaining = parse_agent_args(parser, argv)
+    # The flags registered above ride the same namespace.
+    return cast(SlackFlags, args), remaining
+
+
+class SlackFlags(AgentFlags, Protocol):
+    """Parsed command-line flags of the Slack service."""
+
+    app_token: str
+    bot_token: str
+    persona_dir: str
+    log_prefix: str
+    router_log_channel: str
+    cwd: str | None
+    session_dir: str
+    resume: bool
 
 
 def main() -> int:
@@ -919,13 +934,13 @@ def _load_manifest(session_dir: Path) -> dict[str, dict[str, str]]:
     path = _manifest_path(session_dir)
     if not path.exists():
         return {}
-    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw = json_loads(path.read_text(encoding="utf-8"), dict[str, object])
     result: dict[str, dict[str, str]] = {}
     for k, v in raw.items():
         if isinstance(v, str):
             result[k] = {"persona": v, "system": ""}
         else:
-            result[k] = dict(v)
+            result[k] = from_plain(v, dict[str, str])
     return result
 
 
@@ -1060,7 +1075,7 @@ def _render_event(event: RuntimeEvent) -> str | None:
     return None
 
 
-def _resolve_tokens(args: argparse.Namespace) -> tuple[str, str]:
+def _resolve_tokens(args: SlackFlags) -> tuple[str, str]:
     """Return ``(app_token, bot_token)`` from CLI flags or env, exiting on miss."""
     app = args.app_token or os.environ.get("SLACK_APP_TOKEN", "")
     bot = args.bot_token or os.environ.get("SLACK_BOT_TOKEN", "")
@@ -1072,26 +1087,33 @@ def _resolve_tokens(args: argparse.Namespace) -> tuple[str, str]:
     if missing:
         _ = sys.stderr.write(f"Missing: {', '.join(missing)}\n")
         sys.exit(1)
-    return cast(tuple[str, str], (app, bot))
+    return app, bot
 
 
-async def _run(args: argparse.Namespace) -> None:
-    """Wire up the adapter and any resumed agents, then serve until shutdown."""
-    if args.cwd:
-        os.chdir(args.cwd)
-
-    app_token, bot_token = _resolve_tokens(args)
+def _build_model(args: SlackFlags) -> tuple[Model, ModelRecipe]:
+    """Build the model every agent shares, and the recipe that names it."""
     provider = build_provider(args.provider, args.auth, account=args.account)
     model = provider.model(args.model)
-    model_recipe = ModelRecipe(
+    # Every spawned agent shares this model object, so the flag lands on
+    # its settings once here rather than riding each constructor.
+    if args.effort is not None:
+        model.settings.thinking_effort = args.effort
+    recipe = ModelRecipe(
         provider=args.provider,
         auth=args.auth,
         model_id=model.tagged_model_id,
         account=args.account,
     )
-    # Every spawned agent shares this model object, so the flag lands on
-    # its settings once here rather than riding each constructor.
-    model.settings.thinking_effort = cast(ThinkingEffort, args.effort)
+    return model, recipe
+
+
+async def _run(args: SlackFlags) -> None:
+    """Wire up the adapter and any resumed agents, then serve until shutdown."""
+    if args.cwd is not None and args.cwd:
+        os.chdir(args.cwd)
+
+    app_token, bot_token = _resolve_tokens(args)
+    model, model_recipe = _build_model(args)
     compactor = SummaryCompactor() if args.compact else None
     persona_dir = Path(args.persona_dir)
 

@@ -1048,12 +1048,12 @@ def _tool_allowed(tc: ToolCall, allowed_tools: set[str] | None) -> bool:
 def _parse_qwen_tool_call(raw: str) -> ToolCall | None:
     """Parse a Qwen-format ``<tool_call>`` body into a ``ToolCall``."""
     try:
-        payload = json.loads(raw.strip())
+        payload = json_loads(raw.strip())
     except json.JSONDecodeError:
         return None
     if not isinstance(payload, dict):
         return None
-    payload_d = cast(dict[str, MutablePlainTree], payload)
+    payload_d = payload
     name = cast(str | None, payload_d.get("name"))
     raw_args = payload_d.get("arguments") or {}
     if not isinstance(name, str) or not name or not isinstance(raw_args, dict):

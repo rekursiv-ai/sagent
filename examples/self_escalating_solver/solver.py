@@ -24,7 +24,7 @@ model id is injected, so it runs on Gemini or Anthropic unchanged.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Final
+from typing import TYPE_CHECKING, Final, TypedDict
 
 import asyncio
 import re
@@ -133,10 +133,11 @@ def check(samples):
 
 
 def _parse_verdict(out: str) -> str | None:
-    hits = re.findall(rf"ORACLE_{_ORACLE_TOKEN}:\s*(PASS|FAIL[^\n]*)", out or "")
+    hits = list(re.finditer(rf"ORACLE_{_ORACLE_TOKEN}:\s*(PASS|FAIL[^\n]*)", out or ""))
     if not hits:
         return None
-    return "PASS" if hits[-1].startswith("PASS") else "FAIL"
+    verdict = hits[-1].group(0).split(":", 1)[1].lstrip()
+    return "PASS" if verdict.startswith("PASS") else "FAIL"
 
 
 # --------------------------------------------------------------------------
@@ -149,6 +150,14 @@ _DANGER = re.compile(
     r"|\b(eval|exec|__import__)\s*\(|\bopen\s*\(|os\.\w+\(|inspect\.",
     re.IGNORECASE,
 )
+
+
+class _Call(TypedDict):
+    """One ``run_python`` call: the script, its output, and the grader's verdict."""
+
+    code: str
+    out: str
+    verdict: str | None
 
 
 class RunPython:
@@ -166,7 +175,7 @@ class RunPython:
     )
 
     def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
+        self.calls: list[_Call] = []
 
     directive_schema: Mapping[str, PlainTree] = immutable(
         {
@@ -247,7 +256,7 @@ async def run_condition(
     allow_upgrade: bool,
     model_recipe: ModelRecipe | None = None,
     max_budget: float = 0.50,
-) -> dict[str, Any]:
+) -> ConditionResult:
     """Run one arm on the task; return a captured, grader-graded result dict.
 
     Args:
@@ -287,7 +296,9 @@ async def run_condition(
     history = agent.history
     timeline = _build_timeline(history, tool, model.tagged_model_id)
     swaps = [s for s in timeline if s["kind"] == "swap"]
-    verdicts = [c["verdict"] for c in tool.calls if c["verdict"]]
+    verdicts = [
+        c["verdict"] for c in tool.calls if c["verdict"] is not None and c["verdict"]
+    ]
     first_verdict = verdicts[0] if verdicts else None
     final_verdict = verdicts[-1] if verdicts else None
     correct = final_verdict == "PASS"
@@ -299,7 +310,7 @@ async def run_condition(
     )
     return {
         "condition": condition,
-        "models": [model.tagged_model_id] + [s["to"] for s in swaps],
+        "models": [model.tagged_model_id] + [str(s["to"]) for s in swaps],
         "timeline": timeline,
         "n_runs": len(tool.calls),
         "n_checks": len(verdicts),
@@ -313,6 +324,23 @@ async def run_condition(
     }
 
 
+class ConditionResult(TypedDict):
+    """One arm's captured, grader-graded run; see :func:`run_condition`."""
+
+    condition: str
+    models: list[str]
+    timeline: list[dict[str, object]]
+    n_runs: int
+    n_checks: int
+    swapped: bool
+    first_verdict: str | None
+    final_verdict: str | None
+    correct: bool
+    self_report: str
+    cost_usd: float
+    error: str
+
+
 # --------------------------------------------------------------------------
 # Run one arm, capture a replayable timeline, grade on the grader's verdict.
 # --------------------------------------------------------------------------
@@ -322,11 +350,11 @@ def _clip(s: str, n: int) -> str:
 
 
 def _build_timeline(
-    history: list[Any],
+    history: Sequence[object],
     tool: RunPython,
     start_model: str,
-) -> list[dict[str, Any]]:
-    steps: list[dict[str, Any]] = []
+) -> list[dict[str, object]]:
+    steps: list[dict[str, object]] = []
     active = start_model
     run_i = 0
     for m in history:
@@ -338,18 +366,21 @@ def _build_timeline(
             )
         for tc in m.tool_calls:
             if tc.name == "run_python":
-                c = tool.calls[run_i] if run_i < len(tool.calls) else {}
+                c = tool.calls[run_i] if run_i < len(tool.calls) else None
                 run_i += 1
                 steps.append(
                     {
                         "kind": "run",
                         "model": active,
                         "code": _clip(
-                            str((tc.args or {}).get("code") or c.get("code", "")),
+                            str(
+                                (tc.args or {}).get("code")
+                                or (c["code"] if c is not None else ""),
+                            ),
                             1600,
                         ),
-                        "out": _clip(c.get("out", ""), 600),
-                        "verdict": c.get("verdict"),
+                        "out": _clip(c["out"] if c is not None else "", 600),
+                        "verdict": c["verdict"] if c is not None else None,
                     },
                 )
             elif tc.name == AgentSelf.name and "model_id" in (tc.args or {}):

@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final, Literal, cast, get_args
+from typing import Final, Literal, cast, get_args
 
 import inspect
 import sys
 
-
-if TYPE_CHECKING:
-    from sagent.types.providers import Provider
+from sagent.types.providers import ModelResolver, Provider
 
 
 type ProviderName = Literal[
@@ -29,7 +27,7 @@ type ProviderName = Literal[
 
 PROVIDER_NAMES: Final[tuple[ProviderName, ...]] = cast(
     tuple[ProviderName, ...],
-    get_args(ProviderName.__value__),
+    get_args(cast(object, ProviderName.__value__)),
 )
 
 # Maps API-key provider names to their account-auth (subscription /
@@ -129,15 +127,20 @@ def build_provider(
     cls = provider_class(provider_name)
     if cls is None:
         raise AttributeError(f"unknown provider {provider_name!r}")
-    factory = getattr(cls, f"from_{auth}", None)
+    factory: object = getattr(cls, f"from_{auth}", None)
     if factory is None:
         raise AttributeError(
             f"provider {provider_name!r} has no ``from_{auth}`` method",
         )
+    if not callable(factory):
+        raise TypeError(f"{provider_name}.from_{auth} is not callable")
     kwargs: dict[str, object] = {}
     if "account" in inspect.signature(factory).parameters:
         kwargs["account"] = account
-    return factory(**kwargs)
+    provider = factory(**kwargs)
+    if not isinstance(provider, Provider):
+        raise TypeError(f"{provider_name}.from_{auth}() built no Provider")
+    return provider
 
 
 def build_provider_with_account_fallback(
@@ -200,11 +203,10 @@ def _catalog_provider(model_id: str) -> str | None:
         if provider.endswith(("CLI", "Subscription")):
             continue
         cls = provider_class(provider)
-        catalog = getattr(cls, "catalog", None)
-        if catalog is None:
+        if not isinstance(cls, ModelResolver):
             continue
         try:
-            catalog.resolve(model_id)
+            cls.catalog.resolve(model_id)
         except ValueError:
             continue
         matches.append(provider)
@@ -214,11 +216,10 @@ def _catalog_provider(model_id: str) -> str | None:
 def _provider_accepts(provider: str, model_id: str) -> bool:
     """Return whether the provider catalog resolves the model id."""
     cls = provider_class(provider)
-    catalog = getattr(cls, "catalog", None)
-    if catalog is None:
+    if not isinstance(cls, ModelResolver):
         return False
     try:
-        catalog.resolve(model_id)
+        cls.catalog.resolve(model_id)
     except ValueError:
         return False
     return True

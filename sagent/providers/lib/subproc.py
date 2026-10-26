@@ -14,7 +14,7 @@ speaks the wire protocol on the returned handle.
 from __future__ import annotations
 
 from collections import deque
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import asyncio
 import contextlib
@@ -23,7 +23,7 @@ import logging
 import shutil
 import signal
 
-from treekle import MutablePlainTree
+from treekle import MutablePlainTree, json_loads
 
 from sagent.types.exceptions import log_task_exception
 
@@ -188,7 +188,7 @@ class Subproc:
                 logger.debug("skipping non-JSON stdout: %s", line[:120])
                 continue
             try:
-                obj = json.loads(stripped)
+                obj = json_loads(stripped)
             except json.JSONDecodeError as exc:
                 if skip_non_json:
                     logger.debug("skipping malformed stdout: %s", line[:120])
@@ -197,7 +197,7 @@ class Subproc:
                     f"non-JSON line on stdout: {line[:200]!r}: {self._diagnostic()}",
                 ) from exc
             if isinstance(obj, dict):
-                return cast(dict[str, MutablePlainTree], obj)
+                return obj
             logger.debug("skipping non-object JSON: %s", line[:120])
 
     async def close(self) -> None:

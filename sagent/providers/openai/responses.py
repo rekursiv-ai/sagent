@@ -504,14 +504,16 @@ def _terminal_metadata(response: object) -> tuple[str, str, int, int, int, int]:
     """Extract terminal response metadata, including SDK-extra usage fields."""
     message_id = str(getattr(response, "id", "") or "")
     status = str(getattr(response, "status", "") or "")
-    usage = getattr(response, "usage", None)
+    usage: object = getattr(response, "usage", None)
     if usage is None:
         return message_id, status, 0, 0, 0, 0
-    input_tokens = from_plain(getattr(usage, "input_tokens", None), int)
-    output_tokens = from_plain(getattr(usage, "output_tokens", None), int)
+    raw_input: object = getattr(usage, "input_tokens", None)
+    raw_output: object = getattr(usage, "output_tokens", None)
+    input_tokens = from_plain(raw_input, int)
+    output_tokens = from_plain(raw_output, int)
     cache_read = 0
     cache_write = 0
-    details = getattr(usage, "input_tokens_details", None)
+    details: object = getattr(usage, "input_tokens_details", None)
     if details is not None:
         # OpenAI SDK 2.44 predates the typed ``cache_write_tokens`` field, but
         # Stainless models preserve unknown response fields and expose them
@@ -739,11 +741,13 @@ def _openai_stream_event_error(event: object) -> UserFacingError:
 def _openai_stream_response_error(response: object) -> UserFacingError:
     response_id = getattr(response, "id", "")
     status = getattr(response, "status", "")
-    error = getattr(response, "error", None)
-    message = getattr(error, "message", None) if error is not None else None
-    code = getattr(error, "code", None) if error is not None else None
-    incomplete = getattr(response, "incomplete_details", None)
-    reason = getattr(incomplete, "reason", None) if incomplete is not None else None
+    error: object = getattr(response, "error", None)
+    message: object = getattr(error, "message", None) if error is not None else None
+    code: object = getattr(error, "code", None) if error is not None else None
+    incomplete: object = getattr(response, "incomplete_details", None)
+    reason: object = (
+        getattr(incomplete, "reason", None) if incomplete is not None else None
+    )
     details = ["OpenAI stream ended without completion"]
     if isinstance(status, str) and status:
         details.append(f"status={status}")
@@ -849,10 +853,10 @@ def _spend_at_served_tier(
 # user instead of the real cause -- swallow and log it.
 async def _close_stream(stream: object) -> None:
     """Close a Responses stream after timeout, cancellation, or stream error."""
-    close = getattr(stream, "aclose", None)
+    close: object = getattr(stream, "aclose", None)
     if close is None:
         close = getattr(stream, "close", None)
-    if close is None:
+    if not callable(close):
         return
     try:
         result = close()

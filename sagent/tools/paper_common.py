@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, cast
 import json
 import re
 
+from treekle import json_loads
 from wesearch.paper.errors import (
     InvalidIdError,
     PaperError,
@@ -235,14 +236,14 @@ def _split_id_bundle(
     s = raw.strip()
     if s.startswith("[") and s.endswith("]"):
         try:
-            parsed = json.loads(s)
+            parsed = json_loads(s)
         except json.JSONDecodeError:
             parsed = None
         if isinstance(parsed, list):
             # String members only, matching the check the caller already applies
             # to a real list: str() here meant {"ids": [1]} was rejected while
             # the equivalent {"ids": "[1]"} silently became ["1"].
-            members = cast(list[object], parsed)
+            members = parsed
             strings = [x for x in members if isinstance(x, str)]
             if len(strings) == len(members):
                 return strings

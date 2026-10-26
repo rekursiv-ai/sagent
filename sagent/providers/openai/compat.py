@@ -814,7 +814,7 @@ def _parse_tool_arguments(
         )
         return {}
     try:
-        parsed = json.loads(args_str)
+        parsed = json_loads(args_str)
     except json.JSONDecodeError:
         logger.warning(
             "OpenAI-compatible tool arguments were invalid JSON: "
@@ -826,7 +826,7 @@ def _parse_tool_arguments(
         )
         return {}
     if isinstance(parsed, dict):
-        return cast(dict[str, MutablePlainTree], parsed)
+        return parsed
     logger.warning(
         "OpenAI-compatible tool arguments were not a JSON object: "
         "source=%s tool=%s call_id=%s",

@@ -62,9 +62,10 @@ _MODEL_CLASSES = [
 def _protocol_members(proto: type) -> set[str]:
     """Public member names declared by a Protocol (methods AND properties)."""
     base = set(dir(Protocol))
+    members = dict[str, object](vars(proto))
     return {
         name
-        for name, val in vars(proto).items()
+        for name, val in members.items()
         if not name.startswith("_")
         and name not in base
         and (callable(val) or isinstance(val, property))
@@ -83,8 +84,9 @@ def _public_members(cls: type) -> set[str]:
         if name.startswith("_"):
             continue
         for base in cls.__mro__:
-            if name in vars(base):
-                val = vars(base)[name]
+            members = dict[str, object](vars(base))
+            if name in members:
+                val = members[name]
                 if callable(val) or isinstance(val, property):
                     found.add(name)
                 break
@@ -102,11 +104,16 @@ def _peer_surface(cls: type) -> set[str]:
     return shared | _MODEL_MEMBERS
 
 
+def _class_name(cls: type) -> str:
+    """Name a parametrized class in the test id."""
+    return cls.__name__
+
+
 _MODEL_MEMBERS = _protocol_members(Model)
 _PROVIDER_MEMBERS = _protocol_members(Provider)
 
 
-@pytest.mark.parametrize("model_cls", _MODEL_CLASSES, ids=lambda c: c.__name__)
+@pytest.mark.parametrize("model_cls", _MODEL_CLASSES, ids=_class_name)
 def test_model_class_implements_full_protocol(model_cls: type) -> None:
     """Every model class implements every ``Model`` member -- no gaps.
 
@@ -118,7 +125,7 @@ def test_model_class_implements_full_protocol(model_cls: type) -> None:
     assert not missing, f"{model_cls.__name__} is missing Model members: {missing}"
 
 
-@pytest.mark.parametrize("model_cls", _MODEL_CLASSES, ids=lambda c: c.__name__)
+@pytest.mark.parametrize("model_cls", _MODEL_CLASSES, ids=_class_name)
 def test_model_class_has_no_extra_public_surface_vs_peers(model_cls: type) -> None:
     """No model class carries a public method another lacks.
 
@@ -161,7 +168,7 @@ def test_close_is_required_and_async_on_every_model() -> None:
     once ``close`` is a contract method, the probe is unjustifiable.
     """
     for model_cls in _MODEL_CLASSES:
-        close = getattr(model_cls, "close", None)
+        close: object = getattr(model_cls, "close", None)
         assert close is not None, f"{model_cls.__name__} has no close()"
         assert inspect.iscoroutinefunction(close), (
             f"{model_cls.__name__}.close must be async"
@@ -273,7 +280,7 @@ def test_cli_shares_catalog_without_api_client(
 @pytest.mark.parametrize(
     "provider_cls",
     [AnthropicCLI, GoogleCLI, Anthropic, Google],
-    ids=lambda c: c.__name__,
+    ids=_class_name,
 )
 def test_every_provider_offers_close_sdk(provider_cls: type) -> None:
     """``close_sdk`` is part of the total ``Provider`` contract."""

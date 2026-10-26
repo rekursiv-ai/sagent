@@ -831,9 +831,11 @@ def test_format_tasks_no_registry_header_only() -> None:
 
 def test_format_tasks_lists_registered_agent_fg_idle() -> None:
     agent = _FakeAgent()
+    runtime = MagicMock()
+    runtime.model_call = None
+    runtime.compact_task = None
     other = MagicMock()
-    other.runtime.model_call = None
-    other.runtime.compact_task = None
+    other.runtime = runtime
     other.background = dict[str, BackgroundTaskEntry]()
     with patch(
         "sagent.repl.slash_handlers.agent_registry",
@@ -858,8 +860,8 @@ def test_format_tasks_marks_self() -> None:
 def test_format_tasks_lists_bg_jobs() -> None:
     agent = _FakeAgent()
     task = MagicMock()
-    task.done.return_value = False
-    task.cancelled.return_value = False
+    task.done = MagicMock(return_value=False)
+    task.cancelled = MagicMock(return_value=False)
     job = BackgroundTaskEntry(
         task=cast(asyncio.Task[object], task),
         tool_name="Bash",
@@ -885,8 +887,8 @@ def test_format_tasks_lists_bg_jobs() -> None:
 def test_format_tasks_namespaces_same_job_id_by_agent_label() -> None:
     agent = _FakeAgent()
     task = MagicMock()
-    task.done.return_value = False
-    task.cancelled.return_value = False
+    task.done = MagicMock(return_value=False)
+    task.cancelled = MagicMock(return_value=False)
     job = BackgroundTaskEntry(
         task=cast(asyncio.Task[object], task),
         tool_name="Bash",
@@ -1627,9 +1629,13 @@ def _make_kb_event(text: str) -> KeyPressEvent:
     buf = MagicMock()
     buf.text = text
     buf.cursor_position = len(text)
-    buf.document.text_before_cursor = text
-    buf.document.text = text
-    buf.history.get_strings.return_value = list[str]()
+    document = MagicMock()
+    document.text_before_cursor = text
+    document.text = text
+    buf.document = document
+    history = MagicMock()
+    history.get_strings = MagicMock(return_value=list[str]())
+    buf.history = history
     event = MagicMock()
     event.current_buffer = buf
     return cast(KeyPressEvent, event)
@@ -1779,9 +1785,9 @@ async def test_pane_restored_onto_idle_agent_still_drains() -> None:
         # older stop the second Up is a no-op at the hard top and the
         # text correctly stays in the buffer -- no restore happens.
         event = _make_kb_event("")
-        cast(MagicMock, event.current_buffer.history).get_strings.return_value = [
-            "older entry",
-        ]
+        cast(MagicMock, event.current_buffer.history).get_strings = MagicMock(
+            return_value=["older entry"],
+        )
         # Up lifts the pane message into the buffer, emptying the pane.
         _kb_up(cast(Agent, holder), queues, nav, event)
         assert queues.queue is None
@@ -2316,8 +2322,8 @@ async def test_repl_commit_during_cohort_preempts_tools_to_background() -> None:
 def _make_subagent_job(queue_id: str = "child-1") -> BackgroundTaskEntry:
     """Return a BackgroundTaskEntry with kind='subagent'."""
     task = MagicMock()
-    task.done.return_value = False
-    task.cancelled.return_value = False
+    task.done = MagicMock(return_value=False)
+    task.cancelled = MagicMock(return_value=False)
     return BackgroundTaskEntry(
         task=cast(asyncio.Task[object], task),
         tool_name="AgentSpawn",
@@ -2341,16 +2347,17 @@ def _make_runtime(
     rt.model_call = model_call
     rt.compact_task = compact_task
     rt.cohort = cohort if cohort is not None else set()
-    rt.inbox = MagicMock()
-    rt.inbox.gate_armed = gate_armed
+    inbox = MagicMock()
+    inbox.gate_armed = gate_armed
+    rt.inbox = inbox
     return rt
 
 
 def test_subagent_phase_stopped_when_task_done() -> None:
     task = MagicMock()
-    task.done.return_value = True
-    task.cancelled.return_value = False
-    task.exception.return_value = None
+    task.done = MagicMock(return_value=True)
+    task.cancelled = MagicMock(return_value=False)
+    task.exception = MagicMock(return_value=None)
     job = BackgroundTaskEntry(
         task=cast(asyncio.Task[object], task),
         tool_name="AgentSpawn",
@@ -2371,9 +2378,9 @@ def test_format_tasks_non_persistent_job_crashed_shows_errored() -> None:
     """
     agent = _FakeAgent()
     task = MagicMock()
-    task.done.return_value = True
-    task.cancelled.return_value = False
-    task.exception.return_value = RuntimeError("boom")
+    task.done = MagicMock(return_value=True)
+    task.cancelled = MagicMock(return_value=False)
+    task.exception = MagicMock(return_value=RuntimeError("boom"))
     crashed_job = BackgroundTaskEntry(
         task=cast(asyncio.Task[object], task),
         tool_name="Bash",
@@ -2405,9 +2412,9 @@ def test_subagent_phase_errored_when_task_crashed() -> None:
     completion.
     """
     task = MagicMock()
-    task.done.return_value = True
-    task.cancelled.return_value = False
-    task.exception.return_value = RuntimeError("boom")
+    task.done = MagicMock(return_value=True)
+    task.cancelled = MagicMock(return_value=False)
+    task.exception = MagicMock(return_value=RuntimeError("boom"))
     job = BackgroundTaskEntry(
         task=cast(asyncio.Task[object], task),
         tool_name="AgentSpawn",
