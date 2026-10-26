@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import datetime
+import datetime as dt
 import logging
 import os
 import platform
@@ -96,7 +96,7 @@ def render_environment(
     *,
     cwd: str,
     context: ContextTag = "",
-    now: datetime.datetime | None = None,
+    now: dt.datetime | None = None,
 ) -> str:
     """Render the environment section, to the hour.
 
@@ -129,7 +129,7 @@ def render_environment(
         if is_worktree
         else ""
     )
-    when = now or datetime.datetime.now().astimezone()
+    when = now or dt.datetime.now().astimezone()
     return read_asset(template).format(
         cwd=cwd,
         is_git=str(is_git).lower(),

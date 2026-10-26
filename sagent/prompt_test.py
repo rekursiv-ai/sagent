@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import datetime
+import datetime as dt
 import os
 import shutil
 import subprocess
@@ -106,7 +106,7 @@ def test_sagent_context_renders_only_the_sections_it_includes() -> None:
 
 
 def test_environment_names_the_hour_so_it_changes_once_an_hour() -> None:
-    at = datetime.datetime(2026, 10, 23, 14, 37, tzinfo=datetime.UTC)
+    at = dt.datetime(2026, 10, 23, 14, 37, tzinfo=dt.UTC)
     assert "now=Fri, 2026-10-23 14:00 UTC" in render_environment(
         _model("m"),
         cwd="/p",
