@@ -1,14 +1,8 @@
-"""Token count, price, and cost calculus.
+"""Token counts, prices, and what a request cost.
 
-Three parallel shapes over the same five token meters: ``TokenCount``
-(integers), ``TokenPrice`` (USD per ``tokens_per_unit``), and
-``TokenCost`` (USD). ``TokenPrice * TokenCount -> TokenCost``; the
-illegal products are absent methods rather than runtime checks.
-
-``PriceCatalog`` maps a ``PriceKey`` -- service tier, prompt-size band, and
-effective date -- to the ``TokenPrice`` a vendor publishes for it, and
-resolves one request to exactly one of them. There is no fallback: a tier
-or date nothing prices raises rather than billing some other rate.
+tokens = TokenCount(request=1_000, response=200, cache_read=5_000)
+cost = model.capability.prices.cost(tokens, service_tier="auto", at=today)
+cost.total                              # USD
 """
 
 from __future__ import annotations
@@ -30,7 +24,13 @@ __all__ = [
 ]
 
 
-type ServiceTier = Literal["auto", "default", "flex", "priority", "ultrafast"]
+type ServiceTier = Literal[
+    "auto",
+    "default",
+    "flex",
+    "priority",
+    "ultrafast",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -69,10 +69,8 @@ class TokenStats[T: (int, float)]:
 
     def __add__(self, other: Self) -> Self:
         """Add two token stats, handling non-matching types gracefully."""
-        # Non-``TokenStats`` operands defer rather than raising
-        # ``AttributeError`` mid-expression: callers reaching through
-        # ``object``-typed plumbing (status pane, persisted-metadata
-        # round-trip) can still pass an int or str.
+        # An operand of another kind defers, so Python raises the usual
+        # ``TypeError`` rather than an ``AttributeError`` from inside.
         if not isinstance(other, type(self)):
             return NotImplemented
         return replace(
@@ -127,10 +125,9 @@ class TokenCount(TokenStats[int]):
     @override
     @classmethod
     def _floor(cls, value: int) -> int:
-        # ``CostTracker.restore_totals`` can move the cumulative total BELOW
-        # a pre-restore snapshot, and the status pane reads
-        # ``current - snapshot``. A negative token COUNT is not a thing; a
-        # negative cost delta is, so only counts clamp.
+        # A count is never negative, so a difference that would be, such as a
+        # total read before a resume restored a smaller one, clamps to zero. A
+        # cost delta may be negative, so only counts clamp.
         return max(0, value)
 
 

@@ -78,7 +78,10 @@ from sagent.agent.session_io import (
     unpersisted_session_error,
 )
 from sagent.agent.state import agent_registry, unique_registry_label
-from sagent.catalog.table import UnknownModelError, UnsupportedTagError
+from sagent.catalog.table import (
+    UnknownModelError,
+    UnsupportedTagError,
+)
 from sagent.compaction.summary import SummaryCompactor
 from sagent.lib.userdirs import data_dir
 from sagent.prompt import SagentContext, static_prompt

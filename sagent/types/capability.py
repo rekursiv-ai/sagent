@@ -1,14 +1,9 @@
-"""What one model accepts, and what one instance chose from it.
+"""What a model allows, and what one model instance chose.
 
-:class:`ModelCapability` and :class:`ModelSettings` share field NAMES:
-``capability.x`` is the allowed set, ``settings.x`` is the chosen value, so
-validation is ``settings.x in capability.x`` for every field. The thinking
-axes are the one grouping: ``settings.thinking_x`` validates against
-``capability.thinking.x``. An axis added to one side without the other is a
-field nothing can select or nothing validates.
-
-Selectable axes are TOTAL: their unset value is spelled ``none``.
-Descriptive facts such as ``knowledge_cutoff`` may still be ``None``.
+model = catalog["anthropic"]["opus"]
+model.capability.thinking.effort        # every effort level allowed
+model.settings.thinking_effort = "high" # ValueError if not allowed
+model.settings.limits.max_request_tokens
 """
 
 from __future__ import annotations
@@ -31,25 +26,59 @@ __all__ = [
     "ModelLimits",
     "ModelSettings",
     "Permission",
+    "PruningPolicy",
     "SummaryKind",
     "ThinkingBudget",
     "ThinkingCapability",
     "ThinkingEffort",
     "ThinkingOutput",
+    "literal_members",
 ]
 
 
-type ThinkingEffort = Literal["none", "min", "low", "medium", "high", "xhigh", "max"]
+type ThinkingEffort = Literal[
+    "none",
+    "min",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+]
 
-type ThinkingBudget = Literal["none", "auto", "fixed"]
+type ThinkingBudget = Literal[
+    "none",
+    "auto",
+    "fixed",
+]
 
-type ThinkingOutput = Literal["none", "text", "redacted"]
+type ThinkingOutput = Literal[
+    "none",
+    "text",
+    "redacted",
+]
 
-type ContextTag = Literal["", "+200k", "+272k", "+1m", "+max", "+min"]
+type ContextTag = Literal[
+    "",
+    "+200k",
+    "+272k",
+    "+1m",
+    "+max",
+    "+min",
+]
 
-type SummaryKind = Literal["none", "auto", "concise", "detailed"]
+type SummaryKind = Literal[
+    "none",
+    "auto",
+    "concise",
+    "detailed",
+]
 
-type Permission = Literal["ask", "accept_edits", "bypass"]
+type Permission = Literal[
+    "ask",
+    "accept_edits",
+    "bypass",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -107,7 +136,7 @@ class ModelCapability:
     spelling, a retry policy, or an auth mode.
 
     ``temperature`` is absent: its domain is a continuous range, so it cannot
-    join the membership check. It rides ``ModelRequest``.
+    join the membership check. A provider that sends one sets it itself.
     """
 
     model_id: str = ""
@@ -134,20 +163,12 @@ class ModelCapability:
     """Reasoning effort, budget, and visibility this transport accepts."""
 
     effort_as_level: bool = False
-    """Whether the wire takes the effort as a named level.
+    """Whether the wire takes a named effort level (Gemini ``thinkingLevel``), not a budget."""
 
-    Gemini 3 ``thinkingLevel``, Qwen 3.8 and Kimi K3 ``reasoning_effort``;
-    otherwise the wire takes a token budget derived from the effort.
-    """
-
+    # Only ``auto``, a request naming no tier, is universal; a transport with no
+    # tier parameter narrows the meet to it.
     service_tier: frozenset[ServiceTier] = frozenset({"auto", "default"})
-    """Speed/price tiers this transport accepts.
-
-    The default is the two a model row offers when it states no tier. Only
-    ``auto`` -- a request naming no tier -- is universal: a transport with no
-    tier parameter (``openai.compatible()``) narrows the meet to it. ``flex``,
-    ``priority``, and ``ultrafast`` are opt-in per row.
-    """
+    """Speed and price tiers this transport accepts."""
 
     # Defaults to BOTH values, not to its unset one: a model row does not know
     # whether the server rolls history, and ``&`` can only remove -- so a row
@@ -159,15 +180,10 @@ class ModelCapability:
     # a catalog row cannot know who bills it, who retries it, or whether the
     # request path writes a cache breakpoint, so ``&`` takes the transport's
     # answer rather than intersecting with a meaningless one.
+    # A set, not a ceiling: vendors sell discrete lifetimes (``5m``, ``1h``). A
+    # transport that always caches omits ``0``, so "do not cache" is unselectable.
     cache_ttl_sec: frozenset[float] = frozenset({0.0})
-    """Prompt-cache lifetimes this transport accepts, in seconds.
-
-    A set, not a ceiling: vendors sell two discrete lifetimes (Anthropic's
-    ``5m`` / ``1h``), so a bound admitted values no wire spells. A transport
-    that writes a breakpoint on every request omits ``0`` -- "do not cache"
-    is then unselectable rather than a claim the settings make and the wire
-    contradicts.
-    """
+    """Prompt-cache lifetimes this transport accepts, in seconds."""
 
     retries_internally: bool = False
     """Whether the transport retries transient failures on its own."""
@@ -222,6 +238,30 @@ class ModelCapability:
         )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PruningPolicy:
+    """Which old tool output may be replaced by a stub, to keep the context small.
+
+    The client prunes when the cost says so (``agent.pruner.Pruner``); a server
+    that prunes, with ``manage_context_server_side``, goes by the two token marks.
+    """
+
+    trigger_tokens: int = 100_000
+    """A server that prunes starts once a request's context passes this."""
+
+    target_tokens: int = 40_000
+    """A server that prunes stops once the context is back near this."""
+
+    keep_recent: int = 3
+    """The newest tool results, which are never pruned."""
+
+    expiry: float = 1.0
+    """``λ``: an unused result expires once its rent reaches ``λ`` times the cost of fetching it again."""
+
+    keep_tools: frozenset[str] = frozenset()
+    """Tools whose results are never pruned."""
+
+
 @dataclass(slots=True, kw_only=True)
 class ModelSettings:
     """What one model instance chose, within what its capability offers.
@@ -269,6 +309,9 @@ class ModelSettings:
     manage_context_server_side: bool = False
     """Whether the server was asked to roll history."""
 
+    pruning: PruningPolicy | None = PruningPolicy()
+    """Which old tool results may be dropped; ``None`` never drops them. Any model takes it."""
+
     @override
     def __setattr__(self, name: str, value: object) -> None:
         """Reject an axis value :attr:`capability` does not offer.
@@ -291,7 +334,7 @@ class ModelSettings:
             context = (
                 self.context
                 if self.context in value.context
-                else _lowest("context", value.context, _ladder(ContextTag))
+                else _lowest("context", value.context, literal_members(ContextTag))
             )
             narrowed = type(self).narrowest(value, context=context)
             narrowed.adopt(self)
@@ -378,22 +421,22 @@ class ModelSettings:
             thinking_effort=_lowest(
                 "thinking_effort",
                 capability.thinking.effort,
-                _ladder(ThinkingEffort),
+                literal_members(ThinkingEffort),
             ),
             thinking_budget=_lowest(
                 "thinking_budget",
                 capability.thinking.budget,
-                _ladder(ThinkingBudget),
+                literal_members(ThinkingBudget),
             ),
             thinking_output=_lowest(
                 "thinking_output",
                 capability.thinking.output,
-                _ladder(ThinkingOutput),
+                literal_members(ThinkingOutput),
             ),
             service_tier=_lowest(
                 "service_tier",
                 capability.service_tier,
-                _ladder(ServiceTier),
+                literal_members(ServiceTier),
             ),
             cache_ttl_sec=_lowest(
                 "cache_ttl_sec",
@@ -413,6 +456,25 @@ class ModelSettings:
         return self.capability.context[self.context]
 
 
+def literal_members[T](alias: object) -> tuple[T, ...]:
+    """Return a ``type X = Literal[...]`` alias's members, in declaration order.
+
+    ``get_args`` of the alias itself is ``()``: the members live on its
+    ``__value__``, which typeshed types as ``Any``.
+
+    Args:
+      alias: The alias, such as ``ThinkingEffort``.
+
+    Returns:
+      members: Each member, the least committing first where a ladder is meant.
+
+    """
+    return cast(
+        tuple[T, ...],
+        get_args(cast(object, cast(TypeAliasType, alias).__value__)),
+    )
+
+
 def _allowed(capability: ModelCapability, name: str) -> Collection[object]:
     """Return the set ``capability`` offers for the settings axis ``name``."""
     match name:
@@ -428,7 +490,8 @@ def _allowed(capability: ModelCapability, name: str) -> Collection[object]:
 
 def _offers(capability: ModelCapability, name: str, value: object) -> bool:
     """Whether ``capability`` allows ``value`` on the axis ``name``."""
-    return value in _allowed(capability, name)
+    # Pruning is the caller's policy, not something a model offers.
+    return name == "pruning" or value in _allowed(capability, name)
 
 
 def _reject_unoffered(capability: ModelCapability, name: str, value: object) -> None:
@@ -440,12 +503,6 @@ def _reject_unoffered(capability: ModelCapability, name: str, value: object) -> 
     # which do not order against each other.
     offered = ", ".join(sorted(repr(v) for v in _allowed(capability, name)))
     raise ValueError(f"{name}={value!r} is not offered by {model}; allowed: {offered}")
-
-
-def _ladder[T](alias: object) -> tuple[T, ...]:
-    """Return the Literal's members, in declaration order -- least committing first."""
-    underlying: object = cast(TypeAliasType, alias).__value__
-    return cast(tuple[T, ...], get_args(underlying))
 
 
 def _lowest[T](name: str, offered: Collection[T], ladder: Sequence[T]) -> T:

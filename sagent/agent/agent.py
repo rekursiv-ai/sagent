@@ -80,7 +80,10 @@ from sagent.agent.state import (
     tool_state_var,
     unique_registry_label,
 )
-from sagent.catalog.table import UnknownModelError, UnsupportedTagError
+from sagent.catalog.table import (
+    UnknownModelError,
+    UnsupportedTagError,
+)
 
 # The module, not its names: ``fold`` imports ``agent.retry``, which loads this
 # package, so a fold-first import reaches here before ``fold`` defines them.

@@ -45,7 +45,11 @@ else:
 from treekle import MutablePlainTree, ReadError, from_plain, json_loads, mutable
 
 from sagent.catalog.openai import compatible
-from sagent.catalog.table import ModelCatalog, ModelTable, base_model_id
+from sagent.catalog.table import (
+    ModelCatalog,
+    ModelTable,
+    base_model_id,
+)
 from sagent.lib import debug_log
 from sagent.providers.lib.errors import (
     error_status_code,
