@@ -1,0 +1,142 @@
+{
+  "capture_date": "2026-10-11",
+  "method": "Live provider-backed CLI in a real PTY, ANSI decoded with pyte and rendered with Pillow/Menlo. No native Terminal app capture.",
+  "provider": "OpenAISubscription",
+  "model": "sol-6.1",
+  "effort": "low",
+  "terminal": {
+    "columns": 100,
+    "rows": 40,
+    "TERM": "xterm-256color",
+    "COLORTERM": "truecolor",
+    "NO_COLOR": "unset"
+  },
+  "raster": {
+    "cell_width": 12,
+    "cell_height": 25,
+    "padding": 16,
+    "fonts": [
+      "Menlo",
+      "Apple Symbols"
+    ],
+    "native_terminal_screenshot": false
+  },
+  "capture_packages": {
+    "pexpect": "4.9.0",
+    "pyte": "0.8.2",
+    "Pillow": "12.3.0"
+  },
+  "before_commit": "f4db9bf079159df5ad8eedd704101ff256a99216",
+  "after_runtime_commit": "8afe18abde0be9622b8444ee31bee0a4f64b67c1",
+  "source_sha256": {
+    "before": {
+      "sagent/repl/console_pane.py": "d76299d7797db5565b2928e0d398a1dcbcbfa6240e155ab292b0ed52e1e19dee",
+      "sagent/repl/input_pane.py": "4fc5b115273b8ccc6e415c9078b6078b678ad1a9e7290ac8dadf11abdc365663",
+      "sagent/repl/keybindings.py": "3a2311cb25122b8a8393fbbe243595aed2a85e52b674b1fa61c4859be19df9b2",
+      "sagent/repl/render.py": "f33454873334d83d669d756a232d1e1a340dabcfc3413c051bb880cb1ea914e9",
+      "sagent/repl/render_diff.py": "c1f776310ee9434a0ac9dbeb09c1e368672abc843f979169f903f933a95dcd62",
+      "sagent/repl/run_repl.py": "374b4ed1358abd14ea25fae60191f3c39cd29a1b0878eb1bb673c222f818948f",
+      "sagent/repl/slash.py": "45ac49c04e371a37a33a6de61deba11d85f597bc99789f690e7f7017af8719e3",
+      "sagent/repl/tool_details.py": null,
+      "sagent/repl/tool_details_view.py": null,
+      "sagent/tools/display.py": "edded3cb9f161489edefb972b2a1a88ae8623b3c6247b94643cae3cb0b45dcdc"
+    },
+    "after": {
+      "sagent/repl/console_pane.py": "87ece3f622fec267f3099a8e15e6e499137b66c5d5a47b3c8348099933fe9969",
+      "sagent/repl/input_pane.py": "d76d5df6ed30b196b75682a25f2e7986bcfc59f035c0ab79cdbbbf381f59dfab",
+      "sagent/repl/keybindings.py": "243a4d2170fa49b296ae1950e9b2d2d280c8b8aa52425dea38bd72371bfd3f60",
+      "sagent/repl/render.py": "8175004e21766d70d6add7c10cef9db1b3b26fba9d5f9341594046a58aacb672",
+      "sagent/repl/render_diff.py": "71fa97293a34667cc2d46bdb027df27fe9808b478584f28aacd2fae5ec6af757",
+      "sagent/repl/run_repl.py": "cdd12a13e07315362d2a1b5c457d08ce8b9803124d280ac4a369720a6acd3e04",
+      "sagent/repl/slash.py": "bfe21ce6f19963ee43b55e0be0d771a25c4096602e80f30efc1a7e0df943802b",
+      "sagent/repl/tool_details.py": "0bae075bc42b94fa8646c0c7930ce5e328b9442654c805fe806bb9d19201c72a",
+      "sagent/repl/tool_details_view.py": "01b7f12edd03b3532d9c1ec1c7164ea846b461480eac10096a66c9387412f40f",
+      "sagent/tools/display.py": "0cf894d0ef0346c2316b659476bbd26af29b915fe6148a925b92c4f4dae5de67"
+    }
+  },
+  "capture_script_sha256": "ce332b9c605b9ef0286c7547c88b02ff0ebdf18667ce0fb8f1a40c2bc5cdcf90",
+  "assets": [
+    {
+      "image": "before-command.png",
+      "image_sha256": "16801363877888ec561d16761f6cc702f235468bff2c84573400312cc2cc259c",
+      "screen_text": "before-command.screen.txt",
+      "screen_text_sha256": "fc73aa772d2fe6eb982461a6bc3cda0d0f5b869536879475cbf71da6f4ac5245",
+      "ansi": "before-command.ansi.gz",
+      "ansi_uncompressed_sha256": "aac77b64d5420ea1e0b31577e4a1e1bbf8a16af30bc7ef1085533c786905d90d"
+    },
+    {
+      "image": "after-command.png",
+      "image_sha256": "8d6466ee1d01a01e97cdd5ba0fb33a4d92477b0f9d3e11bd4727a089c8942ac6",
+      "screen_text": "after-command.screen.txt",
+      "screen_text_sha256": "717dca7686a46883829ade0fb0617f4047e6d3b50cb1fa826afda5a3088d0f7f",
+      "ansi": "after-command.ansi.gz",
+      "ansi_uncompressed_sha256": "51304e75e9994b2f67a57cc2c7822288c453c6535c5893922a3cac8d01b41fc1"
+    },
+    {
+      "image": "before-diff.png",
+      "image_sha256": "e4718da7943caf694ec5a1035d182e9d5fa78f720cbad4bd95b7c2a7fc321ea7",
+      "screen_text": "before-diff.screen.txt",
+      "screen_text_sha256": "8f355daedd98260ca266249b563da341e9f8d6d0aa4ef12519af11619fc0cf46",
+      "ansi": "before-diff.ansi.gz",
+      "ansi_uncompressed_sha256": "ab47d021f9436b76af717df6c5128b658dcff737795d30708b7bfc33188de81f"
+    },
+    {
+      "image": "after-diff.png",
+      "image_sha256": "753f4fa5ed988837b4083bbf17cde1ec8f6e6c6720fd79ea38c2ce402dc962b1",
+      "screen_text": "after-diff.screen.txt",
+      "screen_text_sha256": "d92be7c6b4f6f77c0e97a80146f6bb9a294522261d56406db88db55a97673e40",
+      "ansi": "after-diff.ansi.gz",
+      "ansi_uncompressed_sha256": "36ba52ca242075f1011e1e502c6768999621355a64ce6b6330fcb38aa7c8e522"
+    },
+    {
+      "image": "after-details-expanded.png",
+      "image_sha256": "c0ea4539fce59469b3fafb8fee9c0a0a0595d4fa9666268c632583fc897dc15f",
+      "screen_text": "after-details-expanded.screen.txt",
+      "screen_text_sha256": "36c1d0b1c312195fc6618b92a4cdfa7b78e009f926848c3ab741ddb2e3b742d2",
+      "ansi": "after-details-expanded.ansi.gz",
+      "ansi_uncompressed_sha256": "4633af35ec5c9825efa418098e9af2d3be3b476cbe84e093b775ccbc54c82e8f"
+    }
+  ],
+  "fixture_sha256": {
+    "task.txt": "109c16fceaba348183c94b726fb211c0403be41ab69ef2dcf4d582fa858040c1",
+    "example-before.txt": "afa5ef20d00d3c071955a8928f0190723a93fc564d10e2f3dea15ad5d53c49bf"
+  },
+  "command_sha256": "7c79896cd4b1c69bb02c6053c3b5afd1a6a72f203152f00f1155fc0202942525",
+  "live_verification": {
+    "before": {
+      "bash_executions": 1,
+      "edited_lines": 80,
+      "exact_command_and_edit_arguments": true,
+      "session_sha256": "8b50cb1c84ff9aee3375476f2961aa59352f536311567f006785b890d1b69484",
+      "exit_status": 0,
+      "pid": 96774
+    },
+    "after": {
+      "bash_executions": 1,
+      "edited_lines": 80,
+      "exact_command_and_edit_arguments": true,
+      "session_sha256": "1efb93337686e406ee15f76ae9f5035f671aa82342bb28e920175fe0e2615277",
+      "exit_status": 0,
+      "pid": 96879
+    }
+  },
+  "after_inspector_checks": [
+    "Ctrl+O opened latest diff and preserved draft",
+    "SGR mouse protocol expanded full diff from top",
+    "Search reached after line 79",
+    "Closing restored draft",
+    "Saved session hash unchanged by inspection",
+    "Bash execution count unchanged"
+  ],
+  "fresh_tests": {
+    "command": "pytest -n 2 -q --tb=short sagent/repl/tool_details_test.py sagent/repl/render_test.py sagent/repl/render_diff_test.py sagent/repl/slash_test.py sagent/repl/replay_test.py sagent/repl/keybindings_test.py",
+    "passed": 244
+  },
+  "limits": [
+    "Computer Use denied Terminal access for safety reasons. No native screenshot or physical click claimed.",
+    "Directed isolated fixture. Real provider output, tools and processes; no generated response or tool output inserted."
+  ],
+  "packaging_script_sha256": "24250b7a060f9cf03f907af53627623002d214de39e9496784267bf52f72c78c",
+  "ansi_verification": "Snapshot text had normalized CR/CRLF; exact byte prefixes were recovered from the original continuous PTY logs and checked against every saved screen text cell.",
+  "screen_text_format": "Trailing blank padding omitted; the compressed ANSI preserves exact output."
+}

@@ -1,0 +1,40 @@
+Tool details · 2 items · read only
+┌──────────────────────────────────────────────────────────────────────────────────────────────────┐
+│▸ #1 command · Bash                                                                               │
+│▾ #2 diff · example.txt                                                                           │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+│                                                                                                  │
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────| Command / diff |────────────────────────────────────────┐
+│+after line 56                                                                                   ^│
+│+after line 57                                                                                    │
+│+after line 58                                                                                    │
+│+after line 59                                                                                    │
+│+after line 60                                                                                    │
+│+after line 61                                                                                    │
+│+after line 62                                                                                    │
+│+after line 63                                                                                    │
+│+after line 64                                                                                    │
+│+after line 65                                                                                    │
+│+after line 66                                                                                    │
+│+after line 67                                                                                    │
+│+after line 68                                                                                    │
+│+after line 69                                                                                    │
+│+after line 70                                                                                    │
+│+after line 71                                                                                    │
+│+after line 72                                                                                    │
+│+after line 73                                                                                    │
+│+after line 74                                                                                    │
+│+after line 75                                                                                    │
+│+after line 76                                                                                    │
+│+after line 77                                                                                    │
+│+after line 78                                                                                    │
+│+after line 79                                                                                   v│
+└──────────────────────────────────────────────────────────────────────────────────────────────────┘
+Click / Enter expand · Tab focus · Ctrl+F search · Ctrl+Y copy
+Esc close · F2 mouse on ·
+Raw text: /Users/lokaahai/Documents/ChatGPT/rekursive_tesitng/sagent-pr-live-recheck-20261011/native
+/runs/635-after/project/tmp/sagent-details-a9nw41_p/2.txt

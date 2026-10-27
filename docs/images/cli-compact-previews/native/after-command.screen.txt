@@ -1,0 +1,40 @@
+[OpenAISubscription] sol-6.1
+> Read task.txt and follow its isolated CLI test instructions exactly.
+  Read task.txt
+  Read example.txt
+  Bash
+  ⎿  python3 -c "from pathlib import Path; import time; marker='preview_marker_preview_marker_previe
+     w_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_mar
+     ker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_preview_marker_p
+     … 14 rows omitted …
+     text())+1)); Path('started.txt').write_text('started'); time.sleep(5); print('BASH_LIVE_OK')"
+     Full command: /details 1
+>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+⠴ [37s 4155↑ 316↓ 0↟ 1280↡ $0.01]
