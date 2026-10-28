@@ -83,6 +83,7 @@ from sagent.repl.slash import (
     parse_slash,
 )
 from sagent.repl.slash_handlers import (
+    do_cache,
     do_login,
     do_switch_effort,
     do_switch_model,
@@ -643,6 +644,8 @@ async def _dispatch(
             do_switch_thinking(agent, command, printer)
         case slash.Effort(value=value):
             do_switch_effort(agent, value, printer)
+        case slash.Cache():
+            do_cache(agent, printer)
         case slash.Tool(spec=spec):
             _dispatch_tool(agent, spec, printer)
         case slash.Login():

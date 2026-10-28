@@ -934,6 +934,7 @@ def test_help_text_contains_core_commands() -> None:
     assert "/quit" in HELP_TEXT
     assert "/exit" in HELP_TEXT
     assert "/clear" in HELP_TEXT
+    assert "/cache" in HELP_TEXT
     assert "/send" in HELP_TEXT
     assert "glob" in HELP_TEXT
 

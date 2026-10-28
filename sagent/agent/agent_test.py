@@ -663,18 +663,36 @@ async def test_agent_tool_injects_conditional_agents_md_rule(tmp_path: Path) -> 
 def test_a_self_bounding_tool_is_never_persisted_under_a_host_cap(
     tmp_path: Path,
 ) -> None:
-    """Persisting Read hands back a path only Read opens: it re-spills."""
+    """Historical exemption removed: tools with declared bounds now persist when exceeding host cap."""
 
     @dataclass(slots=True, kw_only=True)
     class _SelfBounded(StubTool):
-        max_result_chars: int = 0
+        max_result_chars: int = 50_000
 
     a = _build_agent(session_dir=tmp_path)
     a.tool_results = ToolResultPolicy(persist_tokens=100)
     body = "x" * 10_000
     out = a.bound_result(ToolResult(call_id="r", content=body), tool=_SelfBounded())
-    assert out.content == body
-    assert not (tmp_path / "tool-results").exists()
+    assert PERSISTED_TAG in out.content
+    assert (tmp_path / "tool-results" / "r.txt").exists()
+    assert (tmp_path / "tool-results" / "r.txt").read_text() == body
+
+
+def test_large_read_result_is_bounded_and_persisted(
+    tmp_path: Path,
+) -> None:
+    """Large Read results (>50k chars) are persisted to disk with <= 600 tokens in context."""
+    a = _build_agent(session_dir=tmp_path)
+    large_payload = "def train_step():\n    pass\n" * 3500  # ~77,000 chars
+    out = a.bound_result(
+        ToolResult(call_id="call_read_large", content=large_payload),
+        tool=Read(),
+    )
+    assert PERSISTED_TAG in out.content
+    assert a.approx_text_tokens(out.content) <= 600
+    on_disk = tmp_path / "tool-results" / "call_read_large.txt"
+    assert on_disk.exists()
+    assert on_disk.read_text() == large_payload
 
 
 @pytest.mark.asyncio
@@ -1745,7 +1763,7 @@ async def test_a_result_that_would_not_fit_the_context_is_persisted(
 async def test_an_exempt_tool_that_would_not_fit_is_refused_not_persisted(
     tmp_path: Path,
 ) -> None:
-    """Read is never persisted: its path back would be Read, which spills again."""
+    """Historical exemption removed: tools declaring max_result_chars=0 now persist when exceeding budget."""
     budget = AgentSettings(
         max_request_tokens=8_000,
         max_response_tokens=1_000,
@@ -1755,9 +1773,9 @@ async def test_an_exempt_tool_that_would_not_fit_is_refused_not_persisted(
 
     [stored] = await _run_one_round(tool, session_dir=tmp_path, budget=budget)
 
-    assert stored.is_error
-    assert "offset and limit" in stored.content
-    assert not (tmp_path / "tool-results").exists()
+    assert not stored.is_error
+    assert PERSISTED_TAG in stored.content
+    assert (tmp_path / "tool-results").exists()
 
 
 @pytest.mark.asyncio
@@ -3600,6 +3618,24 @@ def test_build_system_appends_tool_contributions() -> None:
     out = a.system_prompt()
     assert "root" in out
     assert "(extra-tool-prompt)" in out
+
+
+def test_build_system_renders_constraint_ledger() -> None:
+    """Agent renders protected constraint ledger into system prompt."""
+    a = _build_agent(system="base prompt")
+    a.with_constraint("Never mutate test databases.")
+    a.with_inquiry(
+        "inq_compaction_123",
+        title="Verify context retention",
+        validation="100% of constraints retained",
+    )
+    rendered = a.system_prompt()
+    assert "base prompt" in rendered
+    assert "<protected-constraint-ledger>" in rendered
+    assert "<constraint>Never mutate test databases.</constraint>" in rendered
+    assert '<active-inquiry id="inq_compaction_123">' in rendered
+    assert "<title>Verify context retention</title>" in rendered
+    assert "<validation>100% of constraints retained</validation>" in rendered
 
 
 @pytest.mark.asyncio

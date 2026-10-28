@@ -848,6 +848,7 @@ sagent commands
   /clear                      wipe context (logs preserved on disk)
   /compact [hints]            compact history
   /recompact [hints]          alias for /compact
+  /cache                      prompt-cache hit rate and waste report
 
   /model    [args]            switch model; ids may select context (+200k, +272k)
   /provider <name>            switch provider

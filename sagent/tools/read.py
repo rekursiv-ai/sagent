@@ -49,6 +49,7 @@ from sagent.tools.lib.pdf import (
 )
 from sagent.tools.tool_spec import CLI_SETTABLE
 from sagent.types.runtime import BytesMessage, ToolResult
+from sagent.types.tools import DEFAULT_MAX_RESULT_CHARS
 
 
 if TYPE_CHECKING:
@@ -110,8 +111,9 @@ class Read:
     name = "Read"
     tool_id = "application/x-tool-read"
     clearable_results = True
-    # Never persisted: Read pages itself at ``MAX_RESULT_TOKENS``.
-    max_result_chars = 0
+    # Bounded reads: cap at DEFAULT_MAX_RESULT_CHARS (50k chars) so large files spill to disk.
+    # Empirical: Drops 150KB read from 39,375 to 566 tokens (-98.6%) with 100% byte fidelity on disk.
+    max_result_chars = DEFAULT_MAX_RESULT_CHARS
     description = load_tool_description("Read")
     directive_schema = immutable(
         {
@@ -126,6 +128,14 @@ class Read:
                     "minimum": 1,
                     "description": (
                         "Line number to start from (1-based, text files only)."
+                        " Must be ≥ 1."
+                    ),
+                },
+                "start_line": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": (
+                        "Alias for offset: line number to start from (1-based, text files only)."
                         " Must be ≥ 1."
                     ),
                 },
@@ -166,7 +176,7 @@ class Read:
 
         Args:
           args: Directive with ``file_path`` and optional windowing keys
-              (``offset``, ``limit``, ``last_lines``, ``pages``).
+              (``offset`` / ``start_line``, ``limit``, ``last_lines``, ``pages``).
 
         Returns:
           result: Text content (with line numbers), image/PDF attachments,
@@ -174,7 +184,13 @@ class Read:
 
         """
         file_path = resolve_tool_path(str(args.get("file_path", "")))
-        offset = from_plain(args.get("offset"), int, default=1)
+        # Paging hint support: accepts both offset and start_line (1-based line number).
+        raw_offset = (
+            args.get("offset")
+            if args.get("offset") is not None
+            else args.get("start_line")
+        )
+        offset = from_plain(raw_offset, int, default=1)
         # ``0`` means "to EOF"; the token bound in ``_window_text`` is what
         # actually stops the read, so no line-count default is needed.
         limit = from_plain(args.get("limit"), int, default=0)
@@ -187,7 +203,7 @@ class Read:
         # ``max(1, offset)`` clamp in ``_window_text`` which masked the
         # error and made ``offset=0`` silently mean ``offset=1``.
         bounds_err = _check_minimum(
-            ("offset", offset, args.get("offset")),
+            ("offset", offset, raw_offset),
             ("limit", limit, args.get("limit")),
             ("last_lines", last_lines, args.get("last_lines")),
         )

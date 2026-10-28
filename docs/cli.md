@@ -211,6 +211,16 @@ graceful path as `BackgroundTask cancel persistent:<label>` -- a
 terminal `cancelled` lifecycle record is written before the child shuts
 down. Zero matches surface a visible error.
 
+### Prompt cache diagnostics
+
+Type `/cache` in the interactive REPL to inspect prompt cache performance:
+
+```text
+/cache
+```
+
+Reports total prompt tokens, cached-read tokens, cache hit rate percentage, avoidable misses from prefix mutations, TTL expirations, and estimated wasted USD.
+
 ### Service suspensions
 
 When a model provider returns a recoverable backoff response (HTTP 429,

@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
+import dataclasses
+
 from sagent.agent.cache_waste import (
     CacheMiss,
     detect_cache_miss,
     summarize_cache_waste,
 )
+from sagent.repl.slash_handlers import do_cache
 from sagent.types.cost import TokenCost, TokenCount
 
 
@@ -197,6 +202,49 @@ def test_summarize_cache_waste_aggregates_by_cause() -> None:
     assert totals.miss_count == 3
     assert totals.ttl_expired_count == 1
     assert totals.prefix_mutated_count == 2
+
+
+def test_do_cache_handler_renders_report() -> None:
+    class _Printer:
+        def __init__(self) -> None:
+            self.output = ""
+
+        def write_line(self, msg: str) -> None:
+            self.output += msg
+
+        def write_slash_block(self, msg: str) -> None:
+            self.output += msg
+
+    @dataclasses.dataclass
+    class _MockCostTracker:
+        total: TokenCount = dataclasses.field(
+            default_factory=lambda: TokenCount(
+                request=10_000, cache_read=40_000, response=1_000
+            )
+        )
+        cache_misses: list[CacheMiss] = dataclasses.field(
+            default_factory=lambda: [
+                CacheMiss(
+                    missed_tokens=5_000,
+                    wasted_cost_usd=0.0160,
+                    idle_sec=1.0,
+                    cause="prefix_mutated",
+                )
+            ]
+        )
+
+    @dataclasses.dataclass
+    class _MockAgent:
+        cost_tracker: _MockCostTracker = dataclasses.field(
+            default_factory=_MockCostTracker
+        )
+
+    printer = _Printer()
+    do_cache(cast(Any, _MockAgent()), cast(Any, printer))
+    assert "Prompt Cache Diagnostics:" in printer.output
+    assert "Cache Hit Rate:      80.0%" in printer.output
+    assert "Avoidable Misses:    1" in printer.output
+    assert "$0.0160" in printer.output
 
 
 if __name__ == "__main__":

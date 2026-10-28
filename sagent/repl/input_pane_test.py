@@ -905,6 +905,20 @@ async def test_dispatch_halt_no_printer_swallows_unknown_agent() -> None:
     assert exit_ is False
 
 
+@pytest.mark.asyncio
+async def test_dispatch_cache_calls_do_cache() -> None:
+    """Dispatching slash.Cache calls do_cache handler."""
+    a = _agent()
+    p = RecordingPrinter()
+    with patch.object(
+        input_pane_mod,
+        "do_cache",
+    ) as mock:
+        exit_ = await _dispatch(a, slash.Cache(), p)
+    assert exit_ is False
+    assert mock.called
+
+
 # --- input-pane rendering + PromptToolkitInputSource tests ------------
 # (merged from former repl/prompt_test.py)
 

@@ -20,7 +20,7 @@ from sagent.catalog.custom_typings import (
 )
 from sagent.catalog.table import EXACT_NAME, ModelTable
 from sagent.types.capability import ContextTag, ModelCapability, ModelLimits
-from sagent.types.cost import PriceCatalog, PriceKey, TokenPrice
+from sagent.types.cost import PriceCatalog, PriceKey, ServiceTier, TokenPrice
 
 
 _THIS: Final = Path(__file__).resolve()
@@ -180,7 +180,8 @@ def _prices(row: ModelRow) -> PriceCatalog:
         )
     # ``rate`` raises for a request no card covers; only an undated band-0 card
     # covers every prompt on every day.
-    for tier in {key.service_tier for key in prices}:
+    tiers: set[ServiceTier] = {key.service_tier for key in prices}
+    for tier in tiers:
         if PriceKey(tier) not in prices:
             raise ValueError(
                 f"Tier {tier!r} in {row.model_id!r} has no base card"

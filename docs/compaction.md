@@ -106,7 +106,17 @@ Storage location:
 
 Persisted files are written with owner-only permissions.
 
-`Read` is exempt because it already enforces line/page limits.
+`Read` results exceeding 50,000 characters are saved to disk with a 2,000-character preview and line paging hints (`Read(start_line=...)`).
+
+## Context hygiene and observation pruning
+
+To avoid context exhaustion and provider rate limits during long agent loops without incurring the cost or latency of conversational summarization, Sagent applies continuous, deterministic context hygiene during wire materialization:
+
+- **Bounded file reads:** File reads exceeding 50,000 characters are offloaded to disk with exact line paging hints.
+- **Superseded file read deduplication:** When a file path is re-read in subsequent turns outside the active tail (the most recent 6 turns), earlier read observations are collapsed to a 1-line reference (`[Read of <path> superseded by later turn]`).
+- **Clean bash output scrubbing:** Successful bash commands (`rc=0`) older than 2 turns outside the active tail are collapsed to a 1-line summary (`[Command succeeded: rc=0, N lines elided]`). Failed commands (`rc!=0`) and tracebacks are never scrubbed.
+- **Thinking trace elision:** Chain-of-thought reasoning blocks from assistant turns older than the immediate prior turn ($N-1$) are cleared to save context space while preserving cryptographic thought signatures for provider verification.
+- **Protected constraint ledger:** User constraints, workspace boundaries, and active inquiry identifiers can be registered via `ConstraintLedger` or `agent.with_constraint(...)`, rendering an immutable XML block in the system prompt prefix that survives history compaction.
 
 ## Context budgets
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from sagent.repl.slash import (
+    Cache,
     Clear,
     Compact,
     Defer,
@@ -48,6 +49,11 @@ def test_parse_slash_tasks() -> None:
 
 def test_parse_slash_clear() -> None:
     assert isinstance(parse_slash("/clear"), Clear)
+
+
+def test_parse_slash_cache() -> None:
+    assert isinstance(parse_slash("/cache"), Cache)
+    assert isinstance(parse_slash("  /cache  "), Cache)
 
 
 def test_parse_slash_login() -> None:
