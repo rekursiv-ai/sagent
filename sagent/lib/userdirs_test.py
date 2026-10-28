@@ -4,9 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import os
+import sys
+
 import pytest
 
-from sagent.lib.userdirs import cache_dir, config_dir, data_dir, state_dir
+from sagent.lib.userdirs import (
+    base_dir_variables,
+    cache_dir,
+    config_dir,
+    data_dir,
+    runtime_dir_variables,
+    state_dir,
+)
 
 
 @pytest.fixture
@@ -129,6 +139,79 @@ def test_data_dir_localappdata_override(
 ) -> None:
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData" / "Local"))
     assert data_dir(platform="win32") == tmp_path / "AppData" / "Local"
+
+
+def test_base_dir_variables_are_those_set_and_not_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    # Empty reads as unset, so a child given it would resolve nothing differently.
+    monkeypatch.setenv("XDG_CACHE_HOME", "")
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    monkeypatch.setenv("EDITOR", "vim")
+
+    assert base_dir_variables() == {
+        "HOME": str(tmp_path / "home"),
+        "XDG_CONFIG_HOME": str(tmp_path / "cfg"),
+        "XDG_STATE_HOME": str(tmp_path / "state"),
+    }
+
+
+@pytest.mark.parametrize("plat", ["linux", "darwin", "win32"])
+def test_a_child_given_the_base_dir_variables_alone_resolves_the_same_dirs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    plat: str,
+) -> None:
+    """A service manager starts a child with little of its parent's environment."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    helpers = (data_dir, config_dir, cache_dir, state_dir)
+    parent = [helper(platform=plat) for helper in helpers]
+    given = base_dir_variables()
+
+    monkeypatch.setattr(os, "environ", {})
+    for name, value in given.items():
+        monkeypatch.setenv(name, value)
+
+    assert [helper(platform=plat) for helper in helpers] == parent
+
+
+@pytest.mark.parametrize(
+    ("plat", "made", "found"),
+    [("linux", True, True), ("linux", False, False), ("darwin", True, False)],
+)
+def test_a_runtime_dir_not_set_is_logind_s_where_it_keeps_one(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    plat: str,
+    made: bool,
+    found: bool,
+) -> None:
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(sys, "platform", plat)
+    if made:
+        (tmp_path / str(os.getuid())).mkdir()
+
+    variables = runtime_dir_variables(logind=tmp_path)
+
+    assert variables == (
+        {"XDG_RUNTIME_DIR": str(tmp_path / str(os.getuid()))} if found else {}
+    )
+
+
+def test_a_runtime_dir_set_is_kept_as_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("XDG_RUNTIME_DIR", "/run/user/1001")
+
+    assert runtime_dir_variables(logind=Path("/nowhere")) == {
+        "XDG_RUNTIME_DIR": "/run/user/1001",
+    }
 
 
 if __name__ == "__main__":

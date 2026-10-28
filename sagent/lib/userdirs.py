@@ -63,9 +63,11 @@ import sys
 
 
 __all__ = [
+    "base_dir_variables",
     "cache_dir",
     "config_dir",
     "data_dir",
+    "runtime_dir_variables",
     "state_dir",
 ]
 
@@ -204,3 +206,53 @@ def state_dir(*, platform: str | None = None) -> Path:
     if platform == "darwin":
         return data_dir(platform=platform)
     return Path.home() / ".local" / "state"  # noqa: TID251 -- this module IS the userdirs layout.
+
+
+def base_dir_variables() -> dict[str, str]:
+    """Return the variables the base directories are read from, as set now.
+
+    A child process given them resolves the same base directories as this one,
+    where its own environment would set them otherwise or not at all: a process a
+    service manager starts, say.
+
+    Returns:
+      variables: ``HOME`` (which ``Path.home`` reads), the four ``XDG_*_HOME``
+        and ``LOCALAPPDATA``, each with its value; one unset or empty, which reads
+        as unset, is left out.
+
+    """
+    return {
+        name: value
+        for name in (
+            "HOME",
+            "XDG_DATA_HOME",
+            "XDG_CONFIG_HOME",
+            "XDG_CACHE_HOME",
+            "XDG_STATE_HOME",
+            "LOCALAPPDATA",
+        )
+        if (value := os.environ.get(name, ""))
+    }
+
+
+def runtime_dir_variables(*, logind: Path = Path("/run/user")) -> dict[str, str]:
+    """Return ``XDG_RUNTIME_DIR`` as set now, else the runtime folder logind keeps.
+
+    A login without PAM (sshd's ``UsePAM no``) sets no ``XDG_RUNTIME_DIR``, though
+    logind keeps ``/run/user/<uid>`` for a lingering user's systemd manager, which
+    ``systemctl --user`` finds only through it.
+
+    Args:
+      logind: Where logind keeps each user's runtime folder.
+
+    Returns:
+      variables: ``XDG_RUNTIME_DIR`` with its value; empty where neither is set or
+        found, as on macOS and Windows.
+
+    """
+    if value := os.environ.get("XDG_RUNTIME_DIR", ""):
+        return {"XDG_RUNTIME_DIR": value}
+    if sys.platform in {"darwin", "win32"}:
+        return {}
+    found = logind / str(os.getuid())
+    return {"XDG_RUNTIME_DIR": str(found)} if found.is_dir() else {}
