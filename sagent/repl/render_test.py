@@ -696,7 +696,7 @@ def test_child_event_user_message_emits_block() -> None:
     assert any(isinstance(i, UserMessage) for i in items)
 
 
-def test_child_event_unknown_inner_ignored() -> None:
+def test_child_completion_without_partial_does_not_duplicate_assembled_text() -> None:
     p = RecordingPrinter()
     obs = make_render_observer(p)
     obs(
@@ -705,7 +705,7 @@ def test_child_event_unknown_inner_ignored() -> None:
             inner=ModelResponseComplete(message=AssistantMessage(text="x")),
         ),
     )
-    # No matching atomic translator -> no child block.
+    # Completion is a boundary; its assembled text is not printed again.
     assert p.child_blocks == []
 
 
@@ -770,13 +770,8 @@ def test_nested_child_event_grandchild_reaches_printer() -> None:
     assert any(isinstance(i, ToolLabel) and i.text == "x" for i in items)
 
 
-def test_cross_child_boundary_flushes_pending_stream_text() -> None:
-    """Switching active child label flushes the previous label's stream.
-
-    Without this, a slow child's buffered partial output lingers until
-    its ``ChildDoneEvent`` and renders interleaved with later children
-    -- the wrong slot from the user's point of view.
-    """
+def test_cross_child_boundary_preserves_pending_stream_text() -> None:
+    """Another child's tool label must not force an unfinished reply out."""
     p = RecordingPrinter()
     obs = make_render_observer(p)
     # Buffer streaming text under Agent_0 (no boundary, so it stays).
@@ -786,18 +781,10 @@ def test_cross_child_boundary_flushes_pending_stream_text() -> None:
             inner=ModelResponsePartial(text="incomplete from 0"),
         ),
     )
-    # Switch to Agent_1; should flush Agent_0's buffered text first.
+    # Agent_1's tool event appears immediately, without splitting Agent_0.
     obs(ChildEvent(label="Agent_1", inner=ToolLabel(call_id="c1", text="x")))
-    labels = [label for label, _ in p.child_blocks]
-    assert "Agent_0" in labels, (
-        f"Agent_0's buffered stream text must flush at boundary change;"
-        f" got labels={labels!r}"
-    )
-    agent0_items = next(items for lbl, items in p.child_blocks if lbl == "Agent_0")
-    assert any(
-        isinstance(i, AssistantMessage) and "incomplete from 0" in i.text
-        for i in agent0_items
-    )
+    assert [label for label, _ in p.child_blocks] == ["Agent_1"]
+    assert obs._child_text["Agent_0"] == "incomplete from 0"
 
 
 def test_stream_buf_flushes_at_size_cap() -> None:
