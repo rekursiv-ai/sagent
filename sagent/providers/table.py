@@ -2,7 +2,7 @@
 
 Typical usage example:
 
-  table = ModelTable.from_yaml(path, provider="anthropic", sends=Anthropic.sends)
+  table = anthropic.models("anthropic-cli")  # A section of anthropic.yaml.
   table["opus-5.5"]                         # Its exact name.
   table["claude-opus-5-5"]                  # The vendor's id.
   table["default"]                          # A role: best, default, everyday, utility.
@@ -17,6 +17,8 @@ from __future__ import annotations
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
+from functools import cache
+from importlib.resources import files
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Self, cast, override
 
@@ -50,6 +52,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ModelTable",
     "ModelTags",
+    "models",
 ]
 
 
@@ -101,13 +104,7 @@ class ModelTable(Mapping[str, ModelCapability]):
                 raise ValueError(f"Role {role!r} names no model: {target!r}.")
 
     @classmethod
-    def from_yaml(
-        cls,
-        path: Traversable,
-        *,
-        provider: str,
-        sends: frozenset[ModelSettingName],
-    ) -> Self:
+    def from_yaml(cls, path: Traversable, *, provider: str) -> Self:
         """Read the models one provider serves from a vendor's catalog document.
 
         Layers, lowest first: the reference row, the model's profile, the
@@ -115,13 +112,13 @@ class ModelTable(Mapping[str, ModelCapability]):
         Each replaces whole fields, except that the section's ``thinking``
         replaces only the axes it names. A model the section does not list is
         not served. The section's ``roles`` replace the document's it names.
+        The section's ``sends`` names the settings the provider's requests
+        carry; each other one offers only the row's default, what the vendor
+        does unasked, since a choice nothing sends would change only the label.
 
         Args:
           path: The vendor's YAML document.
           provider: The name of a section under ``providers``.
-          sends: The settings the provider's requests carry. Each other one
-            offers only the row's default, what the vendor does unasked: a
-            choice nothing sends would change only the label.
 
         Returns:
           table: The section's models, validated, and the document's roles.
@@ -138,6 +135,11 @@ class ModelTable(Mapping[str, ModelCapability]):
         if provider not in document.providers:
             raise ValueError(f"The catalog has no provider {provider!r}.")
         section = dict(document.providers[provider])
+        if "sends" not in section:
+            raise ValueError(f"Provider {provider!r} does not say what it sends.")
+        sends = frozenset(
+            from_plain(section.pop("sends"), list[ModelSettingName]),
+        )
         listed = from_plain(
             section.pop("models", {}),
             dict[str, dict[str, object] | None],
@@ -429,6 +431,23 @@ class ModelTags:
                 ),
             ],
         )
+
+
+@cache
+def models(package: str, document: str, *, provider: str) -> ModelTable:
+    """Return the models one section of a packaged catalog document serves.
+
+    Args:
+      package: The package holding the document, as ``sagent.providers.openai``.
+      document: The document's file name, as ``openai.yaml``.
+      provider: The section, as ``openai-sub``.
+
+    Returns:
+      table: Its models, each setting the section does not send fixed at what
+        the vendor does.
+
+    """
+    return ModelTable.from_yaml(files(package) / document, provider=provider)
 
 
 def _choices() -> tuple[ModelSettingName, ...]:

@@ -295,6 +295,9 @@ models:
 
 providers:
   anthropic:
+    sends:
+      [thinking_effort, thinking_budget, thinking_output, service_tier,
+       cache_ttl_sec, manage_context_server_side]
     cache_ttl_sec: [300.0, 3600.0]
     retries_internally: true
     models:
@@ -315,6 +318,7 @@ providers:
       haiku-5.5:
       haiku-4.5:
   anthropic-cli:
+    sends: [thinking_effort]
     # ``claude`` holds the conversation; what it compacts or prunes is its own.
     manage_context_server_side: [true]
     models:

@@ -999,13 +999,21 @@ def test_a_memory_names_the_account_its_model_signs_in_as(
     )
 
 
-def test_every_model_setting_name_is_offered_chosen_and_fixed_when_unsent() -> None:
+def test_every_model_setting_name_is_offered_chosen_and_fixed_when_unsent(
+    tmp_path: Path,
+) -> None:
     """One list of names: a field it adds that a match misses fails here."""
-    unsent = ModelTable.from_yaml(
-        files("sagent.providers.anthropic") / "anthropic.yaml",
-        provider="anthropic",
-        sends=frozenset(),
-    )["opus-5.5"]
+    text = (files("sagent.providers.anthropic") / "anthropic.yaml").read_text()
+    sent = (
+        "\n  anthropic:\n"
+        "    sends:\n"
+        "      [thinking_effort, thinking_budget, thinking_output, service_tier,\n"
+        "       cache_ttl_sec, manage_context_server_side]\n"
+    )
+    assert text.count(sent) == 1
+    path = tmp_path / "unsent.yaml"
+    path.write_text(text.replace(sent, "\n  anthropic:\n    sends: []\n"))
+    unsent = ModelTable.from_yaml(path, provider="anthropic")["opus-5.5"]
     sent = Anthropic.models()["opus-5.5"]
     for name in model_setting_names():
         for value in sent.values(name):

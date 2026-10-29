@@ -213,6 +213,7 @@ models:
 
 providers:
   google:
+    sends: [thinking_effort, thinking_budget, thinking_output]
     retries_internally: true
     models:
       gemini-argon-4.0:
@@ -228,6 +229,7 @@ providers:
   # ``agy``, as ``agy models`` listed them on 2026-10-27: 3.8 Flash alone, its effort
   # the id's suffix (``gemini-3.8-flash-high``).
   google-cli:
+    sends: [thinking_effort]
     roles:
       default: gemini-flash
       best: gemini-flash

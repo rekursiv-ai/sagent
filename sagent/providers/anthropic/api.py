@@ -11,8 +11,6 @@ Typical usage example:
 
 from __future__ import annotations
 
-from functools import cache
-from importlib.resources import files
 from typing import TYPE_CHECKING, ClassVar, override
 
 import asyncio
@@ -23,9 +21,9 @@ import time
 from treekle import from_plain, json_dumps, json_loads
 
 from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
+from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
 from sagent.providers.resources import SharedResources
-from sagent.providers.table import ModelTable
 from sagent.types import AsyncResource
 
 
@@ -40,12 +38,9 @@ if TYPE_CHECKING:
 
     import httpx2
 
-    from sagent.model.capability import (
-        ModelCapability,
-        ModelSettingName,
-        ModelSettings,
-    )
+    from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
+    from sagent.providers.table import ModelTable
     from sagent.providers.types import ProviderSharedResources, UsageWindow
     from sagent.session.types import Attachment
 else:
@@ -57,7 +52,6 @@ else:
 __all__ = [
     "Anthropic",
     "AnthropicModel",
-    "models",
 ]
 
 
@@ -73,18 +67,6 @@ class Anthropic(AsyncResource):
 
     section: ClassVar[str] = "anthropic"
     """The catalog section whose models and settings this provider serves."""
-
-    sends: ClassVar[frozenset[ModelSettingName]] = frozenset(
-        {
-            "thinking_effort",
-            "thinking_budget",
-            "thinking_output",
-            "service_tier",
-            "cache_ttl_sec",
-            "manage_context_server_side",
-        },
-    )
-    """The settings ``wire.encode`` puts in a request; the rest are the vendor's."""
 
     betas: ClassVar[tuple[str, ...]] = ()
     """Beta features every request names, whatever it asks for."""
@@ -130,7 +112,7 @@ class Anthropic(AsyncResource):
           table: Its section's models, offering only the settings it sends.
 
         """
-        return models(cls.section, sends=cls.sends)
+        return anthropic.models(cls.section)
 
     @override
     async def aclose(self) -> None:
@@ -384,25 +366,6 @@ class AnthropicModel(AsyncResource):
             cache_expired=self._answered_at > 0.0
             and idle_sec > self.settings.cache_ttl_sec,
         )
-
-
-@cache
-def models(section: str, *, sends: frozenset[ModelSettingName]) -> ModelTable:
-    """Return the models one section of the Anthropic catalog serves.
-
-    Args:
-      section: The section, as ``anthropic-cli``.
-      sends: The settings its provider's requests carry.
-
-    Returns:
-      table: Its models, each other setting fixed at what the vendor does.
-
-    """
-    return ModelTable.from_yaml(
-        files("sagent.providers.anthropic") / "anthropic.yaml",
-        provider=section,
-        sends=sends,
-    )
 
 
 def _error_body(text: str) -> object:

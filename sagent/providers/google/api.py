@@ -11,8 +11,6 @@ Typical usage example:
 
 from __future__ import annotations
 
-from functools import cache
-from importlib.resources import files
 from typing import TYPE_CHECKING, ClassVar, override
 
 import asyncio
@@ -22,9 +20,9 @@ import os
 from treekle import from_plain, json_dumps, json_loads
 
 from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
+from sagent.providers import google
 from sagent.providers.google import wire
 from sagent.providers.resources import SharedResources
-from sagent.providers.table import ModelTable
 from sagent.types import AsyncResource
 
 
@@ -33,12 +31,9 @@ if TYPE_CHECKING:
 
     import httpx2
 
-    from sagent.model.capability import (
-        ModelCapability,
-        ModelSettingName,
-        ModelSettings,
-    )
+    from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
+    from sagent.providers.table import ModelTable
     from sagent.providers.types import ProviderSharedResources, UsageWindow
     from sagent.session.types import Attachment
 else:
@@ -50,7 +45,6 @@ else:
 __all__ = [
     "Google",
     "GoogleModel",
-    "models",
 ]
 
 
@@ -66,11 +60,6 @@ class Google(AsyncResource):
 
     section: ClassVar[str] = "google"
     """The catalog section whose models and settings this provider serves."""
-
-    sends: ClassVar[frozenset[ModelSettingName]] = frozenset(
-        {"thinking_effort", "thinking_budget", "thinking_output"},
-    )
-    """The settings ``wire.encode`` puts in a request; the rest are the vendor's."""
 
     def __init__(
         self,
@@ -112,7 +101,7 @@ class Google(AsyncResource):
           table: Its section's models, offering only the settings it sends.
 
         """
-        return models(cls.section, sends=cls.sends)
+        return google.models(cls.section)
 
     @override
     async def aclose(self) -> None:
@@ -345,25 +334,6 @@ class GoogleModel(AsyncResource):
             for chunk in reader.feed(event):
                 yield chunk
         yield reader.response()
-
-
-@cache
-def models(section: str, *, sends: frozenset[ModelSettingName]) -> ModelTable:
-    """Return the models one section of the Google catalog serves.
-
-    Args:
-      section: The section, as ``google-cli``.
-      sends: The settings its provider's requests carry.
-
-    Returns:
-      table: Its models, each other setting fixed at what the vendor does.
-
-    """
-    return ModelTable.from_yaml(
-        files("sagent.providers.google") / "google.yaml",
-        provider=section,
-        sends=sends,
-    )
 
 
 # Not every error body is JSON, and one that is not still says what failed.

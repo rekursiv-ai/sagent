@@ -41,7 +41,7 @@ from treekle import ReadError, from_plain, json_dumps, json_loads, mutable
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import AuthError, DisconnectedError, RateLimitedError
 from sagent.model.types import Response, TextChunk
-from sagent.providers.google.api import models
+from sagent.providers import google
 from sagent.providers.resources import SharedResources
 from sagent.session.types import (
     AgentToAgentMessage,
@@ -65,7 +65,6 @@ if TYPE_CHECKING:
 
     from sagent.model.capability import (
         ModelCapability,
-        ModelSettingName,
         ModelSettings,
     )
     from sagent.model.types import Request
@@ -96,9 +95,6 @@ class GoogleCLI(AsyncResource):
 
     section: ClassVar[str] = "google-cli"
     """The catalog section whose models and settings this provider serves."""
-
-    sends: ClassVar[frozenset[ModelSettingName]] = frozenset({"thinking_effort"})
-    """The settings ``agy`` takes, in its model id; the rest are its own."""
 
     def __init__(
         self,
@@ -143,7 +139,7 @@ class GoogleCLI(AsyncResource):
           table: Its section's models, offering only the settings it sends.
 
         """
-        return models(cls.section, sends=cls.sends)
+        return google.models(cls.section)
 
     @override
     async def aclose(self) -> None:
