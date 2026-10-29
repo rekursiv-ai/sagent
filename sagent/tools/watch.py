@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from sagent.agent.team import Team
 from sagent.runtime import types
-from sagent.runtime.exceptions import describe
+from sagent.runtime.exceptions import describe, local_time
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
@@ -124,6 +124,13 @@ class Feed:
             self.pending.append(f"[failed] {describe(event.exception)}")
         elif isinstance(event, types.ModelResponseCancelled):
             self.pending.append("[halted]")
+        elif isinstance(event, types.ModelCallSuspended):
+            if not event.opens_a_quota_wait:
+                return
+            self.pending.append(
+                f"[waiting until {local_time(event.until)}]"
+                f" {describe(event.exception)}",
+            )
         elif isinstance(event, types.AgentIdle):
             agent = self.team.get(self.watched)
             # Woken again at once, as by a nudge: what it did goes, not the idle.
@@ -131,7 +138,9 @@ class Feed:
                 self.send()
                 return
             if self.worked:
+                # pragma: no mutate start -- only its truth is read; None is as false.
                 self.worked = False
+                # pragma: no mutate end
                 self.pending.append(
                     f"[idle: {self.watched} does nothing until messaged]",
                 )

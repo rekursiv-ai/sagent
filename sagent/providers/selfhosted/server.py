@@ -1,12 +1,12 @@
 """Hugging Face causal LMs, loaded into this process and run with transformers.
 
 A model is named by its Hugging Face repo id or local snapshot, with options
-after ``+`` in any order: a device (``cuda``, ``mps``, ``cpu``, or ``auto`` to
+after ``+`` in any order: a device (``cuda``, ``mps``, ``cpu``, or ``shard`` to
 shard across every GPU), a dtype (``bfloat16``, ``float16``, ``float32``),
-``compile``, and a context size (``large``, ``200k``). Lookup reads nothing: the
-config, which states the window, is read when the model's settings are first
-asked for, and the weights load on the first request. Both are shared by every
-model the provider hands out for that repo.
+``compile``, and a context size (``fullcontext``, ``200k``). Lookup reads
+nothing: the config, which states the window, is read when the model's
+settings are first asked for, and the weights load on the first request. Both
+are shared by every model the provider hands out for that repo.
 
 The model is told about tools by its chat template, and its calls are read
 back out of the text: Qwen's ``<tool_call>`` JSON, and DeepSeek's and Kimi's
@@ -385,19 +385,21 @@ def _spec(name: str) -> tuple[_Spec, ContextSizeName | int]:
     path, *options = name.split("+")
     if not path:
         raise ValueError("A local model's name must start with a repo id or path.")
-    devices = ("auto", "cpu", "cuda", "mps")
+    # Each a word of no tag's kind, which a model line keeps in the model: one
+    # spelled as a tag (``auto``, a tier) would be lifted off before it got here.
+    devices: dict[str, Literal["auto", "cpu", "cuda", "mps"]] = {
+        "shard": "auto",
+        "cpu": "cpu",
+        "cuda": "cuda",
+        "mps": "mps",
+    }
     dtypes = ("bfloat16", "float16", "float32")
     spec = _Spec(path=str(Path(path).expanduser()))
     size: ContextSizeName | int = "fullcontext"
     seen: set[str] = set()
     for raw in options:
         option = raw.removeprefix("torch.")
-        # A load option first: the device ``auto`` is a tier's word too.
-        named = (
-            None
-            if option in (*devices, *dtypes, "compile", "no-compile")
-            else ModelTags.parse(f"{path}+{raw}").context
-        )
+        named = ModelTags.parse(f"+{raw}").context
         kind = (
             "device"
             if option in devices
@@ -427,10 +429,7 @@ def _spec(name: str) -> tuple[_Spec, ContextSizeName | int]:
         if named is not None:
             size = named
         elif kind == "device":
-            spec = replace(
-                spec,
-                device=cast(Literal["auto", "cpu", "cuda", "mps"], option),
-            )
+            spec = replace(spec, device=devices[option])
         elif kind == "dtype":
             spec = replace(
                 spec,

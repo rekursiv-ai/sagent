@@ -26,6 +26,15 @@ def test_a_retryable_error_carries_the_advised_wait() -> None:
     assert str(error) == "slow down"
 
 
+@pytest.mark.parametrize(
+    ("advised", "wait_sec"),
+    [(-3.0, 0.0), (691_200.0, 691_200.0), (999_999.0, 691_200.0)],
+)
+def test_a_wait_is_at_most_eight_days(advised: float, wait_sec: float) -> None:
+    """A spent weekly window refills up to seven days away; more is a bad clock."""
+    assert OverloadedError("x", retry_after_sec=advised).retry_after_sec == wait_sec
+
+
 def test_no_advised_wait_is_zero() -> None:
     assert RetryableError("x").retry_after_sec == 0.0
     assert DisconnectedError("x").retry_after_sec == 0.0

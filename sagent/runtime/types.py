@@ -12,7 +12,7 @@ from typing import Literal, Protocol
 
 import asyncio
 
-from sagent.model.exceptions import RetryableError
+from sagent.model.exceptions import RateLimitedError, RetryableError
 from sagent.model.types import Response
 from sagent.session.types import (
     AgentToAgentMessage,
@@ -335,6 +335,13 @@ class ModelCallSuspended:
 
     attempt: int
     """Failures in a row, this one counted; a ``Retry`` starts them again."""
+
+    # The rest are a backoff's waits, minutes at most: telling each would wake
+    # whoever is told every few seconds of an outage.
+    @property
+    def opens_a_quota_wait(self) -> bool:
+        """Whether this is the first wait of a spent quota, which may last days."""
+        return isinstance(self.exception, RateLimitedError) and self.attempt == 1
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

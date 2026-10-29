@@ -504,6 +504,9 @@ async def test_a_failed_turn_raises_what_agy_says(
             155 * 3_600 + 19 * 60 + 17,
         ),
         ("RESOURCE_EXHAUSTED (code 429): Resets in 45s.", 45),
+        # Go spells a duration under a second in milliseconds.
+        ("RESOURCE_EXHAUSTED (code 429): Resets in 500ms.", 0.5),
+        ("RESOURCE_EXHAUSTED (code 429): Resets in 1m0.5s.", 60.5),
         ("RESOURCE_EXHAUSTED: quota exceeded", 0),
     ],
 )

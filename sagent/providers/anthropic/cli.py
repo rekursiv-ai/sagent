@@ -539,8 +539,8 @@ class _Claude:
         stdout = self.process.stdout
         if stdout is None:
             raise ValueError("claude was started without stdout")
-        # Which window stopped the turn, and when it resets, as the API's headers say.
-        spent: dict[str, str] = {}
+        # The window last reported, and when it resets, as the API's headers say.
+        unified: dict[str, str] = {}
         while True:
             # A model that goes quiet this long has dropped the turn.
             raw = await asyncio.wait_for(stdout.readline(), timeout=600.0)
@@ -548,11 +548,11 @@ class _Claude:
                 raise DisconnectedError("claude exited before its answer")
             event = json_loads(raw, dict[str, object])
             if event.get("type") == "rate_limit_event":
-                spent = _spent(event)
+                unified = _unified_headers(event)
                 continue
             if event.get("type") == "result":
                 if event.get("is_error") is True:
-                    raise _failure(event, headers=spent)
+                    raise _failure(event, headers=unified)
                 return
             if event.get("type") != "stream_event":
                 continue
@@ -661,18 +661,19 @@ def _digest(tools: Sequence[Tool]) -> str:
     return hashlib.sha256(json_dumps(offered).encode()).hexdigest()
 
 
-def _spent(event: dict[str, object]) -> dict[str, str]:
-    """Return a ``rate_limit_event`` that stopped the turn as the API's headers say it."""
+def _unified_headers(event: dict[str, object]) -> dict[str, str]:
+    """Return a ``rate_limit_event`` as the API's headers say it; ``wire`` judges it."""
     info = from_plain(event.get("rate_limit_info"), dict[str, object], default={})
-    resets_at = info.get("resetsAt")
-    if info.get("status") != "rejected" or not isinstance(resets_at, (int, float)):
-        return {}
-    return {
-        "anthropic-ratelimit-unified-reset": str(resets_at),
+    headers = {
+        "anthropic-ratelimit-unified-status": str(info.get("status") or ""),
         "anthropic-ratelimit-unified-representative-claim": str(
             info.get("rateLimitType") or "",
         ),
     }
+    resets_at = info.get("resetsAt")
+    if isinstance(resets_at, (int, float)):
+        headers["anthropic-ratelimit-unified-reset"] = str(resets_at)
+    return headers
 
 
 def _failure(event: dict[str, object], *, headers: dict[str, str]) -> Exception:

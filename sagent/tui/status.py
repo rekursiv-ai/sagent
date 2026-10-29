@@ -75,12 +75,14 @@ class Status:
             self._call, self._streamed = now, 0
         elif isinstance(event, types.ModelResponsePartial):
             self._streamed += len(event.text)
+        # A suspended call has ended too: the wait is the runtime's, not the call's.
         elif isinstance(
             event,
             (
                 types.ModelResponseComplete,
                 types.ModelResponseCancelled,
                 types.ModelResponseError,
+                types.ModelCallSuspended,
             ),
         ):
             if isinstance(event, types.ModelResponseComplete):

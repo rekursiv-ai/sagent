@@ -249,8 +249,10 @@ class ModelTags:
 
     ``work@anthropic/opus-5.5+fullcontext+medthink+fast budget=auto``. Tags
     follow the model in any order and case; each word belongs to one kind, so
-    position decides nothing. A word of no kind, such as SelfHosted's ``+cuda``,
-    stays in the model. Choices follow after spaces.
+    position decides nothing, and a value tagged twice is tagged once. A word of
+    no kind, such as SelfHosted's ``+cuda``, stays in the model. Choices follow
+    after a space, from the first word holding ``=``; the model before them may
+    hold spaces, as a local path does.
     """
 
     model: str
@@ -284,14 +286,15 @@ class ModelTags:
           tags: The model, and what its tags and choices name.
 
         Raises:
-          UnsupportedTagError: Two tags name different sizes, two an effort, or
-            two a tier; a word after the tags is no ``CHOICE=VALUE``, or names a
-            choice twice.
+          UnsupportedTagError: Two tags name different sizes, efforts, or
+            tiers; a word after the first choice is no ``CHOICE=VALUE``, or
+            names a choice twice.
 
         """
-        spec, *after = line.split()
+        # Choices start at the first word holding ``=``: a local path may hold spaces.
+        spec, *after = re.split(r"\s+(?=\S*=)", line.strip(), maxsplit=1)
         choices: dict[str, str] = {}
-        for word in after:
+        for word in after[0].split() if after else ():
             choice, equals, value = word.partition("=")
             if not equals:
                 raise UnsupportedTagError(
@@ -305,17 +308,18 @@ class ModelTags:
             choices[choice] = value
         model, *words = spec.split("+")
         kept: list[str] = [model]
+        # Each kind keeps one entry per value: a value spelled twice is one tag.
         sizes: dict[ContextSizeName | int, str] = {}
-        effort: list[ThinkingEffort] = []
-        tier: list[ServiceTier] = []
+        effort: dict[ThinkingEffort, None] = {}
+        tier: dict[ServiceTier, None] = {}
         for raw in words:
             word = raw.lower()
             if (size := _size(word)) is not None:
                 sizes.setdefault(size, f"+{word}")
             elif (named := _effort(word)) is not None:
-                effort.append(named)
+                effort[named] = None
             elif (served := _tier(word)) is not None:
-                tier.append(served)
+                tier[served] = None
             else:
                 kept.append(raw)
         if len(sizes) > 1:
@@ -331,8 +335,8 @@ class ModelTags:
         return cls(
             model="+".join(kept),
             context=next(iter(sizes), None),
-            effort=effort[0] if effort else None,
-            service_tier=tier[0] if tier else None,
+            effort=next(iter(effort), None),
+            service_tier=next(iter(tier), None),
             choices=MappingProxyType(choices),
         )
 

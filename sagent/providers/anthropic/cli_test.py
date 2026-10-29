@@ -622,6 +622,40 @@ async def test_a_spent_window_waits_for_its_reset(
 
 
 @pytest.mark.asyncio
+async def test_a_throttle_while_the_window_allows_waits_no_reset(
+    claude: _Stub,
+    shared: _Resources,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An allowed window names its reset too; a 429 under it is a throttle."""
+    monkeypatch.setattr(wire.time, "time", lambda: 1_793_285_478.0)
+    claude.script(
+        [
+            _rate_limit_event("allowed", resets_at=1_793_451_600, kind="seven_day"),
+            _SPENT,
+        ],
+    )
+    with pytest.raises(RateLimitedError) as raised:
+        await _stream(_model(shared), Request(records=(UserMessage(content="hi"),)))
+    assert (raised.value.retry_after_sec, raised.value.limit) == (0.0, "")
+
+
+@pytest.mark.asyncio
+async def test_a_spent_window_with_no_reset_is_still_named(
+    claude: _Stub,
+    shared: _Resources,
+) -> None:
+    event = _rate_limit_event("rejected", resets_at=0, kind="five_hour")
+    info = event["rate_limit_info"]
+    assert isinstance(info, dict)
+    del info["resetsAt"]
+    claude.script([event, _SPENT])
+    with pytest.raises(RateLimitedError) as raised:
+        await _stream(_model(shared), Request(records=(UserMessage(content="hi"),)))
+    assert (raised.value.retry_after_sec, raised.value.limit) == (0.0, "5-hour")
+
+
+@pytest.mark.asyncio
 async def test_a_window_still_allowed_says_nothing_of_the_wait(
     claude: _Stub,
     shared: _Resources,

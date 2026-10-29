@@ -101,7 +101,7 @@ Add `--log-level DEBUG` or set `SAGENT_LOG_LEVEL=DEBUG` when debugging local
 model load, device placement, prompt rendering, generation, or tool-call
 parsing.
 
-Supported SelfHosted options are `cpu`, `cuda`, `mps`, `auto`, `float16`,
+Supported SelfHosted options are `cpu`, `cuda`, `mps`, `shard`, `float16`,
 `bfloat16`, `float32`, and `compile`. Options can appear in any order, but each
 category can appear only once.
 

@@ -796,17 +796,19 @@ def _failure(result: Mapping[str, object]) -> Exception:
 # (antigravity-cli#1018), "Your quota will reset after 155h19m17s." before it.
 def _reset_sec(error: str) -> float:
     """Return the wait a spent quota's message names; ``0`` when it names none."""
+    # Go's spelling of a duration: ``155h19m17s``, ``1m0.5s``, or ``500ms``.
     found = re.search(
-        r"reset(?:s in| after) ((?:\d+h)?(?:\d+m)?(?:\d+(?:\.\d+)?s)?)",
+        r"reset(?:s in| after) (?:(\d+)h)?(?:(\d+)m(?!s))?(?:(\d+(?:\.\d+)?)(m?)s)?",
         error,
     )
-    if found is None or not found[1]:
+    if found is None:
         return 0.0
-    parts = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?", found[1])
-    hours, minutes, seconds = (
-        (float(p or 0) for p in parts.groups()) if parts else (0, 0, 0)
+    hours, minutes, seconds, milli = found.groups()
+    return (
+        float(hours or 0) * 3_600
+        + float(minutes or 0) * 60
+        + float(seconds or 0) / (1_000 if milli else 1)
     )
-    return min(hours * 3_600 + minutes * 60 + seconds, 691_200.0)
 
 
 def _object(value: object) -> dict[str, object]:

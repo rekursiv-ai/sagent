@@ -688,7 +688,7 @@ async def test_a_successor_restores_what_a_model_was_left_with() -> None:
     assert again.settings.context_size.tokens == 100_000
 
 
-def test_describe_spells_the_model_as_its_name_takes_it() -> None:
+def test_a_model_line_spells_the_model_as_its_name_takes_it() -> None:
     model = _windowed()["wide+300k"]
     model.settings = replace(
         model.settings,

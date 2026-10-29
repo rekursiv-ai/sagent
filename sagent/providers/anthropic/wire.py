@@ -410,9 +410,11 @@ def to_exception(
         return AuthError(text)
     wait_sec = _retry_after(headers or {}, rate_limited=status == 429)
     if status == 429 or kind == "rate_limit_error":
-        claim = {key.lower(): value for key, value in (headers or {}).items()}.get(
-            "anthropic-ratelimit-unified-representative-claim",
-            "",
+        lower = {key.lower(): value for key, value in (headers or {}).items()}
+        claim = (
+            lower.get("anthropic-ratelimit-unified-representative-claim", "")
+            if _stopped(lower)
+            else ""
         )
         return RateLimitedError(text, retry_after_sec=wait_sec, limit=_limit(claim))
     if (
@@ -754,31 +756,29 @@ def _out_of_credit(message: str) -> bool:
 
 def _retry_after(headers: Mapping[str, str], *, rate_limited: bool) -> float:
     """Return the advised wait in seconds; ``0`` when the server gave none."""
-    # At most eight days: a spent weekly window refills up to seven days away.
     lower = {key.lower(): value for key, value in headers.items()}
     # A spent window says when it resets to the second; ``retry-after`` rounds.
     reset = _number(lower.get("anthropic-ratelimit-unified-reset"))
-    if (
-        rate_limited
-        and reset is not None
-        and lower.get("anthropic-ratelimit-unified-status") == "rejected"
-    ):
-        return min(max(reset - time.time(), 0.0), 691_200.0)
+    if rate_limited and reset is not None and _stopped(lower):
+        return reset - time.time()
     raw = lower.get("retry-after")
     seconds = _number(raw)
     if seconds is not None:
-        return min(max(seconds, 0.0), 691_200.0)
-    at: float | None = None
-    if raw is not None:
-        try:
-            at = parsedate_to_datetime(raw).timestamp()
-        except (TypeError, ValueError):
-            at = None
-    # The unified reset is on every reply, as when the window rolls over; it
-    # is a wait only for a request the limit stopped.
-    if at is None and rate_limited:
-        at = _number(lower.get("anthropic-ratelimit-unified-reset"))
-    return 0.0 if at is None else min(max(at - time.time(), 0.0), 691_200.0)
+        return seconds
+    try:
+        return (
+            0.0 if raw is None else parsedate_to_datetime(raw).timestamp() - time.time()
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# The unified headers are on every reply, as when the window rolls over, and
+# name the window nearest its limit, spent or not; an allowed 429 is a throttle.
+def _stopped(lower: Mapping[str, str]) -> bool:
+    """Whether the unified window stopped the request: its status says, or is absent."""
+    status = lower.get("anthropic-ratelimit-unified-status")
+    return status is None or _blocking(status)
 
 
 def _limit(claim: str) -> str:

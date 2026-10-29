@@ -737,7 +737,6 @@ def _out_of_credit(message: str) -> bool:
 
 def _retry_after(fields: Mapping[str, object], *, headers: Mapping[str, str]) -> float:
     """Return the advised wait in seconds; ``0`` when the server gave none."""
-    # At most eight days: a spent weekly quota refills up to seven days away.
     for detail in _objects(fields.get("details")):
         kind, delay = detail.get("@type"), detail.get("retryDelay")
         if (
@@ -747,10 +746,10 @@ def _retry_after(fields: Mapping[str, object], *, headers: Mapping[str, str]) ->
         ):
             seconds = _number(delay.removesuffix("s"))
             if seconds is not None:
-                return min(max(seconds, 0.0), 691_200.0)
+                return seconds
     lower = {key.lower(): value for key, value in headers.items()}
     seconds = _number(lower.get("retry-after"))
-    return 0.0 if seconds is None else min(max(seconds, 0.0), 691_200.0)
+    return 0.0 if seconds is None else seconds
 
 
 def _number(raw: str | None) -> float | None:

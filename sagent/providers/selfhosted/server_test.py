@@ -24,6 +24,7 @@ import torch
 
 from sagent.model.exceptions import UnknownModelError
 from sagent.model.types import Request, Response, TextChunk
+from sagent.providers.catalog import successor
 from sagent.providers.resources import SharedResources
 from sagent.providers.selfhosted import server
 from sagent.providers.selfhosted.server import SelfHosted, SelfHostedModel
@@ -234,7 +235,7 @@ def test_a_name_that_is_no_repo_id_or_path_is_unknown(name: str) -> None:
             server._Spec(path="Org/M", device="cuda", dtype="bfloat16"),
         ),
         (
-            "Org/M+torch.float16+compile+auto",
+            "Org/M+torch.float16+compile+shard",
             server._Spec(path="Org/M", device="auto", dtype="float16", compile=True),
         ),
         ("Org/M+no-compile+mps", server._Spec(path="Org/M", device="mps")),
@@ -272,6 +273,30 @@ def test_a_name_may_carry_a_size_beside_its_load_options(
     assert (spec.path, named) == ("Org/M", size)
 
 
+@pytest.mark.asyncio
+async def test_a_switch_keeps_every_load_option_the_name_gives(
+    loads: list[server._Spec],
+) -> None:
+    """A model line lifts its tags first: an option spelled as one would vanish."""
+    local = SelfHosted()
+    model = await successor(
+        local.__getitem__,
+        "Org/M+shard+bfloat16+compile+lowthink",
+        current=local["Org/N"],
+    )
+    assert isinstance(model, SelfHostedModel)
+    await _reply(model)
+    assert loads == [
+        server._Spec(path="Org/M", device="auto", dtype="bfloat16", compile=True),
+    ]
+    assert model.settings.thinking_effort == "low"
+
+
+def test_a_path_may_hold_a_space() -> None:
+    spec, named = server._spec("/m/My Model+200k+cuda")
+    assert (spec.path, spec.device, named) == ("/m/My Model", "cuda", 200_000)
+
+
 @pytest.mark.parametrize(
     ("name", "message"),
     [
@@ -282,6 +307,7 @@ def test_a_name_may_carry_a_size_beside_its_load_options(
         ("Org/M+compile+no-compile", "compile is given twice"),
         ("Org/M+fullcontext+200k", "size is given twice"),
         ("Org/M+fast", "Unknown option 'fast'"),
+        ("Org/M+auto", "Unknown option 'auto'"),
         ("Org/M+", "Unknown option ''"),
     ],
 )
@@ -752,7 +778,7 @@ def test_a_config_that_states_no_window_is_refused(
         ("Org/M", False, True, "cuda", {}),
         ("Org/M", False, False, None, {}),
         ("Org/M+cpu", True, True, "cpu", {}),
-        ("Org/M+auto", False, True, None, {"device_map": "auto"}),
+        ("Org/M+shard", False, True, None, {"device_map": "auto"}),
         ("Org/M+bfloat16", False, False, None, {"dtype": torch.bfloat16}),
         ("Org/M+float16", False, False, None, {"dtype": torch.float16}),
         ("Org/M+float32", False, False, None, {"dtype": torch.float32}),

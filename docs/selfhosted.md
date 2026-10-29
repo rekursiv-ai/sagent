@@ -67,7 +67,7 @@ SelfHosted model specs are the HuggingFace repo ID or local path followed by
 MODEL[+DEVICE][+DTYPE][+compile]
 ```
 
-Supported devices are `cpu`, `cuda`, `mps`, and `auto`. `auto` delegates
+Supported devices are `cpu`, `cuda`, `mps`, and `shard`. `shard` delegates
 placement to `accelerate` through `device_map="auto"` so large models can shard
 across visible GPUs. When no device option is provided, SelfHosted uses MPS if
 available, then CUDA if available, then the PyTorch CPU default.

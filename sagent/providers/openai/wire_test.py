@@ -363,6 +363,38 @@ def test_a_chatgpt_logins_spent_window_is_named(
     assert error.limit == limit
 
 
+def test_of_two_spent_windows_the_one_reset_last_is_named(now: float) -> None:
+    """Its reset is the wait: the other window refills first."""
+    headers = {
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-used-percent": "100",
+        "x-codex-primary-reset-after-seconds": "600",
+        "x-codex-secondary-window-minutes": "10080",
+        "x-codex-secondary-used-percent": "100",
+        "x-codex-secondary-reset-at": str(now + 86_400),
+    }
+    body = {"error": {"message": "limit", "type": "usage_limit_reached"}}
+    error = wire.to_exception(429, body=body, headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert error.limit == "weekly"
+    assert error.retry_after_sec == 86_400.0
+
+
+def test_a_spent_window_with_no_advice_waits_to_its_reset(now: float) -> None:
+    headers = {
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-used-percent": "100",
+        "x-codex-primary-reset-after-seconds": "600",
+        "x-codex-secondary-window-minutes": "10080",
+        "x-codex-secondary-used-percent": "40",
+        "x-codex-secondary-reset-at": str(now + 86_400),
+    }
+    body = {"error": {"message": "limit", "type": "usage_limit_reached"}}
+    error = wire.to_exception(429, body=body, headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert (error.limit, error.retry_after_sec) == ("5-hour", 600.0)
+
+
 def test_an_overload_carries_the_advised_wait() -> None:
     error = wire.to_exception(503, body="busy", headers={"retry-after": "3"})
     assert isinstance(error, OverloadedError)

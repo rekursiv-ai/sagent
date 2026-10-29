@@ -39,12 +39,14 @@ class RetryableError(Exception):
     Args:
       message: What failed.
       retry_after_sec: The wait the server advised; ``0`` when it gave none.
+        Kept between ``0`` and eight days: a spent weekly window refills up to
+        seven days away, so a longer wait is a bad clock.
 
     """
 
     def __init__(self, message: str, *, retry_after_sec: float = 0.0) -> None:
         super().__init__(message)
-        self.retry_after_sec = retry_after_sec
+        self.retry_after_sec = min(max(retry_after_sec, 0.0), 691_200.0)
 
 
 class RateLimitedError(RetryableError):
@@ -106,4 +108,4 @@ class UnknownProviderError(ValueError):
 
 
 class UnsupportedTagError(ValueError):
-    """The name asks for a context window the model does not offer."""
+    """The name's tags conflict, or name a size or choice it cannot have."""

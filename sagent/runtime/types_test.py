@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Final
+
 import pytest
 
 from sagent.model.cost import TokenCost, TokenCount
@@ -24,6 +27,27 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+
+
+_CWD: Final = Path(__file__).resolve().parent
+
+
+def test_whatever_watches_a_call_fail_decides_about_a_suspended_one_too() -> None:
+    """A suspension ends a call as a failure does, but not the turn.
+
+    An observer that hears only the failure leaves a waiting agent looking
+    busy, or its parent untold. ``Agent`` waits a suspension out, as its
+    ``persistent_retry`` promises.
+    """
+    package = _CWD.parent
+    unheard = {
+        str(path.relative_to(package))
+        for path in package.rglob("*.py")
+        if not path.name.endswith("_test.py")
+        and "ModelResponseError" in (text := path.read_text())
+        and "ModelCallSuspended" not in text
+    }
+    assert unheard == {"agent/agent.py"}
 
 
 def test_agent_text_is_labeled_with_its_sender() -> None:

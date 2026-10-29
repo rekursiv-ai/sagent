@@ -378,16 +378,17 @@ def _retry_after(headers: Mapping[str, str], *, fields: Mapping[str, object]) ->
         wait = _number(str(fields.get("resets_in_seconds", "")))
     if wait is None and (at := _number(str(fields.get("resets_at", "")))) is not None:
         wait = at - time.time()
-    if wait is None:
-        delays = [
-            delay
-            for resource in ("requests", "tokens")
-            if (delay := _duration(lower.get(f"x-ratelimit-reset-{resource}")))
-            is not None
-        ]
-        wait = max(delays, default=0.0)
-    # Eight days: a spent weekly window refills up to seven days away.
-    return min(max(wait, 0.0), 691_200.0)
+    if wait is not None:
+        return wait
+    spent = _spent(headers)
+    if spent is not None and spent.resets_at is not None:
+        return spent.resets_at - time.time()
+    delays = [
+        delay
+        for resource in ("requests", "tokens")
+        if (delay := _duration(lower.get(f"x-ratelimit-reset-{resource}"))) is not None
+    ]
+    return max(delays, default=0.0)
 
 
 def _number(raw: str | None) -> float | None:
@@ -414,18 +415,27 @@ def _duration(raw: str | None) -> float | None:
     return sum(float(part.group(1)) * unit_sec[part.group(2)] for part in parts)
 
 
+# Of two spent, the one that resets last: the wait is until it refills.
+def _spent(headers: Mapping[str, str]) -> UsageWindow | None:
+    """Return the ChatGPT login's spent window that resets last; ``None`` for none."""
+    spent = [
+        window
+        for window in rate_limits(headers)
+        if window.blocked and window.label not in ("requests", "tokens")
+    ]
+    if not spent:
+        return None
+    return max(spent, key=lambda window: window.resets_at or 0.0)
+
+
 def _limit(headers: Mapping[str, str]) -> str:
     """Return the name of a ChatGPT login's spent window, as ``5-hour``; else ``""``."""
-    lower = {key.lower(): value for key, value in headers.items()}
-    for slot in ("primary", "secondary"):
-        used = _number(lower.get(f"x-codex-{slot}-used-percent"))
-        minutes = _number(lower.get(f"x-codex-{slot}-window-minutes"))
-        if used is None or used < 100 or minutes is None or minutes <= 0:
-            continue
-        span = _span(int(minutes))
-        unit = {"d": "day", "h": "hour", "m": "minute"}[span[-1]]
-        return {"7d": "weekly", "1d": "daily"}.get(span, f"{span[:-1]}-{unit}")
-    return ""
+    spent = _spent(headers)
+    if spent is None:
+        return ""
+    span = spent.label
+    unit = {"d": "day", "h": "hour", "m": "minute"}[span[-1]]
+    return {"7d": "weekly", "1d": "daily"}.get(span, f"{span[:-1]}-{unit}")
 
 
 def _span(minutes: int) -> str:

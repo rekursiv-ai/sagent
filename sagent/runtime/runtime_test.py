@@ -5064,6 +5064,66 @@ async def test_any_failure_of_the_model_switched_away_from_calls_the_new_one() -
 
 
 @pytest.mark.asyncio
+async def test_a_call_failing_before_it_streams_on_a_new_model_is_its_failure() -> None:
+    """Read as the old model's, the failure was dropped and the gate called forever."""
+
+    def no_room() -> int:
+        raise RuntimeError("no room")
+
+    async with Harness(reply("never")) as h:
+        h.runtime.model = h.provider["scripted"]
+        h.runtime.reply_room = no_room
+        h.push(_user("hi"))
+        await h.seen(ModelResponseError)
+        await spin()
+    assert h.count(ModelCallStarted) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_call_that_ends_a_suspension_leaves_nothing_stopped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Left stopped, a later switch queued a ``Retry`` behind the next stream."""
+    timers = _recording_timers(monkeypatch)
+    async with Harness(OverloadedError("busy"), reply("ok")) as h:
+        h.runtime.persistent_retry = True
+        h.push(_user("go"))
+        await h.seen(ModelCallSuspended)
+        h.runtime.service_suspended_until = time.time() - 1
+        ((_, wake, args),) = timers
+        wake(*args)
+        await h.seen(ModelIdle)
+        assert (h.runtime.stopped, h.runtime.service_suspended_until) == (False, None)
+
+
+@pytest.mark.asyncio
+async def test_a_peer_writing_during_a_suspension_waits_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only the user, who may have switched accounts, ends a wait early.
+
+    A call sent for a peer would meet the same spent window again.
+    """
+    timers = _recording_timers(monkeypatch)
+    async with Harness(
+        RateLimitedError("spent", retry_after_sec=600.0),
+        reply("ok"),
+    ) as h:
+        h.runtime.persistent_retry = True
+        h.push(_user("go"))
+        await h.seen(ModelCallSuspended)
+        h.push(AgentToAgentMessage(sender="peer", content="still there?"))
+        await spin()
+        assert h.count(ModelCallStarted) == 1
+        assert h.runtime.service_suspended_until is not None
+        ((_, wake, args),) = timers
+        h.runtime.service_suspended_until = time.time() - 1
+        wake(*args)
+        await h.seen(ModelIdle)
+    assert h.said(1) == ["go\n\n[from peer]: still there?"]
+
+
+@pytest.mark.asyncio
 async def test_an_outage_without_advice_backs_off_then_gives_up(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
