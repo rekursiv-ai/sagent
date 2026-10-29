@@ -142,6 +142,9 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
         if: steps.settings.outputs.enabled == 'true'
+        with:
+          # Outranks the checkouts' .python-version, which pins a newer one.
+          python-version: "3.12"
 
       - name: Capture trusted import helper
         if: steps.settings.outputs.enabled == 'true'
@@ -274,15 +277,9 @@ jobs:
             --report "$IMPORT_REPORT" \
             --record-on-validation-failure "${{ github.event_name == 'push' }}" \
             --refresh-public-lockfile \
-            --validation-command 'bash install-libjpeg-turbo.sh' \
-            --validation-command 'uv sync --frozen --all-groups --extra slack' \
-            --validation-command 'uv run pre-commit run --all-files --hook-stage pre-commit' \
+            --validation-command 'uv sync --frozen --all-groups' \
+            --validation-command 'SKIP=superseded-at-pre-push uv run pre-commit run --all-files --hook-stage pre-commit' \
             --validation-command 'uv run pre-commit run --all-files --hook-stage pre-push' \
-            --validation-command 'uv run python -c "import sagent"' \
-            --validation-command 'rm -rf dist' \
-            --validation-command 'uv build --out-dir dist' \
-            --validation-command 'wheels=(dist/sagent-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" --with "wesearch @ git+https://github.com/rekursiv-ai/wesearch" python -P -c "import sagent; print(sagent.__file__)"' \
-            --validation-command 'uv run python sagent/bin/check_wheel.py' \
             --open-pr false
 
       - name: Open or update target import PR

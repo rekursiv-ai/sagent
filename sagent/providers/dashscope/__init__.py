@@ -1,1 +1,1 @@
-"""DashScope provider family: transport modules and the model catalog."""
+"""Qwen through Alibaba's DashScope (Model Studio), over Chat Completions."""

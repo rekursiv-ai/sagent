@@ -1,10966 +1,2132 @@
-"""Tests for ``agent.agent``: Agent composition class."""
+"""Tests for the agent: its turns, its caps, the session it keeps, what it restates."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import datetime
+from functools import partial
 from pathlib import Path
-from types import MappingProxyType
-from typing import Literal, cast, override
-from unittest.mock import MagicMock, Mock, patch
+from typing import TYPE_CHECKING, override
 
 import asyncio
 import contextlib
-import dataclasses
-import inspect
-import json
-import logging
-import re
-import threading
-import time
+import uuid
 
-from treekle import PlainTree, json_loads
+from treekle import PlainTree
 
-import httpx2
 import pytest
 
-from sagent import providers
-from sagent.agent import (
-    agent,
-    runtime,
-)
+from sagent.agent import agent as agent_module
 from sagent.agent.agent import (
-    MAX_OVERFLOW_RECOVERY,
-    REFUSED_RESULT,
-    ActivityTracker,
     Agent,
-    ObservedModel,
-    _AgentCompactor,
-    _AgentTool,
-    _provider_knows_model,
-    _repair_compact_payload,
-    _resolve_target_spec,
-    _should_cancel_background,
-    _wire_attachment_bytes,
-    _wire_request_bytes,
+    NoJournal,
+    NoShrinker,
+    RuntimeSession,
+    default_system_prompt,
 )
-from sagent.agent.background import (
-    BackgroundAwareTool,
-    BackgroundTaskEntry,
-    split_bg_args,
+from sagent.agent.agents_md import AgentsMdConfig, directives
+from sagent.agent.compactor import SummaryCompactor
+from sagent.agent.pruner import drop
+from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+from sagent.model.cost import PriceCatalog, TokenCost, TokenCount
+from sagent.model.exceptions import ContextOverflowError
+from sagent.model.scripted import (
+    Reply,
+    ScriptedModel,
+    ScriptedProvider,
+    call,
+    reply,
 )
-from sagent.agent.context import validate_context
-from sagent.agent.result_storage import PERSISTED_TAG
-from sagent.agent.retry import send_with_retry
-from sagent.agent.session_io import (
-    SessionMeta,
-    append_session,
-    load_session,
-)
-from sagent.agent.state import (
-    AgentLike,
-    ToolState,
-    agent_registry,
-    approx_tokens,
-    tool_state_context,
-)
-from sagent.compaction import fold
-from sagent.compaction.summary import SummaryCompactor
-from sagent.lib import last_models, token_count
-from sagent.providers.lib.errors import PolicyBlockedError
-from sagent.tools.read import Read
-from sagent.types.capability import (
-    ModelCapability,
-    ModelLimits,
-    ModelSettings,
-    ThinkingCapability,
-    ThinkingEffort,
-)
-from sagent.types.compactor import (
-    CompactRestorable,
-    ReattachPolicy,
-)
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceKey,
-    ServiceTier,
-    TokenCost,
-    TokenCount,
-    TokenPrice,
-)
-from sagent.types.exceptions import (
-    BudgetExhaustedError,
-    ContextOverflowError,
-)
-from sagent.types.model import (
-    Model,
-    ModelRecipe,
-    ModelRequest,
-    ModelResponse,
-    ModelTerminationError,
-    PromptTooLongError,
-    RequestTooLargeError,
-    StreamInterruptedError,
-    UsageSnapshot,
-    UsageWindow,
-)
-from sagent.types.runtime import (
-    CANCELLED_PLACEHOLDER,
-    DETACHED_ARRIVED_SYSTEM_NOTE,
-    DETACHED_PLACEHOLDER,
-    AgentIdle,
-    AgentSendMessage,
+from sagent.model.types import Request, Response
+from sagent.providers.catalog import ModelCatalog
+from sagent.providers.table import ModelTable
+from sagent.runtime import types
+from sagent.runtime.exceptions import BudgetExhaustedError, RoundLimitError
+from sagent.runtime.tape import MaskRange
+from sagent.session.jsonl import JsonlJournal
+from sagent.session.recording import RecordingJournal
+from sagent.session.types import (
+    AgentToAgentMessage,
     AssistantMessage,
-    BytesMessage,
-    ClearComplete,
-    Compact,
-    CompactComplete,
-    CompactFailed,
-    CompactStarted,
-    DetachedResult,
-    Halt,
-    Kill,
-    ModelCallStarted,
-    ModelContextEvent,
-    ModelIdle,
-    ModelResponseComplete,
-    ModelResponseError,
-    ModelResponsePartial,
-    ModelServiceSuspended,
-    ModelSwitch,
-    NoticeMessage,
-    Quit,
-    RuntimeEvent,
-    SaveSession,
-    ServiceErrorSnapshot,
-    StatusChanged,
+    Attachment,
+    ContextClear,
+    SessionRecord,
     SystemMessage,
+    TokenUsage,
     ToolCall,
-    ToolLabel,
     ToolResult,
-    ToolResultKind,
+    TurnContext,
+    UncategorizedRecord,
+    UncategorizedToolResult,
     UserMessage,
+    record_classes,
 )
-from sagent.types.settings import (
-    AgentSettings,
-    default_buffer_tokens,
-)
-from sagent.types.tape import (
-    ContextSplice,
-    MaskRange,
-    ReferrableTapeEvent,
-    TapeRecord,
-    TapeRef,
-    full_tape_mask,
-)
-from sagent.types.tools import (
-    DEFAULT_MAX_RESULT_CHARS,
-    MAX_RESULT_TOKENS,
-    MAX_ROUND_RESULT_CHARS,
-    Tool,
-    ToolResultPolicy,
-)
+from sagent.tools.display import ToolDisplay
 
 
-# Delegates to the real ``SummaryCompactor`` so a stub that stubs only the PREDICATE
-# still reports the production scalar -- the two are one heuristic, and a stub answering
-# them independently would let a test pass against a combination production cannot
-# produce.
-def _stub_largest_context(budget: AgentSettings) -> int:
-    """``largest_context`` for the stub compactors below."""
-    return SummaryCompactor().largest_context(budget)
+if TYPE_CHECKING:
+    from sagent.agent.types import Journal
+    from sagent.runtime.types import ModelContextEvent
+    from sagent.tools.types import ToolContext
 
 
-# When ``tape`` is supplied, the mask covers every existing record so every alive splice
-# is absorbed and every HR is hidden. Without ``tape``, the splice has an empty mask
-# (used by tests that only care about the payload and don't need barrier semantics).
-def _summary_override(
-    summary: list[ModelContextEvent],
-    mint_ref: Callable[[], TapeRef],
-    *,
-    tape: Sequence[TapeRecord] = (),
-    strategy: str = "summary",
-    fallback_reason: str = "",
-    preserved_tail_count: int = 0,
-    token_before: int = 0,
-    token_after: int = 0,
-) -> ContextSplice:
-    """Build a barrier splice carrying ``summary`` as its payload."""
-    if tape:
-        mask: tuple[MaskRange, ...] = (MaskRange.between(tape[0].ref, tape[-1].ref),)
-    else:
-        mask = ()
-    return ContextSplice(
-        ref=mint_ref(),
-        mask=mask,
-        insert_after=None,
-        payload=tuple(summary),
-        strategy=strategy,
-        fallback_reason=fallback_reason,
-        preserved_tail_count=preserved_tail_count,
-        token_before=token_before,
-        token_after=token_after,
-    )
+@pytest.fixture(autouse=True)
+def isolate_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the environment's git probe off the user's config and above ``tmp_path``."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
 
 
-@dataclass(slots=True, kw_only=True)
-class StubModel:
-    """Configurable model that yields scripted responses."""
-
-    model_id: str = "stub-1"
-    max_request_tokens: int = 100_000
-    max_response_tokens: int = 1_024
-    supports_thinking: bool = False
-    valid_efforts: tuple[ThinkingEffort, ...] = ()
-    supports_cache_control: bool = False
-    valid_service_tiers: tuple[ServiceTier, ...] = ()
-    supports_context_management: bool = False
-    supports_persistent_retry: bool = False
-    supports_account_auth: bool = False
-    max_image_dim: int = 8_000
-    max_image_bytes: int = 5 * 1024 * 1024
-    max_request_bytes: int = 32 * 1024 * 1024
-    chosen: ModelSettings | None = None
-    responses: list[AssistantMessage] = field(default_factory=list)
-    received: list[ModelRequest] = field(default_factory=list)
-    usage: UsageSnapshot | None = None
-
-    @property
-    def capability(self) -> ModelCapability:
-        """Derive the capability row from this stub's configured flags."""
-        thinking: frozenset[ThinkingEffort] = frozenset({"none", *self.valid_efforts})
-        return ModelCapability(
-            model_id=self.model_id,
-            context=MappingProxyType(
-                {
-                    "": ModelLimits(
-                        max_request_tokens=self.max_request_tokens,
-                        max_response_tokens=self.max_response_tokens,
-                        max_request_bytes=self.max_request_bytes,
-                        max_image_edge_px=self.max_image_dim,
-                        max_image_bytes=self.max_image_bytes,
-                    ),
-                },
-            ),
-            prices=PriceCatalog(
-                {
-                    PriceKey("auto"): TokenPrice(
-                        request=0.0,
-                        response=0.0,
-                        cache_write=0.0,
-                        cache_write_1h=0.0,
-                        cache_read=0.0,
-                    ),
-                }
-                | {
-                    PriceKey(t): TokenPrice(
-                        request=0.0,
-                        response=0.0,
-                        cache_write=0.0,
-                        cache_write_1h=0.0,
-                        cache_read=0.0,
-                    )
-                    for t in self.valid_service_tiers
-                },
-            ),
-            thinking=ThinkingCapability(
-                effort=thinking,
-                budget=frozenset({"none", "auto", "fixed"})
-                if self.supports_thinking
-                else frozenset({"none"}),
-                output=frozenset({"none", "text"})
-                if self.supports_thinking
-                else frozenset({"none"}),
-            ),
-            service_tier=frozenset({"auto", *self.valid_service_tiers}),
-            cache_ttl_sec=frozenset({3600.0 if self.supports_cache_control else 0.0}),
-            manage_context_server_side=(
-                frozenset({False, True})
-                if self.supports_context_management
-                else frozenset({False})
-            ),
-            retries_internally=self.supports_persistent_retry,
-            account_auth=self.supports_account_auth,
-        )
-
-    @property
-    def settings(self) -> ModelSettings:
-        """What this stub chose; materialized once and cached.
-
-        Settings are state the caller writes through, so returning a fresh
-        object per read discarded every selection made against the stub.
-        Lazy because the narrowest selection depends on ``capability``,
-        which the configured flags above derive.
-        """
-        if self.chosen is None:
-            self.chosen = ModelSettings.narrowest(self.capability)
-        return self.chosen
-
-    @property
-    def limits(self) -> ModelLimits:
-        """Ceilings of the selected context tag."""
-        return self.settings.limits
-
-    @property
-    def tagged_model_id(self) -> str:
-        """Display id carrying its context tag."""
-        return f"{self.model_id}{self.settings.context}"
-
-    def spend(self, tokens: TokenCount) -> TokenCost:
-        """Price ``tokens`` at the tier these settings select."""
-        return self.capability.prices.cost(
-            tokens,
-            service_tier=self.settings.service_tier,
-            at=datetime.now(UTC).date(),
-        )
-
-    def approx_text_tokens(self, text: str) -> int:
-        return max(1, len(text) // 4)
-
-    def approx_image_tokens(self, data: bytes) -> int:
-        del data
-        return 256
-
-    def approx_request_tokens(self, request: ModelRequest) -> int:
-        return token_count.approx_request_tokens(request, self)
-
-    async def actual_text_tokens(self, text: str) -> int:
-        return self.approx_text_tokens(text)
-
-    async def actual_image_tokens(self, data: bytes) -> int:
-        return self.approx_image_tokens(data)
-
-    async def actual_request_tokens(self, request: ModelRequest) -> int:
-        return self.approx_request_tokens(request)
-
-    def is_context_overflow(self, error: Exception) -> bool:
-        del error
-        return False
-
-    def is_retryable_provider_error(self, error: Exception) -> bool:
-        del error
-        return False
-
-    def usage_snapshot(self) -> UsageSnapshot | None:
-        return self.usage
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        return await self.stream(request)
-
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        del publish
-        self.received.append(request)
-        msg = self.responses.pop(0) if self.responses else AssistantMessage(text="ok")
-        return ModelResponse(message=msg)
-
-    async def close(self) -> None:
-        """No-op teardown -- the stub holds no resources.
-
-        ``close`` is a required ``Model`` contract member; a
-        resource-free model satisfies it by returning immediately.
-        """
-        return
-
-
-@pytest.mark.asyncio
-async def test_observed_model_delegates_exact_token_measurement() -> None:
-    """The accounting wrapper preserves exact provider token measurement."""
-
-    class _TokenModel(StubModel):
-        @override
-        async def actual_image_tokens(self, data: bytes) -> int:
-            return len(data)
-
-    observed = ObservedModel(_TokenModel(), lambda _response: None)
-
-    assert await observed.actual_text_tokens("abcdefgh") == 2
-    assert await observed.actual_image_tokens(b"image") == 5
-    request = ModelRequest(messages=[UserMessage(text="abcdefgh")])
-    assert await observed.actual_request_tokens(request) > 0
-
-
-_STUB_SCHEMA: Mapping[str, PlainTree] = {"type": "object"}
-
-
-@dataclass(slots=True, kw_only=True)
-class StubTool:
-    """Minimal tool that records calls."""
-
-    name: str = "Echo"
-    tool_id: str = "application/x-tool-echo"
-    description: str = "Echo tool."
-    directive_schema: Mapping[str, PlainTree] = field(
-        default_factory=lambda: {"type": "object"},
-    )
-    clearable_results: bool = False
-    response: str | None = None
-    calls: list[Mapping[str, object]] = field(default_factory=list)
-
-    def summary(self, args: Mapping[str, object]) -> str:
-        del args
-        return "echo"
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        del result
-        return None
-
-    def prompt(self) -> str:
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        del args
-        return None
-
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        self.calls.append(args)
-        content = (
-            self.response if self.response is not None else str(args.get("msg", ""))
-        )
-        return ToolResult(call_id="", content=content)
-
-
-def _build_agent(
-    *,
-    model: Model | None = None,
-    tools: list[Tool] | None = None,
-    system: str = "",
-    budget: AgentSettings | None = None,
-    max_budget_usd: float | None = None,
-    session_dir: Path | None = None,
-) -> Agent:
-    return Agent(
-        model=model or StubModel(),
-        tools=tools or [],
-        system=system,
-        budget=budget,
-        max_budget_usd=max_budget_usd,
-        session_dir=session_dir,
-    )
-
-
-def test_agent_init_sets_basics() -> None:
-    a = _build_agent()
-    assert a.model is not None
-    assert a.tools == []
-    assert isinstance(a.activity, ActivityTracker)
-    assert a.history == []
-    assert a.cost_tracker.spend.total == 0.0
-
-
-def test_an_explicit_budget_rejects_a_conflicting_knob() -> None:
-    """``budget`` owns these choices; a second spelling of one was dropped."""
-    settings = AgentSettings()
-    with pytest.raises(ValueError, match="max_attempts"):
-        _ = Agent(model=StubModel(), budget=settings, max_attempts=2)
-    with pytest.raises(ValueError, match="max_tool_call_rounds"):
-        _ = Agent(model=StubModel(), budget=settings, max_tool_call_rounds=3)
-    with pytest.raises(ValueError, match="max_budget_usd"):
-        _ = Agent(model=StubModel(), budget=settings, max_budget_usd=1.0)
-
-
-def test_agent_max_attempts_defaults_from_agent_settings() -> None:
-    assert Agent(model=StubModel()).max_attempts == AgentSettings().max_attempts
-
-
-def test_agent_budget_defaults_from_model() -> None:
-    a = _build_agent()
-    assert isinstance(a.budget, AgentSettings)
-    assert a.budget.max_request_tokens == 100_000
-
-
-def test_unknown_model_limits_require_explicit_agent_caps() -> None:
-    agent = Agent(model=StubModel(max_request_tokens=0, max_response_tokens=0))
-
-    with pytest.raises(ValueError, match="max_request_tokens is unknown"):
-        _ = agent.budget
-
+def _agent(
+    tmp_path: Path,
+    *replies: Reply,
+    provider: ScriptedProvider | None = None,
+    tools: Sequence[_Tool] = (),
+    journal: Journal | None = None,
+    max_rounds: int | None = None,
+    max_spend_usd: float | None = None,
+    system_prompt: str | None = "S",
+) -> tuple[ScriptedProvider, Agent]:
+    provider = provider if provider is not None else ScriptedProvider(replies=replies)
     agent = Agent(
-        model=StubModel(max_request_tokens=0, max_response_tokens=0),
-        budget=AgentSettings(max_request_tokens=80_000),
+        model=provider["scripted"],
+        tools=tools,
+        journal=journal,
+        cwd=tmp_path,
+        system_prompt=system_prompt,
+        max_rounds=max_rounds,
+        max_spend_usd=max_spend_usd,
+        agents_md=_config(tmp_path),
     )
-    with pytest.raises(ValueError, match="max_response_tokens is unknown"):
-        _ = agent.budget
+    return provider, agent
 
 
-def test_explicit_agent_caps_resolve_unknown_model_limits() -> None:
-    agent = Agent(
-        model=StubModel(max_request_tokens=0, max_response_tokens=0),
-        budget=AgentSettings(
-            max_request_tokens=80_000,
-            max_response_tokens=4_000,
-        ),
-    )
-
-    assert agent.budget.max_request_tokens == 80_000
-    assert agent.budget.max_response_tokens == 4_000
-    assert agent.tool_results == ToolResultPolicy(message_budget_tokens=40_000)
-
-
-def test_explicit_ceiling_equal_initial_remains_on_model_switch() -> None:
-    small = StubModel(max_request_tokens=100_000)
-    large = StubModel(max_request_tokens=1_000_000)
-    agent = Agent(
-        model=small,
-        budget=AgentSettings(max_request_tokens=100_000),
-    )
-    agent.swap_model(large)
-    assert agent.budget.max_request_tokens == 100_000
-
-
-@pytest.mark.asyncio
-async def test_measurement_invalidates_across_swap_clear_and_compaction() -> None:
-    agent = Agent(model=StubModel(), compactor=SummaryCompactor())
-    agent._last_input_tokens = 123
-    agent.swap_model(StubModel(model_id="next"))
-    assert agent._last_input_tokens == 0
-    agent._last_input_tokens = 456
-    driver = asyncio.create_task(agent.runtime.run_forever())
-    clear_task = asyncio.create_task(agent.clear())
-    await asyncio.sleep(0)
-    agent.inbox.push_back(UserMessage(text="resume"))
-    await clear_task
-    assert agent._last_input_tokens == 0
-    agent.inbox.push_back(Quit())
-    await driver
-    agent._last_input_tokens = 789
-    await agent.compact_now()
-    assert agent._last_input_tokens == 0
-
-
-def test_live_context_mutation_updates_budget_policy_without_swap() -> None:
-    capability = ModelCapability(
-        model_id="dynamic",
-        context=MappingProxyType(
-            {
-                "": ModelLimits(max_request_tokens=100_000, max_response_tokens=8_000),
-                "+1m": ModelLimits(
-                    max_request_tokens=1_000_000,
-                    max_response_tokens=8_000,
-                ),
-            },
-        ),
-    )
-    model = StubModel(chosen=ModelSettings(capability=capability))
-    agent = Agent(model=model)
-    model.settings.context = "+1m"
-    assert agent.budget.max_request_tokens == 1_000_000
-    assert agent.budget.max_response_tokens == 8_000
-    assert agent.budget.buffer_tokens == default_buffer_tokens(1_000_000)
-    assert agent.tool_results.message_budget_tokens == 500_000
-    model.settings.context = ""
-    assert agent.budget.max_request_tokens == 100_000
-    assert agent.budget.buffer_tokens == default_buffer_tokens(100_000)
-    assert agent.tool_results.message_budget_tokens == 50_000
-
-
-def test_an_explicit_tool_result_policy_replaces_the_window_derived_one() -> None:
-    policy = ToolResultPolicy(persist_tokens=10_000)
-    model = StubModel(max_request_tokens=1_000_000)
-
-    assert Agent(model=model).max_result_tokens == MAX_RESULT_TOKENS
-    assert Agent(model=model, tool_results=policy).tool_results == policy
-    assert Agent(model=model, tool_results=policy).max_result_tokens == 10_000
-
-
-def test_explicit_buffer_equal_default_remains_explicit_on_switch() -> None:
-    small = StubModel(max_request_tokens=100_000)
-    large = StubModel(max_request_tokens=1_000_000)
-    chosen = default_buffer_tokens(100_000)
-    agent = Agent(model=small, budget=AgentSettings(buffer_tokens=chosen))
-    agent.swap_model(large)
-    assert agent.budget.buffer_tokens == chosen
-
-
-def test_tool_policy_reads_switched_model_limits_live() -> None:
-    small = StubModel(max_request_tokens=100_000)
-    large = StubModel(max_request_tokens=1_000_000)
-    agent = Agent(model=small)
-    assert agent.tool_results.message_budget_tokens == 50_000
-    agent.swap_model(large)
-    assert agent.tool_results.message_budget_tokens == 500_000
-    agent.swap_model(small)
-    agent.swap_model(large)
-    assert agent.tool_results.message_budget_tokens == 500_000
-
-
-def test_token_delta_uses_measured_history_identity_not_last_assistant() -> None:
-    agent = Agent(model=StubModel())
-    measured = UserMessage(text="measured")
-    agent.runtime.append_history(measured)
-    agent._last_input_tokens = 100
-    agent._last_measured_history = (measured,)
-    synthetic = AssistantMessage(text="synthetic arrival")
-    history = [measured, synthetic, UserMessage(text="fresh")]
-    used = agent._estimated_request_tokens(history, agent.model)
-    assert used == 100 + agent.model.approx_request_tokens(
-        ModelRequest(messages=[synthetic, history[-1]]),
-    )
-
-
-@pytest.mark.asyncio
-async def test_divergent_history_replaces_the_measurement_instead_of_adding() -> None:
-    """A rewritten history (coalesced retype after an error) is not double-counted.
-
-    The measured prefix no longer prefixes the history, so the stale
-    measurement must be discarded rather than summed with a full re-estimate
-    of a conversation it already counted.
-    """
-    rec = _ThresholdCompactor()
-    a = Agent(
-        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=128_000),
-        tools=[],
-        compactor=rec,
-    )
-    # ~500k estimated tokens: alone it sits under the ~797k threshold, but
-    # summed with the stale 500k measurement of the same text it crosses it.
-    body = "x" * 2_000_000
-    a._last_input_tokens = 500_000
-    a._last_measured_history = (UserMessage(text=body),)
-    retyped: list[ModelContextEvent] = [UserMessage(text=f"{body}\n\nsecond")]
-
-    assert await a.compact_if_needed(retyped, a.model) is True
-    assert rec.compacted is False
-
-
-def test_account_swap_keeps_the_measurement_for_the_same_model() -> None:
-    """Same model under another account: same tokenizer, so the count stays valid."""
-    agent = Agent(model=StubModel(model_id="opus"))
-    measured = (UserMessage(text="m"),)
-    agent._last_input_tokens = 123
-    agent._last_measured_history = measured
-
-    agent.swap_model(StubModel(model_id="opus"))
-
-    assert agent._last_input_tokens == 123
-    assert agent._last_measured_history is measured
-
-
-@pytest.mark.asyncio
-async def test_agent_tool_injects_conditional_agents_md_rule(tmp_path: Path) -> None:
-    rules = tmp_path / ".sagent" / "rules"
-    rules.mkdir(parents=True)
-    _ = (rules / "python.md").write_text(
-        "---\npaths: ['**/*.py']\n---\nUse Python rule.\n",
-    )
-    target = tmp_path / "main.py"
-    target.write_text("print('hi')\n")
-    agent = _build_agent(tools=[Read()])
-    agent.tool_state.bash_cwd = str(tmp_path)
-    wrapped = _AgentTool(Read(), agent)
-    with tool_state_context(agent.tool_state):
-        result = await wrapped.run({"file_path": str(target)})
-        repeated = await wrapped.run({"file_path": str(target)})
-    assert "<system-reminder>" in result.content
-    assert "Use Python rule." in result.content
-    assert "Use Python rule." not in repeated.content
-
-
-def test_a_self_bounding_tool_is_never_persisted_under_a_host_cap(
-    tmp_path: Path,
-) -> None:
-    """Persisting Read hands back a path only Read opens: it re-spills."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _SelfBounded(StubTool):
-        max_result_chars: int = 0
-
-    a = _build_agent(session_dir=tmp_path)
-    a.tool_results = ToolResultPolicy(persist_tokens=100)
-    body = "x" * 10_000
-    out = a.bound_result(ToolResult(call_id="r", content=body), tool=_SelfBounded())
-    assert out.content == body
-    assert not (tmp_path / "tool-results").exists()
-
-
-@pytest.mark.asyncio
-async def test_a_reread_returns_content_when_the_server_may_clear_results(
-    tmp_path: Path,
-) -> None:
-    """The "unchanged" stub points at a result the server may have dropped."""
-    model = StubModel(supports_context_management=True)
-    model.settings.manage_context_server_side = True
-    target = tmp_path / "f.txt"
-    target.write_text("body\n")
-    agent = _build_agent(model=model, tools=[Read()])
-    wrapped = _AgentTool(Read(), agent)
-    with agent._install_contextvars():
-        _ = await wrapped.run({"file_path": str(target)})
-        again = await wrapped.run({"file_path": str(target)})
-    assert "body" in again.content
-
-
-@pytest.mark.asyncio
-async def test_a_swap_to_a_server_managed_model_stops_read_dedup(
-    tmp_path: Path,
-) -> None:
-    """The answer follows the live model, not the one the agent started with."""
-    managed = StubModel(model_id="m2", supports_context_management=True)
-    target = tmp_path / "f.txt"
-    target.write_text("body\n")
-    agent = _build_agent(tools=[Read()])
-    agent.swap_model(managed)
-    managed.settings.manage_context_server_side = True
-    wrapped = _AgentTool(Read(), agent)
-    with agent._install_contextvars():
-        _ = await wrapped.run({"file_path": str(target)})
-        again = await wrapped.run({"file_path": str(target)})
-    assert "body" in again.content
-
-
-@pytest.mark.asyncio
-async def test_agent_model_stream_materializes_request() -> None:
-    call = ToolCall(id="call_1", name="Bash", args={})
-    model = StubModel()
-    agent = Agent(model=model)
-    agent._tool_results_override = ToolResultPolicy(message_budget_tokens=10)
-
-    agent.runtime.append_history(UserMessage(text="start"))
-    agent.runtime.append_history(AssistantMessage(tool_calls=(call,)))
-    agent.runtime.append_history(ToolResult(call_id="call_1", content="x" * 1_000))
-    _ = await agent._agent_model.stream(
-        agent.runtime.context().messages,
-        lambda _: None,
-    )
-    result = model.received[-1].messages[2]
-    assert isinstance(result, ToolResult)
-    assert "<elided>" in result.content
-
-
-def test_agent_budget_override_respected() -> None:
-    b = AgentSettings(
-        max_request_tokens=50_000,
-        max_response_tokens=512,
-        buffer_tokens=1_000,
-    )
-    a = _build_agent(budget=b)
-    assert a.budget == b
-
-
-def test_agent_like_protocol_exposes_kill_all_tools() -> None:
-    """Regression for H10: ``AgentLike`` advertises ``kill_all_tools``.
-
-    Both the real ``Agent`` (``agent.py``) and the test ``FakeAgent``
-    (``testing.py``) implement ``kill_all_tools``; callers route the
-    verb via the Protocol (e.g. ``repl/input_pane.py``). The Protocol
-    must include the method so static analysis matches reality.
-    """
-    a = _build_agent()
-    via_protocol: AgentLike = a
-    # The Protocol method is present on the structural type; callers
-    # depend on this attribute being typed.
-    assert callable(via_protocol.kill_all_tools)
-
-
-def test_agent_register_and_cancel_background() -> None:
-    a = _build_agent()
-    loop = asyncio.new_event_loop()
-    try:
-        task = loop.create_task(asyncio.sleep(0))
-        entry = BackgroundTaskEntry(
-            task=task,
-            tool_name="bg",
-            queue_id="job-1",
-            started=0.0,
-        )
-        a.register_background("job-1", entry)
-        assert "job-1" in a.background
-        a.cancel_background("job-1")
-        assert "job-1" not in a.background
-        _ = task.cancel()
-        # Drive the loop so the cancellation propagates; otherwise the
-        # ``Task`` is GC'd in pending state and CPython logs the warning.
-        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
-    finally:
-        loop.close()
-
-
-def test_agent_assigns_stable_job_ids_to_detached_call_ids() -> None:
-    a = _build_agent()
-    loop = asyncio.new_event_loop()
-    task = loop.create_task(asyncio.sleep(0))
-    try:
-        a.runtime.detached["call-provider"] = task
-        a._tool_registry["call-provider"] = ("Bash", 123.0)
-        first = a.background
-        second = a.background
-        assert list(first) == ["job-1"]
-        assert list(second) == ["job-1"]
-        assert first["job-1"].queue_id == "job-1"
-        assert first["job-1"].call_id == "call-provider"
-    finally:
-        _ = task.cancel()
-        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
-        loop.close()
-
-
-@pytest.mark.asyncio
-async def test_public_cancel_background_accepts_job_id_for_detached_task() -> None:
-    a = _build_agent()
-    task = asyncio.create_task(asyncio.sleep(60))
-    a.runtime.detached["call-provider"] = task
-    a._tool_registry["call-provider"] = ("Bash", 0.0)
-    job_id = next(iter(a.background))
-    assert job_id == "job-1"
-    a.cancel_background(job_id)
-    assert "call-provider" not in a.runtime.detached
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-    assert task.cancelled()
-
-
-@pytest.mark.asyncio
-async def test_public_cancel_background_actually_cancels_task() -> None:
-    """The public ``cancel_background`` must cancel the underlying task.
-
-    Pre-fix, ``cancel_background`` only popped the registry entry while
-    the private ``_cancel_background`` carried the actual ``task.cancel()``.
-    Two near-identical names with opposite behavior; callers reading the
-    public API expected cancellation and got registry removal.
-    """
-    a = _build_agent()
-    task = asyncio.create_task(asyncio.sleep(10))
-    a.register_background(
-        "j",
-        BackgroundTaskEntry(task=task, tool_name="x", queue_id="j", started=0.0),
-    )
-    a.cancel_background("j")
-    assert task.cancelling() > 0
-    assert "j" not in a.background
-
-
-@pytest.mark.asyncio
-async def test_cancel_background_tool_kind_forgets_job_id_mapping() -> None:
-    """A tool-kind cancel must clear the call_id<->job_id mapping.
-
-    BUG-1: ``cancel_background`` only invoked ``_forget_job_id`` on the
-    detached branch. A ``kind="tool"`` entry cancelled this way left a
-    permanent entry in ``_job_ids_by_call_id`` / ``_call_ids_by_job_id``,
-    poisoning later job-id minting for fresh calls reusing the same
-    provider call id. The symmetric ``forget_background`` already did
-    this for the tool kind, exposing the asymmetry.
-    """
-    a = _build_agent()
-    task = asyncio.create_task(asyncio.sleep(10))
-    a.register_background(
-        "j",
-        BackgroundTaskEntry(
-            task=task,
-            tool_name="x",
-            queue_id="j",
-            started=0.0,
-            kind="tool",
-            call_id="call-x",
-        ),
-    )
-    # Seed the job-id<->call-id map as the live path does at registration.
-    _ = a.job_id_for_call("call-x")
-    assert "call-x" in a._job_ids_by_call_id
-
-    a.cancel_background("j")
-
-    assert "call-x" not in a._job_ids_by_call_id
-    assert task.cancelling() > 0
-
-
-def test_agent_system_string_to_factory() -> None:
-    a = _build_agent(system="hi there")
-    assert a.system_prompt() == "hi there"
-
-
-def test_agent_tools_map_stores_raw_tools() -> None:
-    """H2: ``tools_map`` stores raw rich tools so isinstance / Protocol
-    checks at consumer sites (CompactRestorable, Slack identity swap,
-    etc.) pass through. Wrapping happens per-request in
-    ``_AgentModel.stream``.
-    """
-    tool: Tool = StubTool()
-    a = _build_agent(tools=[tool])
-    assert "Echo" in a.tools_map
-    stored = a.tools_map["Echo"]
-    assert stored is tool
-    assert not isinstance(stored, BackgroundAwareTool)
-
-
-def test_agent_tools_map_preserves_compact_restorable_identity() -> None:
-    """D1/CV2: a ``CompactRestorable`` tool keeps its Protocol identity.
-
-    ``BackgroundAwareTool`` proxies attribute reads but cannot satisfy
-    Protocol ``isinstance`` checks for methods it doesn't redeclare
-    (Python's protocol-isinstance walks the class dict, not
-    ``__getattr__``). The agent's structural fix keeps the *raw* tool
-    in ``tools_map`` so consumer sites' ``isinstance(t,
-    CompactRestorable)`` lookups still hit; per-request wrapping in
-    ``_AgentModel.stream`` injects the BG schema without touching the
-    stored tool. Regression-guard the contract here.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _RestorableStub(StubTool):
-        async def post_compact_restore(
-            self,
-            history: list[ModelContextEvent],
-            tool_state: ToolState,
-            *,
-            budget_tokens: int,
-            estimate_tokens: Callable[[str], int],
-        ) -> None:
-            del history, tool_state, budget_tokens, estimate_tokens
-
-    tool = _RestorableStub()
-    a = _build_agent(tools=[tool])
-    stored = a.tools_map["Echo"]
-    assert isinstance(stored, CompactRestorable), (
-        "raw rich tool must satisfy CompactRestorable; the wrapper would not."
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_request_tools_wrapped_in_background_aware() -> None:
-    """H2: per-request wrapping advertises ``background`` / ``delay`` to
-    the model while keeping ``tools_map`` storage raw.
-    """
-    model = StubModel()
-    tool = StubTool(
-        directive_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
-    )
-    a = _build_agent(model=model, tools=[tool])
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    assert model.received
-    req = model.received[-1]
-    seen = req.tools[0]
-    props = dict(cast(Mapping[str, object], seen.directive_schema["properties"]))
-    assert "background" in props
-    assert "delay" in props
-
-
-def test_a_host_can_replace_the_tool_result_limits() -> None:
-    a = _build_agent(tools=[StubTool()])
-    a.tool_results = ToolResultPolicy(persist_tokens=9_000)
-
-    assert a.max_result_tokens == 9_000
-    assert a.tool_results.message_budget_tokens == 0
-
-
-@pytest.mark.asyncio
-async def test_an_agent_that_forbids_background_offers_no_such_keys_and_runs_a_delay_now() -> (
-    None
-):
-    """Turn ``background`` off for a host that cannot let a turn outlive its reply.
-
-    The tool is not advertised with ``background`` / ``delay``, and a model that
-    sends them anyway gets the call run in the foreground, not parked for 15
-    minutes with the turn held open.
-    """
-    delayed = ToolCall(id="d1", name="Echo", args={"msg": "hi", "delay": 900})
-    model = StubModel(
-        responses=[
-            AssistantMessage(tool_calls=(delayed,)),
-            AssistantMessage(text="done"),
-        ],
-    )
-    tool = StubTool(
-        directive_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
-    )
-    a = Agent(model=model, tools=[tool], allow_background=False)
-
-    async for _ in a.run(UserMessage(text="go")):
-        pass
-
-    first = model.received[0].tools
-    assert first is not None
-    props = dict(cast(Mapping[str, object], first[0].directive_schema["properties"]))
-    assert props.keys().isdisjoint({"background", "delay"})
-    assert tool.calls == [{"msg": "hi"}]
-    assert a.background == {}
-
-
-@pytest.mark.asyncio
-async def test_agent_run_yields_idle_at_end() -> None:
-    a = _build_agent()
-    events: list[str] = [
-        type(ev).__name__ async for ev in a.run(UserMessage(text="ping"))
-    ]
-    assert "ModelIdle" in events
-    assert len(a.history) >= 2
-    assert isinstance(a.history[0], UserMessage)
-
-
-@pytest.mark.asyncio
-async def test_drive_until_first_idle_returns_first_post_work_result() -> None:
-    """T3: ``drive_until_first_idle`` skips the boot idle, returns real work.
-
-    The runtime publishes a boot ``AgentIdle`` at the top of the first
-    ``run_forever`` iteration -- before any work, with empty history. The
-    method must NOT return on that edge; it returns only on the first
-    post-work idle, carrying the assistant's actual reply.
-    """
-    model = StubModel(responses=[AssistantMessage(text="real answer")])
-    a = _build_agent(model=model)
-    result = await a.drive_until_first_idle(UserMessage(text="go"))
-    assert result.content == "real answer"
-    # ``drive_until_first_idle`` does NOT shut down; the loop is still live.
-    assert not a._shutting_down
-    a.shutdown(force=True)
-
-
-@pytest.mark.asyncio
-async def test_drive_until_first_idle_propagates_model_error() -> None:
-    """A terminal model failure must not become an empty successful result."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _FailingModel(StubModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            raise RuntimeError("provider failed")
-
-    a = _build_agent(model=_FailingModel())
-    a.max_attempts = 1
-
-    with pytest.raises(RuntimeError, match="provider failed"):
-        _ = await a.drive_until_first_idle(UserMessage(text="go"))
-
-    a.shutdown(force=True)
-
-
-@pytest.mark.asyncio
-async def test_agent_run_does_not_silently_drop_failed_detached_redrive() -> None:
-    """A transient error on a post-idle detached re-drive must not vanish.
-
-    Definitive root cause of the empty-spawn ("completed with no output")
-    bug, reproduced from the production tape. The chain:
-
-    1. A child detaches a tool (via ``delay``), writes its real final
-       answer, and the model idles. ``Agent.run`` (the ``AgentSpawn``
-       driver) latches ``terminal`` on this first ``ModelIdle`` -- an
-       ``asyncio.Event`` that never resets.
-    2. The detached result lands *after* idle and re-drives the model
-       (tail is the ``DetachedArrived`` ``ToolResult`` -> the model-call
-       gate fires).
-    3. That re-drive's model call fails transiently (``ReadError`` in
-       production). ``_stream_and_post`` is about to push
-       ``ModelResponseError``.
-    4. **Race:** before that push lands, ``Agent.run``'s loop hits an
-       iteration where ``terminal.is_set() and events.empty()`` (the
-       queue momentarily drained during the failing async call), so it
-       breaks and ``shutdown()`` pushes ``Quit``, cancelling the in-flight
-       re-drive.
-    5. ``_stream_and_post``'s ``except asyncio.CancelledError`` wins over
-       the ``ReadError`` -> it publishes ``ModelResponseCancelled``, never
-       ``ModelResponseError``.
-
-    Net: no error surfaces (``child_errors`` stays empty, so ``AgentSpawn``
-    reports ``is_error=False``), the empty ``DetachedArrived`` turn is the
-    history tail, and the child's real answer is silently lost.
-
-    Two contracts, either of which kills the bug:
-      * the failed re-drive must surface as a ``ModelResponseError`` (so
-        ``AgentSpawn`` reports failure rather than empty success), OR
-      * ``run`` must not terminate until the agent is genuinely drained
-        (``AgentIdle`` / ``_fully_drained``), so the re-drive completes.
-
-    This test asserts the weaker, sufficient invariant: the transient
-    error is not silently swallowed -- the run surfaces *some* failure
-    signal rather than returning with an empty answer and no error.
-    """
-
-    @dataclass(kw_only=True, slots=True)
-    class FailOnRedriveModel(StubModel):
-        """Answers once, then raises a transient error on every re-drive."""
-
-        _calls: int = 0
-
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del publish
-            self.received.append(request)
-            self._calls += 1
-            if self._calls == 1:
-                return ModelResponse(message=AssistantMessage(text="the real answer"))
-            # Yield once so a cancellation can preempt, mimicking a
-            # transient transport failure mid-stream on the re-drive.
-            await asyncio.sleep(0)
-            raise httpx2.ReadError("transient transport failure")
-
-    model = FailOnRedriveModel()
-    a = _build_agent(model=model)
-    # Production used max_attempts=5; the bug reproduces regardless because
-    # the cancellation preempts the retry. Pin to 1 for a tight assertion.
-    a.max_attempts = 1
-
-    # Seed a settled detached cohort: an answered placeholder whose real
-    # result will arrive forward after the model idles.
-    call = ToolCall(id="t1", name="echo", args={})
-    a.runtime.append_history(UserMessage(text="go"))
-    a.runtime.append_history(AssistantMessage(tool_calls=(call,)))
-    a.runtime.append_history(ToolResult(call_id="t1", content=DETACHED_PLACEHOLDER))
-
-    # Capture errors exactly as ``AgentSpawn._run_oneshot_child`` does: via
-    # an observer watching for ``ModelResponseError``, registered *first*
-    # (the same order the oneshot path uses). This is the surface that
-    # decides ``is_error`` for the spawned child -- not the yielded stream.
-    captured_errors: list[BaseException] = []
-
-    def _capture_error(event: RuntimeEvent) -> None:
-        if isinstance(event, ModelResponseError):
-            captured_errors.append(event.exception)
-
-    a.runtime.observers.append(_capture_error)
-
-    # The detached result lands only AFTER the answer's first ModelIdle --
-    # the exact production ordering that re-drives into the failing call.
-    idle_count = 0
-
-    def _land_detached_after_idle(event: RuntimeEvent) -> None:
-        nonlocal idle_count
-        if isinstance(event, ModelIdle):
-            idle_count += 1
-            if idle_count == 1:
-                a.runtime.inbox.push_back(
-                    DetachedResult(
-                        result=ToolResult(call_id="t1", content="late evidence"),
-                    ),
-                )
-
-    a.runtime.observers.append(_land_detached_after_idle)
-
-    async def _drive() -> None:
-        async for _ in a.run(UserMessage(text="kick")):
-            pass
-
-    await asyncio.wait_for(_drive(), timeout=3.0)
-
-    last_assistant = next(
-        m for m in reversed(a.history) if isinstance(m, AssistantMessage)
-    )
-    answer_lost = last_assistant.text == ""
-
-    # The failure must not vanish through the spawn-harvest surface: either
-    # the real answer survives as the final turn, or ``_capture_error`` sees
-    # a ``ModelResponseError`` (so ``AgentSpawn`` reports ``is_error=True``).
-    # The bug does neither -- the re-drive's ReadError is converted to a
-    # silent ``ModelResponseCancelled``, so the observer captures nothing and
-    # the empty ``DetachedArrived`` turn is harvested as "no output".
-    assert not answer_lost or captured_errors, (
-        "transient error on the detached re-drive was silently swallowed:"
-        f" final assistant turn is {last_assistant.text!r} and"
-        " _capture_error saw no ModelResponseError -- AgentSpawn would"
-        " report 'completed with no output', dropping the child's answer"
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_run_waits_for_background_tool_result() -> None:
-    """A ``background:true`` / ``delay`` tool's result must not be reaped.
-
-    The production empty-spawn incident: a child emits a tool call with
-    ``background: true`` (or ``delay: N``) so the tool runs while the model
-    keeps going. ``_AgentTool.run`` spawns the task into ``Agent._bg`` and
-    returns a PENDING placeholder; the cohort settles and the model idles.
-
-    ``_fully_drained`` (runtime.py) checks ``runtime.detached`` but **not**
-    ``Agent._bg``, so it returns True while the background tool is still
-    running. ``AgentIdle`` fires, ``Agent.run`` terminates, and
-    ``shutdown()`` cancels the live ``_bg`` task -- its real result is
-    dropped. This is the exact scout pattern (``delay=15..120``) that the
-    ``AgentIdle`` fix did **not** cover: that fix closed the sibling
-    ``runtime.detached`` path only.
-
-    Contract: ``Agent.run`` must not return while a background tool is
-    still running. When it returns, the tool completed and its result
-    reached the runtime.
-    """
-    completed = asyncio.Event()
-
-    @dataclass(kw_only=True, slots=True)
-    class SlowEchoTool:
-        name: str = "slow_echo"
-        tool_id: str = "application/x-tool-slow-echo"
-        description: str = "echoes after a brief async pause"
-        directive_schema: Mapping[str, PlainTree] = field(
-            default_factory=lambda: {"type": "object"},
-        )
-        clearable_results: bool = False
-
-        def summary(self, args: Mapping[str, object]) -> str:
-            del args
-            return "slow_echo"
-
-        def summary_result(self, result: ToolResult) -> str | None:
-            del result
-            return None
-
-        def prompt(self) -> str:
-            return ""
-
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            await asyncio.sleep(0.05)
-            completed.set()
-            return ToolResult(call_id="", content="scout finding")
-
-    bg_call = ToolCall(id="bg1", name="slow_echo", args={"background": True})
-    model = StubModel(
-        responses=[
-            AssistantMessage(tool_calls=(bg_call,)),
-            AssistantMessage(text="ack, working in background"),
-        ],
-    )
-    a = _build_agent(model=model, tools=[SlowEchoTool()])
-
-    async for _ in a.run(UserMessage(text="scout")):
-        pass
-
-    assert completed.is_set(), (
-        "background tool was cancelled before completing real work --"
-        " _fully_drained ignored Agent._bg, AgentIdle latched, and"
-        " Agent.run's shutdown() reaped the live job"
-    )
-    # The forward-delivered result must have landed in history before run
-    # returned -- not been dropped into a dead inbox after Quit.
-    assert any(
-        "scout finding" in (getattr(m, "content", "") or "") for m in a.history
-    ), (
-        "background tool's real result never reached history before"
-        " Agent.run returned -- it was silently dropped"
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_run_not_blocked_by_persistent_subagent() -> None:
-    """A live serviced subagent must not wedge a one-shot ``Agent.run``.
-
-    The background idle gate (``has_pending_background``) must report only
-    *finite, turn-scoped* work. Subagents register in ``_bg`` with
-    ``kind="subagent"`` and live indefinitely by design -- they own their
-    own ``serve_forever`` and are explicitly spared by ``shutdown``
-    (agent.py ``_should_cancel_background``). If the idle gate counts them
-    as pending, ``AgentIdle`` never fires and ``Agent.run`` hangs forever
-    waiting on a daemon that never completes.
-    """
-    model = StubModel(responses=[AssistantMessage(text="done")])
-    a = _build_agent(model=model)
-
-    daemon = asyncio.create_task(asyncio.sleep(3600))
-    a.register_background(
-        "sub-1",
-        BackgroundTaskEntry(
-            task=daemon,
-            tool_name="reviewer",
-            queue_id="sub-1",
-            started=0.0,
-            kind="subagent",
-            lifecycle="serviced",
-            persistent_run_id="r1",
-        ),
-    )
-
-    async def _drive() -> None:
-        async for _ in a.run(UserMessage(text="hi")):
-            pass
-
-    try:
-        await asyncio.wait_for(_drive(), timeout=2.0)
-    except TimeoutError:
-        pytest.fail(
-            "Agent.run hung on a serviced subagent: has_pending_background"
-            " counts kind='subagent' as turn-blocking work",
-        )
-    finally:
-        _ = daemon.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await daemon
-
-
-@pytest.mark.asyncio
-async def test_agent_run_not_blocked_by_hidden_background_infra() -> None:
-    """Hidden infra (REPL pump, watchdogs) must not wedge ``Agent.run``.
-
-    Hidden ``_bg`` entries (``hidden=True``) are long-lived infrastructure,
-    not turn work; ``_should_cancel_background`` skips them. The idle gate
-    must skip them too, or a one-shot ``Agent.run`` hangs forever.
-    """
-    model = StubModel(responses=[AssistantMessage(text="done")])
-    a = _build_agent(model=model)
-
-    pump = asyncio.create_task(asyncio.sleep(3600))
-    a.register_background(
-        "pump-1",
-        BackgroundTaskEntry(
-            task=pump,
-            tool_name="repl-pump",
-            queue_id="pump-1",
-            started=0.0,
-            kind="tool",
-            hidden=True,
-        ),
-    )
-
-    async def _drive() -> None:
-        async for _ in a.run(UserMessage(text="hi")):
-            pass
-
-    try:
-        await asyncio.wait_for(_drive(), timeout=2.0)
-    except TimeoutError:
-        pytest.fail(
-            "Agent.run hung on hidden infra: has_pending_background counts"
-            " hidden=True jobs as turn-blocking work",
-        )
-    finally:
-        _ = pump.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await pump
-
-
-@pytest.mark.asyncio
-async def test_has_pending_background_predicate_table() -> None:
-    """Exhaustively pin ``_has_pending_background`` over every ``_bg`` cell.
-
-    The predicate feeds the runtime idle gate, so its truth table is the
-    contract: only a live (``not done``), visible (``not hidden``),
-    turn-scoped (``kind="tool"``) job counts as pending. Every other
-    flavor -- persistent subagents, hidden infra, finished jobs -- must be
-    invisible to the gate, or a one-shot ``Agent.run`` wedges. This mirrors
-    ``_should_cancel_background``'s taxonomy; the two must never diverge.
-    """
-    a = _build_agent()
-
-    async def _running() -> asyncio.Task[None]:
-        t: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(3600))
-        return t
-
-    async def _done() -> asyncio.Task[None]:
-        t: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
-        await t
-        return t
-
-    def _entry(
-        task: asyncio.Task[None],
-        *,
-        kind: str = "tool",
-        hidden: bool = False,
-    ) -> BackgroundTaskEntry:
-        return BackgroundTaskEntry(
-            task=task,
-            tool_name="x",
-            queue_id="q",
-            started=0.0,
-            kind=cast(Literal["tool", "subagent", "detached"], kind),
-            lifecycle="serviced",
-            hidden=hidden,
-            persistent_run_id="r" if kind == "subagent" else "",
-        )
-
-    running, done = await _running(), await _done()
-    try:
-        # Empty registry -> not pending.
-        assert a._bg == {}
-        assert a._has_pending_background() is False
-
-        cases: list[tuple[str, BackgroundTaskEntry, bool]] = [
-            ("live tool", _entry(running), True),
-            ("done tool", _entry(done), False),
-            ("hidden tool", _entry(running, hidden=True), False),
-            ("subagent", _entry(running, kind="subagent"), False),
-            ("detached", _entry(running, kind="detached"), False),
-        ]
-        for label, entry, expected in cases:
-            a._bg.clear()
-            a._bg["j"] = entry
-            assert a._has_pending_background() is expected, (
-                f"{label}: expected has_pending_background={expected}"
-            )
-
-        # Mixed: a live tool alongside a persistent subagent -> pending
-        # (the tool blocks); after the tool drains, the subagent alone does not.
-        a._bg.clear()
-        a._bg["tool"] = _entry(running)
-        a._bg["sub"] = _entry(running, kind="subagent")
-        assert a._has_pending_background() is True
-        a._bg["tool"] = _entry(done)
-        assert a._has_pending_background() is False, (
-            "a persistent subagent must not keep the gate pending once the"
-            " only live tool has finished"
-        )
-
-        # Two live tools: stays pending until BOTH drain.
-        a._bg.clear()
-        a._bg["t1"] = _entry(running)
-        a._bg["t2"] = _entry(running)
-        assert a._has_pending_background() is True
-        a._bg["t1"] = _entry(done)
-        assert a._has_pending_background() is True
-        a._bg["t2"] = _entry(done)
-        assert a._has_pending_background() is False
-    finally:
-        for t in (running, done):
-            _ = t.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await t
-
-
-@pytest.mark.asyncio
-async def test_agent_run_does_not_hang_on_external_quit() -> None:
-    """An external ``Quit`` must not wedge ``Agent.run`` forever.
-
-    ``Agent.run`` waits on ``{events.get(), terminal.wait()}`` and breaks
-    only on ``terminal`` (``AgentIdle`` / ``ModelResponseError``). But
-    ``Quit`` makes ``run_forever`` *return* without publishing either --
-    e.g. a CLI signal handler pushing a raw ``Quit`` into the inbox. The
-    drive task is then done, yet ``run``'s wait set excludes it, so
-    ``events.get()`` blocks forever. ``run`` must observe the driver's
-    completion and exit.
-    """
-    blocked = asyncio.Event()
-
-    @dataclass(kw_only=True, slots=True)
-    class BlockingModel(StubModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            blocked.set()
-            await asyncio.Event().wait()  # Never returns.
-            raise AssertionError("unreachable")
-
-    a = _build_agent(model=BlockingModel())
-
-    async def _drive() -> None:
-        async for _ in a.run(UserMessage(text="go")):
-            pass
-
-    driver = asyncio.create_task(_drive())
-    # Wait until the model call is in flight, then inject a raw Quit -- the
-    # runtime returns from run_forever with no terminal event published.
-    await asyncio.wait_for(blocked.wait(), timeout=2.0)
-    a.runtime.inbox.push_back(Quit())
-
-    try:
-        await asyncio.wait_for(driver, timeout=2.0)
-    except TimeoutError:
-        pytest.fail(
-            "Agent.run hung after an external Quit: run_forever returned"
-            " without AgentIdle/ModelResponseError and run never observed"
-            " the driver's completion",
-        )
-    finally:
-        if not driver.done():
-            driver.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await driver
-
-
-@pytest.mark.asyncio
-async def test_background_result_lands_before_single_agent_idle() -> None:
-    """No spurious ``AgentIdle`` during the bg result handoff; result lands first.
-
-    Covers two adjacent concerns:
-
-    * Forward-delivery timing (#4): the bg tool's real result must reach
-      history before ``Agent.run`` reports the agent idle. A REPL observer
-      flushing deferred input on ``AgentIdle`` must see a settled history.
-    * The forget-race (#5): ``_run_bg`` pushes ``DetachedResult`` then
-      ``forget_background`` with no ``await`` between, so ``_fully_drained``
-      never observes empty-inbox + empty-``_bg`` mid-handoff. Assert
-      exactly one ``AgentIdle`` -- a spurious mid-handoff idle would yield
-      two (one premature, one real).
-    """
-    completed = asyncio.Event()
-
-    @dataclass(kw_only=True, slots=True)
-    class SlowEchoTool:
-        name: str = "slow_echo"
-        tool_id: str = "application/x-tool-slow-echo"
-        description: str = "echoes after a brief async pause"
-        directive_schema: Mapping[str, PlainTree] = field(
-            default_factory=lambda: {"type": "object"},
-        )
-        clearable_results: bool = False
-
-        def summary(self, args: Mapping[str, object]) -> str:
-            del args
-            return "slow_echo"
-
-        def summary_result(self, result: ToolResult) -> str | None:
-            del result
-            return None
-
-        def prompt(self) -> str:
-            return ""
-
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            await asyncio.sleep(0.05)
-            completed.set()
-            return ToolResult(call_id="", content="bg payload")
-
-    bg_call = ToolCall(id="bg1", name="slow_echo", args={"background": True})
-    model = StubModel(
-        responses=[
-            AssistantMessage(tool_calls=(bg_call,)),
-            AssistantMessage(text="ack"),
-        ],
-    )
-    a = _build_agent(model=model, tools=[SlowEchoTool()])
-
-    # Snapshot history at the first AgentIdle: the bg payload must already
-    # be present (forward-delivery landed before idle was reported).
-    history_at_idle: list[str] = []
-    idle_count = 0
-
-    def _on_idle(event: RuntimeEvent) -> None:
-        nonlocal idle_count
-        if isinstance(event, AgentIdle):
-            idle_count += 1
-            history_at_idle.extend(getattr(m, "content", "") or "" for m in a.history)
-
-    a.runtime.observers.append(_on_idle)
-
-    async for _ in a.run(UserMessage(text="go")):
-        pass
-
-    assert completed.is_set()
-    assert idle_count == 1, (
-        f"expected exactly one AgentIdle, got {idle_count} -- a spurious"
-        " mid-handoff idle indicates the forget-race window opened"
-    )
-    assert any("bg payload" in c for c in history_at_idle), (
-        "bg result was not in history at AgentIdle -- forward delivery"
-        " landed after the agent reported idle"
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_run_drains_queued_events_when_driver_exits_externally() -> None:
-    """An external ``Quit`` must not drop events already queued for the caller.
-
-    The ``drive in done`` break (the external-Quit-hang fix) must fire only
-    after the event queue is drained: both break conditions guard on
-    ``events.empty()``. So a queued event observed in the same scheduling
-    window as the driver's exit is still yielded before ``run`` returns --
-    the break never races ahead of a pending event.
-    """
-    model = StubModel(
-        responses=[AssistantMessage(text="hello")],
-    )
-    a = _build_agent(model=model)
-
-    yielded: list[RuntimeEvent] = []
-
-    async def _drive() -> None:
-        async for ev in a.run(UserMessage(text="go")):
-            yielded.append(ev)
-            # On the first event, inject a raw external Quit so the driver
-            # exits without a terminal event while more events may be queued.
-            if len(yielded) == 1:
-                a.runtime.inbox.push_back(Quit())
-
-    await asyncio.wait_for(_drive(), timeout=2.0)
-
-    # The driver exited via Quit, but the queued events were drained first --
-    # the model's response publish (carried by ModelResponseComplete) and the
-    # terminal AgentIdle are not lost to a premature break.
-    assert any(isinstance(e, ModelResponseComplete) for e in yielded), (
-        f"queued response event dropped when driver exited externally: {yielded}"
-    )
-    assert any(isinstance(e, AgentIdle) for e in yielded), (
-        f"terminal AgentIdle dropped when driver exited externally: {yielded}"
-    )
-
-
-def test_fully_drained_ignores_background_when_callback_unset() -> None:
-    """A bare ``AgentRuntime`` (no Agent) must behave exactly as pre-change.
-
-    ``has_pending_background`` defaults to ``None``; the ``_fully_drained``
-    term must then drop out entirely, leaving the predicate byte-identical
-    to its pre-callback form. Pins the standalone-runtime safety property.
-    """
-    bare_runtime = runtime.AgentRuntime(model=cast(runtime.Model, StubModel()))
-    assert bare_runtime.has_pending_background is None
-    # Fresh runtime, empty inbox, no work -> fully drained, as before.
-    assert bare_runtime._fully_drained() is True
-    # Setting a callback that reports pending flips it; clearing restores.
-    bare_runtime.has_pending_background = lambda: True
-    assert bare_runtime._fully_drained() is False
-    bare_runtime.has_pending_background = None
-    assert bare_runtime._fully_drained() is True
-
-
-@pytest.mark.asyncio
-async def test_agent_tool_persists_with_runtime_call_id(tmp_path: Path) -> None:
-    call = ToolCall(id="tool_call_1", name="Echo", args={})
-    model = StubModel(
-        responses=[
-            AssistantMessage(tool_calls=(call,)),
-            AssistantMessage(text="done"),
-        ],
-    )
-    tool = StubTool(response="X" * 5_000)
-    a = _build_agent(model=model, tools=[tool], session_dir=tmp_path)
-    a._tool_results_override = ToolResultPolicy(persist_tokens=1_000)
-
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-
-    assert (tmp_path / "tool-results" / "tool_call_1.txt").read_text() == "X" * 5_000
-    assert not (tmp_path / "tool-results" / "id_e3b0c44298fc1c14.txt").exists()
-
-
-@dataclass(slots=True, kw_only=True)
-class _CappedTool(StubTool):
-    """Stub that declares its own result character cap."""
-
-    max_result_chars: int = DEFAULT_MAX_RESULT_CHARS
-
-
-async def _run_one_round(
-    tool: StubTool,
-    *,
-    session_dir: Path,
-    calls: int = 1,
-    budget: AgentSettings | None = None,
-) -> list[ToolResult]:
-    """Run one round of ``calls`` parallel calls and return the stored results."""
-    round_calls = tuple(
-        ToolCall(id=f"c{i}", name="Echo", args={}) for i in range(calls)
-    )
-    model = StubModel(
-        max_request_tokens=1_000_000,
-        responses=[
-            AssistantMessage(tool_calls=round_calls),
-            AssistantMessage(text="done"),
-        ],
-    )
-    a = _build_agent(model=model, tools=[tool], session_dir=session_dir, budget=budget)
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    return [m for m in a.history if isinstance(m, ToolResult)]
-
-
-@pytest.mark.asyncio
-async def test_a_result_over_its_tools_char_cap_is_persisted_on_a_huge_window(
-    tmp_path: Path,
-) -> None:
-    """Session ``ca1c4eb5``: a 453k-char Grep stayed inline on a 1M window.
-
-    The per-result cap was ``window // 4`` tokens, 250k on a 1M window, so the
-    result never reached disk. The cap is now characters and fixed per tool.
-    """
-    tool = _CappedTool(response="y" * 21_000, max_result_chars=20_000)
-
-    [stored] = await _run_one_round(tool, session_dir=tmp_path)
-
-    assert stored.content.startswith(PERSISTED_TAG), stored.content[:80]
-    assert (tmp_path / "tool-results" / "c0.txt").read_text() == "y" * 21_000
-
-
-@pytest.mark.asyncio
-async def test_a_declared_cap_above_the_global_default_is_clamped(
-    tmp_path: Path,
-) -> None:
-    tool = _CappedTool(
-        response="y" * (DEFAULT_MAX_RESULT_CHARS + 1),
-        max_result_chars=10**9,
-    )
-
-    [stored] = await _run_one_round(tool, session_dir=tmp_path)
-
-    assert stored.content.startswith(PERSISTED_TAG)
-
-
-@pytest.mark.asyncio
-async def test_a_tool_without_a_declared_cap_gets_the_global_default(
-    tmp_path: Path,
-) -> None:
-    under = StubTool(response="y" * DEFAULT_MAX_RESULT_CHARS)
-    over = StubTool(response="y" * (DEFAULT_MAX_RESULT_CHARS + 1))
-
-    [kept] = await _run_one_round(under, session_dir=tmp_path / "a")
-    [spilled] = await _run_one_round(over, session_dir=tmp_path / "b")
-
-    assert kept.content == "y" * DEFAULT_MAX_RESULT_CHARS
-    assert spilled.content.startswith(PERSISTED_TAG)
-
-
-@pytest.mark.asyncio
-async def test_a_round_of_parallel_results_shares_one_char_budget(
-    tmp_path: Path,
-) -> None:
-    """Five 45k results each pass the 50k cap; together they pass 200k."""
-    per = 45_000
-    calls = MAX_ROUND_RESULT_CHARS // per + 1
-    tool = StubTool(response="y" * per)
-
-    stored = await _run_one_round(tool, session_dir=tmp_path, calls=calls)
-
-    inline = [r for r in stored if not r.content.startswith(PERSISTED_TAG)]
-    assert len(inline) == MAX_ROUND_RESULT_CHARS // per
-    assert sum(len(r.content) for r in stored) < MAX_ROUND_RESULT_CHARS
-
-
-@pytest.mark.asyncio
-async def test_a_result_that_would_not_fit_the_context_is_persisted(
-    tmp_path: Path,
-) -> None:
-    """Under every char cap, yet bigger than the room left: still persisted."""
-    budget = AgentSettings(
-        max_request_tokens=8_000,
-        max_response_tokens=1_000,
-        buffer_tokens=1_000,
-    )
-    tool = StubTool(response="y" * 40_000)
-
-    [stored] = await _run_one_round(tool, session_dir=tmp_path, budget=budget)
-
-    assert stored.content.startswith(PERSISTED_TAG)
-
-
-@pytest.mark.asyncio
-async def test_an_exempt_tool_that_would_not_fit_is_refused_not_persisted(
-    tmp_path: Path,
-) -> None:
-    """Read is never persisted: its path back would be Read, which spills again."""
-    budget = AgentSettings(
-        max_request_tokens=8_000,
-        max_response_tokens=1_000,
-        buffer_tokens=1_000,
-    )
-    tool = _CappedTool(response="y" * 40_000, max_result_chars=0)
-
-    [stored] = await _run_one_round(tool, session_dir=tmp_path, budget=budget)
-
-    assert stored.is_error
-    assert "offset and limit" in stored.content
-    assert not (tmp_path / "tool-results").exists()
-
-
-@pytest.mark.asyncio
-async def test_agent_run_passes_rich_tools_to_model() -> None:
-    """Regression: provider iterates ``request.tools`` reading ``.description``
-    etc.; the runtime hands the model layer ``_AgentTool`` wrappers, which
-    expose only ``name``/``run``. The Agent must translate them back to rich
-    tools before constructing ``types.model.ModelRequest`` so providers see the full
-    Tool surface.
-    """
-    model = StubModel()
-    tool: Tool = StubTool()
-    a = _build_agent(model=model, tools=[tool])
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    assert model.received, "model.stream must have been invoked"
-    req = model.received[-1]
-    assert len(req.tools) == 1
-    seen = req.tools[0]
-    # Every Tool-protocol attribute the providers read must resolve.
-    assert seen.name == "Echo"
-    assert seen.description == "Echo tool."
-    assert seen.tool_id == "application/x-tool-echo"
-    # B1: the wrapper injects ``background`` / ``delay`` even into
-    # schemaless tools; check the underlying ``type`` is preserved and
-    # the injected fields are present.
-    schema = dict(seen.directive_schema)
-    assert schema["type"] == "object"
-    props = cast(Mapping[str, object], schema["properties"])
-    assert "background" in props
-    assert "delay" in props
-    assert seen.summary({}) == "echo"
-    assert seen.prompt() == ""
-
-
-@pytest.mark.asyncio
-async def test_agent_records_response_into_cost_tracker() -> None:
-    model = StubModel()
-    a = _build_agent(model=model)
-    async for _ in a.run(UserMessage(text="ping")):
-        pass
-    # StubModel emits empty TokenCount, but ``calls_by_model`` records
-    # one entry per model invocation.
-    assert a.cost_tracker.calls_by_model.get("stub-1", 0) >= 1
-
-
-def test_agent_record_response_budget_exhaustion_raises() -> None:
-    a = _build_agent(max_budget_usd=1.0)
-    # First response below the cap: clean.
-    a.record_response(ModelResponse(message=AssistantMessage(text="x")))
-    # The per-agent cap is checked against ``_own_spend`` (this agent's
-    # own spend), not the shared root cost sink. A single over-cap response
-    # trips it; verify the raise is a ``UserFacingError`` subclass (polished
-    # remediation, not raw ``RuntimeError``).
-    with pytest.raises(BudgetExhaustedError) as exc_info:
-        a.record_response(
-            ModelResponse(
-                message=AssistantMessage(text="x"),
-                spend=TokenCost(request=2.0),
-            ),
-        )
-    assert exc_info.value.max_budget_usd == 1.0
-    assert exc_info.value.total_cost_usd == pytest.approx(2.0)
-    assert "Budget exhausted" in str(exc_info.value)
-
-
-def test_agent_record_response_spend_equal_to_the_cap_is_exhausted() -> None:
-    a = _build_agent(max_budget_usd=1.0)
-    with pytest.raises(BudgetExhaustedError):
-        a.record_response(
-            ModelResponse(
-                message=AssistantMessage(text="x"),
-                spend=TokenCost(request=1.0),
-            ),
-        )
-
-
-def test_record_response_remembers_the_history_its_tokens_measured() -> None:
-    a = _build_agent()
-    a.record_response(ModelResponse(message=AssistantMessage(text="x")))
-    assert a._last_measured_history == tuple(a.runtime.context().messages)
-
-
-def test_record_response_anchors_on_disjoint_token_pools() -> None:
-    """``_last_input_tokens`` sums the disjoint pools, not double-counting cache.
-
-    The compaction trigger anchors on this value. With the non-cached
-    ``input_tokens`` convention the three pools are disjoint, so the anchor is
-    their sum; a cache-inclusive ``input_tokens`` would inflate it and fire
-    compaction prematurely.
-    """
-    a = _build_agent()
-    a.record_response(
-        ModelResponse(
-            message=AssistantMessage(text="x"),
-            tokens=TokenCount(
-                request=100_000,
-                response=500,
-                cache_read=400_000,
-            ),
-        ),
-    )
-    assert a._last_input_tokens == 500_000
-
-
-def test_record_response_detects_cache_miss_within_ttl_window() -> None:
-    """``record_response`` wires cache-miss detection: a within-TTL miss on
-    the same model records as ``prefix_mutated`` -- the #361 scenario, where
-    a subagent spawn (or other drift) mutates the request bytes rather than
-    the provider's cache simply expiring.
-    """
-    a = _build_agent(model=StubModel(supports_cache_control=True))
-    a.record_response(
-        ModelResponse(
-            message=AssistantMessage(text="x"),
-            tokens=TokenCount(cache_read=10_000),
-        ),
-    )
-    a.record_response(
-        ModelResponse(
-            message=AssistantMessage(text="y"),
-            tokens=TokenCount(request=10_000),
-        ),
-    )
-    assert len(a.cost_tracker.cache_misses) == 1
-    miss = a.cost_tracker.cache_misses[0]
-    assert miss.cause == "prefix_mutated"
-    assert miss.missed_tokens == 10_000
-
-
-def test_record_response_skips_cache_miss_on_first_response() -> None:
-    """No prior turn means nothing could have been cached yet."""
-    a = _build_agent(model=StubModel(supports_cache_control=True))
-    a.record_response(
-        ModelResponse(
-            message=AssistantMessage(text="x"),
-            tokens=TokenCount(request=5_000),
-        ),
-    )
-    assert a.cost_tracker.cache_misses == []
-
-
-def test_record_response_a_model_change_is_not_a_cache_miss() -> None:
-    """A different model has its own cache, so its cold start is no prefix drift."""
-    a = _build_agent(model=StubModel(supports_cache_control=True))
-    a.record_response(
-        ModelResponse(
-            message=AssistantMessage(text="x"),
-            tokens=TokenCount(cache_read=10_000),
-        ),
-    )
-    a.model = StubModel(model_id="stub-2", supports_cache_control=True)
-    a.record_response(
-        ModelResponse(
-            message=AssistantMessage(text="y"),
-            tokens=TokenCount(request=10_000),
-        ),
-    )
-    assert a.cost_tracker.cache_misses == []
-
-
-def test_job_id_for_call_is_stable_and_maps_back_to_its_call() -> None:
-    a = _build_agent()
-    job_id = a.job_id_for_call("call-x")
-    assert a.job_id_for_call("call-x") == job_id
-    assert a.job_id_for_call("call-y") != job_id
-    assert a._call_id_for_job(job_id) == "call-x"
-
-
-@pytest.mark.asyncio
-async def test_await_event_resolves_on_its_own_event_and_leaves_no_observer() -> None:
-    a = _build_agent()
-    observers = list(a.runtime.observers)
-    waiting = asyncio.create_task(
-        a._await_event(CompactStarted(), complete=CompactComplete),
-    )
-    await asyncio.sleep(0)
-
-    a.publish(CompactStarted())
-    await asyncio.sleep(0)
-    assert not waiting.done()
-
-    a.publish(CompactComplete(records=()))
-    await asyncio.wait_for(waiting, timeout=1.0)
-    assert a.runtime.observers == observers
-
-
-def test_record_response_surfaces_usage_warning_once() -> None:
-    model = StubModel()
-    a = Agent(model=model, tools=[])
-    published: list[object] = []
-    a.runtime.observers.append(published.append)
-
-    resp = ModelResponse(message=AssistantMessage(text="x"))
-    # Below threshold: no advisory.
-    model.usage = UsageSnapshot(windows=(UsageWindow(label="7d", utilization=0.5),))
-    a.record_response(resp)
-    # Crosses 0.75: one advisory.
-    model.usage = UsageSnapshot(windows=(UsageWindow(label="7d", utilization=0.89),))
-    a.record_response(resp)
-    a.record_response(resp)  # Still high -> not re-warned.
-
-    notices = [e for e in published if isinstance(e, NoticeMessage)]
-    assert len(notices) == 1
-    assert notices[0].tier == "advisory"
-    assert "7d" in notices[0].text
-    assert "89%" in notices[0].text
-
-
-def test_record_response_usage_warning_rearms_after_drop() -> None:
-    model = StubModel()
-    a = Agent(model=model, tools=[])
-    published: list[object] = []
-    a.runtime.observers.append(published.append)
-    resp = ModelResponse(message=AssistantMessage(text="x"))
-    for util in (0.9, 0.5, 0.9):
-        model.usage = UsageSnapshot(
-            windows=(UsageWindow(label="5h", utilization=util),),
-        )
-        a.record_response(resp)
-    # Warned at the first 0.9, cleared at 0.5 (< 0.60), re-warned at 0.9.
-    notices = [e for e in published if isinstance(e, NoticeMessage)]
-    assert len(notices) == 2
-
-
-def test_record_response_usage_warning_escalates_to_blocked() -> None:
-    model = StubModel()
-    a = Agent(model=model, tools=[])
-    published: list[object] = []
-    a.runtime.observers.append(published.append)
-    resp = ModelResponse(message=AssistantMessage(text="x"))
-
-    model.usage = UsageSnapshot(windows=(UsageWindow(label="7d", utilization=0.89),))
-    a.record_response(resp)
-    # Same window now hard-blocked: the escalation must surface a new advisory.
-    model.usage = UsageSnapshot(
-        windows=(UsageWindow(label="7d", utilization=1.0, blocked=True),),
-    )
-    a.record_response(resp)
-
-    notices = [e for e in published if isinstance(e, NoticeMessage)]
-    assert [n.text for n in notices] == [
-        "[usage: 7d window 89% used]",
-        "[usage: 7d window blocked]",
-    ]
-
-
-def test_record_response_usage_warning_no_chatter_above_clear() -> None:
-    model = StubModel()
-    a = Agent(model=model, tools=[])
-    published: list[object] = []
-    a.runtime.observers.append(published.append)
-    resp = ModelResponse(message=AssistantMessage(text="x"))
-    # Oscillating between 0.78 and 0.72 -- both above the 0.60 clear point --
-    # must warn once, not on every crossing of 0.75.
-    for util in (0.78, 0.72, 0.78, 0.72):
-        model.usage = UsageSnapshot(
-            windows=(UsageWindow(label="5h", utilization=util),),
-        )
-        a.record_response(resp)
-    notices = [e for e in published if isinstance(e, NoticeMessage)]
-    assert len(notices) == 1
-
-
-def test_token_count_addable() -> None:
-    """``TokenCount`` supports ``+`` so ``CostTracker.record`` can fold."""
-    a = TokenCount()
-    b = TokenCount()
-    c = a + b
-    assert c == TokenCount()
-
-
-def test_agent_shutdown_idempotent() -> None:
-    a = _build_agent()
-    a.shutdown()
-    a.shutdown()  # Second call must not raise.
-
-
-@pytest.mark.asyncio
-async def test_agent_shutdown_closes_active_model_once() -> None:
-    @dataclass(slots=True, kw_only=True)
-    class ClosableStubModel(StubModel):
-        close_count: int = 0
-        closed_event: asyncio.Event = field(default_factory=asyncio.Event)
-
-        @override
-        async def close(self) -> None:
-            self.close_count += 1
-            self.closed_event.set()
-
-    model = ClosableStubModel()
-    a = _build_agent(model=model)
-    a.shutdown()
-    await a.aclose()
-    await a.aclose()
-    assert model.closed_event.is_set()
-    assert model.close_count == 1
-    assert a._close_task is not None
-    assert a._close_task.done()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("interruption", ["error", "cancel"])
-async def test_interrupted_run_releases_driver_without_closing_model(
-    interruption: str,
-) -> None:
-    started = asyncio.Event()
-    cancelled = asyncio.Event()
-    closed = asyncio.Event()
-
-    class InterruptibleModel(StubModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            message = request.messages[-1]
-            assert isinstance(message, UserMessage)
-            if message.text == "interrupt":
-                if interruption == "error":
-                    raise ValueError("provider error")
-                started.set()
-                try:
-                    await asyncio.Future[None]()
-                finally:
-                    cancelled.set()
-            return await StubModel.stream(self, request, publish)
-
-        @override
-        async def close(self) -> None:
-            closed.set()
-
-    a = _build_agent(model=InterruptibleModel())
-    observers = tuple(a.runtime.observers)
-
-    async def consume() -> None:
-        async with contextlib.aclosing(a.run(UserMessage(text="interrupt"))) as events:
-            async for event in events:
-                if isinstance(event, ModelResponseError):
-                    raise event.exception
-
-    try:
-        if interruption == "error":
-            with pytest.raises(ValueError, match="provider error"):
-                await consume()
-        else:
-            task = asyncio.create_task(consume())
-            await asyncio.wait_for(started.wait(), timeout=1.0)
-            task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await task
-            await asyncio.wait_for(cancelled.wait(), timeout=1.0)
-        assert tuple(a.runtime.observers) == observers
-        assert not a._run_active
-        assert not closed.is_set()
-        events = [event async for event in a.run(UserMessage(text="retry"))]
-        assert any(isinstance(event, ModelResponseComplete) for event in events)
-        assert not closed.is_set()
-    finally:
-        a.shutdown()
-        await asyncio.wait_for(closed.wait(), timeout=1.0)
-
-
-def test_max_request_tokens_setter_rejects_over_model_limit() -> None:
-    a = _build_agent()
-    with pytest.raises(ValueError, match="exceeds model's"):
-        a.max_request_tokens = a.model.limits.max_request_tokens + 1
-
-
-def test_max_request_tokens_setter_accepts_within_limit() -> None:
-    a = _build_agent()
-    a.max_request_tokens = 50_000
-    assert a.budget.max_request_tokens == 50_000
-
-
-def test_max_response_tokens_setter_rejects_over_model_limit() -> None:
-    a = _build_agent()
-    with pytest.raises(ValueError, match="exceeds model's"):
-        a.max_response_tokens = a.model.limits.max_response_tokens + 1
-
-
-def test_max_response_tokens_setter_accepts_within_limit() -> None:
-    a = _build_agent()
-    a.max_response_tokens = 256
-    assert a.budget.max_response_tokens == 256
-
-
-def test_the_agent_keeps_no_copy_of_a_model_setting() -> None:
-    """What the model reports is what the wire will send.
-
-    A shadow field on ``Agent`` was set by ``/thinking`` and never read by
-    the wire builders, so the selection silently never shipped. The axes
-    live on ``model.settings`` and nowhere else.
-    """
-    a = _build_agent(model=StubModel(supports_thinking=True))
-    shadowed = ("thinking", "show_thinking", "effort", "cache_ttl", "service_tier")
-    for name in shadowed:
-        assert not hasattr(a, name), name
-
-
-def test_thinking_writes_through_to_the_model() -> None:
-    a = _build_agent(model=StubModel(supports_thinking=True))
-    a.model.settings.thinking_budget = "fixed"
-    a.model.settings.thinking_output = "text"
-    assert a.model.settings.thinking_budget == "fixed"
-
-
-def test_thinking_rejects_what_the_model_does_not_offer() -> None:
-    a = _build_agent()  # StubModel offers only the ``none`` budget.
-    with pytest.raises(ValueError, match="thinking_budget"):
-        a.model.settings.thinking_budget = "fixed"
-
-
-def test_change_model_builds_the_provider_without_construction_options(
-    patched_build_provider: Mapping[str, object],
-) -> None:
-    """Construction knobs are the factory's; the swap invents none."""
-    a = _build_agent_with_spec()
-    _ = a.change_model(model_id="claude-sonnet-4-6")
-    build_provider = patched_build_provider["build_provider"]
-    assert isinstance(build_provider, Mock)
-    build_provider.assert_called_with("Anthropic", "api", account=None)
-
-
-def test_effort_rejects_when_model_lacks_support() -> None:
-    a = _build_agent()  # StubModel offers only the ``none`` effort.
-    with pytest.raises(ValueError, match="thinking_effort"):
-        a.model.settings.thinking_effort = "high"
-
-
-def test_effort_accepts_when_model_supports() -> None:
-    a = _build_agent(model=StubModel(valid_efforts=("low", "medium", "high")))
-    a.model.settings.thinking_effort = "medium"
-    assert a.model.settings.thinking_effort == "medium"
-
-
-def test_effort_rejects_a_value_outside_valid_efforts() -> None:
-    a = _build_agent(model=StubModel(valid_efforts=("low", "high")))
-    with pytest.raises(ValueError, match="thinking_effort"):
-        a.model.settings.thinking_effort = "medium"
-
-
-def test_effort_accepts_none_unconditionally() -> None:
-    a = _build_agent()
-    a.model.settings.thinking_effort = "none"
-    assert a.model.settings.thinking_effort == "none"
-
-
-def test_cache_ttl_rejects_more_than_the_model_caches() -> None:
-    a = _build_agent()  # StubModel has no prompt cache.
-    with pytest.raises(ValueError, match="cache_ttl_sec"):
-        a.model.settings.cache_ttl_sec = 3600.0
-
-
-def test_cache_ttl_accepts_within_the_bound() -> None:
-    a = _build_agent(model=StubModel(supports_cache_control=True))
-    a.model.settings.cache_ttl_sec = 3600.0
-    assert a.model.settings.cache_ttl_sec == 3600.0
-
-
-def test_a_cacheless_model_starts_at_no_cache() -> None:
-    """The default is a value nobody chose, so it must not fail construction."""
-    a = _build_agent()
-    assert a.model.settings.cache_ttl_sec == 0.0
-
-
-def test_service_tier_rejects_when_model_lacks_support() -> None:
-    a = _build_agent()  # StubModel offers only the ``auto`` tier.
-    with pytest.raises(ValueError, match="service_tier"):
-        a.model.settings.service_tier = "priority"
-
-
-def test_service_tier_rejects_unknown_value() -> None:
-    a = _build_agent(model=StubModel(valid_service_tiers=("auto", "priority")))
-    with pytest.raises(ValueError, match="service_tier"):
-        a.model.settings.service_tier = "flex"
-
-
-def test_service_tier_accepts_when_model_supports() -> None:
-    model = StubModel(valid_service_tiers=("auto", "priority"))
-    a = _build_agent(model=model)
-    a.model.settings.service_tier = "priority"
-    assert model.settings.service_tier == "priority"
-    a.model.settings.service_tier = "auto"
-    assert model.settings.service_tier == "auto"
-
-
-def test_status_setter_round_trip() -> None:
-    a = _build_agent()
-    a.status = "busy"
-    assert a.status == "busy"
-
-
-def test_ephemeral_session_id_is_hex_string() -> None:
-    a = _build_agent()
-    assert len(a.session_id) == 8
-    assert a.runtime.session_id == a.session_id
-
-
-def test_persisted_session_uses_session_directory_name(tmp_path: Path) -> None:
-    session_dir = tmp_path / "d940b751c9fe"
-    a = _build_agent(session_dir=session_dir)
-    a.runtime.append_history(UserMessage(text="hello"))
-
-    assert a.session_id == "d940b751c9fe"
-    assert a.runtime.session_id == "d940b751c9fe"
-    assert a.runtime.tape[0].ref.session_id == "d940b751c9fe"
-
-
-def test_inbox_and_work_properties_reflect_runtime() -> None:
-    a = _build_agent()
-    assert a.inbox is a.runtime.inbox
-    # No model call or compact_task is active right after construction.
-    assert a.work is None
-
-
-def test_tools_property_lists_wrapped_tools() -> None:
-    tool: Tool = StubTool()
-    a = _build_agent(tools=[tool])
-    assert len(a.tools) == 1
-
-
-def test_total_cost_total_tokens_num_rounds_initially_zero() -> None:
-    a = _build_agent()
-    assert a.cost_tracker.spend.total == 0.0
-    assert a.total_tokens.request == 0
-    assert a.num_tool_call_rounds == 0
-
-
-def test_an_agent_without_tools_sends_its_system_alone() -> None:
-    a = _build_agent(system="root")
-    assert a.system_blocks() == ("root",)
-
-
-def test_the_detached_arrived_note_leads_before_any_tool_detaches() -> None:
-    """The prohibition must precede the imitable ``DetachedArrived`` pattern.
-
-    It is in the first block from the first request, ahead of ``system``, so
-    a caller's replacement prompt cannot drop it and its arrival never
-    rewrites the cached prefix.
-    """
-    a = _build_agent(system="root", tools=[StubTool()])
-    assert a.system_blocks()[0] == f"{DETACHED_ARRIVED_SYSTEM_NOTE}\n\nroot"
-
-
-def test_background_merges_detached_and_explicit() -> None:
-    a = _build_agent()
-    loop = asyncio.new_event_loop()
-    try:
-        # Stash a detached task on the runtime; expect it surfaces.
-        det_task = loop.create_task(asyncio.sleep(0))
-        a.runtime.detached["det-1"] = det_task
-        # Register an explicit job too.
-        ex_task = loop.create_task(asyncio.sleep(0))
-        a.register_background(
-            "job-2",
-            BackgroundTaskEntry(
-                task=ex_task,
-                tool_name="X",
-                queue_id="job-2",
-                started=0.0,
-            ),
-        )
-        merged = a.background
-        assert "job-1" in merged
-        assert "job-2" in merged
-        assert merged["job-1"].kind == "detached"
-        assert merged["job-1"].call_id == "det-1"
-        _ = det_task.cancel()
-        _ = ex_task.cancel()
-        loop.run_until_complete(
-            asyncio.gather(det_task, ex_task, return_exceptions=True),
-        )
-    finally:
-        loop.close()
-
-
-def test_swap_model_clamps_whole_window_budget_to_smaller_model() -> None:
-    # Default budget == old model's max (the "whole window" case). Swapping
-    # to a smaller model clamps the budget down instead of raising.
-    a = _build_agent()
-    assert a.budget.max_request_tokens == a.model.limits.max_request_tokens
-    a.swap_model(StubModel(model_id="small", max_request_tokens=50_000))
-    assert a.budget.max_request_tokens == 50_000
-
-
-def test_swap_model_grows_whole_window_budget_to_larger_model() -> None:
-    # A budget pinned at the old model's max follows the new model up.
-    a = _build_agent()
-    assert a.budget.max_request_tokens == a.model.limits.max_request_tokens
-    a.swap_model(StubModel(model_id="big", max_request_tokens=1_000_000))
-    assert a.budget.max_request_tokens == 1_000_000
-
-
-def test_swap_model_preserves_pinned_budget_under_new_max() -> None:
-    # An explicitly lowered budget (below the old model's max) is preserved
-    # when it still fits the new model.
-    a = _build_agent()
-    a.max_request_tokens = 50_000
-    a.swap_model(StubModel(model_id="big", max_request_tokens=1_000_000))
-    assert a.budget.max_request_tokens == 50_000
-
-
-def test_swap_model_clamps_pinned_budget_over_new_max() -> None:
-    # An explicit budget that exceeds the new model's max is clamped down.
-    a = _build_agent()
-    a.max_request_tokens = 80_000
-    a.swap_model(StubModel(model_id="small", max_request_tokens=50_000))
-    assert a.budget.max_request_tokens == 50_000
-
-
-def test_swap_model_rescales_response_window_to_smaller_model() -> None:
-    a = _build_agent()
-    assert a.budget.max_response_tokens == a.model.limits.max_response_tokens
-    a.swap_model(StubModel(model_id="small", max_response_tokens=256))
-    assert a.budget.max_response_tokens == 256
-
-
-@dataclass(slots=True, kw_only=True)
-class _NoopCompactor:
-    @property
-    def reattach(self) -> ReattachPolicy:
-        return ReattachPolicy()
-
-    def largest_context(self, settings: AgentSettings) -> int:
-        return _stub_largest_context(settings)
-
-    def should_compact(
-        self,
-        current_tokens: int,
-        largest_context: int,
-        system_tokens: int = 0,
-    ) -> bool:
-        del current_tokens, largest_context, system_tokens
-        return False
-
-    async def compact(
-        self,
-        tape: Sequence[TapeRecord],
-        context: Sequence[ModelContextEvent],
-        model: Model,
-        mint_ref: Callable[[], TapeRef],
-        custom_instructions: str | None = None,
-    ) -> ContextSplice:
-        del context, model, custom_instructions
-        return _summary_override(
-            [UserMessage(text="ok")],
-            mint_ref,
-            tape=tape,
-        )
-
-
-def test_swap_model_never_enqueues_compaction() -> None:
-    """A model selection changes configuration without mutating history."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _LyingTokenModel(StubModel):
-        """Returns 500k tokens regardless of actual request size."""
-
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            del request
-            return 500_000
-
-    agent = Agent(
-        model=_LyingTokenModel(
-            model_id="claude-haiku-4-5",
-            max_request_tokens=200_000,
-        ),
-        tools=[],
-        compactor=SummaryCompactor(),
-    )
-    agent.runtime.inbox.drain_nowait()
-    agent.runtime.append_history(UserMessage(text="payload"))
-
-    agent.swap_model(
-        _LyingTokenModel(
-            model_id="claude-opus-4-8",
-            max_request_tokens=200_000,
-        ),
-    )
-
-    items = agent.runtime.inbox.drain_nowait()
-    assert not any(isinstance(event, Compact) for event in items), items
-
-
-def test_swap_model_does_not_push_compact_when_history_fits() -> None:
-    """Swap to a model whose budget comfortably holds current history: no compact."""
-    a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
-    a.runtime.inbox.drain_nowait()
-
-    a.swap_model(StubModel(model_id="same-size"))
-
-    items = a.runtime.inbox.drain_nowait()
-    compacts = [ev for ev in items if isinstance(ev, Compact)]
-    assert not compacts, (
-        f"swap_model to fitting model spuriously pushed Compact(); inbox was {items!r}"
-    )
-
-
-def test_swap_model_rescales_buffer_to_the_new_window() -> None:
-    """A window-proportional buffer must shrink with the window.
-
-    ``largest_context`` deducts ``buffer_tokens`` in full, so a buffer left
-    at the outgoing model's value dominates a smaller successor: 1M -> 100k
-    kept 66,666 tokens of headroom on a 100k window, leaving 32% of the new
-    model reachable and compacting sessions it could hold outright.
-    """
-    gate = SummaryCompactor()
-    a = Agent(
-        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=1_024),
-        tools=[],
-        compactor=gate,
-    )
-    assert (a.budget.buffer_tokens or 0) == default_buffer_tokens(1_000_000)
-
-    a.swap_model(StubModel(model_id="small", max_request_tokens=100_000))
-
-    assert (a.budget.buffer_tokens or 0) <= default_buffer_tokens(100_000)
-    assert gate.largest_context(a.budget) > 100_000 * 0.85, (
-        f"largest_context {gate.largest_context(a.budget):,} leaves too little"
-        f" of the 100k window; buffer is {(a.budget.buffer_tokens or 0):,}"
-    )
-
-
-def test_largest_context_respects_provider_input_plus_max_tokens_ceiling() -> None:
-    """The gate must fire below ``input + max_tokens <= window``.
-
-    Vendors count input and output against ONE window -- Anthropic rejects
-    with ``input length and max_tokens exceed context limit: A + B > W``.
-    The reply must therefore be reserved as an ABSOLUTE count, which is
-    ``largest_context``'s job; the proportional ``u`` slack is estimation
-    headroom on top and cannot substitute for it. While the reply was left
-    to ``u=0.95`` alone the gate fired at 942k against an 872k ceiling on a
-    1M model, and 117k past the ceiling on a 200k one.
-    """
-    gate = SummaryCompactor()
-    for window, response in ((1_000_000, 128_000), (200_000, 128_000)):
-        budget = AgentSettings(
-            max_request_tokens=window,
-            max_response_tokens=response,
-            buffer_tokens=default_buffer_tokens(window),
-        )
-        largest = gate.largest_context(budget)
-        ceiling = window - response
-        assert gate.should_compact(ceiling, largest, 0) is True, (
-            f"window={window:,}: gate must fire at or before the provider"
-            f" ceiling {ceiling:,}"
-        )
-        # And it must not fire so early the model is unusable.
-        assert gate.should_compact(largest // 2, largest, 0) is False
-
-
-def test_swap_model_no_compact_when_no_compactor_configured() -> None:
-    """No compactor wired: swap_model must not push Compact()."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _LyingTokenModel(StubModel):
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            del request
-            return 500_000
-
-    a = Agent(
-        model=_LyingTokenModel(model_id="big", max_request_tokens=1_000_000),
-        tools=[],
-    )
-    a.runtime.inbox.drain_nowait()
-    a.runtime.append_history(UserMessage(text="payload"))
-
-    a.swap_model(_LyingTokenModel(model_id="small", max_request_tokens=100_000))
-
-    items = a.runtime.inbox.drain_nowait()
-    compacts = [ev for ev in items if isinstance(ev, Compact)]
-    assert not compacts
-
-
-def test_swap_model_replaces_model_and_inner_wrapper() -> None:
-    a = _build_agent()
-    new = StubModel(model_id="stub-2")
-    a.swap_model(new)
-    assert a.model is new
-    # The wrapper's inner reference was updated too.
-    assert a._agent_model._inner is new
-
-
-@pytest.mark.asyncio
-async def test_swap_model_noop_does_not_close_active_model() -> None:
-    """Swapping in the *current* model must not tear it down.
-
-    Pre-fix, ``swap_model(self.model)`` captured ``old = self.model`` then
-    assigned ``self.model = model`` (same object), then unconditionally
-    scheduled ``close(old)`` -- so the now-active model got torn down,
-    leaving subsequent requests to fail against a dead SDK client.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class ClosableStubModel(StubModel):
-        closed_event: asyncio.Event = field(default_factory=asyncio.Event)
-
-        @override
-        async def close(self) -> None:
-            self.closed_event.set()
-
-    m = ClosableStubModel()
-    a = _build_agent(model=m)
-    a.swap_model(m)
-    # Give any scheduled close a chance to run; under the bug the
-    # Event would be set after the next loop step.
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    assert not m.closed_event.is_set()
-    assert a.model is m
-
-
-def test_swap_model_clears_unsupported_service_tier() -> None:
-    a = _build_agent(model=StubModel(valid_service_tiers=("priority",)))
-    a.model.settings.service_tier = "priority"
-    a.swap_model(StubModel(model_id="stub-2"))
-    assert a.model.settings.service_tier == "auto"
-
-
-def test_swap_model_normalizes_unsupported_cache_ttl() -> None:
-    a = _build_agent(model=StubModel(supports_cache_control=True))
-    a.model.settings.cache_ttl_sec = 3600.0
-    a.swap_model(StubModel(model_id="stub-2"))
-    assert a.model.settings.cache_ttl_sec == 0.0
-
-
-@pytest.mark.asyncio
-async def test_swap_model_schedules_close_on_old_cli_model() -> None:
-    """CLI providers own subprocess pools via ``HotSpare`` and define
-    ``async def close()``. ``Agent.swap_model`` must schedule that
-    teardown for the swapped-out model so the prior ``claude`` /
-    ``gemini`` subprocess and warming-spare task don't leak past the
-    swap. API-key models (no ``close``) are skipped silently.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class ClosableStubModel(StubModel):
-        closed_event: asyncio.Event = field(default_factory=asyncio.Event)
-
-        @override
-        async def close(self) -> None:
-            self.closed_event.set()
-
-    old = ClosableStubModel()
-    a = _build_agent(model=old)
-    a.swap_model(StubModel(model_id="stub-2"))
-    # The scheduled close task needs the loop to step once before its
-    # body runs; ``wait_for`` with a short timeout is more robust than
-    # ``sleep(0)`` against scheduler quirks (the close coroutine itself
-    # only sets an Event, so this resolves immediately under correct
-    # behavior and times out under regression).
-    await asyncio.wait_for(old.closed_event.wait(), timeout=1.0)
-    assert old.closed_event.is_set()
-
-
-@pytest.mark.asyncio
-async def test_swap_model_logs_close_failure_via_log_task_exception(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A crash inside ``close()`` on the swapped-out model lands at ERROR.
-
-    The teardown task is fire-and-forget. Before the unification, the
-    site used a hand-rolled done-callback (``_log_close_errors``) that
-    called ``log_exception_or_warning`` outside any ``except`` block --
-    so ``logger.exception`` read an empty ``sys.exc_info()`` and the
-    traceback never made it into the log record. Replacing it with the
-    shared ``log_task_exception`` helper (which passes ``exc_info=exc``
-    explicitly) preserves the traceback. Pin both contracts here:
-    ERROR level, AND traceback present.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class CrashingCloseModel(StubModel):
-        closed_event: asyncio.Event = field(default_factory=asyncio.Event)
-
-        @override
-        async def close(self) -> None:
-            try:
-                raise RuntimeError("simulated close failure")
-            finally:
-                self.closed_event.set()
-
-    old = CrashingCloseModel()
-    a = _build_agent(model=old)
-    logger_name = "sagent.agent.agent"
-    caplog.set_level(logging.DEBUG, logger=logger_name)
-    a.swap_model(StubModel(model_id="stub-2"))
-    # Wait for the close coroutine to start its raise.
-    await asyncio.wait_for(old.closed_event.wait(), timeout=1.0)
-    # The done-callback fires on a later loop tick after the task
-    # transitions to done. Poll a handful of yields rather than
-    # guess the exact tick count.
-    for _ in range(20):
-        await asyncio.sleep(0.001)
-        if any(
-            r.name == logger_name and r.levelname == "ERROR" for r in caplog.records
-        ):
-            break
-    errs = [
-        r for r in caplog.records if r.name == logger_name and r.levelname == "ERROR"
-    ]
-    assert errs, (
-        "swapped-out model close failure must surface at ERROR; "
-        f"records={[(r.levelname, r.getMessage()) for r in caplog.records]!r}"
-    )
-    assert errs[0].exc_info is not None, "close ERROR must carry a traceback"
-
-
-@dataclass(slots=True, kw_only=True)
-class _ClosingProvider:
-    """Provider whose ``close_sdk`` calls are counted."""
-
-    closed: int = 0
-    fail_model: bool = False
-
-    def model(self, model_id: str | None = None) -> Model:
-        if self.fail_model:
-            raise ValueError(f"unknown model {model_id!r}")
-        return StubModel(model_id=model_id or "stub-p")
-
-    async def close_sdk(self) -> None:
-        self.closed += 1
-
-
-def test_swap_to_the_active_model_still_records_the_new_spec() -> None:
-    a = _build_agent_with_spec()
-    spec = ModelRecipe(provider="Anthropic", auth="sub", model_id="m", account="b")
-    a.swap_model(a.model, spec=spec)
-    assert a.model_recipe is spec
-
-
-@pytest.mark.asyncio
-async def test_aclose_closes_the_owned_provider_once() -> None:
-    provider = _ClosingProvider()
-    a = Agent(model=StubModel(), owned_provider=provider)
-    await a.aclose()
-    await a.aclose()
-    assert provider.closed == 1
-
-
-@pytest.mark.asyncio
-async def test_swap_closes_the_outgoing_owned_provider() -> None:
-    old, new = _ClosingProvider(), _ClosingProvider()
-    a = Agent(model=StubModel(), owned_provider=old)
-    a.swap_model(StubModel(model_id="next"), provider=new)
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    assert (old.closed, new.closed) == (1, 0)
-    await a.aclose()
-    assert new.closed == 1
-
-
-@pytest.mark.asyncio
-async def test_change_model_build_failure_closes_the_built_provider() -> None:
-    provider = _ClosingProvider(fail_model=True)
-    a = _build_agent_with_spec()
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            return_value=provider,
-        ),
-        pytest.raises(ValueError, match="unknown model"),
-    ):
-        _ = a.change_model(model_id="nope")
-    await asyncio.sleep(0)
-    assert provider.closed == 1
-
-
-@pytest.mark.asyncio
-async def test_change_model_hands_its_provider_to_the_agent() -> None:
-    provider = _ClosingProvider()
-    a = _build_agent_with_spec()
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=provider,
-    ):
-        _ = a.change_model(model_id="claude-sonnet-4-6")
-    for switch in _drain_model_switches(a):
-        switch.apply()
-    assert provider.closed == 0
-    await a.aclose()
-    assert provider.closed == 1
-
-
-# --- Agent.change_model -----------------------------------------------------
-
-
-# ``_build_agent`` uses ``StubModel`` without a spec. ``change_model`` consults
-# ``self.model_recipe`` to inherit fields and to detect the cross-provider case; this
-# helper attaches an Anthropic spec.
-def _build_agent_with_spec(model_id: str = "claude-opus-4-7") -> Agent:
-    """Build an agent with a real ``types.model.ModelRecipe`` so ``change_model`` works."""
-    a = _build_agent()
-    a.model_recipe = ModelRecipe(
-        provider="Anthropic",
-        auth="api",
-        model_id=model_id,
-        account=None,
-    )
-    return a
-
-
-@pytest.fixture
-def patched_build_provider() -> Iterator[Mapping[str, object]]:
-    """Stub ``build_provider`` so ``change_model`` can run without real creds.
-
-    The provider's ``model(model_id)`` returns a minimal stub model that
-    satisfies the budget guards in ``swap_model``.
-    """
-
-    def fake_model(model_id: str) -> StubModel:
-        return StubModel(model_id=model_id)
-
-    fake_provider = MagicMock()
-    fake_provider.model = MagicMock(side_effect=fake_model)
-
-    # ``change_model`` calls ``build_provider`` through its defining module, so
-    # the stub goes there rather than on the package facade.
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ) as build_provider:
-        yield {"provider": fake_provider, "build_provider": build_provider}
-
-
-def test_change_model_same_provider_new_model_queues_swap(
-    patched_build_provider: Mapping[str, object],
-) -> None:
-    """Naming a new model on the current provider queues the swap."""
-    del patched_build_provider
-    a = _build_agent_with_spec()
-    target = a.change_model(model_id="claude-sonnet-4-6")
-    assert target.provider == "Anthropic"
-    assert target.model_id == "claude-sonnet-4-6"
-    items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    switches = [m for m in items if isinstance(m, ModelSwitch)]
-    assert len(switches) == 1
-
-
-def _drain_model_switches(a: Agent) -> list[ModelSwitch]:
-    items = a.runtime.inbox.drain_nowait()
-    return [m for m in items if isinstance(m, ModelSwitch)]
-
-
-def test_provider_knows_model_strips_the_context_tag() -> None:
-    """Cross-provider ``change_model`` must not discard a tagged id."""
-    assert _provider_knows_model("Anthropic", "claude-opus-4-8+200k")
-    assert not _provider_knows_model("Anthropic", "unknown-model+1m")
-
-
-def test_change_model_context_tag_rides_the_model_id(
-    patched_build_provider: Mapping[str, object],
-) -> None:
-    """The tag flows through the swap and selects the wider window."""
-    del patched_build_provider
-    a = _build_agent_with_spec()
-    target = a.change_model(model_id="claude-opus-4-8+1m")
-    assert target.model_id == "claude-opus-4-8+1m"
-    switches = _drain_model_switches(a)
-    assert len(switches) == 1
-
-
-def test_change_model_cross_provider_no_model_preserves_current(
-    patched_build_provider: Mapping[str, object],
-) -> None:
-    """Cross-provider with no model_id keeps the current model when known.
-
-    ``Anthropic`` / ``AnthropicCLI`` share ``KNOWN_MODELS`` via
-    inheritance so ``claude-opus-4-7`` is valid on both transports.
-    """
-    del patched_build_provider
-    a = _build_agent_with_spec(model_id="claude-opus-4-7")
-    target = a.change_model(provider="AnthropicCLI")
-    assert target.provider == "AnthropicCLI"
-    assert target.model_id == "claude-opus-4-7"
-
-
-def test_resolve_target_spec_provider_change_uses_target_default_auth() -> None:
-    spec = ModelRecipe(
-        provider="OpenAISubscription",
-        auth="credentials",
-        model_id="gpt-5.5",
-        account="work",
-    )
-    target = _resolve_target_spec(
-        spec,
-        provider="Google",
-        auth=None,
-        model_id="gemini-3-pro",
-        account=None,
-    )
-    assert target.auth == "env"
-    assert target.account == "work"
-
-
-def test_resolve_target_spec_explicit_default_account_is_preserved() -> None:
-    spec = ModelRecipe(
-        provider="OpenAISubscription",
-        auth="credentials",
-        model_id="gpt-5.5",
-        account="work",
-    )
-    target = _resolve_target_spec(
-        spec,
-        provider=None,
-        auth=None,
-        model_id="gpt-5",
-        account="default",
-    )
-    assert target.account == "default"
-
-
-def test_change_model_missing_inherited_account_falls_back_to_default() -> None:
-    a = _build_agent()
-    a.model_recipe = ModelRecipe(
-        provider="StubSource",
-        auth="credentials",
-        model_id="source-model",
-        account="work",
-    )
-    fake_provider = MagicMock()
-    fake_provider.model = MagicMock(return_value=StubModel(model_id="target-model"))
-    calls: list[tuple[str, str, str | None]] = []
-
-    def build(provider: str, auth: str, *, account: str | None) -> MagicMock:
-        calls.append((provider, auth, account))
-        if account == "work":
-            raise FileNotFoundError("No credentials for work")
-        return fake_provider
-
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            side_effect=build,
-        ),
-        patch(
-            "sagent.providers.providers.default_auth_for_provider",
-            return_value="credentials",
-        ),
-    ):
-        target = a.change_model(provider="StubTarget", model_id="target-model")
-    assert calls == [
-        ("StubTarget", "credentials", "work"),
-        ("StubTarget", "credentials", None),
-    ]
-    assert target.account is None
-
-
-def test_change_model_explicit_missing_account_does_not_fallback() -> None:
-    a = _build_agent()
-    a.model_recipe = ModelRecipe(
-        provider="StubSource",
-        auth="credentials",
-        model_id="source-model",
-        account="source-work",
-    )
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            side_effect=FileNotFoundError("No credentials for target-work"),
-        ) as build,
-        patch(
-            "sagent.providers.providers.default_auth_for_provider",
-            return_value="credentials",
-        ),
-        pytest.raises(FileNotFoundError, match="target-work"),
-    ):
-        _ = a.change_model(
-            provider="StubTarget",
-            model_id="target-model",
-            account="target-work",
-        )
-    build.assert_called_once_with(
-        "StubTarget",
-        "credentials",
-        account="target-work",
-    )
-
-
-def test_change_model_provider_change_without_auth_uses_target_default(
-    patched_build_provider: Mapping[str, object],
-) -> None:
-    del patched_build_provider
-    a = _build_agent_with_spec(model_id="claude-opus-4-7")
-    target = a.change_model(provider="Google", model_id="gemini-3-pro")
-    assert target.auth == "env"
-
-
-def test_change_model_cross_provider_falls_back_to_default(
-    monkeypatch: pytest.MonkeyPatch,
-    patched_build_provider: Mapping[str, object],
-) -> None:
-    """When current model isn't in new provider's catalog, use DEFAULT_MODEL.
-
-    ``claude-opus-4-7`` is not in Google's catalog; with no
-    ``last_models`` entry recorded, resolution falls through to
-    ``Google.DEFAULT_MODEL``.
-    """
-    del patched_build_provider
-
-    def _empty_last_models() -> dict[str, str]:
-        return {}
-
-    monkeypatch.setattr(last_models, "load", _empty_last_models)
-    a = _build_agent_with_spec(model_id="claude-opus-4-7")
-    target = a.change_model(provider="Google", auth="env")
-    assert target.provider == "Google"
-    assert target.model_id == "default"
-
-
-def test_change_model_cross_provider_falls_back_to_last_models(
-    monkeypatch: pytest.MonkeyPatch,
-    patched_build_provider: Mapping[str, object],
-) -> None:
-    """``last_models`` takes precedence over ``DEFAULT_MODEL`` on cross-provider."""
-    del patched_build_provider
-
-    def _remembered() -> dict[str, str]:
-        return {"Google": "gemini-2.5-flash-lite"}
-
-    monkeypatch.setattr(last_models, "load", _remembered)
-    a = _build_agent_with_spec(model_id="claude-opus-4-7")
-    target = a.change_model(provider="Google", auth="env")
-    assert target.model_id == "gemini-2.5-flash-lite"
-
-
-def test_change_model_unknown_provider_raises(
-    patched_build_provider: Mapping[str, object],
-) -> None:
-    """Naming a non-existent provider class surfaces as ``ValueError``."""
-    del patched_build_provider
-    a = _build_agent_with_spec()
-    with pytest.raises((AttributeError, ValueError), match="unknown provider"):
-        _ = a.change_model(provider="NotAProvider")
-
-
-def test_change_model_returns_resolved_spec(
-    patched_build_provider: Mapping[str, object],
-) -> None:
-    """Return value is the resolved target spec, not the old one."""
-    del patched_build_provider
-    a = _build_agent_with_spec()
-    target = a.change_model(model_id="claude-sonnet-4-6")
-    assert target.model_id == "claude-sonnet-4-6"
-    assert target.provider == "Anthropic"
-
-
-def test_change_model_apply_resets_oversized_budget(
-    patched_build_provider: Mapping[str, object],
-) -> None:
-    """Queued ``/model`` swaps reset stale budgets before applying the model."""
-    del patched_build_provider
-    a = _build_agent(
-        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=32_000),
-    )
-    a.model_recipe = ModelRecipe(
-        provider="Anthropic",
-        auth="api",
-        model_id="claude-opus-4-7+1m",
-    )
-    _ = a.change_model(model_id="claude-sonnet-4-6")
-    items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    switch = next(m for m in items if isinstance(m, ModelSwitch))
-    switch.apply()
-    assert a.model.tagged_model_id == "claude-sonnet-4-6"
-    assert a.max_request_tokens == a.model.limits.max_request_tokens
-
-
-# --- Agent.relogin ----------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_relogin_calls_login_classmethod() -> None:
-    """``Agent.relogin`` drives the provider class's ``login`` classmethod."""
-    a = _build_agent_with_spec()
-    login_mock = MagicMock()
-    fake_provider_cls = type("FakeAnthropic", (), {"login": login_mock})
-    with patch.object(providers, "Anthropic", fake_provider_cls, create=True):
-        await a.relogin()
-    login_mock.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_relogin_anthropic_cli_invokes_native_login() -> None:
-    """In-session ``/login`` reaches Claude Code instead of rejecting it."""
-    a = _build_agent_with_spec()
-    a.model_recipe = ModelRecipe(
-        provider="AnthropicCLI",
-        auth="credentials",
-        model_id="claude-opus-4-8",
-    )
-
-    with patch.object(providers.AnthropicCLI, "login") as login:
-        await a.relogin()
-
-    login.assert_called_once_with()
-
-
-@pytest.mark.asyncio
-async def test_relogin_forwards_named_account() -> None:
-    """``/login`` refreshes the active credential slot, not the default one."""
-    a = _build_agent_with_spec()
-    a.model_recipe = ModelRecipe(
-        provider="OpenAISubscription",
-        auth="credentials",
-        model_id="sol-5.6",
-        account="work",
-    )
-    calls: list[str | None] = []
-
-    class _Provider:
-        @classmethod
-        def login(cls, *, account: str | None = None) -> None:
-            calls.append(account)
-
-    with patch.object(
-        providers,
-        "OpenAISubscription",
-        _Provider,
-        create=True,
-    ):
-        await a.relogin()
-
-    assert calls == ["work"]
-
-
-@pytest.mark.asyncio
-async def test_relogin_runs_blocking_login_off_event_loop() -> None:
-    """``login`` blocks (browser/``input()`` wait); it must not freeze the loop.
-
-    Running it inline would wedge the single-threaded REPL: the input
-    pump could not drain and a stuck auth would freeze the session.
-    Assert the event loop keeps making progress while ``login`` blocks.
-    """
-    a = _build_agent_with_spec()
-    login_entered = threading.Event()
-    release = threading.Event()
-    loop_progressed = False
-
-    def _blocking_login() -> None:
-        login_entered.set()
-        # Hold the worker thread until the event loop proves it advanced.
-        assert release.wait(timeout=5.0)
-
-    fake_provider_cls = type(
-        "FakeAnthropic",
-        (),
-        {"login": staticmethod(_blocking_login)},
-    )
-
-    async def _drive() -> None:
-        nonlocal loop_progressed
-        await asyncio.to_thread(login_entered.wait, 5.0)
-        # The loop scheduled and ran this coroutine while login blocks.
-        loop_progressed = True
-        release.set()
-
-    with patch.object(providers, "Anthropic", fake_provider_cls, create=True):
-        await asyncio.gather(a.relogin(), _drive())
-
-    assert loop_progressed
-
-
-@pytest.mark.asyncio
-async def test_relogin_reloads_auth_when_provider_supports_protocol() -> None:
-    """When the running provider satisfies ``AuthReloadable``, hot-reload it.
-
-    After ``login`` writes fresh credentials to disk, the in-memory
-    refresh token is still the old one. ``handle_auth_error`` is the
-    provider's "re-read disk creds" entry point.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class ReloadableProvider:
-        handle_auth_error_count: int = 0
-
-        async def handle_auth_error(self) -> None:
-            self.handle_auth_error_count += 1
-
-    @dataclass(slots=True, kw_only=True)
-    class _ModelWithProvider(StubModel):
-        _provider: object | None = None
-
-    live_provider = ReloadableProvider()
-    model = _ModelWithProvider(_provider=live_provider)
-
-    a = _build_agent(model=model)
-    a.model_recipe = ModelRecipe(
-        provider="Anthropic",
-        auth="api",
-        model_id="claude-opus-4-7",
-    )
-
-    fake_cls = type("FakeAnthropic", (), {"login": MagicMock()})
-    with patch.object(providers, "Anthropic", fake_cls, create=True):
-        await a.relogin()
-    assert live_provider.handle_auth_error_count == 1
-
-
-@pytest.mark.asyncio
-async def test_relogin_clears_suspension_and_halts_inflight_call() -> None:
-    """``relogin`` recovers a call wedged in a service-suspension sleep.
-
-    The retry loop sleeps uninterruptibly until ``retry_at``; without this,
-    fresh credentials sit unused for the rest of that wait. ``relogin`` must
-    clear the stale suspension timestamps and ``Halt`` the live call so the
-    user regains control immediately.
-    """
-    a = _build_agent_with_spec()
-    a.runtime.service_suspended_until = time.time() + 15_000.0
-    a.runtime.resume_retry_at = time.time() + 15_000.0
-
-    async def _never() -> None:
-        await asyncio.sleep(3600)
-
-    a.runtime.model_call = asyncio.ensure_future(_never())
-    try:
-        fake_cls = type("FakeAnthropic", (), {"login": MagicMock()})
-        with patch.object(providers, "Anthropic", fake_cls, create=True):
-            await a.relogin()
-        assert a.runtime.service_suspended_until is None
-        assert a.runtime.resume_retry_at is None
-        items = a.runtime.inbox.drain_nowait()
-        assert any(isinstance(it, Halt) for it in items)
-    finally:
-        a.runtime.model_call.cancel()
-
-
-@pytest.mark.asyncio
-async def test_relogin_no_halt_when_idle() -> None:
-    """With no in-flight call, ``relogin`` clears suspension but queues no Halt."""
-    a = _build_agent_with_spec()
-    a.runtime.service_suspended_until = time.time() + 100.0
-    fake_cls = type("FakeAnthropic", (), {"login": MagicMock()})
-    with patch.object(providers, "Anthropic", fake_cls, create=True):
-        await a.relogin()
-    assert a.runtime.service_suspended_until is None
-    items = a.runtime.inbox.drain_nowait()
-    assert not any(isinstance(it, Halt) for it in items)
-
-
-@pytest.mark.asyncio
-async def test_relogin_raises_when_provider_has_no_login() -> None:
-    """Providers without a ``login`` classmethod surface as ``ValueError``."""
-    a = _build_agent_with_spec()
-    fake_cls = type("FakeAnthropic", (), {})  # No ``login`` attribute.
-    with patch.object(providers, "Anthropic", fake_cls, create=True):  # noqa: SIM117 -- The test keeps independent context managers explicit for readability.
-        with pytest.raises(ValueError, match="no login method"):
-            await a.relogin()
-
-
-@pytest.mark.asyncio
-async def test_relogin_unknown_provider_raises() -> None:
-    """``relogin`` for an unrecognized provider class raises ``ValueError``."""
-    a = _build_agent()
-    a.model_recipe = ModelRecipe(provider="NotAProvider", auth="api", model_id="x")
-    with pytest.raises(ValueError, match="unknown provider"):
-        await a.relogin()
-
-
-def test_halt_pushes_halt_event() -> None:
-    a = _build_agent()
-    a.halt()
-    items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    assert any(isinstance(i, Halt) for i in items)
-
-
-def test_kill_tool_pushes_kill_event() -> None:
-    a = _build_agent()
-    a.kill_tool("call-7")
-    items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    kills = [i for i in items if isinstance(i, Kill)]
-    assert len(kills) == 1
-    assert kills[0].call_id == "call-7"
-
-
-def test_kill_all_tools_pushes_kill_with_none_id() -> None:
-    a = _build_agent()
-    a.kill_all_tools()
-    items = asyncio.new_event_loop().run_until_complete(a.runtime.inbox.drain())
-    kills = [i for i in items if isinstance(i, Kill)]
-    assert kills[0].call_id is None
-
-
-@pytest.mark.asyncio
-async def test_shutdown_force_cancels_explicit_jobs() -> None:
-    a = _build_agent()
-
-    async def hang() -> None:
-        await asyncio.sleep(10.0)
-
-    task = asyncio.create_task(hang())
-    a.register_background(
-        "job-x",
-        BackgroundTaskEntry(
-            task=task,
-            tool_name="bg",
-            queue_id="job-x",
-            started=0.0,
-            hidden=False,
-        ),
-    )
-    a.shutdown(force=True)
-    # Yield so the cancellation propagates.
-    with contextlib.suppress(asyncio.CancelledError):
-        await task
-    assert task.cancelled()
-
-
-@pytest.mark.asyncio
-async def test_shutdown_force_preserves_persistent_subagent() -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _Child:
-        shutdown_calls: list[bool] = field(default_factory=list)
-
-        def shutdown(self, *, force: bool = False) -> None:
-            self.shutdown_calls.append(force)
-
-    a = _build_agent()
-    child = _Child()
-
-    async def hang() -> None:
-        await asyncio.sleep(10.0)
-
-    task = asyncio.create_task(hang())
-    a.register_background(
-        "child",
-        BackgroundTaskEntry(
-            task=task,
-            tool_name="Agent",
-            queue_id="child",
-            started=0.0,
-            hidden=False,
-            kind="subagent",
-            lifecycle="serviced",
-            persistent_run_id="run-child",
-        ),
-    )
-    agent_registry["child"] = cast(Agent, child)
-    try:
-        a.shutdown(force=True)
-        await asyncio.sleep(0)
-        assert child.shutdown_calls == []
-        assert not task.cancelled()
-        assert "child" in a.background
-    finally:
-        _ = agent_registry.pop("child", None)
-        _ = task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-
-@pytest.mark.asyncio
-async def test_shutdown_force_preserves_missing_registry_persistent_subagent() -> None:
-    a = _build_agent()
-
-    async def hang() -> None:
-        await asyncio.sleep(10.0)
-
-    task = asyncio.create_task(hang())
-    a.register_background(
-        "child",
-        BackgroundTaskEntry(
-            task=task,
-            tool_name="Agent",
-            queue_id="missing-child",
-            started=0.0,
-            hidden=False,
-            kind="subagent",
-            lifecycle="serviced",
-            persistent_run_id="run-missing",
-        ),
-    )
-    try:
-        a.shutdown(force=True)
-        await asyncio.sleep(0)
-        assert not task.cancelled()
-        assert "child" in a.background
-    finally:
-        _ = task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-
-@pytest.mark.asyncio
-async def test_compact_awaits_compact_complete_event() -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _StubCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model
-            del custom_instructions
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_StubCompactor())
-
-    async def drive() -> None:
-        await a.serve_forever()
-
-    drive_task = asyncio.create_task(drive())
-    try:
-        await a.compact("")
-    finally:
-        a.shutdown()
-        with contextlib.suppress(asyncio.CancelledError):
-            await drive_task
-
-    assert any(isinstance(e, UserMessage) and e.text == "[summary]" for e in a.history)
-
-
-@pytest.mark.asyncio
-async def test_public_compact_returns_when_halt_cancels_compaction() -> None:
-    started = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class _HangingCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref, custom_instructions
-            started.set()
-            await asyncio.Future[None]()
-            raise AssertionError("unreachable")
-
-    a = Agent(model=StubModel(), tools=[], compactor=_HangingCompactor())
-    drive_task = asyncio.create_task(a.serve_forever())
-    compact_task = asyncio.create_task(a.compact(""))
-    try:
-        await asyncio.wait_for(started.wait(), timeout=1.0)
-        a.halt()
-        await asyncio.wait_for(compact_task, timeout=1.0)
-    finally:
-        a.shutdown()
-        with contextlib.suppress(asyncio.CancelledError):
-            await drive_task
-
-
-@pytest.mark.asyncio
-async def test_public_recompact_returns_when_clear_cancels_compaction() -> None:
-    started = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class _HangingCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref, custom_instructions
-            started.set()
-            await asyncio.Future[None]()
-            raise AssertionError("unreachable")
-
-    a = Agent(model=StubModel(), tools=[], compactor=_HangingCompactor())
-    drive_task = asyncio.create_task(a.serve_forever())
-    recompact_task = asyncio.create_task(a.recompact("retry"))
-    try:
-        await asyncio.wait_for(started.wait(), timeout=1.0)
-        await a.clear()
-        await asyncio.wait_for(recompact_task, timeout=1.0)
-    finally:
-        a.shutdown()
-        with contextlib.suppress(asyncio.CancelledError):
-            await drive_task
-
-
-@pytest.mark.asyncio
-async def test_recompact_awaits_compact_complete_event() -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _StubCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model
-            del custom_instructions
-            return _summary_override(
-                [UserMessage(text="[recompacted]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_StubCompactor())
-    drive_task = asyncio.create_task(a.serve_forever())
-    try:
-        await a.recompact("instr")
-    finally:
-        a.shutdown()
-        with contextlib.suppress(asyncio.CancelledError):
-            await drive_task
-
-    assert any(
-        isinstance(e, UserMessage) and e.text == "[recompacted]" for e in a.history
-    )
-
-
-@pytest.mark.asyncio
-async def test_clear_resets_file_tracking_and_awaits_completion() -> None:
-    """``Agent.clear`` resolves after the runtime publishes ``ClearComplete``.
-
-    Regression for AGENT-REVIEW-003: ``clear`` used to push the
-    ``Clear`` event and return immediately, so callers could observe
-    history that had not yet been wiped.
-    """
-    a = _build_agent()
-    # Stage state that ``clear`` should reset.
-    a.tool_state.mark_read("/tmp/x.txt")  # noqa: S108 -- The test passes a documented temporary-path fixture string.
-    assert a.tool_state.has_been_read("/tmp/x.txt")  # noqa: S108 -- The test passes a documented temporary-path fixture string.
-    a.runtime.append_history(UserMessage(text="hello"))
-    assert a.history
-
-    drive_task = asyncio.create_task(a.serve_forever())
-    try:
-        await a.clear()
-        assert not a.tool_state.has_been_read("/tmp/x.txt")  # noqa: S108 -- The test passes a documented temporary-path fixture string.
-        assert a.history == []
-    finally:
-        a.shutdown()
-        await drive_task
-
-
-def test_build_system_appends_tool_contributions() -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _PromptingTool(StubTool):
-        @override
-        def prompt(self) -> str:
-            return "(extra-tool-prompt)"
-
-    a = _build_agent(system="root", tools=[_PromptingTool()])
-    out = a.system_prompt()
-    assert "root" in out
-    assert "(extra-tool-prompt)" in out
-
-
-@pytest.mark.asyncio
-async def test_activity_active_spans_tool_execution() -> None:
-    """``activity.active`` stays True from first types.runtime.ModelCallStarted through types.runtime.ModelIdle.
-
-    Before fix: ``types.runtime.ModelResponseComplete`` always cleared ``active``,
-    so the status-pane spinner went dark during tool execution. The
-    user sees a long-running Bash with no visible progress indicator.
-
-    After fix: when ``types.runtime.ModelResponseComplete`` carries ``tool_calls``,
-    ``active`` stays True so the spinner keeps ticking through the
-    cohort window. ``active`` only clears on true terminal events
-    (``types.runtime.ModelIdle`` / cancel / error).
-    """
-    a = _build_agent()
-    tc = ToolCall(id="c1", name="Echo", args={})
-    msg_with_tools = AssistantMessage(text="", tool_calls=(tc,))
-
-    a.publish(ModelCallStarted())
-    assert a.activity.active is True
-
-    a.publish(ModelResponseComplete(message=msg_with_tools))
-    assert a.activity.active is True, (  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
-        "spinner should keep ticking while tools run; tool_calls in the "
-        "response mean the cohort is about to fire"
-    )
-
-    # Tool result arrives.
-    a.publish(ToolResult(call_id="c1", content="ok"))
-    assert a.activity.active is True  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
-
-    # Round 2 model call fires.
-    a.publish(ModelCallStarted())
-    assert a.activity.active is True  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
-
-    # Round 2 has no tool calls; model truly idles.
-    a.publish(ModelResponseComplete(message=AssistantMessage(text="done")))
-    a.publish(ModelIdle())
-    assert a.activity.active is False, "ModelIdle marks the end of the round chain"  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
-
-
-@pytest.mark.asyncio
-async def test_activity_active_clears_on_model_response_error() -> None:
-    """``types.runtime.ModelResponseError`` must clear ``activity.active`` (stop spinner).
-
-    Bug repro: model call fails (e.g. ``AuthRefreshError`` on expired
-    OAuth). The runtime catches the exception and pushes
-    ``types.runtime.ModelResponseError`` to the inbox. Before fix: ``_record_activity``
-    only resets ``active`` on ``types.runtime.ModelResponseComplete`` / ``types.runtime.ModelIdle``
-    / ``ModelResponseCancelled``, so the status-pane spinner keeps
-    ticking forever even though no model call is in flight. After fix:
-    ``types.runtime.ModelResponseError`` joins the terminal-event set and clears
-    ``active``.
-    """
-    a = _build_agent()
-    a.publish(ModelCallStarted())
-    assert a.activity.active is True
-
-    a.publish(ModelResponseError(RuntimeError("boom")))
-    assert a.activity.active is False, (  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
-        "ModelResponseError is terminal -- spinner must stop"
-    )
-    assert a.activity.current_call_start == 0.0, (
-        f"current_call_start must reset; got {a.activity.current_call_start}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_activity_pauses_during_model_service_suspended() -> None:
-    """Suspension banks elapsed-so-far and pauses the timer until the next chunk."""
-    a = _build_agent()
-    loop = asyncio.get_running_loop()
-
-    a.publish(ModelCallStarted())
-    start = a.activity.current_call_start
-    assert start > 0
-    # Tick the loop's notion of time forward to accrue some elapsed.
-    await asyncio.sleep(0.01)
-    a.publish(
-        ModelServiceSuspended(
-            provider="anthropic",
-            auth="key",
-            account="default",
-            model_id="claude-test",
-            retry_at=loop.time() + 0.05,
-            delay_sec=0.05,
-            server_supplied=True,
-            error=ServiceErrorSnapshot(
-                type_name="RateLimitError",
-                message="429",
-                status=429,
-            ),
-        ),
-    )
-    banked = a.activity.elapsed_seconds
-    assert banked > 0
-    assert a.activity.current_call_start == 0.0
-    assert a.activity.active is True
-
-    await asyncio.sleep(0.05)
-    a.publish(ModelResponsePartial(text="x"))
-    assert a.activity.current_call_start > 0
-    # No further banking yet; live timer has just resumed.
-    assert a.activity.elapsed_seconds == banked
-
-    await asyncio.sleep(0.01)
-    a.publish(ModelResponseComplete(message=AssistantMessage(text="done")))
-    # Total elapsed should exclude the ~0.05s suspension sleep.
-    assert a.activity.elapsed_seconds < 0.05
-
-
-@pytest.mark.asyncio
-async def test_run_bg_propagates_external_cancellation() -> None:
-    """``_AgentTool._run_bg`` must re-raise ``CancelledError`` on outer cancel.
-
-    Today the handler swallows ``CancelledError`` unconditionally: if
-    ``job_id not in agent.background`` it returns; otherwise it posts a
-    "[cancelled]" ``ToolResult`` and returns. Neither path re-raises.
-    An asyncio task that catches ``CancelledError`` without re-raising
-    breaks the cancel chain -- the parent (e.g. event-loop shutdown)
-    thinks the child finished normally.
-
-    Test: cancel the ``_run_bg`` task from outside while the job IS
-    registered. The task must not exit normally -- it must propagate
-    the cancellation.
-    """
-    tool_started = asyncio.Event()
-    release = asyncio.Event()
-
-    @dataclass(kw_only=True, slots=True)
-    class _BlockingTool:
-        name: str = "blocker"
-        tool_id: str = "application/x-tool-blocker"
-        description: str = ""
-        directive_schema: Mapping[str, PlainTree] = field(
-            default_factory=lambda: {"type": "object"},
-        )
-        clearable_results: bool = False
-
-        def summary(self, args: Mapping[str, object]) -> str:
-            del args
-            return ""
-
-        def summary_result(self, result: ToolResult) -> str | None:
-            del result
-            return None
-
-        def prompt(self) -> str:
-            return ""
-
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            tool_started.set()
-            await release.wait()  # Never released.
-            return ToolResult(call_id="", content="unreached")
-
-    a = _build_agent()
-    wrapped = _AgentTool(_BlockingTool(), a)
-    job_id = "job-bg-1"
-    task = asyncio.create_task(wrapped._run_bg("call-1", job_id, {}, 0.0))
-    a.register_background(
-        job_id,
-        BackgroundTaskEntry(
-            task=task,
-            tool_name="blocker",
-            queue_id=job_id,
-            call_id="call-1",
-            started=0.0,
-            kind="tool",
-        ),
-    )
-    await tool_started.wait()
-    # External cancel while job_id is still registered.
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-
-@pytest.mark.asyncio
-async def test_activity_current_call_start_resets_on_each_model_call() -> None:
-    """Mid-chain ``ModelCallStarted`` must reset ``current_call_start``.
-
-    Round chain: ``ModelCallStarted`` (call 1) → tools → ``ModelCallStarted``
-    (call 2). The status pane reads ``now - current_call_start`` to decide
-    whether to surface "waiting on model.". If ``current_call_start`` is
-    not reset on call 2, the pane shows the entire chain's elapsed time,
-    not the current call's -- "waiting on model." appears the instant
-    call 2 starts even if it just began.
-    """
-    a = _build_agent()
-    a.publish(ModelCallStarted())
-    t1 = a.activity.current_call_start
-    assert t1 > 0
-    await asyncio.sleep(0.02)
-    # Mid-chain tool-bearing response: spinner keeps ticking; the next
-    # ``ModelCallStarted`` is the start of a new call.
-    a.publish(
-        ModelResponseComplete(
-            message=AssistantMessage(
-                text="",
-                tool_calls=(ToolCall(id="t1", name="Bash", args={}),),
-            ),
-        ),
-    )
-    await asyncio.sleep(0.02)
-    a.publish(ModelCallStarted())
-    t2 = a.activity.current_call_start
-    assert t2 > t1, (
-        "second ModelCallStarted must restamp current_call_start so the"
-        " status pane measures the current call's age, not the whole"
-        f" round chain; got t1={t1!r} t2={t2!r}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_activity_current_compact_start_resets_on_compact_complete() -> None:
-    """``CompactComplete`` clears ``activity.current_compact_start``."""
-    a = _build_agent()
-    a.publish(CompactStarted())
-    assert a.activity.current_compact_start > 0.0
-    a.publish(CompactComplete(records=()))
-    assert a.activity.current_compact_start == 0.0
-
-
-@pytest.mark.asyncio
-async def test_streaming_tokens_recorded_in_activity() -> None:
-    """``_track_activity`` records streamed response text so the live token
-    estimate tokenizes the WHOLE response, not each chunk in isolation.
-
-    The model estimator here is ``max(1, len // 4)``; the cumulative
-    12-char response is 3 tokens.
-    """
-    a = _build_agent()
-    # Pre-bracket partial is ignored (handler only acts when ``active``).
-    a.publish(ModelResponsePartial(text="abc"))
-    a.publish(ModelCallStarted())
-    a.publish(ModelResponsePartial(text="x" * 8))
-    a.publish(ModelResponsePartial(text="y" * 4))
-    assert a.model.approx_text_tokens(a.activity.live_response_text) == 3
-
-
-@pytest.mark.asyncio
-async def test_streaming_live_tokens_tokenize_whole_not_per_chunk() -> None:
-    """Tiny chunks must not floor to zero.
-
-    Regression: per-chunk ``int(len(chunk)/cpt)`` floors every sub-ratio
-    chunk to 0, so a response streamed one character at a time read 0
-    tokens for the entire stream. The fix tokenizes the cumulative text.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _Floor3Model(StubModel):
-        model_id: str = "floor3"
-
-        @override
-        def approx_text_tokens(self, text: str) -> int:  # int(), no max(1)
-            return int(len(text) / 3)
-
-    a = _build_agent(model=_Floor3Model())
-    a.publish(ModelCallStarted())
-    for _ in range(9):  # Nine 1-char chunks.
-        a.publish(ModelResponsePartial(text="x"))
-    # Per-chunk: 9 * int(1/3) = 0. Whole: int(9/3) = 3.
-    assert a.model.approx_text_tokens(a.activity.live_response_text) == 3
-
-
-def test_tool_registry_recorded_on_response_with_tool_calls() -> None:
-    """``_track_tool_registry`` records cohort id → tool name and bumps rounds."""
-    a = _build_agent()
-    tc = ToolCall(id="c1", name="Echo", args={})
-    msg = AssistantMessage(text="", tool_calls=(tc,))
-    a.publish(ModelResponseComplete(message=msg))
-    assert a._tool_registry["c1"][0] == "Echo"
-    assert a.activity.num_tool_call_rounds == 1
-
-
-@pytest.mark.asyncio
-async def test_compact_now_no_compactor_is_noop() -> None:
-    a = _build_agent()
-    a.runtime.append_history(UserMessage(text="x"))
-    await a.compact_now()
-    # History untouched: no compactor wired.
-    assert len(a.runtime.context().messages) == 1
-
-
-@pytest.mark.asyncio
-async def test_compact_now_replaces_history_in_place() -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _ReplaceCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model
-            del custom_instructions
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_ReplaceCompactor())
-    a.runtime.append_history(UserMessage(text="old"))
-    await a.compact_now()
-    assert len(a.runtime.context().messages) == 1
-    entry = a.runtime.context().messages[0]
-    assert isinstance(entry, UserMessage)
-    assert entry.text == "[summary]"
-
-
-@pytest.mark.asyncio
-async def test_compact_now_preserves_arrivals_after_its_snapshot() -> None:
-    compact_started = asyncio.Event()
-    release_compact = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class _BlockingCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            compact_started.set()
-            await release_compact.wait()
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    agent = Agent(model=StubModel(), compactor=_BlockingCompactor())
-    agent.runtime.append_history(UserMessage(text="old"))
-    compact = asyncio.create_task(agent.compact_now())
-    await asyncio.wait_for(compact_started.wait(), timeout=1.0)
-    agent.runtime.append_history(UserMessage(text="new"))
-    release_compact.set()
-
-    assert await compact
-    texts = [
-        entry.text
-        for entry in agent.runtime.context().messages
-        if isinstance(entry, UserMessage)
-    ]
-    assert texts.count("[summary]") == 1
-    assert texts.count("new") == 1
-
-
-@pytest.mark.asyncio
-async def test_compact_now_survives_a_tape_carrying_an_alive_coalesce() -> None:
-    """Compaction must not die on a tape that holds an alive coalesce splice.
-
-    ``widen_barrier_mask`` widens a compactor's mask to every tape ref, so it
-    newly absorbs any alive splice the compactor's summary never carried. The
-    append-time payload guard then rejects that -- and ``adopt_record`` sits
-    OUTSIDE ``compact_now``'s try, so the rejection escapes the method: no
-    ``CompactFailed``, no ``last_compact_error``, no ``False`` return. Every
-    caller, including overflow recovery, sees an unhandled exception instead
-    of a degraded compaction. A coalesce splice is the ordinary product of two
-    back-to-back user messages, so this is the common tape shape.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _SummaryCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, custom_instructions
-            return _summary_override([UserMessage(text="[summary]")], mint_ref)
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_SummaryCompactor())
-    a.runtime.append_history(UserMessage(text="first"))
-    a.runtime.append_history(AssistantMessage(text="reply"))
-    # Resume's ``orphan_tool_result_repair`` barrier carries the whole
-    # conversation; the next user message coalesces onto it and inherits that
-    # payload. The resulting alive splice is therefore many entries wide, which
-    # is what the compactor's one-entry summary is measured against.
-    a.runtime.append_splice(
-        mask=full_tape_mask(a.runtime.tape),
-        insert_after=None,
-        payload=(
-            UserMessage(text="first"),
-            AssistantMessage(text="reply"),
-        ),
-        strategy="orphan_tool_result_repair",
-    )
-    a.runtime._append_or_coalesce_user(UserMessage(text="second"))
-
-    assert await a.compact_now(), f"compaction failed: {a.last_compact_error!r}"
-    texts = [getattr(m, "text", "") for m in a.runtime.context().messages]
-    assert "[summary]" in texts, f"summary did not land; got {texts}"
-
-
-@pytest.mark.asyncio
-async def test_compact_recall_reset_waits_for_barrier_adoption(tmp_path: Path) -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _NoopCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-    a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
-    agent_compactor = a._agent_compactor
-    assert agent_compactor is not None
-    f = tmp_path / "foo.py"
-    f.write_text("x")
-    a.tool_state.mark_read(str(f), content="x")
-    a.tool_state.invoked_skills.update({"alpha", "beta"})
-    a.runtime.append_history(UserMessage(text="old"))
-
-    override = await agent_compactor.compact(
-        a.runtime.tape,
-        a.runtime.context().messages,
-        a._agent_model,
-        a.runtime.mint_ref,
-        "",
-    )
-
-    assert a.tool_state.read_cache
-    assert a.tool_state.invoked_skills == {"alpha", "beta"}
-
-    a.runtime.adopt_record(override)
-    a.publish(CompactComplete(records=(override,)))
-
-    assert a.tool_state.read_cache == {}
-    assert a.tool_state.invoked_skills == set()
-
-
-@pytest.mark.asyncio
-async def test_compact_now_clears_tool_recall(tmp_path: Path) -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _NoopCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-    a = Agent(model=StubModel(), tools=[], compactor=_NoopCompactor())
-    f = tmp_path / "foo.py"
-    f.write_text("x")
-    a.tool_state.mark_read(str(f), content="x")
-    a.tool_state.invoked_skills.update({"alpha", "beta"})
-    assert a.tool_state.read_cache
-    assert a.tool_state.invoked_skills == {"alpha", "beta"}
-
-    a.runtime.append_history(UserMessage(text="old"))
-    await a.compact_now()
-
-    assert a.tool_state.read_cache == {}
-    assert a.tool_state.invoked_skills == set()
-
-
-@pytest.mark.asyncio
-async def test_compact_now_returns_true_on_success() -> None:
-    """``compact_now`` reports whether compaction made progress.
-
-    Recovery logic in ``_AgentModel.stream`` needs to distinguish a
-    successful compaction (history actually shrank; retry the model)
-    from a swallowed failure (compactor raised; history unchanged or
-    longer). Returning bool gives that signal without the caller
-    having to grovel through history mutation.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _OkCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model
-            del custom_instructions
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(UserMessage(text="old"))
-    ok = await a.compact_now()
-    assert ok is True
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("stop_reason", "max_budget_usd", "expected_error"),
-    [
-        ("model_finished", 0.1, BudgetExhaustedError),
-        ("model_refusal", 1.0, ModelTerminationError),
-    ],
-)
-async def test_compactor_model_calls_share_accounting_and_termination_gate(
-    stop_reason: str,
-    max_budget_usd: float,
-    expected_error: type[Exception],
-) -> None:
-    """Compaction cannot bypass paid-response accounting or validation."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _CompactionModel(StubModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            return ModelResponse(
-                message=AssistantMessage(text="<summary>done</summary>"),
-                stop_reason=stop_reason,
-                spend=TokenCost(request=0.25),
-            )
-
-    @dataclass(slots=True, kw_only=True)
-    class _CallingCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, custom_instructions
-            _ = await send_with_retry(
-                cast(Model, model),
-                ModelRequest(messages=[UserMessage(text="summarize")]),
-                max_attempts=1,
-                persistent_retry=False,
-                publish_recoverable=lambda _text: None,
-            )
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(
-        model=_CompactionModel(),
-        tools=[],
-        compactor=_CallingCompactor(),
-        max_budget_usd=max_budget_usd,
-    )
-    a.runtime.append_history(UserMessage(text="old"))
-    measured = tuple(a.runtime.context().messages)
-    a._last_input_tokens = 90_000
-    a._last_measured_history = measured
-
-    assert await a.compact_now() is False
-    assert isinstance(a.last_compact_error, expected_error)
-    assert a.cost_tracker.spend.total == pytest.approx(0.25)
-    # The summary call is billed, but it did not measure the conversation.
-    assert a._last_input_tokens == 90_000
-    assert a._last_measured_history is measured
-
-
-def test_record_side_response_bills_without_measuring_the_conversation() -> None:
-    """A side call (advisor, summary) is paid for but says nothing about context size."""
-    a = _build_agent(max_budget_usd=1.0)
-    a.record_response(
-        ModelResponse(
-            message=AssistantMessage(text="turn"),
-            tokens=TokenCount(request=100_000),
-            spend=TokenCost(request=0.25),
-        ),
-    )
-    measured = a._last_measured_history
-    a.runtime.append_history(UserMessage(text="after"))
-
-    a.record_side_response(
-        ModelResponse(
-            message=AssistantMessage(text="advice"),
-            tokens=TokenCount(request=50, response=5),
-            spend=TokenCost(request=0.5),
-        ),
-    )
-
-    assert a._last_input_tokens == 100_000
-    assert a._last_measured_history is measured
-    assert a.cost_tracker.last_request == TokenCount(request=100_000)
-    assert a.cost_tracker.spend.total == pytest.approx(0.75)
-    assert a.cost_tracker.total == TokenCount(request=100_050, response=5)
-    assert a.cost_tracker.calls_by_model == {a.model.tagged_model_id: 2}
-    with pytest.raises(BudgetExhaustedError):
-        a.record_side_response(
-            ModelResponse(
-                message=AssistantMessage(text="advice"),
-                spend=TokenCost(request=0.5),
-            ),
-        )
-
-
-@pytest.mark.asyncio
-async def test_compact_now_returns_false_on_compactor_failure() -> None:
-    """``compact_now`` returns False when the inner compactor raises.
-
-    Without this signal, ``_AgentModel.stream``'s overflow recovery
-    would re-fire the model with stale (or slightly longer) history
-    and burn ``MAX_OVERFLOW_RECOVERY`` retries on identical failures
-    -- exactly the BUGS34 regression that produced cryptic ``RuntimeError:
-    context overflow recovery failed after 3 compactions`` messages.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _BrokenCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref
-            del custom_instructions
-            raise RuntimeError("compaction blew up")
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
-    a.runtime.append_history(UserMessage(text="x"))
-    ok = await a.compact_now()
-    assert ok is False
-
-
-@pytest.mark.asyncio
-async def test_compact_now_returns_true_when_no_compactor_wired() -> None:
-    """No compactor = nothing to do; report success so callers don't loop.
-
-    Returning ``False`` from a no-op would mislead ``_AgentModel.stream``
-    into raising ``ContextOverflowError`` for agents that never asked
-    to manage their own context (subscription providers, tests). The
-    "no compactor" path is intentional configuration, not a failure.
-    """
-    a = _build_agent()
-    a.runtime.append_history(UserMessage(text="x"))
-    ok = await a.compact_now()
-    assert ok is True
-
-
-@dataclass(slots=True, kw_only=True)
-class _ThresholdCompactor:
-    """Recording compactor that compacts exactly when ``should_compact`` fires.
-
-    Delegates the gate to a REAL ``SummaryCompactor`` so these tests
-    exercise production's threshold (including its ``buffer_tokens`` term),
-    never a re-derived copy that could silently drift from it.
-    """
-
-    compacted: bool = False
-    _gate: SummaryCompactor = field(default_factory=SummaryCompactor)
-
-    @property
-    def reattach(self) -> ReattachPolicy:
-        return ReattachPolicy()
-
-    def largest_context(self, settings: AgentSettings) -> int:
-        return _stub_largest_context(settings)
-
-    def should_compact(
-        self,
-        current_tokens: int,
-        largest_context: int,
-        system_tokens: int = 0,
-    ) -> bool:
-        return self._gate.should_compact(current_tokens, largest_context, system_tokens)
-
-    async def compact(
-        self,
-        tape: Sequence[TapeRecord],
-        context: Sequence[ModelContextEvent],
-        model: object,
-        mint_ref: Callable[[], TapeRef],
-        custom_instructions: str | None = None,
-    ) -> ContextSplice:
-        del context, model, custom_instructions
-        self.compacted = True
-        return _summary_override([UserMessage(text="[s]")], mint_ref, tape=tape)
-
-    def maintain(
-        self,
-        tape: Sequence[TapeRecord],
-        context: Sequence[ModelContextEvent],
-        tools: object,
-        mint_ref: Callable[[], TapeRef],
-    ) -> tuple[ContextSplice, ...]:
-        del tape, context, tools, mint_ref
-        return ()
-
-
-@pytest.mark.asyncio
-async def test_compact_if_needed_returns_true_when_no_compactor_wired() -> None:
-    """``compact_if_needed`` matches ``compact_now``'s no-compactor semantics.
-
-    Before unification, ``compact_if_needed`` returned ``None`` while
-    ``compact_now`` returned ``True`` for the same no-compactor path.
-    The divergence made every caller branch on the bool/None distinction.
-    Unifying on bool gives one type signature, one contract: ``True``
-    means "nothing further to do (success or no-op)", ``False`` means
-    "tried to compact and the inner compactor raised".
-    """
-    a = _build_agent()
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
-    progressed = await a.compact_if_needed(history, a.model)
-    assert progressed is True
-
-
-def test_wire_attachment_bytes_pdf_base64_no_resize() -> None:
-    """PDF wire bytes = exact base64 length ``4 * ceil(n/3)`` (no resize)."""
-    raw = b"%PDF-" + b"\x00" * (3 * 1024 * 1024)
-    msgs = [
-        ToolResult(
-            call_id="c",
-            content="pdf",
-            attachments=(BytesMessage(raw, "application/pdf"),),
-        ),
-    ]
-    got = _wire_attachment_bytes(msgs, max_image_bytes=5 * 1024 * 1024)
-    assert got == 4 * ((len(raw) + 2) // 3)
-
-
-def test_wire_attachment_bytes_image_clamped_then_base64() -> None:
-    """Image wire bytes = ceil(4/3) * min(raw, max_image_bytes)."""
-    raw = b"\xff\xd8" + b"\x00" * (30 * 1024 * 1024)
-    cap = 5 * 1024 * 1024
-    msgs = [
-        UserMessage(
-            text="",
-            attachments=(BytesMessage(raw, "image/jpeg"),),
-        ),
-    ]
-    got = _wire_attachment_bytes(msgs, max_image_bytes=cap)
-    assert got == 4 * ((cap + 2) // 3)  # Clamped to cap, not 30 MB.
-
-
-def test_wire_attachment_bytes_ignores_non_bytes_and_empty() -> None:
-    """Entries without attachments contribute zero."""
-    msgs = [
-        AssistantMessage(text="no attachments"),
-        UserMessage(text="also none"),
-    ]
-    assert _wire_attachment_bytes(msgs, max_image_bytes=5 * 1024 * 1024) == 0
-
-
-def test_wire_attachment_bytes_zero_image_cap_means_unlimited() -> None:
-    """``max_image_bytes=0`` is the unlimited sentinel -- no clamp, full count.
-
-    ``min(raw, 0)`` would zero every image, silently disabling the byte gate
-    and pre-send guard for any model that declares ``max_image_bytes=0``
-    (the 0=unlimited contract used everywhere else: ModelProfile defaults,
-    image_lib.resize, the byte gate's ``> 0`` guard).
-    """
-    msgs = [
-        UserMessage(
-            text="",
-            attachments=(BytesMessage(b"abcd", "image/png"),),
-        ),
-    ]
-    # 4 raw bytes, no clamp -> base64 wire size 4*ceil(4/3) = 8, NOT 0.
-    assert _wire_attachment_bytes(msgs, max_image_bytes=0) == 8
-
-
-def test_wire_attachment_bytes_positive_image_cap_still_clamps() -> None:
-    """A positive cap still clamps (the 0-sentinel fix must not break this)."""
-    msgs = [
-        UserMessage(
-            text="",
-            attachments=(BytesMessage(b"abcdefghij", "image/png"),),
-        ),
-    ]
-    # 10 raw bytes clamped to 5 -> base64 4*ceil(5/3) = 8.
-    assert _wire_attachment_bytes(msgs, max_image_bytes=5) == 8
-
-
-@pytest.mark.parametrize(
-    ("raw_len", "expected"),
-    [(1, 4), (2, 4), (3, 4), (4, 8), (5, 8), (6, 8)],
-)
-def test_wire_attachment_bytes_exact_base64_length(raw_len: int, expected: int) -> None:
-    """Base64 wire size is ``4 * ceil(n/3)``, not the floored ``n * 4 // 3``.
-
-    Floor-dividing under-counts non-multiple-of-3 attachments by up to 3
-    bytes, biasing the gate to fire one turn late.
-    """
-    msgs = [
-        ToolResult(
-            call_id="c",
-            content="pdf",
-            attachments=(BytesMessage(b"x" * raw_len, "application/pdf"),),
-        ),
-    ]
-    assert _wire_attachment_bytes(msgs, max_image_bytes=5 * 1024 * 1024) == expected
-
-
-@dataclass(slots=True, kw_only=True)
-class _TokenIdleByteTightModel(StubModel):
-    """Token gate never fires; only the byte gate can trigger compaction."""
-
-    max_request_bytes: int = 4 * 1024 * 1024
-    max_image_bytes: int = 4 * 1024 * 1024
-
-    @override
-    def approx_request_tokens(self, request: ModelRequest) -> int:
-        del request
-        return 1  # Trivially under any token threshold.
+def _config(tmp_path: Path) -> AgentsMdConfig:
+    return AgentsMdConfig(system_dir=tmp_path / "system", user_dir=tmp_path / "user")
 
 
-# The byte gate only counts attachments in the prefix up to and including the last
-# ``AssistantMessage`` -- the bytes that rode in a prior request and can be shed. A bare
-# trailing ToolResult is this-turn's fresh input and is NOT compactable, so it must be
-# wrapped behind an AssistantMessage plus a following AssistantMessage to land in the
-# compactable prefix.
-def _sent_turn(
-    attachment: BytesMessage,
-) -> list[ModelContextEvent]:
-    """Build a compactable (already-sent) turn: AM tool_call + its ToolResult."""
+def _own(journal: Journal) -> list[SessionRecord]:
+    """Return ``journal``'s window less the model and prompt the agent stands itself."""
     return [
-        AssistantMessage(tool_calls=(ToolCall(id="c", name="Read", args={}),)),
-        ToolResult(call_id="c", content="[PDF: big.pdf]", attachments=(attachment,)),
-        # A later assistant turn makes the ToolResult above part of the
-        # already-sent, compactable prefix (not this turn's fresh tail).
-        AssistantMessage(text="ok"),
+        r
+        for r in journal
+        if not (
+            isinstance(r, UncategorizedRecord) and r.kind in ("model", "system_prompt")
+        )
     ]
 
 
-@pytest.mark.asyncio
-async def test_compact_if_needed_fires_on_byte_pressure_even_when_token_gate_idle() -> (
-    None
-):
-    """Byte bloat in already-sent history triggers proactive compaction.
-
-    Request *bytes* and request *tokens* are distinct budgets. A compactable
-    history whose wire byte payload approaches ``Model.max_request_bytes``
-    must trigger compaction even when the token gate reports headroom.
-    """
-    rec = _ThresholdCompactor()
-    a = Agent(
-        model=_TokenIdleByteTightModel(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-        ),
-        tools=[],
-        compactor=rec,
-    )
-    # PDF (not resized at the wire): 3 MB raw -> ~4 MB base64 >= 0.8 * 4 MB.
-    big = b"%PDF-" + b"\x00" * (3 * 1024 * 1024)
-    history = _sent_turn(BytesMessage(big, "application/pdf"))
-    progressed = await a.compact_if_needed(history, a.model)
-    assert progressed is True
-    assert rec.compacted is True, "byte pressure must trigger proactive compaction"
+def _session(agent: Agent) -> RuntimeSession:
+    session = agent.session
+    assert isinstance(session, RuntimeSession)
+    return session
 
 
-@pytest.mark.asyncio
-async def test_compact_if_needed_byte_trigger_is_overridable_kwarg() -> None:
-    """The byte-compaction trigger fraction is a default-valued kwarg.
-
-    A self-documenting, per-call-overridable knob (mirroring the compactor's
-    ``utilization_trigger``), not an opaque module global. The same payload
-    that stays under the default trigger fires under a lower one.
-    """
-    # ~2 MB raw PDF -> ~2.8 MB base64. Ceiling 4 MB: 0.8*4=3.2MB (no fire),
-    # 0.5*4=2.0MB (fire).
-    big = b"%PDF-" + b"\x00" * (2 * 1024 * 1024)
-    history = _sent_turn(BytesMessage(big, "application/pdf"))
-
-    default_rec = _ThresholdCompactor()
-    a_default = Agent(
-        model=_TokenIdleByteTightModel(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-        ),
-        tools=[],
-        compactor=default_rec,
-    )
-    assert await a_default.compact_if_needed(history, a_default.model) is True
-    assert default_rec.compacted is False, "under default 0.8 trigger: no compaction"
-
-    low_rec = _ThresholdCompactor()
-    a_low = Agent(
-        model=_TokenIdleByteTightModel(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-        ),
-        tools=[],
-        compactor=low_rec,
-    )
-    await a_low.compact_if_needed(history, a_low.model, byte_compact_trigger=0.5)
-    assert low_rec.compacted is True, "lower trigger fires on the same payload"
-
-
-@pytest.mark.asyncio
-async def test_byte_gate_does_not_strip_fresh_turn_user_attachment() -> None:
-    """A first-turn user attachment must NOT trip the byte gate.
-
-    Bytes appended since the last assistant response are this turn's own
-    input -- compaction would strip them (``_strip_attachments``) before the
-    model ever sees them, destroying the user's request. The byte gate counts
-    only the compactable prefix, so a lone fresh user attachment never fires
-    it, even when its bytes exceed the ceiling.
-    """
-    rec = _ThresholdCompactor()
-    a = Agent(
-        model=_TokenIdleByteTightModel(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-        ),
-        tools=[],
-        compactor=rec,
-    )
-    # 5 MB user attachment, well over the 4 MB ceiling, but it is THIS turn's
-    # input (no prior assistant response) -> not compactable -> gate idle.
-    huge = b"%PDF-" + b"\x00" * (5 * 1024 * 1024)
-    history: list[ModelContextEvent] = [
-        UserMessage(
-            text="describe this",
-            attachments=(BytesMessage(huge, "application/pdf"),),
-        ),
+def _texts(records: Sequence[SessionRecord]) -> list[str]:
+    return [
+        r.content or ""
+        for r in records
+        if isinstance(r, (UserMessage, AssistantMessage))
     ]
-    progressed = await a.compact_if_needed(history, a.model)
-    assert progressed is True
-    assert rec.compacted is False, (
-        "byte gate must not strip the user's own fresh attachment"
-    )
 
 
-@pytest.mark.asyncio
-async def test_byte_gate_counts_base64_wire_expansion() -> None:
-    """The gate measures base64-expanded wire bytes, not raw bytes.
-
-    The wire ships base64 (x4/3). A raw payload just under 0.8 * ceiling can
-    already exceed the wire ceiling after expansion, so the gate must fire on
-    the base64 size, not the raw size.
-    """
-    rec = _ThresholdCompactor()
-    a = Agent(
-        model=_TokenIdleByteTightModel(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            max_request_bytes=20 * 1024 * 1024,
-            max_image_bytes=20 * 1024 * 1024,
-        ),
-        tools=[],
-        compactor=rec,
-    )
-    # 13 MB raw PDF: below 0.8 * 20 MB = 16 MB raw, but base64 ~= 17.3 MB,
-    # which is over the 16 MB trigger. Must fire on the expanded size.
-    raw = b"%PDF-" + b"\x00" * (13 * 1024 * 1024)
-    history = _sent_turn(BytesMessage(raw, "application/pdf"))
-    await a.compact_if_needed(history, a.model)
-    assert rec.compacted is True, "gate must count base64-expanded wire bytes"
-
-
-@pytest.mark.asyncio
-async def test_byte_gate_clamps_image_to_max_image_bytes() -> None:
-    """Image bytes are clamped to ``max_image_bytes`` (the resize ceiling).
-
-    Images are resized to ``max_image_bytes`` before base64 at serialization,
-    so a 30 MB raw JPEG ships at most ``4/3 * max_image_bytes`` -- the gate
-    must not over-count it as 30 MB.
-    """
-    rec = _ThresholdCompactor()
-    a = Agent(
-        model=_TokenIdleByteTightModel(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-            max_request_bytes=32 * 1024 * 1024,
-            max_image_bytes=5 * 1024 * 1024,
-        ),
-        tools=[],
-        compactor=rec,
-    )
-    # 30 MB raw JPEG clamps to 5 MB post-resize -> ~6.7 MB wire, far under
-    # 0.8 * 32 MB = 25.6 MB. Must NOT fire (no over-count of the raw size).
-    raw = b"\xff\xd8\xff\xe0" + b"\x00" * (30 * 1024 * 1024)
-    history = _sent_turn(BytesMessage(raw, "image/jpeg"))
-    await a.compact_if_needed(history, a.model)
-    assert rec.compacted is False, "image bytes must clamp to max_image_bytes"
-
-
-@pytest.mark.asyncio
-async def test_compact_if_needed_returns_true_when_should_compact_false() -> None:
-    """When the compactor decides headroom is fine, ``compact_if_needed`` succeeds.
-
-    Pre-unification, the no-trigger path returned ``None`` implicitly.
-    Same contract as the no-compactor path: ``True`` = "no further work
-    needed", with the gate result rolled up into the bool.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _NeverCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref
-            del custom_instructions
-            raise AssertionError("compact must not run when should_compact False")
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_NeverCompactor())
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
-    progressed = await a.compact_if_needed(history, a.model)
-    assert progressed is True
-
-
-@pytest.mark.asyncio
-async def test_compact_if_needed_triggers_on_last_response_total() -> None:
-    """The gate keys on the last response's real token count, not an estimate.
-
-    A crude local estimator can under-count the true context (opus packs
-    ~2.83 chars/token, not 4), so a 990k-token context can estimate to 100k
-    and never cross the threshold. Anchoring on the provider's reported total
-    fixes it: once a response reports 990k, the next gate compacts regardless
-    of the estimate. The first turn (no response yet) falls back to the
-    estimate.
-    """
-
-    class _UndercountModel(StubModel):
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            del request
-            return 100_000
-
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
-
-    # Turn 1: no response recorded yet -> fall back to the estimate (100k <
-    # threshold), so no compaction.
-    rec = _ThresholdCompactor()
-    a = Agent(
-        model=_UndercountModel(
-            max_request_tokens=1_000_000,
-            max_response_tokens=128_000,
-        ),
-        tools=[],
-        compactor=rec,
-    )
-    assert await a.compact_if_needed(history, a.model) is True
-    assert rec.compacted is False
-
-    # Provider reports the sent request at 990k. Rule: (1 + 0.1) * input >=
-    # window, i.e. 1.1 * 990_000 = 1_089_000 >= 1_000_000. The estimate still
-    # under-counts at 100k, but the gate must now use the real 990k.
-    a.record_response(
-        ModelResponse(
-            message=AssistantMessage(text=""),
-            tokens=TokenCount(request=990_000),
-        ),
-    )
-    await a.compact_if_needed(history, a.model)
-    assert rec.compacted is True  # pyrefly: ignore[unnecessary-comparison] -- pyrefly keeps the pre-call narrowing; the call mutates this state.
-
-
-@pytest.mark.asyncio
-async def test_compact_if_needed_adds_tokens_appended_since_last_response() -> None:
-    """The gate adds entries appended after the last response to the anchor.
-
-    Rule: ``X + min(0.075*X, max_response) >= window``. Anchor 800k alone
-    does not fire (800k + 0.075*800k = 860k < 1M), but a tool-result appended
-    since (~150k est tokens) does: X=950k, 950k + 0.075*950k = 1_021_250 >=
-    1M. Without the since-term the gate would lag a turn and skip compaction.
-    """
-    rec = _ThresholdCompactor()
-    a = Agent(
-        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=128_000),
-        tools=[],
-        compactor=rec,
-    )
-    # Anchor: provider counted the last request at 800k.
-    a.record_response(
-        ModelResponse(
-            message=AssistantMessage(text=""),
-            tokens=TokenCount(request=800_000),
-        ),
-    )
-    # History ends with the response's AssistantMessage, then a fresh
-    # ToolResult appended this turn: 600_000 chars / 4 = ~150_000 est tokens
-    # (StubModel: len // 4). X=950k; 950k + 0.075*950k = 1_021_250 >= 1M.
-    history: list[ModelContextEvent] = [
-        AssistantMessage(text=""),
-        ToolResult(call_id="c", content="x" * 600_000),
-    ]
-    await a.compact_if_needed(history, a.model)
-    assert rec.compacted is True
-
-
-@pytest.mark.asyncio
-async def test_compact_if_needed_no_since_term_when_response_is_tail() -> None:
-    """When history ends at the last response, the since-term is zero.
-
-    Anchor 700k sits under the budget's threshold (1M window - 128k
-    response - 66,666 buffer = 805,334 target, /1.01 for the summary's
-    landing room = 797,360), and nothing has been appended since the last
-    ``AssistantMessage``, so the gate must NOT compact. Its sibling above
-    appends a fresh ``ToolResult`` on the same anchor and DOES compact --
-    together they pin the since-term as the only difference.
-    """
-    rec = _ThresholdCompactor()
-    a = Agent(
-        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=128_000),
-        tools=[],
-        compactor=rec,
-    )
-    a.record_response(
-        ModelResponse(
-            message=AssistantMessage(text=""),
-            tokens=TokenCount(request=700_000),
-        ),
-    )
-    history: list[ModelContextEvent] = [
-        UserMessage(text="q"),
-        AssistantMessage(text=""),
-    ]
-    assert await a.compact_if_needed(history, a.model) is True
-    assert rec.compacted is False
-
-
-@pytest.mark.asyncio
-async def test_compact_if_needed_counts_cached_input_tokens() -> None:
-    """Prompt-cached context still triggers compaction.
-
-    Under prompt caching the provider bills most of the prompt as
-    ``cache_read``; ``input_tokens`` alone stays tiny. The gate must sum the
-    cache pools (input + cache_creation + cache_read), or a 990k cached
-    context -- billed as 5k input + 985k cache_read -- would never compact.
-    This is the exact shape that wedged session 27a70970 (compact_count=0).
-    """
-    rec = _ThresholdCompactor()
-    a = Agent(
-        model=StubModel(max_request_tokens=1_000_000, max_response_tokens=128_000),
-        tools=[],
-        compactor=rec,
-    )
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
-    a.record_response(
-        ModelResponse(
-            message=AssistantMessage(text=""),
-            tokens=TokenCount(request=5_000, cache_read=985_000),
-        ),
-    )
-    # 5_000 + 985_000 = 990_000; 1.1 * 990_000 = 1_089_000 >= 1M -> fires.
-    await a.compact_if_needed(history, a.model)
-    assert rec.compacted is True
-
-
-@pytest.mark.asyncio
-async def test_compact_if_needed_returns_false_on_compaction_failure() -> None:
-    """When ``compact_now`` reports False, ``compact_if_needed`` propagates it.
-
-    The bool flows up so future callers (proactive sites beyond the
-    ``_AgentModel.stream`` overflow loop) can short-circuit on the same
-    "history did not shrink" signal that bool was introduced for.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _CompactBrokenButGatedTrue:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref
-            del custom_instructions
-            raise RuntimeError("compaction blew up")
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_CompactBrokenButGatedTrue())
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
-    progressed = await a.compact_if_needed(history, a.model)
-    assert progressed is False
-
-
-@pytest.mark.asyncio
-async def test_circuit_breaker_short_circuits_after_consecutive_failures() -> None:
-    """``compact_if_needed`` returns False without invoking compactor after N failures."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _AlwaysBroken:
-        call_count: int = 0
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref, custom_instructions
-            self.call_count += 1
-            raise RuntimeError("always broken")
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    compactor = _AlwaysBroken()
-    a = Agent(model=StubModel(), tools=[], compactor=compactor)
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
-
-    # First 3 calls invoke the compactor and fail.
-    for _ in range(3):
-        progressed = await a.compact_if_needed(history, a.model)
-        assert progressed is False
-    assert compactor.call_count == 3
-    assert a.compaction_state.compact_failures == 3
-
-    # 4th call hits the circuit breaker -- compactor is NOT invoked.
-    progressed = await a.compact_if_needed(history, a.model)
-    assert progressed is False
-    assert compactor.call_count == 3, (
-        "circuit breaker should have short-circuited the 4th call"
-    )
-
-
-@pytest.mark.asyncio
-async def test_circuit_breaker_resets_on_successful_compaction() -> None:
-    """A successful compaction zeroes ``compact_failures``."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _SuccessfulCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_SuccessfulCompactor())
-    # Pre-populate failure count -- simulating prior auto-failures.
-    a.compaction_state.compact_failures = 2
-    history: list[ModelContextEvent] = [UserMessage(text="x")]
-    progressed = await a.compact_if_needed(history, a.model)
-    assert progressed is True
-    assert a.compaction_state.compact_failures == 0
-
-
-def test_validate_payload_pending_check_subtracts_paired_externally() -> None:
-    """Mid-payload ``if pending:`` check must subtract ``paired_externally``.
-
-    The splice payload validator's end-of-payload check already subtracts
-    ``paired_externally``; the mid-payload check fired on encountering
-    a ``UserMessage`` did not, so the validator rejected a perfectly
-    well-formed splice whose AM tool_calls were externally paired and
-    whose payload then continued with a user-side entry.
-
-    Without the fix, ``ContextSplice.__post_init__`` raises
-    ``InvalidPayloadError`` here.
-    """
-    splice = ContextSplice(
-        ref=TapeRef(session_id="s", ordinal=0),
-        mask=(),
-        insert_after=None,
-        payload=(
-            AssistantMessage(
-                tool_calls=(ToolCall(id="c1", name="Bash", args={}),),
-            ),
-            UserMessage(text="[continuation]"),
-        ),
-        strategy="external_am_then_user",
-        paired_externally=frozenset({"c1"}),
-    )
-    assert splice.payload[0]
-
-
-@pytest.mark.asyncio
-async def test_agent_compactor_recomputes_paired_externally_from_final_payload() -> (
-    None
-):
-    """``_AgentCompactor.compact`` derives ``paired_externally`` from the
-    post-rewrite payload, and the repair honours what the producer declared.
-
-    The inner compactor returns a (validator-bypassed) override whose payload
-    has an externally paired AM tool_call followed by a UM. That declaration
-    means the answering ``ToolResult`` lives on the TAPE -- the tool is still
-    detached and running -- so the repair must leave the call open rather than
-    synthesizing ``[interrupted]`` for a tool that has not failed. The
-    recomputation then confirms it is still external, which is the honest
-    declaration for the strict validator.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _ExternalAmCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            # Use replay() so we can land [AM, UM] with paired_externally
-            # without the constructor rejecting it -- mirrors a legacy
-            # on-disk splice the runtime resumes.
-            return ContextSplice.replay(
-                ref=mint_ref(),
-                mask=full_tape_mask(tape) if tape else (),
-                insert_after=None,
-                payload=(
-                    AssistantMessage(
-                        text="resuming",
-                        tool_calls=(
-                            ToolCall(
-                                id="external_c1",
-                                name="Bash",
-                                args={},
-                            ),
-                        ),
-                    ),
-                    UserMessage(text="postscript"),
-                ),
-                strategy="external_am_then_user",
-                paired_externally=frozenset({"external_c1"}),
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_ExternalAmCompactor())
-    a.runtime.append_history(UserMessage(text="x"))
-    bridge = _AgentCompactor(_ExternalAmCompactor(), a)
-    # If the validator regression returns, ContextSplice.__post_init__
-    # raises InvalidPayloadError inside dataclasses.replace and the
-    # await propagates the error here.
-    override = await bridge.compact(
-        tape=a.runtime.tape,
-        context=a.runtime.context().messages,
-        model=a.runtime.model,
-        mint_ref=a.runtime.mint_ref,
-        custom_instructions=None,
-    )
-    # The producer declared the pair external, so the repair leaves the call
-    # open and the recomputation agrees: still external, no synthetic
-    # ``[interrupted]`` claiming a running tool died.
-    assert "external_c1" in override.paired_externally
-    am_call_ids: set[str] = set()
-    tr_call_ids: set[str] = set()
-    for entry in override.payload:
-        if isinstance(entry, AssistantMessage):
-            am_call_ids.update(tc.id for tc in entry.tool_calls)
-        elif isinstance(entry, ToolResult):
-            tr_call_ids.add(entry.call_id)
-    assert "external_c1" in am_call_ids
-    assert "external_c1" not in tr_call_ids
-
-
-@pytest.mark.asyncio
-async def test_agent_compactor_scrunches_when_inner_output_still_oversized() -> None:
-    """``_AgentCompactor.compact`` runs scrunch when the inner output won't fit.
-
-    Producer returns a splice whose payload, after enrich+repair, still
-    exceeds the model's input budget (``max_request_tokens -
-    max_response_tokens - buffer_tokens``). The bridge must rescue via
-    the scrunch maneuver -- partitioning oldest-first and re-running
-    the inner producer per partition until the resolved view fits --
-    instead of returning the oversized splice and letting the next
-    provider call wedge.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _OversizedCompactor:
-        compact_calls: int = 0
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            effective = largest_context - system_tokens
-            return current_tokens >= max(0, effective - 10)
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: Model,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            self.compact_calls += 1
-            # First call returns a payload exceeding budget target so
-            # the bridge triggers scrunch. Subsequent calls (scrunch
-            # passes) return small payloads so the maneuver makes
-            # progress and stops within a few iterations.
-            payload_text = "X" * 5_000 if self.compact_calls == 1 else "ok"
-            return _summary_override(
-                [UserMessage(text=payload_text)],
-                mint_ref,
-                tape=tape,
-            )
-
-    @dataclass(slots=True, kw_only=True)
-    class _OverflowModel(StubModel):
-        max_request_tokens: int = 1_000
-        max_response_tokens: int = 100
-
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            # Each entry's text length / 4 = tokens. Mirrors the chars
-            # heuristic the scrunch planner uses.
-            return sum(
-                len(m.text) // 4
-                for m in request.messages
-                if isinstance(m, (UserMessage, AgentSendMessage))
-            )
-
-    budget = AgentSettings(
-        max_request_tokens=1_000,
-        max_response_tokens=100,
-        buffer_tokens=100,
-    )
-    compactor = _OversizedCompactor()
-    a = Agent(
-        model=_OverflowModel(),
-        compactor=compactor,
-        budget=budget,
-    )
-    # Seed history just so the runtime has something to compact.
-    a.runtime.append_history(UserMessage(text="x" * 4_000))
-
-    assert await a.compact_now() is True
-
-    # The producer's one oversized message is folded, not re-summarized by
-    # scrunch passes (``scrunch_test.py`` covers multi-pass folding).
-    assert compactor.compact_calls == 1
-    # Final resolved view must fit (input + buffer below max).
-    resolved = a.runtime.context().messages
-    visible_chars = sum(
-        len(m.text) for m in resolved if isinstance(m, (UserMessage, AgentSendMessage))
-    )
-    target = (
-        a.model.limits.max_request_tokens
-        - a.max_response_tokens
-        - (a.budget.buffer_tokens or 0)
-    )
-    assert visible_chars // 4 <= target, (
-        f"post-scrunch view ({visible_chars // 4} tok) still exceeds target {target}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_compactor_scrunch_passes_record_cost() -> None:
-    """Every summary call -- first pass and scrunch passes -- is billed."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _PayingCompactor:
-        compact_calls: int = 0
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: Model,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, custom_instructions
-            self.compact_calls += 1
-            _ = await model.stream(ModelRequest(messages=[UserMessage(text="s")]))
-            payload_text = "X" * 5_000 if self.compact_calls == 1 else "ok"
-            return _summary_override(
-                [UserMessage(text=payload_text)],
-                mint_ref,
-                tape=tape,
-            )
-
-    @dataclass(slots=True, kw_only=True)
-    class _PricedModel(StubModel):
-        max_request_tokens: int = 1_000
-        max_response_tokens: int = 100
-
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            return sum(
-                len(m.text) // 4
-                for m in request.messages
-                if isinstance(m, (UserMessage, AgentSendMessage))
-            )
-
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            return ModelResponse(
-                message=AssistantMessage(text="<summary>s</summary>"),
-                spend=TokenCost(request=0.25),
-            )
-
-    compactor = _PayingCompactor()
-    a = Agent(
-        model=_PricedModel(),
-        compactor=compactor,
-        budget=AgentSettings(
-            max_request_tokens=1_000,
-            max_response_tokens=100,
-            buffer_tokens=100,
-        ),
-    )
-    a.runtime.append_history(UserMessage(text="x" * 4_000))
-
-    assert await a.compact_now() is True
-    # The oversized producer output is one message, so the fold condenses
-    # it; each fold call is a paid side call like the producer's own.
-    calls = sum(a.cost_tracker.calls_by_model.values())
-    assert calls >= 2
-    assert a.cost_tracker.spend.total == pytest.approx(0.25 * calls)
-
-
-@pytest.mark.asyncio
-async def test_agent_compactor_retrigger_estimate_failure_is_nonfatal() -> None:
-    """A raising token estimator in the willRetriggerNextTurn probe must not
-    abort an otherwise-successful compaction.
-
-    The retrigger probe formerly caught only ``(TypeError, ValueError)``; a
-    provider-backed estimator can raise arbitrary errors (e.g. a CLI
-    subprocess ``RuntimeError``). It must degrade like the sibling estimate
-    blocks, not propagate.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _FlakyEstimateModel(StubModel):
-        n: int = 0
-
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            del request
-            self.n += 1
-            # The third estimate call is the willRetriggerNextTurn probe;
-            # blow up only there so enrich/pre-scrunch estimates succeed.
-            if self.n >= 3:
-                raise RuntimeError("tokenizer subprocess gone")
-            return 1
-
-    @dataclass(slots=True, kw_only=True)
-    class _OkCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=_FlakyEstimateModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(UserMessage(text="x"))
-    # Must not raise -- the RuntimeError inside the retrigger probe is caught.
-    assert await a.compact_now() is True
-
-
-@pytest.mark.asyncio
-async def test_agent_compactor_repairs_payload_after_scrunch() -> None:
-    """Scrunch output is re-repaired so no AM tool_call is left unpaired.
-
-    Scrunch re-runs the producer per partition and can emit a fresh
-    ``AssistantMessage`` whose ``tool_calls`` have no local ``ToolResult``.
-    Without a post-scrunch repair, ``unpaired_call_ids`` would declare those
-    ids ``paired_externally`` even though no external partner exists, and the
-    next provider call would 400. The bridge must synthesize an
-    ``[interrupted]`` result so the splice declares nothing externally paired.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _UnpairedScrunchCompactor:
-        compact_calls: int = 0
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            self.compact_calls += 1
-            if self.compact_calls == 1:
-                # First pass: oversized so the bridge triggers scrunch.
-                return _summary_override(
-                    [UserMessage(text="X" * 5_000)],
-                    mint_ref,
-                    tape=tape,
-                )
-            # Scrunch passes: emit an AM with a tool_call but NO ToolResult.
-            return ContextSplice(
-                ref=mint_ref(),
-                mask=full_tape_mask(tape),
-                insert_after=None,
-                payload=(
-                    UserMessage(text="summary"),
-                    AssistantMessage(
-                        text="partial",
-                        tool_calls=(ToolCall(id="orphan", name="x", args={}),),
-                    ),
-                ),
-                strategy="summary",
-                paired_externally=frozenset({"orphan"}),
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    @dataclass(slots=True, kw_only=True)
-    class _OverflowModel(StubModel):
-        max_request_tokens: int = 1_000
-        max_response_tokens: int = 100
-
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            return sum(
-                len(m.text) // 4
-                for m in request.messages
-                if isinstance(m, (UserMessage, AgentSendMessage))
-            )
-
-    budget = AgentSettings(
-        max_request_tokens=1_000,
-        max_response_tokens=100,
-        buffer_tokens=100,
-    )
-    a = Agent(
-        model=_OverflowModel(),
-        compactor=_UnpairedScrunchCompactor(),
-        budget=budget,
-    )
-    a.runtime.append_history(UserMessage(text="x" * 4_000))
-
-    assert await a.compact_now() is True
-
-    splice = next(r for r in reversed(a.runtime.tape) if isinstance(r, ContextSplice))
-    # No call_id may be declared externally paired without a real partner;
-    # the post-scrunch repair must have synthesized a local TR for "orphan".
-    assert "orphan" not in splice.paired_externally
-    am_ids = {
-        tc.id
-        for e in splice.payload
-        if isinstance(e, AssistantMessage)
-        for tc in e.tool_calls
-    }
-    tr_ids = {e.call_id for e in splice.payload if isinstance(e, ToolResult)}
-    # Every AM tool_call in the payload has a local TR pair.
-    assert am_ids <= tr_ids, f"unpaired AM tool_calls in payload: {am_ids - tr_ids}"
-
-
-@pytest.mark.asyncio
-async def test_agent_compactor_scrunch_uses_agent_budget_not_model_cap() -> None:
-    """Scrunch target uses the agent's (possibly lowered) ``max_request_tokens``.
-
-    A user may set ``max_request_tokens`` below the model cap. Scrunch must fit
-    that budget, not the raw model window, or a payload skips scrunch yet the
-    willRetriggerNextTurn check (which uses the agent budget) flags it -- an
-    inconsistent state that re-compacts every turn.
-    """
-    seen_targets: list[int] = []
-
-    @dataclass(slots=True, kw_only=True)
-    class _RecordingScrunchCompactor:
-        compact_calls: int = 0
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            self.compact_calls += 1
-            payload_text = "X" * 5_000 if self.compact_calls == 1 else "ok"
-            return _summary_override(
-                [UserMessage(text=payload_text)],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    @dataclass(slots=True, kw_only=True)
-    class _OverflowModel(StubModel):
-        max_request_tokens: int = 1_000_000  # `model` cap is huge.
-        max_response_tokens: int = 100
-
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            return sum(
-                len(m.text) // 4
-                for m in request.messages
-                if isinstance(m, (UserMessage, AgentSendMessage))
-            )
-
-    # Agent budget far below the model cap.
-    budget = AgentSettings(
-        max_request_tokens=1_000,
-        max_response_tokens=100,
-        buffer_tokens=100,
-    )
-    a = Agent(
-        model=_OverflowModel(),
-        compactor=_RecordingScrunchCompactor(),
-        budget=budget,
-    )
-
-    async def _spy(
-        self: _AgentCompactor,
-        *,
-        payload: list[ModelContextEvent],
-        mint_ref: Callable[[], TapeRef],
-        target_input_tokens: int,
-    ) -> list[ModelContextEvent]:
-        del self, mint_ref
-        seen_targets.append(target_input_tokens)
-        return list(payload)
-
-    with patch.object(_AgentCompactor, "_scrunch_payload", _spy):
-        a.runtime.append_history(UserMessage(text="x" * 4_000))
-        await a.compact_now()
-
-    assert seen_targets, "scrunch was never invoked"
-    expected = (
-        a.max_request_tokens - a.max_response_tokens - (a.budget.buffer_tokens or 0)
-    )
-    assert seen_targets[0] == expected, (
-        f"scrunch target {seen_targets[0]} != agent budget {expected}"
-        f" (model cap is {a.model.limits.max_request_tokens})"
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_compactor_scrunch_target_subtracts_system_tool_overhead() -> None:
-    """Scrunch target must reserve room for system+tools, not just messages.
-
-    The bridge enters scrunch when the FULL request (system + tools +
-    messages) exceeds the budget, but ``scrunch_to_fit`` measures
-    messages only. If the target handed to scrunch is the whole-request
-    budget, a payload whose messages alone already fit produces no
-    reduction and the next provider call re-overflows. The target passed
-    to ``_scrunch_payload`` must be the budget minus the fixed
-    system+tools overhead.
-    """
-    seen_targets: list[int] = []
-
-    @dataclass(slots=True, kw_only=True)
-    class _SystemCountingModel(StubModel):
-        max_request_tokens: int = 1_000_000
-        max_response_tokens: int = 100
-
-        @override
-        def approx_text_tokens(self, text: str) -> int:
-            return len(text) // 4
-
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            total = len(request.system_text) // 4
-            for m in request.messages:
-                if isinstance(m, (UserMessage, AgentSendMessage)):
-                    total += len(m.text) // 4
-            return total
-
-    @dataclass(slots=True, kw_only=True)
-    class _OversizedCompactor:
-        compact_calls: int = 0
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            self.compact_calls += 1
-            payload_text = "X" * 5_000 if self.compact_calls == 1 else "ok"
-            return _summary_override(
-                [UserMessage(text=payload_text)],
-                mint_ref,
-                tape=tape,
-            )
-
-    # System prompt of 800 chars -> 200 tokens of fixed overhead.
-    system = "s" * 800
-    budget = AgentSettings(
-        max_request_tokens=1_000,
-        max_response_tokens=100,
-        buffer_tokens=100,
-    )
-    a = Agent(
-        model=_SystemCountingModel(),
-        compactor=_OversizedCompactor(),
-        budget=budget,
-        system=system,
-    )
-
-    async def _spy(
-        self: _AgentCompactor,
-        *,
-        payload: list[ModelContextEvent],
-        mint_ref: Callable[[], TapeRef],
-        target_input_tokens: int,
-    ) -> list[ModelContextEvent]:
-        del self, mint_ref
-        seen_targets.append(target_input_tokens)
-        return list(payload)
-
-    with patch.object(_AgentCompactor, "_scrunch_payload", _spy):
-        a.runtime.append_history(UserMessage(text="x" * 4_000))
-        await a.compact_now()
-
-    assert seen_targets, "scrunch was never invoked"
-    budget_target = (
-        a.max_request_tokens - a.max_response_tokens - (a.budget.buffer_tokens or 0)
-    )
-    system_overhead = a.model.approx_text_tokens(system)  # 200.
-    # The messages-only scrunch target must reserve the system overhead.
-    assert seen_targets[0] == budget_target - system_overhead, (
-        f"scrunch target {seen_targets[0]} did not subtract system overhead"
-        f" {system_overhead} from budget target {budget_target}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_compactor_skips_scrunch_when_inner_output_fits() -> None:
-    """Bridge does NOT run scrunch when the inner producer's output fits.
-
-    Sanity check on the gate: scrunch is a rescue, not a default path.
-    When the producer's normal compact() produces a payload that fits
-    the budget, the bridge returns it as-is with one producer call.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _NormalCompactor:
-        compact_calls: int = 0
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: Model,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            self.compact_calls += 1
-            return _summary_override(
-                [UserMessage(text="ok")],
-                mint_ref,
-                tape=tape,
-            )
-
-    compactor = _NormalCompactor()
-    a = Agent(model=StubModel(), compactor=compactor)
-    a.runtime.append_history(UserMessage(text="x"))
-
-    assert await a.compact_now() is True
-
-    assert compactor.compact_calls == 1, (
-        f"bridge should invoke producer exactly once when output fits;"
-        f" got {compactor.compact_calls}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_compact_now_failure_publishes_event_not_context_pollution() -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _BrokenCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref
-            del custom_instructions
-            raise RuntimeError("compaction failed")
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
-    published: list[object] = []
-    a.runtime.observers.append(published.append)
-    a.runtime.append_history(UserMessage(text="x"))
-    await a.compact_now()
-    # Issue#316 #6: the failure does not enter model context. It surfaces via a
-    # published ``CompactFailed`` event (taped + rendered dim), not as a
-    # ``[Compaction error: ...]`` ``UserMessage`` on the wire.
-    polluted = [
-        e
-        for e in a.runtime.context().messages
-        if isinstance(e, UserMessage) and "[Compaction error:" in e.text
-    ]
-    assert polluted == []
-    assert any(isinstance(e, CompactFailed) for e in published)
-
-
-@dataclass(slots=True, kw_only=True)
-class _OverflowModel:
-    """Model that raises types.model.PromptTooLongError on the first N calls."""
-
-    model_id: str = "ovf"
-    max_request_tokens: int = 100_000
-    max_response_tokens: int = 1_024
-    overflow_count: int = 0
-    call_index: int = 0
-
-    @property
-    def capability(self) -> ModelCapability:
-        return ModelCapability(
-            model_id=self.model_id,
-            context=MappingProxyType(
-                {
-                    "": ModelLimits(
-                        max_request_tokens=self.max_request_tokens,
-                        max_response_tokens=self.max_response_tokens,
-                    ),
-                },
-            ),
-            prices=PriceCatalog(
-                {
-                    PriceKey("auto"): TokenPrice(
-                        request=0.0,
-                        response=0.0,
-                        cache_write=0.0,
-                        cache_write_1h=0.0,
-                        cache_read=0.0,
-                    ),
-                },
-            ),
-        )
-
-    @property
-    def settings(self) -> ModelSettings:
-        return ModelSettings(capability=self.capability)
-
-    @property
-    def limits(self) -> ModelLimits:
-        return self.settings.limits
-
-    @property
-    def tagged_model_id(self) -> str:
-        return self.model_id
-
-    def spend(self, tokens: TokenCount) -> TokenCost:
-        return self.capability.prices[PriceKey("auto")] * tokens
-
-    def approx_text_tokens(self, text: str) -> int:
-        return max(1, len(text) // 4)
-
-    def approx_image_tokens(self, data: bytes) -> int:
-        del data
-        return 256
-
-    def approx_request_tokens(self, request: ModelRequest) -> int:
-        return token_count.approx_request_tokens(request, self)
-
-    async def actual_text_tokens(self, text: str) -> int:
-        return self.approx_text_tokens(text)
-
-    async def actual_image_tokens(self, data: bytes) -> int:
-        return self.approx_image_tokens(data)
-
-    async def actual_request_tokens(self, request: ModelRequest) -> int:
-        return self.approx_request_tokens(request)
-
-    def is_context_overflow(self, error: Exception) -> bool:
-        return isinstance(error, PromptTooLongError)
-
-    def is_retryable_provider_error(self, error: Exception) -> bool:
-        del error
-        return False
-
-    def usage_snapshot(self) -> UsageSnapshot | None:
-        return None
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        return await self.stream(request)
-
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        del request, publish
-        idx = self.call_index
-        self.call_index += 1
-        if idx < self.overflow_count:
-            raise PromptTooLongError("too long")
-        return ModelResponse(message=AssistantMessage(text="recovered"))
-
-    async def close(self) -> None:
-        return
-
-
-@dataclass(slots=True, kw_only=True)
-class _RawOverflowModel:
-    """Model that raises a non-types.model.PromptTooLongError but classifies it as overflow.
-
-    Mirrors the production failure where ``anthropic.APIStatusError``
-    propagated up un-normalized: the recovery loop's catch must rely
-    on ``is_context_overflow``, not on ``isinstance(exc,
-    types.model.PromptTooLongError)``, or compaction never engages.
-    """
-
-    model_id: str = "raw"
-    max_request_tokens: int = 100_000
-    max_response_tokens: int = 1_024
-    supports_streaming: bool = True
-    supports_thinking: bool = False
-    valid_thinking_states: tuple[str, ...] = ("off-hide",)
-    supports_effort: bool = False
-    valid_efforts: tuple[str, ...] = ()
-    supports_cache_control: bool = False
-    valid_service_tiers: tuple[str, ...] = ()
-    valid_latency_modes: tuple[str, ...] = ()
-    supports_context_management: bool = False
-    supports_persistent_retry: bool = False
-    supports_account_auth: bool = False
-    max_image_dim: int = 8_000
-    max_image_bytes: int = 5 * 1024 * 1024
-    max_request_bytes: int = 32 * 1024 * 1024
-    overflow_count: int = 0
-    call_index: int = 0
-
-    @property
-    def capability(self) -> ModelCapability:
-        return ModelCapability(
-            model_id=self.model_id,
-            context=MappingProxyType(
-                {
-                    "": ModelLimits(
-                        max_request_tokens=self.max_request_tokens,
-                        max_response_tokens=self.max_response_tokens,
-                    ),
-                },
-            ),
-            prices=PriceCatalog(
-                {
-                    PriceKey("auto"): TokenPrice(
-                        request=0.0,
-                        response=0.0,
-                        cache_write=0.0,
-                        cache_write_1h=0.0,
-                        cache_read=0.0,
-                    ),
-                },
-            ),
-        )
-
-    @property
-    def settings(self) -> ModelSettings:
-        return ModelSettings(capability=self.capability)
-
-    @property
-    def limits(self) -> ModelLimits:
-        return self.settings.limits
-
-    @property
-    def tagged_model_id(self) -> str:
-        return self.model_id
-
-    def spend(self, tokens: TokenCount) -> TokenCost:
-        return self.capability.prices[PriceKey("auto")] * tokens
-
-    def approx_text_tokens(self, text: str) -> int:
-        return max(1, len(text) // 4)
-
-    def approx_image_tokens(self, data: bytes) -> int:
-        del data
-        return 256
-
-    def approx_request_tokens(self, request: ModelRequest) -> int:
-        return token_count.approx_request_tokens(request, self)
-
-    async def actual_text_tokens(self, text: str) -> int:
-        return self.approx_text_tokens(text)
-
-    async def actual_image_tokens(self, data: bytes) -> int:
-        return self.approx_image_tokens(data)
-
-    async def actual_request_tokens(self, request: ModelRequest) -> int:
-        return self.approx_request_tokens(request)
-
-    def is_context_overflow(self, error: Exception) -> bool:
-        return isinstance(error, RuntimeError) and "context window" in str(error)
-
-    def is_retryable_provider_error(self, error: Exception) -> bool:
-        del error
-        return False
-
-    def usage_snapshot(self) -> UsageSnapshot | None:
-        return None
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        return await self.stream(request)
-
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        del request, publish
-        idx = self.call_index
-        self.call_index += 1
-        if idx < self.overflow_count:
-            raise RuntimeError("Request size exceeds model context window")
-        return ModelResponse(message=AssistantMessage(text="recovered"))
-
-    async def close(self) -> None:
-        return
-
-
-@pytest.mark.asyncio
-async def test_agent_model_overflow_triggers_compact_now() -> None:
-    """One overflow followed by success: compact_now runs once, response returned."""
-    compact_calls: list[int] = []
-
-    @dataclass(slots=True, kw_only=True)
-    class _CountingCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model
-            del custom_instructions
-            compact_calls.append(1)
-            return _summary_override(
-                [UserMessage(text="[compact]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    model = _OverflowModel(overflow_count=1)
-    a = Agent(model=model, tools=[], compactor=_CountingCompactor())
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    assert len(compact_calls) == 1
-    # _OverflowModel emitted "recovered" on the second call.
-    assert any(
-        isinstance(e, AssistantMessage) and e.text == "recovered" for e in a.history
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_model_proactive_compaction_runs_before_stream() -> None:
-    """``should_compact`` -> True forces compaction BEFORE the provider call.
-
-    The reactive path (overflow recovery on 400) is necessary but not
-    sufficient: some providers happily accept oversized prompts up to
-    a hard ceiling and only 400 at that ceiling, by which point the
-    cost is already paid. The proactive path consults
-    ``Compactor.should_compact`` ahead of each stream and runs
-    ``compact_now`` when it returns True -- so the headroom buffer
-    actually buys headroom.
-
-    Failure mode without the wiring: a session at ~1.07M tokens with
-    zero ``Compact`` events ever fired (see
-    ``~/.sagent/.../session.jsonl`` from the wedged run).
-    """
-    order: list[str] = []
-
-    @dataclass(slots=True, kw_only=True)
-    class _OneShotCompactor:
-        triggered: bool = False
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            if self.triggered:
-                return False
-            self.triggered = True
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model
-            del custom_instructions
-            order.append("compact")
-            return _summary_override(
-                [UserMessage(text="[compact]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    @dataclass(slots=True, kw_only=True)
-    class _RecordingModel:
-        order_log: list[str]
-        model_id: str = "rec"
-        max_request_tokens: int = 100_000
-        max_response_tokens: int = 1_024
-        supports_streaming: bool = True
-        supports_thinking: bool = False
-        valid_thinking_states: tuple[str, ...] = ("off-hide",)
-        supports_effort: bool = False
-        valid_efforts: tuple[str, ...] = ()
-        supports_cache_control: bool = False
-        valid_service_tiers: tuple[str, ...] = ()
-        valid_latency_modes: tuple[str, ...] = ()
-        supports_context_management: bool = False
-        supports_persistent_retry: bool = False
-        supports_account_auth: bool = False
-        max_image_dim: int = 8_000
-        max_image_bytes: int = 5 * 1024 * 1024
-        max_request_bytes: int = 32 * 1024 * 1024
-
-        @property
-        def capability(self) -> ModelCapability:
-            return ModelCapability(
-                model_id=self.model_id,
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=self.max_request_tokens,
-                            max_response_tokens=self.max_response_tokens,
-                        ),
-                    },
-                ),
-                prices=PriceCatalog(
-                    {
-                        PriceKey("auto"): TokenPrice(
-                            request=0.0,
-                            response=0.0,
-                            cache_write=0.0,
-                            cache_write_1h=0.0,
-                            cache_read=0.0,
-                        ),
-                    },
-                ),
-            )
-
-        @property
-        def settings(self) -> ModelSettings:
-            return ModelSettings(capability=self.capability)
-
-        @property
-        def limits(self) -> ModelLimits:
-            return self.settings.limits
-
-        @property
-        def tagged_model_id(self) -> str:
-            return self.model_id
-
-        def spend(self, tokens: TokenCount) -> TokenCost:
-            return self.capability.prices[PriceKey("auto")] * tokens
-
-        def approx_text_tokens(self, text: str) -> int:
-            return max(1, len(text) // 4)
-
-        def approx_image_tokens(self, data: bytes) -> int:
-            del data
-            return 256
-
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            return token_count.approx_request_tokens(request, self)
-
-        async def actual_text_tokens(self, text: str) -> int:
-            return self.approx_text_tokens(text)
-
-        async def actual_image_tokens(self, data: bytes) -> int:
-            return self.approx_image_tokens(data)
-
-        async def actual_request_tokens(self, request: ModelRequest) -> int:
-            return self.approx_request_tokens(request)
-
-        def is_context_overflow(self, error: Exception) -> bool:
-            del error
-            return False
-
-        def is_retryable_provider_error(self, error: Exception) -> bool:
-            del error
-            return False
-
-        def usage_snapshot(self) -> UsageSnapshot | None:
-            return None
-
-        async def buffer(self, request: ModelRequest) -> ModelResponse:
-            return await self.stream(request)
-
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            self.order_log.append("stream")
-            return ModelResponse(
-                message=AssistantMessage(text="ok"),
-            )
-
-        async def close(self) -> None:
-            return
-
-    model = _RecordingModel(order_log=order)
-    a = Agent(model=model, tools=[], compactor=_OneShotCompactor())
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    assert order == ["compact", "stream"], order
-
-
-@pytest.mark.asyncio
-async def test_compact_now_publishes_compaction_progress_events() -> None:
-    """Direct compaction path emits renderable observer events."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _OkCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model
-            del custom_instructions
-            return _summary_override(
-                [UserMessage(text="[compact]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    events: list[RuntimeEvent] = []
-    a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(UserMessage(text="hi"))
-    a.runtime.observers.append(events.append)
-
-    assert await a.compact_now() is True
-
-    assert [type(event) for event in events] == [
-        CompactStarted,
-        CompactComplete,
-    ]
-    complete = events[-1]
-    assert isinstance(complete, CompactComplete)
-    assert len(complete.records) == 1
-    record = complete.records[0]
-    assert isinstance(record, ContextSplice)
-    assert a.history == list(record.payload)
-    assert a.activity.current_compact_start == 0.0
-
-
-@pytest.mark.asyncio
-async def test_sync_compact_now_reports_token_counts_from_override() -> None:
-    """The sync ``compact_now`` path must report the override's token counts.
-
-    Regression: the synchronous emit site built ``CompactComplete``
-    without ``token_before`` / ``token_after`` / ``payload_entries``,
-    so its fields defaulted to 0. The REPL then rendered
-    ``~0 → ~0 tokens, 0 entries`` for every overflow-recovery
-    compaction even though the override carried real counts. The async
-    ``_compact_and_post`` path forwarded them; the two diverged. Both
-    must derive the counts from the override.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _OkCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            return _summary_override(
-                [UserMessage(text="[compact]")],
-                mint_ref,
-                tape=tape,
-                token_before=120,
-                token_after=10,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    events: list[RuntimeEvent] = []
-    a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(UserMessage(text="hi"))
-    a.runtime.observers.append(events.append)
-
-    assert await a.compact_now() is True
-
-    complete = events[-1]
-    assert isinstance(complete, CompactComplete)
-    assert complete.token_before == 120
-    assert complete.token_after == 10
-    assert complete.payload_entries == 1
-
-
-@pytest.mark.asyncio
-async def test_sync_compact_now_appends_lifecycle_markers_to_tape() -> None:
-    """Sync compaction path appends CompactStarted + CompactComplete to tape.
-
-    The inbox-arm handler at ``runtime.py: case Compact():`` calls
-    ``append_history`` for the lifecycle markers. ``compact_now``
-    bypasses the inbox (the runtime would cancel its own task if it
-    pushed ``Compact``), and previously only published the markers --
-    leaving them off the tape. Resume could not see that a synchronous
-    overflow-recovery compaction had run, only the resulting splice.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _OkCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            return _summary_override(
-                [UserMessage(text="[compact]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_OkCompactor())
-    a.runtime.append_history(UserMessage(text="hi"))
-
-    assert await a.compact_now() is True
-
-    started_seen = any(
-        isinstance(record, ReferrableTapeEvent)
-        and isinstance(record.event, CompactStarted)
-        for record in a.runtime.tape
-    )
-    complete_seen = any(
-        isinstance(record, ReferrableTapeEvent)
-        and isinstance(record.event, CompactComplete)
-        for record in a.runtime.tape
-    )
-    assert started_seen
-    assert complete_seen
-
-
-@pytest.mark.asyncio
-async def test_sync_compact_now_failure_appends_compact_failed_to_tape() -> None:
-    """Sync compaction failure also appends CompactFailed to the tape."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _BrokenCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref, custom_instructions
-            raise RuntimeError("boom")
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(model=StubModel(), tools=[], compactor=_BrokenCompactor())
-    a.runtime.append_history(UserMessage(text="hi"))
-
-    assert await a.compact_now() is False
-
-    started_seen = any(
-        isinstance(record, ReferrableTapeEvent)
-        and isinstance(record.event, CompactStarted)
-        for record in a.runtime.tape
-    )
-    failed_seen = any(
-        isinstance(record, ReferrableTapeEvent)
-        and isinstance(record.event, CompactFailed)
-        for record in a.runtime.tape
-    )
-    assert started_seen
-    assert failed_seen
-
-
-@pytest.mark.asyncio
-async def test_agent_model_proactive_compaction_failure_short_circuits() -> None:
-    """Failed proactive compaction must not fall through to the provider.
-
-    The same ``compact_if_needed`` bool used by reactive overflow
-    recovery applies before the first provider call too. Ignoring it
-    lets an unchanged oversized history hit the provider even though
-    compaction already reported that no progress was made.
-
-    When the compactor's underlying failure is NOT context overflow
-    (transport drop, auth blip, generic ``RuntimeError``), the agent
-    surfaces that error verbatim instead of the polished
-    ``ContextOverflowError`` -- the original session ``bc528d70`` lost
-    the real ``httpx2.RemoteProtocolError`` behind a misleading
-    "context window exhausted" message because the proactive path
-    raised the polished error unconditionally.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _BrokenProactiveCompactor:
-        calls: int = 0
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref
-            del custom_instructions
-            self.calls += 1
-            raise RuntimeError("compaction disconnected")
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    model = StubModel()
-    compactor = _BrokenProactiveCompactor()
-    a = Agent(model=model, tools=[], compactor=compactor)
-
-    with pytest.raises(RuntimeError, match="compaction disconnected"):
-        await a._agent_model.stream(
-            history=[UserMessage(text="hi")],
-            publish=lambda _ev: None,
-        )
-
-    assert compactor.calls == 1
-    assert model.received == []
-
-
-@pytest.mark.asyncio
-async def test_agent_model_proactive_compaction_overflow_surfaces_polished() -> None:
-    """Compaction failure that IS overflow still surfaces the polished message.
-
-    The agent distinguishes ``compact_now`` failures by whether the
-    underlying error is classified as context overflow by the active
-    model. When it is (``PromptTooLongError``, provider-specific
-    overflow exceptions), the polished ``/clear`` / ``/compact`` /
-    ``/model`` remediation message fires. When it isn't, the
-    underlying error propagates verbatim (covered by
-    ``test_agent_model_proactive_compaction_failure_short_circuits``).
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _OverflowingCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref
-            del custom_instructions
-            raise PromptTooLongError("compactor saw overflow")
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(
-        model=_OverflowModel(overflow_count=0),
-        compactor=_OverflowingCompactor(),
-    )
-    with pytest.raises(ContextOverflowError) as ei:
-        await a._agent_model.stream(
-            history=[UserMessage(text="hi")],
-            publish=lambda _ev: None,
-        )
-    msg = str(ei.value)
-    assert "/clear" in msg
-    assert "/compact" in msg
-    assert isinstance(ei.value.__cause__, PromptTooLongError)
-
-
-@pytest.mark.asyncio
-async def test_agent_model_overflow_exhausts_recovery_raises() -> None:
-    """Exhaust MAX_OVERFLOW_RECOVERY: surface a user-facing context-overflow.
-
-    The bare ``PromptTooLongError`` text ("too long") is not actionable
-    for the user; the renderer prefixes it with ``ClassName:`` which is
-    pure noise. After all overflow retries fail, the agent surfaces a
-    :class:`types.exceptions.ContextOverflowError` (a ``UserFacingError``
-    subclass) whose message names the remediations the user can take
-    -- ``/clear``, ``/compact``, ``/model`` with a larger window.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _NoOpCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model
-            del custom_instructions
-            # Returns short summary; model keeps overflowing.
-            return _summary_override(
-                [UserMessage(text="[compact]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    model = _OverflowModel(overflow_count=10)  # Always overflow.
-    a = Agent(model=model, tools=[], compactor=_NoOpCompactor())
-    with pytest.raises(ContextOverflowError) as ei:
-        await a._agent_model.stream(
-            history=[UserMessage(text="x")],
-            publish=lambda _ev: None,
-        )
-    msg = str(ei.value)
-    assert "/clear" in msg
-    assert "/compact" in msg
-    assert isinstance(ei.value.__cause__, PromptTooLongError)
-    # The polished message should not embed the underlying exception
-    # again -- ``__cause__`` already carries it. Duplicating the cause
-    # in the message dilutes the actionable text with Python internals.
-    assert "Underlying error" not in msg, (
-        f"message should not duplicate __cause__; got {msg!r}"
-    )
-    assert "PromptTooLongError" not in msg, (
-        f"message should not leak ClassName: prefix; got {msg!r}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_model_overflow_short_circuits_on_compaction_failure() -> None:
-    """When ``compact_now`` returns False, recovery stops immediately.
-
-    BUGS34 regression coverage: previously the recovery loop called the
-    model again with effectively unchanged history after every failed
-    compaction, burning ``MAX_OVERFLOW_RECOVERY`` retries on identical
-    400s. The agent halts after the FIRST failed compaction so the user
-    gets a halt while we still know what went wrong. When the
-    compactor's failure is NOT context overflow, the underlying error
-    surfaces verbatim rather than being masked by a polished
-    "context window exhausted" message.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _BrokenCompactor:
-        calls: int = 0
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref
-            del custom_instructions
-            self.calls += 1
-            raise RuntimeError("compaction blew up")
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    model = _OverflowModel(overflow_count=10)
-    compactor = _BrokenCompactor()
-    a = Agent(model=model, tools=[], compactor=compactor)
-    with pytest.raises(RuntimeError, match="compaction blew up"):
-        await a._agent_model.stream(
-            history=[UserMessage(text="x")],
-            publish=lambda _ev: None,
-        )
-    # Model was hit once (first attempt), compactor once (the failed
-    # recovery). No further retries.
-    assert model.call_index == 1, (
-        f"model must not retry after failed compaction; got {model.call_index} calls"
-    )
-    assert compactor.calls == 1, (
-        f"compactor must not retry on itself; got {compactor.calls} calls"
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_model_overflow_recovery_via_classifier_not_isinstance() -> None:
-    """Recovery engages on any exception classified as overflow, not just ``types.model.PromptTooLongError``.
-
-    When a provider's normalization slips and a raw provider exception
-    propagates with the canonical ``is_context_overflow(exc)`` returning
-    True, the recovery loop must still fire ``compact_now``. This is
-    the bug that produced the production death-spiral: the recovery
-    catch was narrowed to ``types.model.PromptTooLongError`` while the classifier
-    knew the exception was overflow.
-    """
-    compact_calls: list[int] = []
-
-    @dataclass(slots=True, kw_only=True)
-    class _CountingCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model
-            del custom_instructions
-            compact_calls.append(1)
-            return _summary_override(
-                [UserMessage(text="[compact]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    model = _RawOverflowModel(overflow_count=1)
-    a = Agent(model=model, tools=[], compactor=_CountingCompactor())
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    assert len(compact_calls) == 1
-    assert any(
-        isinstance(e, AssistantMessage) and e.text == "recovered" for e in a.history
+def _capability(
+    model_id: str = "scripted",
+    cutoff: str | None = None,
+) -> ModelCapability:
+    prices = PriceCatalog(window=200_000)
+    return ModelCapability(
+        model_id=model_id,
+        knowledge_cutoff=cutoff,
+        limits=ModelLimits(max_request_tokens=200_000, max_response_tokens=8_000),
+        prices=prices,
+        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
     )
 
 
 @dataclass(slots=True, kw_only=True)
-class _ByteOverflowModel(StubModel):
-    """Model that raises ``RequestTooLargeError`` (byte wire-limit) on first N calls.
-
-    The byte limit is distinct from token-window overflow:
-    ``is_context_overflow`` returns False, but recovery must still fire
-    via the ``RequestTooLargeError`` type so the wedge becomes
-    non-fatal.
-    """
-
-    overflow_count: int = 0
-    call_index: int = 0
-
-    @override
-    def is_context_overflow(self, error: Exception) -> bool:
-        del error
-        return False
-
-    @override
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        del request, publish
-        idx = self.call_index
-        self.call_index += 1
-        if idx < self.overflow_count:
-            raise RequestTooLargeError("Request exceeds the maximum size")
-        return ModelResponse(message=AssistantMessage(text="recovered"))
-
-
-@pytest.mark.asyncio
-async def test_agent_model_request_too_large_recovers_via_compaction() -> None:
-    """A 413 byte-overflow must compact and recover, never dead-halt.
-
-    ``request_too_large`` is not classified as context overflow, yet the
-    recovery loop must still engage (keyed on the ``RequestTooLargeError``
-    type) so compaction sheds historical attachment bytes and the next
-    attempt fits.
-    """
-    compact_calls: list[int] = []
-
-    @dataclass(slots=True, kw_only=True)
-    class _CountingCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            compact_calls.append(1)
-            return _summary_override(
-                [UserMessage(text="[compact]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    model = _ByteOverflowModel(overflow_count=1)
-    a = Agent(model=model, tools=[], compactor=_CountingCompactor())
-    message = await a._agent_model.stream(
-        history=[UserMessage(text="x")],
-        publish=lambda _ev: None,
-    )
-    assert message.text == "recovered"
-    assert len(compact_calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_resume_retry_at_consumed_once_across_overflow_recovery() -> None:
-    """A persisted resume wait is honored ONCE, never replayed on recovery.
-
-    ``resume_retry_at`` is a one-shot wall-clock wait carried across a restart.
-    The first ``send_with_retry`` honors it; if that send then raises overflow,
-    the recovery re-attempt must NOT re-wait the same deadline. Clearing the
-    local only on the success path replays the wait on every overflow loop.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _PassThroughCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            return _summary_override(
-                [UserMessage(text="[compact]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    model = _ByteOverflowModel(overflow_count=1)  # One overflow, then success.
-    a = Agent(model=model, tools=[], compactor=_PassThroughCompactor())
-    # A short, in-range resume wait so ``send_with_retry`` sleeps it the first
-    # time. Overflow raises immediately (no backoff sleep), so the ONLY sleeps
-    # observed are the resume waits -- count them.
-    a.runtime.resume_retry_at = time.time() + 30.0
-
-    resume_sleeps: list[float] = []
-    real_sleep = asyncio.sleep
-
-    async def _recording_sleep(delay: float, *args: object, **kwargs: object) -> object:
-        # The resume wait is the only multi-second sleep in this scenario.
-        if delay > 1.0:
-            resume_sleeps.append(delay)
-            return None  # don't actually wait 30s.
-        return await real_sleep(delay, *args, **kwargs)
-
-    with patch("sagent.agent.retry.asyncio.sleep", _recording_sleep):
-        message = await a._agent_model.stream(
-            history=[UserMessage(text="x")],
-            publish=lambda _ev: None,
-        )
-    assert message.text == "recovered"
-    assert len(resume_sleeps) == 1, (
-        f"resume wait replayed on overflow recovery: {resume_sleeps}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_model_request_too_large_exhaustion_byte_remediation() -> None:
-    """Exhausted byte-overflow recovery surfaces byte-specific remediation.
-
-    The remediation must NOT advise switching to a larger-window model:
-    a larger window has the same 32 MB byte wire-limit. It is a
-    ``RequestTooLargeError`` (its own type, not a context-overflow alias),
-    so the classifier never lies about which limit was hit.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _NoOpCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            return _summary_override(
-                [UserMessage(text="[compact]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    model = _ByteOverflowModel(overflow_count=10)  # Always too large.
-    a = Agent(model=model, tools=[], compactor=_NoOpCompactor())
-    with pytest.raises(RequestTooLargeError) as ei:
-        await a._agent_model.stream(
-            history=[UserMessage(text="x")],
-            publish=lambda _ev: None,
-        )
-    msg = str(ei.value)
-    assert "larger" not in msg.lower(), (
-        f"byte-overflow remediation must not advise a larger window; got {msg!r}"
-    )
-    assert isinstance(ei.value.__cause__, RequestTooLargeError)
-    # Prove the recovery loop actually iterated (compacted between attempts),
-    # not short-circuited on the first failure: model hit once per attempt.
-    assert model.call_index >= MAX_OVERFLOW_RECOVERY + 1, (
-        f"recovery must iterate all attempts; model.call_index={model.call_index}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_fresh_oversize_attachment_rejected_before_send() -> None:
-    """A single fresh attachment over the byte ceiling is rejected pre-send.
-
-    Compaction cannot shed this turn's own attachment, so sending it would
-    waste ``MAX_OVERFLOW_RECOVERY + 1`` full provider round-trips before the
-    same byte-overflow exhaustion. A pre-send guard raises the typed
-    ``RequestTooLargeError`` immediately -- the model is never called.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _SmallByteModel(StubModel):
-        max_request_bytes: int = 4 * 1024 * 1024
-        max_image_bytes: int = 4 * 1024 * 1024
-        call_index: int = 0
-
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            self.call_index += 1
-            return ModelResponse(message=AssistantMessage(text="should not be reached"))
-
-    model = _SmallByteModel()
-    a = Agent(model=model, tools=[], compactor=_ThresholdCompactor())
-    # 6 MB raw PDF -> ~8 MB base64, over the 4 MB ceiling, and it is THIS
-    # turn's fresh input -> not compactable. Seed the runtime tape (the
-    # production source the stream loop refetches from), not just the arg.
-    huge = b"%PDF-" + b"\x00" * (6 * 1024 * 1024)
-    user = UserMessage(
-        text="describe",
-        attachments=(BytesMessage(huge, "application/pdf"),),
-    )
-    a.runtime.append_history(user)
-    history = a.runtime.context().messages
-    with pytest.raises(RequestTooLargeError):
-        await a._agent_model.stream(history=history, publish=lambda _ev: None)
-    assert model.call_index == 0, "oversize fresh attachment must be rejected pre-send"
-
-
-@pytest.mark.asyncio
-async def test_fresh_text_heavy_request_rejected_before_send() -> None:
-    """Pre-send guard counts the WHOLE request, not just attachment bytes.
-
-    A request whose attachment bytes alone are UNDER the ceiling but whose
-    text payload pushes the total OVER it must be rejected before the model
-    call. Counting only attachments (the prior behavior) let a text-heavy
-    fresh request slip the guard and 413 reactively, burning overflow-recovery
-    round-trips on history that compaction cannot shed.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _SmallByteModel(StubModel):
-        max_request_bytes: int = 4 * 1024 * 1024
-        max_image_bytes: int = 4 * 1024 * 1024
-        call_index: int = 0
-
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            self.call_index += 1
-            return ModelResponse(message=AssistantMessage(text="should not be reached"))
-
-    model = _SmallByteModel()
-    # No compactor: ``compact_if_needed`` is a no-op, so the fresh text reaches
-    # the pre-send guard intact (a summarizing compactor would otherwise shed
-    # it). This isolates the guard's whole-request byte accounting.
-    a = Agent(model=model, tools=[], compactor=None)
-    # No attachments at all: 5 MB of fresh user text over the 4 MB ceiling.
-    # Attachment-only accounting would see 0 bytes and wave it through.
-    user = UserMessage(text="x" * (5 * 1024 * 1024))
-    a.runtime.append_history(user)
-    history = a.runtime.context().messages
-    with pytest.raises(RequestTooLargeError):
-        await a._agent_model.stream(history=history, publish=lambda _ev: None)
-    assert model.call_index == 0, "text-heavy fresh request must be rejected pre-send"
-
-
-@pytest.mark.asyncio
-async def test_pre_send_guard_measures_materialized_not_raw_history() -> None:
-    """The guard must size the MATERIALIZED request, not raw history.
-
-    A large HISTORICAL tool result is cut down by ``materialize_messages``'s
-    tool-result budget (truncated to a resumable head, or elided outright when
-    even that will not fit) before the request ships. Sizing raw history counts
-    the un-shed bytes and false-rejects a request the provider would happily
-    accept. The guard must measure the same materialized artifact that
-    ``send_with_retry`` sends.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _CapturingModel(StubModel):
-        max_request_bytes: int = 1 * 1024 * 1024
-        max_image_bytes: int = 1 * 1024 * 1024
-        call_index: int = 0
-
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del publish
-            self.call_index += 1
-            self.received.append(request)
-            return ModelResponse(message=AssistantMessage(text="done"))
-
-    model = _CapturingModel()
-    # message_budget_tokens=1000 -> the 5 MB historical tool result elides to the
-    # short placeholder; the materialized body is tiny and well under 1 MB.
-    a = Agent(model=model, tools=[], compactor=None)
-    a._tool_results_override = ToolResultPolicy(message_budget_tokens=1_000)
-    # A CLOSED tool pair in HISTORY (not this turn's input): user asks, model
-    # calls a tool, a 5 MB tool result returns, then a fresh user turn.
-    a.runtime.append_history(UserMessage(text="hi"))
-    a.runtime.append_history(
-        AssistantMessage(tool_calls=(ToolCall(id="c1", name="Bash", args={}),)),
-    )
-    a.runtime.append_history(ToolResult(call_id="c1", content="x" * (5 * 1024 * 1024)))
-    a.runtime.append_history(UserMessage(text="continue"))
-    history = a.runtime.context().messages
-    # Must NOT raise: the materialized request elides the oversized tool result.
-    await a._agent_model.stream(history=history, publish=lambda _ev: None)
-    assert model.call_index == 1, "guard false-rejected an elidable historical result"
-    sent = model.received[0]
-    shed = next(m for m in sent.messages if isinstance(m, ToolResult))
-    assert len(shed.content) < len("x" * (5 * 1024 * 1024)), (
-        "oversized tool result reached the wire intact"
-    )
-    assert approx_tokens(shed.content) <= 1_000, (
-        f"materialized result exceeds the budget; {len(shed.content)} chars"
-    )
-
-
-def test_wire_request_bytes_counts_tool_call_and_thinking_surfaces() -> None:
-    """``_wire_request_bytes`` must count every wire surface it claims to bound.
-
-    The estimate is documented as a conservative LOWER bound that "counts every
-    text surface". An ``AssistantMessage`` ships its ``tool_calls`` args and
-    ``thinking_blocks`` on the wire; omitting them lets a tool-call/thinking-heavy
-    history slip the guard and 413 reactively. Adding such surfaces must strictly
-    increase the estimate.
-    """
-    plain = AssistantMessage(text="hi")
-    heavy = AssistantMessage(
-        text="hi",
-        thinking_blocks=({"type": "thinking", "thinking": "z" * 5_000},),
-        tool_calls=(ToolCall(id="c1", name="Bash", args={"command": "y" * 5_000}),),
-    )
-    base = _wire_request_bytes([plain], system="", max_image_bytes=0)
-    with_payload = _wire_request_bytes([heavy], system="", max_image_bytes=0)
-    assert with_payload > base + 9_000, (
-        "tool-call args and thinking-block text must be counted on the wire"
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_tool_emits_label_and_delegates() -> None:
-    """The wrapper publishes a types.runtime.ToolLabel and forwards to the inner tool."""
-    inner = StubTool()
-    a = _build_agent(tools=[inner])
-
-    labels: list[ToolLabel] = []
-
-    def _watch(ev: object) -> None:
-        if isinstance(ev, ToolLabel):
-            labels.append(ev)
-
-    a.runtime.observers.append(_watch)
-
-    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
-    result = await wrapper.run({"msg": "hi"})
-    assert result.content == "hi"
-    assert len(labels) == 1
-    assert labels[0].text == "echo"
-
-
-@pytest.mark.asyncio
-async def test_agent_tool_invalid_input_labels_then_errors() -> None:
-    """Invalid input short-circuits dispatch but still publishes a label.
-
-    The label renders as a plain dim tool-call line (not a "running"
-    indicator), so emitting it keeps scrollback consistent with every other
-    tool outcome -- each is preceded by its tool-call line. The inner tool is
-    not invoked; the result is an ``InputValidationError`` naming the tool.
-    """
-    inner = StubTool(
-        directive_schema={
+class _Tool:
+    """A tool to give an agent: it answers ``ok``."""
+
+    name: str = "_Tool"
+    description: str = "A tool."
+    schema: Mapping[str, PlainTree] = field(
+        default_factory=lambda: {
             "type": "object",
-            "properties": {"msg": {"type": "string"}},
-            "required": ["msg"],
-            "additionalProperties": False,
+            "properties": dict[str, PlainTree](),
         },
     )
-    a = _build_agent(tools=[inner])
-    labels: list[ToolLabel] = []
+    display: ToolDisplay = field(default_factory=ToolDisplay)
 
-    def _watch(ev: object) -> None:
-        if isinstance(ev, ToolLabel):
-            labels.append(ev)
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        del arguments
+        return self.name
 
-    a.runtime.observers.append(_watch)
-    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
-
-    result = await wrapper.run({})
-
-    assert result.is_error
-    assert "InputValidationError" in result.content
-    assert inner.calls == []
-    # A label IS published (tool name), before the error result.
-    assert [label.text for label in labels] == ["Echo"]
-
-
-@pytest.mark.asyncio
-async def test_clear_cancels_explicit_background_jobs() -> None:
-    started = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class SlowTool(StubTool):
-        @override
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            started.set()
-            await asyncio.get_running_loop().create_future()
-            return ToolResult(call_id="", content="done")
-
-    a = _build_agent(tools=[SlowTool()])
-    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
-    _ = await wrapper.run({"background": True})
-    task = next(iter(a.background.values())).task
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-
-    drive_task = asyncio.create_task(a.serve_forever())
-    try:
-        await a.clear()
-        await asyncio.wait_for(task, timeout=1.0)
-        assert a.background == {}
-    finally:
-        a.shutdown()
-        await drive_task
-
-
-@pytest.mark.asyncio
-async def test_cancelled_background_tool_splices_placeholder() -> None:
-    started = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class SlowTool(StubTool):
-        @override
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            started.set()
-            await asyncio.get_running_loop().create_future()
-            return ToolResult(call_id="", content="done")
-
-    a = _build_agent(tools=[SlowTool()])
-    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
-    token = runtime.current_call_id_var.set("bg-1")
-    try:
-        placeholder = await wrapper.run({"background": True})
-    finally:
-        runtime.current_call_id_var.reset(token)
-    a.runtime.append_history(
-        AssistantMessage(
-            tool_calls=(ToolCall(id="bg-1", name="Echo", args={"background": True}),),
-        ),
-    )
-    a.runtime.append_history(placeholder)
-    task = a.background["job-1"].task
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-
-    task.cancel()
-    # The job is still in the registry (no ``kill_tool``-style pop),
-    # so the cancellation is treated as an external cascade: ``_run_bg``
-    # posts a ``[cancelled]`` ``DetachedResult`` AND re-raises so the
-    # cancel chain reaches the scheduler.
-    with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1.0)
-    items = await asyncio.wait_for(a.runtime.inbox.drain(), timeout=1.0)
-    detached = [item for item in items if isinstance(item, DetachedResult)]
-    assert len(detached) == 1
-
-    # The cancelled background job posts a ``[cancelled]`` result. Its delivery
-    # into history (foreground-splice) is the BackgroundTask foreground path;
-    # here we assert the posted result itself.
-    result = detached[0].result
-    assert result.content == CANCELLED_PLACEHOLDER
-    assert result.is_error
-
-
-@pytest.mark.asyncio
-async def test_shutdown_during_a_delay_pairs_the_call_and_forgets_the_job() -> None:
-    """A cancel during the pre-run sleep skipped the ``[cancelled]`` pairing."""
-    a = _build_agent(tools=[StubTool()])
-    token = runtime.current_call_id_var.set("bg-1")
-    try:
-        _ = await a.runtime.tools_map["Echo"].run({"delay": 100})
-    finally:
-        runtime.current_call_id_var.reset(token)
-    task = a.background["job-1"].task
-    await asyncio.sleep(0)
-    a.shutdown()
-    with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1.0)
-    items = a.runtime.inbox.drain_nowait()
-    detached = [i for i in items if isinstance(i, DetachedResult)]
-    assert [d.result.content for d in detached] == [CANCELLED_PLACEHOLDER]
-    assert a.background == {}
-
-
-@pytest.mark.asyncio
-async def test_kill_tool_by_call_id_cancels_an_explicit_background_job() -> None:
-    """``Kill`` names call ids; ``_bg`` is keyed by job id."""
-    a = _build_agent(tools=[StubTool()])
-    token = runtime.current_call_id_var.set("c1")
-    try:
-        _ = await a.runtime.tools_map["Echo"].run({"delay": 100})
-    finally:
-        runtime.current_call_id_var.reset(token)
-    task = a.background["job-1"].task
-    a.kill_tool("c1")
-    with contextlib.suppress(asyncio.CancelledError):
-        await asyncio.wait_for(task, timeout=1.0)
-    assert a.background == {}
-
-
-def test_a_finished_detached_call_frees_its_job_id() -> None:
-    """Ids minted for detached calls were never freed: one leak per call."""
-    a = _build_agent()
-    loop = asyncio.new_event_loop()
-    try:
-        fut = loop.create_future()
-        a.runtime.detached["c9"] = cast("asyncio.Task[None]", fut)
-        assert list(a.background) == ["job-1"]
-        del a.runtime.detached["c9"]
-        _ = fut.cancel()
-        assert a.background == {}
-    finally:
-        loop.close()
-    assert a._job_ids_by_call_id == {}
-    assert a._call_ids_by_job_id == {}
-
-
-@pytest.mark.asyncio
-async def test_kill_tool_cancels_explicit_background_job_by_id() -> None:
-    started = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class SlowTool(StubTool):
-        @override
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            started.set()
-            await asyncio.get_running_loop().create_future()
-            return ToolResult(call_id="", content="done")
-
-    a = _build_agent(tools=[SlowTool()])
-    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
-    _ = await wrapper.run({"background": True})
-    call_id = next(iter(a.background))
-    task = a.background[call_id].task
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-
-    a.kill_tool(call_id)
-
-    await asyncio.wait_for(task, timeout=1.0)
-    assert a.background == {}
-
-
-@pytest.mark.asyncio
-async def test_kill_all_tools_cancels_explicit_background_jobs() -> None:
-    started = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class SlowTool(StubTool):
-        @override
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            started.set()
-            await asyncio.get_running_loop().create_future()
-            return ToolResult(call_id="", content="done")
-
-    a = _build_agent(tools=[SlowTool()])
-    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
-    _ = await wrapper.run({"background": True})
-    task = next(iter(a.background.values())).task
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-
-    a.kill_all_tools()
-
-    await asyncio.wait_for(task, timeout=1.0)
-    assert a.background == {}
-
-
-@pytest.mark.asyncio
-async def test_tool_call_round_cap_allows_first_round_when_cap_is_one() -> None:
-    """``max_tool_call_rounds=1`` permits the first tool round.
-
-    Regression for AGENT-REVIEW-001: ``_before_tool_spawn`` used to
-    block when ``num + 1 >= cap``, rejecting the first round whenever
-    ``cap=1``. The docs ("Must be >= 1") and call sites such as
-    ``examples/multi_agent_reviewer.py`` expect exactly one round.
-    """
-    started = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class SideEffectTool(StubTool):
-        @override
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            started.set()
-            return ToolResult(call_id="", content="side effect")
-
-    model = StubModel(
-        responses=[
-            AssistantMessage(tool_calls=(ToolCall(id="c1", name="Echo", args={}),)),
-            AssistantMessage(text="done"),
-        ],
-    )
-    a = Agent(model=model, tools=[SideEffectTool()], max_tool_call_rounds=1)
-    events = [type(ev) async for ev in a.run(UserMessage(text="go"))]
-
-    assert started.is_set()
-    assert ModelIdle in events
-    assert ModelResponseError not in events
-
-
-@pytest.mark.asyncio
-async def test_tool_call_round_cap_blocks_second_round_when_cap_is_one() -> None:
-    """``max_tool_call_rounds=1`` rejects the second tool-bearing response."""
-    started_count = 0
-
-    @dataclass(slots=True, kw_only=True)
-    class CountingTool(StubTool):
-        @override
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            nonlocal started_count
-            started_count += 1
-            return ToolResult(call_id="", content="ran")
-
-    model = StubModel(
-        responses=[
-            AssistantMessage(tool_calls=(ToolCall(id="c1", name="Echo", args={}),)),
-            AssistantMessage(tool_calls=(ToolCall(id="c2", name="Echo", args={}),)),
-        ],
-    )
-    a = Agent(model=model, tools=[CountingTool()], max_tool_call_rounds=1)
-    events = [type(ev) async for ev in a.run(UserMessage(text="go"))]
-
-    assert started_count == 1
-    assert ModelResponseError in events
-
-
-@pytest.mark.asyncio
-async def test_a_refused_round_calls_the_model_only_for_the_next_message() -> None:
-    """A refused response never joins the history, so nothing calls the model on it.
-
-    A call on the history the refused response left would answer the old message
-    inside the next one.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class QuietTool(StubTool):
-        @override
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            return ToolResult(call_id="", content="ran")
-
-    model = StubModel(
-        responses=[
-            AssistantMessage(tool_calls=(ToolCall(id="c1", name="Echo", args={}),)),
-            AssistantMessage(tool_calls=(ToolCall(id="c2", name="Echo", args={}),)),
-        ],
-    )
-    a = Agent(model=model, tools=[QuietTool()], max_tool_call_rounds=1)
-    _ = [event async for event in a.run(UserMessage(text="go"))]
-    _ = [event async for event in a.run(UserMessage(text="next"))]
-
-    asked = [
-        next(
-            message.text
-            for message in reversed(request.messages)
-            if isinstance(message, UserMessage)
-        )
-        for request in model.received
-    ]
-    assert asked == ["go", "go", "next"]
-
-
-@pytest.mark.asyncio
-async def test_clear_drops_cancelled_background_result_after_fresh_turn() -> None:
-    started = asyncio.Event()
-    idle = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class SlowTool(StubTool):
-        @override
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            started.set()
-            await asyncio.get_running_loop().create_future()
-            return ToolResult(call_id="", content="done")
-
-    a = _build_agent(
-        model=StubModel(responses=[AssistantMessage(text="fresh response")]),
-        tools=[SlowTool()],
-    )
-
-    def _watch(event: RuntimeEvent) -> None:
-        if isinstance(event, ModelIdle):
-            idle.set()
-
-    a.runtime.observers.append(_watch)
-    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
-    _ = await wrapper.run({"background": True})
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-    drive = asyncio.create_task(a.serve_forever())
-    try:
-        await a.clear()
-        await asyncio.sleep(0)
-        a.runtime.inbox.push_back(UserMessage(text="fresh"))
-        await asyncio.wait_for(idle.wait(), timeout=1.0)
-    finally:
-        a.shutdown(force=True)
-        with contextlib.suppress(asyncio.CancelledError):
-            await drive
-        a.runtime.observers.remove(_watch)
-
-    user_texts = [entry.text for entry in a.history if isinstance(entry, UserMessage)]
-    assert not any(CANCELLED_PLACEHOLDER in text for text in user_texts)
-    assert not any(text.startswith("[Tool ") for text in user_texts)
-
-
-@pytest.mark.asyncio
-async def test_agent_tool_background_exception_is_logged(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    @dataclass(slots=True, kw_only=True)
-    class FailingTool(StubTool):
-        @override
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            raise RuntimeError("boom")
-
-    a = _build_agent(tools=[FailingTool()])
-    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
-    with caplog.at_level(logging.ERROR, logger="sagent.agent.agent"):
-        result = await wrapper.run({"background": True})
-        assert not result.is_error
-        task = next(iter(a.background.values())).task
-        await task
-    assert any(
-        "background tool 'Echo' failed" in r.getMessage() for r in caplog.records
-    )
-    items = a.runtime.inbox.drain_nowait()
-    detached = [i for i in items if isinstance(i, DetachedResult)]
-    assert len(detached) == 1
-    assert detached[0].is_error
-
-
-@pytest.mark.asyncio
-async def test_agent_compactor_appends_continuation_when_summary_ends_assistant(
-    tmp_path: Path,
-) -> None:
-    """If summary ends with types.runtime.AssistantMessage, an inert types.runtime.UserMessage is appended."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _AssistantTerminatedCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model
-            del custom_instructions
-            return _summary_override(
-                [AssistantMessage(text="model said")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(
-        model=StubModel(),
-        compactor=_AssistantTerminatedCompactor(),
-        session_dir=tmp_path,
-    )
-    a.runtime.append_history(UserMessage(text="x"))
-    await a.compact_now()
-    # The continuation user-message terminator was appended.
-    last = a.runtime.context().messages[-1]
-    assert isinstance(last, UserMessage)
-    assert last.text == "[continuation]"
-
-
-@pytest.mark.asyncio
-async def test_agent_compactor_post_enrich_failure_swallowed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Errors inside ``post_compact_enrich`` are logged and don't propagate."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _OkCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model
-            del custom_instructions
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    async def _boom(**kwargs: object) -> None:
-        del kwargs
-        raise RuntimeError("enrich failed")
-
-    a = Agent(
-        model=StubModel(),
-        compactor=_OkCompactor(),
-        session_dir=tmp_path,
-    )
-    a.runtime.append_history(UserMessage(text="x"))
-
-    monkeypatch.setattr(
-        "sagent.agent.agent.post_compact_enrich",
-        _boom,
-    )
-    await a.compact_now()
-
-    # Summary still survived; the enrich failure was swallowed.
-    assert any(
-        isinstance(e, UserMessage) and e.text == "[summary]"
-        for e in a.runtime.context().messages
-    )
-
-
-@dataclass(slots=True, kw_only=True)
-class _PromptingTool(StubTool):
-    """A tool whose ``prompt()`` names it, counting how often it is asked."""
-
-    asked: list[int] = field(default_factory=list)
-
-    @override
-    def prompt(self) -> str:
-        self.asked.append(1)
-        return f"use {self.name}"
-
-
-@dataclass(slots=True, kw_only=True)
-class _RewordedTool(_PromptingTool):
-    """A ``_PromptingTool`` reconfigured to say something else."""
-
-    @override
-    def prompt(self) -> str:
-        return f"use {self.name} carefully"
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _Context:
-    """A prompt context naming the directory, as the sagent one does."""
-
-    project_text: str = ""
-
-    def project(self, cwd: str, *, additional_dirs: Sequence[str]) -> str:
-        del cwd, additional_dirs
-        return self.project_text
-
-    def environment(
+    def serialize_key(
         self,
-        capability: ModelCapability,
-        *,
-        cwd: str,
-        context: str,
-    ) -> str:
-        del capability, context
-        return f"Working directory: {cwd}"
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        del context, arguments
+        return None
 
-
-@pytest.mark.asyncio
-async def test_the_project_instructions_are_the_last_system_block() -> None:
-    model = StubModel()
-    a = Agent(model=model, system="S", prompt_context=_Context(project_text="P"))
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    assert model.received[-1].system == ("S", "P")
-
-
-@pytest.mark.asyncio
-async def test_the_system_blocks_are_note_and_prompt_then_append_and_tool_prompts() -> (
-    None
-):
-    """Each block ends where a provider may mark it, so its contents are fixed."""
-    model = StubModel()
-    a = Agent(
-        model=model,
-        system="S",
-        append_system="A",
-        tools=[_PromptingTool(name="One"), _PromptingTool(name="Two")],
-    )
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    assert model.received[-1].system == (
-        f"{DETACHED_ARRIVED_SYSTEM_NOTE}\n\nS",
-        "A\n\nuse One\n\nuse Two",
-    )
-
-
-@pytest.mark.asyncio
-async def test_the_system_blocks_are_built_once_and_sent_unchanged() -> None:
-    """A rebuilt prompt broke the provider cache on every request that changed it."""
-    model = StubModel()
-    tool = _PromptingTool()
-    a = Agent(model=model, system="S", tools=[tool])
-    for text in ("one", "two"):
-        async for _ in a.run(UserMessage(text=text)):
-            pass
-    assert model.received[0].system == model.received[1].system
-    assert len(tool.asked) == 1
-
-
-@pytest.mark.asyncio
-async def test_a_changed_directory_is_appended_and_leaves_the_system_blocks_alone(
-    tmp_path: Path,
-) -> None:
-    """``cd`` rewrote the system prompt, so every later turn re-cached the history."""
-    model = StubModel()
-    a = Agent(model=model, system="S", prompt_context=_Context())
-    a.tool_state.bash_cwd = str(tmp_path)
-    async for _ in a.run(UserMessage(text="one")):
-        pass
-    moved = tmp_path / "sub"
-    moved.mkdir()
-    a.tool_state.bash_cwd = str(moved)
-    async for _ in a.run(UserMessage(text="two")):
-        pass
-    first, second = model.received[0], model.received[1]
-    assert first.system == second.system
-    assert f"Working directory: {tmp_path}" in _user_texts(first.messages)[0]
-    assert _user_texts(second.messages)[0] == _user_texts(first.messages)[0]
-    assert f"Working directory: {moved}" in _user_texts(second.messages)[-1]
-
-
-@pytest.mark.asyncio
-async def test_an_unchanged_environment_appends_nothing(tmp_path: Path) -> None:
-    model = StubModel()
-    a = Agent(model=model, system="S", prompt_context=_Context())
-    a.tool_state.bash_cwd = str(tmp_path)
-    for text in ("one", "two"):
-        async for _ in a.run(UserMessage(text=text)):
-            pass
-    assert (
-        "".join(_user_texts(model.received[-1].messages)).count("<system-reminder>")
-        == 1
-    )
-
-
-@pytest.mark.asyncio
-async def test_the_agents_reminders_are_system_messages_not_the_humans_words() -> None:
-    """History keeps what the human typed as typed; the wire still carries both."""
-    model = StubModel()
-    a = Agent(model=model, system="S", prompt_context=_Context())
-    a.tool_state.bash_cwd = "/w"
-    async for _ in a.run(UserMessage(text="one")):
-        pass
-    typed, note, _ = a.history
-    assert isinstance(typed, UserMessage)
-    assert typed.text == "one"
-    assert note == SystemMessage(
-        id=note.id,
-        timestamp=note.timestamp,
-        text="Working directory: /w",
-    )
-    assert _user_texts(model.received[-1].messages) == [
-        "one\n\n<system-reminder>\nWorking directory: /w\n</system-reminder>",
-    ]
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> UncategorizedToolResult:
+        del context, arguments
+        return UncategorizedToolResult(call_id="", content="ok")
 
 
 @dataclass(slots=True, kw_only=True)
-class _RemindingTool(StubTool):
-    """A tool whose per-agent context is told as a reminder."""
+class _Reminding(_Tool):
+    """A tool with something to tell the model each round."""
 
-    told: str = "peers: a"
+    told: str = ""
 
-    def reminder(self) -> str:
+    def reminder(self, context: ToolContext) -> str:
+        del context
         return self.told
 
 
-@pytest.mark.asyncio
-async def test_a_tools_reminder_is_told_once_and_again_when_it_changes() -> None:
-    """Per-agent tool context stays out of the system blocks children share."""
-    model = StubModel()
-    tool = _RemindingTool()
-    a = _build_agent(model=model, tools=[tool])
-    for text in ("one", "two"):
-        async for _ in a.run(UserMessage(text=text)):
-            pass
-    tool.told = "peers: a, b"
-    async for _ in a.run(UserMessage(text="three")):
-        pass
-    told = "".join(_user_texts(model.received[-1].messages))
-    assert told.count("peers: a\n") == 1
-    assert "peers: a, b" in _user_texts(model.received[-1].messages)[-1]
-    assert all("peers" not in block for block in model.received[-1].system)
-
-
-@pytest.mark.asyncio
-async def test_a_tool_gate_keeps_every_schema_and_names_the_offered_tools() -> None:
-    """Removing schemas changed the request's first bytes; masking does not."""
-    model = StubModel()
-    a = _build_agent(model=model, tools=[StubTool(), StubTool(name="Other")])
-    a.tool_gate = frozenset({"Echo"})
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    request = model.received[-1]
-    assert [t.name for t in request.tools] == ["Echo", "Other"]
-    assert request.allowed_tools == frozenset({"Echo"})
-    a.tool_gate = None
-    async for _ in a.run(UserMessage(text="again")):
-        pass
-    assert model.received[-1].allowed_tools is None
-
-
-@pytest.mark.asyncio
-async def test_a_tool_gate_change_is_appended_as_a_reminder() -> None:
-    model = StubModel()
-    a = _build_agent(model=model, tools=[StubTool(), StubTool(name="Other")])
-    async for _ in a.run(UserMessage(text="one")):
-        pass
-    a.tool_gate = frozenset({"Echo"})
-    async for _ in a.run(UserMessage(text="two")):
-        pass
-    assert "Tools available now: Echo" in _user_texts(model.received[-1].messages)[-1]
-
-
-@pytest.mark.asyncio
-async def test_a_tool_gate_change_is_recorded_on_the_message_it_rides() -> None:
-    """A provider that withdraws tools mid-conversation does it at this message."""
-    model = StubModel()
-    a = _build_agent(model=model, tools=[StubTool(), StubTool(name="Other")])
-    async for _ in a.run(UserMessage(text="one")):
-        pass
-    a.tool_gate = frozenset({"Echo"})
-    async for _ in a.run(UserMessage(text="two")):
-        pass
-    a.tool_gate = None
-    async for _ in a.run(UserMessage(text="three")):
-        pass
-    offers = [
-        m.offered_tools
-        for m in model.received[-1].messages
-        if isinstance(m, UserMessage)
-    ]
-    assert offers == [None, ("Echo",), ("Echo", "Other")]
-    # In history the gate is the harness's system message, never the human's message.
-    assert [m.offered_tools for m in a.history if isinstance(m, SystemMessage)] == [
-        ("Echo",),
-        ("Echo", "Other"),
-    ]
-
-
-def _calling(name: str) -> AssistantMessage:
-    """Return a response that calls the tool ``name`` once."""
-    return AssistantMessage(tool_calls=(ToolCall(id="c1", name=name, args={}),))
-
-
-@pytest.mark.asyncio
-async def test_a_call_outside_the_gate_it_was_offered_is_refused() -> None:
-    """Every schema ships, so a model can name a gated tool; the call must not run."""
-    other = StubTool(name="Other")
-    a = _build_agent(
-        model=StubModel(responses=[_calling("Other")]),
-        tools=[StubTool(), other],
-    )
-    a.tool_gate = frozenset({"Echo"})
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    assert other.calls == []
-    [result] = [m for m in a.history if isinstance(m, ToolResult)]
-    assert result.is_error
-    assert result.content == "Not run: Other is not available now. Available: Echo."
-
-
-@pytest.mark.asyncio
-async def test_a_call_runs_under_the_gate_it_was_offered_though_the_host_narrows_it() -> (
-    None
-):
-    """A host narrows the gate as a response lands; that response's calls were offered."""
-    other = StubTool(name="Other")
-    a = _build_agent(
-        model=StubModel(responses=[_calling("Other")]),
-        tools=[StubTool(), other],
-    )
-    a.tool_gate = frozenset({"Echo", "Other"})
-
-    def narrow(event: RuntimeEvent) -> None:
-        if isinstance(event, ModelResponseComplete):
-            a.tool_gate = frozenset({"Echo"})
-
-    a.runtime.observers.append(narrow)
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    assert other.calls == [{}]
-
-
-@pytest.mark.asyncio
-async def test_a_call_that_starts_after_the_next_round_runs_under_its_own_offer() -> (
-    None
-):
-    """A backgrounded call starts late; the next round's narrower gate is not its own."""
-    other = StubTool(name="Other")
-    a = _build_agent(tools=[StubTool(), other])
-    a.retell_context()
-    a.publish(ModelResponseComplete(message=_calling("Other")))
-    a.tool_gate = frozenset({"Echo"})
-    a.retell_context()
-    token = runtime.current_call_id_var.set("c1")
-    try:
-        result = await a.runtime.tools_map["Other"].run({})
-    finally:
-        runtime.current_call_id_var.reset(token)
-    assert not result.is_error
-    assert other.calls == [{}]
-
-
-@pytest.mark.asyncio
-async def test_the_gate_notice_names_only_tools_the_agent_has() -> None:
-    model = StubModel()
-    a = _build_agent(model=model, tools=[StubTool(), StubTool(name="Other")])
-    a.tool_gate = frozenset({"Echo", "Nope"})
-    async for _ in a.run(UserMessage(text="hi")):
-        pass
-    told = _user_texts(model.received[-1].messages)[-1]
-    assert "Tools available now: Echo. Do not call any other tool." in told
-    assert "Nope" not in told
-
-
-def _compacted(a: Agent) -> None:
-    """Replace ``a``'s whole history with a summary, as compaction does."""
-    a.runtime.append_splice(
-        mask=full_tape_mask(a.runtime.tape),
-        insert_after=None,
-        payload=(UserMessage(text="summary"), AssistantMessage(text="ack")),
-        strategy="summary",
-        discards_content=True,
-    )
-    a.runtime.publish(CompactComplete())
-
-
-@pytest.mark.asyncio
-async def test_a_gate_dropped_by_compaction_is_offered_again() -> None:
-    """The gate in force is the one the history carries; a summary carries none."""
-    model = StubModel()
-    a = _build_agent(model=model, tools=[StubTool(), StubTool(name="Other")])
-    a.tool_gate = frozenset({"Echo"})
-    async for _ in a.run(UserMessage(text="one")):
-        pass
-    _compacted(a)
-    async for _ in a.run(UserMessage(text="two")):
-        pass
-    users = [m for m in model.received[-1].messages if isinstance(m, UserMessage)]
-    assert users[-1].offered_tools == ("Echo",)
-
-
-def _resume_from(resumed: Agent, first: Agent) -> None:
-    """Load ``first``'s tape into ``resumed`` under its session, as a resume does."""
-    resumed.runtime.session_id = first.runtime.session_id
-    resumed.runtime.replay_tape(first.runtime.tape)
-
-
-@pytest.mark.asyncio
-async def test_a_resumed_agent_lifts_a_gate_its_history_left_up() -> None:
-    """A fresh process starts ungated; the history it resumes still withholds."""
-    first = _build_agent(tools=[StubTool(), StubTool(name="Other")])
-    first.tool_gate = frozenset({"Echo"})
-    async for _ in first.run(UserMessage(text="one")):
-        pass
-    model = StubModel()
-    resumed = _build_agent(model=model, tools=[StubTool(), StubTool(name="Other")])
-    _resume_from(resumed, first)
-    async for _ in resumed.run(UserMessage(text="two")):
-        pass
-    last = model.received[-1].messages[-1]
-    assert isinstance(last, UserMessage)
-    assert last.offered_tools == ("Echo", "Other")
-    assert "All tools are available again." in last.text
-
-
-@pytest.mark.asyncio
-async def test_a_resumed_agent_does_not_retell_what_its_history_says() -> None:
-    first = Agent(model=StubModel(), system="S", prompt_context=_Context())
-    first.reminders["rule"] = "Reply with AgentSend."
-    async for _ in first.run(UserMessage(text="one")):
-        pass
-    model = StubModel()
-    resumed = Agent(model=model, system="S", prompt_context=_Context())
-    resumed.reminders["rule"] = "Reply with AgentSend."
-    resumed.tool_state.bash_cwd = first.tool_state.bash_cwd
-    _resume_from(resumed, first)
-    async for _ in resumed.run(UserMessage(text="two")):
-        pass
-    told = "".join(_user_texts(model.received[-1].messages))
-    assert told.count("Reply with AgentSend.") == 1
-    assert told.count("Working directory") == 1
-
-
-@pytest.mark.asyncio
-async def test_a_standing_reminder_is_told_once_and_again_after_compaction() -> None:
-    """Context a host must keep in force outlives the history that first told it."""
-    model = StubModel()
-    a = Agent(model=model, system="S")
-    a.reminders["rule"] = "Reply with AgentSend."
-    for text in ("one", "two"):
-        async for _ in a.run(UserMessage(text=text)):
-            pass
-    assert "".join(_user_texts(model.received[-1].messages)).count("AgentSend") == 1
-    _compacted(a)
-    async for _ in a.run(UserMessage(text="three")):
-        pass
-    assert "Reply with AgentSend." in _user_texts(model.received[-1].messages)[-1]
-
-
-@pytest.mark.asyncio
-async def test_a_reminder_a_host_withdraws_is_told_withdrawn() -> None:
-    """Left unsaid, the reminder the context still holds stays in force."""
-    model = StubModel()
-    a = Agent(model=model, system="S")
-    a.reminders["rule"] = "Reply with AgentSend."
-    async for _ in a.run(UserMessage(text="one")):
-        pass
-    del a.reminders["rule"]
-    async for _ in a.run(UserMessage(text="two")):
-        pass
-    told = _user_texts(model.received[-1].messages)[-1]
-    assert "No longer in force: Reply with AgentSend." in told
-
-
-@pytest.mark.asyncio
-async def test_a_reminder_that_shrinks_to_part_of_an_old_one_is_told() -> None:
-    """A text inside an older reminder is not one the model was told on its own."""
-    first = Agent(model=StubModel(), system="S")
-    first.reminders["peers"] = "You may message a. You may message b."
-    async for _ in first.run(UserMessage(text="one")):
-        pass
-    model = StubModel()
-    resumed = Agent(model=model, system="S")
-    resumed.reminders["peers"] = "You may message a."
-    _resume_from(resumed, first)
-    async for _ in resumed.run(UserMessage(text="two")):
-        pass
-    assert "You may message a." in _user_texts(model.received[-1].messages)[-1]
-
-
 @dataclass(slots=True, kw_only=True)
-class _ArmedCompactor:
-    """Summarizes the whole history inside the next model call once armed."""
+class _Briefing(_Tool):
+    """A tool with standing context, read each time the agent asks."""
 
-    armed: bool = False
+    said: str = ""
 
-    @property
-    def reattach(self) -> ReattachPolicy:
-        return ReattachPolicy()
-
-    def largest_context(self, settings: AgentSettings) -> int:
-        return _stub_largest_context(settings)
-
-    def should_compact(
-        self,
-        current_tokens: int,
-        largest_context: int,
-        system_tokens: int = 0,
-    ) -> bool:
-        del current_tokens, largest_context, system_tokens
-        return self.armed
-
-    async def compact(
-        self,
-        tape: Sequence[TapeRecord],
-        context: Sequence[ModelContextEvent],
-        model: object,
-        mint_ref: Callable[[], TapeRef],
-        custom_instructions: str | None = None,
-    ) -> ContextSplice:
-        del context, model, custom_instructions
-        self.armed = False
-        return _summary_override([UserMessage(text="summary")], mint_ref, tape=tape)
+    def briefing(self, context: ToolContext) -> str:
+        del context
+        return self.said
 
 
-@pytest.mark.asyncio
-async def test_a_compaction_inside_a_model_call_keeps_the_standing_context() -> None:
-    """The summary drops what the call's own round told; its request must not."""
-    model = StubModel()
-    compactor = _ArmedCompactor()
-    a = Agent(
-        model=model,
-        system="S",
-        prompt_context=_Context(),
-        tools=[StubTool(), StubTool(name="Other")],
-        compactor=compactor,
-    )
-    a.tool_gate = frozenset({"Echo"})
-    async for _ in a.run(UserMessage(text="one")):
-        pass
-    compactor.armed = True
-    async for _ in a.run(UserMessage(text="two")):
-        pass
-    request = model.received[-1]
-    assert "Working directory" in "".join(_user_texts(request.messages))
-    assert ("Echo",) in [
-        m.offered_tools for m in request.messages if isinstance(m, UserMessage)
-    ]
+class _CountingModel(ScriptedModel):
+    """A scripted model that counts its closes."""
 
-
-@dataclass(slots=True, kw_only=True)
-class _RefusingOnceModel(StubModel):
-    """Refuses its first request (HTTP 200, ``model_refusal``), then answers."""
-
-    refused: bool = False
+    closed: int = 0
 
     @override
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        if self.refused:
-            return await super(_RefusingOnceModel, self).stream(request, publish)
-        self.refused = True
-        return ModelResponse(
-            message=AssistantMessage(text=""),
-            stop_reason="model_refusal",
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+class _Counting(ScriptedProvider):
+    """A scripted provider whose models count their closes."""
+
+    @override
+    def __getitem__(self, model: str) -> _CountingModel:
+        del model
+        return _CountingModel(
+            provider=self,
+            capability=self.capability,
+            settings=self.capability.default,
         )
 
 
-@pytest.mark.asyncio
-async def test_a_reminder_withheld_with_a_refused_turn_is_told_again() -> None:
-    """A refusal masks the turn the reminder rode; the model never kept it."""
-    model = _RefusingOnceModel()
-    a = Agent(model=model, system="S", prompt_context=_Context())
-    for text in ("one", "two"):
-        async for _ in a.run(UserMessage(text=text)):
-            pass
-    assert "Working directory" in "".join(_user_texts(model.received[-1].messages))
+@dataclass(slots=True, kw_only=True)
+class _Seen:
+    """What an agent's runtime publishes, and a way to wait for more of it."""
+
+    events: list[types.RuntimeEvent] = field(default_factory=list)
+    arrived: asyncio.Event = field(default_factory=asyncio.Event)
+
+    def __call__(self, event: types.RuntimeEvent) -> None:
+        self.events.append(event)
+        self.arrived.set()
+
+    def count(self, kind: type[object]) -> int:
+        return sum(isinstance(e, kind) for e in self.events)
+
+    def answered(self) -> bool:
+        """Return whether the agent went idle after its last model reply."""
+        replies = [
+            i
+            for i, e in enumerate(self.events)
+            if isinstance(e, types.ModelResponseComplete)
+        ]
+        return bool(replies) and any(
+            isinstance(e, types.AgentIdle) for e in self.events[replies[-1] :]
+        )
+
+    async def until(self, done: Callable[[], bool]) -> None:
+        """Wait, an event at a time, until ``done``."""
+        async with asyncio.timeout(5):
+            while not done():
+                self.arrived.clear()
+                await self.arrived.wait()
+
+    async def idle(self) -> None:
+        """Wait until the agent goes idle once more."""
+        idles = self.count(types.AgentIdle)
+        await self.until(lambda: self.count(types.AgentIdle) > idles)
+
+
+class _LoopCrash(BaseException):
+    """What kills the runtime's loop: nothing in it catches a ``BaseException``."""
+
+
+async def _crash(agent: Agent, text: str, raised: list[BaseException]) -> None:
+    """Send ``text`` to ``agent`` with its loop set to die on it; note what ``send`` raised."""
+    async with agent:
+        agent.runtime.observers.append(_crash_on_user)
+        try:
+            _ = await agent.send(text)
+        except (_LoopCrash, RuntimeError) as e:
+            raised.append(e)
+            raise
+
+
+def _crash_on_user(event: types.RuntimeEvent) -> None:
+    if isinstance(event, UserMessage):
+        raise _LoopCrash
 
 
 @pytest.mark.asyncio
-async def test_clear_rebuilds_the_system_blocks_from_current_values() -> None:
-    model = StubModel()
-    tool = _PromptingTool()
-    a = Agent(model=model, system="S", tools=[tool], prompt_context=_Context())
-    async for _ in a.run(UserMessage(text="one")):
-        pass
-    a.system = "S2"
-    # What a ``Clear`` does: wipe the history, then say so.
-    _ = a.runtime.append_clear()
-    a.runtime.publish(ClearComplete())
-    async for _ in a.run(UserMessage(text="two")):
-        pass
-    assert len(tool.asked) == 2
-    assert model.received[-1].system[0].endswith("S2")
-    assert "Working directory" in _user_texts(model.received[-1].messages)[-1]
+async def test_send_returns_what_the_model_said_last(tmp_path: Path) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply("looking", calls=[call("Nope", "c1")]),
+        reply("done"),
+    )
+    async with agent:
+        assert await agent.send("go") == "done"
+
+    second = provider.requests[1].records
+    results = [r for r in second if isinstance(r, UncategorizedToolResult)]
+    assert [r.text() for r in results] == ["Unknown tool: Nope"]
 
 
 @pytest.mark.asyncio
-async def test_a_replaced_tool_with_new_guidance_rebuilds_the_system_blocks() -> None:
-    """A reconfigured tool's prompt reaches the model; an unchanged one costs nothing."""
-    model = StubModel()
-    tool = _PromptingTool(name="One")
-    a = Agent(model=model, system="S", tools=[tool])
-    async for _ in a.run(UserMessage(text="one")):
-        pass
-    a.replace_tool("One", _PromptingTool(name="One"))
-    async for _ in a.run(UserMessage(text="two")):
-        pass
-    assert model.received[-1].system == model.received[0].system
-    a.replace_tool("One", _RewordedTool(name="One"))
-    async for _ in a.run(UserMessage(text="three")):
-        pass
-    assert "use One carefully" in model.received[-1].system[-1]
-
-
-def _user_texts(messages: Sequence[ModelContextEvent]) -> list[str]:
-    """Return the text of each user-side message, in order."""
-    return [m.text for m in messages if isinstance(m, (UserMessage, AgentSendMessage))]
+async def test_a_wordless_last_turn_keeps_what_was_said_before(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path, reply("looking", calls=[call("Nope")]), reply(""))
+    async with agent:
+        assert await agent.send("go") == "looking"
 
 
 @pytest.mark.asyncio
-async def test_every_request_carries_the_session_as_its_cache_key() -> None:
-    """A provider that routes its prefix cache by key reuses this session's turns."""
-    model = StubModel()
-    a = _build_agent(model=model)
-    for text in ("one", "two"):
-        async for _ in a.run(UserMessage(text=text)):
-            pass
-    assert [r.cache_key for r in model.received] == [a.session_id] * 2
+async def test_stream_yields_the_words_as_they_are_written(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path, reply("one ", calls=[call("Nope")]), reply("two"))
+    async with agent:
+        assert [words async for words in agent.stream("go")] == ["one ", "two"]
 
 
 @pytest.mark.asyncio
-async def test_stream_forwards_publish_sink_to_inner_model() -> None:
-    """``_AgentModel.stream`` forwards a ``publish`` sink to the inner model.
+async def test_attachments_go_with_the_message(tmp_path: Path) -> None:
+    image = Attachment(mime_descriptor="image/png", data=b"png")
+    provider, agent = _agent(tmp_path, reply("seen"))
+    async with agent:
+        _ = await agent.send("look", attachments=[image])
 
-    The CLI MCP bridge surfaces ``ToolLabel`` for subprocess-driven tool
-    calls by publishing through the sink the model layer is handed. The
-    agent layer is the seam that wires that sink to ``runtime.publish``;
-    without it, the bridge silently no-ops and the REPL never announces
-    CLI tool calls.
+    first = provider.requests[0].records[0]
+    assert first == UserMessage(content="look", attachments=(image,))
 
-    Asserts the visible behavior: a ``ToolLabel`` the inner provider model
-    publishes during its ``stream`` reaches the runtime's observer list,
-    just as calling ``runtime.publish`` directly would.
-    """
 
-    @dataclass(slots=True, kw_only=True)
-    class _PublishingModel(StubModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            if publish is not None:
-                publish(ToolLabel(call_id="probe", text="probe"))
-                publish(ModelResponsePartial(text="hello"))
-            # Zero-arg ``super()`` breaks under ``@dataclass(slots=True)`` on
-            # Python <3.13 (CPython gh-90562): slots rebuilds the class, so the
-            # ``__class__`` cell points at the pre-slots class and the
-            # ``isinstance`` guard fails. Call the base explicitly.
-            return await StubModel.stream(self, request, publish)
+@pytest.mark.asyncio
+async def test_a_model_error_is_raised_from_the_turn(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path, ValueError("boom"))
+    async with agent:
+        with pytest.raises(ValueError, match="boom"):
+            _ = [words async for words in agent.stream("go")]
 
-    model = _PublishingModel()
-    a = _build_agent(model=model)
-    delivered: list[RuntimeEvent] = []
-    _ = await a._agent_model.stream(
-        [UserMessage(text="hi")],
-        delivered.append,
+
+@pytest.mark.asyncio
+async def test_a_halt_from_outside_cancels_the_turn(tmp_path: Path) -> None:
+    provider = ScriptedProvider()
+    _, agent = _agent(tmp_path, provider=provider)
+    provider.replies.append(lambda request: _halted(agent, request))
+    async with agent:
+        with pytest.raises(asyncio.CancelledError):
+            _ = await agent.send("go")
+
+
+def _halted(agent: Agent, request: Request) -> Response:
+    del request
+    agent.runtime.halt()
+    return reply(calls=[call("Nope")])
+
+
+@pytest.mark.asyncio
+async def test_a_turn_needs_an_open_agent(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"^The agent is not open: use it with 'async with'\.$",
+    ):
+        _ = await agent.send("go")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_runs_from_its_open_until_its_loop_stops(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path, reply("done"))
+    seen = [agent.running]
+    async with agent:
+        seen.append(agent.running)
+        _ = await agent.send("go")
+        seen.append(agent.running)
+        agent.runtime.push(types.Quit())
+        with pytest.raises(RuntimeError, match="runtime stopped"):
+            _ = await agent.send("again")
+        seen.append(agent.running)
+    seen.append(agent.running)
+
+    assert seen == [False, True, True, False, False]
+
+
+@pytest.mark.asyncio
+async def test_an_agent_whose_loop_died_is_not_running(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path)
+    running: list[bool] = []
+
+    async def crash() -> None:
+        async with agent:
+            agent.runtime.observers.append(_crash_on_user)
+            try:
+                _ = await agent.send("go")
+            finally:
+                running.append(agent.running)
+
+    with pytest.raises(_LoopCrash):
+        await crash()
+
+    assert running == [False]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_ends_when_the_loop_stops_first(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path)
+    async with agent:
+        agent.runtime.push(types.Quit())
+
+        async with asyncio.timeout(5):
+            with pytest.raises(RuntimeError, match=r"^The agent's runtime stopped\.$"):
+                _ = await agent.send("go")
+
+
+@pytest.mark.asyncio
+async def test_a_loop_that_dies_raises_from_the_turn_and_the_journal_is_kept(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+
+    raised: list[BaseException] = []
+    async with asyncio.timeout(5):
+        with pytest.raises(_LoopCrash):
+            await _crash(agent, "remember me", raised)
+
+    assert [type(e) for e in raised] == [_LoopCrash]
+    assert UserMessage(content="remember me") in list(journal)
+    assert agent.runtime.observers == [_crash_on_user]
+
+
+@pytest.mark.asyncio
+async def test_closing_twice_or_unopened_is_harmless(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    async with agent:
+        pass
+
+    await agent.aclose()
+    await _agent(tmp_path)[1].aclose()
+
+    assert len(_own(journal)) == 1
+
+
+@pytest.mark.asyncio
+async def test_at_the_round_cap_the_model_answers_with_no_tools(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope")]),
+        reply("what I found"),
+        tools=[_Tool(name="Nope")],
+        max_rounds=1,
+    )
+    async with agent:
+        assert await agent.send("go") == "what I found"
+
+    last = provider.requests[1]
+    assert last.allowed == frozenset()
+    told = [r for r in last.records if isinstance(r, TurnContext)][-1]
+    assert "Tools you may call: none" in told.text()
+
+
+@pytest.mark.asyncio
+async def test_the_round_that_reaches_the_cap_runs_its_calls(tmp_path: Path) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope")]),
+        reply("done"),
+        tools=[_Tool(name="Nope")],
+        max_rounds=1,
+    )
+    async with agent:
+        _ = await agent.send("go")
+
+    answered = [r for r in provider.requests[1].records if isinstance(r, ToolResult)]
+    assert [r.text() for r in answered] == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_a_message_from_another_agent_mid_turn_keeps_the_round_cap(
+    tmp_path: Path,
+) -> None:
+    """A persistent child's idle ping arriving mid-turn starts no turn of its own."""
+    agents: list[Agent] = []
+
+    def pinged(request: Request) -> Response:
+        del request
+        agents[0].runtime.push(
+            AgentToAgentMessage(sender="kid", content="[kid is idle]"),
+        )
+        return reply("what I found")
+
+    provider = ScriptedProvider(
+        replies=[
+            reply(calls=[call("Nope", "a")]),
+            pinged,
+            reply(calls=[call("Nope", "b")]),
+            reply("never"),
+        ],
+    )
+    _, agent = _agent(
+        tmp_path,
+        provider=provider,
+        tools=[_Tool(name="Nope")],
+        max_rounds=1,
+    )
+    agents.append(agent)
+    async with agent:
+        with contextlib.suppress(RoundLimitError):
+            _ = await agent.send("go")
+
+    assert [r.allowed for r in provider.requests[1:]] == [frozenset()] * (
+        len(provider.requests) - 1
     )
 
-    assert any(isinstance(e, ToolLabel) and e.call_id == "probe" for e in delivered), (
-        "inner-model-published ToolLabel did not reach the runtime publisher;"
-        " ``_AgentModel.stream`` must forward a ``publish`` sink into"
-        " ``send_with_retry`` so the CLI bridge's labels fan out"
+
+@pytest.mark.asyncio
+async def test_a_call_past_the_round_cap_halts_the_turn(tmp_path: Path) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope", "a")]),
+        reply(calls=[call("Nope", "b")]),
+        reply("never"),
+        tools=[_Tool(name="Nope")],
+        max_rounds=1,
     )
-    assert any(
-        isinstance(e, ModelResponsePartial) and e.text == "hello" for e in delivered
-    ), "inner-model-published text chunk did not reach the runtime publisher"
+    async with agent:
+        with pytest.raises(RoundLimitError) as raised:
+            _ = await agent.send("go")
+
+    assert (raised.value.rounds, raised.value.max_rounds) == (1, 1)
+    assert len(provider.requests) == 2
 
 
 @pytest.mark.asyncio
-async def test_stream_rejects_normalized_refusal_after_recording_cost() -> None:
-    """A provider refusal is an error, not a successful empty assistant turn."""
+async def test_agentsend_is_outside_the_round_cap(tmp_path: Path) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope", "a")]),
+        reply(calls=[call("AgentSend", "s1")]),
+        reply(calls=[call("AgentSend", "s2")]),
+        reply("replied"),
+        tools=[_Tool(name="Nope"), _Tool(name="AgentSend")],
+        max_rounds=1,
+    )
+    async with agent:
+        assert await agent.send("go") == "replied"
 
-    @dataclass(slots=True, kw_only=True)
-    class _RefusingModel(StubModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            return ModelResponse(
-                message=AssistantMessage(text=""),
-                stop_reason="model_refusal",
-                request_id="req_refused",
-                spend=TokenCost(request=0.25),
-            )
+    assert [r.allowed for r in provider.requests[1:]] == [
+        frozenset({"AgentSend"}),
+    ] * 3
 
-    a = _build_agent(model=_RefusingModel())
-    delivered: list[RuntimeEvent] = []
 
-    with pytest.raises(ModelTerminationError) as raised:
-        _ = await a._agent_model.stream([UserMessage(text="hi")], delivered.append)
+@pytest.mark.asyncio
+async def test_the_round_count_starts_over_with_each_message(tmp_path: Path) -> None:
+    _, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope", "a")]),
+        reply("one"),
+        reply(calls=[call("Nope", "b")]),
+        reply("two"),
+        max_rounds=2,
+    )
+    async with agent:
+        assert await agent.send("first") == "one"
+        assert await agent.send("second") == "two"
 
-    assert raised.value.stop_reason == "model_refusal"
-    assert raised.value.response.request_id == "req_refused"
-    assert a.cost_tracker.spend.total == pytest.approx(0.25)
+
+@pytest.mark.asyncio
+async def test_a_turn_stopped_at_its_cap_lets_the_next_one_run(tmp_path: Path) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope", "a")]),
+        reply(calls=[call("Nope", "b")]),
+        reply("again"),
+        tools=[_Tool(name="Nope")],
+        max_rounds=1,
+    )
+    async with agent:
+        with pytest.raises(RoundLimitError):
+            _ = await agent.send("go")
+
+        assert await agent.send("go on") == "again"
+
+    # The next message gives back every tool.
+    assert provider.requests[2].allowed is None
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "stop_reason",
-    ["model_continuing", "max_tokens", "model_context_window_exceeded"],
+    ("spends", "raises"),
+    [((0.6, 0.6), True), ((0.5, 0.5), True), ((0.5, 0.4), False)],
+    ids=["over", "exactly", "under"],
 )
-async def test_stream_keeps_truncated_or_paused_text(stop_reason: str) -> None:
-    """A truncated prose answer is delivered, not discarded after being billed."""
+async def test_the_spend_cap_halts_once_reached(
+    tmp_path: Path,
+    spends: tuple[float, float],
+    raises: bool,
+) -> None:
+    first, second = (TokenCost(response=s) for s in spends)
+    _, agent = _agent(
+        tmp_path,
+        reply("a", calls=[call("Nope")], spend=first),
+        reply("b", spend=second),
+        max_spend_usd=1.0,
+    )
+    async with agent:
+        if not raises:
+            assert await agent.send("go") == "b"
+            return
+        with pytest.raises(BudgetExhaustedError) as raised:
+            _ = await agent.send("go")
 
-    @dataclass(slots=True, kw_only=True)
-    class _TruncatingModel(StubModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            return ModelResponse(
-                message=AssistantMessage(text="partial output"),
-                stop_reason=stop_reason,
-            )
-
-    a = _build_agent(model=_TruncatingModel())
-
-    message = await a._agent_model.stream([UserMessage(text="hi")], lambda _: None)
-
-    assert message.text == "partial output"
-
-
-@dataclass(slots=True, kw_only=True)
-class _PolicyBlockingModel(StubModel):
-    """Raises a safeguard block on every call and counts the requests sent."""
-
-    calls: int = 0
-
-    @override
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        del request, publish
-        self.calls += 1
-        raise PolicyBlockedError(provider_name="Anthropic", provider_message="flagged")
+    assert raised.value.total_cost_usd == pytest.approx(sum(spends))
+    assert raised.value.max_budget_usd == 1.0
 
 
 @pytest.mark.asyncio
-async def test_a_policy_block_drops_the_refused_input_and_keeps_the_session() -> None:
-    """The flagged turn leaves the context; what came before it stays."""
-    model = _PolicyBlockingModel()
-    a = _build_agent(model=model)
-    a.runtime.append_history(UserMessage(text="earlier"))
-    a.runtime.append_history(AssistantMessage(text="earlier answer"))
-    a.runtime.append_history(UserMessage(text="flagged request"))
+async def test_spend_adds_up_across_turns(tmp_path: Path) -> None:
+    _, agent = _agent(
+        tmp_path,
+        reply("a", spend=TokenCost(response=0.6)),
+        reply("b", spend=TokenCost(response=0.6)),
+        max_spend_usd=1.0,
+    )
+    async with agent:
+        assert await agent.send("first") == "a"
+        with pytest.raises(BudgetExhaustedError):
+            _ = await agent.send("second")
 
-    with pytest.raises(PolicyBlockedError):
-        _ = await a._agent_model.stream(a.history, lambda _: None)
 
-    user, assistant = a.history
-    assert isinstance(user, UserMessage)
-    assert user.text == "earlier"
-    assert isinstance(assistant, AssistantMessage)
-    assert assistant.text == "earlier answer"
-    a.runtime.append_history(UserMessage(text="next"))
-    assert [m.text for m in a.history if isinstance(m, UserMessage)] == [
-        "earlier",
+@pytest.mark.asyncio
+async def test_the_spend_cap_is_named_when_both_caps_are_reached(
+    tmp_path: Path,
+) -> None:
+    _, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope")], spend=TokenCost(response=2.0)),
+        max_rounds=1,
+        max_spend_usd=1.0,
+    )
+    async with agent:
+        with pytest.raises(BudgetExhaustedError):
+            _ = await agent.send("go")
+
+
+@pytest.mark.asyncio
+async def test_a_charge_past_the_cap_halts_and_refuses_the_next_turn(
+    tmp_path: Path,
+) -> None:
+    """A child's spend, charged between turns, trips the cap its parent holds."""
+    provider, agent = _agent(tmp_path, reply("unsent"), max_spend_usd=1.0)
+    async with agent:
+        agent.charge(0.5, by="kid")
+        assert agent.spend_usd == 0.5
+        agent.charge(0.75, by="kid")
+        with pytest.raises(BudgetExhaustedError) as raised:
+            _ = await agent.send("go")
+    assert raised.value.total_cost_usd == pytest.approx(1.25)
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_session_with_no_journal_s_history_is_what_the_model_sees(
+    tmp_path: Path,
+) -> None:
+    _, agent = _agent(tmp_path, reply("hi"))
+    async with agent:
+        assert await agent.send("go") == "hi"
+        assert list(agent.session.history()) == list(agent.session)
+    assert [
+        r.content for r in agent.session.history() if isinstance(r, UserMessage)
+    ] == [
+        "go",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_system_prompt_is_sent_and_can_be_changed(tmp_path: Path) -> None:
+    provider, agent = _agent(tmp_path, reply("1"), reply("2"), reply("3"))
+    async with agent:
+        _ = await agent.send("one")
+        agent.system_prompt = "T"
+        assert agent.system_prompt == "T"
+        _ = await agent.send("two")
+        agent.system_prompt = None
+        _ = await agent.send("three")
+
+    assert [r.system for r in provider.requests] == [
+        ("S",),
+        ("T",),
+        (default_system_prompt(),),
+    ]
+    assert default_system_prompt().strip()
+
+
+def test_no_system_prompt_is_the_default_one(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path, system_prompt=None)
+
+    assert agent.system_prompt is None
+    assert agent.runtime.system == (default_system_prompt(),)
+
+
+@pytest.mark.asyncio
+async def test_a_new_model_answers_the_next_call_and_is_named(tmp_path: Path) -> None:
+    first, agent = _agent(tmp_path, reply("from the first"))
+    other = ScriptedProvider(
+        replies=[reply("from the other")],
+        capability=_capability(model_id="other"),
+    )
+    async with agent:
+        assert await agent.send("one") == "from the first"
+        agent.model = other["other"]
+        assert await agent.send("two") == "from the other"
+
+    assert len(first.requests) == 1
+    stated = [r for r in other.requests[0].records if isinstance(r, TurnContext)]
+    assert [s.model for s in stated] == ["scripted+fullcontext", "other+fullcontext"]
+
+
+def test_the_agent_hands_its_settings_to_the_runtime(tmp_path: Path) -> None:
+    provider = ScriptedProvider()
+    agent = Agent(
+        model=provider["scripted"],
+        tools=[_Tool(name="A"), _Tool(name="B")],
+        cwd=tmp_path,
+        persistent_retry=True,
+        max_result_chars=1234,
+    )
+
+    assert list(agent.tools) == ["A", "B"]
+    assert agent.runtime.persistent_retry is True
+    assert agent.runtime.tool_context.cwd == tmp_path
+    assert agent.runtime.tool_context.max_result_chars == 1234
+    default = Agent(model=provider["scripted"])
+    assert default.runtime.persistent_retry is False
+    assert default.runtime.tool_context.max_result_chars == 50_000
+    assert default.runtime.tool_context.spill_dir is None
+
+
+def test_a_journaled_agent_spills_cut_output_beside_its_journal(tmp_path: Path) -> None:
+    provider = ScriptedProvider()
+    journal = JsonlJournal(tmp_path / "s1" / "session.jsonl")
+    agent = Agent(model=provider["scripted"], journal=journal, cwd=tmp_path)
+    assert agent.runtime.tool_context.spill_dir == tmp_path / "s1"
+
+
+def test_tools_must_have_distinct_names(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Duplicate tool name"):
+        _ = _agent(tmp_path, tools=[_Tool(), _Tool()])
+
+
+@pytest.mark.asyncio
+async def test_without_a_compactor_nothing_shrinks(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path)
+
+    for shrinker in (agent.session.compactor, agent.session.pruner):
+        assert isinstance(shrinker, NoShrinker)
+        assert not shrinker.should_run()
+        with pytest.raises(NotImplementedError):
+            await shrinker.run()
+    assert agent.runtime.compactor is None
+    assert agent.runtime.compact_due is None
+    assert agent.runtime.reply_room is None
+    assert agent.runtime.prune is None
+
+
+class _Dropper(NoShrinker):
+    """A pruner the runtime can ask before each round."""
+
+    def prune(self) -> bool:
+        return False
+
+
+def test_a_pruner_that_prunes_is_asked_by_the_runtime(tmp_path: Path) -> None:
+    agent = Agent(model=ScriptedProvider()["scripted"], cwd=tmp_path, pruner=_Dropper)
+
+    pruner = agent.session.pruner
+    assert isinstance(pruner, _Dropper)
+    assert agent.runtime.prune == pruner.prune
+
+
+def test_a_summary_compactor_is_the_runtimes(tmp_path: Path) -> None:
+    agent = Agent(
+        model=ScriptedProvider()["scripted"],
+        cwd=tmp_path,
+        compactor=SummaryCompactor,
+    )
+
+    compactor = agent.session.compactor
+    assert isinstance(compactor, SummaryCompactor)
+    assert agent.runtime.compactor is compactor
+    assert agent.runtime.compact_due == compactor.should_run
+    assert agent.runtime.reply_room == compactor.reply_room
+
+
+@pytest.mark.asyncio
+async def test_an_overflow_is_compacted_and_called_again(tmp_path: Path) -> None:
+    provider = ScriptedProvider(
+        replies=[
+            ContextOverflowError("too long"),
+            reply("<summary>the gist</summary>"),
+            reply("ok"),
+        ],
+    )
+    agent = Agent(
+        model=provider["scripted"],
+        cwd=tmp_path,
+        system_prompt="S",
+        compactor=SummaryCompactor,
+        agents_md=_config(tmp_path),
+    )
+    async with agent:
+        agent.session.append(UserMessage(content="old"), AssistantMessage(content="ok"))
+        assert await agent.send("go") == "ok"
+
+    lead = provider.requests[2].records[0]
+    assert isinstance(lead, UserMessage)
+    assert "Summary:\nthe gist" in (lead.content or "")
+
+
+@pytest.mark.asyncio
+async def test_an_overflow_without_a_compactor_is_raised(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path, ContextOverflowError("too long"))
+    async with agent:
+        with pytest.raises(ContextOverflowError):
+            _ = await agent.send("go")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_given_no_journal_keeps_nothing(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path, reply("hi"))
+    async with agent:
+        assert await agent.send("go") == "hi"
+
+    journal = agent.session.journal
+    assert isinstance(journal, NoJournal)
+    assert journal.path is None
+    assert list(journal) == []
+    assert list(journal.history()) == []
+    journal.flush()
+
+
+@pytest.mark.asyncio
+async def test_a_session_is_named_by_its_directory(tmp_path: Path) -> None:
+    _, first = _agent(tmp_path)
+    _, second = _agent(tmp_path)
+    async with JsonlJournal(tmp_path / "the-session" / "journal.jsonl") as journal:
+        _, named = _agent(tmp_path, journal=journal)
+
+    assert named.session.id == "the-session"
+    assert len(first.session.id) == 32
+    assert int(first.session.id, 16) >= 0
+    assert first.session.id != second.session.id
+
+
+@pytest.mark.asyncio
+async def test_a_new_session_starts_its_journal_with_the_prompt(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    async with agent:
+        pass
+
+    (start,) = _own(journal)
+    assert isinstance(start, ContextClear)
+    assert start.system_prompt == "S"
+    assert start.history == ()
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_session_is_what_the_model_sees_and_is_not_rewritten(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    window: list[SessionRecord] = [
+        ContextClear(system_prompt="S"),
+        UserMessage(content="remember 42"),
+        AssistantMessage(content="noted"),
+    ]
+    journal.append(*window)
+    provider, agent = _agent(tmp_path, reply("42"), journal=journal)
+    async with agent:
+        assert _own(journal) == window
+
+        assert await agent.send("what was it?") == "42"
+
+    assert _texts(provider.requests[0].records)[:3] == [
+        "remember 42",
+        "noted",
+        "what was it?",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_call_still_running_when_its_session_ended_resumes_killed(
+    tmp_path: Path,
+) -> None:
+    markers = types.Markers()
+    journal = RecordingJournal()
+    journal.append(
+        ContextClear(system_prompt="S"),
+        UserMessage(content="go"),
+        ToolCall(call_id="c1", name="Echo"),
+        UncategorizedToolResult(call_id="c1", content=markers.detached, stub="pending"),
+        AssistantMessage(content="waiting"),
+    )
+    provider, agent = _agent(tmp_path, reply("ok"), journal=journal)
+    async with agent:
+        _ = await agent.send("and?")
+
+    killed = [
+        (r.content, r.stub)
+        for r in journal
+        if isinstance(r, UncategorizedToolResult)
+        and r.call_id == f"c1{markers.arrival}"
+    ]
+    assert killed == [(markers.cancelled, "cancelled")]
+    assert any(
+        isinstance(r, UncategorizedToolResult) and r.content == markers.cancelled
+        for r in provider.requests[0].records
+    )
+
+
+@pytest.mark.asyncio
+async def test_each_turn_is_journaled_with_what_it_cost(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    tokens = TokenCount(
+        request=10,
+        response=5,
+        cache_write=3,
+        cache_write_1h=2,
+        cache_read=1,
+    )
+    _, agent = _agent(
+        tmp_path,
+        reply("hello", tokens=tokens, spend=TokenCost(response=0.25)),
+        journal=journal,
+    )
+    async with agent:
+        _ = await agent.send("hi")
+
+    records = _own(journal)
+    assert [type(r) for r in records] == [
+        ContextClear,
+        UserMessage,
+        TurnContext,
+        AssistantMessage,
+        TokenUsage,
+    ]
+    usage = records[-1]
+    assert isinstance(usage, TokenUsage)
+    assert dict(usage.info) == {
+        "request": 10,
+        "response": 5,
+        "cache_write": 3,
+        "cache_write_1h": 2,
+        "cache_read": 1,
+        "spend_usd": 0.25,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_starts_a_new_window_in_the_journal(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    provider = ScriptedProvider(
+        replies=[reply("<summary>the gist</summary>"), reply("resumed")],
+    )
+    agent = Agent(
+        model=provider["scripted"],
+        cwd=tmp_path,
+        journal=journal,
+        compactor=SummaryCompactor,
+        agents_md=_config(tmp_path),
+    )
+    seen = tmp_path / "seen.txt"
+    _ = seen.write_text("x")
+    async with agent:
+        agent.session.append(UserMessage(content="old"), AssistantMessage(content="ok"))
+        agent.runtime.tool_context.files.saw(seen)
+        await agent.session.compactor.run()
+
+        start = next(iter(journal))
+        assert seen not in agent.runtime.tool_context.files
+    assert isinstance(start, ContextClear)
+    lead = start.history[0]
+    assert isinstance(lead, UserMessage)
+    assert "Summary:\nthe gist" in (lead.content or "")
+    assert all(type(r).__name__ in record_classes() for r in journal)
+
+
+@pytest.mark.asyncio
+async def test_a_session_resumes_from_its_journal_file(tmp_path: Path) -> None:
+    path = tmp_path / "s.jsonl"
+    async with JsonlJournal(path) as journal:
+        _, agent = _agent(tmp_path, reply("noted"), journal=journal)
+        async with agent:
+            _ = await agent.send("remember 42")
+
+    async with JsonlJournal(path) as journal:
+        provider, agent = _agent(tmp_path, reply("42"), journal=journal)
+        async with agent:
+            assert await agent.send("what was it?") == "42"
+
+    assert _texts(provider.requests[0].records)[:2] == ["remember 42", "noted"]
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_session_tells_vendors_it_is_the_same_conversation(
+    tmp_path: Path,
+) -> None:
+    path, other = tmp_path / "a" / "session.jsonl", tmp_path / "b" / "session.jsonl"
+    sessions: list[str] = []
+    for journaled in (path, path, other):
+        async with JsonlJournal(journaled) as journal:
+            provider, agent = _agent(tmp_path, reply("ok"), journal=journal)
+            async with agent:
+                _ = await agent.send("hi")
+        sessions.append(provider.requests[0].session)
+    first, resumed, elsewhere = sessions
+    assert first == resumed != elsewhere
+    assert str(uuid.UUID(first)) == first
+
+
+def test_appended_records_are_turns_and_what_no_turn_holds_is_dropped(
+    tmp_path: Path,
+) -> None:
+    _, agent = _agent(tmp_path)
+    turn = (AssistantMessage(content="reading"), ToolCall(call_id="c1", name="Read"))
+    result = UncategorizedToolResult(call_id="c1", content="text")
+
+    agent.session.append(
+        ContextClear(summary="the gist", history=(UserMessage(content="kept"),)),
+        *turn,
+        result,
+        TokenUsage(info={"request": 1}),
+        AssistantMessage(content="done"),
+    )
+
+    assert list(agent.session) == [
+        UserMessage(content="the gist"),
+        UserMessage(content="kept"),
+        *turn,
+        result,
+        AssistantMessage(content="done"),
+    ]
+    entries = agent.runtime.context().messages
+    assert len(entries) == 5
+    # A stored turn says nothing of how it ended or what it cost.
+    assert entries[2] == Response(
+        records=turn,
+        tokens=TokenCount(),
+        spend=TokenCost(),
+        stop_reason="",
+    )
+
+
+@pytest.mark.asyncio
+async def test_clear_starts_over_and_reads_the_window_prompt_afresh(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    briefing = _Briefing(name="Briefing", said="index v1")
+    provider, agent = _agent(
+        tmp_path,
+        reply("first"),
+        reply("second"),
+        tools=[_Tool(name="Plain"), briefing],
+        journal=journal,
+    )
+    seen = tmp_path / "seen.txt"
+    _ = seen.write_text("x")
+    async with agent:
+        _ = await agent.send("old news")
+        agent.runtime.tool_context.files.saw(seen)
+        briefing.said = "index v2"
+        await agent.session.clear()
+
+        assert list(agent.session) == []
+        (start,) = _own(journal)
+        assert isinstance(start, ContextClear)
+        assert seen not in agent.runtime.tool_context.files
+        assert agent.runtime.system == ("S", "index v2")
+        _ = await agent.send("fresh")
+
+    assert provider.requests[0].system[-1] == "index v1"
+    assert provider.requests[1].system[-1] == "index v2"
+    assert "old news" not in _texts(provider.requests[1].records)
+
+
+@pytest.mark.asyncio
+async def test_a_window_prompt_holds_the_prompt_then_agents_md_and_briefings(
+    tmp_path: Path,
+) -> None:
+    """Read once at the start: a byte changed mid-window rewrites the whole cache."""
+    _ = (tmp_path / "AGENTS.md").write_text("be terse\n")
+    briefing = _Briefing(name="Briefing", said="index")
+    _, agent = _agent(tmp_path, reply("1"), tools=[briefing, _Briefing(name="Quiet")])
+    async with agent:
+        framed = agent.runtime.system
+        briefing.said = "index, saved since"
+        _ = await agent.send("one")
+        (turn,) = (r for r in agent.session if isinstance(r, TurnContext))
+
+    text = directives(tmp_path, config=_config(tmp_path))
+    assert "be terse" in text
+    assert framed == ("S", f"{text}\n\nindex")
+    assert agent.runtime.system == framed
+    assert turn.agents_md is None
+
+
+@pytest.mark.asyncio
+async def test_with_nothing_standing_the_window_prompt_is_the_prompt(
+    tmp_path: Path,
+) -> None:
+    _, agent = _agent(tmp_path, system_prompt="")
+    async with agent:
+        assert agent.runtime.system == ()
+        agent.system_prompt = None
+        assert agent.runtime.system == (default_system_prompt(),)
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_reads_the_window_prompt_afresh(tmp_path: Path) -> None:
+    briefing = _Briefing(name="Briefing", said="before")
+    _, agent = _agent(tmp_path, tools=[briefing])
+    async with agent:
+        briefing.said = "after"
+        assert agent.runtime.system == ("S", "before")
+        agent.runtime.publish(types.CompactComplete())
+        assert agent.runtime.system == ("S", "after")
+
+
+def test_a_new_session_restates_where_and_as_what_it_runs(tmp_path: Path) -> None:
+    _ = (tmp_path / "AGENTS.md").write_text("be terse\n")
+    provider = ScriptedProvider(capability=_capability(cutoff="June 2026"))
+    agent = Agent(model=provider["scripted"], cwd=tmp_path, agents_md=_config(tmp_path))
+
+    (turn,) = _session(agent).updates()
+
+    assert isinstance(turn, TurnContext)
+    assert turn.cwd == str(tmp_path)
+    assert turn.model == "scripted+fullcontext"
+    # The root's AGENTS.md is the window's prompt, never a restated setting.
+    assert turn.agents_md is None
+    assert "be terse" in agent.runtime.system[-1]
+    assert turn.environment is not None
+    assert "Git repository: false" in turn.environment
+    assert turn.environment.endswith("Knowledge cutoff: June 2026.")
+
+
+def test_an_agent_without_the_environment_is_told_only_its_model(
+    tmp_path: Path,
+) -> None:
+    """An agent serving outsiders tells them nothing of the host it runs on."""
+    _ = (tmp_path / "AGENTS.md").write_text("be terse\n")
+    provider = ScriptedProvider(capability=_capability(cutoff="June 2026"))
+    agent = Agent(
+        model=provider["scripted"],
+        cwd=tmp_path,
+        agents_md=AgentsMdConfig(tiers=frozenset()),
+        environment=False,
+    )
+    session = _session(agent)
+
+    (turn,) = session.updates()
+    session.append(turn)
+
+    assert isinstance(turn, TurnContext)
+    assert (turn.cwd, turn.environment, turn.agents_md) == (None, None, None)
+    assert turn.model == "scripted+fullcontext"
+    assert str(tmp_path) not in turn.text()
+    assert session.updates() == []
+
+
+def test_settings_already_stated_are_not_stated_again(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path)
+    session = _session(agent)
+    session.append(*session.updates())
+
+    assert session.updates() == []
+
+
+def test_each_setting_is_stated_again_only_when_it_changes(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
+    _, agent = _agent(tmp_path)
+    session = _session(agent)
+    session.append(*session.updates())
+
+    agent.runtime.tool_context.cwd = tmp_path / "sub"
+    (moved,) = session.updates()
+    session.append(moved)
+    agent.model = ScriptedProvider(capability=_capability(model_id="other"))["other"]
+    (switched,) = session.updates()
+
+    assert isinstance(moved, TurnContext)
+    assert (moved.cwd, moved.environment, moved.model) == (
+        str(tmp_path / "sub"),
+        None,
+        None,
+    )
+    assert isinstance(switched, TurnContext)
+    assert (switched.cwd, switched.model) == (None, "other+fullcontext")
+
+
+def test_a_directorys_agents_md_is_given_once_where_the_model_works(
+    tmp_path: Path,
+) -> None:
+    _ = (tmp_path / "AGENTS.md").write_text("be terse\n")
+    own = tmp_path / "own"
+    own.mkdir()
+    _ = (own / "AGENTS.md").write_text("be thorough\n")
+    _ = (tmp_path / "x.py").write_text("x")
+    _, agent = _agent(tmp_path)
+    session = _session(agent)
+    session.append(*session.updates())
+
+    agent.runtime.tool_context.cwd = own
+    moved, given = session.updates()
+    session.append(moved, given)
+    agent.runtime.tool_context.cwd = tmp_path
+    back = session.updates()
+    agent.runtime.tool_context.files.saw(tmp_path / "x.py")
+    agent.runtime.tool_context.cwd = own
+    again = [u for u in session.updates() if isinstance(u, SystemMessage)]
+
+    assert isinstance(given, SystemMessage)
+    assert given.subtype == "rules"
+    assert "be thorough" in (given.content or "")
+    assert "be terse" not in (given.content or "")
+    assert [u for u in back if isinstance(u, SystemMessage)] == []
+    assert again == []
+
+
+def test_a_file_read_below_brings_its_directorys_agents_md(tmp_path: Path) -> None:
+    deep = tmp_path / "pkg" / "deep"
+    deep.mkdir(parents=True)
+    _ = (tmp_path / "pkg" / "AGENTS.md").write_text("pkg-rule\n")
+    _ = (deep / "a.py").write_text("x")
+    _, agent = _agent(tmp_path)
+    session = _session(agent)
+    session.append(*session.updates())
+
+    agent.runtime.tool_context.files.saw(deep / "a.py")
+    (given,) = session.updates()
+
+    assert isinstance(given, SystemMessage)
+    assert "pkg-rule" in (given.content or "")
+
+
+def test_the_hour_rolling_over_states_the_time_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, agent = _agent(tmp_path)
+    session = _session(agent)
+    monkeypatch.setattr(agent_module, "_now", lambda: "2026-10-24T13:00:00+00:00")
+    session.append(*session.updates())
+    monkeypatch.setattr(agent_module, "_now", lambda: "2026-10-24T13:59:59+00:00")
+    same_hour = session.updates()
+    monkeypatch.setattr(agent_module, "_now", lambda: "2026-10-24T14:00:00+00:00")
+    (later,) = session.updates()
+
+    assert same_hour == []
+    assert isinstance(later, TurnContext)
+    assert later.timestamp == "2026-10-24T14:00:00+00:00"
+    # The time alone: nothing else changed.
+    assert later.text().startswith("Current time: ")
+    assert "\n" not in later.text()
+
+
+def test_the_tools_allowed_are_stated_and_again_when_they_change(
+    tmp_path: Path,
+) -> None:
+    _, agent = _agent(tmp_path, tools=[_Tool(name="a"), _Tool(name="b")])
+    session = _session(agent)
+    (everything,) = session.updates()
+    session.append(everything)
+    agent.allowed = frozenset({"b"})
+    (gated,) = session.updates()
+    session.append(gated)
+    unchanged = session.updates()
+    agent.allowed = frozenset()
+
+    assert isinstance(everything, TurnContext)
+    assert everything.tools is None
+    assert isinstance(gated, TurnContext)
+    assert gated.tools == ("b",)
+    assert "Tools you may call: b" in gated.text()
+    assert unchanged == []
+    assert agent.runtime.allowed == frozenset()
+    (none,) = session.updates()
+    assert isinstance(none, TurnContext)
+    assert "Tools you may call: none" in none.text()
+    session.append(none)
+    agent.allowed = None
+    (lifted,) = session.updates()
+    assert isinstance(lifted, TurnContext)
+    assert "Tools you may call: a, b" in lifted.text()
+
+
+def test_allowing_a_tool_the_agent_lacks_is_refused() -> None:
+    provider = ScriptedProvider()
+    with pytest.raises(ValueError, match=r"Unknown tools: Absent\."):
+        _ = Agent(model=provider["scripted"], tools=[_Tool()], allowed=["Absent"])
+    agent = Agent(model=provider["scripted"], tools=[_Tool()], allowed=["_Tool"])
+    assert agent.allowed == frozenset({"_Tool"})
+    agent.allowed = None
+    assert agent.allowed is None
+
+
+def test_a_rule_is_given_once_when_a_file_it_governs_is_seen(tmp_path: Path) -> None:
+    rules = tmp_path / ".sagent" / "rules"
+    rules.mkdir(parents=True)
+    py = rules / "py.md"
+    md = rules / "md.md"
+    _ = py.write_text("---\npaths: ['**/*.py']\n---\npy-rule\n")
+    _ = md.write_text("---\npaths: ['**/*.md']\n---\nmd-rule\n")
+    for name in ("a.py", "b.py", "c.md"):
+        _ = (tmp_path / name).write_text("x")
+    _, agent = _agent(tmp_path)
+    session = _session(agent)
+    files = agent.runtime.tool_context.files
+    session.append(*session.updates())
+
+    files.saw(tmp_path / "a.py")
+    (given,) = session.updates()
+    session.append(given)
+    files.saw(tmp_path / "b.py")
+    again = session.updates()
+    files.saw(tmp_path / "c.md")
+    (second,) = session.updates()
+
+    assert isinstance(given, SystemMessage)
+    assert given.subtype == "rules"
+    assert "py-rule" in (given.content or "")
+    assert given.extra == {"rules": (str(py.resolve()),)}
+    assert again == []
+    assert isinstance(second, SystemMessage)
+    assert second.extra == {"rules": (str(md.resolve()),)}
+    assert "py-rule" not in (second.content or "")
+
+
+def test_a_tools_reminder_is_told_once_and_again_when_it_changes(
+    tmp_path: Path,
+) -> None:
+    reminding = _Reminding(name="Peers")
+    _, agent = _agent(tmp_path, tools=[_Tool(), reminding])
+    session = _session(agent)
+    session.append(*session.updates())
+    assert session.updates() == []
+
+    reminding.told = "peers: a"
+    (told,) = session.updates()
+    session.append(told)
+    unchanged = session.updates()
+    reminding.told = "peers: a, b"
+    (changed,) = session.updates()
+
+    assert told == SystemMessage(
+        timestamp=told.timestamp,
+        content="peers: a",
+        subtype="reminder",
+        extra={"tool": "Peers"},
+    )
+    assert unchanged == []
+    assert isinstance(changed, SystemMessage)
+    assert changed.content == "peers: a, b"
+
+
+def test_a_gated_off_tool_reminds_of_nothing(tmp_path: Path) -> None:
+    reminding = _Reminding(name="Peers", told="reply by Peers")
+    _, agent = _agent(tmp_path, tools=[_Tool(), reminding])
+    agent.allowed = frozenset({"_Tool"})
+    session = _session(agent)
+    gated = session.updates()
+    agent.allowed = None
+    opened = session.updates()
+
+    assert [u for u in gated if isinstance(u, SystemMessage)] == []
+    assert [u.content for u in opened if isinstance(u, SystemMessage)] == [
+        "reply by Peers",
+    ]
+
+
+def test_a_reminder_that_empties_is_withdrawn_once(tmp_path: Path) -> None:
+    reminding = _Reminding(name="Peers", told="peers: a")
+    _, agent = _agent(tmp_path, tools=[reminding])
+    session = _session(agent)
+    session.append(*session.updates())
+
+    reminding.told = ""
+    (withdrawn,) = session.updates()
+    session.append(withdrawn)
+    quiet = session.updates()
+    reminding.told = "peers: b"
+    (back,) = session.updates()
+
+    assert withdrawn == SystemMessage(
+        timestamp=withdrawn.timestamp,
+        content="No longer in force: peers: a",
+        subtype="reminder",
+        extra={"tool": "Peers", "withdrawn": True},
+    )
+    assert quiet == []
+    assert isinstance(back, SystemMessage)
+    assert back.content == "peers: b"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ends", ["compaction", "clear"])
+async def test_a_new_window_returns_to_where_the_session_started(
+    tmp_path: Path,
+    ends: str,
+) -> None:
+    (tmp_path / "elsewhere").mkdir()
+    _, agent = _agent(tmp_path)
+    async with agent:
+        agent.runtime.tool_context.cwd = tmp_path / "elsewhere"
+        if ends == "clear":
+            await agent.session.clear()
+        else:
+            agent.runtime.publish(types.CompactComplete())
+        notes = [
+            r
+            for r in agent.session
+            if isinstance(r, SystemMessage) and r.subtype == "moved"
+        ]
+
+    assert agent.runtime.tool_context.cwd == tmp_path
+    assert [n.content for n in notes] == [
+        f"Working directory reset to {tmp_path}; it was {tmp_path / 'elsewhere'}.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_window_at_its_root_says_nothing_of_moving(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path)
+    async with agent:
+        agent.runtime.publish(types.CompactComplete())
+
+        assert [r for r in agent.session if isinstance(r, SystemMessage)] == []
+
+
+def test_the_window_prompt_holds_the_roots_agents_md_wherever_the_model_went(
+    tmp_path: Path,
+) -> None:
+    _ = (tmp_path / "AGENTS.md").write_text("root-rule\n")
+    (tmp_path / "away").mkdir()
+    _ = (tmp_path / "away" / "AGENTS.md").write_text("away-rule\n")
+    _, agent = _agent(tmp_path)
+    agent.runtime.tool_context.cwd = tmp_path / "away"
+
+    _session(agent).frame()
+
+    assert "root-rule" in agent.runtime.system[-1]
+    assert "away-rule" not in agent.runtime.system[-1]
+
+
+def test_the_model_is_named_with_its_window(tmp_path: Path) -> None:
+    prices = PriceCatalog(window=1_000_000)
+    capability = ModelCapability(
+        model_id="opus",
+        limits=ModelLimits(max_request_tokens=1_000_000, max_response_tokens=8_000),
+        prices=prices,
+        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+    )
+    provider = ScriptedProvider(capability=capability)
+    _, agent = _agent(tmp_path, provider=provider)
+    session = _session(agent)
+    (first,) = session.updates()
+    session.append(first)
+    agent.model.settings = replace(
+        agent.model.settings,
+        context_size=prices["auto", 258_000],
+    )
+    (smaller,) = session.updates()
+
+    assert isinstance(first, TurnContext)
+    assert first.model == "opus+fullcontext"
+    assert isinstance(smaller, TurnContext)
+    assert smaller.model == "opus+258k"
+
+
+def _two_models() -> ModelCatalog:
+    """Return a catalog whose one provider serves ``a`` and ``b``."""
+    models = ModelTable(rows=(_capability("a"), _capability("b")))
+    return ModelCatalog(
+        factories={"scripted": partial(ScriptedProvider, models=models)},
+    )
+
+
+def test_a_model_switched_away_from_is_cached_as_it_was_left(tmp_path: Path) -> None:
+    catalog = _two_models()
+    agent = Agent(model=catalog["scripted"]["a+2k"], cwd=tmp_path)
+    left = agent.model.settings
+
+    agent.model = catalog["scripted"]["b"]
+    agent.model = catalog["scripted"]["b"]
+
+    assert list(agent.model_cache) == ["scripted/a"]
+    assert agent.model_cache["scripted/a"].settings is left
+    assert left.context_size.tokens == 2_000
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_agent_recalls_its_model_its_cache_and_its_prompt(
+    tmp_path: Path,
+) -> None:
+    catalog = _two_models()
+    path = tmp_path / "s" / "session.jsonl"
+    async with JsonlJournal(path) as journal:
+        agent = Agent(
+            model=catalog["scripted"]["a+1k"],
+            journal=journal,
+            system_prompt="mine",
+            cwd=tmp_path,
+            agents_md=_config(tmp_path),
+        )
+        async with agent:
+            agent.model = catalog["scripted"]["b+2k"]
+
+    async with JsonlJournal(path) as journal:
+        again = Agent(
+            model=catalog["scripted"]["a"],
+            journal=journal,
+            cwd=tmp_path,
+            agents_md=_config(tmp_path),
+        )
+        await again.recall(catalog)
+
+    assert (
+        again.model.capability.model_id,
+        again.model.settings.context_size.tokens,
+    ) == ("b", 2_000)
+    assert list(again.model_cache) == ["scripted/a"]
+    assert again.model_cache["scripted/a"].settings.context_size.tokens == 1_000
+    assert again.system_prompt == "mine"
+
+
+@pytest.mark.asyncio
+async def test_an_agent_with_nothing_stood_recalls_nothing(tmp_path: Path) -> None:
+    catalog = _two_models()
+    model = catalog["scripted"]["a"]
+    async with JsonlJournal(tmp_path / "s" / "session.jsonl") as journal:
+        agent = Agent(model=model, journal=journal, cwd=tmp_path)
+        await agent.recall(catalog)
+    assert (agent.model, agent.model_cache, agent.system_prompt) == (model, {}, None)
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_stands_once_and_the_default_withdraws_it(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    agent = Agent(
+        model=ScriptedProvider()["scripted"],
+        journal=journal,
+        system_prompt="mine",
+        cwd=tmp_path,
+    )
+    async with agent:
+        _session(agent).persist()
+        agent.system_prompt = None
+        _session(agent).persist()
+        _session(agent).persist()
+
+    stood = [
+        (r.kind, r.payload.get("text"))
+        for r in journal.history()
+        if isinstance(r, UncategorizedRecord)
+        and r.payload.get("standing") == "system_prompt"
+    ]
+    assert stood == [("system_prompt", "mine"), ("withdrawn", None)]
+
+
+@pytest.mark.asyncio
+async def test_the_model_stands_once_until_it_changes(tmp_path: Path) -> None:
+    catalog = _two_models()
+    journal = RecordingJournal()
+    agent = Agent(model=catalog["scripted"]["a"], journal=journal, cwd=tmp_path)
+    async with agent:
+        _session(agent).persist()
+        agent.model.settings = replace(
+            agent.model.settings,
+            context_size=agent.model.capability.prices["auto", 3_000],
+        )
+        _session(agent).persist()
+
+    stood = [
+        r.payload["model"]
+        for r in journal.history()
+        if isinstance(r, UncategorizedRecord) and r.kind == "model"
+    ]
+    assert stood == [
+        "scripted/a+fullcontext+nothink",  # codespell:ignore nothink
+        "scripted/a+3k+nothink",  # codespell:ignore nothink
+    ]
+
+
+@pytest.mark.asyncio
+async def test_the_journal_keeps_local_time_with_its_offset(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    async with agent:
+        pass
+
+    (start,) = _own(journal)
+    assert isinstance(start, ContextClear)
+    assert start.timestamp is not None
+    assert datetime.fromisoformat(start.timestamp).utcoffset() is not None
+    assert "." not in start.timestamp
+
+
+@pytest.mark.asyncio
+async def test_the_settings_ride_the_first_round_only(tmp_path: Path) -> None:
+    provider, agent = _agent(tmp_path, reply("1"), reply("2"))
+    async with agent:
+        _ = await agent.send("one")
+        _ = await agent.send("two")
+
+    stated = [r for r in provider.requests[1].records if isinstance(r, TurnContext)]
+    assert len(stated) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_standing_record_outlives_a_new_window_until_withdrawn(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    record = UncategorizedRecord(kind="note", payload={"what": "child"})
+    async with agent:
+        agent.session.stand("child", record)
+        agent.session.stand("other", UncategorizedRecord(kind="note"))
+        agent.session.stand("other", None)
+        agent.session.append(UserMessage(content="before the clear"))
+        await agent.runtime.schedule(_nothing)
+        await agent.session.clear()
+
+    window = _own(journal)
+    assert isinstance(window[0], ContextClear)
+    assert window[1:] == [
+        UncategorizedRecord(
+            kind="note",
+            payload={"what": "child", "standing": "child"},
+        ),
+    ]
+    assert [r for r in agent.session.standing() if r.kind == "note"] == [record]
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_session_reads_what_stands_and_what_was_withdrawn(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    _, first = _agent(tmp_path, journal=journal)
+    async with first:
+        first.session.stand("kept", UncategorizedRecord(kind="note", payload={"n": 1}))
+        first.session.stand("gone", UncategorizedRecord(kind="note", payload={"n": 2}))
+        first.session.stand("gone", None)
+    journal.append(UncategorizedRecord(kind="note", payload={"n": 3}))
+
+    _, resumed = _agent(tmp_path, journal=journal)
+    async with resumed:
+        assert [r for r in resumed.session.standing() if r.kind == "note"] == [
+            UncategorizedRecord(kind="note", payload={"n": 1}),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_messages_from_other_agents_start_the_round_count_over(
+    tmp_path: Path,
+) -> None:
+    _, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope", "a")]),
+        reply("one"),
+        reply(calls=[call("Nope", "b")]),
+        reply("two"),
+        max_rounds=2,
+    )
+    seen = _Seen()
+    async with agent:
+        agent.runtime.observers.append(seen)
+        for text in ("first", "second"):
+            agent.runtime.push(AgentToAgentMessage(sender="peer", content=text))
+            await seen.idle()
+
+    assert seen.count(types.Halt) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("carried", [False, True], ids=["usage", "new-window"])
+async def test_a_resumed_session_keeps_what_it_spent(
+    tmp_path: Path,
+    carried: bool,
+) -> None:
+    journal = RecordingJournal()
+    _, first = _agent(
+        tmp_path,
+        reply("a", spend=TokenCost(response=5.0)),
+        reply("<summary>gist</summary>"),
+        journal=journal,
+    )
+    async with first:
+        _ = await first.send("spend")
+        if carried:
+            await first.session.clear()
+    assert first.spend_usd == 5.0
+
+    provider, resumed = _agent(tmp_path, reply("b"), journal=journal, max_spend_usd=5.0)
+    async with resumed:
+        assert resumed.spend_usd == 5.0
+        with pytest.raises(BudgetExhaustedError):
+            _ = await resumed.send("more")
+
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_coalesced_turns_grow_the_journal_linearly(tmp_path: Path) -> None:
+    sizes: list[int] = []
+    async with JsonlJournal(tmp_path / "s.jsonl") as journal:
+        _, agent = _agent(tmp_path, *[reply("ok")] * 30, journal=journal)
+        async with agent:
+            seen = _Seen()
+            agent.runtime.observers.append(seen)
+            for i in range(30):
+                agent.runtime.push(UserMessage(content=f"part one of {i}"))
+                agent.runtime.push(UserMessage(content=f"part two of {i}"))
+                await seen.idle()
+                sizes.append((tmp_path / "s.jsonl").stat().st_size)
+
+    first, second = sizes[14] - sizes[0], sizes[29] - sizes[15]
+    assert second < 1.5 * first
+
+
+@pytest.mark.asyncio
+async def test_a_coalesced_turn_resumes_as_one_message(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, first = _agent(tmp_path, reply("ok"), journal=journal)
+    async with first:
+        seen = _Seen()
+        first.runtime.observers.append(seen)
+        first.runtime.push(UserMessage(content="part one"))
+        first.runtime.push(UserMessage(content="part two"))
+        await seen.idle()
+
+    provider, resumed = _agent(tmp_path, reply("again"), journal=journal)
+    async with resumed:
+        _ = await resumed.send("next")
+
+    assert _texts(provider.requests[0].records)[:3] == [
+        "part one\n\npart two",
+        "ok",
         "next",
     ]
 
 
-@dataclass(slots=True, kw_only=True)
-class _RefusingAfterToolModel(StubModel):
-    """Refuses (HTTP 200, ``model_refusal``) whatever it is sent."""
-
-    @override
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        del request, publish
-        return ModelResponse(
-            message=AssistantMessage(text=""),
-            stop_reason="model_refusal",
-        )
-
-
 @pytest.mark.asyncio
-async def test_a_refusal_stubs_the_tool_results_it_was_sent() -> None:
-    """A refused tool result becomes a stub so the call stays answered."""
-    a = _build_agent(model=_RefusingAfterToolModel())
-    call = ToolCall(id="c1", name="Read", args={})
-    a.runtime.append_history(UserMessage(text="read it"))
-    a.runtime.append_history(AssistantMessage(tool_calls=(call,)))
-    a.runtime.append_history(ToolResult(call_id="c1", content="flagged bytes"))
-
-    with pytest.raises(ModelTerminationError):
-        _ = await a._agent_model.stream(a.history, lambda _: None)
-
-    user, assistant, result = a.history
-    assert isinstance(user, UserMessage)
-    assert user.text == "read it"
-    assert isinstance(assistant, AssistantMessage)
-    assert assistant.tool_calls == (call,)
-    assert isinstance(result, ToolResult)
-    assert (result.call_id, result.content, result.is_error) == (
-        "c1",
-        REFUSED_RESULT,
-        True,
-    )
-
-
-def _texts(history: Sequence[ModelContextEvent]) -> list[str]:
-    return [m.text for m in history if isinstance(m, (UserMessage, AssistantMessage))]
-
-
-@pytest.mark.asyncio
-async def test_a_refused_coalesced_tail_leaves_no_part_of_it_behind() -> None:
-    """Masking the coalesce splice must not resurrect what IT had masked."""
-    a = _build_agent(model=_RefusingAfterToolModel())
-    a.runtime.append_history(UserMessage(text="earlier"))
-    a.runtime.append_history(AssistantMessage(text="answer"))
-    a.runtime.append_history(UserMessage(text="flagged1"))
-    a.runtime._append_or_coalesce_user(UserMessage(text="flagged2"))
-
-    with pytest.raises(ModelTerminationError):
-        _ = await a._agent_model.stream(a.history, lambda _: None)
-
-    assert _texts(a.history) == ["earlier", "answer"]
-    assert len(a.history) == 2
-
-
-@pytest.mark.asyncio
-async def test_a_refusal_inside_a_summary_keeps_the_summary_not_what_it_replaced() -> (
-    None
-):
-    a = _build_agent(model=_RefusingAfterToolModel())
-    a.runtime.append_history(UserMessage(text="old q"))
-    a.runtime.append_history(AssistantMessage(text="old a"))
-    a.runtime.append_history(UserMessage(text="flagged"))
-    a.runtime.append_splice(
-        mask=full_tape_mask(a.runtime.tape),
-        insert_after=None,
-        payload=(
-            UserMessage(text="summary"),
-            AssistantMessage(text="ack"),
-            UserMessage(text="flagged"),
-        ),
-        strategy="summary",
-        discards_content=True,
-    )
-
-    with pytest.raises(ModelTerminationError):
-        _ = await a._agent_model.stream(a.history, lambda _: None)
-
-    assert _texts(a.history) == ["summary", "ack"]
-    assert len(a.history) == 2
-
-
-@pytest.mark.asyncio
-async def test_a_refusal_with_nothing_after_the_last_answer_changes_nothing() -> None:
-    a = _build_agent(model=_RefusingAfterToolModel())
-    a.runtime.append_history(UserMessage(text="q"))
-    a.runtime.append_history(AssistantMessage(text="a"))
-    tape_len = len(a.runtime.tape)
-
-    with pytest.raises(ModelTerminationError):
-        _ = await a._agent_model.stream(a.history, lambda _: None)
-
-    assert len(a.runtime.tape) == tape_len
-
-
-@pytest.mark.asyncio
-async def test_stream_rejects_tool_call_truncated_by_the_cap() -> None:
-    """A capped tool call may carry cut-off arguments, so it must not dispatch."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _CappedToolModel(StubModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            return ModelResponse(
-                message=AssistantMessage(
-                    text="",
-                    tool_calls=(ToolCall(id="c1", name="Echo", args={"msg": "x"}),),
-                ),
-                stop_reason="max_tokens",
-            )
-
-    a = _build_agent(model=_CappedToolModel())
-
-    with pytest.raises(ModelTerminationError) as raised:
-        _ = await a._agent_model.stream([UserMessage(text="hi")], lambda _: None)
-
-    assert raised.value.stop_reason == "max_tokens"
-
-
-@pytest.mark.asyncio
-async def test_stream_rejects_tool_use_without_tool_calls() -> None:
-    """The shared boundary enforces stop-reason/content consistency."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _BrokenToolModel(StubModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del request, publish
-            return ModelResponse(
-                message=AssistantMessage(text=""),
-                stop_reason="model_tool_use",
-            )
-
-    a = _build_agent(model=_BrokenToolModel())
-    a.max_attempts = 1
-
-    with pytest.raises(StreamInterruptedError):
-        _ = await a._agent_model.stream([UserMessage(text="hi")], lambda _: None)
-
-
-def test_subagent_inherits_root_cost_tracker() -> None:
-    """C5: non-persistent subagent's cost folds into the root tracker."""
-    root = _build_agent()
-    child = _build_agent()
-    response = ModelResponse(
-        message=AssistantMessage(text="ok"),
-        tokens=TokenCount(request=10, response=5),
-        spend=TokenCost(request=0.02),
-    )
-    with root._install_contextvars(), child._install_contextvars():
-        child.record_response(response)
-    assert root.cost_tracker.spend.total == pytest.approx(0.02)
-    assert child.cost_tracker.spend.total == 0.0
-
-
-def test_serviced_subagent_cost_rolls_up_to_root() -> None:
-    """Unified lifecycle: a serviced subagent's cost rolls up to the root.
-
-    Every child -- oneshot or serviced -- inherits the root cost sink, so
-    the root's ``total_cost_usd`` is the whole tree's spend. The child's
-    own tracker stays at zero (it is not a root sink); its per-agent cap
-    is enforced against ``_own_spend`` instead.
-    """
-    root = _build_agent()
-    child = _build_agent()
-    child._lifecycle = "serviced"
-    response = ModelResponse(
-        message=AssistantMessage(text="ok"),
-        tokens=TokenCount(),
-        spend=TokenCost(request=0.02),
-    )
-    with root._install_contextvars(), child._install_contextvars():
-        child.record_response(response)
-    assert root.cost_tracker.spend.total == pytest.approx(0.02)
-    assert child.cost_tracker.spend.total == 0.0
-
-
-def test_child_cost_records_once_on_root_tokens_self_only() -> None:
-    """T7: child cost hits the ROOT total once; root tokens stay self-only.
-
-    - ``root.cost_tracker.spend.total`` gains the child's cost exactly once.
-    - ``root.cost_tracker.total`` (tokens) is unchanged -- token totals are
-      self-only, so the child's tokens never leak into the root's count.
-    - ``child.own_spend`` equals the child's own cost (drives its cap).
-    """
-    root = _build_agent()
-    child = _build_agent()
-    response = ModelResponse(
-        message=AssistantMessage(text="ok"),
-        tokens=TokenCount(request=42, response=7),
-        spend=TokenCost(request=0.03),
-    )
-    with root._install_contextvars(), child._install_contextvars():
-        child.record_response(response)
-    assert root.cost_tracker.spend.total == pytest.approx(0.03)
-    assert root.cost_tracker.total == TokenCount()
-    assert child.cost_tracker.total == TokenCount(request=42, response=7)
-    assert child.own_spend.total == pytest.approx(0.03)
-
-
-def test_own_spend_reports_child_spend_under_root_sink() -> None:
-    """A child's own spend is public even though its tracker's spend stays 0."""
-    root = _build_agent()
-    child = _build_agent()
-    response = ModelResponse(
-        message=AssistantMessage(text="ok"),
-        tokens=TokenCount(),
-        spend=TokenCost(request=0.5),
-    )
-    with root._install_contextvars(), child._install_contextvars():
-        child.record_response(response)
-    assert child.cost_tracker.spend.total == 0.0
-    assert child.own_spend == TokenCost(request=0.5)
-    assert root.own_spend == TokenCost()
-
-
-def test_subagent_tool_state_depth_increments() -> None:
-    """C6: nested subagent's ``ToolState.depth`` reflects spawn depth."""
-    root = _build_agent()
-    child = _build_agent()
-    with root._install_contextvars():
-        assert root.tool_state.depth == 0
-        with child._install_contextvars():
-            assert child.tool_state.depth == 1
-
-
-def test_tool_state_depth_restored_on_context_exit() -> None:
-    """``_install_contextvars`` must restore ``tool_state.depth`` like its ContextVars.
-
-    ``depth`` is a plain instance field mutated inside the block; every other
-    piece of state is token-restored on exit. If ``depth`` is not restored, a
-    reused agent re-entered under a different parent computes ``parent.depth+1``
-    from a stale starting value and the depth cap drifts.
-    """
-    root = _build_agent()
-    deep = _build_agent()  # One agent object reused under two parents.
-    with root._install_contextvars(), deep._install_contextvars():
-        assert deep.tool_state.depth == 1
-    # After both blocks exit, the reused agent's depth must be back to its
-    # pre-entry value (0), not left at the in-context 1.
-    assert deep.tool_state.depth == 0, "depth leaked past the context block"
-    # Re-enter under a fresh root: depth must again be exactly 1, not 2.
-    root2 = _build_agent()
-    with root2._install_contextvars(), deep._install_contextvars():
-        assert deep.tool_state.depth == 1, "stale depth accumulated across re-entry"
-
-
-def test_default_named_agents_get_unique_registry_label() -> None:
-    """H11/M7: two agents with the same name don't overwrite each other."""
-    a1 = _build_agent()
-    a2 = _build_agent()
-    assert a1.name == a2.name == "Agent"
-    with a1._install_contextvars(), a2._install_contextvars():
-        labels = [k for k, v in agent_registry.items() if v in (a1, a2)]
-        assert len(set(labels)) == 2
-
-
-def test_status_setter_publishes_status_changed() -> None:
-    """H5: changing ``status`` publishes ``types.runtime.StatusChanged`` to observers."""
-    a = _build_agent()
-    events: list[str] = []
-
-    def watch(event: object) -> None:
-        if isinstance(event, StatusChanged):
-            events.append(event.text)
-
-    a.runtime.observers.append(watch)
-    a.status = "working"
-    a.status = "working"  # No-op: same value.
-    a.status = "idle"
-    assert events == ["working", "idle"]
-
-
-def test_split_bg_args_strips_background_and_delay() -> None:
-    """C7: ``background`` / ``delay`` removed from forwarded args."""
-    bg, delay, clean = split_bg_args({"msg": "hi", "background": True, "delay": 3})
-    assert bg is True
-    assert delay == 3.0
-    assert clean == {"msg": "hi"}
-
-
-def test_split_bg_args_delay_implies_background() -> None:
-    """C7: positive ``delay`` implies ``background=True`` even when omitted."""
-    bg, delay, _ = split_bg_args({"delay": 5})
-    assert bg is True
-    assert delay == 5.0
-
-
-@pytest.mark.asyncio
-async def test_model_switch_event_queues_swap_until_call_drains() -> None:
-    """Write-mode ``/model`` (via ``runtime.ModelSwitch``) defers the
-    swap until the in-flight model call finishes, so cost is recorded
-    against the OLD model and only the NEXT call uses the NEW one.
-
-    Calling ``agent.swap_model`` directly mid-call mis-attributes cost
-    (the bug); routing through the inbox sequences the swap correctly.
-    """
-    stream_entered = asyncio.Event()
-    gate = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class GatedModel(StubModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            del publish
-            self.received.append(request)
-            stream_entered.set()
-            await gate.wait()
-            return ModelResponse(
-                message=AssistantMessage(text="from A"),
-                spend=TokenCost(request=0.10),
-            )
-
-    model_a = GatedModel(model_id="model-A")
-    model_b = StubModel(model_id="model-B")
-    agent = _build_agent(model=model_a)
-
-    async def consume() -> None:
-        async for _ in agent.run(UserMessage(text="hi")):
-            pass
-
-    drive = asyncio.create_task(consume())
-    await asyncio.wait_for(stream_entered.wait(), timeout=1.0)
-
-    # User types ``/model model-B``. Slash handler pushes a
-    # ``ModelSwitch`` event into the inbox; runtime defers it.
-    agent.runtime.inbox.push_back(
-        ModelSwitch(apply=lambda: agent.swap_model(model_b), label="A -> B"),
-    )
-
-    # Release the in-flight call.
-    gate.set()
-    await drive
-
-    # Cost lands on model-A: the runtime didn't apply the swap until
-    # AFTER ``types.runtime.ModelResponseComplete`` set ``model_call`` to None, which
-    # is after ``_AgentModel.stream`` called ``record_response``.
-    assert len(model_a.received) == 1
-    assert len(model_b.received) == 0
-    assert agent.cost_tracker.calls_by_model == {"model-A": 1}
-    # And the deferred swap did fire: the NEXT call would go to B.
-    assert agent.model is model_b
-
-
-def test_swap_model_clears_unsupported_thinking() -> None:
-    """Swapping to a model without thinking support drops the budget."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _NoThinkingModel(StubModel):
-        supports_thinking: bool = False
-
-    a = _build_agent(model=StubModel(supports_thinking=True))
-    a.model.settings.thinking_budget = "auto"
-    a.swap_model(_NoThinkingModel())
-    assert a.model.settings.thinking_budget == "none"
-
-
-def test_swap_model_resets_a_budget_the_new_model_rejects() -> None:
-    """Mirrors the live generation split: 4-8 takes ``adaptive``, 4-5 does not.
-
-    The swap must drop the now-unofferable budget rather than send
-    ``thinking.type=adaptive`` and earn a 400 on the next turn.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class _EnabledOnlyModel(StubModel):
-        """Reasons, but only via the ``fixed`` budget -- no ``adaptive``."""
-
-        supports_thinking: bool = True
-
-        @property
-        @override
-        def capability(self) -> ModelCapability:
-            # Two-arg ``super``: ``slots=True`` rebuilds the class, so the
-            # zero-arg form's ``__class__`` cell points at the discarded
-            # original and raises on Python < 3.14 (python/cpython#90562).
-            base = super(_EnabledOnlyModel, self).capability
-            return dataclasses.replace(
-                base,
-                thinking=dataclasses.replace(
-                    base.thinking,
-                    budget=frozenset({"none", "fixed"}),
-                ),
-            )
-
-    a = _build_agent(model=StubModel(supports_thinking=True))
-    a.model.settings.thinking_budget = "auto"
-    a.swap_model(_EnabledOnlyModel())
-    assert a.model.settings.thinking_budget == "none"
-
-
-def test_swap_model_carries_a_selection_the_new_model_still_offers() -> None:
-    """A swap keeps what the user chose; only the unofferable is dropped."""
-    a = _build_agent(model=StubModel(supports_thinking=True))
-    a.model.settings.thinking_budget = "fixed"
-    a.swap_model(StubModel(model_id="other", supports_thinking=True))
-    assert a.model.settings.thinking_budget == "fixed"
-
-
-def test_swap_model_resets_effort_invalid_for_new_model() -> None:
-    """Effort outside the new model's ``valid_efforts`` resets to unset."""
-    a = _build_agent(model=StubModel(valid_efforts=("low", "high")))
-    a.model.settings.thinking_effort = "high"
-    a.swap_model(StubModel(valid_efforts=("low", "medium")))
-    assert a.model.settings.thinking_effort == "none"
-
-
-def test_recompact_docstring_describes_alias_semantics() -> None:
-    assert Agent.recompact.__doc__ is not None
-    assert "alias" in Agent.recompact.__doc__.lower()
-
-
-@pytest.mark.asyncio
-async def test_compact_if_needed_uses_agent_request_cap() -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _RecorderCompactor:
-        seen_limits: list[int] = field(default_factory=list)
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, system_tokens
-            self.seen_limits.append(largest_context)
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref, custom_instructions
-            raise AssertionError("compact should not run")
-
-    compactor = _RecorderCompactor()
-    a = Agent(model=StubModel(max_request_tokens=100_000), compactor=compactor)
-    a.max_request_tokens = 10_000
-
-    progressed = await a.compact_if_needed([UserMessage(text="x")], a.model)
-
-    assert progressed is True
-    # The agent's lowered cap (10_000), not the model's 100_000, and net of
-    # the response + buffer reservations the strategy makes.
-    assert compactor.seen_limits == [compactor.largest_context(a.budget)]
-    assert compactor.seen_limits[0] < 10_000
-
-
-@pytest.mark.asyncio
-async def test_compact_if_needed_resets_failure_breaker_when_healthy() -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _HealthyCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref, custom_instructions
-            raise AssertionError("compact should not run")
-
-    a = Agent(model=StubModel(), compactor=_HealthyCompactor())
-    a.compaction_state.compact_failures = 3
-
-    progressed = await a.compact_if_needed([UserMessage(text="x")], a.model)
-
-    assert progressed is True
-    assert a.compaction_state.compact_failures == 0
-
-
-@pytest.mark.asyncio
-async def test_compactor_estimates_use_live_background_aware_tools() -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _RecordingModel(StubModel):
-        estimated_tools: list[Sequence[Tool] | None] = field(default_factory=list)
-
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            self.estimated_tools.append(request.tools)
-            return StubModel.approx_request_tokens(self, request)
-
-    @dataclass(slots=True, kw_only=True)
-    class _NoopCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return False
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref, custom_instructions
-            raise AssertionError("compact should not run")
-
-    model = _RecordingModel()
-    tool = StubTool(
-        directive_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
-    )
-    a = Agent(model=model, tools=[tool], compactor=_NoopCompactor())
-
-    progressed = await a.compact_if_needed([UserMessage(text="x")], model)
-
-    assert progressed is True
-    tools_seen = model.estimated_tools[-1]
-    assert tools_seen is not None
-    assert isinstance(tools_seen[0], BackgroundAwareTool)
-
-
-@pytest.mark.asyncio
-async def test_agent_compactor_receives_canonical_context() -> None:
-    seen_context: list[Sequence[ModelContextEvent]] = []
-
-    @dataclass(slots=True, kw_only=True)
-    class _RecordingCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del model, custom_instructions
-            seen_context.append(context)
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-    call = ToolCall(id="call_1", name="Bash", args={})
-    a = Agent(model=StubModel(), compactor=_RecordingCompactor())
-    a._tool_results_override = ToolResultPolicy(message_budget_tokens=10)
-    a.runtime.append_history(UserMessage(text="start"))
-    a.runtime.append_history(AssistantMessage(tool_calls=(call,)))
-    a.runtime.append_history(ToolResult(call_id="call_1", content="x" * 1_000))
-
-    assert await a.compact_now() is True
-    result = seen_context[-1][2]
-    assert isinstance(result, ToolResult)
-    assert result.content == "x" * 1_000
-
-
-@pytest.mark.asyncio
-async def test_post_compact_estimates_use_live_background_aware_tools() -> None:
-    @dataclass(slots=True, kw_only=True)
-    class _RecordingModel(StubModel):
-        estimated_tools: list[Sequence[Tool] | None] = field(default_factory=list)
-
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            self.estimated_tools.append(request.tools)
-            # Two-arg ``super``: see ``_EnabledOnlyModel``.
-            return super(_RecordingModel, self).approx_request_tokens(request)
-
-    @dataclass(slots=True, kw_only=True)
-    class _OkCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-    model = _RecordingModel()
-    tool = StubTool(
-        directive_schema={"type": "object", "properties": {"msg": {"type": "string"}}},
-    )
-    a = Agent(model=model, tools=[tool], compactor=_OkCompactor())
-    a.runtime.append_history(UserMessage(text="x"))
-
-    assert await a.compact_now() is True
-
-    for tools_seen in model.estimated_tools:
-        assert tools_seen is not None
-        assert isinstance(tools_seen[0], BackgroundAwareTool)
-
-
-@pytest.mark.asyncio
-async def test_compact_payload_ending_with_tool_calls_gets_synthetic_results() -> None:
-    """Post-compact tail repair must preserve tool-call pairing.
-
-    The producer declares nothing external, so an unanswered call in its
-    payload is a genuine orphan and the repair pairs it. (A producer that DOES
-    declare an id external is answered on the tape instead -- see
-    ``test_agent_compactor_recomputes_paired_externally_from_final_payload``.)
-    """
-
-    class _ToolCallCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: Model,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            call = ToolCall(id="call-1", name="Echo", args={})
-            del tape
-            return ContextSplice.replay(
-                ref=mint_ref(),
-                mask=(),
-                insert_after=None,
-                payload=(AssistantMessage(tool_calls=(call,)),),
-                strategy="legacy",
-            )
-
-    a = Agent(model=StubModel(), compactor=_ToolCallCompactor())
-    a.runtime.append_history(UserMessage(text="x"))
-
-    assert await a.compact_now() is True
-
-    payload = a.runtime.context().messages
-    validate_context(payload)
-    assert isinstance(payload[-1], ToolResult)
-    assert payload[-1].call_id == "call-1"
-    assert payload[-1].is_error is True
-
-
-@pytest.mark.asyncio
-async def test_compact_now_awaits_active_runtime_compact_task() -> None:
-    """Overflow compaction must not race an inbox-driven compaction."""
-    started = asyncio.Event()
-    release = asyncio.Event()
-    call_count = 0
-
-    class _SlowCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: Model,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            nonlocal call_count
-            del context, model, custom_instructions
-            call_count += 1
-            started.set()
-            await release.wait()
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-    a = Agent(model=StubModel(), compactor=_SlowCompactor())
-    a.runtime.append_history(UserMessage(text="x"))
-    a.runtime.compact_task = asyncio.create_task(a.runtime._compact_and_post(""))
-    await started.wait()
-
-    waiting = asyncio.create_task(a.compact_now())
-    await asyncio.sleep(0.05)
-    assert call_count == 1
-    assert not waiting.done()
-    release.set()
-
-    assert await waiting is True
-    await a.runtime.compact_task
-    assert call_count == 1
-
-
-@pytest.mark.asyncio
-async def test_will_retrigger_uses_agent_budget_not_model_cap() -> None:
-    """Post-compact retry prediction must call compactor with agent budget."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _BudgetModel(StubModel):
-        # Over the 0.95 retrigger threshold (~75) yet within the 80-token
-        # target, so the splice is kept and flagged rather than refused.
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            del request
-            return 78
-
-    @dataclass(slots=True, kw_only=True)
-    class _RecordingCompactor:
-        should_compact_calls: list[tuple[int, int, int]] = field(default_factory=list)
-
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            self.should_compact_calls.append(
-                (current_tokens, largest_context, system_tokens),
-            )
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: Model,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-    budget = AgentSettings(
-        max_request_tokens=100,
-        max_response_tokens=10,
-        buffer_tokens=10,
-    )
-    compactor = _RecordingCompactor()
-    a = Agent(
-        model=_BudgetModel(max_request_tokens=1_000, max_response_tokens=10),
-        compactor=compactor,
-        budget=budget,
-    )
-    a.runtime.append_history(UserMessage(text="x"))
-
-    assert await a.compact_now() is True
-
-    splices = [record for record in a.runtime.tape if isinstance(record, ContextSplice)]
-    assert len(splices) == 1
-    assert "re-trigger compaction" in splices[0].fallback_reason
-    # The retry-prediction call must use the agent budget (100 - 10 - 10 =
-    # 80), not the raw model cap (1_000). The leading should_compact call is
-    # the proactive gate; the trailing one is the willRetriggerNextTurn
-    # prediction -- both run against the agent budget's ``input_target``.
-    assert compactor.should_compact_calls, "should_compact never called"
-    for _input, target, _system in compactor.should_compact_calls:
-        assert target == 80, (
-            f"willRetriggerNextTurn used input_target={target}, expected 80"
-        )
-
-
-@pytest.mark.asyncio
-async def test_post_compact_hook_budget_is_what_the_strategy_left_over() -> None:
-    """The hook may spend exactly the window the strategy did not reserve.
-
-    Tokens throughout: the budget was once scaled by a ``chars_per_token``
-    divisor, so a hook measuring its own output with the model's tokenizer
-    overran the very window compaction had just cleared.
-    """
-    calls: list[int] = []
-
-    @dataclass(slots=True, kw_only=True)
-    class _SaturatedModel(StubModel):
-        @override
-        def approx_request_tokens(self, request: ModelRequest) -> int:
-            del request
-            return self.max_request_tokens - 100
-
-    @dataclass(slots=True, kw_only=True)
-    class _RestorableTool(StubTool):
-        async def post_compact_restore(
-            self,
-            history: list[ModelContextEvent],
-            tool_state: ToolState,
-            *,
-            budget_tokens: int,
-            estimate_tokens: Callable[[str], int],
-        ) -> None:
-            del history, tool_state, estimate_tokens
-            calls.append(budget_tokens)
-
-    @dataclass(slots=True, kw_only=True)
-    class _OkCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
-
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del context, model, custom_instructions
-            return _summary_override(
-                [UserMessage(text="[summary]")],
-                mint_ref,
-                tape=tape,
-            )
-
-    budget = AgentSettings(
-        max_request_tokens=1_000,
-        max_response_tokens=5,
-        buffer_tokens=5,
-    )
-    a = Agent(
-        model=_SaturatedModel(max_request_tokens=1_000, max_response_tokens=5),
-        tools=[_RestorableTool()],
-        compactor=_OkCompactor(),
-        budget=budget,
-    )
-    a.runtime.append_history(UserMessage(text="x"))
-
-    assert await a.compact_now() is True
-
-    # 100 tokens left of the 1,000 window, less the 10 the strategy reserves.
-    assert calls == [90]
-
-
-def test_agent_with_session_dir_auto_persists(tmp_path: Path) -> None:
-    """Constructing an Agent with ``session_dir`` self-installs the persistence
-    observer; no external wiring needed.
-
-    Regression test for a bug surfaced by session 8588644a: AgentSpawn handed
-    each child a ``session_dir`` but the persistence observer was only wired
-    by the CLI for the root agent, so subagent work vanished without trace.
-    Now Agent.__init__ auto-installs.
-    """
-    a = _build_agent(session_dir=tmp_path)
-    a.status = "working"  # Triggers StatusChanged → persistence observer fires.
-    session_file = tmp_path / "session.jsonl"
-    assert session_file.exists()
-    lines = session_file.read_text(encoding="utf-8").splitlines()
-    assert lines, "expected at least one record"
-    first = json_loads(lines[0], dict[str, object])
-    assert first["kind"] == "meta"
-    assert first["status"] == "working"
-
-
-def test_agent_without_session_dir_does_not_persist(tmp_path: Path) -> None:
-    """No ``session_dir`` -> no observer attached -> no file written."""
-    a = _build_agent()
-    a.status = "working"
-    assert not (tmp_path / "session.jsonl").exists()
-
-
-def test_agent_resume_rebaselines_persistence(tmp_path: Path) -> None:
-    """``resume()`` must rebaseline the persistence observer.
-
-    Without rebaselining, the replayed tape records would be written
-    back to ``session.jsonl`` on the next ``SaveSession``, duplicating
-    every persisted record. Tests this by populating session.jsonl,
-    constructing a fresh Agent with the same session_dir, resuming
-    from the file, then triggering a SaveSession and asserting the
-    file size hasn't grown.
-    """
-    # Phase 1: write some records via a first agent.
-    a1 = _build_agent(session_dir=tmp_path)
-    a1.status = "first"
-    a1.status = "second"  # Ensure at least one tape record gets written.
-    a1.runtime.publish(SaveSession())
-    session_file = tmp_path / "session.jsonl"
-    assert session_file.exists()
-    size_after_phase1 = session_file.stat().st_size
-    assert size_after_phase1 > 0
-
-    # Phase 2: fresh agent, same session_dir. Load, resume, save.
-    loaded = load_session(tmp_path)
-    assert loaded is not None
-    a2 = _build_agent(session_dir=tmp_path)
-    a2.resume(*loaded)
-    a2.runtime.publish(SaveSession())
-
-    # File should not have grown materially -- the resumed tape was
-    # already on disk, so the SaveSession after resume must be a no-op
-    # on tape (only the meta line gets updated, if anything).
-    size_after_resume = session_file.stat().st_size
-    # The post-resume save may rewrite meta; allow some growth, but not
-    # the full tape duplication that would result from a missing rebaseline.
-    assert size_after_resume < 2 * size_after_phase1, (
-        f"resume rebaseline broken: file grew from {size_after_phase1}"
-        f" to {size_after_resume} after resume+save"
-    )
-
-
-def test_agent_resume_loads_service_suspended_retry_at(tmp_path: Path) -> None:
-    """``resume()`` populates ``runtime.resume_retry_at`` from the latest event."""
-    a1 = _build_agent(session_dir=tmp_path)
-    later = ModelServiceSuspended(
-        provider="anthropic",
-        auth="key",
-        account="default",
-        model_id="claude-test",
-        retry_at=2_000.0,
-        delay_sec=120.0,
-        server_supplied=True,
-        error=ServiceErrorSnapshot(type_name="RateLimitError", message="429"),
-    )
-    earlier = replace(later, retry_at=1_000.0)
-    a1.runtime.publish(SaveSession())
-    append_session(tmp_path / "session.jsonl", runtime_events=[earlier, later])
-
-    loaded = load_session(tmp_path)
-    assert loaded is not None
-    a2 = _build_agent(session_dir=tmp_path)
-    a2.resume(*loaded)
-    assert a2.runtime.resume_retry_at == 2_000.0
-
-
-def test_a_resumed_agent_cannot_spend_its_cap_again(tmp_path: Path) -> None:
-    """The per-agent cap reads own spend, so own spend must survive a resume."""
-    a1 = _build_agent(session_dir=tmp_path, max_budget_usd=1.0)
-    with contextlib.suppress(BudgetExhaustedError):
-        a1.record_response(
-            ModelResponse(
-                message=AssistantMessage(text="a"),
-                spend=TokenCost(request=1),
-            ),
-        )
-    a1.runtime.publish(SaveSession())
-    loaded = load_session(tmp_path)
-    assert loaded is not None
-
-    a2 = _build_agent(session_dir=tmp_path, max_budget_usd=1.0)
-    a2.resume(*loaded)
-    with pytest.raises(BudgetExhaustedError):
-        a2.record_response(
-            ModelResponse(
-                message=AssistantMessage(text="b"),
-                spend=TokenCost(request=0.01),
-            ),
-        )
-
-
-def test_a_childs_session_records_its_own_spend(tmp_path: Path) -> None:
-    """Under a root sink a child's tracker spend is 0; its meta must not be."""
-    root = _build_agent()
-    child = _build_agent(session_dir=tmp_path)
-    with root._install_contextvars(), child._install_contextvars():
-        child.record_response(
-            ModelResponse(
-                message=AssistantMessage(text="a"),
-                spend=TokenCost(request=0.5),
-            ),
-        )
-        child.runtime.publish(SaveSession())
-    loaded = load_session(tmp_path)
-    assert loaded is not None
-    assert loaded[0].own_spend == TokenCost(request=0.5)
-
-
-def test_resume_restores_a_recipe_that_differs_only_in_provider(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Same model id under another provider/account is a different model."""
-    a = _build_agent_with_spec(model_id="stub-1")
-    restored = StubModel()
-    spec = ModelRecipe(provider="P2", auth="key", model_id="stub-1", account="b")
-    calls: list[SessionMeta] = []
-
-    def fake_restore(
-        meta: SessionMeta,
-    ) -> tuple[Model, ModelRecipe, None]:
-        calls.append(meta)
-        return restored, spec, None
-
-    monkeypatch.setattr(agent, "restore_model", fake_restore)
-    meta = SessionMeta(provider="P2", auth="key", account="b", model_id="stub-1")
-    a.resume(meta, [], ToolState())
-    assert len(calls) == 1
-    assert a.model_recipe == spec
-
-
-def test_a_resume_saves_memories_where_its_shown_index_lives(tmp_path: Path) -> None:
-    """Blocks built before a resume named one directory; Memory saved to another."""
-    a = Agent(model=StubModel(), system="S", prompt_context=_Context())
-    _ = a.system_blocks()
-    a.resume(SessionMeta(), [], ToolState(bash_cwd=str(tmp_path)))
-    _ = a.system_blocks()
-    assert a.tool_state.project_cwd == str(tmp_path)
-
-
-@pytest.mark.asyncio
-async def test_shutdown_force_false_cancels_detached_and_explicit_bg() -> None:
-    """``shutdown(force=False)`` must cancel detached + explicit_bg tasks.
-
-    Without this, detached / explicit-bg tasks outlive ``serve_forever``
-    and post to a dead inbox after the runtime has Quit. Only persistent
-    subagents are spared -- they own their own ``serve_forever``.
-    """
-    a = _build_agent()
-    detached_task = asyncio.create_task(asyncio.sleep(60))
-    explicit_task = asyncio.create_task(asyncio.sleep(60))
-    persistent_task = asyncio.create_task(asyncio.sleep(60))
-    a.runtime.detached["call-d"] = detached_task
-    a.register_background(
-        "job-explicit",
-        BackgroundTaskEntry(
-            task=explicit_task,
-            tool_name="X",
-            queue_id="job-explicit",
-            started=0.0,
-            kind="tool",
-        ),
-    )
-    a.register_background(
-        "job-persistent",
-        BackgroundTaskEntry(
-            task=persistent_task,
-            tool_name="Y",
-            queue_id="job-persistent",
-            started=0.0,
-            kind="subagent",
-            lifecycle="serviced",
-            persistent_run_id="run-persistent",
-        ),
-    )
-    try:
-        a.shutdown(force=False)
-        with contextlib.suppress(asyncio.CancelledError):
-            await detached_task
-        with contextlib.suppress(asyncio.CancelledError):
-            await explicit_task
-        assert detached_task.cancelled()
-        assert explicit_task.cancelled()
-        assert not persistent_task.cancelled(), (
-            "serviced subagent owns its own serve_forever; must NOT be cancelled"
-        )
-    finally:
-        _ = persistent_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await persistent_task
-
-
-# --- A40: _repair_compact_payload pairs tool calls and fills missing TRs --
-
-
-def test_repair_compact_payload_fills_missing_tool_results_with_interrupted() -> None:
-    """Each ``ToolCall`` id declared by an ``AssistantMessage`` must
-    receive a matching ``ToolResult`` after repair. Missing pairs get
-    a synthetic ``[interrupted]`` placeholder so the payload is a
-    wire-valid compaction input.
-    """
-    am = AssistantMessage(
-        tool_calls=tuple(
-            ToolCall(id=f"c{idx}", name="x", args={}) for idx in range(20)
-        ),
-    )
-    # Only every other id has a real result; the rest must be filled.
-    results = [ToolResult(call_id=f"c{idx}", content="ok") for idx in range(0, 20, 2)]
-    out = _repair_compact_payload([am, *results, UserMessage(text="next")])
-    seen_ids = {e.call_id for e in out if isinstance(e, ToolResult)}
-    assert seen_ids == {f"c{idx}" for idx in range(20)}
-    interrupted = [
-        e for e in out if isinstance(e, ToolResult) and e.content == "[interrupted]"
-    ]
-    assert len(interrupted) == 10
-
-
-def test_repair_compact_payload_coalesces_cross_source_user_turns() -> None:
-    """Adjacent user-side turns must collapse so the splice stays valid.
-
-    A persistent reviewer's ``AgentSendMessage`` abutting a human
-    ``UserMessage`` in the compaction tail are both wire ``user`` role.
-    ``ContextSplice.__post_init__`` (re-run by ``dataclasses.replace`` in
-    ``_AgentCompactor.compact``) rejects two consecutive user-side entries
-    with ``InvalidPayloadError: payload violates role alternation`` -- the
-    wedge that halted session 98aebeae (``[from rev-gpt2]``) and recurred
-    on every retry and on compaction. Repair must coalesce them, demoting
-    the cross-source pair to ``UserMessage`` so attribution is not falsified.
-    """
-    out = _repair_compact_payload(
-        [
-            UserMessage(text="please review"),
-            AgentSendMessage(source="rev-gpt2", text="End of review."),
-        ],
-    )
-    assert len(out) == 1
-    merged = out[0]
-    assert isinstance(merged, UserMessage)
-    # The agent send keeps its attribution via an inlined ``[from X]: `` label
-    # on demotion; the human turn is unlabeled.
-    assert merged.text == "please review\n\n[from rev-gpt2]: End of review."
-    # The construct-time validator the live wedge tripped must now accept it.
-    splice = ContextSplice(
-        ref=TapeRef(session_id="s", ordinal=0),
-        mask=(),
-        insert_after=None,
-        strategy="summary",
-        payload=(UserMessage(text="[summary]"),),
-    )
-    replace(splice, payload=tuple(out))
-
-
-def test_repair_compact_payload_keeps_same_source_agent_send_type() -> None:
-    """Same-source ``AgentSendMessage`` pairs keep their type and ``source``."""
-    out = _repair_compact_payload(
-        [
-            AgentSendMessage(source="a", text="x"),
-            AgentSendMessage(source="a", text="y"),
-        ],
-    )
-    assert len(out) == 1
-    merged = out[0]
-    assert isinstance(merged, AgentSendMessage)
-    assert merged.source == "a"
-    assert merged.text == "x\n\ny"
-
-
-def test_repair_compact_payload_dedups_tool_call_ids_across_assistants() -> None:
-    """Two AMs sharing a tool_call id must not yield a dup-id splice payload.
-
-    ``_repair_compact_payload`` tracks only one AM-TR window, so two AMs
-    declaring the same id each get a synthetic ``[interrupted]`` result ->
-    ``[AM(t1), TR(t1), AM(t1), TR(t1)]``: duplicate ``ToolResult`` call_id
-    (rule 3) and duplicate tool_call id across AMs (rule 4). The downstream
-    ``dataclasses.replace`` that rebuilds the ``ContextSplice`` then raises
-    ``InvalidPayloadError`` and wedges compaction. Repair must dedupe so its
-    output is splice-valid.
-    """
-    tc = ToolCall(id="t1", name="x", args={})
-    out = _repair_compact_payload(
-        [
-            AssistantMessage(tool_calls=(tc,)),
-            AssistantMessage(tool_calls=(tc,)),
-        ],
-    )
-    tr_ids = [e.call_id for e in out if isinstance(e, ToolResult)]
-    assert len(tr_ids) == len(set(tr_ids)), f"duplicate ToolResult ids: {tr_ids}"
-    # Exactly one synthetic [interrupted] result survives -- locks that the
-    # cross-AM dedup (here) and the in-merge dedup (_merge_assistant) together
-    # collapse the colliding id to a single TR, not two (R2O-1).
-    assert len(tr_ids) == 1
-    # Must construct as a splice payload (the live wedge was here).
-    ContextSplice(
-        ref=TapeRef(session_id="s", ordinal=0),
-        mask=(),
-        insert_after=None,
-        strategy="summary",
-        payload=tuple(out),
-    )
-
-
-def test_repair_compact_payload_drops_hollow_dup_only_assistant() -> None:
-    """A dup-only AM with no text/thinking must not survive as a hollow turn.
-
-    When every tool_call id of a later AM was already claimed, dedup empties
-    it; with no text or thinking it carries nothing. If it is not adjacent to
-    another AM (so coalescing can't absorb it), it ships as an empty assistant
-    turn -- wire-dropped by the provider but polluting the splice payload and
-    size accounting. Mirror ``_sanitize_for_send``: drop it (F6).
-    """
-    tc = ToolCall(id="t1", name="x", args={})
-    out = _repair_compact_payload(
-        [
-            AssistantMessage(tool_calls=(tc,)),
-            ToolResult(call_id="t1", content="r"),
-            UserMessage(text="hi"),
-            AssistantMessage(tool_calls=(tc,)),
-        ],
-    )
-    hollow = [
-        e
-        for e in out
-        if isinstance(e, AssistantMessage)
-        and not e.tool_calls
-        and not e.text
-        and not e.thinking_blocks
-    ]
-    assert hollow == [], f"hollow AM leaked into payload: {out!r}"
-
-
-def test_repair_compact_payload_interrupted_results_are_ordered() -> None:
-    """Synthetic [interrupted] results are emitted in deterministic order.
-
-    ``_append_interrupted_results`` iterates ``sorted(pending)`` rather than
-    ``set.pop()`` (arbitrary), so the same input always yields the same
-    on-disk ``session.jsonl`` and a deterministic resume (R2O-6).
-    """
-    calls = tuple(ToolCall(id=f"c{i}", name="x", args={}) for i in range(8))
-    out = _repair_compact_payload(
-        [AssistantMessage(tool_calls=calls)],
-    )
-    tr_ids = [e.call_id for e in out if isinstance(e, ToolResult)]
-    assert tr_ids == sorted(tr_ids) == [f"c{i}" for i in range(8)]
-
-
-def test_repair_compact_payload_coalesces_adjacent_assistants() -> None:
-    """Two adjacent assistant turns must collapse, not just user-side ones.
-
-    The role-alternation invariant ``ContextSplice`` enforces has two legs:
-    user->user and assistant->assistant. ``_repair_compact_payload`` closed
-    the user leg but left ``[AM, AM]`` flowing through untouched, so the
-    identical ``InvalidPayloadError: payload violates role alternation``
-    still wedges compaction when the payload tail carries two assistant
-    turns (e.g. an interrupted turn re-summarized beside a fresh one). The
-    repair pass must coalesce both legs so its output is always splice-valid.
-    """
-    out = _repair_compact_payload(
-        [
-            AssistantMessage(text="one"),
-            AssistantMessage(text="two"),
-        ],
-    )
-    # The construct-time validator the live wedge tripped must now accept it.
-    splice = ContextSplice(
-        ref=TapeRef(session_id="s", ordinal=0),
-        mask=(),
-        insert_after=None,
-        strategy="summary",
-        payload=(UserMessage(text="[summary]"),),
-    )
-    replace(splice, payload=tuple(out))
-    assert sum(isinstance(e, AssistantMessage) for e in out) == 1
-
-
-@pytest.mark.asyncio
-async def test_agent_run_rejects_concurrent_drivers() -> None:
-    """A second ``run`` while one drives would push ``Quit`` into it."""
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    @dataclass(slots=True, kw_only=True)
-    class _HoldingModel(StubModel):
-        @override
-        async def stream(
-            self,
-            request: ModelRequest,
-            publish: Callable[[RuntimeEvent], None] | None = None,
-        ) -> ModelResponse:
-            started.set()
-            await release.wait()
-            return await StubModel.stream(self, request, publish)
-
-    a = _build_agent(model=_HoldingModel())
-
-    async def _drain(text: str) -> None:
-        async for _event in a.run(UserMessage(text=text)):
-            pass
-
-    first = asyncio.create_task(_drain("first"))
-    await asyncio.wait_for(started.wait(), timeout=1.0)
-    with pytest.raises(RuntimeError, match="not reentrant"):
-        await _drain("second")
-    release.set()
-    await asyncio.wait_for(first, timeout=1.0)
-    await _drain("third")
-
-
-def test_the_driver_claim_is_taken_without_an_await() -> None:
-    """``_claim_driver`` is synchronous, so no caller can interleave it."""
-    assert not inspect.iscoroutinefunction(Agent._claim_driver)
-
-
-# --- A31: unified background-cancel predicate ------------------------------
-
-
-_BgKind = Literal["tool", "subagent", "detached"]
-
-
-def _bg_entry(
-    task: asyncio.Task[object],
-    *,
-    kind: _BgKind,
-    lifecycle: Literal["oneshot", "serviced"] = "serviced",
-    hidden: bool = False,
-) -> BackgroundTaskEntry:
-    # ``persistent_run_id`` is mandatory for a serviced subagent and ignored
-    # otherwise; supplying a stub keeps the helper general.
-    needs_run_id = kind == "subagent" and lifecycle == "serviced"
-    return BackgroundTaskEntry(
-        task=task,
-        tool_name="t",
-        queue_id="q",
-        started=0.0,
-        hidden=hidden,
-        kind=kind,
-        lifecycle=lifecycle,
-        persistent_run_id="run-test" if needs_run_id else "",
-    )
-
-
-@pytest.mark.asyncio
-async def test_should_cancel_background_tools_only_mode() -> None:
-    """tools_only mode cancels only ``kind == 'tool'`` non-hidden jobs."""
-    loop = asyncio.get_running_loop()
-    live = cast(asyncio.Task[object], loop.create_future())
-    try:
-        assert (
-            _should_cancel_background(_bg_entry(live, kind="tool"), mode="tools_only")
-            is True
-        )
-        assert (
-            _should_cancel_background(
-                _bg_entry(live, kind="detached"),
-                mode="tools_only",
-            )
-            is False
-        )
-        assert (
-            _should_cancel_background(
-                _bg_entry(live, kind="subagent"),
-                mode="tools_only",
-            )
-            is False
-        )
-        assert (
-            _should_cancel_background(
-                _bg_entry(live, kind="tool", hidden=True),
-                mode="tools_only",
-            )
-            is False
-        )
-    finally:
-        _ = cast(asyncio.Future[object], live).cancel()
-
-
-@pytest.mark.asyncio
-async def test_should_cancel_background_all_mode() -> None:
-    """All mode cancels every non-hidden live job except a serviced subagent.
-
-    A serviced subagent owns its own ``serve_forever`` and is exempt; a
-    oneshot subagent has self-stopped so it is NOT exempt (it would be
-    cancelled were it still live).
-    """
-    loop = asyncio.get_running_loop()
-    live = cast(asyncio.Task[object], loop.create_future())
-    done_future = loop.create_future()
-    done_future.set_result(None)
-    done = cast(asyncio.Task[object], done_future)
-    try:
-        assert (
-            _should_cancel_background(_bg_entry(live, kind="tool"), mode="all") is True
-        )
-        assert (
-            _should_cancel_background(_bg_entry(live, kind="detached"), mode="all")
-            is True
-        )
-        assert (
-            _should_cancel_background(
-                _bg_entry(live, kind="subagent", lifecycle="serviced"),
-                mode="all",
-            )
-            is False
-        )
-        assert (
-            _should_cancel_background(
-                _bg_entry(live, kind="subagent", lifecycle="oneshot"),
-                mode="all",
-            )
-            is True
-        )
-        assert (
-            _should_cancel_background(
-                _bg_entry(live, kind="tool", hidden=True),
-                mode="all",
-            )
-            is False
-        )
-        assert (
-            _should_cancel_background(_bg_entry(done, kind="tool"), mode="all") is False
-        )
-    finally:
-        _ = cast(asyncio.Future[object], live).cancel()
-
-
-# --- A6: ``job_id_for_call`` is public (no SLF001 noqa needed) -------------
-
-
-def test_job_id_for_call_is_public_on_agent() -> None:
-    """The cross-class helper must not require an SLF001 suppression."""
-    assert hasattr(Agent, "job_id_for_call")
-    assert not hasattr(Agent, "_job_id_for_call"), (
-        "rename leftover: remove the private alias"
-    )
-    source = Path(inspect.getfile(Agent)).read_text(encoding="utf-8")
-    assert "SLF001" not in source or "_job_id_for_call" not in source, (
-        "SLF001 noqa should be gone with the rename"
-    )
-
-
-# --- W7-α regression tests --------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_background_aware_tool_strips_bg_keys_before_inner() -> None:
-    """REV7-020: direct ``BackgroundAwareTool.run`` calls must strip bg keys.
-
-    The wrapper advertises ``background`` / ``delay`` in the schema, so
-    it -- not just the runtime-path ``_AgentTool`` wrapper -- owns
-    stripping them before the inner tool's schema validation sees them.
-    """
-    inner_calls: list[Mapping[str, object]] = []
-
-    @dataclass(slots=True, kw_only=True)
-    class CapturingTool(StubTool):
-        @override
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            inner_calls.append(dict(args))
-            return ToolResult(call_id="", content="ok")
-
-    wrap = BackgroundAwareTool(CapturingTool())
-    _ = await wrap.run({"background": True, "msg": "hi"})
-    assert inner_calls, "inner tool was not invoked"
-    last = inner_calls[-1]
-    assert "background" not in last
-    assert "delay" not in last
-    assert last["msg"] == "hi"
-
-
-def test_background_aware_tool_rejects_non_object_schema() -> None:
-    """REV7-019: ``BackgroundAwareTool`` requires object-typed schemas.
-
-    Injecting ``properties`` into a ``type: "string"`` / ``"array"`` /
-    etc. schema silently produces a schema that strict validators reject
-    and misrepresents the tool to the model. The wrapper must refuse
-    construction up front.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class StringSchemaTool(StubTool):
-        directive_schema: Mapping[str, PlainTree] = field(
-            default_factory=lambda: {"type": "string"},
-        )
-
-    with pytest.raises(ValueError, match="object-typed"):
-        _ = BackgroundAwareTool(StringSchemaTool())
-
-
-def test_background_aware_tool_accepts_typeless_schema() -> None:
-    """REV7-019: schemaless inner schemas still wrap (JSON Schema's "any")."""
-
-    @dataclass(slots=True, kw_only=True)
-    class TypelessTool(StubTool):
-        directive_schema: Mapping[str, PlainTree] = field(
-            default_factory=lambda: cast(Mapping[str, PlainTree], {}),
-        )
-
-    wrap = BackgroundAwareTool(TypelessTool())
-    # Injection still happens; the wrapper's whole job depends on it.
-    props = cast(Mapping[str, object], wrap.directive_schema["properties"])
-    assert "background" in props
-    assert "delay" in props
-
-
-@pytest.mark.asyncio
-async def test_compact_if_needed_circuit_breaker_stashes_synthetic_error(
+async def test_a_message_merged_into_an_unanswered_one_journals_only_itself(
     tmp_path: Path,
 ) -> None:
-    """REV7-004: the breaker branch sets ``last_compact_error`` so the
-    ``_AgentModel.stream`` ``assert last_err is not None`` invariant holds
-    even after a coupling slip clears the prior error.
-    """
+    journal = RecordingJournal()
+    _, first = _agent(tmp_path, ValueError("model down"), reply("ok"), journal=journal)
+    async with first:
+        with pytest.raises(ValueError, match="model down"):
+            _ = await first.send("part one")
+        assert await first.send("part two") == "ok"
 
-    @dataclass(slots=True, kw_only=True)
-    class _AlwaysCompactCompactor:
-        @property
-        def reattach(self) -> ReattachPolicy:
-            return ReattachPolicy()
+    assert sum(isinstance(r, ContextClear) for r in journal) == 1
+    assert UserMessage(content="part two") in [
+        replace(r, timestamp=None) for r in journal if isinstance(r, UserMessage)
+    ]
+    provider, resumed = _agent(tmp_path, reply("again"), journal=journal)
+    async with resumed:
+        _ = await resumed.send("next")
 
-        def largest_context(self, settings: AgentSettings) -> int:
-            return _stub_largest_context(settings)
-
-        def should_compact(
-            self,
-            current_tokens: int,
-            largest_context: int,
-            system_tokens: int = 0,
-        ) -> bool:
-            del current_tokens, largest_context, system_tokens
-            return True
-
-        async def compact(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            model: object,
-            mint_ref: Callable[[], TapeRef],
-            custom_instructions: str | None = None,
-        ) -> ContextSplice:
-            del tape, context, model, mint_ref, custom_instructions
-            raise RuntimeError("ignored: breaker is open")
-
-        def maintain(
-            self,
-            tape: Sequence[TapeRecord],
-            context: Sequence[ModelContextEvent],
-            tools: object,
-            mint_ref: Callable[[], TapeRef],
-        ) -> tuple[ContextSplice, ...]:
-            del tape, context, tools, mint_ref
-            return ()
-
-    a = Agent(
-        model=StubModel(),
-        compactor=_AlwaysCompactCompactor(),
-        session_dir=tmp_path,
-    )
-    # Open the breaker AND clear last_compact_error to simulate the
-    # coupling slip the assert is supposed to defend against.
-    a.compaction_state.compact_failures = 3
-    a.last_compact_error = None
-    a.runtime.append_history(UserMessage(text="x"))
-    progressed = await a.compact_if_needed(a.runtime.context().messages, a.model)
-    assert progressed is False
-    assert a.last_compact_error is not None
+    assert _texts(provider.requests[0].records)[:3] == [
+        "part one\n\npart two",
+        "ok",
+        "next",
+    ]
 
 
-def test_agent_rejects_zero_max_attempts() -> None:
-    """REV7-015: ``max_attempts < 1`` would yield
-    ``RetriesExhaustedError("Failed after 0 attempts: None")`` from the
-    first send. Validate up front instead.
-    """
-    with pytest.raises(ValueError, match="max_attempts"):
-        _ = Agent(model=StubModel(), max_attempts=0)
-
-
-def test_agent_summary_failure_falls_back_to_tool_name(
-    caplog: pytest.LogCaptureFixture,
+@pytest.mark.asyncio
+async def test_a_resumed_session_signs_in_as_the_account_it_stood(
+    tmp_path: Path,
 ) -> None:
-    """REV7-006: any ``summary()`` exception falls back to the tool name."""
+    def per_account(account: str | None) -> dict[str, partial[ScriptedProvider]]:
+        del account
+        return {"vendor": partial(ScriptedProvider, capability=_capability("wide"))}
 
-    @dataclass(slots=True, kw_only=True)
-    class BrokenSummaryTool(StubTool):
-        @override
-        def summary(self, args: Mapping[str, object]) -> str:
-            del args
-            raise TypeError("author bug")
+    journal = RecordingJournal()
+    catalog = ModelCatalog(factories=per_account)
+    first = Agent(
+        model=catalog.signed_in("vendor", account="work")["wide"],
+        journal=journal,
+        cwd=tmp_path,
+        agents_md=_config(tmp_path),
+        account="work",
+    )
+    async with first:
+        pass
 
-    a = _build_agent(tools=[BrokenSummaryTool()])
-    wrapper = next(t for t in a.runtime.tools_map.values() if t.name == "Echo")
-    with caplog.at_level(logging.ERROR, logger="sagent.agent.agent"):
-        result = asyncio.new_event_loop().run_until_complete(wrapper.run({}))
-    # Tool ran to completion; no ``is_error`` leak from the label failure.
-    assert not result.is_error
-    assert any("summary" in r.getMessage() for r in caplog.records)
+    fresh = ModelCatalog(factories=per_account)
+    again = Agent(
+        model=fresh["vendor"]["wide"],
+        journal=journal,
+        cwd=tmp_path,
+        agents_md=_config(tmp_path),
+    )
+    await again.recall(fresh)
+
+    assert again.account == "work"
+    assert again.model.provider is fresh.signed_in("vendor", account="work")
 
 
-def test_tool_round_cap_pushes_single_error_when_before_spawn_blocks() -> None:
-    """``_before_tool_spawn`` is the one round-cap gate: exactly one error."""
-
-    @dataclass(slots=True, kw_only=True)
-    class CountingTool(StubTool):
-        @override
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        @override
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            return ToolResult(call_id="", content="ran")
-
-    model = StubModel(
-        responses=[
-            AssistantMessage(tool_calls=(ToolCall(id="c1", name="Echo", args={}),)),
-            AssistantMessage(tool_calls=(ToolCall(id="c2", name="Echo", args={}),)),
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tail",
+    [
+        [
+            reply(calls=[call("Nope", "c1")]),
+            UncategorizedToolResult(call_id="c1", content="[detached]", stub="pending"),
         ],
+        [UserMessage(content="are you there?")],
+        [
+            reply(calls=[call("Nope", "c1")]),
+            UncategorizedToolResult(call_id="c1", content="ok"),
+        ],
+    ],
+    ids=["job-running-at-quit", "unanswered-message", "unanswered-result"],
+)
+async def test_a_resumed_session_waits_for_the_user_before_answering(
+    tmp_path: Path,
+    tail: list[ModelContextEvent],
+) -> None:
+    """What the last process left unanswered is answered with the user's next message."""
+    journal = RecordingJournal()
+    _, first = _agent(tmp_path, reply("hello"), journal=journal)
+    async with first:
+        _ = await first.send("hi")
+        for record in tail:
+            _ = first.runtime.append_history(record)
+
+    provider = ScriptedProvider(replies=[reply("answered")])
+    _, resumed = _agent(tmp_path, provider=provider, journal=journal)
+    # As ``recall`` does: the model the session stood replaces the one built.
+    resumed.model = provider["scripted"]
+    async with resumed:
+        assert resumed.runtime.inbox.gate_armed
+        assert provider.requests == []
+        assert await resumed.send("next") == "answered"
+
+    (asked,) = provider.requests
+    assert _texts(asked.records)[-1].endswith("next")
+
+
+@pytest.mark.asyncio
+async def test_a_cap_tripped_outside_a_turn_does_not_haunt_the_next(
+    tmp_path: Path,
+) -> None:
+    provider = ScriptedProvider(
+        replies=[reply(calls=[call("Nope", "a")]), reply(calls=[call("Nope", "b")])],
     )
-    a = Agent(model=model, tools=[CountingTool()], max_tool_call_rounds=1)
+    _, agent = _agent(tmp_path, provider=provider, max_rounds=1)
+    provider.replies.append(lambda request: _halting(agent, request))
+    seen = _Seen()
+    async with agent:
+        agent.runtime.observers.append(seen)
+        agent.runtime.push(AgentToAgentMessage(sender="peer", content="work"))
+        await seen.until(lambda: seen.count(types.Halt) > 0)
 
-    async def _drive() -> int:
-        count = 0
-        async for ev in a.run(UserMessage(text="go")):
-            if isinstance(ev, ModelResponseError):
-                count += 1
-        return count
-
-    error_count = asyncio.new_event_loop().run_until_complete(_drive())
-    assert error_count == 1, f"expected 1 ModelResponseError, got {error_count}"
+        with pytest.raises(asyncio.CancelledError):
+            _ = await agent.send("then this")
 
 
-@pytest.mark.asyncio
-async def test_serve_forever_rejects_a_concurrent_run() -> None:
-    """``run`` documents protection from a concurrent ``serve_forever``.
-
-    Only ``run`` and ``drive_until_first_idle`` claimed the flag, so a
-    direct ``serve_forever`` was invisible to the check and ``run``'s
-    ``finally`` would push ``Quit`` into the foreign driver's inbox.
-    """
-    a = _build_agent()
-    serving = asyncio.create_task(a.serve_forever())
-    await asyncio.sleep(0)
-    try:
-        with pytest.raises(RuntimeError):
-            async for _ in a.run(UserMessage(text="hi")):
-                pass
-    finally:
-        a.shutdown(force=True)
-        _ = serving.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await serving
+def _halting(agent: Agent, request: Request) -> Response:
+    del request
+    agent.runtime.halt()
+    return reply("halted by the user")
 
 
 @pytest.mark.asyncio
-async def test_a_tool_owned_delay_reaches_the_tool() -> None:
-    """A tool declaring ``delay`` keeps it; it is not a background request."""
-    schema: Mapping[str, PlainTree] = {
-        "type": "object",
-        "properties": {"delay": {"type": "integer"}},
-    }
-    tool = StubTool(directive_schema=schema)
-    a = _build_agent(tools=[tool])
-    assert "background" not in json.dumps(a.live_tools()[0].directive_schema)
-    wrapper = a.runtime.tools_map["Echo"]
-    result = await wrapper.run({"delay": 5})
-    assert tool.calls == [{"delay": 5}]
-    assert result.kind != ToolResultKind.PENDING
-    assert a.background == {}
+async def test_an_agent_closes_the_models_it_was_given(tmp_path: Path) -> None:
+    provider = _Counting()
+    first, second, third = (provider["scripted"] for _ in range(3))
+    agent = Agent(model=first, cwd=tmp_path, agents_md=_config(tmp_path))
+    agent.model = second
+    async with agent:
+        agent.model = third
+        agent.model = third
+        await agent.runtime.schedule(_nothing)
+
+        assert (first.closed, second.closed, third.closed) == (1, 1, 0)
+    assert third.closed == 1
 
 
-@pytest.mark.parametrize("args", [{"delay": 1.5}, {"background": "true"}])
-@pytest.mark.asyncio
-async def test_a_mistyped_control_key_is_an_input_validation_error(
-    args: dict[str, object],
+async def _nothing() -> None:
+    return
+
+
+def test_an_edit_of_earlier_history_writes_a_new_window(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    session = _session(agent)
+    session.resume()
+    first = agent.runtime.append_history(UserMessage(content="one"))
+    session.persist()
+    _ = agent.runtime.append_history(reply("noted", spend=TokenCost(response=0.5)))
+    session.persist()
+    edited = UserMessage(content="one, edited")
+
+    _ = agent.runtime.append_splice(
+        mask=(MaskRange(session_id="", lo=first.ordinal, hi=first.ordinal),),
+        payload=(edited,),
+        strategy="edit",
+        discards_content=True,
+    )
+    session.persist()
+
+    (window,) = _own(journal)
+    assert isinstance(window, ContextClear)
+    assert window.history == (edited, AssistantMessage(content="noted"))
+
+
+class _FailingJournal(RecordingJournal):
+    """Raises on the next ``fails`` appends, as a full disk does."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.fails = 0
+
+    @override
+    def append(self, *records: SessionRecord) -> None:
+        if self.fails:
+            self.fails -= 1
+            raise OSError("No space left on device")
+        super().append(*records)
+
+
+@pytest.mark.parametrize("edit", [False, True], ids=["append", "new-window"])
+def test_what_a_failed_write_dropped_the_next_write_writes(
+    tmp_path: Path,
+    edit: bool,
 ) -> None:
-    a = _build_agent(tools=[StubTool()])
-    result = await a.runtime.tools_map["Echo"].run(args)
-    assert result.is_error
-    assert "InputValidationError" in result.content
-
-
-@pytest.mark.asyncio
-async def test_a_second_serve_forever_is_rejected() -> None:
-    """Two loops on one inbox: whichever exits first unguarded the other."""
-    a = _build_agent()
-    serving = asyncio.create_task(a.serve_forever())
-    await asyncio.sleep(0)
-    second = asyncio.create_task(a.serve_forever())
-    try:
-        with pytest.raises(RuntimeError, match="not reentrant"):
-            await asyncio.wait_for(asyncio.shield(second), timeout=1.0)
-    finally:
-        a.shutdown(force=True)
-        for task in (serving, second):
-            _ = task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, RuntimeError):
-                await task
-
-
-@pytest.mark.asyncio
-async def test_drive_until_first_idle_propagates_a_driver_crash(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A crashed loop must not read as an empty successful result."""
-    a = _build_agent()
-
-    async def _boom(claim: object) -> None:
-        del claim
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(a, "_serve", _boom)
-    with pytest.raises(RuntimeError, match="boom"):
-        _ = await a.drive_until_first_idle(UserMessage(text="hi"))
-
-
-def test_tool_registry_is_bounded_across_a_long_session(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """One entry per tool call, never pruned, grows for the whole session."""
-    registry_max = 8
-    monkeypatch.setattr(agent, "_TOOL_REGISTRY_MAX", registry_max)
-    a = _build_agent()
-    for i in range(registry_max + 2):
-        a._track_tool_registry(
-            ModelResponseComplete(
-                message=AssistantMessage(
-                    text="",
-                    tool_calls=(ToolCall(id=f"c{i}", name="Echo", args={}),),
-                ),
-            ),
+    journal = _FailingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    session = _session(agent)
+    session.resume()
+    first = agent.runtime.append_history(UserMessage(content="one"))
+    if edit:
+        _ = agent.runtime.append_splice(
+            mask=(MaskRange(session_id="", lo=first.ordinal, hi=first.ordinal),),
+            payload=(UserMessage(content="one, edited"),),
+            strategy="edit",
+            discards_content=True,
         )
-    assert len(a._tool_registry) <= registry_max
+    journal.fails = 1
+
+    with pytest.raises(OSError, match="No space left"):
+        session.persist()
+    session.persist()
+
+    _, resumed = _agent(tmp_path, journal=journal)
+    _session(resumed).resume()
+    said = [r.content for r in _session(resumed) if isinstance(r, UserMessage)]
+    assert said == (["one, edited"] if edit else ["one"])
 
 
-def test_tool_registry_keeps_detached_calls_however_old(
+def test_a_removal_from_earlier_history_writes_a_new_window(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    session = _session(agent)
+    session.resume()
+    _ = agent.runtime.append_history(UserMessage(content="one"))
+    second = agent.runtime.append_history(UserMessage(content="two"))
+    session.persist()
+
+    _ = agent.runtime.append_splice(
+        mask=(MaskRange(session_id="", lo=second.ordinal, hi=second.ordinal),),
+        strategy="edit",
+        discards_content=True,
+    )
+    session.persist()
+
+    (window,) = _own(journal)
+    assert isinstance(window, ContextClear)
+    assert window.history == (UserMessage(content="one"),)
+
+
+def test_a_pruned_result_is_journaled_as_itself_and_resumes_pruned(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    session = _session(agent)
+    session.resume()
+    _ = agent.runtime.append_history(UserMessage(content="go"))
+    _ = agent.runtime.append_history(reply(calls=[call("Echo", "c1")]))
+    _ = agent.runtime.append_history(
+        UncategorizedToolResult(call_id="c1", content="long output", is_error=True),
+    )
+    session.persist()
+
+    drop(agent.runtime, [2], stub="[pruned]")
+    _ = agent.runtime.append_history(reply("done"))
+    session.persist()
+
+    assert sum(isinstance(r, ContextClear) for r in journal.history()) == 1
+    _, resumed = _agent(tmp_path, journal=journal)
+    _session(resumed).resume()
+    assert list(_session(resumed)) == list(session)
+    assert UncategorizedToolResult(
+        call_id="c1",
+        content="[pruned]",
+        is_error=True,
+    ) in list(session)
+
+
+def _result(n: int) -> UncategorizedToolResult:
+    return UncategorizedToolResult(
+        call_id=f"c{n}",
+        content=f"output {n}",
+        is_error=True,
+    )
+
+
+def test_a_result_pruned_in_the_pass_it_came_is_journaled_whole(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    session = _session(agent)
+    session.resume()
+    _ = agent.runtime.append_history(UserMessage(content="go"))
+    _ = agent.runtime.append_history(reply(calls=[call("Echo", "c1")]))
+    _ = agent.runtime.append_history(_result(1))
+    drop(agent.runtime, [2], stub="[pruned]")
+    _ = agent.runtime.append_history(reply(calls=[call("Echo", "c2")]))
+    _ = agent.runtime.append_history(_result(2))
+    drop(agent.runtime, [4], stub="[pruned]")
+    _ = agent.runtime.append_history(reply("done"))
+    session.persist()
+
+    kept = list(journal.history())
+    assert _result(1) in kept
+    assert _result(2) in kept
+    assert sum(isinstance(r, ContextClear) for r in kept) == 1
+    _, resumed = _agent(tmp_path, journal=journal)
+    _session(resumed).resume()
+    assert list(_session(resumed)) == list(session)
+    stubs = [r for r in session if isinstance(r, ToolResult) and r.text() == "[pruned]"]
+    assert [r.call_id for r in stubs] == ["c1", "c2"]
+
+
+def test_a_result_edited_away_in_the_pass_it_came_is_journaled_whole(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    session = _session(agent)
+    session.resume()
+    first = agent.runtime.append_history(UserMessage(content="go"))
+    _ = agent.runtime.append_history(reply(calls=[call("Echo", "c1")]))
+    last = agent.runtime.append_history(_result(1))
+    _ = agent.runtime.append_splice(
+        mask=(MaskRange(session_id="", lo=first.ordinal, hi=last.ordinal),),
+        payload=(UserMessage(content="summary"),),
+        strategy="edit",
+        discards_content=True,
+    )
+    session.persist()
+
+    assert _result(1) in list(journal.history())
+    (window,) = _own(journal)
+    assert isinstance(window, ContextClear)
+    assert window.history == (UserMessage(content="summary"),)
+
+
+def test_a_reply_in_an_appending_pass_still_journals_what_it_cost(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    session = _session(agent)
+    session.resume()
+    _ = agent.runtime.append_history(UserMessage(content="one"))
+    session.persist()
+
+    _ = agent.runtime.append_history(reply("noted", spend=TokenCost(response=0.5)))
+    last = agent.runtime.append_history(UserMessage(content="two"))
+    _ = agent.runtime.append_splice(insert_after=last, strategy="note")
+    session.persist()
+
+    assert UserMessage(content="two") in list(journal)
+    usage = [r for r in journal if isinstance(r, TokenUsage)]
+    assert [u.info["spend_usd"] for u in usage] == [0.5]
+
+
+def test_the_default_prompt_reads_as_utf8_whatever_the_locale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A detached result lands later; forgetting it loses its attribution."""
-    registry_max = 8
-    monkeypatch.setattr(agent, "_TOOL_REGISTRY_MAX", registry_max)
-    a = _build_agent()
-    loop = asyncio.new_event_loop()
-    try:
-        task = loop.create_task(asyncio.sleep(0))
-        a.runtime.detached["old"] = task
-        a._tool_registry["old"] = ("Bash", 0.0)
-        for i in range(registry_max + 2):
-            a._track_tool_registry(
-                ModelResponseComplete(
-                    message=AssistantMessage(
-                        text="",
-                        tool_calls=(ToolCall(id=f"c{i}", name="Echo", args={}),),
-                    ),
-                ),
-            )
-        assert a._tool_registry["old"] == ("Bash", 0.0)
-        _ = task.cancel()
-        loop.run_until_complete(asyncio.gather(task, return_exceptions=True))
-    finally:
-        loop.close()
+    latin1 = _Latin1()
+    monkeypatch.setattr(Path, "read_text", latin1)
 
+    _ = default_system_prompt()
 
-@pytest.mark.asyncio
-async def test_a_live_drive_loop_still_blocks_a_second_driver() -> None:
-    """REV6 AG-001: the single-driver claim outlived only the method, not the loop.
-
-    ``drive_until_first_idle`` returns while its ``serve_forever`` keeps
-    running by design, but its ``finally`` cleared ``_run_active``
-    unconditionally -- so a second ``run`` / ``drive_until_first_idle`` walked
-    past the guard onto the same inbox. Two drivers then consume each other's
-    events, and whichever exits first pushes ``Quit`` into the other's loop.
-    """
-    a = _build_agent(model=StubModel(responses=[AssistantMessage(text="hi")]))
-    _ = await a.drive_until_first_idle(UserMessage(text="go"))
-    # The loop must still be live, or the guard has nothing to protect.
-    assert a._drive_task is not None
-    assert not a._drive_task.done()
-
-    with pytest.raises(RuntimeError, match="not reentrant"):
-        _ = await a.drive_until_first_idle(UserMessage(text="again"))
-
-    a.shutdown(force=True)
-    with contextlib.suppress(asyncio.CancelledError):
-        await a._drive_task
-
-
-@pytest.mark.asyncio
-async def test_the_driver_claim_clears_once_the_loop_exits() -> None:
-    """The guard must not latch: after shutdown a fresh driver is allowed."""
-    a = _build_agent(model=StubModel(responses=[AssistantMessage(text="hi")]))
-    _ = await a.drive_until_first_idle(UserMessage(text="go"))
-    a.shutdown(force=True)
-    assert a._drive_task is not None
-    with contextlib.suppress(asyncio.CancelledError):
-        await a._drive_task
-
-    assert not a._run_active, "the claim latched after its loop exited"
+    assert latin1.asked == {"system_prompt.md": "utf-8"}
 
 
 @dataclass(slots=True, kw_only=True)
-class _FoldingModel(StubModel):
-    """Answer fold calls with the chunk markers they carried; others as a stub.
+class _Latin1:
+    """Read text as a latin-1 locale would, and note the encodings asked for."""
 
-    A fold call is recognized by the fold prompt it carries, never by the
-    request's shape, so an agent with a system prompt cannot misroute one.
-    A chunk marker in the final request proves its chunk was represented.
-    """
+    asked: dict[str, str | None] = field(default_factory=dict)
 
-    fold_requests: list[ModelRequest] = field(default_factory=list)
-    padding_chars: int = 0
+    def __get__(self, path: Path, owner: type[Path] | None = None) -> partial[str]:
+        """Bind to the path read, as the method it stands in for would."""
+        del owner
+        return partial(self, path)
 
-    @override
-    async def stream(
+    def __call__(
         self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        body = _user_text(request)
-        if "<content>" not in body:
-            return await super(_FoldingModel, self).stream(request, publish)
-        self.fold_requests.append(request)
-        listing = " ".join(re.findall(r"C\d{3}", body))
-        return ModelResponse(
-            message=AssistantMessage(text=f"saw {listing}\n{'p' * self.padding_chars}"),
-        )
-
-
-def _user_text(request: ModelRequest) -> str:
-    """Return the joined text of every user message in ``request``."""
-    return "\n".join(m.text for m in request.messages if isinstance(m, UserMessage))
-
-
-def _diff_prompt(chunks: int = 200) -> tuple[str, list[str]]:
-    """Return a commit-message request: instructions first, then a marked diff."""
-    markers = [f"C{i:03d}" for i in range(chunks)]
-    diff = "".join(f"{m} {'d' * 994}\n" for m in markers)
-    return f"OUTPUT-FORMAT: BEGIN_COMMIT ... END_COMMIT\n{diff}LAST-HUNK\n", markers
-
-
-async def _run_agent(model: _FoldingModel, *prompts: str) -> Agent:
-    """Commit all but the last prompt, then run the agent on the last one."""
-    budget = AgentSettings(
-        max_request_tokens=8_000,
-        max_response_tokens=1_000,
-        buffer_tokens=1_000,
-    )
-    a = Agent(model=model, compactor=SummaryCompactor(), budget=budget)
-    for prompt in prompts[:-1]:
-        _ = a.runtime.append_history(UserMessage(text=prompt))
-    async for _ in a.run(UserMessage(text=prompts[-1])):
-        pass
-    return a
-
-
-def _assert_folded(a: Agent, model: _FoldingModel, markers: list[str]) -> None:
-    """One fitting request; head and tail verbatim; every chunk represented."""
-    [request] = model.received
-    assert model.approx_request_tokens(request) <= SummaryCompactor().largest_context(
-        a.budget,
-    )
-    text = _user_text(request)
-    assert "OUTPUT-FORMAT: BEGIN_COMMIT ... END_COMMIT" in text, text[:200]
-    assert "LAST-HUNK" in text, text[-200:]
-    assert set(re.findall(r"C\d{3}", text)) == set(markers)
-    assert all(
-        model.approx_request_tokens(r) <= a.max_request_tokens
-        for r in model.fold_requests
-    )
-
-
-@pytest.mark.asyncio
-async def test_a_user_message_larger_than_the_window_is_folded_to_fit() -> None:
-    """A 1.29M-token stdin prompt wedged auto-compaction in a retry loop.
-
-    Compaction kept the trailing user turn verbatim, so no summary could
-    shrink it, and the unchanged request shipped once per recovery attempt.
-    """
-    model = _FoldingModel()
-    prompt, markers = _diff_prompt()
-
-    a = await _run_agent(model, prompt)
-
-    _assert_folded(a, model, markers)
-    assert len(model.fold_requests) >= 2
-
-
-@pytest.mark.asyncio
-async def test_an_oversized_message_folds_when_summaries_are_long() -> None:
-    """Luna on a 1.5 MB diff: each summary was ~3k tokens; scrunch then gave up."""
-    model = _FoldingModel(padding_chars=2_000)
-    prompt, markers = _diff_prompt()
-
-    a = await _run_agent(model, prompt)
-
-    _assert_folded(a, model, markers)
-
-
-@pytest.mark.asyncio
-async def test_user_messages_that_coalesce_past_the_window_are_folded() -> None:
-    """Each half fits; the merged user turn the runtime commits does not."""
-    model = _FoldingModel()
-    prompt, markers = _diff_prompt(chunks=30)
-    middle = prompt.index("C015")
-
-    a = await _run_agent(model, prompt[:middle], prompt[middle:])
-
-    _assert_folded(a, model, markers)
-
-
-@pytest.mark.asyncio
-async def test_a_user_message_within_the_window_is_left_inline() -> None:
-    model = _FoldingModel()
-
-    _ = await _run_agent(model, "fits")
-
-    [request] = model.received
-    assert _user_text(request) == "fits"
-    assert model.fold_requests == []
-
-
-@pytest.mark.asyncio
-async def test_fold_messages_folds_only_oversized_user_side_text_to_even_shares(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Each user-side message over half the target folds to an equal share of half.
-
-    The rest of the payload passes through in order and untouched, and every fold
-    call may send what one model request leaves after its reply.
-    """
-    folds: list[tuple[str, int, int]] = []
-
-    async def fake_fold(
-        text: str,
-        *,
-        model: Model,
-        max_tokens: int,
-        call_tokens: int,
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
     ) -> str:
-        del model
-        folds.append((text[:1], max_tokens, call_tokens))
-        return f"folded {text[:1]}"
-
-    monkeypatch.setattr(fold, "fold_text", fake_fold)
-    a = Agent(
-        model=StubModel(),
-        compactor=SummaryCompactor(),
-        budget=AgentSettings(
-            max_request_tokens=8_000,
-            max_response_tokens=1_000,
-            buffer_tokens=1_000,
-        ),
-    )
-    bridge = _AgentCompactor(SummaryCompactor(), a)
-    target = 1_000
-    at_half = a.model.approx_text_tokens("h" * 2_000)
-    assert at_half == target // 2, "the boundary message must sit exactly at half"
-    big_user = UserMessage(text="u" * 8_000)
-    big_send = AgentSendMessage(source="peer", text="s" * 8_000)
-    payload: list[ModelContextEvent] = [
-        big_user,
-        AssistantMessage(text="a" * 8_000),
-        UserMessage(text="h" * 2_000),
-        big_send,
-        UserMessage(text="small"),
-    ]
-
-    out = await bridge._fold_messages(payload, target_input_tokens=target)
-
-    assert folds == [("u", 250, 7_000), ("s", 250, 7_000)]
-    assert out[1:3] == payload[1:3]
-    assert out[4] is payload[4]
-    # A fold replaces only the text; the message keeps its identity and source.
-    assert out[0] == replace(big_user, text="folded u")
-    assert out[3] == replace(big_send, text="folded s")
-
-    # A target too small to split still gives each fold at least one token.
-    folds.clear()
-    _ = await bridge._fold_messages(payload[:1], target_input_tokens=1)
-    assert folds == [("u", 1, 7_000)]
-
-
-@pytest.mark.asyncio
-async def test_fold_messages_leaves_a_payload_without_oversized_text_as_is(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def fake_fold(
-        text: str,
-        *,
-        model: Model,
-        max_tokens: int,
-        call_tokens: int,
-    ) -> str:
-        raise AssertionError(f"folded {text!r} {model} {max_tokens} {call_tokens}")
-
-    monkeypatch.setattr(fold, "fold_text", fake_fold)
-    a = Agent(model=StubModel(), compactor=SummaryCompactor())
-    payload: list[ModelContextEvent] = [
-        AssistantMessage(text="a" * 80_000),
-        UserMessage(text="small"),
-    ]
-
-    out = await _AgentCompactor(SummaryCompactor(), a)._fold_messages(
-        payload,
-        target_input_tokens=1_000,
-    )
-
-    assert out is payload
-
-
-@pytest.mark.asyncio
-async def test_a_request_compaction_cannot_fit_never_reaches_the_provider() -> None:
-    """Only the unfoldable part over the window raises: here, the system prompt.
-
-    The compactor reported ``fallback_reason`` and ``compact_now`` returned
-    True, so the unchanged oversized request was sent -- once proactively,
-    then once per overflow-recovery attempt.
-    """
-    model = StubModel()
-    a = Agent(
-        model=model,
-        system="s" * 40_000,
-        compactor=SummaryCompactor(),
-        budget=AgentSettings(
-            max_request_tokens=8_000,
-            max_response_tokens=1_000,
-            buffer_tokens=1_000,
-        ),
-    )
-
-    with pytest.raises(ContextOverflowError):
-        await a._agent_model.stream(
-            history=[UserMessage(text="hi")],
-            publish=lambda _ev: None,
-        )
-
-    assert model.received == []
+        del errors, newline
+        self.asked[path.name] = encoding
+        return path.read_bytes().decode(encoding or "latin-1")
 
 
 if __name__ == "__main__":

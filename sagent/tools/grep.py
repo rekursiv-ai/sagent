@@ -1,718 +1,428 @@
-"""Grep tool: the agent-facing schema over ``sagent.lib.files.grep``."""
+"""Grep: search file contents with ripgrep.
+
+Matches come back one per line in every output mode, so ``offset``,
+``keep_first``, and ``keep_last`` page them alike. A long line is cut around
+its first match, which is the part a search exists to show.
+
+Typical usage example:
+
+  result = await Grep().call(context, {"pattern": "def main", "-C": 2})
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final, cast, get_args
+from dataclasses import dataclass, field
+from importlib.resources import files
+from typing import TYPE_CHECKING, Annotated
 
+import asyncio
 import re
 
-from treekle import from_plain, immutable
+from treekle import PlainTree
 
-from sagent.agent.state import approx_tokens
 from sagent.lib.files.grep import GrepError, OutputMode, Query, Row, grep_rows
-from sagent.tools.core import (
-    bound_by_tokens,
-    load_tool_description,
-    resolve_tool_path,
-    result_token_budget,
-    run_sync,
-)
-from sagent.tools.display import Toggle, Wrap
-from sagent.tools.lib.bash import (
+from sagent.session.types import UncategorizedToolResult
+from sagent.tools.command_analyzer import (
     Invocation,
     bounding_sink,
-    cwd_is_known,
+    line_count,
     operands,
-    parse_line_count,
-    render_command,
     replaceable,
-    resolve_cwd_path,
-    walk_commands,
+    resolve,
 )
-from sagent.tools.tool_spec import CLI_SETTABLE
-from sagent.types.runtime import ToolResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import Arg, parse, schema_of
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
-    from bashlex.ast import (
-        node as BashlexNode,  # noqa: N812 -- PascalCase for the type name; bashlex spells it lowercase.
-    )
+    from sagent.tools.types import ToolContext
 
 
-# Short grep flags whose semantics we know how to express via the
-# Grep tool's schema. Bundled forms (``-rln``) are split char-by-char
-# and each character checked. Anything outside these sets bails.
-_GREP_TRANSLATABLE_FLAGS: frozenset[str] = frozenset(
-    {
-        "-r",
-        "-R",  # Recursive (Grep tool is recursive by default)
-        "-l",  # -> output_mode="files_with_matches"
-        "-c",  # -> output_mode="count"
-        "-n",  # → -n.
-        "-i",  # → -i.
-        "-E",  # Extended regex (ripgrep's default is close enough)
-        "-P",  # PCRE2 → Grep's pcre=True.
-        # Output-format flags we translate lossily: Grep tool always
-        # shows filenames in content mode, so ``-h`` (no filenames)
-        # loses info but the nudge is still useful. ``-H`` and ``-s``
-        # are (near-)no-ops for our output shape.
-        "-h",
-        "-H",
-        "-s",
-    },
-)
-
-# Short flags that consume the next token as their value.
-_GREP_VALUE_FLAGS: frozenset[str] = frozenset({"-B", "-A", "-C"})
-
-# Long flags we translate. ``--include`` → ``glob``; ``--exclude`` →
-# ``exclude``. Both forms (``--flag=VAL`` and ``--flag VAL``) are
-# accepted.
-_GREP_LONG_VALUE_FLAGS: frozenset[str] = frozenset({"--include", "--exclude"})
-
-# Bash executables we redirect to the Grep tool. ``rg`` shares grep's
-# basic shape (``rg PATTERN [PATH]`` with the same -i/-n/-l/-c/-A/-B/-C
-# flags), so the same parsers apply; ripgrep-only flags like ``-U`` or
-# ``-t`` fall through and the nudge bails on those shapes.
-_GREP_EXES: frozenset[str] = frozenset({"grep", "rg"})
-
-# ``grep`` reads by default and has no write mode, so nothing here makes
-# Bash necessary. Notably ABSENT: ``-c``, which counts matching lines and
-# is ``output_mode="count"``; a denylist shared with ``head`` (where
-# ``-c`` means bytes) silently dropped every ``grep -c``.
-#
-# ``-v`` inverts the match, and ``directive_schema`` has no property for
-# that -- ``exclude`` is a PATH glob (it becomes ``rg --glob !PAT``).
-# Measured on a file containing ``ERROR DEBUG b``: the pipeline
-# ``grep ERROR | grep -v DEBUG`` drops that line while
-# ``exclude='DEBUG'`` returns it.
-#
-# ``-q`` prints NOTHING and is read for its exit status -- the whole
-# point of ``grep -q x f && action``. A tool call returns matches, not a
-# status a later shell command can branch on, so Bash is necessary.
-_GREP_DENY: frozenset[str] = frozenset({"-v", "--invert-match", "-q", "--quiet"})
+__all__ = [
+    "Grep",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Grep:
-    """Search file contents with regex patterns."""
+    """Search file contents with ripgrep."""
+
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes; ripgrep's own spellings, such as ``-B``, as keys."""
+
+        pattern: Annotated[
+            str,
+            "The regular expression to search file contents for.",
+        ]
+        path: Annotated[
+            str,
+            "File or directory to search (rg PATH). Defaults to the cwd.",
+        ] = "."
+        glob: Annotated[
+            str,
+            'Files to search, e.g. "*.js" or "*.{ts,tsx}" (rg --glob).',
+        ] = ""
+        file_type: Annotated[
+            str,
+            "File type to search (rg --type): js, py, rust, go, ...",
+            Arg(key="type"),
+        ] = ""
+        exclude: Annotated[
+            str,
+            'Files to skip, e.g. "*.test.py" (rg --glob "!PAT").',
+        ] = ""
+        output_mode: Annotated[
+            OutputMode,
+            'Defaults to "files_with_matches".',
+        ] = "files_with_matches"
+        before: Annotated[
+            int,
+            'Lines before each match (rg -B); "content" mode only.',
+            Arg(minimum=0, key="-B"),
+        ] = 0
+        after: Annotated[
+            int,
+            'Lines after each match (rg -A); "content" mode only.',
+            Arg(minimum=0, key="-A"),
+        ] = 0
+        around: Annotated[int, "Alias for context.", Arg(minimum=0, key="-C")] = 0
+        context: Annotated[
+            int,
+            'Lines around each match (rg -C); "content" mode only.',
+            Arg(minimum=0),
+        ] = 0
+        ignore_case: Annotated[bool, "Ignore case (rg -i).", Arg(key="-i")] = False
+        line_numbers: Annotated[
+            bool,
+            "Show line numbers (rg -n). Defaults to true.",
+            Arg(key="-n"),
+        ] = True
+        keep_first: Annotated[
+            int,
+            "Keep the first N entries. Omit or 0 to keep as many as fit.",
+            Arg(minimum=0),
+        ] = 0
+        keep_last: Annotated[
+            int,
+            "Keep the last N entries instead; overrides keep_first and offset.",
+            Arg(minimum=0),
+        ] = 0
+        offset: Annotated[
+            int,
+            "Skip the first N entries before keep_first.",
+            Arg(minimum=0),
+        ] = 0
+        multiline: Annotated[
+            bool,
+            "Let . match newlines and patterns span lines (rg -U --multiline-dotall).",
+        ] = False
+        pcre: Annotated[
+            bool,
+            "Use PCRE2 (rg -P): lookaround, backrefs. Default Rust regex.",
+        ] = False
 
     name = "Grep"
-    tool_id = "application/x-tool-grep"
-    clearable_results = True
-    max_result_chars = 20_000
-    description = load_tool_description("Grep")
-    directive_schema = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "pattern": {
-                    "type": "string",
-                    "description": "The regular expression pattern to search for in file contents",
-                },
-                "path": {
-                    "type": "string",
-                    "description": "File or directory to search in (rg PATH). Defaults to current working directory.",
-                },
-                "glob": {
-                    "type": "string",
-                    "description": 'Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}") - maps to rg --glob',
-                },
-                "type": {
-                    "type": "string",
-                    "description": "File type to search (rg --type). Common types: js, py, rust, go, java, etc.",
-                },
-                "output_mode": {
-                    "type": "string",
-                    "enum": ["content", "files_with_matches", "count"],
-                    "description": 'Output mode. Defaults to "files_with_matches".',
-                },
-                "-B": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": 'Number of lines to show before each match (rg -B). Requires output_mode: "content". Must be ≥ 0.',
-                },
-                "-A": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": 'Number of lines to show after each match (rg -A). Requires output_mode: "content". Must be ≥ 0.',
-                },
-                "-C": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Alias for context. Must be ≥ 0.",
-                },
-                "context": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": 'Number of lines to show before and after each match (rg -C). Requires output_mode: "content". Must be ≥ 0.',
-                },
-                "-i": {
-                    "type": "boolean",
-                    "description": "Case insensitive search (rg -i)",
-                },
-                "-n": {
-                    "type": "boolean",
-                    "description": "Show line numbers in output (rg -n). Defaults to true.",
-                },
-                "keep_first": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Keep only the first N lines/entries. Omit for a budget-derived default; 0 means unlimited. Ignored when keep_last is set.",
-                },
-                "keep_last": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Keep only the last N lines/entries. Defaults to 0 (disabled). When set, takes precedence over keep_first and offset.",
-                },
-                "offset": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Skip first N lines/entries before applying keep_first. Defaults to 0. Ignored when keep_last is set.",
-                },
-                "multiline": {
-                    "type": "boolean",
-                    "description": "Enable multiline mode where . matches newlines and patterns can span lines (rg -U --multiline-dotall). Default: false.",
-                },
-                "pcre": {
-                    "type": "boolean",
-                    "description": (
-                        "Enable PCRE2 regex (rg -P): lookaround, backrefs,"
-                        " etc. Default: false (Rust regex)."
-                    ),
-                },
-                "exclude": {
-                    "type": "string",
-                    "description": (
-                        'Glob pattern of files to EXCLUDE (rg --glob "!PAT").'
-                        ' E.g. "*.test.py".'
-                    ),
-                },
-            },
-            "required": ["pattern"],
-        },
+    description = (files(__package__) / "assets" / "grep.md").read_text(
+        encoding="utf-8",
     )
+    schema = schema_of(Arguments)
 
-    output: Annotated[Toggle, CLI_SETTABLE] = "off"
-    """Whether the result body renders in the pane."""
+    display: ToolDisplay = field(default=ToolDisplay())
 
-    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Leading body rows kept."""
+    max_line_chars: int = 500
+    """Longest line shown, cut around its first match."""
 
-    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+    max_result_chars: int = 20_000
+    """How much text one result may hold, if below the context's."""
 
-    output_max_width: Annotated[int, CLI_SETTABLE] = 0
-    """Cell width cap; ``0`` uses the pane width."""
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``Grep '<pattern>'``, with ``in <path>`` when not the cwd."""
+        path = arguments.get("path")
+        where = f" in {path}" if path not in {None, "", "."} else ""
+        return f"Grep {str(arguments.get('pattern', ''))!r}{where}"
 
-    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
-    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
-
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short label for this tool invocation.
-
-        Args:
-          args: Parsed tool directive mapping.
-
-        Returns:
-          label: Compact one-line label for renderer display.
-
-        """
-        pattern = str(args.get("pattern", ""))
-        path = str(args.get("path", "")) or "."
-        suffix = f" in {path}" if path != "." else ""
-        return f"Grep {pattern!r}{suffix}"
-
-    def prompt(self) -> str:
-        """Return supplemental prompt text for this tool.
-
-        Returns:
-          text: Supplemental prompt text; empty for Grep.
-
-        """
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: read-only search needs no serialization."""
-        del args
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``None``: searching changes nothing."""
+        del context, arguments
         return None
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Search for a regex pattern in files and return matches.
+    def from_shell(
+        self,
+        invocation: Invocation,
+    ) -> Mapping[str, PlainTree] | str | None:
+        """Return the Grep call for ``grep`` or ``rg`` over files.
+
+        Three shapes search files: ``grep p f``, ``cat f | grep p``, and
+        ``find ROOT -name G | xargs grep p``.
 
         Args:
-          args: Parsed tool directive mapping.
+          invocation: One simple command, with its pipeline.
 
         Returns:
-          result: ``ToolResult`` carrying matches (or counts/filenames)
-            per ``output_mode``.
+          arguments: The Grep call for the same search; a message for flags no
+            call matches; or ``None`` when the command searches no file, as
+            ``git log | grep fix`` does, or needs the shell, as ``grep -q``.
 
         """
-        keep_first = from_plain(args.get("keep_first"), int, default=0)
-        keep_last = from_plain(args.get("keep_last"), int, default=0)
-        offset = from_plain(args.get("offset"), int, default=0)
-        context = _int_arg(args, "-C", "context")
-        context_before = max(_int_arg(args, "-B"), context)
-        context_after = max(_int_arg(args, "-A"), context)
-        # Schema declares all pagination/context knobs as ``minimum: 0``
-        # integers but ``get(..., int)`` accepts negatives, which then index
-        # from the end of the result list (``lines[-N:]`` returns the
-        # tail instead of failing). Enforce the schema floor here so a
-        # malformed directive surfaces as a tool error rather than
-        # mystery output.
-        bounds_err = _check_nonnegative(
-            ("keep_first", keep_first, args.get("keep_first")),
-            ("keep_last", keep_last, args.get("keep_last")),
-            ("offset", offset, args.get("offset")),
-            ("-B", _int_arg(args, "-B"), args.get("-B")),
-            ("-A", _int_arg(args, "-A"), args.get("-A")),
-            ("-C", context, args.get("-C") or args.get("context")),
-        )
-        if bounds_err is not None:
-            return bounds_err
-        output_mode = str(args.get("output_mode", "files_with_matches"))
-        if output_mode not in get_args(OutputMode):
-            return _error(
-                f"unknown output_mode: {output_mode!r}"
-                f" (expected one of {sorted(get_args(OutputMode))})",
+        searches = frozenset({"grep", "rg"})
+        refusal = "Search with Grep: pattern, path, glob, -i, -C, output_mode."
+        source = invocation.piped_from
+        # Bash fills in ``$x`` before the search runs; Grep would take it as written.
+        if invocation.expands or (source is not None and source.expands):
+            return None
+        if invocation.exe == "xargs":
+            search = _xargs_search(invocation, searches=searches)
+            if search is None:
+                return None
+            exe, args, root, name = search
+            path = resolve(invocation.cwd, root)
+            extra: dict[str, PlainTree] = {"glob": name} if name else {}
+        else:
+            deny = frozenset({"-v", "--invert-match", "-q", "--quiet"})
+            common = frozenset({"-A", "-B", "-C", "-m", "-e", "-f", "--color"})
+            takes_value = common | (
+                {"-d", "-D", "--label"} if invocation.exe == "grep" else {"-g", "-t"}
             )
-        query = Query(
-            pattern=str(args.get("pattern", "")),
-            glob=str(args.get("glob") or ""),
-            exclude=str(args.get("exclude") or ""),
-            file_type=str(args.get("type") or ""),
-            output_mode=cast("OutputMode", output_mode),
-            context_before=context_before,
-            context_after=context_after,
-            case_insensitive=from_plain(args.get("-i"), bool, default=False),
-            line_numbers=from_plain(args.get("-n"), bool, default=True),
-            multiline=from_plain(args.get("multiline"), bool, default=False),
-            pcre=from_plain(args.get("pcre"), bool, default=False),
-        )
-        return await run_sync(
-            _search,
-            path=Path(resolve_tool_path(str(args.get("path") or "."))),
-            query=query,
-            keep_first=keep_first,
-            keep_last=keep_last,
-            offset=offset,
-        )
+            if not replaceable(
+                invocation,
+                exes=searches,
+                deny=deny,
+                takes_value=takes_value,
+                fed=True,
+                counted=True,
+            ):
+                return None
+            exe, args, path = invocation.exe, invocation.args, ""
+            extra = dict[str, PlainTree]()
+            if source is not None:
+                # ``cat f | grep p``; a window, as ``head -n 20 f``, searches
+                # part of the file, which Grep cannot.
+                if source.exe not in {"cat", "head", "tail", "sed"}:
+                    # ``git log | grep fix`` searches a stream, not a file.
+                    return None
+                files = operands(source.args)
+                if source.exe != "cat" or source.args != files or len(files) != 1:
+                    return refusal
+                path = resolve(invocation.cwd, files[0])
+        parsed = _grep_arguments(args)
+        if parsed is None or path is None:
+            return refusal
+        arguments, patterns = parsed
+        named = arguments.pop("path", None)
+        fed = source is not None
+        # A file named beside the fed or listed ones is searched as well.
+        if fed and named is not None:
+            return refusal
+        # Without a file or ``-r``, grep reads its input, as both do for ``-``.
+        if named == "-" or (
+            exe == "grep" and not fed and named is None and not _flagged(args, "rR")
+        ):
+            return None
+        if (
+            exe == "grep"
+            and not _flagged(args, "EP")
+            and any(re.search(r"[+?|(){}]", p) for p in patterns)
+        ):
+            # A basic regular expression reads these as themselves, Grep as syntax.
+            return None
+        target = path if fed else resolve(invocation.cwd, str(named or ""))
+        if target is None or any(c in target for c in "*?[$`"):
+            return refusal
+        if target:
+            arguments["path"] = target
+        arguments.update(extra)
+        for sink in invocation.downstream():
+            if sink.exe == "wc":
+                arguments["output_mode"] = "count"
+        sink = bounding_sink(invocation)
+        if sink is not None:
+            count = line_count(sink.args)
+            if count is None:
+                return refusal
+            arguments["keep_last" if sink.exe == "tail" else "keep_first"] = count
+        return arguments
 
-    def bash_match(self, trees: Sequence[BashlexNode]) -> str | None:
-        """Emit a tool-use nudge for a replaceable grep shape.
-
-        Detection is :func:`replaceable`; this decides only which
-        executables Grep claims. ``find … | xargs grep`` is claimed too:
-        the search is the xargs payload and the find half only
-        enumerates what to search.
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> UncategorizedToolResult:
+        """Search the files under ``path`` for ``pattern``.
 
         Args:
-          trees: Parsed bash command-trees from the Bash directive.
+          context: The calling agent's state.
+          arguments: What the model passed, as ``Grep.Arguments``.
 
         Returns:
-          nudge: Suggestion text when the shape is replaceable, else ``None``.
+          result: One entry per line, with a note to resume when cut.
 
         """
-        for inv in walk_commands(trees):
-            if replaceable(inv, exes=_GREP_EXES, deny=_GREP_DENY) or (
-                inv.exe == "xargs" and _xargs_searches_files(inv)
-            ):
-                return _nudge_for(inv)
-        return None
-
-
-# Translation runs AFTER detection and may fail freely: an untranslated flag costs the
-# caller a worked example, not the nudge. Gating detection on it instead made every flag
-# outside :data:`_GREP_TRANSLATABLE_FLAGS` -- most of grep's ~80 -- silent.
-#
-# The translated args come from the SEARCH, which is not always ``inv``: an ``xargs``
-# payload carries the search behind the wrapper, and a stdin-fed search's path sits on
-# the producer feeding it. Translating ``inv.args`` blindly rendered ``xargs grep pat``
-# as ``pattern='grep' path='pat'``.
-def _nudge_for(inv: Invocation) -> str:
-    """Render the nudge, with concrete Grep arguments when translatable."""
-    args = _search_args(inv)
-    fields = _translate_grep_args(args, cwd=inv.cwd) if args is not None else ""
-    if fields:
-        fields += _sink_fields(inv)
-    call = f" Try: Grep {fields}" if fields else ""
-    return f"grep/rg via Bash is a bad UX. Use the Grep tool. Replaces: `{render_command(inv)}`.{call}"
-
-
-# Returns ``None`` when the operand cannot be recovered, so the caller drops the worked
-# example rather than inventing one.
-def _search_args(inv: Invocation) -> tuple[str, ...] | None:
-    """Argv of the SEARCH itself, with its path operand resolved."""
-    if inv.exe == "xargs":
-        payload = _strip_xargs_prefix(inv.args)
-        source = inv.piped_from
-        if payload is None or source is None:
-            return None
-        # ``find``'s own vocabulary: its operands are the ROOTS, and a
-        # predicate's value (``-name '*.py'``) is not one of them.
-        roots = operands("find", source.args)
-        if len(roots) > 1:
-            return None
-        # ``find -name '*.py'`` omits the root, which defaults to the
-        # cwd. Reading the first non-flag token as the root instead named
-        # the GLOB as the path.
-        root = roots[0] if roots else "."
-        name = next(
-            (source.args[i + 1] for i, a in enumerate(source.args) if a == "-name"),
-            "",
+        a = parse(arguments, Grep.Arguments)
+        around = max(a.around, a.context)
+        query = Query(
+            pattern=a.pattern,
+            glob=a.glob,
+            exclude=a.exclude,
+            file_type=a.file_type,
+            output_mode=a.output_mode,
+            context_before=max(a.before, around),
+            context_after=max(a.after, around),
+            case_insensitive=a.ignore_case,
+            line_numbers=a.line_numbers,
+            multiline=a.multiline,
+            pcre=a.pcre,
         )
-        # ``-name`` is optional: ``find /src -type f`` names a root and
-        # nothing else, which is a Grep call with no ``glob``.
-        return (*payload, root, *(("--include", name) if name else ()))
-    if inv.piped_from is None:
-        return inv.args
-    # ``cat f | grep p``: the pattern is here, the path one hop upstream.
-    # Ask through ``operands`` so a producer's flag VALUE is not counted
-    # as a second path -- ``head -n 20 f`` spends its ``20`` on the flag.
-    source = inv.piped_from
-    paths = [
-        a
-        for a in operands(source.exe, source.args)
-        if not bool(_SED_SCRIPT.fullmatch(a))
-    ]
-    if len(paths) != 1:
-        return None
-    return (*inv.args, paths[0])
+        try:
+            rows = await asyncio.to_thread(
+                grep_rows,
+                context.path(a.path or "."),
+                query,
+            )
+        except GrepError as e:
+            return UncategorizedToolResult(call_id="", content=str(e), is_error=True)
+        # ``keep_last`` starts the window at the tail; the resume note names it.
+        start = max(0, len(rows) - a.keep_last) if a.keep_last else a.offset
+        end = start + a.keep_first if a.keep_first and not a.keep_last else None
+        window = [self._clip(row) + "\n" for row in rows[start:end]]
+        if not window:
+            # Past the last entry, saying none matched would be false.
+            content = "(no matches in this window)" if rows else "(no matches)"
+            return UncategorizedToolResult(call_id="", content=content)
+        note = f"\n... ({len(window):,} more entries; pass offset={start + len(window)} to continue)"
+        body, kept = context.fit(window, reserve=len(note), cap=self.max_result_chars)
+        body = body.rstrip("\n")
+        if kept < len(window):
+            body += (
+                f"\n... ({len(window) - kept:,} more entries;"
+                f" pass offset={start + kept} to continue)"
+            )
+        return UncategorizedToolResult(call_id="", content=body)
 
-
-# ``sed -n '1,50p' f`` puts the script in operand position, so a producer's path cannot
-# be recovered by counting operands alone.
-# A ``sed`` address plus command (``5p``, ``1,50p``, ``10,$p``) or a
-# substitution -- the spellings that appear where a path would.
-_SED_SCRIPT: Final = re.compile(r"\d+(,(\d+|\$))?[a-z]|s/.*/.*/[a-z]*")
-
-
-# ``_sink_blocks`` accepts ``| wc -l`` precisely because Grep expresses it as
-# ``output_mode="count"``; omitting it advertises a different search than the one
-# replaced.
-#
-# Notably ABSENT: ``| grep -v X``. Measured on a file whose line reads ``ERROR DEBUG
-# b``: the pipeline drops that line, while ``exclude='DEBUG'`` returns it -- ``exclude``
-# is a PATH glob passed to ``rg --glob !PAT``, not a line filter.
-def _sink_fields(inv: Invocation) -> str:
-    """Render the downstream stages ``replaceable`` folded into this call."""
-    fields = "".join(
-        ' output_mode="count"'
-        for sink in inv.downstream()
-        if sink.exe == "wc" and sink.args == ("-l",)
-    )
-    # ``| head -5`` bounds the search, and Grep says that directly. A
-    # suggestion without it returns the whole match set.
-    sink = bounding_sink(inv)
-    count = parse_line_count(sink.args) if sink is not None else None
-    if count is not None:
-        fields += (
-            f" keep_last={count}"
-            if sink and sink.exe == "tail"
-            else (f" keep_first={count}")
+    # The ``path:line:`` prefix is kept whole: it is how the row is found.
+    def _clip(self, row: Row) -> str:
+        """Cut a row to ``max_line_chars`` around its first match."""
+        cut = row.prefix_end
+        text = row.text[cut:]
+        if len(text) <= self.max_line_chars:
+            return row.text
+        center = max(0, row.column - cut)
+        start = max(
+            0,
+            min(center - self.max_line_chars // 2, len(text) - self.max_line_chars),
         )
-    return fields
+        end = start + self.max_line_chars
+        head = f"[{start:,} chars] " if start else ""
+        tail = f" [{len(text) - end:,} chars]" if end < len(text) else ""
+        return f"{row.text[:cut]}{head}{text[start:end]}{tail}"
 
 
-# ``cwd`` is the enclosing ``cd`` prefix. Grep resolves a relative ``path`` against the
-# AGENT's cwd, not the shell's, so dropping it searches a different tree than the
-# command being replaced.
-def _translate_grep_args(args: tuple[str, ...], *, cwd: str = "") -> str:
-    """Render ``args`` as Grep tool keywords, or ``""`` when unsupported."""
-    fields: list[str] = []
-    positional: list[str] = []
+# The pattern is the first operand unless ``-e`` names it; one more operand is the path,
+# returned under ``path`` relative to the shell.
+# Returns ``None`` when an argument has no Grep counterpart.
+def _grep_arguments(
+    args: tuple[str, ...],
+) -> tuple[dict[str, PlainTree], list[str]] | None:
+    """Return ``grep`` or ``rg`` arguments as Grep's, and the patterns they join."""
+    arguments: dict[str, PlainTree] = {"output_mode": "content"}
+    operand: list[str] = []
     patterns: list[str] = []
     i = 0
     while i < len(args):
-        a = args[i]
-        if a == "-" or not a.startswith("-"):
-            positional.append(a)
+        arg = args[i]
+        value = args[i + 1] if i + 1 < len(args) else None
+        if arg == "-" or not arg.startswith("-"):
+            operand.append(arg)
+        elif arg in {"-e", "--regexp"} and value is not None:
+            patterns.append(value)
             i += 1
-            continue
-        if a in ("-e", "--regexp"):
-            # ``-e`` NAMES the pattern -- the only spelling that works
-            # for a pattern beginning with a dash. Skipping it as an
-            # ordinary flag value left the search with no pattern at all.
-            if i + 1 >= len(args):
-                return ""
-            patterns.append(args[i + 1])
-            i += 2
-            continue
-        if a.startswith("--"):
-            name, eq, value = a.partition("=")
-            if name not in _GREP_LONG_VALUE_FLAGS:
-                return ""
+        elif arg.partition("=")[0] in {"--include", "--exclude"}:
+            name, eq, given = arg.partition("=")
             if not eq:
-                if i + 1 >= len(args):
-                    return ""
-                value = args[i + 1]
-            fields.append(
-                f"glob={value!r}" if name == "--include" else f"exclude={value!r}",
-            )
-            i += 1 if eq else 2
-            continue
-        if a in _GREP_VALUE_FLAGS:
-            if i + 1 >= len(args):
-                return ""
-            # Bare, not quoted: the schema property IS ``-B``, and the
-            # sibling booleans already render ``-i=true``. ``"-B"=3``
-            # parses as nothing a caller can paste.
-            fields.append(f"{a}={args[i + 1]}")
-            i += 2
-            continue
-        for c in a[1:]:
-            if f"-{c}" not in _GREP_TRANSLATABLE_FLAGS:
-                return ""
-            if c == "l":
-                fields.append('output_mode="files_with_matches"')
-            elif c == "c":
-                fields.append('output_mode="count"')
-            elif c == "i":
-                fields.append("-i=true")
-            elif c == "P":
-                fields.append("pcre=true")
+                if value is None:
+                    return None
+                given, i = value, i + 1
+            arguments["glob" if name == "--include" else "exclude"] = given
+        elif arg in {"-A", "-B", "-C"} and value is not None and value.isdigit():
+            arguments[arg] = int(value)
+            i += 1
+        elif arg.startswith("--") or set(arg[1:]) - set("rRlcniEPhHs"):
+            return None
+        else:
+            for letter in arg[1:]:
+                if letter == "l":
+                    arguments["output_mode"] = "files_with_matches"
+                elif letter == "c":
+                    arguments["output_mode"] = "count"
+                elif letter == "i":
+                    arguments["-i"] = True
+                elif letter == "P":
+                    arguments["pcre"] = True
         i += 1
-    # With ``-e`` the pattern is already named, so every positional is a
-    # path; without it the first positional is the pattern.
-    if patterns:
-        pattern, paths = "|".join(patterns), positional
-    elif positional:
-        pattern, paths = positional[0], positional[1:]
-    else:
-        return ""
-    if len(paths) > 1:
-        return ""
-    head = f"pattern={pattern!r}"
-    target = resolve_cwd_path(cwd, paths[0] if paths else "")
-    if paths and not cwd_is_known(cwd):
-        # ``cd``/``cd -`` moved somewhere the text does not name, so the
-        # operand cannot be resolved and a pattern-only call would search
-        # a different tree than the command it claims to replace.
-        return ""
-    if target:
-        head += f" path={target!r}"
-    return " ".join([head, *fields])
+    if not patterns:
+        patterns, operand = operand[:1], operand[1:]
+    if not patterns or len(operand) > 1:
+        return None
+    arguments["pattern"] = "|".join(patterns)
+    if operand:
+        arguments["path"] = operand[0]
+    return arguments, patterns
 
 
-# ``xargs`` runs an arbitrary command, so this shape is recognised by its payload rather
-# than by :func:`replaceable`: the operand lives on the ``find`` half, which only
-# enumerates what to search.
-def _xargs_searches_files(inv: Invocation) -> bool:
-    """Whether ``find … | xargs grep …`` is one Grep call."""
-    if any(d.captures_stdout for d in inv.downstream()):
-        return False
-    grep_args = _strip_xargs_prefix(inv.args)
-    if grep_args is None:
-        return False
-    source = inv.piped_from
-    if source is None or source.exe != "find":
-        return False
-    return (
-        _parse_find_for_grep(source.args)
-        and len([a for a in grep_args if not a.startswith("-")]) == 1
+def _flagged(args: tuple[str, ...], letters: str) -> bool:
+    """Return whether a short-flag cluster in ``args`` holds one of ``letters``."""
+    return any(
+        a.startswith("-") and not a.startswith("--") and set(a[1:]) & set(letters)
+        for a in args
     )
 
 
-# Simple xargs flags we know how to ignore (data-plumbing only, no
-# effect on what ``grep`` sees beyond NUL-separated stdin).
-_XARGS_PLUMBING_FLAGS: frozenset[str] = frozenset(
-    {"-0", "--null", "-r", "--no-run-if-empty"},
-)
-
-
-# Bails on any xargs option outside our plumbing allowlist (``-I``, ``-n``, ``-P``, etc.
-# change how the search is invoked per-file, which doesn't round-trip to a single Grep
-# tool call).
-def _strip_xargs_prefix(args: tuple[str, ...]) -> tuple[str, ...] | None:
-    """Return the search-command tail of ``xargs [-0|-r …] {grep,rg} …``."""
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in _XARGS_PLUMBING_FLAGS:
-            i += 1
-            continue
-        if a.startswith("-"):
-            return None
-        if a not in _GREP_EXES:
-            return None
-        return args[i + 1 :]
-    return None
-
-
-# Accepts ``find [PATH] [-type f|d] [-name|-iname GLOB] [-print|-print0]``. Whitelist-
-# only: any predicate outside the branches below bails. Extracted values are discarded -
-# the nudge is a fixed string.
-def _parse_find_for_grep(args: tuple[str, ...]) -> bool:
-    """Validate that ``args`` is a ``find`` shape we understand."""
-    seen_path = False
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a in ("-print", "-print0"):
-            i += 1
-            continue
-        if a == "-name":
-            if i + 1 >= len(args):
-                return False
-            i += 2
-            continue
-        if a == "-iname":
-            # Case-INsensitive. Grep's ``glob`` is case-sensitive, so
-            # rendering the same pattern asks a different question.
-            return False
-        if a == "-type":
-            # Only ``f``. ``-type d`` feeds xargs DIRECTORIES, so the
-            # search recurses each one -- a shape Grep's single ``path``
-            # cannot express, and the nudge named the pattern as a path.
-            if i + 1 >= len(args) or args[i + 1] != "f":
-                return False
-            i += 2
-            continue
-        if a.startswith("-"):
-            return False
-        if seen_path:
-            return False
-        seen_path = True
-        i += 1
-    return True
-
-
-def _search(
+# ``find ROOT [-type f] [-name G] [-print0] | xargs [-0] [-r] grep ...``: the
+# ``find`` only lists what to search. ``-iname`` and ``-type d`` change what is
+# searched in ways Grep's ``glob`` and ``path`` cannot.
+def _xargs_search(
+    invocation: Invocation,
     *,
-    path: Path,
-    query: Query,
-    keep_first: int,
-    keep_last: int,
-    offset: int,
-) -> str | ToolResult:
-    """Run ``query`` and page its lines; a failed search is a tool error."""
-    try:
-        rows = grep_rows(path, query)
-    except GrepError as error:
-        return _error(str(error))
-    return _paginate(rows, keep_first=keep_first, keep_last=keep_last, offset=offset)
-
-
-# The single place either backend slices. Both produce one entry per line for every
-# ``output_mode``, so slicing here means ``offset`` and ``keep_first`` mean the same
-# thing in ripgrep and in the fallback -- and in ``content``, ``count``, and
-# ``files_with_matches`` alike. Slicing inside the accumulator instead let the unit
-# differ per mode (content lines vs. per-file counts vs. context separators).
-#
-# ``offset`` applies with context lines too. Both backends used to zero it and prepend
-# an "offset ignored" notice, which left the reply both ignoring the knob AND telling
-# the reader to pass it -- a resume note that cannot be followed. Slicing rendered lines
-# is agnostic to how they were produced, so context rows page like any others; a group
-# separator inside the window is simply one more entry.
-def _paginate(
-    lines: list[Row],
-    *,
-    keep_first: int,
-    keep_last: int,
-    offset: int,
-) -> str:
-    """Apply the pagination knobs to already-rendered output lines."""
-    # Where the shown window BEGINS in the full match set. Every resume
-    # note is phrased from this, never from the caller's ``offset``:
-    # ``keep_last`` slices a tail and leaves ``offset`` at 0, so a note
-    # built from ``offset`` named a position at the HEAD while the body
-    # showed the TAIL -- following it re-fetched rows already shown and
-    # never reached the omitted ones.
-    if keep_last > 0:
-        start = max(0, len(lines) - keep_last)
-        lines = lines[start:]
-    else:
-        start = offset
-        if offset > 0:
-            lines = lines[offset:]
-        if keep_first > 0:
-            lines = lines[:keep_first]
-    if not lines:
-        return "(no matches)"
-    clipped = [_clip(line) for line in lines]
-    # The token bound is the backstop for an unpaginated search: the
-    # caller's knobs are a window, and neither says how wide a match is.
-    # The resume note is part of the result, so its own cost comes out of
-    # the budget -- appending it afterwards put the reply back over.
-    budget = result_token_budget()
-    # Reserve the note by rendering the REAL one for the worst case (all
-    # entries withheld), not a second hand-written copy: a stand-in with
-    # placeholder values drifts from what actually ships.
-    reserved = _resume_note(withheld=len(clipped), resume=start + len(clipped))
-    body, kept = bound_by_tokens(
-        (f"{line}\n" for line in clipped),
-        budget=max(1, budget - approx_tokens(reserved)),
-    )
-    body = body.rstrip("\n")
-    if kept < len(clipped):
-        body += _resume_note(withheld=len(clipped) - kept, resume=start + kept)
-    return body
-
-
-_MAX_LINE_CHARS: Final = 500
-"""Claude Code's ``--max-columns 500``: one rendered line's character cap."""
-
-
-# Not ``rg --max-columns``: that keeps only a long line's LEADING columns, so a match
-# further right (a needle in minified JSON) vanished. The window is centred on the
-# first match instead, which is the part a search result exists to show.
-def _clip(row: Row) -> str:
-    """Cut a row's text to :data:`_MAX_LINE_CHARS` around its first match."""
-    line = row.text
-    # The ``path:line:`` prefix is kept whole: it is how the row is located, and
-    # counting it made a long path clip a short line.
-    if len(line) <= _MAX_LINE_CHARS:
-        return line
-    cut = row.prefix_end
-    text = line[cut:]
-    if len(text) <= _MAX_LINE_CHARS:
-        return line
-    center = max(0, row.column - cut)
-    start = max(0, min(center - _MAX_LINE_CHARS // 2, len(text) - _MAX_LINE_CHARS))
-    end = start + _MAX_LINE_CHARS
-    head = f"[{start:,} chars] " if start else ""
-    tail = f" [{len(text) - end:,} chars]" if end < len(text) else ""
-    return f"{line[:cut]}{head}{text[start:end]}{tail}"
-
-
-def _resume_note(*, withheld: int, resume: int) -> str:
-    """Render the continuation note for entries this reply did not show."""
-    return f"\n... ({withheld} more entries; pass offset={resume} to continue)"
-
-
-# Each tuple is ``(name, coerced, raw)``: when the caller supplied ``raw`` (anything but
-# ``None``) but the coerced int is negative, surface a tool error instead of letting it
-# index from the end of a result slice downstream.
-def _check_nonnegative(
-    *fields: tuple[str, int, object],
-) -> ToolResult | None:
-    """Reject schema-violating negative knobs at the tool entrypoint."""
-    for name, coerced, raw in fields:
-        if raw is None:
+    searches: frozenset[str],
+) -> tuple[str, tuple[str, ...], str, str] | None:
+    """Return the search, its arguments, root, and name glob of ``find | xargs grep``."""
+    source = invocation.piped_from
+    if source is None or source.exe != "find" or source.piped_from is not None:
+        return None
+    # As for a bare search: what follows may only cut or count, so that a
+    # ``| xargs rm`` after it is never dropped with the shell command.
+    if not replaceable(
+        invocation,
+        exes=frozenset({"xargs"}),
+        bare=True,
+        fed=True,
+        counted=True,
+    ):
+        return None
+    args = list(invocation.args)
+    while args and args[0] in {"-0", "--null", "-r", "--no-run-if-empty"}:
+        args.pop(0)
+    if not args or args[0] not in searches:
+        return None
+    root, name = ".", ""
+    rest = list(source.args)
+    while rest:
+        arg = rest.pop(0)
+        if arg in {"-print", "-print0"}:
             continue
-        if coerced < 0:
-            return _error(f"'{name}' must be ≥ 0, got {coerced}.")
-    return None
-
-
-# ``-B``/``-A``/``-C`` are not identifiers, so they arrive as raw mapping
-# entries. Unparseable values become 0 rather than raising: ``Tool.run`` must
-# not raise, and the schema gate already rejects non-integers in production.
-def _int_arg(args: Mapping[str, object], *keys: str) -> int:
-    """Return the first present ``keys`` entry as an int, or 0."""
-    value = next((args[k] for k in keys if args.get(k) is not None), 0)
-    if isinstance(value, bool) or not isinstance(value, int | float | str):
-        return 0
-    try:
-        return int(value)
-    except ValueError:
-        return 0
-
-
-def _error(message: str) -> ToolResult:
-    """Return ``message`` as a failed tool result."""
-    return ToolResult(call_id="", content=message, is_error=True)
+        # Two names must both match, which one glob cannot say.
+        if arg == "-name" and rest and not name:
+            name = rest.pop(0)
+        elif arg == "-type" and rest[:1] == ["f"]:
+            rest.pop(0)
+        elif arg.startswith("-") or root != ".":
+            return None
+        else:
+            root = arg
+    return args[0], tuple(args[1:]), root, name

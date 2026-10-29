@@ -1,958 +1,439 @@
-"""Shared OpenAI Responses request construction and stream consumption."""
+"""Translate between our records and OpenAI's Responses API JSON, without I/O.
+
+Every request is stateless (``store: false``): the whole conversation rides
+each one, and reasoning comes back sealed so the next request can replay it.
+
+Typical usage example:
+
+  body = encode(request, capability=c, settings=s)   # POST to /responses
+  reader = StreamReader(capability=c, settings=s)
+  async for event in wire.events(response.aiter_lines()):
+      chunk = reader.feed(event)                      # New text, to show at once.
+  reader.response()                                   # The records and their cost.
+"""
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Protocol, cast, override
+from typing import TYPE_CHECKING
 
-import asyncio
-import base64
-import inspect
-import json
-import logging
+from treekle import (
+    ReadError,
+    from_plain,
+    immutable,
+    json_dumps,
+    json_loads,
+    mutable,
+)
 
-from treekle import from_plain, json_loads, mutable
-
-from sagent.catalog.openai import (
-    keeps_reasoning_across_turns,
-    reasoning_effort,
-    served_tier,
-)
-from sagent.catalog.table import base_model_id
-from sagent.lib import debug_log
-from sagent.providers.lib.errors import (
-    StreamingResponseNotReadError,
-    error_status_code,
-    find_response_not_read,
-    is_context_overflow_text,
-    is_request_too_large,
-    raise_if_request_too_large,
-)
-from sagent.providers.lib.id_remap import IdRemapper
-from sagent.providers.lib.model_base import ModelDefaults
-from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.providers.lib.usage import openai_usage
-from sagent.providers.openai import token_count
-from sagent.types.cost import ServiceTier, TokenCost, TokenCount
-from sagent.types.exceptions import UserFacingError
-from sagent.types.model import (
-    ModelRequest,
-    ModelResponse,
-    PromptTooLongError,
-    StreamInterruptedError,
-    UsageSnapshot,
-)
-from sagent.types.runtime import (
-    AgentSendMessage,
-    AssistantMessage,
-    BytesMessage,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    RuntimeEvent,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
+from sagent.model.cost import TokenCount
+from sagent.model.exceptions import DisconnectedError
+from sagent.model.types import Response, TextChunk
+from sagent.providers.openai import wire
+from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolResult
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterable, Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
-    from openai.types import responses
-    from openai.types.responses.response_create_params import (
-        ResponseCreateParamsStreaming,
-    )
-    from openai.types.responses.response_input_param import FunctionCallOutput
-    from openai.types.shared.reasoning_effort import ReasoningEffort
-
-    import openai
-
-    from sagent.lib.image import resize
-    from sagent.types.capability import ModelCapability, ModelSettings
-    from sagent.types.tools import Tool
-else:
-    from wrapt import lazy_import
-
-    openai = lazy_import("openai")
-    responses = lazy_import("openai.types.responses")
-    resize = lazy_import("sagent.lib.image", "resize")
-logger = logging.getLogger(__name__)
-_STREAM_IDLE_TIMEOUT = 600.0  # house-ignore[globals] -- Stream idle timeout.
+    from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+    from sagent.model.cost import ServiceTier, TokenCost
+    from sagent.model.types import Request
+    from sagent.session.types import Attachment, SessionRecord
+    from sagent.tools.types import Tool
 
 
-class ResponsesProvider(Protocol):
-    """SDK ownership shared by API-key and OAuth providers."""
-
-    async def get_sdk(self) -> openai.AsyncOpenAI:
-        """Return the provider-owned SDK for the current event loop.
-
-        Returns:
-          sdk: Authenticated client shared by this provider's models.
-
-        """
-        ...
+__all__ = [
+    "StreamReader",
+    "encode",
+]
 
 
-class _OpenAIResponsesModel(ModelDefaults):
-    """Responses transport with local history and provider-owned clients.
+def encode(
+    request: Request,
+    *,
+    capability: ModelCapability,
+    settings: ModelSettings,
+    temperature: float | None = None,
+) -> dict[str, object]:
+    """Return the body of a streamed ``/responses`` request.
 
-    ``close`` stays the inherited no-op: sibling models share the provider's SDK,
-    so a model swap closing it would break every other model of that provider.
+    Args:
+      request: What the model is asked.
+      capability: The model it is asked of.
+      settings: The settings chosen for that model.
+      temperature: The sampling temperature a model that cannot reason is sent;
+        ``None`` sends none.
+
+    Returns:
+      body: The request body.
+
+    """
+    limits = capability.limits
+    body: dict[str, object] = {
+        "model": capability.wire_model_id or capability.model_id,
+        "input": _input(request.records, limits=limits),
+        "instructions": "\n\n".join(text for text in request.system if text),
+        "stream": True,
+        "store": False,
+    }
+    if request.tools:
+        body["tools"] = [_tool(tool) for tool in request.tools]
+        # The runtime runs a reply's independent calls at once anyway.
+        body["parallel_tool_calls"] = True
+        if request.allowed is not None:
+            body["tool_choice"] = _allowed(request.tools, allowed=request.allowed)
+    # ``none`` is said, not left out: left out, the model reasons at its default.
+    if settings.thinking_effort == "none" and capability.thinking_effort != frozenset(
+        {"none"},
+    ):
+        body["reasoning"] = {"effort": "none"}
+    elif settings.thinking_effort != "none":
+        reasoning: dict[str, object] = {"effort": settings.thinking_effort}
+        if settings.thinking_output == "text":
+            reasoning["summary"] = "auto"
+        if capability.model_id in frozenset(
+            {
+                "astra-6.0",
+                "sol-6.1",
+                "sol-6.0",
+                "luna-6.0",
+                "sol-5.6",
+                "gpt-5.6",
+                "terra-5.6",
+                "luna-5.6",
+            },
+        ):
+            reasoning["context"] = "all_turns"
+        body["reasoning"] = reasoning
+        # Stateless, so the sealed reasoning is the only way it reaches the
+        # next request.
+        body["include"] = ["reasoning.encrypted_content"]
+    if reply := request.response_tokens(limits):
+        body["max_output_tokens"] = reply
+    # A reasoning model rejects a sampling temperature.
+    if temperature is not None and capability.thinking_effort == frozenset({"none"}):
+        body["temperature"] = temperature
+    if settings.service_tier != "auto":
+        body["service_tier"] = settings.service_tier
+    body["prompt_cache_key"] = wire.cache_key(request)
+    return body
+
+
+class StreamReader:
+    """Collects a streamed reply's events into records.
+
+    Args:
+      capability: The model replying, whose prices cost the reply.
+      settings: The settings it was asked with.
+
     """
 
-    def __init__(
-        self,
-        *,
-        provider: ResponsesProvider,
-        capability: ModelCapability,
-        settings: ModelSettings,
-    ) -> None:
-        self._provider = provider
+    def __init__(self, *, capability: ModelCapability, settings: ModelSettings) -> None:
         self._capability = capability
         self._settings = settings
-        self._last_usage: UsageSnapshot | None = None
+        self._records: dict[int, AssistantMessage | Thinking | ToolCall] = {}
+        self._refusing: set[str] = set()
+        self._refused = False
+        self._final: dict[str, object] | None = None
 
-    @property
-    @override
-    def capability(self) -> ModelCapability:
-        """Return the model's capabilities on this transport.
-
-        Returns:
-          capability: Supported model settings, limits, and prices.
-
-        """
-        return self._capability
-
-    @property
-    @override
-    def settings(self) -> ModelSettings:
-        """Return the settings selected for this model instance.
-
-        Returns:
-          settings: Mutable selections validated against the model's capabilities.
-
-        """
-        return self._settings
-
-    @override
-    def approx_text_tokens(self, text: str) -> int:
-        """Estimate text tokens using the model's local tokenizer.
+    def feed(self, event: Mapping[str, object]) -> TextChunk | None:
+        """Take one event, and return the text it adds, if any.
 
         Args:
-          text: Text to count, treating special-token spellings as ordinary text.
+          event: One server-sent event.
 
         Returns:
-          tokens: Tokenizer count, or chars/4 when the tokenizer is unknown.
-
-        """
-        return token_count.approx_text_tokens(
-            text,
-            model_id=self._wire_model_id,
-            approx_chars_per_token=self.capability.approx_chars_per_token,
-        )
-
-    @override
-    def approx_image_tokens(self, data: bytes) -> int:
-        """Estimate image tokens with the model's patch or tile formula.
-
-        Args:
-          data: Encoded image bytes.
-
-        Returns:
-          tokens: Model-specific estimate, or zero when dimensions are unavailable.
-
-        """
-        return token_count.approx_image_tokens(
-            data,
-            model_id=self._wire_model_id,
-            max_edge=self.limits.max_image_edge_px,
-        )
-
-    def is_context_overflow(self, error: Exception) -> bool:
-        """Classify token-context overflow separately from request-byte limits.
-
-        Args:
-          error: Provider exception to classify.
-
-        Returns:
-          overflow: Whether shortening the token context can address the error.
-
-        """
-        if is_request_too_large(error_status_code(error), str(error)):
-            return False
-        return is_context_overflow_text(str(error))
-
-    @property
-    def _wire_model_id(self) -> str:
-        return self.capability.wire_model_id or base_model_id(self.capability.model_id)
-
-    def _effective_service_tier(self) -> ServiceTier | None:
-        tier = self.settings.service_tier
-        return tier if tier != "auto" else None
-
-    @override
-    def usage_snapshot(self) -> UsageSnapshot | None:
-        """Return quota telemetry from the latest response headers.
-
-        Returns:
-          usage: Normalized quota windows, or None when unavailable.
-
-        """
-        return self._last_usage
-
-    @override
-    def is_retryable_provider_error(self, error: Exception) -> bool:
-        """Recognize the provider's retry hint in statusless errors.
-
-        Args:
-          error: Provider exception to inspect.
-
-        Returns:
-          retryable: Whether the error text explicitly invites retrying.
-
-        """
-        return "you can retry" in str(error).lower()
-
-    def _reasoning_effort(self) -> ReasoningEffort | None:
-        if self.settings.thinking_effort == "none":
-            return None
-        return reasoning_effort(self.settings.thinking_effort)
-
-    def _build_kwargs(self, request: ModelRequest) -> ResponseCreateParamsStreaming:
-        body: ResponseCreateParamsStreaming = {
-            "model": self._wire_model_id,
-            "input": _build_input(
-                request,
-                max_image_dim=self.limits.max_image_edge_px,
-                max_image_bytes=self.limits.max_image_bytes,
-            ),
-            "instructions": request.system_text,
-            "stream": True,
-            "store": False,
-        }
-        if request.tools:
-            body["tools"] = _build_tools(request.tools)
-            # Independent reads and searches go out together in one round; the agent
-            # runtime already runs a response's independent tool calls concurrently.
-            body["parallel_tool_calls"] = True
-            # The gate names what may be called; every schema still ships, so the
-            # prefix the server cached is the same whatever the gate.
-            allowed = request.allowed_tools
-            if allowed is not None:
-                # A gate naming no tool the request carries allows none; an empty
-                # ``allowed_tools`` list is not a request the API accepts.
-                names = [t.name for t in request.tools if t.name in allowed]
-                body["tool_choice"] = (
-                    {
-                        "type": "allowed_tools",
-                        "mode": "auto",
-                        "tools": [{"type": "function", "name": n} for n in names],
-                    }
-                    if names
-                    else "none"
-                )
-        effort = self._reasoning_effort()
-        if effort is not None:
-            body["reasoning"] = {"effort": effort, "summary": "auto"}
-            body["include"] = ["reasoning.encrypted_content"]
-            if keeps_reasoning_across_turns(self._wire_model_id):
-                body["reasoning"]["context"] = "all_turns"
-        if request.max_response_tokens is not None:
-            body["max_output_tokens"] = request.max_response_tokens
-        if self.capability.thinking.effort == frozenset({"none"}):
-            body["temperature"] = request.temperature
-        tier = self._effective_service_tier()
-        if tier is not None:
-            body["service_tier"] = tier
-        if request.cache_key:
-            body["prompt_cache_key"] = request.cache_key
-        return body
-
-    def _headers(self, request: ModelRequest) -> dict[str, str]:
-        """Return per-request HTTP headers; the API-key endpoint takes none."""
-        del request
-        return {}
-
-    @override
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        """Stream a Responses request and assemble its message and usage.
-
-        Args:
-          request: Local history, tools, and generation settings to send.
-          publish: Callback for text and reasoning events; None disables publication.
-
-        Returns:
-          response: Completed message, stop reason, token counts, and cost.
+          chunk: The text or reasoning the event adds; ``None`` for the rest.
 
         Raises:
-          PromptTooLongError: The server reports token-context overflow.
-          RequestTooLargeError: The request exceeds the server's byte limit.
-          StreamInterruptedError: The stream ends without a terminal response.
-          StreamingResponseNotReadError: The SDK hides a streaming HTTP error body.
-          TimeoutError: The stream exceeds its idle timeout.
+          Exception: The ``wire.to_exception`` of an error or failed reply.
 
         """
-        sdk = await self._provider.get_sdk()
-        debug_log.trace(
-            "api_call",
-            kind="openai_responses",
-            model=self._wire_model_id,
-            service_tier=self._effective_service_tier(),
-        )
-        try:
-            raw = await sdk.responses.with_raw_response.create(
-                **self._build_kwargs(request),  # pyrefly: ignore[open-unpacking] -- The spread TypedDict is open; none of its extra keys collide here.
-                extra_headers=self._headers(request) or None,
+        kind = event.get("type")
+        delta = str(event.get("delta") or "")
+        # Items stream one after another, so the records before this one are done.
+        at = from_plain(event.get("output_index"), int, default=len(self._records))
+        record = sum(1 for i in self._records if i < at)
+        if kind == "response.output_text.delta":
+            return TextChunk(text=delta, record=record)
+        if kind in (
+            "response.reasoning_summary_text.delta",
+            "response.reasoning_text.delta",
+        ):
+            return TextChunk(text=delta, thinking=True, record=record)
+        if kind == "response.refusal.delta":
+            self._refusing.add(str(event.get("item_id") or ""))
+            return TextChunk(text=delta, record=record)
+        if kind == "response.refusal.done":
+            # A refusal sent whole, with no deltas, is shown whole.
+            if str(event.get("item_id") or "") not in self._refusing:
+                return TextChunk(text=str(event.get("refusal") or ""), record=record)
+        elif kind == "response.output_item.done":
+            self._done(
+                from_plain(event.get("output_index"), int, default=len(self._records)),
+                item=_object(event.get("item")),
             )
-            self._last_usage = openai_usage(raw.headers)
-            events = raw.parse(to=openai.AsyncStream[responses.ResponseStreamEvent])
-            return await _consume_stream(events, model=self, publish=publish)
-        except Exception as exc:
-            if find_response_not_read(exc) is not None:
-                raise StreamingResponseNotReadError(provider_name="OpenAI") from exc
-            raise_if_request_too_large(error_status_code(exc), str(exc), cause=exc)
-            if self.is_context_overflow(exc):
-                raise PromptTooLongError(str(exc)) from exc
-            raise
+        elif kind in ("response.completed", "response.incomplete"):
+            self._final = _object(event.get("response"))
+        elif kind == "response.failed":
+            reply = _object(event.get("response"))
+            raise wire.to_exception(0, body=reply.get("error") or reply)
+        elif kind == "error":
+            raise wire.to_exception(0, body=event)
+        return None
+
+    def response(self) -> Response:
+        """Return the finished reply.
+
+        Returns:
+          response: Its records in output order, its tokens, and their cost.
+
+        Raises:
+          DisconnectedError: The stream ended before the reply was finished.
+
+        """
+        final = self._final
+        if final is None:
+            raise DisconnectedError("The reply ended before it was finished.")
+        records = tuple(record for _, record in sorted(self._records.items()))
+        tokens = _tokens(_object(final.get("usage")))
+        reason = str(_object(final.get("incomplete_details")).get("reason") or "")
+        if self._refused or reason == "content_filter":
+            stop_reason = "refusal"
+        elif final.get("status") == "incomplete":
+            stop_reason = "max_tokens"
+        elif any(isinstance(record, ToolCall) for record in records):
+            stop_reason = "tool_use"
+        else:
+            stop_reason = "end_turn"
+        return Response(
+            records=records,
+            tokens=tokens,
+            spend=self._spend(tokens, reported=final.get("service_tier")),
+            stop_reason=stop_reason,
+        )
+
+    def _done(self, index: int, *, item: Mapping[str, object]) -> None:
+        """Keep a finished output item as its record."""
+        kind = item.get("type")
+        if kind == "message":
+            parts = _objects(item.get("content"))
+            self._refused = self._refused or any(
+                part.get("type") == "refusal" for part in parts
+            )
+            text = "".join(
+                str(part.get("text") or part.get("refusal") or "") for part in parts
+            )
+            if text:
+                self._records[index] = AssistantMessage(content=text)
+        elif kind == "reasoning":
+            summary = "\n\n".join(
+                str(part.get("text") or "") for part in _objects(item.get("summary"))
+            )
+            text = "".join(
+                str(part.get("text") or "") for part in _objects(item.get("content"))
+            )
+            sealed = item.get("encrypted_content")
+            if summary or text or isinstance(sealed, str):
+                self._records[index] = Thinking(
+                    content=text or None,
+                    summary=summary or None,
+                    encrypted=sealed if isinstance(sealed, str) else None,
+                    extra={"reasoning_id": str(item.get("id") or "")},
+                )
+        elif kind == "function_call":
+            self._records[index] = ToolCall(
+                call_id=str(item.get("call_id") or ""),
+                name=str(item.get("name") or ""),
+                arguments=immutable(_arguments(str(item.get("arguments") or ""))),
+            )
+
+    # The server's tier names grow without notice, and the reply is already
+    # paid for, so an unknown tier is priced at the one asked for.
+    def _spend(self, tokens: TokenCount, *, reported: object) -> TokenCost:
+        """Price ``tokens`` at the tier the server served, else the tier asked for."""
+        served = _served(reported if isinstance(reported, str) else None)
+        today = datetime.now(UTC).date()
+        prices = self._capability.prices
+        if served is not None:
+            try:
+                return prices[served, tokens.prompt, today] * tokens
+            except KeyError:
+                pass
+        return prices[self._settings.service_tier, tokens.prompt, today] * tokens
 
 
-_FINISH_MAP: Final[dict[str, str]] = {
-    "completed": "stop",
-    "incomplete": "length",
-}
+def _input(
+    records: Sequence[SessionRecord],
+    *,
+    limits: ModelLimits,
+) -> list[dict[str, object]]:
+    """Return ``records`` as Responses input items; none for bookkeeping records."""
+    # Another vendor's ids may not fit OpenAI's, so each is renamed,
+    # consistently within one request.
+    ids: dict[str, str] = {}
+    items: list[dict[str, object]] = []
+    for record in wire.flatten(records):
+        said = wire.user_content(record)
+        if said is not None:
+            items.append(_user(*said, limits=limits))
+            continue
+        match record:
+            case AssistantMessage(content=str() as text) if text:
+                items.append({"role": "assistant", "content": text})
+            # OpenAI accepts back only reasoning it sealed itself; another
+            # vendor's thinking has no reasoning id and is left out.
+            case Thinking(
+                encrypted=str() as sealed,
+                extra={"reasoning_id": str() as reasoning_id},
+            ) if reasoning_id:
+                summary = record.summary or ""
+                items.append(
+                    {
+                        "type": "reasoning",
+                        "id": reasoning_id,
+                        "summary": [{"type": "summary_text", "text": summary}]
+                        if summary
+                        else [],
+                        "encrypted_content": sealed,
+                    },
+                )
+            case ToolCall(call_id=call_id, name=name, arguments=arguments):
+                native = ids.setdefault(call_id, f"fc_{len(ids)}")
+                items.append(
+                    {
+                        "type": "function_call",
+                        "id": native,
+                        "call_id": native,
+                        "name": name,
+                        "arguments": json_dumps(mutable(arguments)),
+                        "status": "completed",
+                    },
+                )
+            case ToolResult():
+                items.append(
+                    {
+                        "type": "function_call_output",
+                        "call_id": ids.setdefault(record.call_id, f"fc_{len(ids)}"),
+                        "output": _output(record, limits=limits),
+                        "status": "completed",
+                    },
+                )
+            case _:
+                pass
+    return items
 
-_STREAM_ERROR_STATUS: Final[dict[str, int]] = {
-    "rate_limit": 429,
-    "rate_limit_error": 429,
-    "rate_limit_exceeded": 429,
-    "api_error": 500,
-    "overloaded_error": 529,
-    "server_error": 500,
-}
+
+def _user(
+    text: str,
+    attachments: Sequence[Attachment],
+    *,
+    limits: ModelLimits,
+) -> dict[str, object]:
+    """Return a user turn, its images inline; other attachments are left out."""
+    images = [
+        {"type": "input_image", "detail": "auto", "image_url": url}
+        for attachment in attachments
+        if (url := wire.image_url(attachment, limits=limits)) is not None
+    ]
+    if not images:
+        return {"role": "user", "content": text}
+    blocks: list[dict[str, object]] = (
+        [{"type": "input_text", "text": text}] if text else []
+    )
+    return {"role": "user", "content": [*blocks, *images]}
 
 
-def _build_tools(
-    tools: Sequence[Tool],
-) -> list[responses.FunctionToolParam]:
-    """Translate each ``Tool`` into a Responses API function-tool param."""
-    return [_build_tool(t) for t in tools]
+def _output(result: ToolResult, *, limits: ModelLimits) -> object:
+    """Return a tool result's output: its text, or its text and images."""
+    text = result.text()
+    if result.is_error is True and text:
+        text = f"[Error] {text}"
+    images: list[dict[str, object]] = [
+        {"type": "input_image", "detail": "auto", "image_url": url}
+        for attachment in result.attachments
+        if (url := wire.image_url(attachment, limits=limits)) is not None
+    ]
+    if not images:
+        return text
+    return [{"type": "input_text", "text": text}, *images] if text else images
 
 
-def _build_tool(tool: Tool) -> responses.FunctionToolParam:
-    """Wire-shape a single ``Tool`` for the Responses API."""
+def _tool(tool: Tool) -> dict[str, object]:
+    # Our schemas are not written to strict mode's rules (every property
+    # required, no open objects), which strict mode rejects.
     return {
         "type": "function",
         "name": tool.name,
         "description": tool.description,
-        "parameters": dict(mutable(tool.directive_schema)),
-        "strict": None,
+        "parameters": mutable(tool.schema),
+        "strict": False,
     }
 
 
-def _build_input(
-    request: ModelRequest,
-    *,
-    max_image_dim: int = 0,
-    max_image_bytes: int = 0,
-) -> responses.ResponseInputParam:
-    """Convert history entries to Responses API input items."""
-    ids = IdRemapper("fc_")
-    items: responses.ResponseInputParam = []
-    for entry in request.messages:
-        if isinstance(entry, (AgentSendMessage, UserMessage)):
-            items.append(
-                _build_user_item(entry, max_image_dim, max_image_bytes),
-            )
-        elif isinstance(entry, AssistantMessage):
-            _build_assistant_items(entry, items, ids)
-        else:
-            items.append(
-                _build_tool_result_item(
-                    entry,
-                    ids,
-                    max_image_dim=max_image_dim,
-                    max_image_bytes=max_image_bytes,
-                ),
-            )
-    return items
-
-
-def _build_user_item(
-    entry: AgentSendMessage | UserMessage,
-    max_image_dim: int,
-    max_image_bytes: int,
-) -> responses.EasyInputMessageParam:
-    """Wire-shape a user-side entry, inlining any image attachments."""
-    image_atts = [att for att in entry.attachments if _is_image_attachment(att)]
-    non_image_atts = [att for att in entry.attachments if not _is_image_attachment(att)]
-    for att in non_image_atts:
-        logger.warning(
-            "OpenAI: skipping non-image attachment (mime=%s)",
-            att.descriptor,
-        )
-    if not image_atts:
-        return {"role": "user", "content": entry.text}
-    blocks: list[responses.ResponseInputContentParam] = []
-    if entry.text:
-        blocks.append({"type": "input_text", "text": entry.text})
-    for att in image_atts:
-        raw, mime = resize(att.data, max_dim=max_image_dim, max_bytes=max_image_bytes)
-        b64 = base64.b64encode(raw).decode()
-        blocks.append(
-            {
-                "type": "input_image",
-                "detail": "auto",
-                "image_url": f"data:{mime};base64,{b64}",
-            },
-        )
-    return {"role": "user", "content": blocks}
-
-
-def _is_image_attachment(att: BytesMessage) -> bool:
-    """Check whether an attachment's descriptor is an image MIME type."""
-    return att.descriptor.startswith("image/")
-
-
-def _build_assistant_items(
-    entry: AssistantMessage,
-    items: responses.ResponseInputParam,
-    ids: IdRemapper,
-) -> None:
-    """Expand an AssistantMessage into assistant + function_call items."""
-    for block in entry.thinking_blocks:
-        if block.get("type") == "reasoning" and isinstance(
-            block.get("encrypted_content"),
-            str,
-        ):
-            # OpenAI documents replaying the reasoning output item verbatim in
-            # stateless mode. Copy the opaque mapping so persisted session data
-            # never mutates while the SDK serializes the request.
-            items.append(cast(responses.ResponseReasoningItemParam, dict(block)))
-    if entry.text:
-        items.append({"role": "assistant", "content": entry.text})
-    for tc in entry.tool_calls:
-        native_id = ids.map(tc.id)
-        items.append(
-            {
-                "type": "function_call",
-                "id": native_id,
-                "call_id": native_id,
-                "name": tc.name,
-                "arguments": json.dumps(dict(tc.args)),
-                "status": "completed",
-            },
-        )
-
-
-def _build_tool_result_item(
-    entry: ToolResult,
-    ids: IdRemapper,
-    *,
-    max_image_dim: int = 0,
-    max_image_bytes: int = 0,
-) -> FunctionCallOutput:
-    """Encode tool output with its image attachments and matching call id."""
-    text = (
-        f"[Error] {entry.content}"
-        if entry.is_error and entry.content
-        else entry.content
-    )
-    output: str | responses.ResponseFunctionCallOutputItemListParam = text
-    if entry.attachments:
-        parts: responses.ResponseFunctionCallOutputItemListParam = []
-        if text:
-            parts.append({"type": "input_text", "text": text})
-        for attachment in entry.attachments:
-            if _is_image_attachment(attachment):
-                raw, mime = resize(
-                    attachment.data,
-                    max_dim=max_image_dim,
-                    max_bytes=max_image_bytes,
-                )
-                parts.append(
-                    {
-                        "type": "input_image",
-                        "detail": "auto",
-                        "image_url": f"data:{mime};base64,{base64.b64encode(raw).decode()}",
-                    },
-                )
-            else:
-                logger.warning(
-                    "OpenAI: skipping non-image attachment (mime=%s)",
-                    attachment.descriptor,
-                )
-        output = parts or text
+def _allowed(tools: Sequence[Tool], *, allowed: frozenset[str]) -> object:
+    """Return the ``tool_choice`` that lets the model call only ``allowed``."""
+    # Every schema still ships, so the cached prefix is the same whatever the
+    # gate; a gate naming no tool offered allows none, as an empty list fails.
+    names = [tool.name for tool in tools if tool.name in allowed]
+    if not names:
+        return "none"
     return {
-        "type": "function_call_output",
-        "call_id": ids.map(entry.call_id),
-        "output": output,
-        "status": "completed",
+        "type": "allowed_tools",
+        "mode": "auto",
+        "tools": [{"type": "function", "name": name} for name in names],
     }
 
 
-class _UsageDetails(Protocol):
-    """Minimum SDK usage-details surface needed for forward-compatible fields."""
-
-    def to_dict(self) -> dict[str, object]: ...
-
-
-def _terminal_metadata(response: object) -> tuple[str, str, int, int, int, int]:
-    """Extract terminal response metadata, including SDK-extra usage fields."""
-    message_id = str(getattr(response, "id", "") or "")
-    status = str(getattr(response, "status", "") or "")
-    usage: object = getattr(response, "usage", None)
-    if usage is None:
-        return message_id, status, 0, 0, 0, 0
-    raw_input: object = getattr(usage, "input_tokens", None)
-    raw_output: object = getattr(usage, "output_tokens", None)
-    input_tokens = from_plain(raw_input, int)
-    output_tokens = from_plain(raw_output, int)
-    cache_read = 0
-    cache_write = 0
-    details: object = getattr(usage, "input_tokens_details", None)
-    if details is not None:
-        # OpenAI SDK 2.44 predates the typed ``cache_write_tokens`` field, but
-        # Stainless models preserve unknown response fields and expose them
-        # through ``to_dict``. Reading the mapping keeps new usage data without
-        # an Any cast or waiting for an SDK schema release.
-        raw_details = cast(_UsageDetails, details).to_dict()
-        cache_read = from_plain(raw_details.get("cached_tokens"), int, default=0)
-        cache_write = from_plain(raw_details.get("cache_write_tokens"), int, default=0)
-    return (
-        message_id,
-        status,
-        input_tokens,
-        output_tokens,
-        cache_read,
-        cache_write,
+def _tokens(usage: Mapping[str, object]) -> TokenCount:
+    """Return the reply's usage, its cached prompt split from the uncached."""
+    details = _object(usage.get("input_tokens_details"))
+    read = from_plain(details.get("cached_tokens"), int, default=0)
+    written = from_plain(details.get("cache_write_tokens"), int, default=0)
+    prompt = from_plain(usage.get("input_tokens"), int, default=0)
+    return TokenCount(
+        request=max(prompt - read - written, 0),
+        response=from_plain(usage.get("output_tokens"), int, default=0),
+        cache_write=written,
+        cache_read=read,
     )
 
 
-class OpenAIStreamError(UserFacingError):
-    """In-band OpenAI stream error retaining retry/rate-limit classification data.
-
-    Both OpenAI wires raise it: an error event mid-stream carries no HTTP status,
-    so ``status_code`` and ``body`` are rebuilt from the event's ``code``.
-    """
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        code: str | None,
-        param: str | None = None,
-    ) -> None:
-        super().__init__(message)
-        normalized_code = code or "unknown_error"
-        normalized_type = (
-            "rate_limit_error"
-            if normalized_code in {"rate_limit", "rate_limit_exceeded"}
-            else normalized_code
-        )
-        self.status_code = _STREAM_ERROR_STATUS.get(normalized_code)
-        self.body: Mapping[str, object] = {
-            "type": "error",
-            "error": {
-                "type": normalized_type,
-                "code": normalized_code,
-                "message": message,
-                "param": param,
-            },
-        }
+def _served(reported: str | None) -> ServiceTier | None:
+    """Return the tier whose card prices a reply; ``None`` for a tier unknown."""
+    tiers: dict[str | None, ServiceTier] = {
+        None: "auto",
+        "auto": "auto",
+        "default": "auto",
+        # Scale Tier is prepaid capacity, metered at the standard card.
+        "scale": "auto",
+        "flex": "flex",
+        "priority": "priority",
+        "fast": "priority",
+        "ultrafast": "ultrafast",
+    }
+    return tiers.get(reported)
 
 
-async def _consume_stream(
-    stream: AsyncIterable[object],
-    *,
-    model: _OpenAIResponsesModel,
-    publish: Callable[[RuntimeEvent], None] | None,
-) -> ModelResponse:
-    """Parse a Responses API event stream into an assembled ModelResponse."""
-    text_parts: list[str] = []
-    refusal_parts: list[str] = []
-    thinking_parts: list[str] = []
-    encrypted_reasoning: list[Mapping[str, object]] = []
-    tool_calls: list[ToolCall] = []
-    tool_args: dict[str, list[str]] = {}
-    input_tokens = 0
-    output_tokens = 0
-    cache_read = 0
-    cache_write = 0
-    reported_tier: str | None = None
-    message_id = ""
-    finish_reason: str | None = None
-    completed = False
-
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _STREAM_IDLE_TIMEOUT
-    # Single cleanup rule: every path that does not return a terminal response
-    # closes the stream. A mid-stream error event (raises below), an idle
-    # timeout / cancellation, and the no-completion fallthrough all leave the
-    # SSE connection open otherwise -- a per-error connection leak. ``completed``
-    # gates the one exit that legitimately keeps reading until done.
+# A call whose arguments do not parse is kept with none, so the tool reports the
+# bad call to the model rather than the reply failing whole.
+def _arguments(text: str) -> dict[str, object]:
     try:
-        async with asyncio.timeout_at(deadline) as watchdog:
-            async for event in stream:
-                watchdog.reschedule(loop.time() + _STREAM_IDLE_TIMEOUT)
-                if isinstance(event, responses.ResponseRefusalDeltaEvent):
-                    refusal_parts.append(event.delta)
-                    text_parts.append(event.delta)
-                    if publish is not None:
-                        publish(ModelResponsePartial(event.delta))
-                elif isinstance(event, responses.ResponseRefusalDoneEvent):
-                    # Normally deltas already contain the full refusal. Keep a
-                    # done-only stream useful and append only an unseen suffix.
-                    seen = "".join(refusal_parts)
-                    suffix = (
-                        event.refusal[len(seen) :]
-                        if event.refusal.startswith(seen)
-                        else ""
-                    )
-                    if not seen:
-                        suffix = event.refusal
-                    if suffix:
-                        refusal_parts.append(suffix)
-                        text_parts.append(suffix)
-                        if publish is not None:
-                            publish(ModelResponsePartial(suffix))
-                elif isinstance(event, responses.ResponseTextDeltaEvent):
-                    text_parts.append(event.delta)
-                    if publish is not None:
-                        publish(ModelResponsePartial(event.delta))
-                elif isinstance(
-                    event,
-                    (
-                        responses.ResponseReasoningTextDeltaEvent,
-                        responses.ResponseReasoningSummaryTextDeltaEvent,
-                    ),
-                ):
-                    thinking_parts.append(event.delta)
-                    if publish is not None:
-                        publish(ModelResponseThinking(event.delta))
-                elif isinstance(
-                    event,
-                    responses.ResponseFunctionCallArgumentsDeltaEvent,
-                ):
-                    tool_args.setdefault(event.item_id, []).append(event.delta)
-                elif isinstance(event, responses.ResponseOutputItemDoneEvent):
-                    item = event.item
-                    if item.type == "function_call":
-                        tc_id = item.call_id or ""
-                        tc_name = item.name or ""
-                        item_id = item.id or ""
-                        delta_args = "".join(tool_args.get(item_id, []))
-                        done_args = item.arguments or ""
-                        args = _parse_tool_arguments(
-                            delta_args,
-                            done_args,
-                            tool_name=tc_name,
-                            call_id=tc_id,
-                        )
-                        tool_calls.append(
-                            ToolCall(
-                                id=tc_id,
-                                name=tc_name,
-                                args=args,
-                            ),
-                        )
-                    elif item.type == "reasoning":
-                        reasoning_item = item.to_dict(exclude_none=True)
-                        if isinstance(reasoning_item.get("encrypted_content"), str):
-                            encrypted_reasoning.append(reasoning_item)
-                elif isinstance(event, responses.ResponseErrorEvent):
-                    raise _openai_stream_event_error(event)
-                elif isinstance(event, responses.ResponseFailedEvent):
-                    raise _openai_stream_response_error(event.response)
-                elif isinstance(
-                    event,
-                    (
-                        responses.ResponseCompletedEvent,
-                        responses.ResponseIncompleteEvent,
-                    ),
-                ):
-                    resp = event.response
-                    (
-                        message_id,
-                        finish_reason,
-                        input_tokens,
-                        output_tokens,
-                        cache_read,
-                        cache_write,
-                    ) = _terminal_metadata(resp)
-                    if finish_reason == "incomplete":
-                        incomplete = getattr(resp, "incomplete_details", None)
-                        if getattr(incomplete, "reason", None) == "content_filter":
-                            finish_reason = "content_filter"
-                    reported_tier = from_plain(
-                        getattr(resp, "service_tier", None),
-                        str,
-                        default=None,
-                    )
-                    # Set last: if a usage/attr read above raises on an SDK shape
-                    # change, ``completed`` stays False so the ``finally`` still
-                    # closes the stream instead of leaking the connection.
-                    completed = True
-    finally:
-        if not completed:
-            await _close_stream(stream)
-
-    if refusal_parts and finish_reason in (None, "completed", "stop"):
-        finish_reason = "content_filter"
-    response = _build_stream_response(
-        text_parts=text_parts,
-        thinking_parts=thinking_parts,
-        encrypted_reasoning=encrypted_reasoning,
-        tool_calls=tool_calls,
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        cache_write=cache_write,
-        cache_read=cache_read,
-        reported_tier=reported_tier,
-        finish_reason=finish_reason,
-        message_id=message_id,
-        model=model,
-    )
-    if not completed:
-        raise StreamInterruptedError(response)
-    return response
+        return json_loads(text, dict[str, object])
+    except ValueError:
+        return {}
 
 
-def _openai_stream_event_error(event: object) -> UserFacingError:
-    code = getattr(event, "code", None)
-    param = getattr(event, "param", None)
-    message = getattr(event, "message", "OpenAI stream error")
-    details = ["OpenAI stream error"]
-    if isinstance(code, str) and code:
-        details.append(f"code={code}")
-    if isinstance(param, str) and param:
-        details.append(f"param={param}")
-    details.append(str(message))
-    return OpenAIStreamError(
-        ": ".join(details),
-        code=code if isinstance(code, str) else None,
-        param=param if isinstance(param, str) else None,
-    )
-
-
-def _openai_stream_response_error(response: object) -> UserFacingError:
-    response_id = getattr(response, "id", "")
-    status = getattr(response, "status", "")
-    error: object = getattr(response, "error", None)
-    message: object = getattr(error, "message", None) if error is not None else None
-    code: object = getattr(error, "code", None) if error is not None else None
-    incomplete: object = getattr(response, "incomplete_details", None)
-    reason: object = (
-        getattr(incomplete, "reason", None) if incomplete is not None else None
-    )
-    details = ["OpenAI stream ended without completion"]
-    if isinstance(status, str) and status:
-        details.append(f"status={status}")
-    if isinstance(response_id, str) and response_id:
-        details.append(f"response_id={response_id}")
-    if isinstance(code, str) and code:
-        details.append(f"code={code}")
-    if isinstance(reason, str) and reason:
-        details.append(f"reason={reason}")
-    if isinstance(message, str) and message:
-        details.append(message)
-    return OpenAIStreamError(
-        ": ".join(details),
-        code=code if isinstance(code, str) else None,
-    )
-
-
-def _build_stream_response(
-    *,
-    text_parts: list[str],
-    thinking_parts: list[str],
-    encrypted_reasoning: list[Mapping[str, object]],
-    tool_calls: list[ToolCall],
-    input_tokens: int,
-    output_tokens: int,
-    cache_write: int,
-    cache_read: int,
-    reported_tier: str | None,
-    finish_reason: str | None,
-    message_id: str,
-    model: _OpenAIResponsesModel,
-) -> ModelResponse:
-    raw_reason = _FINISH_MAP.get(finish_reason or "", finish_reason)
-
-    # The Responses API reports a cache-inclusive prompt total; keep ordinary,
-    # cache-write, and cache-read pools disjoint in Sagent's normalized usage.
-    non_cached_input = max(0, input_tokens - cache_read - cache_write)
-    tokens = TokenCount(
-        request=non_cached_input,
-        response=output_tokens,
-        cache_write=cache_write,
-        cache_read=cache_read,
-    )
-    thinking_blocks: list[Mapping[str, object]] = list(encrypted_reasoning)
-    if thinking_parts:
-        thinking_blocks.append({"type": "reasoning", "text": "".join(thinking_parts)})
-    return ModelResponse(
-        message=AssistantMessage(
-            text="".join(text_parts),
-            thinking_blocks=tuple(thinking_blocks),
-            tool_calls=tuple(tool_calls),
-        ),
-        tokens=tokens,
-        stop_reason=normalize_stop_reason(
-            raw_reason,
-            kind="openai",
-            has_tool_use=bool(tool_calls),
-        ),
-        message_id=message_id,
-        request_id=message_id,
-        spend=_spend_at_served_tier(model, tokens, reported_tier=reported_tier),
-    )
-
-
-# The server's tier vocabulary grows without notice, and the response is already
-# paid for, so pricing degrades to the requested tier rather than raising.
-def _spend_at_served_tier(
-    model: _OpenAIResponsesModel,
-    tokens: TokenCount,
-    *,
-    reported_tier: str | None,
-) -> TokenCost:
-    """Price ``tokens`` at the tier the server reports, else the requested tier."""
-    served = served_tier(reported_tier)
-    debug_log.trace("api_response", kind="openai_responses", service_tier=served)
-    if served is None:
-        logger.warning(
-            "OpenAI reported unknown service_tier %r; billing the requested tier %r.",
-            reported_tier,
-            model.settings.service_tier,
-        )
-        return model.spend(tokens)
+def _object(value: object) -> dict[str, object]:
     try:
-        return model.capability.prices.cost(
-            tokens,
-            service_tier=served,
-            at=datetime.now(UTC).date(),
-        )
-    except KeyError:
-        logger.warning(
-            "%s has no price for served service_tier %r; billing the requested "
-            "tier %r.",
-            model.capability.model_id,
-            served,
-            model.settings.service_tier,
-        )
-        return model.spend(tokens)
+        return from_plain(value, dict[str, object])
+    except ReadError:
+        return {}
 
 
-# Runs in a ``finally`` / cleanup context, so a failure HERE must never replace the
-# error that triggered the close (e.g. a ``UserFacingError`` from a
-# ``ResponseFailedEvent``). A broken pipe on ``aclose`` would otherwise surface to the
-# user instead of the real cause -- swallow and log it.
-async def _close_stream(stream: object) -> None:
-    """Close a Responses stream after timeout, cancellation, or stream error."""
-    close: object = getattr(stream, "aclose", None)
-    if close is None:
-        close = getattr(stream, "close", None)
-    if not callable(close):
-        return
+def _objects(value: object) -> list[dict[str, object]]:
     try:
-        result = close()
-        if inspect.isawaitable(result):
-            await result
-    except Exception:
-        logger.debug("stream close raised during cleanup", exc_info=True)
-
-
-def _parse_tool_arguments(
-    delta_args: str,
-    done_args: str,
-    *,
-    tool_name: str,
-    call_id: str,
-) -> dict[str, object]:
-    """Parse streamed function-call arguments with completed-item fallback."""
-    saw_args = False
-    parsed_by_source: dict[str, dict[str, object]] = {}
-    for source, args_str in (("delta", delta_args), ("done", done_args)):
-        if not args_str:
-            continue
-        saw_args = True
-        try:
-            parsed = json_loads(args_str, dict[str, object])
-        except json.JSONDecodeError:
-            logger.warning(
-                "OpenAI Responses tool arguments were invalid JSON: "
-                "source=%s tool=%s call_id=%s chars=%d",
-                source,
-                tool_name,
-                call_id,
-                len(args_str),
-            )
-            continue
-        except TypeError:
-            logger.warning(
-                "OpenAI Responses tool arguments were not a JSON object: "
-                "source=%s tool=%s call_id=%s",
-                source,
-                tool_name,
-                call_id,
-            )
-            continue
-        parsed_by_source[source] = parsed
-        if not parsed:
-            logger.warning(
-                "OpenAI Responses tool arguments were an empty JSON object: "
-                "source=%s tool=%s call_id=%s chars=%d",
-                source,
-                tool_name,
-                call_id,
-                len(args_str),
-            )
-    if not saw_args:
-        logger.warning(
-            "OpenAI Responses tool arguments were empty: tool=%s call_id=%s",
-            tool_name,
-            call_id,
-        )
-    delta = parsed_by_source.get("delta", {})
-    done = parsed_by_source.get("done", {})
-    if len(parsed_by_source) == 2 and delta != done:
-        logger.warning(
-            "OpenAI Responses tool arguments differed between delta and done: "
-            "tool=%s call_id=%s delta_chars=%d done_chars=%d "
-            "delta_keys=%d done_keys=%d",
-            tool_name,
-            call_id,
-            len(delta_args),
-            len(done_args),
-            len(delta),
-            len(done),
-        )
-    if done:
-        logger.debug(
-            "OpenAI Responses selected completed tool arguments: "
-            "tool=%s call_id=%s delta_chars=%d done_chars=%d "
-            "delta_keys=%d done_keys=%d",
-            tool_name,
-            call_id,
-            len(delta_args),
-            len(done_args),
-            len(delta) if "delta" in parsed_by_source else -1,
-            len(done),
-        )
-        return done
-    if delta:
-        logger.debug(
-            "OpenAI Responses selected streamed delta tool arguments: "
-            "tool=%s call_id=%s delta_chars=%d done_chars=%d delta_keys=%d",
-            tool_name,
-            call_id,
-            len(delta_args),
-            len(done_args),
-            len(delta),
-        )
-        return delta
-    return {}
+        return from_plain(value, list[dict[str, object]])
+    except ReadError:
+        return []

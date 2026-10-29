@@ -1,1154 +1,815 @@
-"""Tests for ``providers.google_cli``: wire-format + lifecycle."""
+"""Tests for Gemini through ``agy``, against a stub ``agy`` on PATH.
+
+The stub speaks whatever stream-json lines a test scripts: each line it reads plays
+the next numbered turn file, counted across every process, and ``WAIT name`` in a
+turn waits for a file our fake tool server writes when a held call is answered.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Self, override
 
 import asyncio
-import inspect
-import json
+import io
 import os
+import stat
 import tempfile
-import time
+
+from PIL import Image
+from treekle import PlainTree, json_dumps, json_loads
 
 import pytest
+import pytest_asyncio
 
-from sagent.agent.retry import validate_model_response
-from sagent.providers.google import cli
-from sagent.providers.google.api import Google
-from sagent.providers.google.cli import (
-    GoogleCLI,
-    _dispatch_session_update,
-    _GoogleCLIModel,
-    _GoogleCLIProcState,
-    _read_expiry,
-    _user_prompt_blocks,
+from sagent.model.cost import TokenCount
+from sagent.model.exceptions import (
+    AuthError,
+    DisconnectedError,
+    RateLimitedError,
 )
-from sagent.providers.lib.cli_respawn import hash_system
-from sagent.providers.lib.hotspare import HotSpare
-from sagent.providers.lib.mcp_bridge import ToolsBridge
-from sagent.providers.lib.subproc import (
-    Subproc,
-    SubprocessTransportError,
-)
-from sagent.tools.core import tool
-from sagent.types.model import ModelRequest, ModelTerminationError
-from sagent.types.runtime import (
+from sagent.model.types import Request, Response, TextChunk
+from sagent.providers.google.cli import GoogleCLI, GoogleCLIModel
+from sagent.providers.resources import SharedResources
+from sagent.session.types import (
+    AgentToAgentMessage,
+    AnyToolResult,
     AssistantMessage,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    RuntimeEvent,
+    Attachment,
+    ContextClear,
+    SystemMessage,
+    Thinking,
     ToolCall,
-    ToolResult,
+    TurnContext,
+    UncategorizedToolResult,
     UserMessage,
 )
+from sagent.tools.display import ToolDisplay
+from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Sequence
 
-    from treekle import MutablePlainTree
+    import httpx2
 
-
-_CRED_PAYLOAD: dict[str, object] = {
-    "access_token": "test-at",
-    "refresh_token": "test-rt",
-    "expiry_date": (time.time() + 3600) * 1000.0,
-}
+    from sagent.model.capability import ThinkingEffort
+    from sagent.providers.types import ProcessPool, ToolMount
+    from sagent.tools.types import Tool, ToolContext
 
 
-class _Peeks:
-    """Records each topic its tool was asked to peek at."""
+_AGY = r"""#!/bin/sh
+dir=$(dirname "$0")
+trap 'exit 0' TERM
+while IFS= read -r line; do
+  if [ ! -e "$dir/argv.$$" ]; then
+    printf '%s\n' "$@" > "$dir/argv.$$"
+    env > "$dir/env.$$"
+    pwd > "$dir/cwd.$$"
+    cp -r "$HOME/.gemini" "$dir/gemini.$$"
+  fi
+  printf '%s %s\n' "$$" "$line" >> "$dir/said"
+  n=$(cat "$dir/count" 2>/dev/null || echo 0)
+  echo $((n + 1)) > "$dir/count"
+  [ -e "$dir/turn.$n" ] || continue
+  while IFS= read -r out; do
+    case "$out" in
+      "WAIT "*) f="$dir/${out#WAIT }"; while [ ! -e "$f" ]; do sleep 0.005; done ;;
+      EXIT) exit 0 ;;
+      *) printf '%s\n' "$out" ;;
+    esac
+  done < "$dir/turn.$n"
+done
+"""
 
-    def __init__(self) -> None:
-        self.topics: list[str] = []
+_INIT = {"event": "init", "conversation_id": "c1", "init": {"tools": ["view_file"]}}
 
-    def peek(self, topic: str) -> str:
-        """Peek at a topic."""
-        self.topics.append(topic)
-        return topic
+
+@pytest.fixture(autouse=True)
+def private_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make every agy home under ``tmp_path``, not the shared temp directory."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+
+
+@pytest.fixture
+def stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Stub:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    script = bin_dir / "agy"
+    script.write_text(_AGY)
+    script.chmod(script.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return _Stub(dir=bin_dir)
+
+
+@pytest_asyncio.fixture
+async def shared(stub: _Stub) -> AsyncIterator[_Resources]:
+    async with _Resources(stub=stub) as resources:
+        yield resources
+
+
+# ---- the process ---------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_the_bridge_refuses_a_tool_the_request_withholds() -> None:
-    """The CLI runs tools through the bridge, where the runtime cannot refuse them."""
-    peeks = _Peeks()
-    model = GoogleCLI().model("gemini-2.5-flash")
-    model._tools_bridge = ToolsBridge([])
-    model._sync_tools_bridge(
-        ModelRequest(
-            messages=[UserMessage(text="hi", offered_tools=("Look",))],
-            tools=[tool(peeks.peek, name="Look"), tool(peeks.peek, name="Peek")],
-        ),
-    )
-
-    _ = await model._tools_bridge._call_tool("Peek", {"topic": "withheld"})
-    _ = await model._tools_bridge._call_tool("Look", {"topic": "offered"})
-
-    assert peeks.topics == ["offered"]
-
-
-def _write_creds(tmp_path: Path) -> Path:
-    """Write a fake credentials file into ``tmp_path`` and return its path."""
-    path = tmp_path / "oauth_creds.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(_CRED_PAYLOAD), encoding="utf-8")
-    return path
-
-
-def test_google_cli_does_not_import_subscription_provider() -> None:
-    source = inspect.getsource(cli)
-    assert "providers.google_sub" not in source
-
-
-def test_from_cli_requires_credentials(
+async def test_agy_runs_as_our_agent_in_a_home_of_its_own(
+    shared: _Resources,
+    stub: _Stub,
     monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
 ) -> None:
-    """``from_credentials`` raises ``FileNotFoundError`` if no creds file exists."""
-    monkeypatch.setattr(
-        "sagent.providers.google.cli._CREDS_PATH",
-        tmp_path / "missing.json",
+    """Our prompt is its agent's, our tools its only ones; its login is its own."""
+    monkeypatch.setenv("GEMINI_API_KEY", "leak")
+    monkeypatch.setenv("KEEP_ME", "1")
+    stub.script([_INIT, *_said("hi", tokens=(10, 2))])
+    provider = GoogleCLI(resources=shared)
+    model = provider["gemini-flash"]
+    request = Request(
+        system=("Be terse.", "", "Rules."),
+        records=_HELLO,
+        tools=(_Echo(),),
     )
-    with pytest.raises(FileNotFoundError, match="no credentials"):
-        GoogleCLI.from_credentials()
+    await _stream(model, request)
 
-
-def test_from_cli_rejects_missing_executable(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """``from_credentials`` fails fast if ``gemini`` is not on ``PATH``."""
-    creds = _write_creds(tmp_path)
-    monkeypatch.setattr(
-        "sagent.providers.google.cli._CREDS_PATH",
-        creds,
+    assert stub.only("argv").splitlines() == [
+        "--agent",
+        "sagent",
+        "--input-format",
+        "stream-json",
+        "--output-format",
+        "stream-json",
+        "--disable-slash-commands",
+        "--model",
+        "gemini-3.8-flash-high",
+    ]
+    env = dict(
+        line.split("=", 1) for line in stub.only("env").splitlines() if "=" in line
     )
-
-    def _which_missing(name: str) -> str | None:
-        del name
-        return None
-
-    monkeypatch.setattr(
-        "sagent.providers.google.cli.shutil.which",
-        _which_missing,
+    home = Path(env["HOME"])
+    assert (env["KEEP_ME"], "GEMINI_API_KEY" in env, env["USERPROFILE"]) == (
+        "1",
+        False,
+        env["HOME"],
     )
-    with pytest.raises(RuntimeError, match="not on PATH"):
-        GoogleCLI.from_credentials()
-
-
-def test_from_cli_with_credentials(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """``from_credentials`` returns a configured provider when both creds + CLI exist."""
-    creds = _write_creds(tmp_path)
-    monkeypatch.setattr(
-        "sagent.providers.google.cli._CREDS_PATH",
-        creds,
+    assert home.name.startswith("sagent-agy-")
+    assert stub.only("cwd") == str(home / "workdir")
+    gemini = stub.copied()
+    # ``agy`` lists an MCP tool by name alone; without its schema the model
+    # guesses the arguments, or spends a call reading the schema's file.
+    assert (gemini / "config" / "agents" / "sagent" / "agent.md").read_text() == (
+        "---\nname: sagent\ndescription: Answers as sagent asks, with sagent's tools.\n"
+        "mainAgent: true\ntools: []\n---\nBe terse.\n\nRules.\n\n"
+        "# Tools\n\n"
+        "Each tool is on the MCP server `sagent`; call it through call_mcp_tool,"
+        " with arguments as its input schema says. A relative path resolves"
+        " against sagent's working directory, not the workspace agy names.\n\n"
+        "## Echo\n\nSay the text back.\n\n"
+        'Input schema: {"type":"object","properties":{"text":{"type":"string"}}}\n'
     )
-
-    def _which_gemini(name: str) -> str | None:
-        del name
-        return "/usr/bin/gemini"
-
-    monkeypatch.setattr(
-        "sagent.providers.google.cli.shutil.which",
-        _which_gemini,
-    )
-    provider = GoogleCLI.from_credentials()
-    assert provider.account is None
-
-
-def test_from_cli_rejects_malformed_credentials(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    creds = tmp_path / "oauth_creds.json"
-    creds.write_text("", encoding="utf-8")
-    monkeypatch.setattr(
-        "sagent.providers.google.cli._CREDS_PATH",
-        creds,
-    )
-
-    def _which_gemini(name: str) -> str | None:
-        del name
-        return "/usr/bin/gemini"
-
-    monkeypatch.setattr(
-        "sagent.providers.google.cli.shutil.which",
-        _which_gemini,
-    )
-    with pytest.raises(ValueError, match="Invalid credentials"):
-        GoogleCLI.from_credentials()
-
-
-def test_from_cli_rejects_credentials_missing_oauth_fields(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    creds = tmp_path / "oauth_creds.json"
-    creds.write_text(json.dumps({}), encoding="utf-8")
-    monkeypatch.setattr(
-        "sagent.providers.google.cli._CREDS_PATH",
-        creds,
-    )
-
-    def _which_gemini(name: str) -> str | None:
-        del name
-        return "/usr/bin/gemini"
-
-    monkeypatch.setattr(
-        "sagent.providers.google.cli.shutil.which",
-        _which_gemini,
-    )
-    with pytest.raises(ValueError, match="Invalid credentials"):
-        GoogleCLI.from_credentials()
-
-
-def test_from_key_delegates_to_google() -> None:
-    """``GoogleCLI.from_key`` returns a plain ``Google`` provider for API keys."""
-    fallback = GoogleCLI.from_key("AIza-not-real")
-    assert not isinstance(fallback, GoogleCLI)
-
-
-def test_model_unknown_raises() -> None:
-    """An unsupported model id surfaces with the known-model list."""
-    provider = GoogleCLI()
-    with pytest.raises(ValueError, match="Unknown model"):
-        _ = provider.model("not-a-gemini")
-
-
-def test_model_uses_default_when_unset() -> None:
-    provider = GoogleCLI()
-    model = provider.model()
-    assert model.capability.model_id == provider.catalog.resolve("default")[0].model_id
-
-
-def test_catalog_inherits_from_google() -> None:
-    assert tuple(GoogleCLI.catalog.models) == tuple(Google.catalog.models)
-
-
-def test_utility_model_picks_flash_lite() -> None:
-    """``utility`` resolves the same row on the CLI as on the API."""
-    provider = GoogleCLI()
-    model = provider.model("utility")
-    assert model.capability.model_id == provider.catalog.resolve("utility")[0].model_id
-
-
-def test_model_capabilities() -> None:
-    """The CLI transport narrows the row it inherits from the API."""
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    assert (
-        model.capability.thinking.budget
-        == provider.catalog.models["gemini-2.5-flash"].thinking.budget
-    )
-    assert model.capability.thinking.effort == frozenset({"none"})
-    assert model.capability.cache_ttl_sec == frozenset({0.0})
-    assert model.capability.manage_context_server_side == frozenset({True})
-    assert model.capability.account_auth is True
-
-
-def test_limits_come_from_catalog() -> None:
-    provider = GoogleCLI()
-    model = provider.model()
-    assert model.limits == provider.catalog.models["default"].context[""]
-
-
-def test_is_context_overflow_text_markers() -> None:
-    """Overflow classification covers Gemini's documented overflow strings."""
-    model = GoogleCLI().model("gemini-2.5-flash")
-    assert model.is_context_overflow(RuntimeError("Input too long")) is True
-    assert model.is_context_overflow(RuntimeError("exceeds the maximum")) is True
-    assert model.is_context_overflow(RuntimeError("other")) is False
-
-
-def test_byte_limit_not_classified_as_context_overflow() -> None:
-    """A request-byte-limit error must not be swallowed by ``"too large"``.
-
-    The bare ``"too large"`` substring would otherwise mis-route a byte
-    wire-limit error into token-overflow recovery; the shared byte guard
-    must short-circuit it first, uniform with the HTTP siblings.
-    """
-    model = GoogleCLI().model("gemini-2.5-flash")
-    assert model.is_context_overflow(RuntimeError("request entity too large")) is False
-
-
-def test_user_prompt_blocks_text_only() -> None:
-    """Plain text turns into a single ``{type:text}`` block."""
-    blocks = _user_prompt_blocks(
-        UserMessage(text="hi"),
-        max_image_dim=3072,
-        max_image_bytes=20 * 1024 * 1024,
-    )
-    assert blocks == [{"type": "text", "text": "hi"}]
-
-
-def test_user_prompt_blocks_empty_user_emits_placeholder() -> None:
-    """An empty user message still emits one block to satisfy ACP shape."""
-    blocks = _user_prompt_blocks(
-        UserMessage(text=""),
-        max_image_dim=3072,
-        max_image_bytes=20 * 1024 * 1024,
-    )
-    assert blocks == [{"type": "text", "text": ""}]
-
-
-def test_dispatch_session_update_routes_text_and_thinking() -> None:
-    """``agent_message_chunk`` / ``agent_thought_chunk`` fan to the callbacks."""
-    text_parts: list[str] = []
-    thinking_parts: list[str] = []
-    text_chunks: list[str] = []
-    thinking_chunks: list[str] = []
-
-    def _sink(ev: RuntimeEvent) -> None:
-        if isinstance(ev, ModelResponsePartial):
-            text_chunks.append(ev.text)
-        elif isinstance(ev, ModelResponseThinking):
-            thinking_chunks.append(ev.text)
-
-    message_chunk: dict[str, MutablePlainTree] = {
-        "update": {
-            "sessionUpdate": "agent_message_chunk",
-            "content": {"text": "hello"},
-        },
+    assert json_loads((gemini / "config" / "mcp_config.json").read_text()) == {
+        "mcpServers": {"sagent": {"serverUrl": shared.mount.url}},
     }
-    thought_chunk: dict[str, MutablePlainTree] = {
-        "update": {
-            "sessionUpdate": "agent_thought_chunk",
-            "content": {"text": "thinking..."},
-        },
+    assert json_loads((gemini / "antigravity-cli" / "settings.json").read_text()) == {
+        "permissions": {"allow": ["mcp(sagent/*)"]},
+        "showTips": False,
+        "showFeedbackSurvey": False,
     }
-    _dispatch_session_update(
-        message_chunk,
-        text_parts,
-        thinking_parts,
-        _sink,
-    )
-    _dispatch_session_update(
-        thought_chunk,
-        text_parts,
-        thinking_parts,
-        _sink,
-    )
-    assert text_parts == ["hello"]
-    assert thinking_parts == ["thinking..."]
-    assert text_chunks == ["hello"]
-    assert thinking_chunks == ["thinking..."]
+    await provider.aclose()
+    assert not await asyncio.to_thread(home.exists)
 
 
-def test_dispatch_session_update_ignores_unknown_kinds() -> None:
-    """``tool_call_update`` and other kinds are dropped without side effects."""
-    text_parts: list[str] = []
-    thinking_parts: list[str] = []
-    unknown_update: dict[str, MutablePlainTree] = {
-        "update": {"sessionUpdate": "tool_call_update", "id": 1},
-    }
-    _dispatch_session_update(
-        unknown_update,
-        text_parts,
-        thinking_parts,
-        None,
-    )
-    assert text_parts == []
-    assert thinking_parts == []
+@pytest.mark.asyncio
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+async def test_the_effort_is_the_model_id_s_suffix(
+    shared: _Resources,
+    stub: _Stub,
+    effort: ThinkingEffort,
+) -> None:
+    """``agy`` refuses ``--effort`` beside a suffixed id: the suffix is the effort."""
+    stub.script([_INIT, *_said("hi")])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    model.settings = replace(model.settings, thinking_effort=effort)
+    await _stream(model, Request(records=_HELLO))
+    assert stub.only("argv").splitlines()[-1] == f"gemini-3.8-flash-{effort}"
+    await model.provider.aclose()
 
 
-def test_approx_request_tokens_sums_user_and_assistant() -> None:
-    """The walker counts both user and assistant text entries."""
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    request = ModelRequest(
-        messages=[
-            UserMessage(text="aaaa" * 4),
-            AssistantMessage(text="bbbb"),
-            UserMessage(text="cccc"),
+# ---- turns ---------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_first_turn_tells_the_conversation_and_streams_the_reply(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    stub.script(
+        [
+            _INIT,
+            _step("user_input"),
+            _step("agent_response", text="good ", state="ACTIVE"),
+            _step("agent_response", text="day", usage=(30, 5, 20)),
+            _step("checkpoint", usage=(7, 1, 0)),
+            _result(),
         ],
     )
-    estimate = model.approx_request_tokens(request)
-    assert estimate == sum(
-        model.approx_text_tokens(text) for text in ("a" * 16, "bbbb", "cccc")
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    records = (
+        UserMessage(content="first"),
+        AssistantMessage(content="ok"),
+        SystemMessage(content="mind the tests"),
+        UserMessage(content="second"),
     )
+    events = await _stream(model, Request(records=records))
 
-
-def test_read_expiry_handles_missing_and_invalid(tmp_path: Path) -> None:
-    """``_read_expiry`` returns ``0`` for missing, malformed, or non-numeric files."""
-    target = tmp_path / "creds.json"
-    target.write_text("{}", encoding="utf-8")
-    assert _read_expiry(target) == 0.0
-    target.write_text("not json", encoding="utf-8")
-    assert _read_expiry(target) == 0.0
-    target.write_text(json.dumps({"expiry_date": 12345.0}), encoding="utf-8")
-    assert _read_expiry(target) == pytest.approx(12345.0)
-
-
-def test_should_respawn_triggers() -> None:
-    """Each respawn trigger from §1.4 is detected on the next request."""
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-
-    class _DummyActive:
-        pass
-
-    model._hot_spare._active = cast(Subproc, _DummyActive())
-    user = UserMessage(text="hi")
-    request = ModelRequest(messages=[user])
-
-    model._system_hash = hash_system("different")
-    assert model._should_respawn(request) is True
-
-    model._system_hash = hash_system("")
-    model._sent_history_head = UserMessage(text="other")
-    assert model._should_respawn(request) is True
-
-    model._sent_history_head = user
-    model._turn_count = 200
-    assert model._should_respawn(request) is True
-
-    model._turn_count = 0
-    model._last_input_tokens = model.limits.max_request_tokens
-    assert model._should_respawn(request) is True
-
-    model._last_input_tokens = 0
-    assert model._should_respawn(request) is False
-
-
-@pytest.mark.asyncio
-async def test_stream_eof_respawns_and_resets_sent_index(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Subprocess EOF is transport failure and resets Google send state."""
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    respawn_count = 0
-
-    class _DeadProc:
-        async def write_line(self, line: str) -> None:
-            del line
-
-        async def read_json_line(self, *, skip_non_json: bool = False) -> None:
-            del skip_non_json
-
-    class _HotSpare:
-        active = cast(Subproc | None, object())
-
-        async def acquire(self) -> Subproc:
-            return cast(Subproc, _DeadProc())
-
-        async def respawn_after_transport_failure(self) -> Subproc:
-            nonlocal respawn_count
-            respawn_count += 1
-            return cast(Subproc, _DeadProc())
-
-    model._system_hash = hash_system("")
-    model._session_id = "session"
-    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
-    request = ModelRequest(messages=[UserMessage(text="hi")])
-    with pytest.raises(Exception, match="stdout closed"):
-        await model.stream(request)
-    assert respawn_count == 1
-    assert model._last_sent_index == 0
-    assert model._sent_history_head is None
-
-
-@pytest.mark.asyncio
-async def test_stream_read_timeout_respawns_and_resets_sent_index(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    respawn_count = 0
-
-    class _StalledProc:
-        async def write_line(self, line: str) -> None:
-            del line
-
-        async def read_json_line(self, *, skip_non_json: bool = False) -> object:
-            del skip_non_json
-            raise SubprocessTransportError("subprocess stdout idle timeout")
-
-    class _HotSpare:
-        active = cast(Subproc | None, object())
-
-        async def acquire(self) -> Subproc:
-            return cast(Subproc, _StalledProc())
-
-        async def respawn_after_transport_failure(self) -> Subproc:
-            nonlocal respawn_count
-            respawn_count += 1
-            return cast(Subproc, _StalledProc())
-
-    model._system_hash = hash_system("")
-    model._session_id = "session"
-    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
-    request = ModelRequest(messages=[UserMessage(text="hi")])
-    with pytest.raises(Exception, match="stdout idle timeout"):
-        await model.stream(request)
-    assert respawn_count == 1
-    assert model._last_sent_index == 0
-    assert model._sent_history_head is None
-
-
-@pytest.mark.asyncio
-async def test_stream_repeated_transport_failures_trip_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Repeated subprocess transport failures stop respawning indefinitely."""
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    respawn_count = 0
-
-    class _DeadProc:
-        async def write_line(self, line: str) -> None:
-            del line
-
-        async def read_json_line(self, *, skip_non_json: bool = False) -> None:
-            del skip_non_json
-
-    class _HotSpare:
-        active = cast(Subproc | None, object())
-
-        async def acquire(self) -> Subproc:
-            return cast(Subproc, _DeadProc())
-
-        async def respawn_after_transport_failure(self) -> Subproc:
-            nonlocal respawn_count
-            respawn_count += 1
-            if respawn_count == 2:
-                raise RuntimeError("transport failure budget exhausted")
-            return cast(Subproc, _DeadProc())
-
-    model._system_hash = hash_system("")
-    model._session_id = "session"
-    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
-    request = ModelRequest(messages=[UserMessage(text="hi")])
-
-    with pytest.raises(Exception, match="stdout closed"):
-        await model.stream(request)
-    with pytest.raises(RuntimeError, match="transport failure budget exhausted"):
-        await model.stream(request)
-
-    assert respawn_count == 2
-    assert model._last_sent_index == 0
-    assert model._sent_history_head is None
-
-
-def test_should_respawn_skips_when_no_active() -> None:
-    """Before the first acquire, the model has no active and skips respawn."""
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    assert model._should_respawn(ModelRequest(messages=[UserMessage(text="hi")])) is (
-        False
-    )
-
-
-@pytest.mark.asyncio
-async def test_stream_system_change_discards_warmed_old_system_spare(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    spawned_systems: list[str] = []
-    used_systems: list[str] = []
-    warmed = asyncio.Event()
-
-    class _Proc:
-        async def close(self) -> None:
-            pass
-
-    async def spawn_initialized() -> Subproc:
-        proc = cast(Subproc, _Proc())
-        spawned_systems.append(model._pending_system)
-        if len(spawned_systems) == 2:
-            warmed.set()
-        state = _GoogleCLIProcState(
-            proc=proc,
-            session_id=f"session-{model._pending_system}",
-            tmpdir=Path.cwd(),
-            system_hash=hash_system(model._pending_system),
-        )
-        _GoogleCLIModel._attach_proc_state(state)
-        return proc
-
-    async def send_prompt(
-        proc: Subproc,
-        prompt_blocks: list[dict[str, MutablePlainTree]],
-        text_parts: list[str],
-        thinking_parts: list[str],
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> str | None:
-        del proc, prompt_blocks, text_parts, thinking_parts, publish
-        used_systems.append(model._system_hash)
-        return "end_turn"
-
-    monkeypatch.setattr(model, "_send_prompt", send_prompt)
-    model._hot_spare = HotSpare(spawn_initialized)
-
-    _ = await model.stream(
-        ModelRequest(messages=[UserMessage(text="a")], system=("A",)),
-    )
-    await warmed.wait()
-    _ = await model.stream(
-        ModelRequest(messages=[UserMessage(text="b")], system=("B",)),
-    )
-
-    assert used_systems == [hash_system("A"), hash_system("B")]
-    assert spawned_systems == ["A", "A", "B"]
-    await model.close()
-
-
-@pytest.mark.asyncio
-async def test_hot_spare_warmup_does_not_overwrite_active_session_id(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    ready = asyncio.Event()
-    warmed = asyncio.Event()
-
-    class _DummyProc:
-        session_ids: list[str]
-
-        def __init__(self) -> None:
-            self.session_ids = []
-
-        async def close(self) -> None:
-            pass
-
-    async def spawn_initialized() -> Subproc:
-        proc = cast(Subproc, _DummyProc())
-        session_id = "active-session"
-        if not ready.is_set():
-            ready.set()
-        else:
-            session_id = "spare-session"
-            warmed.set()
-        state = _GoogleCLIProcState(
-            proc=proc,
-            session_id=session_id,
-            tmpdir=Path.cwd(),
-            system_hash=hash_system(""),
-        )
-        _GoogleCLIModel._attach_proc_state(state)
-        return proc
-
-    async def send_prompt(
-        proc: Subproc,
-        prompt_blocks: list[dict[str, MutablePlainTree]],
-        text_parts: list[str],
-        thinking_parts: list[str],
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> str | None:
-        del prompt_blocks, text_parts, thinking_parts, publish
-        cast(_DummyProc, proc).session_ids.append(model._session_id)
-        return "end_turn"
-
-    monkeypatch.setattr(model, "_send_prompt", send_prompt)
-    model._hot_spare = HotSpare(spawn_initialized)
-    proc = await model._hot_spare.acquire()
-    await warmed.wait()
-    response = await model.stream(ModelRequest(messages=[UserMessage(text="hi")]))
-    assert cast(_DummyProc, proc).session_ids == ["active-session"]
-    assert response.message_id == "active-session"
-    await model.close()
-
-
-@pytest.mark.asyncio
-async def test_exchange_turn_skips_assistant_replay(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Respawn replay sends only user-like entries to the CLI subprocess."""
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    prompts: list[list[dict[str, MutablePlainTree]]] = []
-
-    async def send_prompt(
-        proc: Subproc,
-        prompt_blocks: list[dict[str, MutablePlainTree]],
-        text_parts: list[str],
-        thinking_parts: list[str],
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> str | None:
-        del proc, text_parts, thinking_parts, publish
-        prompts.append(prompt_blocks)
-        return "end_turn"
-
-    monkeypatch.setattr(model, "_send_prompt", send_prompt)
-    response = await model._exchange_turn(
-        cast(Subproc, object()),
-        ModelRequest(
-            messages=[
-                UserMessage(text="first"),
-                AssistantMessage(text="hidden"),
-                UserMessage(text="second"),
-            ],
-        ),
-        publish=None,
-    )
-
-    assert [[block["text"] for block in prompt] for prompt in prompts] == [
-        ["first\n\nsecond"],
+    assert stub.said() == [
+        {
+            "event": "user",
+            "message": {
+                "content": "User: first\n\nAssistant: ok\n\n"
+                "<system-reminder>\nmind the tests\n</system-reminder>\n\nUser: second",
+            },
+        },
     ]
-    assert response.stop_reason == "model_finished"
+    assert events[:-1] == [TextChunk(text="good "), TextChunk(text="day")]
+    response = _response(events)
+    assert response.records == (AssistantMessage(content="good day"),)
+    assert response.stop_reason == "end_turn"
+    # Each step's usage, summed: input, then output, then what the cache served.
+    assert response.tokens == TokenCount(request=37, response=6, cache_read=20)
+    await model.provider.aclose()
 
 
 @pytest.mark.asyncio
-async def test_stream_writeback_failure_returns_response(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_the_next_user_message_goes_to_the_same_agy(
+    shared: _Resources,
+    stub: _Stub,
 ) -> None:
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    success_count = 0
+    stub.script([_INIT, *_said("one")], _said("two"))
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    first = _response(await _stream(model, Request(records=_HELLO)))
+    records = (*_HELLO, *first.records, UserMessage(content="and now?"))
+    second = _response(await _stream(model, Request(records=records)))
 
-    class _Proc:
-        pass
-
-    class _HotSpare:
-        active = cast(Subproc | None, object())
-
-        async def acquire(self) -> Subproc:
-            return cast(Subproc, _Proc())
-
-        def record_success(self) -> None:
-            nonlocal success_count
-            success_count += 1
-
-    async def send_prompt(
-        proc: Subproc,
-        prompt_blocks: list[dict[str, MutablePlainTree]],
-        text_parts: list[str],
-        thinking_parts: list[str],
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> str | None:
-        del proc, prompt_blocks, thinking_parts, publish
-        text_parts.append("ok")
-        return "end_turn"
-
-    async def writeback_credentials() -> None:
-        raise OSError("credential writeback failed")
-
-    user = UserMessage(text="hi")
-    model._system_hash = hash_system("")
-    model._session_id = "session"
-    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
-    monkeypatch.setattr(model, "_send_prompt", send_prompt)
-    monkeypatch.setattr(model, "_writeback_credentials", writeback_credentials)
-
-    response = await model.stream(ModelRequest(messages=[user]))
-
-    assert response.message.text == "ok"
-    assert response.message_id == "session"
-    assert success_count == 1
-    assert model._last_sent_index == 1
-    assert model._sent_history_head is user
-    assert model._turn_count == 1
+    assert second.records == (AssistantMessage(content="two"),)
+    assert len(stub.processes()) == 1
+    assert stub.said()[-1] == {"event": "user", "message": {"content": "and now?"}}
+    await model.provider.aclose()
 
 
 @pytest.mark.asyncio
-async def test_respawn_resets_active_counters(monkeypatch: pytest.MonkeyPatch) -> None:
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    model._turn_count = 100
-    model._last_input_tokens = model.limits.max_request_tokens
-
-    class _Proc:
-        pass
-
-    class _HotSpare:
-        active = cast(Subproc | None, object())
-
-        async def acquire(self) -> Subproc:
-            return cast(Subproc, _Proc())
-
-        async def respawn(self) -> Subproc:
-            return cast(Subproc, _Proc())
-
-        def record_success(self) -> None:
-            pass
-
-    async def send_prompt(
-        proc: Subproc,
-        prompt_blocks: list[dict[str, MutablePlainTree]],
-        text_parts: list[str],
-        thinking_parts: list[str],
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> str | None:
-        del proc, prompt_blocks, text_parts, thinking_parts, publish
-        return "end_turn"
-
-    model._system_hash = hash_system("")
-    model._session_id = "session"
-    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
-    monkeypatch.setattr(model, "_send_prompt", send_prompt)
-
-    request = ModelRequest(messages=[UserMessage(text="hi")])
-    response = await model.stream(request)
-
-    assert response.message_id == "session"
-    assert model._turn_count == 1
-    assert model._last_input_tokens == 0
-    assert model._should_respawn(request) is False
-
-
-@pytest.mark.asyncio
-async def test_exchange_turn_returns_current_output_only(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_a_call_of_our_tools_is_held_and_its_result_continues_the_turn(
+    shared: _Resources,
+    stub: _Stub,
 ) -> None:
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    text_callbacks: list[str] = []
-
-    async def send_prompt(
-        proc: Subproc,
-        prompt_blocks: list[dict[str, MutablePlainTree]],
-        text_parts: list[str],
-        thinking_parts: list[str],
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> str | None:
-        del proc, thinking_parts
-        text = str(prompt_blocks[0]["text"])
-        text_parts.append(text)
-        if publish is not None:
-            publish(ModelResponsePartial(text))
-        return "end_turn"
-
-    def _sink(ev: RuntimeEvent) -> None:
-        if isinstance(ev, ModelResponsePartial):
-            text_callbacks.append(ev.text)
-
-    monkeypatch.setattr(model, "_send_prompt", send_prompt)
-    response = await model._exchange_turn(
-        cast(Subproc, object()),
-        ModelRequest(messages=[UserMessage(text="first"), UserMessage(text="current")]),
-        publish=_sink,
+    call = ToolCall(call_id="c1", name="Echo", arguments={"text": "x"})
+    shared.mount.calls.put_nowait(call)
+    stub.script(
+        [
+            _INIT,
+            _step("agent_response", text="calling", usage=(10, 3, 0)),
+            _step("tool", state="ACTIVE", tool="call_mcp_tool"),
+            "WAIT answered.0",
+            _step("tool", tool="call_mcp_tool"),
+            _step("agent_response", text="done", usage=(15, 2, 10)),
+            _result(),
+        ],
+    )
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    request = Request(records=_HELLO, tools=(_Echo(),))
+    held = _response(await _stream(model, request))
+    assert held.records == (AssistantMessage(content="calling"), call)
+    # Each stream bills its own steps, so the last reply's count is one call's.
+    assert (held.stop_reason, held.tokens) == (
+        "tool_use",
+        TokenCount(request=10, response=3),
     )
 
-    assert response.message.text == "first\n\ncurrent"
-    assert text_callbacks == ["first\n\ncurrent"]
+    result = UncategorizedToolResult(call_id="c1", content="x")
+    records = (*_HELLO, *held.records, result)
+    done = _response(await _stream(model, Request(records=records, tools=(_Echo(),))))
+
+    assert shared.mount.answered == [(call, result)]
+    assert done.records == (AssistantMessage(content="done"),)
+    assert done.tokens == TokenCount(request=15, response=2, cache_read=10)
+    assert len(stub.processes()) == 1
+    assert shared.mount.offered[-1] == ("Echo",)
+    await model.provider.aclose()
 
 
 @pytest.mark.asyncio
-async def test_terminal_json_rpc_error_respawns_and_resets_state(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_another_system_prompt_starts_a_fresh_agy(
+    shared: _Resources,
+    stub: _Stub,
 ) -> None:
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    respawn_count = 0
+    stub.script([_INIT, *_said("one")], [_INIT, *_said("two")])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    first = _response(await _stream(model, Request(system=("A",), records=_HELLO)))
+    records = (*_HELLO, *first.records, UserMessage(content="again"))
+    await _stream(model, Request(system=("B",), records=records))
 
-    class _ErrorProc:
-        async def write_line(self, line: str) -> None:
-            del line
-
-        async def read_json_line(
-            self,
-            *,
-            skip_non_json: bool = False,
-        ) -> dict[str, MutablePlainTree]:
-            del skip_non_json
-            return {"id": 1, "error": {"message": "boom"}}
-
-    class _HotSpare:
-        active = cast(Subproc | None, object())
-
-        async def acquire(self) -> Subproc:
-            return cast(Subproc, _ErrorProc())
-
-        async def respawn_after_transport_failure(self) -> Subproc:
-            nonlocal respawn_count
-            respawn_count += 1
-            return cast(Subproc, _ErrorProc())
-
-    user = UserMessage(text="hi")
-    model._system_hash = hash_system("")
-    model._session_id = "session"
-    model._last_sent_index = 0
-    model._sent_history_head = user
-    model._turn_count = 9
-    model._last_input_tokens = 123
-    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
-
-    with pytest.raises(SubprocessTransportError, match="JSON-RPC error"):
-        _ = await model.stream(ModelRequest(messages=[user]))
-
-    assert respawn_count == 1
-    assert model._last_sent_index == 0
-    assert model._sent_history_head is None
-    assert model._turn_count == 0
-    assert model._last_input_tokens == 0
+    assert len(stub.processes()) == 2
+    assert stub.said()[-1]["message"] == {
+        "content": "User: hello\n\nAssistant: one\n\nUser: again",
+    }
+    await model.provider.aclose()
 
 
 @pytest.mark.asyncio
-async def test_exchange_turn_skips_tool_results_from_api_history(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_a_fresh_agy_hears_the_whole_conversation_as_a_transcript(
+    shared: _Resources,
+    stub: _Stub,
 ) -> None:
-    """History recorded by an API provider carries tool results; skip them."""
-    model = GoogleCLI().model("gemini-2.5-flash")
-    prompts: list[list[dict[str, MutablePlainTree]]] = []
-
-    async def send_prompt(
-        proc: Subproc,
-        prompt_blocks: list[dict[str, MutablePlainTree]],
-        text_parts: list[str],
-        thinking_parts: list[str],
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> str | None:
-        del proc, text_parts, thinking_parts, publish
-        prompts.append(prompt_blocks)
-        return "end_turn"
-
-    monkeypatch.setattr(model, "_send_prompt", send_prompt)
-    await model._exchange_turn(
-        cast(Subproc, object()),
-        ModelRequest(
-            messages=[
-                UserMessage(text="list files"),
-                AssistantMessage(
-                    text="",
-                    tool_calls=(ToolCall(id="c1", name="Bash", args={}),),
-                ),
-                ToolResult(call_id="c1", content="a.txt"),
-                UserMessage(text="thanks"),
-            ],
-        ),
-        publish=None,
+    stub.script([_INIT, *_said("ok")])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    records = (
+        ContextClear(summary="earlier", history=(UserMessage(content="before"),)),
+        ContextClear(history=(UserMessage(content="kept"),)),
+        AgentToAgentMessage(content="from a", sender="lead"),
+        AgentToAgentMessage(content="anon"),
+        Thinking(content="hmm"),
+        AssistantMessage(content="ok"),
+        ToolCall(call_id="c0", name="Echo", arguments={"text": "x"}),
+        UncategorizedToolResult(call_id="c0", content="x"),
+        TurnContext(),
+        TurnContext(cwd="/w"),
+        UserMessage(content="go"),
     )
-    assert [[block["text"] for block in prompt] for prompt in prompts] == [
-        ["list files\n\nthanks"],
-    ]
+    await _stream(model, Request(records=records))
+
+    assert stub.said()[0]["message"] == {
+        "content": "Summary of the conversation so far:\nearlier\n\n"
+        "User: before\n\nUser: kept\n\nAgent lead: from a\n\nAgent: anon\n\n"
+        "Assistant: ok\n\n"
+        'Assistant called Echo as c0: {"text": "x"}\n\nc0 returned: x\n\n'
+        "<system-reminder>\nWorking directory: /w\n</system-reminder>\n\n"
+        "User: go",
+    }
+    await model.provider.aclose()
 
 
 @pytest.mark.asyncio
-async def test_exchange_turn_without_input_does_not_prompt(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_the_next_turn_says_each_new_message_its_own_way(
+    shared: _Resources,
+    stub: _Stub,
 ) -> None:
-    model = GoogleCLI().model("gemini-2.5-flash")
-    model._last_sent_index = 1
-
-    async def send_prompt(*args: object) -> str | None:
-        raise AssertionError(f"unexpected prompt {args!r}")
-
-    monkeypatch.setattr(model, "_send_prompt", send_prompt)
-    response = await model._exchange_turn(
-        cast(Subproc, object()),
-        ModelRequest(messages=[UserMessage(text="seen")]),
-        publish=None,
+    stub.script([_INIT, *_said("one")], _said("two"))
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    first = _response(await _stream(model, Request(records=_HELLO)))
+    records = (
+        *_HELLO,
+        *first.records,
+        AgentToAgentMessage(content="hi", sender="lead"),
+        AgentToAgentMessage(content="plain"),
+        TurnContext(),
+        TurnContext(cwd="/w"),
+        UserMessage(content="go"),
     )
-    assert response.message.text == ""
+    await _stream(model, Request(records=records))
+
+    assert stub.said()[-1]["message"] == {
+        "content": "[from lead]: hi\n\nplain\n\n"
+        "<system-reminder>\nWorking directory: /w\n</system-reminder>\n\ngo",
+    }
+    assert len(stub.processes()) == 1
+    await model.provider.aclose()
 
 
 @pytest.mark.asyncio
-async def test_cancelled_prompt_respawns_before_next_turn(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_a_history_it_never_said_starts_a_fresh_agy(
+    shared: _Resources,
+    stub: _Stub,
 ) -> None:
-    """A cancelled prompt keeps streaming in the CLI; that process is retired."""
-    model = GoogleCLI().model("gemini-2.5-flash")
-    respawns = 0
+    """Only results it waits for, or new user lines, go to a running ``agy``."""
+    stub.script([_INIT, *_said("one")], [_INIT, *_said("two")])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    first = _response(await _stream(model, Request(records=_HELLO)))
+    records = (
+        *_HELLO,
+        *first.records,
+        AssistantMessage(content="put in"),
+        UserMessage(content="again"),
+    )
+    await _stream(model, Request(records=records))
 
-    class _CancelProc:
-        async def write_line(self, line: str) -> None:
-            del line
+    assert len(stub.processes()) == 2
+    assert stub.said()[-1]["message"] == {
+        "content": "User: hello\n\nAssistant: one\n\nAssistant: put in\n\nUser: again",
+    }
+    await model.provider.aclose()
 
-        async def read_json_line(self, *, skip_non_json: bool = False) -> object:
-            del skip_non_json
-            raise asyncio.CancelledError
 
-    class _HotSpare:
-        active = cast(Subproc | None, object())
+@pytest.mark.asyncio
+async def test_a_call_no_longer_waiting_starts_a_fresh_agy(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    """A held call the server gave up on cannot take its result; a new agy hears it."""
+    call = ToolCall(call_id="c1", name="Echo", arguments={"text": "x"})
+    shared.mount.calls.put_nowait(call)
+    stub.script(
+        [_INIT, _step("tool", state="ACTIVE", tool="call_mcp_tool"), "WAIT never"],
+        [_INIT, *_said("redone")],
+    )
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    request = Request(records=_HELLO, tools=(_Echo(),))
+    held = _response(await _stream(model, request))
+    shared.mount.late = True
 
-        async def acquire(self) -> Subproc:
-            return cast(Subproc, _CancelProc())
+    result = UncategorizedToolResult(call_id="c1", content="x")
+    records = (*_HELLO, *held.records, result)
+    done = _response(await _stream(model, Request(records=records, tools=(_Echo(),))))
 
-        async def respawn_after_transport_failure(self) -> Subproc:
-            nonlocal respawns
-            respawns += 1
-            return cast(Subproc, _CancelProc())
+    assert done.records == (AssistantMessage(content="redone"),)
+    assert len(stub.processes()) == 2
+    assert stub.said()[-1]["message"] == {
+        "content": 'User: hello\n\nAssistant called Echo as c1: {"text": "x"}\n\n'
+        "c1 returned: x",
+    }
+    await model.provider.aclose()
 
-    user = UserMessage(text="hi")
-    model._system_hash = hash_system("")
-    model._session_id = "session"
-    model._sent_history_head = user
-    monkeypatch.setattr(model, "_hot_spare", _HotSpare())
-    with pytest.raises(asyncio.CancelledError):
-        await model.stream(ModelRequest(messages=[user]))
-    assert respawns == 1
-    assert model._last_sent_index == 0
+
+@pytest.mark.asyncio
+async def test_a_line_that_is_no_json_is_passed_over(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    stub.script([_INIT, "warning: not json", *_said("hi")])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    response = _response(await _stream(model, Request(records=_HELLO)))
+    assert response.records == (AssistantMessage(content="hi"),)
+    await model.provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_image_is_named_not_sent(shared: _Resources, stub: _Stub) -> None:
+    """``agy`` takes text alone; the model is told an image was left out."""
+    stub.script([_INIT, *_said("ok")])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    image = Attachment(mime_descriptor="image/png", data=_png(2, 2))
+    await _stream(
+        model,
+        Request(records=(UserMessage(content="look", attachments=(image,)),)),
+    )
+    assert stub.said()[0]["message"] == {
+        "content": "User: look\n[an image/png attachment, which agy cannot send]",
+    }
+    await model.provider.aclose()
+
+
+# ---- failures ------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "reply",
-    [None, {"id": 1, "error": {"message": "auth failed"}}],
+    ("error", "kind"),
+    [
+        ("authentication required", AuthError),
+        ("RESOURCE_EXHAUSTED: quota exceeded", RateLimitedError),
+        ("model is not recognized", RuntimeError),
+    ],
 )
-async def test_handshake_failure_is_a_transport_error(
-    reply: dict[str, MutablePlainTree] | None,
+async def test_a_failed_turn_raises_what_agy_says(
+    shared: _Resources,
+    stub: _Stub,
+    error: str,
+    kind: type[Exception],
 ) -> None:
-    """A dead or erroring handshake must take the respawn path."""
-
-    class _Proc:
-        async def write_line(self, line: str) -> None:
-            del line
-
-        async def read_json_line(self, *, skip_non_json: bool = False) -> object:
-            del skip_non_json
-            return reply
-
-    with pytest.raises(SubprocessTransportError):
-        await cli._rpc_call(cast(Subproc, _Proc()), 1, "initialize", {})
+    stub.script([_INIT, _result(status="ERROR", error=error)])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    with pytest.raises(kind, match=error):
+        await _stream(model, Request(records=_HELLO))
+    await model.provider.aclose()
 
 
 @pytest.mark.asyncio
-async def test_spawn_removes_tmpdir_when_population_fails(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("error", "wait_sec"),
+    [
+        # As agy 1.2.2 ended a turn on a spent window (antigravity-cli#1018).
+        (
+            (
+                "API error (attempt 3): RESOURCE_EXHAUSTED (code 429): Individual quota"
+                " reached. Please upgrade your subscription to increase your limits."
+                " Resets in 2h39m52s."
+            ),
+            2 * 3_600 + 39 * 60 + 52,
+        ),
+        (
+            (
+                "You have exhausted your capacity on this model."
+                " Your quota will reset after 155h19m17s."
+            ),
+            155 * 3_600 + 19 * 60 + 17,
+        ),
+        ("RESOURCE_EXHAUSTED (code 429): Resets in 45s.", 45),
+        ("RESOURCE_EXHAUSTED: quota exceeded", 0),
+    ],
+)
+async def test_a_spent_quota_waits_for_the_reset_agy_names(
+    shared: _Resources,
+    stub: _Stub,
+    error: str,
+    wait_sec: int,
 ) -> None:
-    monkeypatch.setattr(
-        "sagent.providers.google.cli._CREDS_PATH",
-        tmp_path / "missing.json",
-    )
-    made: list[Path] = []
-    real_mkdtemp = tempfile.mkdtemp
+    """Agy says when the quota resets; dropped, the wait was a backoff's guess."""
+    stub.script([_INIT, _result(status="ERROR", error=error)])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    with pytest.raises(RateLimitedError) as raised:
+        await _stream(model, Request(records=_HELLO))
+    assert raised.value.retry_after_sec == wait_sec
+    await model.provider.aclose()
 
-    def _tracking_mkdtemp(**kwargs: str) -> str:
-        path = real_mkdtemp(dir=tmp_path, **kwargs)
-        made.append(Path(path))
+
+@pytest.mark.asyncio
+async def test_agy_exiting_mid_turn_is_a_disconnect(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    stub.script([_INIT, _step("agent_response", text="half", state="ACTIVE"), "EXIT"])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    with pytest.raises(DisconnectedError, match="agy exited"):
+        await _stream(model, Request(records=_HELLO))
+    await model.provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_agy_quiet_too_long_is_a_disconnect(
+    shared: _Resources,
+    stub: _Stub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(GoogleCLIModel, "quiet_sec", 0.05)
+    stub.script([_INIT, "WAIT never"])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    with pytest.raises(DisconnectedError, match=r"^agy went quiet for 0\.05 seconds$"):
+        await _stream(model, Request(records=_HELLO))
+    await model.provider.aclose()
+
+
+# ---- the provider --------------------------------------------------------------
+
+
+def test_the_provider_serves_what_agy_offers() -> None:
+    """``agy models`` listed 3.8 Flash alone on 2026-10-27, at three efforts."""
+    provider = GoogleCLI()
+    assert (GoogleCLI.section, provider.name, provider.usage) == (
+        "google-cli",
+        "google-cli",
+        (),
+    )
+    assert GoogleCLI(name="work").name == "work"
+    assert list(provider) == ["gemini-flash-3.8"]
+    for role in ("default", "best", "everyday", "utility"):
+        assert provider[role].capability.model_id == "gemini-flash-3.8"
+    assert provider["gemini-flash"].capability.thinking_effort == frozenset(
+        {"low", "medium", "high"},
+    )
+
+
+def test_an_attachment_costs_only_the_line_naming_it() -> None:
+    model = GoogleCLI()["gemini-flash"]
+    picture = Attachment(mime_descriptor="image/png", data=_png(1600, 800))
+    named = "[an image/png attachment, which agy cannot send]"
+    assert model.attachment_tokens(picture) == int(
+        len(named) / model.capability.approx_chars_per_token,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_request_counts_as_the_text_agy_is_sent() -> None:
+    model = GoogleCLI()["gemini-flash"]
+    picture = Attachment(mime_descriptor="image/png", data=_png(1600, 800))
+    plain = Request(system=("S",), records=(UserMessage(content="look"),))
+    pictured = Request(
+        system=("S",),
+        records=(UserMessage(content="look", attachments=(picture,)),),
+    )
+
+    grown = await model.count(pictured) - await model.count(plain)
+
+    assert 0 < grown <= model.attachment_tokens(picture) + 1
+
+
+@pytest.mark.asyncio
+async def test_a_provider_given_no_resources_closes_its_own() -> None:
+    provider = GoogleCLI()
+    client = provider.resources.http
+    await provider.aclose()
+    assert client.is_closed
+
+
+# ---- helpers -------------------------------------------------------------------
+
+
+_HELLO: tuple[UserMessage, ...] = (UserMessage(content="hello"),)
+
+
+def _step(
+    kind: str,
+    *,
+    text: str = "",
+    state: str = "DONE",
+    usage: tuple[int, int, int] | None = None,
+    tool: str = "",
+) -> dict[str, object]:
+    """Return one ``step_update``; ``usage`` is input, output, and cache-read tokens."""
+    step: dict[str, object] = {
+        "conversation_id": "c1",
+        "state": state,
+        "step_type": kind,
+    }
+    if text:
+        step["text_delta"] = text
+    if tool:
+        step["tool_name"] = tool
+    if usage is not None:
+        step["usage"] = {
+            "input_tokens": usage[0],
+            "output_tokens": usage[1],
+            "cache_read_tokens": usage[2],
+        }
+    return {"event": "step_update", "step_update": step}
+
+
+def _result(*, status: str = "SUCCESS", error: str = "") -> dict[str, object]:
+    result: dict[str, object] = {"conversation_id": "c1", "status": status}
+    if error:
+        result["error"] = error
+    # Cumulative over the session: never what one turn cost.
+    result["usage"] = {"input_tokens": 999_999, "output_tokens": 999_999}
+    return {"event": "result", "result": result}
+
+
+def _said(text: str, *, tokens: tuple[int, int] = (1, 1)) -> list[object]:
+    """Return the lines of a turn in which the model says ``text``."""
+    return [
+        _step("user_input"),
+        _step("agent_response", text=text, usage=(*tokens, 0)),
+        _result(),
+    ]
+
+
+async def _stream(
+    model: GoogleCLIModel,
+    request: Request,
+) -> list[TextChunk | Response]:
+    return [event async for event in model.stream(request)]
+
+
+def _response(events: Sequence[TextChunk | Response]) -> Response:
+    response = events[-1]
+    assert isinstance(response, Response)
+    return response
+
+
+def _png(width: int, height: int) -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (width, height), "red").save(out, format="PNG")
+    return out.getvalue()
+
+
+@dataclass(slots=True, kw_only=True)
+class _Stub:
+    """The directory the stub ``agy`` runs from, and what it recorded there."""
+
+    dir: Path
+    next_turn: int = 0
+
+    def script(self, *turns: Sequence[object]) -> None:
+        """Write each turn, as the lines the stub prints for the next line it reads."""
+        for turn in turns:
+            lines = [
+                line if isinstance(line, str) else json_dumps(line) for line in turn
+            ]
+            (self.dir / f"turn.{self.next_turn}").write_text("\n".join(lines) + "\n")
+            self.next_turn += 1
+
+    def said(self) -> list[dict[str, object]]:
+        path = self.dir / "said"
+        lines = path.read_text().splitlines() if path.exists() else []
+        return [json_loads(line.partition(" ")[2], dict[str, object]) for line in lines]
+
+    def processes(self) -> list[Path]:
+        return sorted(self.dir.glob("argv.*"))
+
+    def only(self, kind: str) -> str:
+        (path,) = self.dir.glob(f"{kind}.*")
+        return (
+            path.read_text().removesuffix("\n") if kind == "cwd" else path.read_text()
+        )
+
+    def copied(self) -> Path:
+        """Return the copy of the ``.gemini`` the only process started with."""
+        (path,) = self.dir.glob("gemini.*")
         return path
 
-    monkeypatch.setattr(tempfile, "mkdtemp", _tracking_mkdtemp)
-    model = GoogleCLI().model("gemini-2.5-flash")
-    model._tools_bridge = cast(ToolsBridge, object())
-    with pytest.raises(ValueError, match="Invalid credentials"):
-        await model._spawn_initialized()
-    assert made
-    assert not any(path.exists() for path in made)
 
+@dataclass(slots=True, kw_only=True)
+class _Mount:
+    """Tools offered to the stub; a call answered writes the file it waits for."""
 
-def test_build_response_estimates_tokens_and_cost() -> None:
-    """The Code Assist response is reconstructed with estimated usage + cost."""
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    request = ModelRequest(messages=[UserMessage(text="aaaa" * 4)])
-    response = model._build_response(
-        text_parts=["hello"],
-        thinking_parts=["thinking..."],
-        stop_reason="end_turn",
-        request=request,
+    stub: _Stub
+    url: str = "http://127.0.0.1:1/mount"
+    calls: asyncio.Queue[ToolCall] = field(default_factory=asyncio.Queue[ToolCall])
+    offered: list[tuple[str, ...]] = field(default_factory=list[tuple[str, ...]])
+    answered: list[tuple[ToolCall, AnyToolResult]] = field(
+        default_factory=list[tuple[ToolCall, "AnyToolResult"]],
     )
-    assert response.message.text == "hello"
-    assert response.stop_reason == "model_finished"
-    assert response.tokens.request == model.approx_text_tokens("a" * 16)
-    assert response.tokens.response == model.approx_text_tokens("hello")
-    assert response.total_cost >= 0.0
-    assert len(response.message.thinking_blocks) == 1
+    late: bool = False
+    """Whether a held call has stopped waiting, so answering it times out."""
+
+    def offer(self, tools: Sequence[Tool]) -> None:
+        self.offered.append(tuple(tool.name for tool in tools))
+
+    async def called(self) -> ToolCall:
+        return await self.calls.get()
+
+    async def answer(self, call: ToolCall, result: AnyToolResult) -> None:
+        if self.late:
+            raise TimeoutError
+        (self.stub.dir / f"answered.{len(self.answered)}").touch()
+        self.answered.append((call, result))
+
+    def cancel(self) -> None:
+        return
 
 
-@pytest.mark.parametrize(
-    ("raw", "accepted"),
-    [("end_turn", True), ("max_turn_requests", True), ("refusal", False)],
-)
-def test_build_response_normalizes_acp_stop_reasons(raw: str, accepted: bool) -> None:
-    """ACP reports ``end_turn`` for every normal turn; it must not fail the turn."""
-    model = GoogleCLI().model("gemini-2.5-flash")
-    response = model._build_response(
-        text_parts=["hello"],
-        thinking_parts=[],
-        stop_reason=raw,
-        request=ModelRequest(messages=[UserMessage(text="hi")]),
+class _ToolServer(AsyncResource):
+    """One mount, so a test can read what reached it."""
+
+    def __init__(self, *, mounted: _Mount) -> None:
+        self.mounted = mounted
+
+    async def mount(self) -> _Mount:
+        return self.mounted
+
+    async def unmount(self, mount: ToolMount) -> None:
+        del mount
+
+
+class _Resources(AsyncResource):
+    """Real process pools, beside a tool server that runs no MCP."""
+
+    def __init__(self, *, stub: _Stub) -> None:
+        self._shared = SharedResources()
+        self.mount = _Mount(stub=stub)
+        self.server = _ToolServer(mounted=self.mount)
+
+    @property
+    def http(self) -> httpx2.AsyncClient:
+        return self._shared.http
+
+    def process_pool(self, name: str) -> ProcessPool:
+        assert name == "agy"
+        return self._shared.process_pool(name)
+
+    @property
+    def tool_server(self) -> _ToolServer:
+        return self.server
+
+    @override
+    async def aclose(self) -> None:
+        await self._shared.aclose()
+
+    @override
+    async def __aenter__(self) -> Self:
+        return self
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Echo:
+    """A tool the model may call; the caller, not agy, would run it."""
+
+    name: str = "Echo"
+    description: str = "Say the text back."
+    schema: Mapping[str, PlainTree] = field(
+        default_factory=lambda: MappingProxyType(
+            {"type": "object", "properties": {"text": {"type": "string"}}},
+        ),
     )
-    if accepted:
-        validate_model_response(response)
-    else:
-        with pytest.raises(ModelTerminationError):
-            validate_model_response(response)
+    display: ToolDisplay = field(default_factory=ToolDisplay)
 
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        del arguments
+        return self.name
 
-@pytest.mark.asyncio
-async def test_writeback_credentials_atomic_and_0o600(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Writeback is atomic (failure leaves target untouched) and target is ``0o600``.
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        del context, arguments
+        return None
 
-    With ``shutil.copyfile`` the destination is created and partially
-    written before any failure; a mid-write crash leaves a corrupt
-    file. ``atomic_write_bytes`` writes to a tmp sibling and renames,
-    so a mid-write crash never disturbs ``target``.
-    """
-    monkeypatch.setattr(
-        "sagent.providers.google.cli._CREDS_PATH",
-        tmp_path / "home" / ".gemini" / "oauth_creds.json",
-    )
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    src_dir = tmp_path / "sandbox" / ".gemini"
-    src_dir.mkdir(parents=True)
-    src = src_dir / "oauth_creds.json"
-    src.write_text(json.dumps(_CRED_PAYLOAD), encoding="utf-8")
-    model._tmpdir = tmp_path / "sandbox"
-    target = tmp_path / "home" / ".gemini" / "oauth_creds.json"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    sentinel = json.dumps({"existing": "do not clobber"})
-    target.write_text(sentinel, encoding="utf-8")
-    target.chmod(0o600)
-    later = (time.time() + 7200) * 1000.0
-    src.write_text(
-        json.dumps({**_CRED_PAYLOAD, "expiry_date": later}),
-        encoding="utf-8",
-    )
-
-    real_open = os.open
-
-    def _flaky_open(path: str | os.PathLike[str], flags: int, mode: int = 0o777) -> int:
-        if str(path).startswith(str(target)):
-            raise OSError("simulated disk full")
-        return real_open(path, flags, mode)
-
-    with monkeypatch.context() as fail_open:
-        fail_open.setattr(
-            "sagent.lib.atomic_file.os.open",
-            _flaky_open,
-        )
-        with pytest.raises(OSError, match="simulated disk full"):
-            await model._writeback_credentials()
-    assert target.read_text(encoding="utf-8") == sentinel
-    leftover = list(target.parent.glob(f"{target.name}.tmp.*"))
-    assert leftover == [], f"non-atomic writeback left tmp files: {leftover}"
-
-    await model._writeback_credentials()
-    assert (target.stat().st_mode & 0o777) == 0o600
-    assert json.loads(target.read_text(encoding="utf-8"))["expiry_date"] == (
-        pytest.approx(later)
-    )
-
-
-def test_writeback_credentials_works_across_event_loops(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A model whose lock was first used in loop A still works in loop B."""
-    monkeypatch.setattr(
-        "sagent.providers.google.cli._CREDS_PATH",
-        tmp_path / "home" / ".gemini" / "oauth_creds.json",
-    )
-    provider = GoogleCLI()
-    model = provider.model("gemini-2.5-flash")
-    src_dir = tmp_path / "sandbox" / ".gemini"
-    src_dir.mkdir(parents=True)
-    src = src_dir / "oauth_creds.json"
-    src.write_text(json.dumps(_CRED_PAYLOAD), encoding="utf-8")
-    model._tmpdir = tmp_path / "sandbox"
-
-    asyncio.run(model._writeback_credentials())
-    payload = dict(_CRED_PAYLOAD)
-    payload["expiry_date"] = (time.time() + 7200) * 1000.0
-    src.write_text(json.dumps(payload), encoding="utf-8")
-    asyncio.run(model._writeback_credentials())
-
-    target = tmp_path / "home" / ".gemini" / "oauth_creds.json"
-    assert json.loads(target.read_text(encoding="utf-8"))["expiry_date"] == (
-        pytest.approx(payload["expiry_date"])
-    )
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> AnyToolResult:
+        del context, arguments
+        return UncategorizedToolResult(call_id="")
 
 
 if __name__ == "__main__":

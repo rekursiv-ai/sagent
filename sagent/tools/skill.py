@@ -1,411 +1,323 @@
-"""Skills: user-authored prompt snippets the agent can invoke.
+"""Skill: load a user-authored workflow from its ``SKILL.md``.
 
-- Discovery: ``data_dir() / "rekursiv-ai" / "sagent" / "skills"``
-  (user-global, through ``sagent.lib.userdirs``) and
-  ``<cwd>/{.sagent,.claude,.agents}/skills/<name>/SKILL.md`` (project-local).
-- Frontmatter (YAML) fields honored: ``name``, ``description``.
-  (``allowed-tools`` / ``user-invocable`` / ``paths`` parsed but not
-  enforced yet; all discovered skills are surfaced to the model.)
-- System prompt: we list ``name: description`` pairs only, so the
-  model knows what's available without blowing the token budget.
-- Invocation: the ``Skill`` tool loads the full SKILL.md body and
-  returns it as a tool result. The agent then continues its next
-  model request with the instructions in-context.
+A skill is ``<name>/SKILL.md`` under a skills directory: ``.sagent/skills`` in
+the directory the agent started in and each parent, the nearest first, then the
+user's ``data_dir() / "rekursiv-ai" / "sagent" / "skills"``. A name found twice
+is the first one found. The file's YAML frontmatter gives its ``name`` and the
+``description`` saying when to use it; a skill's directory may hold more skills.
+
+The skills visible from where the agent started ride in this tool's reminder, so
+the model reads every trigger without paying for every body; a call returns one
+body, whole. A ``cd`` changes neither: the list stays as the window first read it.
+
+Typical usage example:
+
+  skill = Skill()
+  result = await skill.call(context, {"skill": "tdd", "args": "the parser"})
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from html import escape
+from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated, Literal
 
-import dataclasses
+import asyncio
 import logging
 import re
 
-from treekle import PlainTree, immutable
+from treekle import ReadError, from_plain
 
-from sagent.agent.state import ToolState, get_tool_state
-from sagent.lib.dotsagent import parse_frontmatter, walk_up
+from sagent.agent.agents_md import frontmatter
 from sagent.lib.userdirs import data_dir
-from sagent.tools.core import load_tool_description
-from sagent.tools.prompt_text import escape_prompt_text
-from sagent.types.runtime import (
-    ModelContextEvent,
-    ToolResult,
-    UserMessage,
-)
+from sagent.session.types import UncategorizedToolResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import parse, schema_of
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Iterator, Mapping
+
+    from treekle import PlainTree
+
+    from sagent.tools.types import ToolContext
+
+
+__all__ = [
+    "Skill",
+    "SkillInfo",
+]
 
 
 logger = logging.getLogger(__name__)
 
 
+type Source = Literal[
+    "project",
+    "user",
+    "builtin",
+]
+
+
+type _Stamp = tuple[int, int, int, int] | None
+"""A path's mtime, size, inode, and link count; ``None`` when absent."""
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SkillInfo:
-    """A discovered skill (name, description, and full body)."""
+    """A skill as found: its name, trigger, and body."""
 
     name: str
-    """Skill name; matched against the model's ``Skill`` invocation."""
+    """What the model loads it by."""
 
     description: str
-    """One-line trigger description surfaced in the system-prompt listing."""
+    """When to use it; ``""`` when its file says nothing."""
 
     body: str
-    """Full ``SKILL.md`` body returned when the skill is invoked."""
+    """The instructions, without the frontmatter."""
 
-    source: str
-    """Discovery tier (``project`` / ``user``)."""
+    source: Source
+    """Which skills directory it came from."""
 
     path: Path
-    """Absolute path to the source ``SKILL.md``."""
+    """Its ``SKILL.md``."""
 
 
-def user_skill_roots() -> tuple[Path, ...]:
-    """Return the user-global skill roots.
-
-    Resolved per call, not at import: the XDG base directories are read
-    from the environment, so a module-level constant would freeze
-    whatever value happened to be set when this module was first
-    imported.
-
-    Returns:
-      roots: User-global skill directories, outermost first.
-
-    """
-    return (data_dir() / "rekursiv-ai" / "sagent" / "skills",)
-
-
-def discover(cwd: str | Path) -> list[SkillInfo]:
-    """Discover all skills visible from ``cwd``.
-
-    Walks from filesystem root to ``cwd``, collecting the three
-    harness skill roots (``.sagent``, ``.claude``, ``.agents``) at each
-    level.
-
-    Args:
-      cwd: Working directory to scan from.
-
-    Returns:
-      skills: Deduplicated list of discovered skills, project-first.
-
-    """
-    # Harness dirs, each holding a ``skills`` subdir. Named separately from the
-    # join so no literal harness path appears in exported source (leak check).
-    project_roots = [
-        d / name / "skills"
-        for d in reversed(walk_up(Path(cwd)))
-        for name in (".sagent", ".claude", ".agents")
-    ]
-    project = _scan_roots(project_roots, "project")
-    user = _scan_roots(list(user_skill_roots()), "user")
-    seen: set[str] = set()
-    out: list[SkillInfo] = []
-    for s in project + user:
-        if s.name in seen:
-            continue
-        seen.add(s.name)
-        out.append(s)
-    return out
-
-
-def format_listing(skills: list[SkillInfo]) -> str:
-    """Format skills into a system prompt section (names + descriptions).
-
-    Args:
-      skills: Discovered skills to render.
-
-    Returns:
-      text: Markdown-formatted section, or empty string when no skills.
-
-    """
-    if not skills:
-        return ""
-    lines = [
-        "# Skills",
-        (
-            "The following user-authored skills are available. Invoke one by"
-            ' calling the `Skill` tool with `{"skill": "<name>"}`. Each skill'
-            " description states when to use it -- match against user requests"
-            " and invoke when applicable."
-        ),
-        "",
-        (
-            "Before each response, scan the skill list below. If any trigger"
-            " matches the current request or the direction of conversation,"
-            " invoke it before producing any other response. Do not describe"
-            " or reference a skill without invoking it. Do not re-invoke a"
-            " skill whose instructions are already active in the conversation."
-        ),
-        "",
-    ]
-    for s in skills:
-        desc = s.description or "(no description)"
-        lines.append(f"- **{s.name}** ({s.source}) - {desc}")
-    return "\n".join(lines)
-
-
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Skill:
-    """Tool: invoke a named skill by loading its full SKILL.md body."""
+    """Load a skill's instructions."""
 
-    name: str = "Skill"
-    tool_id: str = "application/x-tool-skill"
-    clearable_results: bool = False
-    description: str = load_tool_description("Skill")
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
 
-    def __init__(self, *, restore_after_compact: bool = False) -> None:
-        """Configure post-compaction restore behavior.
+        skill: Annotated[str, "The skill's name, from the list of skills."]
+        args: Annotated[str, "Text to pass to the skill."] = ""
 
-        Args:
-          restore_after_compact: When True, ``post_compact_restore``
-              re-prepends previously invoked skill bodies to history.
-              Defaults to False: skill bodies are dropped on macro-compact
-              and the agent re-invokes ``Skill`` on demand. The catalog
-              listing in the system prompt still surfaces triggers.
-
-        """
-        self.restore_after_compact = restore_after_compact
-
-    directive_schema: Mapping[str, PlainTree] = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "skill": {
-                    "type": "string",
-                    "description": "The skill name (must match a '# Skills' entry).",
-                },
-                "args": {
-                    "type": "string",
-                    "description": "Optional arguments forwarded to the skill.",
-                },
-            },
-            "required": ["skill"],
-        },
+    name = "Skill"
+    description = (files(__package__) / "assets" / "skill.md").read_text(
+        encoding="utf-8",
     )
+    schema = schema_of(Arguments)
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short label for this skill invocation.
+    user_dir: Path = field(
+        default_factory=lambda: data_dir() / "rekursiv-ai" / "sagent" / "skills",
+    )
+    """The user's skills, found after every project's."""
 
-        Args:
-          args: Directive carrying the ``skill`` name.
+    builtin_dir: Path = field(
+        default_factory=lambda: Path(str(files("sagent"))) / "skills",
+    )
+    """The skills sagent ships, found last: a project's or the user's of the same
+    name is found first."""
 
-        Returns:
-          label: ``Skill <name>`` line shown before invocation.
+    display: ToolDisplay = field(default=ToolDisplay())
 
-        """
-        skill = str(args.get("skill", ""))
-        return f"Skill {skill}" if skill else "Skill"
+    _scans: dict[Path, _Scan] = field(
+        default_factory=dict[Path, "_Scan"],
+        init=False,
+        repr=False,
+        compare=False,
+    )
+    """The last scan from each working directory."""
 
-    def prompt(self) -> str:
-        """Return a per-request listing of discoverable skills.
+    def discover(self, cwd: Path) -> list[SkillInfo]:
+        """Return the skills visible from ``cwd``, one per name.
 
-        Returns:
-          contribution: ``# Skills`` markdown section listing available
-              skills, or empty string when none are discovered.
-
-        """
-        return format_listing(discover(get_tool_state().bash_cwd))
-
-    async def post_compact_restore(
-        self,
-        history: list[ModelContextEvent],
-        tool_state: ToolState,
-        *,
-        budget_tokens: int,
-        estimate_tokens: Callable[[str], int],
-    ) -> None:
-        """Re-attach previously invoked skill bodies after compaction.
-
-        No-op unless ``restore_after_compact=True`` was set at
-        construction. When disabled, skill bodies vanish on macro-compact
-        and the agent re-invokes ``Skill`` if it needs the workflow again.
-
-        Bodies are restored WHOLE or not at all -- a skill is a contract,
-        and half a workflow misleads worse than an absent one. When they
-        do not all fit, the omitted names are listed so the agent can
-        re-invoke deliberately instead of silently proceeding without a
-        workflow it believes is loaded.
+        The reminder asks every model round, so a scan is kept and given again
+        while every directory and ``SKILL.md`` it read stats the same.
 
         Args:
-          history: Post-compaction history; mutated in place.
-          tool_state: Active tool state; ``invoked_skills`` selects which
-              bodies to restore.
-          budget_tokens: Tokens this hook may add. The compactor derives
-              it from the space actually left after compaction, so
-              overrunning it can push the just-compacted request back
-              over the window -- the very condition compaction ran to
-              relieve. ``0`` means unbounded.
-          estimate_tokens: The model's own tokenizer.
+          cwd: The working directory.
+
+        Returns:
+          skills: The nearest project's first, then the user's, then
+            sagent's own; each directory's in name order, a skill before those
+            below it.
 
         """
-        if not self.restore_after_compact:
-            return
-        invoked = tool_state.invoked_skills
-        if not invoked:
-            return
-        cwd = tool_state.bash_cwd
-        if not cwd:
-            return
-        skills = discover(cwd)
-        parts: list[str] = []
-        skipped: list[str] = []
-        total = 0
-        for s in skills:
-            if s.name not in invoked:
-                continue
-            body = escape_prompt_text(s.body)
-            block = f"<skill name='{s.name}' source='{s.source}'>\n{body}\n</skill>"
-            cost = estimate_tokens(block)
-            if budget_tokens > 0 and total + cost > budget_tokens:
-                skipped.append(s.name)
-                continue
-            total += cost
-            parts.append(block)
-        if skipped:
-            parts.append(
-                "Not restored (post-compaction budget): "
-                + ", ".join(sorted(skipped))
-                + ". Re-invoke Skill if you need one of these.",
-            )
-        if not parts:
-            return
-        text = (
-            "Previously invoked skills (re-attached post-compaction):\n\n"
-            + "\n\n".join(parts)
+        resolved = cwd.resolve()
+        scan = self._scans.get(resolved)
+        if scan is not None and all(_stamp(p) == s for p, s in scan.stamps):
+            return list(scan.skills)
+        roots: list[tuple[Path, Source]] = [
+            *(
+                (d / ".sagent" / "skills", "project")
+                for d in (resolved, *resolved.parents)
+            ),
+            (self.user_dir, "user"),
+            (self.builtin_dir, "builtin"),
+        ]
+        visited: set[Path] = set()
+        stamps: list[tuple[Path, _Stamp]] = []
+        found: dict[str, SkillInfo] = {}
+        for root, source in roots:
+            for info in _skills_under(root, source, visited, stamps):
+                found.setdefault(info.name, info)
+        self._scans[resolved] = _Scan(
+            skills=tuple(found.values()),
+            stamps=tuple(stamps),
         )
-        _prepend_to_first_user(history, text)
+        return list(found.values())
 
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: skill loading has no shared resource."""
-        del args
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``Skill <name>``."""
+        return f"Skill {arguments.get('skill', '')}".strip()
+
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``None``: loading a skill changes nothing."""
+        del context, arguments
         return None
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Load and return the named skill's SKILL.md body.
+    def reminder(self, context: ToolContext) -> str:
+        """Return each skill visible from where the agent started, with its trigger.
 
         Args:
-          args: Directive with ``skill`` name and optional ``args``.
+          context: The calling agent's state; its ``origin`` finds the skills.
 
         Returns:
-          result: Skill body wrapped in a ``<skill>`` tag, or an error
-              listing valid names when the requested skill is unknown.
+          text: One line per skill; ``""`` when there are none.
 
         """
-        skill = str(args.get("skill", ""))
-        skill_args = str(args.get("args", ""))
-        state = get_tool_state()
-        skills = discover(state.bash_cwd)
-        match = next((s for s in skills if s.name == skill), None)
+        skills = self.discover(context.origin)
+        if not skills:
+            return ""
+        return "\n".join(
+            [
+                "Skills you can load with the Skill tool:",
+                *(
+                    f"- {s.name} ({s.source}): "
+                    + (" ".join(s.description.split()) or "(no description)")
+                    for s in skills
+                ),
+            ],
+        )
+
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> UncategorizedToolResult:
+        """Return the named skill's body, and ``args``, in a ``<skill>`` block.
+
+        Args:
+          context: The calling agent's state; its ``origin`` finds the skills.
+          arguments: What the model passed, as ``Skill.Arguments``.
+
+        Returns:
+          result: The body, escaped so it cannot close its block early.
+
+        Raises:
+          ValueError: No skill visible from ``cwd`` has the name.
+
+        """
+        a = parse(arguments, Skill.Arguments)
+        skills = await asyncio.to_thread(self.discover, context.origin)
+        match = next((s for s in skills if s.name == a.skill), None)
         if match is None:
             names = ", ".join(s.name for s in skills) or "(none)"
-            return ToolResult(
-                call_id="",
-                content=f"Unknown skill: {skill!r}. Available: {names}",
-                is_error=True,
-            )
-        # Idempotent within a recall window: when this skill was already
-        # loaded in this session and its prior body is still in context
-        # (cleared on macro-compact via ``ToolState.reset_tool_recall``),
-        # return a stub instead of re-paying the body in tokens.
-        if match.name in state.invoked_skills:
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"[Skill {match.name!r} already loaded earlier in this"
-                    " session; see the prior <skill> block in context.]"
-                ),
-            )
-        state.invoked_skills.add(match.name)
-        preface = f"<skill name='{match.name}' source='{match.source}'>\n"
-        body = escape_prompt_text(match.body)
-        if skill_args:
-            body += f"\n\nArguments: {escape_prompt_text(skill_args)}"
-        return ToolResult(call_id="", content=f"{preface}{body}\n</skill>")
+            raise ValueError(f"Unknown skill {a.skill!r}. Available: {names}.")
+        body = escape(match.body, quote=False)
+        if a.args:
+            body += f"\n\nArguments: {escape(a.args, quote=False)}"
+        return UncategorizedToolResult(
+            call_id="",
+            content=f"<skill name='{match.name}' source='{match.source}'>\n{body}\n</skill>",
+        )
 
 
-def _prepend_to_first_user(history: list[ModelContextEvent], text: str) -> None:
-    """Prepend ``text`` to the first ``UserMessage`` in history."""
-    for i, entry in enumerate(history):
-        if isinstance(entry, UserMessage):
-            new_text = text + "\n\n" + entry.text if entry.text else text
-            history[i] = dataclasses.replace(entry, text=new_text)
-            return
+# Each directory is entered once by its resolved path, so a link back up the
+# tree, such as ``.claude -> .sagent``, ends instead of recursing forever.
+def _skills_under(
+    root: Path,
+    source: Source,
+    visited: set[Path],
+    stamps: list[tuple[Path, _Stamp]],
+) -> Iterator[SkillInfo]:
+    """Yield every skill below ``root``, depth first, in name order; stamp each path read."""
+    # Stamped before reading: a write landing between them then shows as a change.
+    stamps.append((root, _stamp(root)))
+    for child in _subdirs(root):
+        resolved = child.resolve()
+        if resolved in visited:
+            continue
+        visited.add(resolved)
+        stamps.append((child / "SKILL.md", _stamp(child / "SKILL.md")))
+        info = _load(child, source)
+        if info is not None:
+            yield info
+        yield from _skills_under(child, source, visited, stamps)
 
 
-def _first_nonempty_line(text: str) -> str:
-    """First non-blank, non-heading line in ``text`` (empty string when none)."""
-    for line in text.splitlines():
-        s = line.strip()
-        if s and not s.startswith("#"):
-            return s
-    return ""
-
-
-def _load_skill(skill_dir: Path, source: str) -> SkillInfo | None:
-    """Load a single ``<name>/SKILL.md`` file."""
-    md = skill_dir / "SKILL.md"
-    if not md.exists():
-        return None
+# Mtime moves when a file is written or a directory gains or loses an entry; a
+# file saved by renaming a new one over it gets a new inode. The clock ticks
+# coarsely, so two writes can share an mtime: size and link count catch most.
+def _stamp(path: Path) -> _Stamp:
+    """Return what changes when ``path`` does; ``None`` when it is absent."""
     try:
-        raw = md.read_text(encoding="utf-8")
+        st = path.stat()
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size, st.st_ino, st.st_nlink
+
+
+def _subdirs(directory: Path) -> list[Path]:
+    """Return ``directory``'s subdirectories, sorted; none when it cannot be listed."""
+    try:
+        return sorted(p for p in directory.iterdir() if p.is_dir())
+    except OSError:
+        return []
+
+
+def _load(directory: Path, source: Source) -> SkillInfo | None:
+    """Return the skill ``directory/SKILL.md`` holds; ``None`` for none or a bad one."""
+    path = directory / "SKILL.md"
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
     except (OSError, UnicodeDecodeError):
+        logger.warning("Skipping unreadable skill %s.", path)
         return None
-    meta, body = parse_frontmatter(raw)
-    stated_name = meta.get("name")
-    name = (
-        stated_name if isinstance(stated_name, str) and stated_name else skill_dir.name
-    )
-    if not re.fullmatch(r"^[a-z0-9][a-z0-9-]{0,63}$", name):
-        logger.warning("Skipping skill with invalid name %r at %s.", name, md)
+    meta, body = frontmatter(raw)
+    try:
+        name = from_plain(meta.get("name"), str, default="") or directory.name
+        description = from_plain(meta.get("description"), str, default="")
+    except ReadError:
+        logger.warning(
+            "Skipping skill with a non-text name or description at %s.",
+            path,
+        )
         return None
-    stated = meta.get("description")
-    description = (
-        stated if isinstance(stated, str) and stated else _first_nonempty_line(body)
-    )
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", name) is None:
+        logger.warning("Skipping skill with invalid name %r at %s.", name, path)
+        return None
     return SkillInfo(
         name=name,
-        description=description,
-        body=body.strip() or raw,
+        description=description or _first_line(body),
+        body=body.strip() or raw.strip(),
         source=source,
-        path=md,
+        path=path,
     )
 
 
-# Recurses into nested skill directories so a child doc such as ``trax/paper/SKILL.md``
-# registers as its own skill (name from frontmatter). Symlink cycles (e.g. ``.claude``
-# -> ``.sagent``) are broken via a resolved-path visited set.
-def _scan_roots(roots: list[Path], source: str) -> list[SkillInfo]:
-    """Collect every loadable ``<name>/SKILL.md`` under each root."""
-    out: list[SkillInfo] = []
-    visited: set[Path] = set()
-    for root in roots:
-        if not root.exists() or not root.is_dir():
-            continue
-        for child in sorted(root.iterdir()):
-            if not child.is_dir():
-                continue
-            _scan_skill_dir(child, source, out, visited)
-    return out
+def _first_line(text: str) -> str:
+    """Return the first line of ``text`` that is neither blank nor a heading."""
+    return next(
+        (s for line in text.splitlines() if (s := line.strip()) and s[0] != "#"),
+        "",
+    )
 
 
-def _scan_skill_dir(
-    skill_dir: Path,
-    source: str,
-    out: list[SkillInfo],
-    visited: set[Path],
-) -> None:
-    """Load ``skill_dir``'s SKILL.md (if any), then recurse into subdirs."""
-    resolved = skill_dir.resolve()
-    if resolved in visited:
-        return
-    visited.add(resolved)
-    info = _load_skill(skill_dir, source)
-    if info is not None:
-        out.append(info)
-    for sub in sorted(skill_dir.iterdir()):
-        if sub.is_dir():
-            _scan_skill_dir(sub, source, out, visited)
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Scan:
+    """One discovery, and how each path it read stood then."""
+
+    skills: tuple[SkillInfo, ...]
+    stamps: tuple[tuple[Path, _Stamp], ...]

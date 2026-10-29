@@ -1,6 +1,6 @@
 # Python API
 
-Sagent is a Python runtime for typed agent loops. The CLI and Slack service are thin surfaces over the same `Agent`, `Model`, `Provider`, `Tool`, and `Message` contracts.
+Sagent is a Python runtime for typed agent loops. The CLI is a thin surface over the same `Agent`, `Model`, `Provider`, `Tool`, and `Message` contracts.
 
 ## Minimal agent
 
@@ -79,7 +79,7 @@ events: asyncio.Queue[Message | None] = asyncio.Queue()
 result = await agent.run(immutable({"prompt": "Do the task"}), events=events)
 ```
 
-`run_forever(events=None)` drains `agent.inbox`, joins queued strings into prompts, calls `run()`, survives cancellation, and exits when it receives Sagent's quit sentinel. The REPL and Slack service use this shape for long-lived agents.
+`run_forever(events=None)` drains `agent.inbox`, joins queued strings into prompts, calls `run()`, survives cancellation, and exits when it receives Sagent's quit sentinel. The REPL uses this shape for long-lived agents.
 
 The inbox is the coordination point for REPL input, background tool completion, and peer-agent messages. Prefer putting text into the inbox over mutating history directly.
 

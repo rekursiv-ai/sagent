@@ -1,264 +1,205 @@
-"""Tests for ``tools.play_audio``: cross-platform WAV playback shim."""
+"""Tests for PlayAudio, with stand-in players on ``PATH``: no sound is made."""
 
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import TYPE_CHECKING
 
-import subprocess
+import logging
+import platform
+import re
 
 import pytest
 
-from sagent.testing import with_fake_agent
-from sagent.tools import play_audio
 from sagent.tools.play_audio import PlayAudio
+from sagent.tools.types import ToolContext
+
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+@pytest.fixture
+def players(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Return an empty directory that is the whole ``PATH``; players go in it."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    monkeypatch.setenv("PATH", str(bin_dir))
+    return bin_dir
 
 
 @pytest.fixture
 def wav(tmp_path: Path) -> Path:
-    """Create an empty .wav file so existence/suffix checks pass."""
-    p = tmp_path / "beep.wav"
-    p.write_bytes(b"RIFF")
-    return p
+    path = tmp_path / "ding.wav"
+    path.write_bytes(b"RIFF")
+    return path
 
 
-@pytest.fixture
-def play_calls(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-    """Replace ``_play`` with a stub that records each call and succeeds."""
-    seen: list[Path] = []
-
-    def fake_play(p: Path) -> str | None:
-        seen.append(p)
-        return None
-
-    monkeypatch.setattr(play_audio, "_play", fake_play)
-    return seen
+def test_summary_names_the_file() -> None:
+    assert PlayAudio().summary({"path": "/sounds/ding.wav"}) == "PlayAudio ding.wav"
+    assert PlayAudio().summary({}) == "PlayAudio "
 
 
-def test_metadata_basics() -> None:
-    t = PlayAudio()
-    assert t.name == "PlayAudio"
-    assert t.tool_id == "application/x-tool-playaudio"
-    assert t.prompt() == ""
-
-
-def test_summary_renders_basename() -> None:
-    t = PlayAudio()
-    assert t.summary({"path": "/x/y/beep.wav"}) == "PlayAudio beep.wav"
-    assert t.summary({}) == "PlayAudio ?"
+def test_playback_runs_beside_anything(tmp_path: Path) -> None:
+    assert (
+        PlayAudio().serialize_key(ToolContext(cwd=tmp_path), {"path": "a.wav"}) is None
+    )
 
 
 @pytest.mark.asyncio
-async def test_run_missing_path() -> None:
-    t = PlayAudio()
-    with with_fake_agent():
-        result = await t.run({"path": ""})
-    assert result.is_error
-    assert "path is required" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_not_found(tmp_path: Path) -> None:
-    t = PlayAudio()
-    with with_fake_agent() as agent:
-        agent.tool_state.bash_cwd = str(tmp_path)
-        result = await t.run({"path": "absent.wav"})
-    assert result.is_error
-    assert "Not found" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_not_a_file(tmp_path: Path) -> None:
-    sub = tmp_path / "dir.wav"
-    sub.mkdir()
-    t = PlayAudio()
-    with with_fake_agent() as agent:
-        agent.tool_state.bash_cwd = str(tmp_path)
-        result = await t.run({"path": str(sub)})
-    assert result.is_error
-    assert "Not a file" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_wrong_suffix(tmp_path: Path) -> None:
-    bad = tmp_path / "song.mp3"
-    bad.write_bytes(b"ID3")
-    t = PlayAudio()
-    with with_fake_agent() as agent:
-        agent.tool_state.bash_cwd = str(tmp_path)
-        result = await t.run({"path": str(bad)})
-    assert result.is_error
-    assert "Unsupported format" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_relative_uses_bash_cwd(wav: Path, play_calls: list[Path]) -> None:
-    t = PlayAudio()
-    with with_fake_agent() as agent:
-        agent.tool_state.bash_cwd = str(wav.parent)
-        result = await t.run({"path": wav.name})
-    assert not result.is_error
-    assert "Played beep.wav" in result.content
-    assert play_calls == [wav]
-
-
-@pytest.mark.asyncio
-async def test_run_absolute_path_success(wav: Path, play_calls: list[Path]) -> None:
-    t = PlayAudio()
-    with with_fake_agent():
-        result = await t.run({"path": str(wav)})
-    assert not result.is_error
-    assert play_calls == [wav]
-
-
-@pytest.mark.asyncio
-async def test_run_play_soft_fail_reported(
+async def test_the_first_player_that_works_plays_the_file(
+    tmp_path: Path,
+    players: Path,
     wav: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _soft_fail(_: Path) -> str:
-        return "no audio backend worked"
-
-    monkeypatch.setattr(play_audio, "_play", _soft_fail)
-    t = PlayAudio()
-    with with_fake_agent():
-        result = await t.run({"path": str(wav)})
-    # Soft fail returns success-ish text (not is_error) with reason embedded.
-    assert not result.is_error
-    assert "best effort" in result.content
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    _player(players, "paplay", log=tmp_path / "paplay.args")
+    _player(players, "play", log=tmp_path / "play.args")
+    result = await PlayAudio().call(ToolContext(cwd=tmp_path), {"path": "ding.wav"})
+    assert (result.text(), result.is_error) == ("Played ding.wav.", None)
+    assert result.call_id == ""
+    assert (tmp_path / "paplay.args").read_text() == f"{wav}\n"
+    assert not (tmp_path / "play.args").exists()
 
 
-def test_play_via_cmd_no_path_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _none(_: str) -> str | None:
-        return None
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("system", "player", "args"),
+    [
+        ("Linux", "aplay", ["-q", "{wav}"]),
+        ("Linux", "play", ["-q", "{wav}"]),
+        ("Darwin", "afplay", ["{wav}"]),
+        (
+            "Windows",
+            "powershell",
+            [
+                "-NoProfile",
+                "-Command",
+                "(New-Object Media.SoundPlayer '{quoted}').PlaySync()",
+            ],
+        ),
+    ],
+)
+async def test_each_platform_runs_its_own_player(
+    tmp_path: Path,
+    players: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    system: str,
+    player: str,
+    args: list[str],
+) -> None:
+    sound = tmp_path / "it's.wav"
+    sound.write_bytes(b"RIFF")
+    monkeypatch.setattr(platform, "system", lambda: system)
+    _player(players, player, log=tmp_path / "args")
+    result = await PlayAudio().call(ToolContext(cwd=tmp_path), {"path": str(sound)})
+    assert result.text() == "Played it's.wav."
+    quoted = str(sound).replace("'", "''")
+    assert (tmp_path / "args").read_text().splitlines() == [
+        a.format(wav=sound, quoted=quoted) for a in args
+    ]
 
-    monkeypatch.setattr("shutil.which", _none)
-    out = play_audio._play_via_cmd(Path("/x.wav"), ["aplay"])
-    assert out is not None
-    assert "not on PATH" in out
 
-
-def test_play_via_cmd_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _which(exe: str) -> str:
-        return f"/usr/bin/{exe}"
-
-    completed: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
-        args=[],
-        returncode=0,
-        stdout="",
-        stderr="",
+@pytest.mark.asyncio
+async def test_a_host_with_no_working_player_still_succeeds_and_says_why(
+    tmp_path: Path,
+    players: Path,
+    wav: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    _player(players, "paplay", code=1)
+    (players / "play").write_text("#!/nonexistent/shell\n")
+    (players / "play").chmod(0o755)
+    with caplog.at_level(logging.WARNING):
+        result = await PlayAudio().call(ToolContext(cwd=tmp_path), {"path": str(wav)})
+    assert result.is_error is None
+    assert re.fullmatch(
+        r"Played ding\.wav \(best effort\): no audio backend worked: aplay \(not on"
+        r" PATH\); paplay \(exit 1\); play \(\[Errno \d+\] .+\)",
+        result.text(),
     )
-
-    def _run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
-        return completed
-
-    monkeypatch.setattr("shutil.which", _which)
-    monkeypatch.setattr("subprocess.run", _run)
-    assert play_audio._play_via_cmd(Path("/x.wav"), ["aplay"]) is None
+    (warning,) = caplog.records
+    assert warning.getMessage().startswith("PlayAudio: no audio backend worked: ")
 
 
-def test_play_via_cmd_nonzero_returns_reason(
+@pytest.mark.asyncio
+async def test_a_player_that_hangs_is_given_up_on(
+    tmp_path: Path,
+    players: Path,
+    wav: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def _which(exe: str) -> str:
-        return f"/usr/bin/{exe}"
-
-    completed: subprocess.CompletedProcess[str] = subprocess.CompletedProcess(
-        args=[],
-        returncode=2,
-        stdout="",
-        stderr="",
+    monkeypatch.setattr(platform, "system", lambda: "Darwin")
+    (players / "afplay").write_text("#!/bin/sh\nexec /bin/sleep 5\n")
+    (players / "afplay").chmod(0o755)
+    result = await PlayAudio(timeout_sec=0.05).call(
+        ToolContext(cwd=tmp_path),
+        {"path": str(wav)},
     )
-
-    def _run(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
-        return completed
-
-    monkeypatch.setattr("shutil.which", _which)
-    monkeypatch.setattr("subprocess.run", _run)
-    out = play_audio._play_via_cmd(Path("/x.wav"), ["aplay"])
-    assert out is not None
-    assert "exit 2" in out
+    assert result.text().startswith(
+        "Played ding.wav (best effort): no audio backend worked: afplay (Command",
+    )
+    assert "timed out after 0.05 seconds)" in result.text()
 
 
-def test_play_via_cmd_exception_collected(monkeypatch: pytest.MonkeyPatch) -> None:
-    def _which(exe: str) -> str:
-        return f"/usr/bin/{exe}"
-
-    def _boom(*_a: object, **_k: object) -> subprocess.CompletedProcess[str]:
-        raise OSError("nope")
-
-    monkeypatch.setattr("shutil.which", _which)
-    monkeypatch.setattr("subprocess.run", _boom)
-    out = play_audio._play_via_cmd(Path("/x.wav"), ["aplay"])
-    assert out is not None
-    assert "aplay" in out
-
-
-def test_play_dispatch_linux(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("platform.system", lambda: "Linux")
-    captured: list[tuple[Path, tuple[list[str], ...]]] = []
-
-    def fake_via_cmd(path: Path, *candidates: list[str]) -> str | None:
-        captured.append((path, candidates))
-        return None
-
-    monkeypatch.setattr(play_audio, "_play_via_cmd", fake_via_cmd)
-    assert play_audio._play(Path("/x.wav")) is None
-    assert captured[0][0] == Path("/x.wav")
-    assert [c[0] for c in captured[0][1]] == ["aplay", "paplay", "play"]
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "message"),
+    [
+        ("absent.wav", "Not a file: {}"),
+        ("dir.wav", "Not a file: {}"),
+        ("ding.mp3", "Unsupported format '.mp3'; only .wav is supported."),
+    ],
+)
+async def test_what_is_no_wav_file_is_an_error(
+    tmp_path: Path,
+    players: Path,
+    name: str,
+    message: str,
+) -> None:
+    (tmp_path / "dir.wav").mkdir()
+    (tmp_path / "ding.mp3").write_bytes(b"ID3")
+    _player(players, "aplay", log=tmp_path / "args")
+    result = await PlayAudio().call(ToolContext(cwd=tmp_path), {"path": name})
+    assert result.is_error is True
+    assert result.text() == message.format(tmp_path / name)
+    assert not (tmp_path / "args").exists()
 
 
-def test_play_dispatch_darwin(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("platform.system", lambda: "Darwin")
-    captured: list[list[str]] = []
-
-    def fake_via_cmd(_: Path, *candidates: list[str]) -> str | None:
-        captured.extend(candidates)
-        return None
-
-    monkeypatch.setattr(play_audio, "_play_via_cmd", fake_via_cmd)
-    assert play_audio._play(Path("/x.wav")) is None
-    assert captured == [["afplay"]]
-
-
-def test_play_dispatch_windows(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("platform.system", lambda: "Windows")
-
-    def _stub(_: Path) -> str | None:
-        return None
-
-    monkeypatch.setattr(play_audio, "_play_windows", _stub)
-    assert play_audio._play(Path("/x.wav")) is None
+@pytest.mark.asyncio
+async def test_an_upper_case_suffix_is_still_a_wav(
+    tmp_path: Path,
+    players: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    (tmp_path / "DING.WAV").write_bytes(b"RIFF")
+    _player(players, "aplay")
+    result = await PlayAudio().call(ToolContext(cwd=tmp_path), {"path": "DING.WAV"})
+    assert result.text() == "Played DING.WAV."
 
 
-def test_play_windows_no_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(_: str) -> object:
-        raise ImportError("not on POSIX")
-
-    monkeypatch.setattr("importlib.import_module", boom)
-    out = play_audio._play_windows(Path("/x.wav"))
-    assert out is not None
-    assert "winsound unavailable" in out
+@pytest.mark.asyncio
+async def test_a_call_without_a_path_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Missing argument 'path'"):
+        await PlayAudio().call(ToolContext(cwd=tmp_path), {})
 
 
-def test_play_windows_runtime_error() -> None:
-    fake_ws = MagicMock()
-    fake_ws.SND_FILENAME = 1
-    fake_ws.SND_NODEFAULT = 2
-    fake_ws.PlaySound = MagicMock(side_effect=RuntimeError("hw fail"))
-    with patch("importlib.import_module", return_value=fake_ws):
-        out = play_audio._play_windows(Path("/x.wav"))
-    assert out is not None
-    assert "winsound.PlaySound failed" in out
-
-
-def test_play_windows_success() -> None:
-    fake_ws = MagicMock()
-    fake_ws.SND_FILENAME = 1
-    fake_ws.SND_NODEFAULT = 2
-    fake_ws.PlaySound = MagicMock()
-    with patch("importlib.import_module", return_value=fake_ws):
-        assert play_audio._play_windows(Path("/x.wav")) is None
+def _player(
+    bin_dir: Path,
+    name: str,
+    *,
+    code: int = 0,
+    log: Path | None = None,
+) -> None:
+    """Put a stand-in ``name`` on ``PATH`` that records its arguments and exits ``code``."""
+    record = f"printf '%s\\n' \"$@\" > '{log}'\n" if log is not None else ""
+    script = bin_dir / name
+    script.write_text(f"#!/bin/sh\n{record}exit {code}\n")
+    script.chmod(0o755)
 
 
 if __name__ == "__main__":

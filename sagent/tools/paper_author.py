@@ -1,18 +1,21 @@
-"""PaperAuthor tool - Semantic Scholar author lookup.
+"""PaperAuthor: find authors, and list an author's papers.
 
-Thin adapter over :mod:`wesearch.paper`: author name search, batched author
-metadata, and an author's papers. The tool owns schema, arg validation, the
-process cache, and text rendering.
+Typical usage example:
+
+  result = await PaperAuthor(session=session).call(context, {"query": "Yoshua Bengio"})
+  result = await PaperAuthor(session=session).call(
+      context, {"ids": "1741101", "operation": "papers", "year_from": 2022},
+  )
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from importlib.resources import files
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import asyncio
 
-from treekle import PlainTree, immutable
 from wesearch.fetch import FetchSession
 from wesearch.paper.authors import author_metadata, author_papers, search_authors
 from wesearch.paper.errors import PaperError
@@ -25,332 +28,223 @@ from wesearch.paper.render import (
 
 import cachetools
 
-from sagent.tools.core import load_tool_description, opt_int
-from sagent.tools.paper_common import (
-    parse_optional_ids,
-    summary_ids,
-    validate_abstract_chars,
-    validate_limit,
-    validate_year_range,
-)
-from sagent.types.runtime import ToolResult
+from sagent.session.types import UncategorizedToolResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.paper_common import error, paper_ids, summary_ids
+from sagent.tools.types import Arg, parse, schema_of
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from treekle import PlainTree
 
-_cache = cachetools.LRUCache[tuple[object, ...], str](maxsize=1024)
+    from sagent.tools.types import ToolContext
 
 
+__all__ = [
+    "PaperAuthor",
+]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PaperAuthor:
-    """Author search / metadata / papers via the Semantic Scholar API."""
+    """Search authors by name, look them up, or list one's papers."""
 
-    name: str = "PaperAuthor"
-    tool_id: str = "application/x-tool-paperauthor"
-    clearable_results: bool = True
-    description: str = load_tool_description("PaperAuthor")
-    directive_schema: Mapping[str, PlainTree] = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": (
-                        "Author name to search for (free-form). Mutually "
-                        "exclusive with 'ids'."
-                    ),
-                },
-                "ids": {
-                    "type": ["array", "string"],
-                    "items": {"type": "string"},
-                    "description": (
-                        "Semantic Scholar author id(s) (opaque integer "
-                        "strings, e.g. '1741101'): a single id as a bare "
-                        "string, or several as an array. Mutually exclusive "
-                        "with 'query'. For author metadata, pass every id at "
-                        "once: they are resolved in ONE batched request (up "
-                        "to 500), far more efficient against the 1 "
-                        "request/second rate limit than one call per id; "
-                        "results come back in input order. 'operation=papers' "
-                        "lists a single author's works, so pass exactly one "
-                        "id with it."
-                    ),
-                },
-                "operation": {
-                    "type": "string",
-                    "enum": ["papers"],
-                    "description": (
-                        "Optional. With exactly one id: 'papers' lists that "
-                        "author's publications. Omit for author metadata."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Max results. Omit to let Semantic Scholar decide "
-                        "(one default page)."
-                    ),
-                },
-                "year_from": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": (
-                        "Papers only: inclusive lower bound on publication year."
-                    ),
-                },
-                "year_to": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": (
-                        "Papers only: inclusive upper bound on publication year."
-                    ),
-                },
-                "abstract_chars": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Papers only: truncate every abstract to this many "
-                        "characters. Must be ≥ 1. Omit for full abstracts."
-                    ),
-                },
-            },
-        },
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        query: Annotated[
+            str,
+            "Author name to search for (free-form). Mutually exclusive with 'ids'.",
+        ] = ""
+        ids: Annotated[
+            tuple[str, ...] | str,
+            "Semantic Scholar author id(s) (opaque integer strings, e.g."
+            " '1741101'): a single id as a bare string, or several as an array."
+            " Mutually exclusive with 'query'. For author metadata, pass every id"
+            " at once: they are resolved in ONE batched request (up to 500), far"
+            " more efficient against the 1 request/second rate limit than one call"
+            " per id; results come back in input order. 'operation=papers' lists a"
+            " single author's works, so pass exactly one id with it.",
+        ] = ()
+        operation: Annotated[
+            Literal["papers"] | None,
+            "Optional. With exactly one id: 'papers' lists that author's"
+            " publications. Omit for author metadata.",
+        ] = None
+        limit: Annotated[
+            int | None,
+            "Max results. Omit to let Semantic Scholar decide (one default page).",
+            Arg(minimum=1),
+        ] = None
+        year_from: Annotated[
+            int | None,
+            "Papers only: inclusive lower bound on publication year.",
+            Arg(minimum=0),
+        ] = None
+        year_to: Annotated[
+            int | None,
+            "Papers only: inclusive upper bound on publication year.",
+            Arg(minimum=0),
+        ] = None
+        abstract_chars: Annotated[
+            int | None,
+            "Papers only: truncate every abstract to this many characters. Omit for"
+            " full abstracts.",
+            Arg(minimum=1),
+        ] = None
+
+    name = "PaperAuthor"
+    description = (files(__package__) / "assets" / "paperauthor.md").read_text(
+        encoding="utf-8",
     )
+    schema = schema_of(Arguments)
 
-    def __init__(self, *, session: FetchSession | None = None) -> None:
-        self.session = FetchSession() if session is None else session
+    display: ToolDisplay = field(default=ToolDisplay())
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short display label for this invocation.
+    session: FetchSession = field(repr=False)
+    """Connections, browser, and egress every lookup reuses; whoever made it closes it."""
+
+    cache: cachetools.LRUCache[tuple[object, ...], str] = field(
+        default_factory=lambda: cachetools.LRUCache[tuple[object, ...], str](
+            maxsize=1024,
+        ),
+        repr=False,
+    )
+    """Rendered results, by lookup."""
+
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``PaperAuthor search '<query>'``, or the ids and operation.
 
         Args:
-          args: Parsed tool arguments.
+          arguments: What the model passed.
 
         Returns:
-          label: Compact invocation label.
+          label: Such as ``PaperAuthor papers 1741101``.
 
         """
-        query = str(args.get("query", "")).strip()
-        op = str(args.get("operation", "")).strip()
+        query = str(arguments.get("query", "")).strip()
         if query:
             return f"PaperAuthor search {query!r}"
-        label = summary_ids(args)
-        if label != "?":
-            if op == "papers":
-                return f"PaperAuthor papers {label}"
-            return f"PaperAuthor {label}"
-        return "PaperAuthor"
+        ids = summary_ids(arguments)
+        if ids == "?":
+            return "PaperAuthor"
+        if arguments.get("operation") == "papers":
+            return f"PaperAuthor papers {ids}"
+        return f"PaperAuthor {ids}"
 
-    def prompt(self) -> str:
-        """Return supplemental system-prompt text (none)."""
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: independent network fetch, no serialization."""
-        del args
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``None``: lookups are independent."""
+        del context, arguments
         return None
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Execute an author search, metadata lookup, or papers listing.
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> UncategorizedToolResult:
+        """Search authors, look up ``ids``, or list one author's papers.
 
         Args:
-          args: Parsed tool arguments.
+          context: The calling agent's state.
+          arguments: What the model passed, as ``PaperAuthor.Arguments``.
 
         Returns:
-          result: Author search, metadata, or papers listing result.
+          result: One line per candidate, a block per author, or one line per
+            paper.
+
+        Raises:
+          ValueError: The arguments contradict each other.
 
         """
-        query = str(args.get("query", ""))
-        operation = str(args.get("operation", ""))
-        limit = validate_limit(opt_int(args, "limit"))
-        if isinstance(limit, ToolResult):
-            return limit
-        year_from = opt_int(args, "year_from")
-        year_to = opt_int(args, "year_to")
-        year_error = validate_year_range(year_from, year_to)
-        if year_error is not None:
-            return year_error
-        cap = validate_abstract_chars(opt_int(args, "abstract_chars"))
-        if isinstance(cap, ToolResult):
-            return cap
-        q = query.strip()
-        op = operation.strip().lower()
-
-        # S2 author ids are opaque integer strings, so a comma-joined bundle
-        # splits on ``str.isdigit`` rather than the default DOI/arXiv check.
-        ids = parse_optional_ids(args, looks_like_id=str.isdigit)
-        if isinstance(ids, ToolResult):
-            return ids
-
-        err = _validate_author_args(q, ids, op, year_from=year_from, year_to=year_to)
-        if err is not None:
-            return err
-
+        del context
+        a = parse(arguments, PaperAuthor.Arguments)
+        query = a.query.strip()
+        # Author ids are integer strings, so a bundle splits on digits.
+        ids = paper_ids(a.ids, looks_like_id=str.isdigit)
+        if bool(query) == bool(ids):
+            raise ValueError("Set exactly one of 'query' or 'ids'.")
+        if a.operation is not None and len(ids) != 1:
+            raise ValueError("'operation=papers' needs exactly one id in 'ids'.")
+        years = a.year_from is not None or a.year_to is not None
+        if a.operation is None and years:
+            raise ValueError(
+                "'year_from' / 'year_to' only apply to operation='papers'.",
+            )
+        if (
+            a.year_from is not None
+            and a.year_to is not None
+            and a.year_from > a.year_to
+        ):
+            raise ValueError(
+                f"'year_from' ({a.year_from}) must not exceed 'year_to' ({a.year_to}).",
+            )
+        if query:
+            key: tuple[object, ...] = ("search", query, a.limit)
+        elif a.operation == "papers":
+            key = ("papers", ids[0], a.limit, a.year_from, a.year_to, a.abstract_chars)
+        else:
+            key = ("authors", tuple(ids))
+        cached = self.cache.get(key)
+        if cached is not None:
+            return UncategorizedToolResult(call_id="", content=cached)
         try:
-            if not q and not op and len(ids) > 1:
-                return await self._author_batch(ids)
-            return await self._dispatch(
-                q,
-                ids[0] if ids else "",
-                op,
-                limit=limit,
-                year_from=year_from,
-                year_to=year_to,
-                abstract_chars=cap,
-            )
+            if query:
+                text = await self._search(query, limit=a.limit)
+            elif a.operation == "papers":
+                text = await self._papers(ids[0], a)
+            else:
+                records = await asyncio.to_thread(
+                    author_metadata,
+                    ids,
+                    session=self.session,
+                )
+                text = "\n\n".join(
+                    format_author_block(r) if r is not None else f"{label}: not found"
+                    for label, r in zip(ids, records, strict=True)
+                )
+                if any(r is None for r in records):
+                    return UncategorizedToolResult(call_id="", content=text)
         except PaperError as e:
-            return ToolResult(call_id="", content=str(e), is_error=True)
-
-    async def _author_batch(self, author_ids: list[str]) -> ToolResult:
-        """Fetch metadata for many authors in one batched S2 request."""
-        key = ("author_batch", tuple(author_ids))
-        cached = _cache.get(key)
-        if cached is not None:
-            return ToolResult(call_id="", content=cached)
-        records = await asyncio.to_thread(
-            author_metadata,
-            author_ids,
-            session=self.session,
-        )
-        blocks = [
-            format_author_block(rec) if rec is not None else f"{label}: not found"
-            for label, rec in zip(author_ids, records, strict=True)
-        ]
-        content = "\n\n".join(blocks)
-        if all(r is not None for r in records):
-            _cache[key] = content
-        return ToolResult(call_id="", content=content)
-
-    async def _dispatch(
-        self,
-        q: str,
-        raw_id: str,
-        op: str,
-        *,
-        limit: int | None,
-        year_from: int | None,
-        year_to: int | None,
-        abstract_chars: int | None,
-    ) -> ToolResult:
-        """Dispatch to search, papers, or single-author metadata with caching."""
-        if q:
-            cache_key: tuple[object, ...] = ("search", q, limit)
-        elif op == "papers":
-            cache_key = ("papers", raw_id, limit, year_from, year_to, abstract_chars)
-        else:
-            cache_key = ("author", raw_id)
-        cached = _cache.get(cache_key)
-        if cached is not None:
-            return ToolResult(call_id="", content=cached)
-
-        if q:
-            content = await self._search(q, limit=limit)
-        elif op == "papers":
-            content = await self._papers(
-                raw_id,
-                limit=limit,
-                year_from=year_from,
-                year_to=year_to,
-                abstract_chars=abstract_chars,
-            )
-        else:
-            content = await self._author(raw_id)
-        _cache[cache_key] = content
-        return ToolResult(call_id="", content=content)
+            return error(str(e))
+        self.cache[key] = text
+        return UncategorizedToolResult(call_id="", content=text)
 
     async def _search(self, query: str, *, limit: int | None) -> str:
-        """Search authors by name and return ranked results."""
-        result = await asyncio.to_thread(
+        """Return the authors named like ``query``, most prolific first."""
+        found = await asyncio.to_thread(
             search_authors,
             query,
             limit=limit,
             session=self.session,
         )
-        if not result.records:
+        if not found.records:
             return "(no results)"
-        body = "\n".join(format_author_line(r) for r in result.records)
-        return body + truncation_notice(len(result.records), result.total)
-
-    async def _author(self, author_id: str) -> str:
-        """Fetch full metadata for a single author."""
-        records = await asyncio.to_thread(
-            author_metadata,
-            [author_id],
-            session=self.session,
+        return "\n".join(format_author_line(r) for r in found.records) + (
+            truncation_notice(len(found.records), found.total)
         )
-        rec = records[0]
-        if rec is None:
-            return f"{author_id}: not found"
-        return format_author_block(rec)
 
-    async def _papers(
-        self,
-        author_id: str,
-        *,
-        limit: int | None,
-        year_from: int | None,
-        year_to: int | None,
-        abstract_chars: int | None,
-    ) -> str:
-        """Fetch an author's publications with optional year filtering."""
+    async def _papers(self, author_id: str, a: PaperAuthor.Arguments) -> str:
+        """Return one author's papers, one per line."""
         listing = await asyncio.to_thread(
             author_papers,
             author_id,
-            limit=limit,
-            year_from=year_from,
-            year_to=year_to,
+            limit=a.limit,
+            year_from=a.year_from,
+            year_to=a.year_to,
             session=self.session,
         )
         if not listing.records:
             return "(no results)"
-        lines = [
-            format_record(r, abstract_chars=abstract_chars) for r in listing.records
-        ]
-        body = "\n".join(lines)
+        body = "\n".join(
+            format_record(r, abstract_chars=a.abstract_chars) for r in listing.records
+        )
         if not listing.complete:
             body += "\n... (more matches exist; raise 'limit' or narrow the years)"
         return body
-
-
-def _validate_author_args(
-    q: str,
-    ids: list[str],
-    op: str,
-    *,
-    year_from: int | None,
-    year_to: int | None,
-) -> ToolResult | None:
-    """Return an error if author args are invalid, else None."""
-    if q and ids:
-        return ToolResult(
-            call_id="",
-            content="Set exactly one of 'query' or 'ids', not both.",
-            is_error=True,
-        )
-    if not q and not ids:
-        return ToolResult(
-            call_id="",
-            content="'query' or 'ids' is required.",
-            is_error=True,
-        )
-    if op and op != "papers":
-        return ToolResult(
-            call_id="",
-            content=f"Unknown operation {op!r}. Valid: 'papers' (with id), or omit.",
-            is_error=True,
-        )
-    if op and len(ids) != 1:
-        return ToolResult(
-            call_id="",
-            content="'operation=papers' needs exactly one id in 'ids'.",
-            is_error=True,
-        )
-    if (q or not op) and (year_from is not None or year_to is not None):
-        return ToolResult(
-            call_id="",
-            content="'year_from' / 'year_to' only apply to operation='papers'.",
-            is_error=True,
-        )
-    return None

@@ -1,349 +1,207 @@
-"""Edit tool: exact-string replacement in existing files.
+"""Edit: replace exact text in a file.
 
-Unlike Write, Edit intentionally does not require a prior Read. The
-``old_string`` exact match is the operation's safety gate, which keeps
-sed-like replacements cheap when the caller already knows the target text.
+An unread file may be edited: the exact ``old_string`` is the check that the
+model knows what it is replacing. A file read and then changed may not.
+
+Typical usage example:
+
+  result = await Edit().call(
+      context, {"file_path": "a.py", "old_string": "x = 1", "new_string": "x = 2"}
+  )
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from dataclasses import dataclass, field
+from importlib.resources import files
+from typing import TYPE_CHECKING, Annotated, cast
 
-import difflib
+import asyncio
 import re
-import shlex
 
-from treekle import from_plain, immutable
-
-from sagent.agent.state import get_tool_state
-from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.tools.core import (
-    file_lock_key,
-    load_tool_description,
-    locked_file_write,
-    resolve_tool_path,
+from sagent.session.types import FileEditResult, Splice, UncategorizedToolResult
+from sagent.tools.command_analyzer import (
+    Invocation,
+    operands,
+    replaceable,
+    resolve,
 )
-from sagent.tools.display import Toggle, Wrap
-from sagent.tools.lib.bash import resolve_cwd_path, walk_commands
-from sagent.tools.tool_spec import CLI_SETTABLE
-from sagent.types.runtime import ToolResult
+from sagent.tools.display import DisplaySpec, ToolDisplay
+from sagent.tools.types import parse, schema_of
+from sagent.tools.write import write_file
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
 
-    from bashlex.ast import (
-        node as Node,  # noqa: N812 -- PascalCase for the type name; bashlex spells it lowercase.
-    )
+    from treekle import PlainTree
+
+    from sagent.tools.types import ToolContext
 
 
-def make_diff(old: str, new: str, offset: int) -> str:
-    """Produce a unified diff with absolute line numbers.
-
-    Args:
-      old: Original text fragment.
-      new: Replacement text fragment.
-      offset: Line offset (0-based) within the containing file at which
-        ``old`` begins, added to each hunk header so the diff reflects
-        absolute file line numbers rather than fragment-relative ones.
-
-    Returns:
-      diff: Unified-diff string with ``---``/``+++`` headers stripped.
-
-    """
-    lines = list(
-        difflib.unified_diff(
-            old.splitlines(),
-            new.splitlines(),
-            lineterm="",
-            n=3,
-        ),
-    )[2:]  # Skip --- / +++ headers.
-    result: list[str] = []
-    for line in lines:
-        m = re.match(r"^@@ -(\d+)((?:,\d+)?) \+(\d+)((?:,\d+)?) @@", line)
-        if m:
-            old_start = int(m.group(1)) + offset
-            new_start = int(m.group(3)) + offset
-            result.append(f"@@ -{old_start}{m.group(2)} +{new_start}{m.group(4)} @@")
-        else:
-            result.append(line)
-    return "\n".join(result)
+__all__ = [
+    "Edit",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Edit:
-    """Perform exact-string replacement in files.
+    """Replace exact text in a file."""
 
-    This tool deliberately permits unread files. The exact ``old_string`` match
-    is treated as the safety check; stale-file checks apply when prior session
-    state exists, but lack of a prior Read is not itself an error.
-    """
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        file_path: Annotated[str, "Path to the file."]
+        old_string: Annotated[str, "Text to find."]
+        new_string: Annotated[str, "Replacement text."]
+        replace_all: Annotated[bool, "Replace all occurrences."] = False
 
     name = "Edit"
-    tool_id = "application/x-tool-edit"
-    clearable_results = False
-    description = load_tool_description("Edit")
-    directive_schema = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "Path to the file."},
-                "old_string": {"type": "string", "description": "Text to find."},
-                "new_string": {"type": "string", "description": "Replacement text."},
-                "replace_all": {
-                    "type": "boolean",
-                    "description": "Replace all occurrences.",
-                },
-            },
-            "required": ["file_path", "old_string", "new_string"],
-        },
+    description = (files(__package__) / "assets" / "edit.md").read_text(
+        encoding="utf-8",
     )
+    schema = schema_of(Arguments)
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Apply an exact-string replacement to a file.
+    display: ToolDisplay = field(default=ToolDisplay(output=DisplaySpec()))
 
-        Args:
-          args: Directive with ``file_path``, ``old_string``, ``new_string``,
-              and optional ``replace_all``.
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``Edit <path>``."""
+        return f"Edit {arguments.get('file_path', '')}"
 
-        Returns:
-          result: Replacement confirmation with a unified diff, or an
-              error when validation fails or no match is found.
-
-        """
-        file_path = resolve_tool_path(str(args.get("file_path", "")))
-        old_string = str(args.get("old_string", ""))
-        new_string = str(args.get("new_string", ""))
-        replace_all = from_plain(args.get("replace_all"), bool, default=False)
-        # Serialize against any other mutating tool on the same file.
-        return await locked_file_write(
-            file_path,
-            lambda: self._run(file_path, old_string, new_string, replace_all),
-        )
-
-    output: Annotated[Toggle, CLI_SETTABLE] = "on"
-    """Whether the result body renders in the pane."""
-
-    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Leading body rows kept."""
-
-    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
-
-    output_max_width: Annotated[int, CLI_SETTABLE] = 0
-    """Cell width cap; ``0`` uses the pane width."""
-
-    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
-    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Serialize same-file Read/Edit/Write within a cohort.
-
-        Args:
-          args: Directive carrying ``file_path``.
-
-        Returns:
-          key: Canonical path, or ``None`` when no path was supplied.
-
-        """
-        path = resolve_tool_path(str(args.get("file_path", "")))
-        return file_lock_key(path) if path else None
-
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short label summarizing this edit.
-
-        Args:
-          args: Directive carrying ``file_path``.
-
-        Returns:
-          label: ``Edit <basename>`` line shown before invocation.
-
-        """
-        file_path = resolve_tool_path(str(args.get("file_path", "")))
-        fname = Path(file_path).name if file_path else "?"
-        return f"Edit {fname}"
-
-    def prompt(self) -> str:
-        """Return no supplemental system-prompt text for Edit.
-
-        Returns:
-          contribution: Empty string.
-
-        """
-        return ""
-
-    def _validate(self, file_path: str, old_string: str) -> ToolResult | None:
-        """Return an error ``ToolResult`` on invalid inputs, else ``None``."""
-        if not old_string:
-            # text.count("") returns len+1; text.replace("", …) inserts
-            # between every char. Silently destroys the file - reject.
-            return ToolResult(
-                call_id="",
-                content="old_string cannot be empty.",
-                is_error=True,
-            )
-        p = Path(file_path)
-        if not p.exists():
-            return ToolResult(
-                call_id="",
-                content=f"File not found: {file_path}",
-                is_error=True,
-            )
-        if p.is_dir():
-            return ToolResult(
-                call_id="",
-                content=f"{file_path} is a directory, not a file.",
-                is_error=True,
-            )
-        state = get_tool_state()
-        if state.check_stale(file_path):
-            return ToolResult(
-                call_id="",
-                content=(
-                    "File has been modified since read, either by the user, a"
-                    " linter, or another agent. Read it again before attempting"
-                    " to edit it."
-                ),
-                is_error=True,
-            )
-        return None
-
-    def _run(
+    def serialize_key(
         self,
-        file_path: str,
-        old_string: str,
-        new_string: str,
-        replace_all: bool,
-    ) -> ToolResult:
-        """Run the validated edit synchronously and return the result."""
-        err = self._validate(file_path, old_string)
-        if err is not None:
-            return err
-        p = Path(file_path)
-        state = get_tool_state()
-        try:
-            text = p.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            size = p.stat().st_size
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"[Non-UTF-8 file: {file_path} ({size} bytes)."
-                    " Use Bash with an explicit decoder to inspect or rewrite.]"
-                ),
-                is_error=True,
-            )
-        count = text.count(old_string)
-        if count == 0:
-            return ToolResult(
-                call_id="",
-                content="old_string not found in file.",
-                is_error=True,
-            )
-        if count > 1 and not replace_all:
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"old_string found {count} times."
-                    f" Use replace_all=True or provide more context."
-                ),
-                is_error=True,
-            )
-        new_text = (
-            text.replace(old_string, new_string)
-            if replace_all
-            else text.replace(old_string, new_string, 1)
-        )
-        # Atomic write (tmp + rename). Forward the original file mode so
-        # Edit doesn't silently flip a ``0o600`` file to ``0o644``.
-        file_mode = p.stat().st_mode & 0o777
-        atomic_write_bytes(p, new_text.encode("utf-8"), file_mode=file_mode)
-        state.mark_written(file_path)
-        replaced = count if replace_all else 1
-        confirmation = f"Replaced {replaced} occurrence(s) in {file_path}"
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return the file, so calls on one file run in order."""
+        return str(context.path(str(arguments.get("file_path", ""))).resolve())
 
-        # Compute diff from text already in hand -- no extra file read.
-        idx = text.find(old_string)
-        offset = text[:idx].count("\n") if idx >= 0 else 0
-        diff = make_diff(old_string, new_string, offset)
+    def from_shell(
+        self,
+        invocation: Invocation,
+    ) -> Mapping[str, PlainTree] | str | None:
+        """Return the Edit call for ``sed -i 's/OLD/NEW/[g]' FILE``.
 
-        return ToolResult(
-            call_id="",
-            content=confirmation,
-            diff=diff,
-            diff_file_path=file_path,
-        )
-
-    def bash_match(self, trees: Sequence[Node]) -> str | None:
-        """Emit a hint if any command is a simple ``sed -i 's/X/Y/g' FILE``.
-
-        Policy only: :func:`walk_commands` supplies every simple command
-        with its context, so a leading ``cd``, an enclosing loop, and a
-        sequence all reach this matcher without it re-deriving AST shape.
+        Only literal text: ``sed`` matches a regular expression and Edit exact
+        text, so a script using regex syntax stays a shell command.
 
         Args:
-          trees: Parsed bashlex command trees from the active Bash call.
+          invocation: One simple command, with its pipeline.
 
         Returns:
-          hint: Nudge string redirecting to the Edit tool, or ``None``.
+          arguments: The Edit call making the same change, or ``None``.
 
         """
-        for inv in walk_commands(trees):
-            if inv.exe != "sed" or inv.env_prefix or inv.captures_stdout:
-                continue
-            hint = _match_sed(inv.cwd, inv.args)
-            if hint is not None:
-                return hint
-        return None
+        takes_value = frozenset({"-e", "-f", "--expression", "--file"})
+        # Bash fills in ``$x`` before sed sees it; Edit would write it as is.
+        if invocation.expands or not replaceable(
+            invocation,
+            exes=frozenset({"sed"}),
+            takes_value=takes_value,
+        ):
+            return None
+        args = invocation.args
+        flags = [a for a in args if a.startswith("-")]
+        given = operands(args, takes_value=takes_value)
+        script = re.fullmatch(r"s/([^/]*)/([^/]*)/(g?)", given[0]) if given else None
+        if flags not in (["-i"], ["--in-place"]) or len(given) != 2 or script is None:
+            return None
+        files = given[1:]
+        # Every group takes part in a match, so none is ``None``.
+        old, new, every = cast("tuple[str, str, str]", script.groups())
+        # Regex syntax in OLD, or a back-reference in NEW, is not literal.
+        if not old or re.search(r"[.*\[\]^$\\]", old) or re.search(r"[&\\]", new):
+            return None
+        target = resolve(invocation.cwd, files[0])
+        if target is None or any(c in target for c in "*?[$`"):
+            return None
+        return {
+            "file_path": target,
+            "old_string": old,
+            "new_string": new,
+            "replace_all": bool(every),
+        }
+
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> FileEditResult | UncategorizedToolResult:
+        """Replace ``old_string`` with ``new_string`` in ``file_path``.
+
+        ``old_string`` must occur once, unless ``replace_all``.
+
+        Args:
+          context: The calling agent's state.
+          arguments: What the model passed, as ``Edit.Arguments``.
+
+        Returns:
+          result: Each replacement made, or why none was.
+
+        """
+        return await asyncio.to_thread(_edit, context, parse(arguments, Edit.Arguments))
 
 
-# ``cwd`` is the enclosing ``cd`` prefix. Edit resolves a relative ``file_path`` against
-# the AGENT's cwd, not the shell's, so a nudge that drops it points the caller at a
-# different file -- the same failure every sibling matcher resolves through
-# ``resolve_cwd_path``.
-def _match_sed(cwd: str, args: tuple[str, ...]) -> str | None:
-    """Match a simple ``sed -i 's/OLD/NEW/[g]' FILE`` for an Edit nudge."""
-    in_place = False
-    script: str | None = None
-    file: str | None = None
-    i = 0
-    while i < len(args):
-        a = args[i]
-        # ``-i`` (GNU) or ``-i BACKUP`` (BSD) - accept only the
-        # no-backup form to avoid suggesting a lossy translation.
-        if a in {"-i", "--in-place"}:
-            in_place = True
-            i += 1
-            continue
-        if a.startswith("-i") and len(a) > 2 and not a.startswith("--"):
-            # ``-i.bak`` - backup suffix, don't try to translate.
-            return None
-        if a.startswith("-"):
-            return None
-        if script is None:
-            script = a
-        elif file is None:
-            file = a
-        else:
-            return None
-        i += 1
-    if not in_place or script is None or file is None:
-        return None
-    # Simple ``s/OLD/NEW/[g]`` only: no escaped delimiters, no alternate
-    # delimiter, no address ranges. Anything more complex is not nudged.
-    m = re.match(r"^s/([^/\\]*)/([^/\\]*)/([gi]*)$", script)
-    if m is None:
-        return None
-    if "i" in m.group(3):
-        # Case-insensitive substitution - Edit is exact-match only.
-        return None
-    target = resolve_cwd_path(cwd, file)
-    return (
-        f"sed via Bash is a bad UX. Use the Edit tool. Replaces: `sed {' '.join(shlex.quote(a) for a in args)}`."
-        f" Try: Edit file_path={target!r}"
-        f" old_string={m.group(1)!r} new_string={m.group(2)!r}"
-        f"{' replace_all=true' if 'g' in m.group(3) else ''}"
+def _edit(
+    context: ToolContext,
+    a: Edit.Arguments,
+) -> FileEditResult | UncategorizedToolResult:
+    """Make the replacement ``a`` asks for."""
+    path = context.path(a.file_path)
+    # ``str.replace("", ...)`` inserts between every character.
+    if not a.old_string:
+        return _error("old_string is empty.")
+    if not path.is_file():
+        return _error(f"{path} is not a file.")
+    if context.files.changed(path):
+        return _error(
+            f"{path} changed since it was read, by the user, a linter, or"
+            " another agent. Read it again before editing it.",
+        )
+    try:
+        raw = path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError:
+        return _error(f"{path} is not UTF-8. Use Bash with an explicit decoder.")
+    # Read shows a CRLF file with ``\n``, so the strings the model quotes have
+    # ``\n``; the file keeps its ``\r\n``. A file of mixed endings is matched as is.
+    crlf = "\r\n" in raw and raw.count("\r\n") == raw.count("\n")
+    text, old, new = raw, a.old_string, a.new_string
+    if crlf:
+        text, old, new = (s.replace("\r\n", "\n") for s in (raw, old, new))
+    count = text.count(old)
+    if count == 0:
+        return _error("old_string not found in file.")
+    if count > 1 and not a.replace_all:
+        return _error(
+            f"old_string found {count} times. Set replace_all, or give more"
+            " context to make it unique.",
+        )
+    replaced = count if a.replace_all else 1
+    edited = text.replace(old, new, replaced)
+    write_file(path, (edited.replace("\n", "\r\n") if crlf else edited).encode())
+    context.files.saw(path)
+    return FileEditResult(
+        call_id="",
+        path=str(path),
+        edits=tuple(
+            Splice(before=old, after=new, start=start, count=old.count("\n") + 1)
+            for start in _lines_at(text, old, count=replaced)
+        ),
     )
+
+
+def _lines_at(text: str, needle: str, *, count: int) -> list[int]:
+    """Return the one-based line of each of the first ``count`` ``needle``."""
+    lines: list[int] = []
+    line, scanned, at = 1, 0, text.find(needle)
+    while at >= 0 and len(lines) < count:
+        line += text.count("\n", scanned, at)
+        lines.append(line)
+        scanned = at
+        at = text.find(needle, at + len(needle))
+    return lines
+
+
+def _error(message: str) -> UncategorizedToolResult:
+    return UncategorizedToolResult(call_id="", content=message, is_error=True)

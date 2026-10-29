@@ -12,7 +12,6 @@ Use the smallest tool set that can solve the task. For untrusted prompts or repo
 | File tools | Read and write paths the current process can access. |
 | `Bash` | Executes shell commands with current process permissions. |
 | Web and paper tools | Send queries/URLs/paper identifiers to external services. |
-| Slack and Linear | Read and mutate configured external workspaces. |
 | Sessions | Persist plaintext local state. |
 
 ## Recommended tool profiles
@@ -71,9 +70,6 @@ SEMANTIC_SCHOLAR_API_KEY=...
 OPENALEX_EMAIL=...
 SAGENT_DEBUG=...
 SAGENT_DEBUG_LOG=...
-SLACK_APP_TOKEN=...
-SLACK_BOT_TOKEN=...
-LINEAR_API_KEY=...
 ```
 
 Do not pass literal API keys through `--auth`; it names a `from_<auth>` factory.
@@ -82,8 +78,6 @@ Use `--auth env` so secrets stay out of shell history and process listings.
 ## Shell and filesystem safety
 
 `Skill` loads local/project-authored instruction files into the model context. Treat skill directories as trusted prompt sources, not user-upload locations.
-
-`Wiki` reads local/project-authored wiki pages into the model context. Treat wiki roots as trusted content sources.
 
 `Bash` runs commands through the local shell. File tools use the current process permissions. Sagent adds safety checks for common editing mistakes, such as requiring `Write` to read existing files first and serializing writes per path, but these are not a sandbox.
 
@@ -133,14 +127,6 @@ nothing waits on it, so nothing stops it.
 
 ## Network safety
 
-`WebFetch` accepts only HTTP(S) URLs and rejects hosts that resolve to loopback, private, link-local, multicast, reserved, or unspecified addresses. Redirect targets are checked too. This reduces SSRF risk when Sagent is exposed through hosted surfaces such as Slack.
+`WebFetch` accepts only HTTP(S) URLs and rejects hosts that resolve to loopback, private, link-local, multicast, reserved, or unspecified addresses. Redirect targets are checked too. This reduces SSRF risk when Sagent is exposed through hosted surfaces.
 
-Search, fetch, paper, Slack, and Linear tools still send user/model-provided data to external services. Scope credentials and tool access accordingly.
-
-## Slack and Linear
-
-`Slack` can post messages, list/read channels and threads, list users, and create channels. `sagent-slack` can route workspace messages into agents and create per-agent log channels.
-
-`Linear` can list, read, create, update issues, and add comments.
-
-These actions are externally visible. Use dedicated bot accounts, least-privilege workspace installs, and explicit human review for sensitive workspaces.
+Search, fetch, and paper tools still send user/model-provided data to external services. Scope credentials and tool access accordingly.

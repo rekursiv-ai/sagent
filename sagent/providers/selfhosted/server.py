@@ -1,1100 +1,728 @@
-"""SelfHosted provider - drives HuggingFace causal LMs from sagent.
+"""Hugging Face causal LMs, loaded into this process and run with transformers.
 
-Loads a HuggingFace ``AutoModelForCausalLM`` and ``AutoTokenizer`` from either
-a model name or a local cache path, then exposes the ``Model`` interface
-consumed by :class:`sagent.agent.Agent`.
+A model is named by its Hugging Face repo id or local snapshot, with options
+after ``+`` in any order: a device (``cuda``, ``mps``, ``cpu``, or ``auto`` to
+shard across every GPU), a dtype (``bfloat16``, ``float16``, ``float32``),
+``compile``, and a context size (``large``, ``200k``). Lookup reads nothing: the
+config, which states the window, is read when the model's settings are first
+asked for, and the weights load on the first request. Both are shared by every
+model the provider hands out for that repo.
 
-Usage::
+The model is told about tools by its chat template, and its calls are read
+back out of the text: Qwen's ``<tool_call>`` JSON, and DeepSeek's and Kimi's
+``<｜tool▁calls▁begin｜>`` blocks.
 
-    from sagent.providers import SelfHosted
+Download a model into the shared cache (``HF_HOME``, provisioned by ops/env),
+not a directory of its own, so every checkout and user reuses one copy:
 
-    provider = SelfHosted.from_key("Qwen/Qwen3.6-27B+bfloat16+cuda")
-    model = provider.model()              # same snapshot
-    response = await model.buffer(request)
+  hf download Qwen/Qwen3.6-27B
 
-Tool-calling:
-  - Qwen3 chat template renders tool declarations and asks the model
-    to emit ``<tool_call>{"name": ..., "arguments": {...}}</tool_call>``.
-  - DeepSeek-V3 / Kimi-K2 emit JSON inside ``<｜tool▁calls▁begin｜>``
-    blocks. Both formats are parsed here.
+Typical usage example:
 
-Models can be downloaded, for example, via,
-
-hf download Qwen/Qwen3.6-27B
-
-No ``--local-dir``: ``HF_HOME`` is provisioned (see ``ops/env``) so the
-download lands in the shared hub cache at
-``$HF_HOME/hub/models--Qwen--Qwen3.6-27B`` and every later load reuses
-it. Passing an explicit directory writes a second private copy that no
-other checkout or user can hit, which is what the shared cache exists to
-avoid -- and ``from_key`` takes the repo id, so nothing needs the path.
-
+  async with SelfHosted() as local:                   # Qwen/Qwen3.6-27B
+      qwen = local["Qwen/Qwen3.6-27B+bfloat16+cuda"]
+      async for event in qwen.stream(request):        # Loads the weights.
+          ...
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from pathlib import Path
-from types import MappingProxyType
-from typing import (
-    TYPE_CHECKING,
-    ClassVar,
-    Literal,
-    Protocol,
-    cast,
-    override,
-    runtime_checkable,
-)
+from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, cast, override
 
 import asyncio
-import json
-import logging
-import re
-import time
-import uuid
+import contextlib
+import threading
 
-from treekle import MutablePlainTree, ReadError, json_loads, mutable
+from treekle import from_plain, json_dumps, mutable
 
-from sagent.lib import token_count
-from sagent.providers.lib.id_remap import IdRemapper
-from sagent.providers.lib.model_base import ModelDefaults
-from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.types.capability import (
+from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
     ModelSettings,
+    literal_members,
 )
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceKey,
-    TokenCount,
-    TokenPrice,
-)
-from sagent.types.model import (
-    ModelRequest,
-    ModelResponse,
-)
-from sagent.types.runtime import (
-    AgentSendMessage,
-    AssistantMessage,
-    ModelResponsePartial,
-    RuntimeEvent,
-    ToolCall,
-    UserMessage,
-)
+from sagent.model.context import ContextSizeName
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
+from sagent.model.exceptions import UnknownModelError
+from sagent.model.types import Response, TextChunk
+from sagent.providers.openai import wire
+from sagent.providers.resources import SharedResources
+from sagent.providers.selfhosted.calls import read_calls
+from sagent.providers.table import ModelTags
+from sagent.session.types import AssistantMessage, Thinking, ToolCall, ToolResult
+from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
-    # Type-only, and every runtime ``cast`` below quotes them: a runtime
-    # ``from torch import ...`` here would defeat the lazy import and make the
-    # torch-free sagent package unimportable.
-    from torch import (
-        Tensor,  # noqa: TC004 -- ``_RenderedPrompt`` is never JSON-serialized, so its field type is not resolved at runtime; eager torch would make the torch-free package unimportable.
-        nn,
-    )
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
+
+    from torch import Tensor, nn
 
     import torch
-    import transformers as transformers_lib
+    import transformers
 
-    from sagent.lib import image
-    from sagent.types.tools import Tool
+    from sagent.model.types import Request
+    from sagent.providers.types import ProviderSharedResources, UsageWindow
+    from sagent.session.types import Attachment
+    from sagent.tools.types import Tool
 else:
     from wrapt import lazy_import
 
-    # ``transformers`` and ``torch`` add several seconds to importing
-    # ``sagent.providers``. The CLI dispatches providers by
-    # name, so hosted-provider users must not pay that cost just because
-    # ``SelfHosted`` lives in the same package.
-    transformers_lib = lazy_import("transformers")
+    # Seconds to import; a caller that never runs a local model never pays.
     torch = lazy_import("torch")
-    image = lazy_import("sagent.lib.image")
-
-logger = logging.getLogger(__name__)
+    transformers = lazy_import("transformers")
 
 
-class _Tokenizer(Protocol):
-    """Minimal HF tokenizer surface used by ``SelfHosted``."""
-
-    eos_token_id: int
-
-    def apply_chat_template(self, messages: object, **kwargs: object) -> object: ...
-
-    def decode(self, token_ids: object, *, skip_special_tokens: bool) -> str: ...
-
-    def encode(self, text: str, **kwargs: object) -> list[int]: ...
+__all__ = [
+    "SelfHosted",
+    "SelfHostedModel",
+]
 
 
-class _GenerateModel(Protocol):
-    """Minimal HF generate surface used by ``SelfHosted``."""
+class SelfHosted(AsyncResource):
+    """Hugging Face models, run in this process.
 
-    def generate(self, input_ids: Tensor, **kwargs: object) -> Tensor: ...
+    Args:
+      name: The name the catalog knows this provider by; the section by default.
+      resources: What this shares with other providers; ``None`` makes and
+        closes its own.
+      model: What a role (``default``, ``utility``) names: a repo id or local
+        snapshot, with options.
+      trust_remote_code: Whether a repo's own Python may run on load.
 
+    """
 
-@runtime_checkable
-class _HasInputIds(Protocol):
-    """Object with an ``input_ids`` attribute (HF batch encoding)."""
-
-    input_ids: object
-
-
-@runtime_checkable
-class _HasData(Protocol):
-    """Object with a ``data`` mapping (HF BatchEncoding)."""
-
-    data: object
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class _RenderedPrompt:
-    """Tokenized chat-template output with optional attention mask."""
-
-    input_ids: Tensor
-    attention_mask: Tensor | None
-
-
-@dataclass(frozen=True, kw_only=True, slots=True)
-class _ModelSpec:
-    """Parsed ``path+option+option`` self-hosted model spec."""
-
-    path_or_repo: str
-    device: str | None
-    dtype: torch.dtype | None
-    compile_model: bool
-
-
-_ModelOption = Literal["device", "dtype", "compile_model"]
-
-
-def _parse_model_spec(spec: str) -> _ModelSpec:
-    """Parse a SelfHosted model spec with order-independent options."""
-    parts = spec.split("+")
-    path_or_repo = parts[0]
-    if not path_or_repo:
-        raise ValueError("SelfHosted model spec must start with a model ID or path.")
-    options: dict[_ModelOption, object] = {}
-    for option in parts[1:]:
-        key, value = _parse_model_option(option)
-        if key in options:
-            raise ValueError(f"Duplicate SelfHosted {key} option in {spec!r}.")
-        options[key] = value
-    return _ModelSpec(
-        path_or_repo=path_or_repo,
-        device=cast(str | None, options.get("device")),
-        dtype=cast(torch.dtype | None, options.get("dtype")),
-        compile_model=cast(bool, options.get("compile_model", False)),
-    )
-
-
-def _parse_model_option(option: str) -> tuple[_ModelOption, object]:
-    """Classify one SelfHosted model option."""
-    if not option:
-        raise ValueError("SelfHosted model options must not be empty.")
-    normalized = option.removeprefix("torch.")
-    dtypes = {
-        "bfloat16": torch.bfloat16,
-        "float16": torch.float16,
-        "float32": torch.float32,
-    }
-    devices = {"auto": "auto", "cpu": "cpu", "cuda": "cuda", "mps": "mps"}
-    compile_options = {"compile": True, "no-compile": False}
-    parsers: dict[_ModelOption, Mapping[str, object]] = {
-        "dtype": dtypes,
-        "device": devices,
-        "compile_model": compile_options,
-    }
-    for key, values in parsers.items():
-        if normalized in values:
-            return key, values[normalized]
-    valid = sorted(value for values in parsers.values() for value in values)
-    raise ValueError(
-        f"Unsupported SelfHosted model option {option!r}; use {', '.join(valid)}.",
-    )
-
-
-def _context_window(config: dict[str, MutablePlainTree], default: int) -> int:
-    """Extract the configured context window from an HF config dict."""
-    max_pos = config.get("max_position_embeddings")
-    if isinstance(max_pos, int):
-        return max_pos
-    text_config = config.get("text_config")
-    if isinstance(text_config, dict):
-        text_max_pos = text_config.get(
-            "max_position_embeddings",
-        )
-        if isinstance(text_max_pos, int):
-            return text_max_pos
-    return default
-
-
-def _default_device() -> str | None:
-    """Choose the fastest local torch device available by default."""
-    if torch.backends.mps.is_available():
-        return "mps"
-    if torch.cuda.is_available():
-        return "cuda"
-    return None
-
-
-class SelfHosted:
-    """Self-hosted model provider backed by HuggingFace transformers."""
-
-    DEFAULT_MAX_REQUEST_TOKENS: ClassVar[int] = 32_768
-    DEFAULT_MAX_RESPONSE_TOKENS: ClassVar[int] = 4_096
+    section: ClassVar[str] = "selfhosted"
+    """The catalog section whose models and settings this provider serves."""
 
     def __init__(
         self,
         *,
-        model: nn.Module,
-        tokenizer: _Tokenizer,
-        model_id: str,
-        max_request_tokens: int,
-        max_response_tokens: int | None = None,
-    ) -> None:
-        self._model = model
-        self._tokenizer = tokenizer
-        self._model_id = model_id
-        self._max_request_tokens = max_request_tokens
-        self._max_response_tokens = (
-            max_response_tokens or self.DEFAULT_MAX_RESPONSE_TOKENS
-        )
-
-    @classmethod
-    def from_key(
-        cls,
-        path_or_repo: str,
-        *,
-        device: torch.device | str | None = None,
-        dtype: torch.dtype | None = None,
-        compile_model: bool | None = None,
-    ) -> SelfHosted:
-        """Build a provider from a HuggingFace repo ID or local snapshot path.
-
-        Args:
-          path_or_repo: HuggingFace repo ID or local HF snapshot path. Appended
-            ``+`` options configure device, dtype, and compilation.
-          device: Target device for model tensors.
-          dtype: Data type for model parameters.
-          compile_model: Whether to wrap the model with ``torch.compile``.
-
-        Returns:
-          provider: Configured self-hosted provider.
-
-        """
-        spec = _parse_model_spec(path_or_repo)
-        path = str(Path(spec.path_or_repo).expanduser())
-        return cls.from_hf(
-            path,
-            device=device or spec.device or _default_device(),
-            dtype=dtype or spec.dtype,
-            compile_model=spec.compile_model
-            if compile_model is None
-            else compile_model,
-        )
-
-    @classmethod
-    def from_env(cls) -> SelfHosted:
-        """Build a provider with the default SelfHosted model.
-
-        Returns:
-          provider: Configured self-hosted provider.
-
-        """
-        return cls.from_key("Qwen/Qwen3.6-27B")
-
-    @property
-    def native_model(self) -> nn.Module:
-        """Return the underlying model."""
-        return self._model
-
-    @property
-    def tokenizer(self) -> _Tokenizer:
-        """Return the tokenizer."""
-        return self._tokenizer
-
-    @property
-    def hosted_model_id(self) -> str:
-        """Return the model identifier."""
-        return self._model_id
-
-    @property
-    def hosted_max_request_tokens(self) -> int:
-        """Return the maximum request tokens."""
-        return self._max_request_tokens
-
-    @property
-    def hosted_max_response_tokens(self) -> int:
-        """Return the maximum response tokens."""
-        return self._max_response_tokens
-
-    @classmethod
-    def from_hf(
-        cls,
-        path_or_repo: str | Path,
-        *,
-        device: torch.device | str | None = None,
-        dtype: torch.dtype | None = None,
+        name: str = "",
+        resources: ProviderSharedResources | None = None,
+        model: str = "Qwen/Qwen3.6-27B",
         trust_remote_code: bool = False,
-        compile_model: bool = False,
-    ) -> SelfHosted:
-        """Build a SelfHosted provider from a HuggingFace repo ID or path.
+    ) -> None:
+        self._name = name or self.section
+        self._owns_resources = resources is None
+        self._resources = SharedResources() if resources is None else resources
+        self._default = model
+        self._trust_remote_code = trust_remote_code
+        self._windows: dict[str, int] = {}
+        self._loaded: dict[_Spec, _Loaded] = {}
+        self._lock = asyncio.Lock()
 
-        Loads the model through ``transformers.AutoModelForCausalLM`` and the
-        tokenizer through ``transformers.AutoTokenizer``. ``path_or_repo`` may
-        be a HuggingFace model ID or a local snapshot/cache path.
+    @property
+    def name(self) -> str:
+        """Return the name the catalog knows this provider by."""
+        return self._name
+
+    @property
+    def resources(self) -> ProviderSharedResources:
+        """Return what this provider shares with others."""
+        return self._resources
+
+    @property
+    def usage(self) -> tuple[UsageWindow, ...]:
+        """Return ``()``: a local model has no rate limits."""
+        return ()
+
+    def __getitem__(self, model: str) -> SelfHostedModel:
+        roles = ("default", "best", "everyday", "utility")
+        # A catalog asks each provider in turn who serves a bare ``opus``; taken
+        # as a repo id, it would load from the Hub instead of failing the lookup.
+        if model not in roles and "/" not in model.partition("+")[0]:
+            raise UnknownModelError(
+                f"{model!r} is no Hugging Face repo id or path; give ORG/NAME or a path.",
+            )
+        spec, size = _spec(self._default if model in roles else model)
+        return SelfHostedModel(provider=self, spec=spec, size=size)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter((self._default,))
+
+    @override
+    async def aclose(self) -> None:
+        self._loaded = {}
+        if self._owns_resources:
+            await self._resources.aclose()
+
+    def window(self, path: str) -> int:
+        """Return the tokens ``path``'s model takes in, read from its config once.
 
         Args:
-          path_or_repo: HuggingFace repo ID or local HF snapshot path.
-          device: Target device for model tensors.
-          dtype: Data type for model parameters.
-          trust_remote_code: Whether to allow model repository Python code.
-          compile_model: Whether to wrap the model with ``torch.compile``.
+          path: A repo id or local snapshot.
 
         Returns:
-          provider: Configured SelfHosted instance.
-
-        """
-        model_id = str(path_or_repo)
-        start = time.perf_counter()
-        logger.info(
-            "Loading SelfHosted model model_id=%s device=%s dtype=%s "
-            "trust_remote_code=%s",
-            model_id,
-            device,
-            dtype,
-            trust_remote_code,
-        )
-        load_kwargs: dict[str, object] = {"trust_remote_code": trust_remote_code}
-        if dtype is not None:
-            load_kwargs["dtype"] = dtype
-        config = cast(
-            dict[str, MutablePlainTree],
-            transformers_lib.AutoConfig.from_pretrained(
-                model_id,
-                trust_remote_code=trust_remote_code,
-            ).to_dict(),
-        )
-        max_request_tokens = _context_window(config, cls.DEFAULT_MAX_REQUEST_TOKENS)
-        logger.debug(
-            "Loaded SelfHosted config model_id=%s max_request_tokens=%d",
-            model_id,
-            max_request_tokens,
-        )
-        # device="auto" delegates placement to accelerate's device_map,
-        # sharding weights across all visible GPUs. Required for models
-        # that exceed a single GPU's VRAM.
-        shard_auto = isinstance(device, str) and device == "auto"
-        if shard_auto:
-            load_kwargs["device_map"] = "auto"
-        model = cast(
-            "nn.Module",
-            transformers_lib.AutoModelForCausalLM.from_pretrained(
-                model_id,
-                **load_kwargs,
-            ),
-        )
-        if device is not None and not shard_auto:
-            model = model.to(device)
-        model.eval()
-        if compile_model:
-            compile_start = time.perf_counter()
-            logger.info(
-                "Compiling SelfHosted model model_id=%s device=%s",
-                model_id,
-                _module_device(model),
-            )
-            model = cast(
-                "nn.Module",
-                cast(Callable[[object], object], torch.compile)(model),
-            )
-            logger.info(
-                "Compiled SelfHosted model model_id=%s elapsed_sec=%.2f",
-                model_id,
-                time.perf_counter() - compile_start,
-            )
-        tokenizer = cast(
-            _Tokenizer,
-            transformers_lib.AutoTokenizer.from_pretrained(
-                model_id,
-                trust_remote_code=trust_remote_code,
-            ),
-        )
-        logger.info(
-            "Loaded SelfHosted model model_id=%s device=%s max_request_tokens=%d "
-            "elapsed_sec=%.2f",
-            model_id,
-            _module_device(model),
-            max_request_tokens,
-            time.perf_counter() - start,
-        )
-        return cls(
-            model=model,
-            tokenizer=tokenizer,
-            model_id=model_id,
-            max_request_tokens=max_request_tokens,
-        )
-
-    def model(
-        self,
-        model_id: str | None = None,
-        max_request_tokens: int | None = None,
-    ) -> SelfHostedModel:
-        """Return the bound model.
-
-        ``model_id`` must match the loaded model or be ``None``.
-        ``max_request_tokens`` is accepted for Protocol conformance but
-        ignored; the context window is fixed at load time.
-
-        Args:
-          model_id: Must match the loaded model or be ``None``.
-          max_request_tokens: Ignored; accepted for Protocol conformance.
-
-        Returns:
-          model: Bound model instance.
+          tokens: The config's ``max_position_embeddings``.
 
         Raises:
-          ValueError: If ``model_id`` doesn't match the loaded model.
+          ValueError: The config states no window.
 
         """
-        del max_request_tokens
-        if model_id not in {None, "default", "utility", self._model_id}:
-            raise ValueError(
-                f"SelfHosted provider is bound to {self._model_id!r}, "
-                f"got {model_id!r}. Rebuild via SelfHosted.from_hf().",
+        window = self._windows.get(path)
+        if window is None:
+            window = self._windows[path] = _window(
+                path,
+                trust_remote_code=self._trust_remote_code,
             )
-        return SelfHostedModel(provider=self)
+        return window
 
-    async def close_sdk(self) -> None:
-        """Do nothing: the loaded weights live as long as this provider."""
+    async def load(self, spec: _Spec) -> _Loaded:
+        """Return the weights ``spec`` names, loading them on first use.
+
+        Args:
+          spec: The model and its load options.
+
+        Returns:
+          loaded: The weights and tokenizer, shared by every model of ``spec``.
+
+        """
+        async with self._lock:
+            loaded = self._loaded.get(spec)
+            if loaded is None:
+                loaded = self._loaded[spec] = await asyncio.to_thread(
+                    _load,
+                    spec,
+                    trust_remote_code=self._trust_remote_code,
+                )
+        return loaded
 
 
-class _ProviderLike(Protocol):
-    """Provider surface ``SelfHostedModel`` reads from."""
+class SelfHostedModel(AsyncResource):
+    """One local model; its capability and settings are built when first asked for."""
 
-    @property
-    def hosted_max_request_tokens(self) -> int: ...
-    @property
-    def hosted_model_id(self) -> str: ...
-    @property
-    def hosted_max_response_tokens(self) -> int: ...
-    @property
-    def native_model(self) -> nn.Module: ...
-    @property
-    def tokenizer(self) -> _Tokenizer: ...
+    temperature: ClassVar[float] = 1.0
+    """The sampling temperature; ``0`` decodes greedily."""
 
-
-class SelfHostedModel(ModelDefaults):
-    """``Model`` backend for a self-hosted HuggingFace model."""
-
-    def __init__(self, *, provider: _ProviderLike) -> None:
+    def __init__(
+        self,
+        *,
+        provider: SelfHosted,
+        spec: _Spec,
+        size: ContextSizeName | int = "fullcontext",
+    ) -> None:
         self._provider = provider
-        # In-process weights: every rate is genuinely zero, and the window
-        # comes from the loaded model, not a published catalog.
-        self._capability = ModelCapability(
-            model_id=provider.hosted_model_id,
-            context=MappingProxyType(
-                {
-                    "": ModelLimits(
-                        max_request_tokens=provider.hosted_max_request_tokens,
-                        max_response_tokens=provider.hosted_max_response_tokens,
-                    ),
-                },
-            ),
-            prices=PriceCatalog(
-                {
-                    PriceKey("auto"): TokenPrice(
-                        request=0.0,
-                        response=0.0,
-                        cache_write=0.0,
-                        cache_write_1h=0.0,
-                        cache_read=0.0,
-                    ),
-                },
-            ),
-            # In-process weights: there is no server to roll history.
-            manage_context_server_side=frozenset({False}),
-        )
-        self._settings = ModelSettings.narrowest(self.capability)
+        self._spec = spec
+        self._size: ContextSizeName | int = size
+        self._capability: ModelCapability | None = None
+        self._settings: ModelSettings | None = None
 
     @property
-    @override
+    def provider(self) -> SelfHosted:
+        """Return the provider serving this model."""
+        return self._provider
+
+    @property
     def capability(self) -> ModelCapability:
-        """What this model offers; the window comes from the loaded weights."""
+        """Return every setting this model offers, built from the config on first call."""
+        if self._capability is None:
+            window = self.provider.window(self._spec.path)
+            # In-process weights cost nothing, and no server rolls history.
+            prices = PriceCatalog(
+                prices={PriceCondition(): TokenPrice()},
+                window=window,
+            )
+            self._capability = ModelCapability(
+                model_id=self._spec.path,
+                # ``stream`` caps each reply to the room the prompt leaves.
+                limits=ModelLimits(
+                    max_request_tokens=window,
+                    max_response_tokens=4_096,
+                    truncates_at_context=True,
+                ),
+                prices=prices,
+                thinking_effort=frozenset({"none", "low", "medium", "high"}),
+                default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+            )
         return self._capability
 
     @property
-    @override
     def settings(self) -> ModelSettings:
-        """What this instance chose."""
+        """Return the settings chosen, at the size the name gave."""
+        if self._settings is None:
+            capability = self.capability
+            self._settings = replace(
+                capability.default,
+                context_size=capability.prices["auto", self._size],
+            )
         return self._settings
 
-    @property
-    def max_request_tokens(self) -> int:
-        """Return the maximum request tokens."""
-        return self._provider.hosted_max_request_tokens
+    @settings.setter
+    def settings(self, settings: ModelSettings) -> None:
+        """Choose ``settings``; raise unless the capability offers each choice."""
+        self.capability.check(settings)
+        self._settings = settings
 
-    @property
-    def model_id(self) -> str:
-        """Return the model identifier."""
-        return self._provider.hosted_model_id
+    async def count(self, request: Request) -> int:
+        """Return the tokens ``request`` renders to, as the model's tokenizer counts."""
+        loaded = await self._loaded()
+        return _render(loaded.tokenizer, request, settings=self.settings).shape[-1]
 
-    @property
-    def max_response_tokens(self) -> int:
-        """Return the maximum response tokens."""
-        return self._provider.hosted_max_response_tokens
-
-    @property
-    def supports_streaming(self) -> bool:
-        """Return whether streaming is supported."""
-        # Naive streaming would tokenize then emit one token at a time.
-        # Not implemented for the first cut; ``stream`` falls back to
-        # buffering and publishing once.
-        return False
-
-    @property
-    def supports_thinking(self) -> bool:
-        """Return whether thinking mode is supported."""
-        return False
-
-    @property
-    def supports_effort(self) -> bool:
-        """Return whether effort control is supported."""
-        return True
-
-    @property
-    def valid_efforts(self) -> tuple[str, ...]:
-        """Self-hosted maps ``none`` -> thinking off, any other -> on."""
-        return ("none", "low", "medium", "high")
-
-    @property
-    def supports_cache_control(self) -> bool:
-        """Return whether cache control is supported."""
-        return False
-
-    @property
-    def supports_context_management(self) -> bool:
-        """Return whether context management is supported."""
-        return False
-
-    @property
-    def supports_persistent_retry(self) -> bool:
-        """Return whether persistent retry is supported."""
-        return False
-
-    @property
-    def supports_account_auth(self) -> bool:
-        """Return whether account auth is supported."""
-        return False
-
-    @override
-    def approx_text_tokens(self, text: str) -> int:
-        """Exact count from the loaded HF tokenizer.
-
-        The model's real tokenization, available locally and
-        synchronously -- no reason for the budget path to divide by a
-        ratio when the tokenizer that will actually run is in-process.
-        """
-        return len(self._provider.tokenizer.encode(text, add_special_tokens=False))
-
-    @override
-    def approx_image_tokens(self, data: bytes) -> int:
-        """Local estimate via vision-encoder patch geometry.
-
-        Default matches Qwen3.6-27B (``patch_size=16, spatial_merge_size=2`` →
-        32x32 pixels per token); other self-hosted models override.
-        """
-        dims = image.get_dimensions(data)
-        return dims[0] * dims[1] // (32 * 32) if dims is not None else 0
-
-    @override
-    async def actual_request_tokens(self, request: ModelRequest) -> int:
-        """Walker driven by the HF tokenizer for text + provider's image formula."""
-        return token_count.approx_request_tokens(
-            request,
-            _HfEstimator(tokenizer=self._provider.tokenizer, image_fallback=self),
-        )
-
-    @property
-    def max_image_dim(self) -> int:
-        """No fixed image-dimension cap for a local model.
-
-        ``0`` means unlimited (skip dimension-based resize) -- consistent
-        with the byte caps below; a local vision model has no more a fixed
-        pixel ceiling than a fixed byte ceiling.
-        """
+    def attachment_tokens(self, attachment: Attachment) -> int:
+        """Return ``0``: the chat template renders text alone, so no attachment is sent."""
+        del attachment
         return 0
 
-    @property
-    def max_image_bytes(self) -> int:
-        """No fixed per-image byte cap; bounded by GPU/context.
-
-        ``0`` means unlimited (skip byte-based resize).
-        """
-        return 0
-
-    @property
-    def max_request_bytes(self) -> int:
-        """No HTTP wire ceiling for an in-process local model.
-
-        ``0`` means unlimited, so the byte-aware compaction gate never
-        fires (the only real limit is the token window).
-        """
-        return 0
-
-    def is_context_overflow(self, error: Exception) -> bool:
-        """Return whether the error indicates a context overflow.
+    async def stream(self, request: Request) -> AsyncIterator[TextChunk | Response]:
+        """Yield the reply, whole, then the finished ``Response``.
 
         Args:
-          error: Exception from the model.
+          request: What the model is asked.
 
-        Returns:
-          is_overflow: Always ``False`` for self-hosted models.
-
-        """
-        del error
-        return False
-
-    @override
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        """Render messages via chat template, generate, and parse tool calls.
-
-        Args:
-          request: Model request with messages and tool declarations.
-
-        Returns:
-          response: Model response with text and/or tool-call messages.
+        Yields:
+          event: The reply's text as one ``TextChunk``, then one ``Response``.
 
         """
-        rendered = self._render_prompt(request)
-        model = self._provider.native_model
-        device = next(iter(model.parameters())).device
-        input_ids = rendered.input_ids.to(device)
-        attention_mask = (
-            rendered.attention_mask.to(device)
-            if rendered.attention_mask is not None
-            else torch.ones_like(input_ids)
+        loaded = await self._loaded()
+        ids = _render(loaded.tokenizer, request, settings=self.settings)
+        prompt = ids.shape[-1]
+        limits = self.capability.limits
+        budget = min(
+            request.response_tokens(limits),
+            max(1, limits.max_request_tokens - prompt),
         )
-        max_new = min(
-            request.max_response_tokens or self.max_response_tokens,
-            max(1, self._provider.hosted_max_request_tokens - input_ids.shape[-1]),
+        new = await _generated(
+            loaded,
+            ids,
+            max_new_tokens=budget,
+            temperature=self.temperature,
         )
-        generate_kwargs: dict[str, object] = {
-            "attention_mask": attention_mask,
-            "max_new_tokens": max_new,
-            "eos_token_id": self._provider.tokenizer.eos_token_id,
-            "pad_token_id": self._provider.tokenizer.eos_token_id,
-        }
-        if _disable_generate_cache(str(device)):
-            generate_kwargs["use_cache"] = False
-        if request.temperature > 0:
-            generate_kwargs["do_sample"] = True
-            generate_kwargs["temperature"] = request.temperature
-        start = time.perf_counter()
-        logger.debug(
-            "SelfHosted generate start model_id=%s device=%s input_tokens=%d "
-            "max_new_tokens=%d tools=%d attention_mask=%s",
-            self.model_id,
-            device,
-            input_ids.shape[-1],
-            max_new,
-            len(request.tools),
-            rendered.attention_mask is not None,
-        )
-        out = await asyncio.to_thread(_generate, model, input_ids, generate_kwargs)
-        elapsed_sec = time.perf_counter() - start
-        new_tokens = out[0, input_ids.shape[-1] :]
-        output_tokens = new_tokens.shape[-1]
-        text = self._provider.tokenizer.decode(
-            new_tokens,
-            skip_special_tokens=True,
-        )
-        tool_calls, cleaned_text = _extract_tool_calls(
+        text = loaded.tokenizer.decode(new, skip_special_tokens=True)
+        calls, said = read_calls(
             text,
-            allowed_tools={t.name for t in request.tools},
+            offered=[tool.name for tool in request.tools],
         )
-        # HF ``generate`` doesn't return a finish_reason; infer from
-        # whether we exhausted the budget.
-        hit_cap = output_tokens >= max_new
-        finish_reason = "length" if hit_cap else "stop"
-        logger.debug(
-            "SelfHosted generate end model_id=%s output_tokens=%d "
-            "finish_reason=%s tool_calls=%d elapsed_sec=%.2f "
-            "output_tokens_per_sec=%.2f",
-            self.model_id,
-            output_tokens,
-            finish_reason,
-            len(tool_calls),
-            elapsed_sec,
-            output_tokens / elapsed_sec if elapsed_sec > 0 else 0.0,
+        if said:
+            yield TextChunk(text=said)
+        records = (*((AssistantMessage(content=said),) if said else ()), *calls)
+        tokens = TokenCount(request=prompt, response=new.shape[-1])
+        # ``generate`` says no finish reason; a reply that spent its budget ran out.
+        stop_reason = (
+            "max_tokens"
+            if tokens.response >= budget
+            else "tool_use"
+            if calls
+            else "end_turn"
         )
-        return ModelResponse(
-            message=AssistantMessage(
-                text=cleaned_text,
-                tool_calls=tuple(tool_calls),
-            ),
-            tokens=TokenCount(
-                request=input_ids.shape[-1],
-                response=output_tokens,
-            ),
-            stop_reason=normalize_stop_reason(
-                finish_reason,
-                kind="openai",  # Use OpenAI vocab - same stop/length semantics.
-                has_tool_use=bool(tool_calls),
-            ),
+        yield Response(
+            records=records,
+            tokens=tokens,
+            spend=self.capability.prices[
+                "auto",
+                tokens.prompt,
+                datetime.now(UTC).date(),
+            ]
+            * tokens,
+            stop_reason=stop_reason,
         )
 
-    @override
-    async def stream(
+    async def _loaded(self) -> _Loaded:
+        """Return the weights."""
+        return await self.provider.load(self._spec)
+
+
+class _Tokenizer(Protocol):
+    """What this module asks of a Hugging Face tokenizer."""
+
+    eos_token_id: int
+
+    def apply_chat_template(
         self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        """Buffer the response then publish text in one shot."""
-        resp = await self.buffer(request)
-        if publish is not None and resp.message.text:
-            publish(ModelResponsePartial(resp.message.text))
-        return resp
+        conversation: list[dict[str, object]],
+        **kwargs: object,
+    ) -> object:
+        """Return the conversation rendered, as ids when ``tokenize`` is set."""
+        ...
 
-    # Tool declarations are passed to ``apply_chat_template`` when the tokenizer
-    # supports the ``tools=`` kwarg; otherwise they're rendered as a system-preamble
-    # JSON block so the model at least sees the schema.
-    def _render(self, request: ModelRequest) -> Tensor:
-        """Render a ``ModelRequest`` into token ids via the chat template."""
-        return self._render_prompt(request).input_ids
+    def decode(self, token_ids: Tensor, *, skip_special_tokens: bool) -> str:
+        """Return ``token_ids`` as text."""
+        ...
 
-    def _render_prompt(self, request: ModelRequest) -> _RenderedPrompt:
-        """Render a ``ModelRequest`` and preserve tokenizer masks."""
-        tokenizer = self._provider.tokenizer
-        messages = _build_chat_messages(request)
-        kwargs: dict[str, MutablePlainTree] = {
-            "tokenize": True,
-            "add_generation_prompt": True,
-            "return_tensors": "pt",
-        }
-        kwargs["enable_thinking"] = self.settings.thinking_effort != "none"
-        if request.tools:
-            kwargs["tools"] = [_tool_schema(t) for t in request.tools]
-        rendered = _apply_chat_template(
-            tokenizer,
-            messages,
-            kwargs,
-            request.tools,
+
+class _Generator(Protocol):
+    """What this module asks of a Hugging Face causal LM."""
+
+    def generate(self, inputs: Tensor, **kwargs: object) -> Tensor:
+        """Return ``inputs`` and the tokens generated after them."""
+        ...
+
+    def parameters(self) -> Iterator[nn.Parameter]:
+        """Yield the weights, the first of which says the device."""
+        ...
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Spec:
+    """A model named with its load options."""
+
+    path: str
+    device: Literal["", "auto", "cpu", "cuda", "mps"] = ""
+    """Where the weights go; empty picks the fastest device present."""
+
+    dtype: Literal["", "bfloat16", "float16", "float32"] = ""
+    """The weights' type; empty keeps the checkpoint's."""
+
+    compile: bool = False
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Loaded:
+    """A model's weights and tokenizer, in memory."""
+
+    model: _Generator
+    tokenizer: _Tokenizer
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    """Held while the model generates: it serves one reply at a time."""
+
+
+def _spec(name: str) -> tuple[_Spec, ContextSizeName | int]:
+    """Return what ``name`` (``repo+option+option``) asks to load, and the size it names."""
+    path, *options = name.split("+")
+    if not path:
+        raise ValueError("A local model's name must start with a repo id or path.")
+    devices = ("auto", "cpu", "cuda", "mps")
+    dtypes = ("bfloat16", "float16", "float32")
+    spec = _Spec(path=str(Path(path).expanduser()))
+    size: ContextSizeName | int = "fullcontext"
+    seen: set[str] = set()
+    for raw in options:
+        option = raw.removeprefix("torch.")
+        # A load option first: the device ``auto`` is a tier's word too.
+        named = (
+            None
+            if option in (*devices, *dtypes, "compile", "no-compile")
+            else ModelTags.parse(f"{path}+{raw}").context
         )
-        ids_tensor = cast("Tensor", _input_ids(rendered))
-        if ids_tensor.ndim == 1:
-            ids_tensor = ids_tensor.unsqueeze(0)
-        attention_mask = cast("Tensor | None", _attention_mask(rendered))
-        if attention_mask is not None and attention_mask.ndim == 1:
-            attention_mask = attention_mask.unsqueeze(0)
-        return _RenderedPrompt(input_ids=ids_tensor, attention_mask=attention_mask)
+        kind = (
+            "device"
+            if option in devices
+            else "dtype"
+            if option in dtypes
+            else "compile"
+            if option in ("compile", "no-compile")
+            else "size"
+            if named is not None
+            else ""
+        )
+        if not kind:
+            known = ", ".join(
+                (
+                    *devices,
+                    *dtypes,
+                    "compile",
+                    "no-compile",
+                    *literal_members(ContextSizeName),
+                    "200k",
+                ),
+            )
+            raise ValueError(f"Unknown option {raw!r} in {name!r}; use {known}.")
+        if kind in seen:
+            raise ValueError(f"The {kind} is given twice in {name!r}.")
+        seen.add(kind)
+        if named is not None:
+            size = named
+        elif kind == "device":
+            spec = replace(
+                spec,
+                device=cast(Literal["auto", "cpu", "cuda", "mps"], option),
+            )
+        elif kind == "dtype":
+            spec = replace(
+                spec,
+                dtype=cast(Literal["bfloat16", "float16", "float32"], option),
+            )
+        else:
+            spec = replace(spec, compile=option == "compile")
+    return spec, size
 
 
-def _apply_chat_template(
+def _window(path: str, *, trust_remote_code: bool) -> int:
+    """Return the tokens ``path``'s model takes in, as its config states."""
+    config = dict[str, object](
+        transformers.AutoConfig.from_pretrained(
+            path,
+            trust_remote_code=trust_remote_code,
+        ).to_dict(),
+    )
+    text = from_plain(config.get("text_config"), dict[str, object], default={})
+    stated = config.get("max_position_embeddings", text.get("max_position_embeddings"))
+    if stated is None:
+        raise ValueError(f"{path!r}'s config states no max_position_embeddings.")
+    return from_plain(stated, int)
+
+
+def _load(spec: _Spec, *, trust_remote_code: bool) -> _Loaded:
+    """Load ``spec``'s weights and tokenizer; this blocks for minutes."""
+    device = spec.device or (
+        "mps"
+        if torch.backends.mps.is_available()
+        else "cuda"
+        if torch.cuda.is_available()
+        else ""
+    )
+    options: dict[str, object] = {"trust_remote_code": trust_remote_code}
+    if spec.dtype:
+        options["dtype"] = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }[spec.dtype]
+    # ``auto`` lets accelerate shard the weights across every visible GPU, for
+    # a model larger than one GPU holds.
+    if device == "auto":
+        options["device_map"] = "auto"
+    model = transformers.AutoModelForCausalLM.from_pretrained(spec.path, **options)
+    if device and device != "auto":
+        model = model.to(device)
+    model.eval()
+    compiled = (
+        cast("Callable[[object], object]", torch.compile)(model)
+        if spec.compile
+        else model
+    )
+    return _Loaded(
+        model=cast(_Generator, compiled),
+        tokenizer=cast(
+            _Tokenizer,
+            transformers.AutoTokenizer.from_pretrained(
+                spec.path,
+                trust_remote_code=trust_remote_code,
+            ),
+        ),
+    )
+
+
+def _render(
     tokenizer: _Tokenizer,
-    messages: list[dict[str, MutablePlainTree]],
-    kwargs: dict[str, MutablePlainTree],
+    request: Request,
+    *,
+    settings: ModelSettings,
+) -> Tensor:
+    """Return the request rendered by the model's chat template, as token ids."""
+    messages = _messages(request)
+    options: dict[str, object] = {
+        "tokenize": True,
+        "add_generation_prompt": True,
+        "return_tensors": "pt",
+        "enable_thinking": settings.thinking_effort != "none",
+    }
+    if request.tools:
+        options["tools"] = [_schema(tool) for tool in request.tools]
+    rendered = _templated(tokenizer, messages, options=options, tools=request.tools)
+    ids = cast("Tensor", _field(rendered, "input_ids"))
+    return ids.unsqueeze(0) if ids.ndim == 1 else ids
+
+
+# A template that knows neither switch rejects it; each is dropped in turn, and a
+# template that cannot take tools reads their schemas from the system prompt.
+def _templated(
+    tokenizer: _Tokenizer,
+    messages: list[dict[str, object]],
+    *,
+    options: dict[str, object],
     tools: Sequence[Tool],
 ) -> object:
-    """Apply a chat template with graceful HF feature fallback."""
-    try:
-        return tokenizer.apply_chat_template(messages, **kwargs)
-    except (TypeError, ValueError) as e:
-        last_error = e
-
-    if "enable_thinking" in kwargs:
-        logger.debug(
-            "SelfHosted tokenizer rejected enable_thinking; retrying without it.",
+    """Apply the chat template, dropping each feature it rejects."""
+    attempts: list[tuple[list[dict[str, object]], dict[str, object]]] = [
+        (messages, options),
+    ]
+    bare = {key: value for key, value in options.items() if key != "enable_thinking"}
+    attempts.append((messages, bare))
+    if tools:
+        inlined = _with_preamble(messages, tools=tools)
+        without_tools = {key: value for key, value in bare.items() if key != "tools"}
+        attempts.append(
+            (inlined, {**without_tools, "enable_thinking": options["enable_thinking"]}),
         )
-        retry_kwargs = dict(kwargs)
-        retry_kwargs.pop("enable_thinking")
-        try:
-            return tokenizer.apply_chat_template(messages, **retry_kwargs)
-        except (TypeError, ValueError) as e:
-            last_error = e
-            kwargs = retry_kwargs
+        attempts.append((inlined, without_tools))
+    for conversation, kwargs in attempts[:-1]:
+        with contextlib.suppress(TypeError, ValueError):
+            return tokenizer.apply_chat_template(conversation, **kwargs)
+    conversation, kwargs = attempts[-1]
+    return tokenizer.apply_chat_template(conversation, **kwargs)
 
-    if "tools" in kwargs:
-        logger.debug(
-            "SelfHosted tokenizer rejected native tools; retrying with inlined schema.",
+
+def _field(rendered: object, name: str) -> object:
+    """Return ``name`` from what a chat template returned: a tensor, or a batch."""
+    if isinstance(rendered, Mapping):
+        return cast("Mapping[str, object]", rendered)[name]
+    return getattr(rendered, name, rendered)
+
+
+# A cancelled caller stops the model at its next token and waits for it, so neither the
+# GPU nor the next reply is left behind a reply no one reads.
+async def _generated(
+    loaded: _Loaded,
+    ids: Tensor,
+    *,
+    max_new_tokens: int,
+    temperature: float,
+) -> Tensor:
+    """Generate the reply's tokens, one reply at a time; return only the new ones."""
+    stop = threading.Event()
+    async with loaded.lock:
+        generating = asyncio.ensure_future(
+            asyncio.to_thread(
+                _generate,
+                loaded,
+                ids,
+                max_new_tokens=max_new_tokens,
+                temperature=temperature,
+                stop=stop,
+            ),
         )
-        _inline_tool_preamble(messages, tools)
-        retry_kwargs = dict(kwargs)
-        retry_kwargs.pop("tools")
         try:
-            return tokenizer.apply_chat_template(messages, **retry_kwargs)
-        except (TypeError, ValueError) as e:
-            last_error = e
-            if "enable_thinking" not in retry_kwargs:
-                raise
-            retry_kwargs.pop("enable_thinking")
-            return tokenizer.apply_chat_template(messages, **retry_kwargs)
-    raise last_error
+            return await asyncio.shield(generating)
+        except asyncio.CancelledError:
+            stop.set()
+            await asyncio.wait({generating})
+            raise
 
 
 def _generate(
-    model: nn.Module,
-    input_ids: Tensor,
-    generate_kwargs: dict[str, object],
+    loaded: _Loaded,
+    ids: Tensor,
+    *,
+    max_new_tokens: int,
+    temperature: float,
+    stop: threading.Event,
 ) -> Tensor:
-    """Run blocking HF generation under inference mode."""
+    """Generate the reply's tokens, blocking; return only the new ones."""
+    device = next(iter(loaded.model.parameters())).device
+    ids = ids.to(device)
+    options = _options(
+        ids,
+        device=device,
+        eos=loaded.tokenizer.eos_token_id,
+        max_new_tokens=max_new_tokens,
+        temperature=temperature,
+        stop=stop,
+    )
     with torch.inference_mode():
-        return cast(_GenerateModel, model).generate(input_ids, **generate_kwargs)
+        out = loaded.model.generate(ids, **options)
+    return out[0, ids.shape[-1] :]
 
 
-def _disable_generate_cache(device: str) -> bool:
-    """Return whether generation should avoid KV caching."""
-    return device.startswith("mps")
+def _options(
+    ids: Tensor,
+    *,
+    device: torch.device,
+    eos: int,
+    max_new_tokens: int,
+    temperature: float,
+    stop: threading.Event,
+) -> dict[str, object]:
+    """Return what ``generate`` is asked for one reply."""
+    options: dict[str, object] = {
+        "attention_mask": torch.ones_like(ids),
+        "max_new_tokens": max_new_tokens,
+        "eos_token_id": eos,
+        "pad_token_id": eos,
+        # A plain list: ``generate`` merges it into its own criteria.
+        "stopping_criteria": [_Stopped(stop)],
+    }
+    if device.type == "mps":
+        options["use_cache"] = False
+    if temperature > 0:
+        options["do_sample"] = True
+        options["temperature"] = temperature
+    return options
 
 
-def _module_device(model: nn.Module) -> str:
-    """Return the first parameter device for diagnostics."""
-    param = next(iter(model.parameters()), None)
-    return str(param.device) if param is not None else "unknown"
+class _Stopped:
+    """A stopping criterion: done, every row, once ``event`` is set."""
 
+    def __init__(self, event: threading.Event) -> None:
+        self._event = event
 
-def _inline_tool_preamble(
-    messages: list[dict[str, MutablePlainTree]],
-    tools: Sequence[Tool],
-) -> None:
-    """Inline tool schemas for templates without native tool support."""
-    if not tools:
-        return
-    if messages and messages[0]["role"] == "system":
-        messages[0]["content"] = (
-            str(messages[0]["content"]) + "\n\n" + _tool_preamble(tools)
+    def __call__(self, input_ids: Tensor, scores: object, **kwargs: object) -> Tensor:
+        del scores, kwargs
+        return torch.full(
+            (input_ids.shape[0],),
+            self._event.is_set(),
+            dtype=torch.bool,
+            device=input_ids.device,
         )
-    else:
-        messages.insert(
-            0,
-            {"role": "system", "content": _tool_preamble(tools)},
-        )
 
 
-def _input_ids(rendered: object) -> object:
-    """Extract token ids from chat-template return values."""
-    if isinstance(rendered, Mapping):
-        return cast(Mapping[str, object], rendered)["input_ids"]
-    if isinstance(rendered, _HasInputIds):
-        return rendered.input_ids
-    if isinstance(rendered, _HasData) and isinstance(rendered.data, Mapping):
-        return cast(Mapping[str, object], rendered.data)["input_ids"]
-    return rendered
-
-
-def _attention_mask(rendered: object) -> object | None:
-    """Extract an attention mask from chat-template return values."""
-    if isinstance(rendered, Mapping):
-        return cast(Mapping[str, object], rendered).get("attention_mask")
-    if isinstance(rendered, _HasData) and isinstance(rendered.data, Mapping):
-        return cast(Mapping[str, object], rendered.data).get("attention_mask")
-    return getattr(rendered, "attention_mask", None)
-
-
-def _build_chat_messages(request: ModelRequest) -> list[dict[str, MutablePlainTree]]:
-    """Translate history entries to HF chat-template format."""
-    ids = IdRemapper("call_")
-    messages: list[dict[str, MutablePlainTree]] = []
-    if request.system_text:
-        messages.append({"role": "system", "content": request.system_text})
-    for entry in request.messages:
-        if isinstance(entry, (AgentSendMessage, UserMessage)):
-            messages.append({"role": "user", "content": entry.text})
-        elif isinstance(entry, AssistantMessage):
-            tool_calls_hf: list[dict[str, MutablePlainTree]] = [
-                {
-                    "id": ids.map(tc.id),
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(dict(tc.args)),
-                    },
-                }
-                for tc in entry.tool_calls
-            ]
-            asst_entry: dict[str, MutablePlainTree] = {
-                "role": "assistant",
-                "content": entry.text,
-            }
-            if tool_calls_hf:
-                asst_entry["tool_calls"] = mutable(tool_calls_hf)
-            messages.append(asst_entry)
-        else:
-            content = entry.content
-            if entry.is_error and content:
-                content = f"[Error] {content}"
+def _messages(request: Request) -> list[dict[str, object]]:
+    """Return the system prompt and records as chat-template messages, text only."""
+    ids: dict[str, str] = {}
+    messages: list[dict[str, object]] = []
+    if system := "\n\n".join(text for text in request.system if text):
+        messages.append({"role": "system", "content": system})
+    turn: dict[str, object] | None = None
+    for record in wire.flatten(request.records):
+        if isinstance(record, (AssistantMessage, ToolCall)):
+            if turn is None:
+                turn = {"role": "assistant", "content": ""}
+                messages.append(turn)
+            if isinstance(record, AssistantMessage):
+                turn["content"] = f"{turn['content']}{record.content or ''}"
+            else:
+                calls = cast("list[object]", turn.setdefault("tool_calls", []))
+                calls.append(_call(record, ids=ids))
+            continue
+        if isinstance(record, Thinking):
+            continue
+        said = wire.user_content(record)
+        if said is not None:
+            turn = None
+            messages.append({"role": "user", "content": said[0]})
+        elif isinstance(record, ToolResult):
+            turn = None
+            text = record.text()
             messages.append(
                 {
                     "role": "tool",
-                    "tool_call_id": ids.map(entry.call_id),
-                    "content": content,
+                    "tool_call_id": ids.setdefault(record.call_id, f"call_{len(ids)}"),
+                    "content": f"[Error] {text}"
+                    if record.is_error is True and text
+                    else text,
                 },
             )
     return messages
 
 
-def _tool_schema(tool: Tool) -> dict[str, MutablePlainTree]:
-    """Wire-shape a ``Tool`` as the HF chat-template ``tools`` schema entry."""
-    schema: dict[str, MutablePlainTree] = {
+def _call(call: ToolCall, *, ids: dict[str, str]) -> dict[str, object]:
+    return {
+        "id": ids.setdefault(call.call_id, f"call_{len(ids)}"),
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": json_dumps(mutable(call.arguments)),
+        },
+    }
+
+
+def _schema(tool: Tool) -> dict[str, object]:
+    return {
         "type": "function",
         "function": {
             "name": tool.name,
             "description": tool.description,
-            "parameters": mutable(tool.directive_schema),
+            "parameters": mutable(tool.schema),
         },
     }
-    return schema
 
 
-def _tool_preamble(tools: Sequence[Tool]) -> str:
-    """Format tool schemas as a system-preamble for templates lacking ``tools``."""
-    schemas = [_tool_schema(t) for t in tools]
-    return (
+def _with_preamble(
+    messages: list[dict[str, object]],
+    *,
+    tools: Sequence[Tool],
+) -> list[dict[str, object]]:
+    """Return ``messages`` with the tools' schemas told in the system prompt."""
+    preamble = (
         "You have access to the following tools. To call a tool, emit "
         '<tool_call>{"name": "...", "arguments": {...}}</tool_call>.\n'
-        + json.dumps(schemas, indent=2)
+        + json_dumps([_schema(tool) for tool in tools], indent=2)
     )
-
-
-#
-# Qwen3: ``<tool_call>{"name": "...", "arguments": {...}}</tool_call>``
-# DSV3 / Kimi-K2: ``<｜tool▁calls▁begin｜>...<｜tool▁calls▁end｜>`` with
-# nested function descriptors. We accept both and any substring that
-# looks like ``<tool_call>...</tool_call>``; everything outside the
-# call blocks becomes the free-text response.
-
-_DS_BLOCK = re.compile(
-    r"<\u2502tool\u2581calls\u2581begin\u2502>(.*?)<\u2502tool\u2581calls\u2581end\u2502>",
-    re.DOTALL,
-)
-_DS_ONE = re.compile(
-    r"<\u2502tool\u2581call\u2581begin\u2502>(.*?)<\u2502tool\u2581call\u2581end\u2502>",
-    re.DOTALL,
-)
-
-
-def _extract_tool_calls(
-    text: str,
-    *,
-    allowed_tools: set[str] | None = None,
-) -> tuple[list[ToolCall], str]:
-    """Strip Qwen/DeepSeek tool-call blocks out of ``text``."""
-    calls: list[ToolCall] = []
-
-    def qwen_repl(match: re.Match[str]) -> str:
-        """Consume one Qwen tool-call block, recording the call when valid.
-
-        Args:
-          match: Regex match containing the serialized tool call.
-
-        Returns:
-          replacement: Empty text when parsed, otherwise the original block.
-
-        """
-        tc = _parse_qwen_tool_call(match.group(1))
-        if tc is None:
-            logger.warning("SelfHosted preserved malformed Qwen tool call.")
-            return match.group(0)
-        if not _tool_allowed(tc, allowed_tools):
-            logger.warning(
-                "SelfHosted preserved unadvertised tool call tool=%s.",
-                tc.name,
-            )
-            return match.group(0)
-        calls.append(tc)
-        return ""
-
-    cleaned = re.sub(r"<tool_call>(.*?)</tool_call>", qwen_repl, text, flags=re.DOTALL)
-
-    def deepseek_repl(block: re.Match[str]) -> str:
-        """Consume one DeepSeek tool-call block, recording its calls when valid.
-
-        Args:
-          block: Regex match containing one or more serialized tool calls.
-
-        Returns:
-          replacement: Empty text when parsed, otherwise the original block.
-
-        """
-        block_calls: list[ToolCall] = []
-        for inner in _DS_ONE.finditer(block.group(1)):
-            tc = _parse_deepseek_tool_call(inner.group(1))
-            if tc is None:
-                logger.warning("SelfHosted preserved malformed DeepSeek tool call.")
-                return block.group(0)
-            if not _tool_allowed(tc, allowed_tools):
-                logger.warning(
-                    "SelfHosted preserved unadvertised tool call tool=%s.",
-                    tc.name,
-                )
-                return block.group(0)
-            block_calls.append(tc)
-        if not block_calls:
-            logger.warning("SelfHosted preserved empty DeepSeek tool-call block.")
-            return block.group(0)
-        calls.extend(block_calls)
-        return ""
-
-    cleaned = _DS_BLOCK.sub(deepseek_repl, cleaned)
-    return calls, cleaned.strip()
-
-
-def _tool_allowed(tc: ToolCall, allowed_tools: set[str] | None) -> bool:
-    """Return whether a parsed tool call was advertised to the model."""
-    return allowed_tools is None or tc.name.lower() in {
-        tool.lower() for tool in allowed_tools
-    }
-
-
-def _parse_qwen_tool_call(raw: str) -> ToolCall | None:
-    """Parse a Qwen-format ``<tool_call>`` body into a ``ToolCall``."""
-    try:
-        payload = json_loads(raw.strip())
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    payload_d = payload
-    name = cast(str | None, payload_d.get("name"))
-    raw_args = payload_d.get("arguments") or {}
-    if not isinstance(name, str) or not name or not isinstance(raw_args, dict):
-        return None
-    return ToolCall(
-        id=str(uuid.uuid4())[:12],
-        name=name,
-        args=raw_args,
-    )
-
-
-def _parse_deepseek_tool_call(raw: str) -> ToolCall | None:
-    r"""DeepSeek/Kimi format: ``function\n{name}\n```json\n{args}\n``` ``."""
-    text = raw.strip()
-    name_match = re.search(r"function\s*\n\s*([A-Za-z0-9_]+)", text)
-    json_match = re.search(r"```json\s*(.*?)\s*```", text, flags=re.DOTALL)
-    if name_match is None or json_match is None:
-        return None
-    try:
-        args = json_loads(json_match.group(1), dict[str, object])
-    except (json.JSONDecodeError, ReadError):
-        return None
-    return ToolCall(id=str(uuid.uuid4())[:12], name=name_match.group(1), args=args)
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _HfEstimator:
-    """``TokenEstimator`` adapter using a HuggingFace tokenizer for text.
-
-    Attributes:
-      tokenizer: HF tokenizer with an ``encode`` method.
-      image_fallback: ``SelfHostedModel`` whose ``approx_image_tokens``
-          provides image-token estimates.
-
-    """
-
-    tokenizer: _Tokenizer
-    image_fallback: SelfHostedModel
-
-    def approx_text_tokens(self, text: str) -> int:
-        return len(self.tokenizer.encode(text, add_special_tokens=False))
-
-    def approx_image_tokens(self, data: bytes) -> int:
-        return self.image_fallback.approx_image_tokens(data)
+    if messages and messages[0]["role"] == "system":
+        head = {**messages[0], "content": f"{messages[0]['content']}\n\n{preamble}"}
+        return [head, *messages[1:]]
+    return [{"role": "system", "content": preamble}, *messages]

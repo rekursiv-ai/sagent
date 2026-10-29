@@ -1,6 +1,6 @@
 # Concepts
 
-Sagent is a typed Python runtime for LLM agents. The CLI and Slack service are surfaces over the same library API.
+Sagent is a typed Python runtime for LLM agents. The CLI is a surface over the same library API.
 
 ## Agent
 
@@ -16,7 +16,7 @@ Agents can also act as tools. Parent agents can spawn child agents for review, d
 
 ## Tool
 
-A `Tool` receives a JSON directive inside a `Message` and returns a `Message`. Tools cover local files, shell commands, search, scholarly papers, Slack, Linear, audio, wiki access, skills, background jobs, and agent coordination.
+A `Tool` receives a JSON directive inside a `Message` and returns a `Message`. Tools cover local files, shell commands, search, scholarly papers, audio, skills, background jobs, and agent coordination.
 
 Tools are normal Python objects. You can use Sagent's built-ins, wrap a function with `@tool`, or implement the full protocol.
 
@@ -46,7 +46,7 @@ Compaction lets one agent session stay coherent across many model requests witho
 
 ## Inbox
 
-The inbox is the agent's coordination boundary. REPL input, Slack messages, background task completions, and peer-agent sends all become inbox items. The agent drains them at the top of the loop.
+The inbox is the agent's coordination boundary. REPL input, background task completions, and peer-agent sends all become inbox items. The agent drains them at the top of the loop.
 
 ## AgentSelf, AgentSpawn, AgentSend
 

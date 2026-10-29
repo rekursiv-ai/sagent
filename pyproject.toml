@@ -23,62 +23,41 @@ classifiers = [
 ]
 dependencies = [
     # Prefer https://awesome-python.com deps over alternatives.
-    "treekle>=0.3.1",
-    # media
-    "imagesize>=1.4",
-    "pillow",
-    # On 24.04 LTS, package libturbojpeg is too old.
-    #   R=libjpeg-turbo/libjpeg-turbo/releases
-    #   V=$(curl -fsSL https://api.github.com/repos/$R/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')
-    #   F=libjpeg-turbo-official_${V}_amd64.deb
-    #   cd "$(mktemp -d)"
-    #   curl -fsSL https://github.com/$R/download/$V/$F && sudo dpkg -i $F
-    #   sudo ln -sf {/opt/libjpeg-turbo/lib64,/usr/local/lib}/libturbojpeg.so.0 && sudo ldconfig
-    "pyturbojpeg>=1.8.2",
-    "webp>=0.4.0",
-    # data
-    "numpy>=2.1",
     # nlp
     "tiktoken>=0.12.0",
-    # web client / scraping
+    # web client
     "httpx2>=2.12",
-    # 0.1.11 for the WebFetch/WebSearch parameter schemas (now
-    # `wesearch.mcp.types`) and `wesearch.search.render`.
-    "wesearch>=0.1.11",
-    # web server / api
-    "uvicorn>=0.30.0",
     # mcp
     "mcp>=2.0.0",
     "starlette>=0.40",
-    # llm
-    "anthropic>=0.72.0",
-    "openai>=2.20",
-    # serialization
-    "fastjsonschema>=2.22.2",
+    "uvicorn>=0.30.0",
     # config
     "pyyaml>=6.0",
     # text / docs
-    "pypdfium2",
+    "pypdfium2>=5.14.0",
     # markdown
-    # repl/tight_markdown.py wraps the private ``list_block`` rule and swaps
-    # ``state.parentType``; 4.2 is the version those internals were verified
-    # against. An older release has a different rule body.
     "markdown-it-py>=4.2",
-    "prompt-toolkit",
-    "pygments",
-    "rich",
+    "prompt-toolkit>=3.0.53",
+    "pygments>=2.21.0",
+    "rich>=15.0.0",
     # containers
-    "cachetools",
-    "wrapt",
-    # misc
+    "cachetools>=7.2.1",
+    "wrapt>=2.5.0",
+    # json
+    # 0.4.1 leaves dataclass fields at their defaults out of trees.
+    "treekle>=0.4.1",
+    # bash
     "bashlex>=0.18",
-    # gitignore-aware tree walks: the `ignore` crate behind ripgrep and fd
+    # media
+    "pillow>=11.3.0",
+    # web search/fetch
+    "wesearch>=0.1.11",
+    # grep (rg fallback needs gitignore-aware tree walks)
     "rignore>=0.8.1",
 ]
 
 [project.scripts]
-sagent = "sagent.bin.cli:main"
-sagent-slack = "sagent.bin.slack:main"
+sagent = "sagent.tui.main:main"
 
 [dependency-groups]
 # NEVER ADD MORE DEPENDENCIES!
@@ -98,12 +77,13 @@ test = [
     "hypothesis>=6.155.1",
     "pytest-cov",
     "pytest-asyncio>=1.3.0",
+    "sagent[selfhosted]",
 ]
 typecheck = [
     "basedpyright>=1.40.1",
     "pyrefly>=1.4.0",
     "ty>=0.0.84",
-    "rekursiv-ai-typings>=0.1.6",
+    "rekursiv-ai-typings>=0.1.11",
 ]
 "pre-commit" = [
     "pre-commit>=4.6",
@@ -127,24 +107,16 @@ Issues = "https://github.com/rekursiv-ai/sagent/issues"
 Changelog = "https://github.com/rekursiv-ai/sagent/releases"
 
 [project.optional-dependencies]
-# The `sagent-slack` entrypoint (bin/slack.py) is the only slack_sdk consumer
-# and is not reached by `import sagent` or the main CLI, so its deps are opt-in.
-# aiohttp is required transitively by slack_sdk.socket_mode.aiohttp. Install via
-# `pip install sagent[slack]`; the bin/slack.py shebang passes `--extra slack`.
-slack = [
-    "slack-sdk>=3.33.0",
-    "aiohttp>=3.13.5",
-]
 selfhosted = [
     "accelerate>=1.13.0",
     "auto-round>=0.12.3",
-    "compressed-tensors",
+    "compressed-tensors>=0.19.0",
     "kernels>=0.13.0",
-    "nvidia-cudnn-cu13 ; sys_platform == 'linux'",
-    "nvidia_cudnn_frontend ; sys_platform == 'linux'",
-    "protobuf",
-    "safetensors",
-    "sentencepiece",
+    "nvidia-cudnn-cu13>=9.19.0.56 ; sys_platform == 'linux'",
+    "nvidia_cudnn_frontend>=1.30.0 ; sys_platform == 'linux'",
+    "protobuf>=6.33.6",
+    "safetensors>=0.8.0",
+    "sentencepiece>=0.2.2",
     "torch>=2.11.0",
     "torchvision>=0.26.0",
     "transformers>=5.8.0",
@@ -166,9 +138,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sagent"]
-# The vendored pytest harness imports pytest, a test-group dependency, and the
-# Ctrl+D repro drives agent_test's stub model, which the wheel never ships.
-exclude = ["**/*_test.py", "**/conftest.py", "sagent/lib/testing/**", "sagent/scripts/repro_ctrld_hang.py"]
+# The vendored pytest harness imports pytest, a test-group dependency.
+exclude = ["**/*_test.py", "**/conftest.py", "sagent/lib/testing/**"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [".github/**", ".codespell-ignore"]
@@ -292,9 +263,9 @@ omit = [
     "*/tests/*",
     "*/.venv/*",
     "*/typings/*",
-    "*/scripts/*",
     "*/testdata/*",
     "*/__main__.py",
+    "*/conftest.py",
 ]
 
 [tool.coverage.report]
@@ -315,9 +286,9 @@ exclude_lines = [
     # callers' results, not by line coverage.
     "^def \\w+_numba\\(",
 ]
-# fail_under = 90
 show_missing = true
 skip_covered = true
+fail_under = 100
 
 [tool.ruff]
 show-fixes = true

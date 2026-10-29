@@ -1,1263 +1,410 @@
-"""Tests for ``tools.agent_self``: agent self-mutation directives."""
+"""Tests for AgentSelf: a patch to the calling agent, planned whole, then applied."""
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from types import MappingProxyType
-from typing import TYPE_CHECKING, cast, override
-from unittest.mock import MagicMock, patch
+from functools import partial
+from pathlib import Path
+from typing import TYPE_CHECKING, override
 
-import asyncio
+import importlib
 
 import pytest
 
-from sagent import providers
 from sagent.agent.agent import Agent
-from sagent.agent.state import current_agent_var, tool_state_var
-from sagent.catalog.table import ModelCatalog, ModelTable
-from sagent.testing import MockModelCaps
+from sagent.agent.team import Team
+from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+from sagent.model.cost import PriceCatalog
+from sagent.model.exceptions import UnknownProviderError
+from sagent.model.scripted import ScriptedModel, ScriptedProvider
+from sagent.providers.catalog import ModelCatalog
+from sagent.providers.table import ModelTable
+from sagent.runtime import types
+from sagent.tools import agent_self
 from sagent.tools.agent_self import AgentSelf
-from sagent.types.capability import (
-    ModelCapability,
-    ModelLimits,
-    ThinkingEffort,
-)
-from sagent.types.cost import ServiceTier, TokenCost, TokenCount
-from sagent.types.model import (
-    ModelRecipe,
-    ModelRequest,
-    ModelResponse,
-)
-from sagent.types.runtime import (
-    AssistantMessage,
-    Clear,
-    Compact,
-    ModelSwitch,
-    Recompact,
-    RuntimeEvent,
-)
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Mapping
+    from treekle import PlainTree
+
+    from sagent.providers.types import ProviderFactory, ProviderSharedResources
+    from sagent.runtime.types import RuntimeEvent
 
 
-@dataclass(slots=True, kw_only=True)
-class StubProviderModel(MockModelCaps):
-    """Provider model that returns scripted responses on call."""
-
-    model_id: str = "stub-1"
-    max_request_tokens: int = 100_000
-    responses: list[AssistantMessage] = field(default_factory=list)
-    _idx: int = field(default=0, init=False)
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        return await self.stream(request)
-
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        del request, publish
-        idx = self._idx
-        self._idx += 1
-        msg = (
-            self.responses[idx]
-            if idx < len(self.responses)
-            else AssistantMessage(text="ok")
-        )
-        return ModelResponse(message=msg)
-
-
-def _catalog_stub(capabilities: Mapping[str, ModelCapability]) -> type:
-    """Stand-in provider class exposing side-effect-free model resolution."""
-
-    class StubCatalog:
-        catalog = ModelCatalog(
-            models=ModelTable(rows=tuple(capabilities.values())),
-            transport=ModelCapability(),
-        )
-
-    return StubCatalog
-
-
-def _make_agent(*, spec: ModelRecipe | None = None) -> Agent:
-    return Agent(
-        model=StubProviderModel(),
-        tools=[],
-        model_recipe=spec,
+def _capability(model_id: str) -> ModelCapability:
+    prices = PriceCatalog(window=1_000)
+    return ModelCapability(
+        model_id=model_id,
+        limits=ModelLimits(max_request_tokens=1_000, max_response_tokens=100),
+        prices=prices,
+        thinking_effort=frozenset({"none", "low", "high"}),
+        thinking_budget=frozenset({"none", "auto"}),
+        thinking_output=frozenset({"none", "text"}),
+        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
     )
 
 
-def _land_switches(agent: Agent) -> None:
-    """Apply queued model switches, as the runtime does once no call is in flight."""
-    for item in agent.runtime.inbox.drain_nowait():
-        if isinstance(item, ModelSwitch):
-            item.apply()
-
-
-@contextmanager
-def _active(agent: Agent) -> Generator[Agent]:
-    token = current_agent_var.set(agent)
-    state_token = tool_state_var.set(agent.tool_state)
-    try:
-        yield agent
-    finally:
-        tool_state_var.reset(state_token)
-        current_agent_var.reset(token)
-
-
-def test_metadata_basics() -> None:
-    t = AgentSelf()
-    assert t.name == "AgentSelf"
-    assert t.tool_id == "application/x-tool-agentself"
-    assert t.prompt() == ""
-
-
-def test_summary_renders_parts() -> None:
-    t = AgentSelf()
-    out = t.summary(
-        {
-            "status": "thinking",
-            "context": "compact",
-            "model_id": "m1",
-            "provider": "P",
-            "max_request_tokens": 100,
-            "max_response_tokens": 10,
-            "model_options": {"thinking": True},
-            "diagnostics": True,
-            "catalog": "models",
+def _setup(tmp_path: Path) -> tuple[Team, Agent, AgentSelf]:
+    catalog = ModelCatalog(
+        factories={
+            "scripted": partial(ScriptedProvider, capability=_capability("scripted")),
+            "other": partial(ScriptedProvider, capability=_capability("other")),
         },
     )
-    assert "status=thinking" in out
-    assert "context=compact" in out
-    assert "diagnostics" in out
-    assert "catalog=models" in out
+    team = Team(catalog=catalog)
+    agent = Agent(model=catalog["scripted"]["scripted"], cwd=tmp_path)
+    _ = team.join(agent)
+    return team, agent, AgentSelf(team=team)
 
 
-def test_summary_empty_just_name() -> None:
-    t = AgentSelf()
-    assert t.summary({}) == "AgentSelf"
+async def _patch(
+    tool: AgentSelf,
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+    *,
+    label: str = "Agent",
+) -> str:
+    result = await tool.call(ToolContext(cwd=tmp_path, label=label), arguments)
+    return result.text()
 
 
-@pytest.mark.asyncio
-async def test_run_no_active_agent() -> None:
-    token = current_agent_var.set(None)
-    try:
-        t = AgentSelf()
-        result = await t.run({})
-    finally:
-        current_agent_var.reset(token)
-    assert result.is_error
-    assert "No active agent" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_no_changes_message() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({})
-    assert not result.is_error
-    assert "No changes" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_status_updates_agent() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"status": "working"})
-    assert not result.is_error
-    assert agent.status == "working"
-    assert "status=working" in result.content
-
-
-@pytest.mark.asyncio
-async def test_run_empty_status_is_error() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"status": "   "})
-    assert result.is_error
-    assert result.call_id == ""
-    assert result.content == "status cannot be empty when provided."
-
-
-@pytest.mark.asyncio
-async def test_non_string_status_is_error() -> None:
-    agent = _make_agent()
-    with _active(agent):
-        result = await AgentSelf().run({"status": 42})
-    assert result.is_error
-    assert result.content == "status must be a string."
-
-
-@pytest.mark.asyncio
-async def test_context_prompt_without_context_is_error() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"context_prompt": "x"})
-    assert result.is_error
-    assert "context_prompt is only valid" in result.content
-
-
-@pytest.mark.asyncio
-async def test_non_string_context_prompt_is_error() -> None:
-    agent = _make_agent()
-    with _active(agent):
-        result = await AgentSelf().run({"context": "compact", "context_prompt": 42})
-    assert result.is_error
-    assert result.content == "context_prompt must be a string."
-
-
-@pytest.mark.asyncio
-async def test_invalid_context_is_error() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"context": "wipe"})
-    assert result.is_error
-    assert "Invalid context" in result.content
-
-
-@pytest.mark.asyncio
-async def test_invalid_model_options_object_errors() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_options": "not-an-object"})
-    assert result.is_error
-    assert "model_options must be an object" in result.content
-
-
-@pytest.mark.asyncio
-async def test_non_string_model_option_key_is_error() -> None:
-    agent = _make_agent()
-    options = cast(dict[str, object], cast(object, {1: "value"}))
-    with _active(agent):
-        result = await AgentSelf().run({"model_options": options})
-    assert result.is_error
-    assert result.content == "model_options keys must be strings."
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("key", ["cache_ttl", "service_tier"])
-@pytest.mark.parametrize("value", [[], {}])
-async def test_unhashable_model_option_value_is_error(
-    key: str,
-    value: object,
+@pytest.mark.parametrize(
+    ("arguments", "summary"),
+    [
+        ({}, "AgentSelf"),
+        ({"status": "Fixing", "effort": "high"}, "AgentSelf status effort"),
+        ({"status": "", "diagnostics": False, "model": None}, "AgentSelf"),
+    ],
+)
+def test_the_summary_names_the_keys_set(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+    summary: str,
 ) -> None:
-    agent = Agent(model=TierStubModel(), tools=[])
-    with _active(agent):
-        result = await AgentSelf().run({"model_options": {key: value}})
-    assert result.is_error
-    assert key in result.content
+    _, _, tool = _setup(tmp_path)
+
+    assert tool.summary(arguments) == summary
+    assert tool.serialize_key(ToolContext(cwd=tmp_path), arguments) == "*"
 
 
 @pytest.mark.asyncio
-async def test_invalid_catalog_errors() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"catalog": "garbage"})
-    assert result.is_error
-    assert "Invalid catalog" in result.content
+async def test_a_caller_outside_the_team_is_refused(tmp_path: Path) -> None:
+    _, _, tool = _setup(tmp_path)
+
+    with pytest.raises(ValueError, match="needs a calling agent"):
+        _ = await _patch(tool, tmp_path, {"status": "x"}, label="nobody")
 
 
 @pytest.mark.asyncio
-async def test_catalog_provider_without_models_catalog_errors() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"catalog_provider": "P"})
-    assert result.is_error
-    assert "catalog_provider is only valid" in result.content
+async def test_an_empty_patch_changes_nothing(tmp_path: Path) -> None:
+    _, agent, tool = _setup(tmp_path)
+
+    assert await _patch(tool, tmp_path, {}) == "No change."
+    assert agent.runtime.inbox.drain_nowait() == []
 
 
 @pytest.mark.asyncio
-async def test_context_clear_pushes_clear_event() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"context": "clear"})
-    assert not result.is_error
-    items = await agent.runtime.inbox.drain()
-    assert any(isinstance(i, Clear) for i in items)
+async def test_a_status_is_published(tmp_path: Path) -> None:
+    _, agent, tool = _setup(tmp_path)
+    seen: list[RuntimeEvent] = []
+    agent.runtime.observers.append(seen.append)
+
+    assert await _patch(tool, tmp_path, {"status": "Fixing the parser"}) == (
+        "status: Fixing the parser"
+    )
+    assert seen == [types.StatusChanged(text="Fixing the parser")]
 
 
 @pytest.mark.asyncio
-async def test_context_compact_pushes_compact_event() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"context": "compact", "context_prompt": "trim it"})
-    assert not result.is_error
-    items = await agent.runtime.inbox.drain()
-    compacts = [i for i in items if isinstance(i, Compact)]
-    assert len(compacts) == 1
-    assert compacts[0].args == "trim it"
+async def test_reasoning_and_tier_changes_are_applied_and_reported(
+    tmp_path: Path,
+) -> None:
+    _, agent, tool = _setup(tmp_path)
 
-
-@pytest.mark.asyncio
-async def test_context_recompact_pushes_recompact_event() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"context": "recompact"})
-    assert not result.is_error
-    items = await agent.runtime.inbox.drain()
-    assert any(isinstance(i, Recompact) for i in items)
-
-
-@pytest.mark.asyncio
-async def test_max_request_tokens_within_model_cap() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"max_request_tokens": 10_000})
-    assert not result.is_error
-    assert agent.max_request_tokens == 10_000
-
-
-@pytest.mark.asyncio
-async def test_max_request_tokens_exceeds_model_cap() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"max_request_tokens": 999_999_999})
-    assert result.is_error
-    assert "exceeds model" in result.content
-
-
-@pytest.mark.asyncio
-async def test_exceeds_cap_suggests_window_variant_when_one_exists() -> None:
-    """Over-raising the limit to reach a bigger window points at the +1m id.
-
-    Regression for the AgentSelf footgun: asked to switch to a 1M-context
-    model, agents kept the base 200k model id and forced
-    ``max_request_tokens`` up -- rejected at the cap. The rejection now
-    names the ``+1m`` sibling so the wrong path self-corrects.
-    """
-    catalog = _catalog_stub(
+    text = await _patch(
+        tool,
+        tmp_path,
         {
-            "big-base": ModelCapability(
-                model_id="big-base",
-                context=MappingProxyType(
-                    {
-                        "": ModelLimits(
-                            max_request_tokens=200_000,
-                            max_response_tokens=8_000,
-                        ),
-                        "+1m": ModelLimits(
-                            max_request_tokens=1_000_000,
-                            max_response_tokens=8_000,
-                        ),
-                    },
-                ),
-            ),
+            "budget": "auto",
+            "output": "text",
+            "effort": "high",
+            "service_tier": "default",
         },
     )
-    agent = Agent(
-        model=StubProviderModel(model_id="big-base"),
-        tools=[],
-        model_recipe=ModelRecipe(
-            provider="StubCat",
-            auth="env",
-            model_id="big-base",
-            account="",
-        ),
-    )
-    t = AgentSelf()
-    with (
-        _active(agent),
-        patch.object(providers, "StubCat", catalog, create=True),
-    ):
-        result = await t.run({"max_request_tokens": 1_000_000})
-    assert result.is_error
-    assert "exceeds model" in result.content
-    assert "model_id=big-base+1m" in result.content
 
-
-@pytest.mark.asyncio
-async def test_exceeds_smaller_profile_suggests_the_maximal_bare_id() -> None:
-    agent = Agent(
-        model=StubProviderModel(
-            model_id="astra-6.0+272k",
-            max_request_tokens=272_000,
-        ),
-        tools=[],
-        model_recipe=ModelRecipe(
-            provider="OpenAI",
-            auth="env",
-            model_id="astra-6.0+272k",
-            account="",
-        ),
-    )
-    with _active(agent):
-        result = await AgentSelf().run({"max_request_tokens": 500_000})
-    assert result.is_error
-    assert "model_id=astra-6.0 " in result.content
-
-
-@pytest.mark.asyncio
-async def test_exceeds_cap_no_variant_hint_when_none_fits() -> None:
-    """No window-variant sibling -> plain rejection, no spurious suggestion."""
-    agent = _make_agent()  # StubProviderModel has no provider catalog.
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"max_request_tokens": 999_999_999})
-    assert result.is_error
-    assert "exceeds model" in result.content
-    assert "model_id=" not in result.content
-
-
-@pytest.mark.asyncio
-async def test_max_request_tokens_below_one_errors() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"max_request_tokens": 0})
-    assert result.is_error
-    assert "Must be at least 1" in result.content
-
-
-@pytest.mark.asyncio
-async def test_max_request_tokens_wrong_type_errors() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        # Lists are not coercible to int.
-        result = await t.run({"max_request_tokens": [10]})
-    assert result.is_error
-    assert "must be a number" in result.content
-
-
-@pytest.mark.asyncio
-async def test_model_swap_without_spec_errors() -> None:
-    agent = _make_agent(spec=None)
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_id": "claude"})
-    assert result.is_error
-    assert "no model spec" in result.content
-
-
-@pytest.mark.asyncio
-async def test_model_change_auth_without_model_id_preserves_current_model() -> None:
-    """Auth-only swap reuses the current model_id rather than erroring.
-
-    Mirrors REPL ``/model --auth sub`` semantics (see
-    ``repl/run_repl_test.py::test_parse_model_args_flag_auth``) so the
-    tool surface and the slash command behave the same way. Without
-    this, an agent that wants to bounce between subscription and API
-    auth has to re-spell its model_id on every swap -- an LLM
-    foot-gun.
-    """
-    agent = _make_agent(
-        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1", account=""),
-    )
-    t = AgentSelf()
-    with (
-        _active(agent),
-        patch(
-            "sagent.providers.providers.build_provider",
-        ) as bp,
-    ):
-        bp.return_value = MagicMock(model=MagicMock(return_value=StubProviderModel()))
-        result = await t.run({"auth": "new"})
-    _land_switches(agent)
-    assert not result.is_error, result.content
-    assert agent.model_recipe is not None
-    assert agent.model_recipe.auth == "new"
-    assert agent.model_recipe.model_id == "stub-1", (
-        f"auth-only swap must preserve model_id; got {agent.model_recipe.model_id!r}"
-    )
-
-
-@pytest.mark.asyncio
-async def test_diagnostics_returns_lines() -> None:
-    agent = _make_agent(
-        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1", account=""),
-    )
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"diagnostics": True})
-    assert not result.is_error
-    assert "Provider:" in result.content
-    assert "Bash cwd:" in result.content
-
-
-@pytest.mark.asyncio
-async def test_diagnostics_catalog_providers() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"diagnostics": True, "catalog": "providers"})
-    assert "Known providers:" in result.content
-
-
-@pytest.mark.asyncio
-async def test_diagnostics_catalog_models_unknown_provider() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run(
-            {
-                "diagnostics": True,
-                "catalog": "models",
-                "catalog_provider": "Nope",
-            },
-        )
-    assert "unknown provider" in result.content
-
-
-@pytest.mark.asyncio
-async def test_diagnostics_catalog_models_no_provider() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"diagnostics": True, "catalog": "models"})
-    assert "set catalog_provider" in result.content
-
-
-@pytest.mark.asyncio
-async def test_diagnostics_reports_live_cost_tracker_state() -> None:
-    """``diagnostics`` reads ``cost_tracker`` + ``num_tool_call_rounds``.
-
-    Regression guard for the pre-existing dead ``ToolState.stats``
-    contract: diagnostics now
-    pulls directly from the single cost store, so a real model response
-    surfaces in the output without any separate publisher step.
-    """
-    agent = _make_agent()
-    agent.max_request_tokens = 50_000
-    agent.max_response_tokens = 5_000
-    response = ModelResponse(
-        message=AssistantMessage(text="ok"),
-        tokens=TokenCount(
-            request=10_000,
-            response=30,
-            cache_write=7,
-            cache_read=3,
-        ),
-        spend=TokenCost(request=0.42),
-    )
-    agent.cost_tracker.record_tokens(response, model_id="stub-1")
-    agent.cost_tracker.record_cost(response)
-    agent.activity.num_tool_call_rounds = 2
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"diagnostics": True})
-    assert "No stats yet" not in result.content
-    assert "Tool call rounds:   2" in result.content
-    assert "Max request tokens:   50,000" in result.content
-    assert "Max response tokens:  5,000" in result.content
-    assert "Input tokens:       10,000 (20.0% of max request)" in result.content
-    assert "Total input tokens: 10,000" in result.content
-    assert "Total output tokens:30" in result.content
-    assert "Cache creation 5m:  7" in result.content
-    assert "Cache read:         3" in result.content
-    assert "Total cost (USD):   $0.42" in result.content
-
-
-@pytest.mark.asyncio
-async def test_model_options_unsupported_key_errors() -> None:
-    # StubProviderModel doesn't support thinking; passing the key errors.
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_options": {"thinking": True}})
-    assert result.is_error
-    assert "Unsupported model_options" in result.content
-
-
-@dataclass(slots=True, kw_only=True)
-class OptionsStubModel(StubProviderModel):
-    """Stub model advertising effort and cache-TTL choices."""
-
-    valid_efforts: tuple[ThinkingEffort, ...] = ("low", "high")
-
-    @property
-    @override
-    def capability(self) -> ModelCapability:
-        return replace(
-            super(OptionsStubModel, self).capability,
-            cache_ttl_sec=frozenset({0.0, 300.0}),
-        )
-
-
-@pytest.mark.asyncio
-async def test_null_effort_and_cache_ttl_clear_settings() -> None:
-    agent = Agent(model=OptionsStubModel(), tools=[])
-    agent.model.settings.thinking_effort = "high"
-    agent.model.settings.cache_ttl_sec = 300.0
-    with _active(agent):
-        result = await AgentSelf().run(
-            {"model_options": {"effort": None, "cache_ttl": None}},
-        )
-    assert not result.is_error, result.content
-    assert agent.model.settings.thinking_effort == "none"
-    assert agent.model.settings.cache_ttl_sec == 0.0
-
-
-@dataclass(slots=True, kw_only=True)
-class TierStubModel(StubProviderModel):
-    """``StubProviderModel`` advertising a non-empty service-tier set."""
-
-    service_tiers: tuple[ServiceTier, ...] = ("auto", "default", "flex", "priority")
-
-
-@pytest.mark.asyncio
-async def test_service_tier_unsupported_when_model_lacks_capability() -> None:
-    agent = _make_agent()  # StubProviderModel.capability.service_tier = ()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_options": {"service_tier": "priority"}})
-    assert result.is_error
-    assert "Unsupported model_options" in result.content
-
-
-@pytest.mark.asyncio
-async def test_service_tier_rejects_unknown_value() -> None:
-    agent = Agent(model=TierStubModel(), tools=[])
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_options": {"service_tier": "turbo"}})
-    assert result.is_error
-    assert "service_tier" in result.content
-    assert "must be one of" in result.content
-
-
-@pytest.mark.asyncio
-async def test_service_tier_priority_applied() -> None:
-    agent = Agent(model=TierStubModel(), tools=[])
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_options": {"service_tier": "priority"}})
-    assert not result.is_error
-    assert agent.model.settings.service_tier == "priority"
-    assert "service_tier=priority" in result.content
-
-
-@pytest.mark.asyncio
-async def test_service_tier_null_clears() -> None:
-    agent = Agent(model=TierStubModel(), tools=[])
-    agent.model.settings.service_tier = "priority"
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_options": {"service_tier": None}})
-    assert not result.is_error
-    assert agent.model.settings.service_tier == "auto"
-    assert "service_tier=auto" in result.content
-
-
-@pytest.mark.asyncio
-async def test_service_tier_listed_in_supported_diagnostics() -> None:
-    agent = Agent(model=TierStubModel(), tools=[])
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"diagnostics": True})
-    assert "service_tier" in result.content
-    assert "Service tier:" in result.content
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("value", ["fast", "turbo", None])
-async def test_latency_option_redirects_to_service_tier(value: str | None) -> None:
-    """``model_options.latency`` was replaced by ``service_tier``."""
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_options": {"latency": value}})
-    assert result.is_error
-    assert "service_tier" in result.content
-
-
-@pytest.mark.asyncio
-async def test_max_response_tokens_exceeds_model_cap() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"max_response_tokens": 1_000_000})
-    assert result.is_error
-    assert "max_response_tokens" in result.content
-
-
-@pytest.mark.asyncio
-async def test_max_response_tokens_within_cap_applied() -> None:
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"max_response_tokens": 1_024})
-    assert not result.is_error
-    assert agent.budget.max_response_tokens == 1_024
-
-
-@pytest.mark.asyncio
-async def test_account_empty_string_errors() -> None:
-    agent = _make_agent(
-        spec=ModelRecipe(
-            provider="OpenAISubscription",
-            auth="credentials",
-            model_id="gpt-5.5",
-            account="work",
-        ),
-    )
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"account": ""})
-    assert result.is_error
-    assert "account cannot be empty" in result.content
-
-
-@pytest.mark.asyncio
-async def test_provider_change_without_auth_uses_target_default() -> None:
-    agent = _make_agent(
-        spec=ModelRecipe(
-            provider="OpenAISubscription",
-            auth="credentials",
-            model_id="gpt-5.5",
-            account="work",
-        ),
-    )
-    fake_provider = MagicMock()
-    fake_provider.model = MagicMock(
-        return_value=StubProviderModel(model_id="gemini-3-pro"),
-    )
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ) as build:
-        t = AgentSelf()
-        with _active(agent):
-            result = await t.run({"provider": "Google", "model_id": "gemini-3-pro"})
-    assert not result.is_error
-    build.assert_called_once_with("Google", "env", account="work")
-
-
-@pytest.mark.asyncio
-async def test_provider_change_falls_back_when_inherited_account_is_missing() -> None:
-    agent = _make_agent(
-        spec=ModelRecipe(
-            provider="StubSource",
-            auth="credentials",
-            model_id="source-model",
-            account="work",
-        ),
-    )
-    fake_provider = MagicMock()
-    fake_provider.model = MagicMock(return_value=StubProviderModel(model_id="gpt-5.5"))
-    calls: list[tuple[str, str, str | None]] = []
-
-    def build(provider: str, auth: str, *, account: str | None) -> MagicMock:
-        calls.append((provider, auth, account))
-        if account == "work":
-            raise FileNotFoundError("No credentials for work")
-        return fake_provider
-
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            side_effect=build,
-        ),
-        patch(
-            "sagent.providers.providers.default_auth_for_provider",
-            return_value="credentials",
-        ),
-        _active(agent),
-    ):
-        result = await AgentSelf(allow_providers=("StubTarget",)).run(
-            {"provider": "StubTarget", "model_id": "gpt-5.5"},
-        )
-    _land_switches(agent)
-    assert not result.is_error, result.content
-    assert calls == [
-        ("StubTarget", "credentials", "work"),
-        ("StubTarget", "credentials", None),
+    settings = agent.model.settings
+    assert (
+        settings.thinking_budget,
+        settings.thinking_output,
+        settings.thinking_effort,
+        settings.service_tier,
+    ) == ("auto", "text", "high", "default")
+    assert text.splitlines() == [
+        "thinking_budget: none -> auto",
+        "thinking_output: none -> text",
+        "thinking_effort: none -> high",
+        "service_tier: auto -> default",
     ]
-    assert agent.model_recipe is not None
-    assert agent.model_recipe.account is None
 
 
 @pytest.mark.asyncio
-async def test_explicit_missing_account_does_not_fall_back() -> None:
-    agent = _make_agent(
-        spec=ModelRecipe(
-            provider="StubSource",
-            auth="credentials",
-            model_id="source-model",
-            account="default",
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"effort": "high", "service_tier": "priority"},
+        {"effort": "high", "budget": "fixed"},
+        {"effort": "high", "output": "redacted"},
+        {"provider": "other", "effort": "max"},
+    ],
+    ids=["tier", "budget", "output", "effort-with-switch"],
+)
+async def test_a_patch_with_any_setting_not_offered_changes_nothing(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+) -> None:
+    _, agent, tool = _setup(tmp_path)
+    model = agent.model
+
+    with pytest.raises(ValueError, match="not offered"):
+        _ = await _patch(tool, tmp_path, arguments)
+
+    assert agent.model is model
+    assert model.settings.thinking_effort == "none"
+
+
+@pytest.mark.asyncio
+async def test_a_model_switch_keeps_the_settings_and_says_what_changed(
+    tmp_path: Path,
+) -> None:
+    _, agent, tool = _setup(tmp_path)
+    agent.model.settings = replace(agent.model.settings, thinking_effort="low")
+
+    text = await _patch(tool, tmp_path, {"provider": "other", "model": "other"})
+
+    assert text == "model: scripted/scripted+fullcontext -> other/other+fullcontext"
+    assert agent.model.capability.model_id == "other"
+    assert agent.model.settings.thinking_effort == "low"
+
+
+@pytest.mark.asyncio
+async def test_a_switch_with_settings_applies_them_to_the_new_model(
+    tmp_path: Path,
+) -> None:
+    _, agent, tool = _setup(tmp_path)
+    before = agent.model
+
+    text = await _patch(tool, tmp_path, {"model": "scripted", "effort": "high"})
+
+    assert text.splitlines() == [
+        "model: scripted/scripted+fullcontext -> scripted/scripted+fullcontext",
+        "thinking_effort: none -> high",
+    ]
+    assert agent.model is not before
+    assert agent.model.settings.thinking_effort == "high"
+    assert before.settings.thinking_effort == "none"
+
+
+def _windowed(model_id: str) -> ModelTable:
+    """Return a table serving ``model_id`` with a 1M window."""
+    prices = PriceCatalog(window=1_000_000)
+    return ModelTable(
+        rows=(
+            ModelCapability(
+                model_id=model_id,
+                limits=ModelLimits(max_request_tokens=1_000_000),
+                prices=prices,
+                default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+            ),
         ),
     )
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            side_effect=FileNotFoundError("No credentials for work"),
-        ) as build,
-        patch(
-            "sagent.providers.providers.default_auth_for_provider",
-            return_value="credentials",
-        ),
-        _active(agent),
+
+
+@pytest.mark.asyncio
+async def test_a_switch_finds_who_serves_the_model_and_keeps_the_window(
+    tmp_path: Path,
+) -> None:
+    catalog = ModelCatalog(
+        factories={
+            "first": partial(ScriptedProvider, models=_windowed("a-1.0")),
+            "second": partial(ScriptedProvider, models=_windowed("b-1.0")),
+        },
+    )
+    team = Team(catalog=catalog)
+    agent = Agent(model=catalog["first"]["a+200k"], cwd=tmp_path)
+    _ = team.join(agent)
+
+    text = await _patch(AgentSelf(team=team), tmp_path, {"model": "b"})
+
+    assert text == "model: first/a-1.0+200k -> second/b-1.0+200k"
+    assert agent.model.settings.context_size.tokens == 200_000
+
+
+@pytest.mark.asyncio
+async def test_a_switch_signs_in_as_the_catalogs_account(tmp_path: Path) -> None:
+    def per_account(account: str | None) -> dict[str, ProviderFactory]:
+        del account
+        return {"first": partial(ScriptedProvider, models=_windowed("a-1.0"))}
+
+    team = Team(catalog=ModelCatalog(factories=per_account))
+    agent = Agent(model=team.catalog["first"]["a"], cwd=tmp_path)
+    _ = team.join(agent)
+    team.catalog.use_account("work")
+
+    _ = await _patch(AgentSelf(team=team), tmp_path, {"model": "a+200k"})
+
+    assert agent.account == "work"
+    assert agent.model.provider is team.catalog.signed_in("first", account="work")
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_provider_is_refused(tmp_path: Path) -> None:
+    _, agent, tool = _setup(tmp_path)
+    model = agent.model
+
+    with pytest.raises(
+        UnknownProviderError,
+        match=r"^unknown provider 'nope'; known: scripted, other$",
     ):
-        result = await AgentSelf(allow_providers=("StubTarget",)).run(
-            {
-                "provider": "StubTarget",
-                "model_id": "gpt-5.5",
-                "account": "work",
-            },
+        _ = await _patch(tool, tmp_path, {"provider": "nope"})
+    assert agent.model is model
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_report_what_the_agent_runs_on(tmp_path: Path) -> None:
+    _, _, tool = _setup(tmp_path)
+
+    assert (await _patch(tool, tmp_path, {"diagnostics": True})).splitlines() == [
+        "label: Agent",
+        "model: scripted/scripted+fullcontext",
+        "context: 1k",
+        "thinking: budget=none output=none effort=none",
+        "service_tier: auto; cache_ttl_sec: 0",
+        "limits: request=1000 response=100",
+        f"cwd: {tmp_path}",
+        "tools: ",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "line"),
+    [
+        ({"catalog": "providers"}, "providers: scripted, other"),
+        ({"catalog": "models"}, "scripted models: scripted"),
+        ({"catalog": "models", "catalog_provider": "other"}, "other models: other"),
+    ],
+)
+async def test_the_catalog_lists_providers_or_one_providers_models(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+    line: str,
+) -> None:
+    _, _, tool = _setup(tmp_path)
+
+    assert await _patch(tool, tmp_path, arguments) == line
+
+
+@pytest.mark.asyncio
+async def test_a_refused_switch_closes_the_model_it_built(tmp_path: Path) -> None:
+    team, _, tool = _setup(tmp_path)
+    built: list[ScriptedModel] = []
+    closed: list[ScriptedModel] = []
+    team.catalog = ModelCatalog(
+        factories={"other": partial(_Recording, built=built, closed=closed)},
+    )
+
+    with pytest.raises(ValueError, match="not offered"):
+        _ = await _patch(tool, tmp_path, {"provider": "other", "effort": "max"})
+
+    assert closed == built
+    assert len(built) == 1
+
+
+class _Recording(ScriptedProvider):
+    """A provider whose models note when they are built and closed."""
+
+    def __init__(
+        self,
+        *,
+        built: list[ScriptedModel],
+        closed: list[ScriptedModel],
+        name: str = "",
+        resources: ProviderSharedResources | None = None,
+    ) -> None:
+        super().__init__(
+            name=name,
+            resources=resources,
+            capability=_capability("other"),
         )
-    assert result.is_error
-    assert "No credentials for work" in result.content
-    build.assert_called_once_with(
-        "StubTarget",
-        "credentials",
-        account="work",
-    )
+        self.built = built
+        self.closed = closed
+
+    @override
+    def __getitem__(self, model: str) -> ScriptedModel:
+        del model
+        made = _Closing(
+            provider=self,
+            capability=self.capability,
+            settings=self.capability.default,
+            closed=self.closed,
+        )
+        self.built.append(made)
+        return made
 
 
-@pytest.mark.asyncio
-async def test_account_default_string_is_preserved() -> None:
-    agent = _make_agent(
-        spec=ModelRecipe(
-            provider="OpenAISubscription",
-            auth="credentials",
-            model_id="gpt-5.5",
-            account="work",
-        ),
-    )
-    fake_provider = MagicMock()
-    fake_provider.model = MagicMock(return_value=StubProviderModel(model_id="gpt-5"))
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ) as build:
-        t = AgentSelf()
-        with _active(agent):
-            result = await t.run({"model_id": "gpt-5", "account": "default"})
-    assert not result.is_error
-    build.assert_called_once_with(
-        "OpenAISubscription",
-        "credentials",
-        account="default",
-    )
+class _Closing(ScriptedModel):
+    """A scripted model that notes its close."""
+
+    def __init__(
+        self,
+        *,
+        provider: ScriptedProvider,
+        capability: ModelCapability,
+        settings: ModelSettings,
+        closed: list[ScriptedModel],
+    ) -> None:
+        super().__init__(provider=provider, capability=capability, settings=settings)
+        self._closed = closed
+
+    @override
+    async def aclose(self) -> None:
+        self._closed.append(self)
 
 
-@pytest.mark.asyncio
-async def test_explicit_current_provider_is_not_overridden_by_inference() -> None:
-    """``provider=<current>`` is a choice; a model id must not reroute it."""
-    agent = _make_agent(
-        spec=ModelRecipe(provider="Anthropic", auth="env", model_id="opus-4.8"),
-    )
-    fake_provider = MagicMock()
-    fake_provider.model = MagicMock(return_value=StubProviderModel(model_id="gpt-5.5"))
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            return_value=fake_provider,
-        ) as build,
-        _active(agent),
-    ):
-        _ = await AgentSelf().run({"provider": "Anthropic", "model_id": "gpt-5.5"})
-    build.assert_called_once_with("Anthropic", "env", account=None)
+def test_the_description_reads_as_utf8_whatever_the_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked = _Asked()
+    with monkeypatch.context() as patched:
+        patched.setattr(Path, "read_text", asked)
+        _ = importlib.reload(agent_self)
+    _ = importlib.reload(agent_self)
+
+    assert asked.encodings["agentself.md"] == "utf-8"
 
 
 @dataclass(slots=True, kw_only=True)
-class _CountingProvider:
-    closes: int = 0
-    model_id: str = "stub-2"
+class _Asked:
+    """Read text as UTF-8, noting the encoding each read asked for."""
 
-    def model(self, model_id: str | None = None) -> StubProviderModel:
-        del model_id
-        return StubProviderModel(model_id=self.model_id)
+    encodings: dict[str, str | None] = field(default_factory=dict)
 
-    async def close_sdk(self) -> None:
-        self.closes += 1
+    def __get__(self, path: Path, owner: type[Path] | None = None) -> partial[str]:
+        """Bind to the path read, as the method it stands in for would."""
+        del owner
+        return partial(self, path)
 
-
-@pytest.mark.asyncio
-async def test_swapped_in_provider_is_owned_and_closed_on_the_next_swap() -> None:
-    agent = _make_agent(
-        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1"),
-    )
-    first, second = _CountingProvider(), _CountingProvider(model_id="stub-3")
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            side_effect=[first, second],
-        ),
-        _active(agent),
-    ):
-        _ = await AgentSelf().run({"model_id": "stub-2"})
-        _land_switches(agent)
-        _ = await AgentSelf().run({"model_id": "stub-3"})
-        _land_switches(agent)
-        for _ in range(5):
-            await asyncio.sleep(0)
-    assert (first.closes, second.closes) == (1, 0)
-
-
-@pytest.mark.asyncio
-async def test_a_refused_swap_closes_the_provider_it_built() -> None:
-    agent = _make_agent(
-        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1"),
-    )
-    built = _CountingProvider()
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            return_value=built,
-        ),
-        _active(agent),
-    ):
-        result = await AgentSelf().run(
-            {"model_id": "stub-2", "model_options": {"latency": "fast"}},
-        )
-        for _ in range(5):
-            await asyncio.sleep(0)
-    assert result.is_error
-    assert built.closes == 1
-
-
-@pytest.mark.asyncio
-async def test_a_switch_with_invalid_options_keeps_the_old_model() -> None:
-    """A refused patch queues nothing and closes what it built."""
-    agent = _make_agent(
-        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1"),
-    )
-    old_model = agent.model
-    built = _CountingProvider()
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            return_value=built,
-        ),
-        _active(agent),
-    ):
-        result = await AgentSelf().run(
-            {"model_id": "stub-2", "model_options": {"effort": "max"}},
-        )
-        queued = agent.runtime.inbox.drain_nowait()
-        for _ in range(5):
-            await asyncio.sleep(0)
-    assert result.is_error
-    assert not any(isinstance(item, ModelSwitch) for item in queued)
-    assert agent.model is old_model
-    assert built.closes == 1
-
-
-@pytest.mark.asyncio
-async def test_a_valid_switch_applies_its_options_to_the_new_model() -> None:
-    """Options ride the swap, landing on the NEW model, not the old one."""
-
-    @dataclass(slots=True, kw_only=True)
-    class _EffortModel(StubProviderModel):
-        valid_efforts: tuple[ThinkingEffort, ...] = ("low", "high")
-
-    agent = _make_agent(
-        spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1"),
-    )
-    old_model = agent.model
-    new_model = _EffortModel(model_id="stub-2")
-    provider = MagicMock()
-    provider.model = MagicMock(return_value=new_model)
-    with (
-        patch(
-            "sagent.providers.providers.build_provider",
-            return_value=provider,
-        ),
-        _active(agent),
-    ):
-        result = await AgentSelf().run(
-            {
-                "model_id": "stub-2",
-                "model_options": {"effort": "high"},
-                "max_response_tokens": 1_000,
-            },
-        )
-        assert agent.model is old_model, "the swap is queued, not immediate"
-        _land_switches(agent)
-    assert not result.is_error, result.content
-    assert "(queued)" in result.content
-    assert agent.model is new_model
-    assert new_model.settings.thinking_effort == "high"
-    assert agent.max_response_tokens == 1_000
-
-
-@pytest.mark.asyncio
-async def test_agent_self_lands_where_change_model_lands() -> None:
-    """The tool and the agent API resolve and record a swap identically."""
-    states: list[tuple[ModelRecipe | None, str]] = []
-    for via_tool in (True, False):
-        agent = _make_agent(
-            spec=ModelRecipe(provider="StubP", auth="env", model_id="stub-1"),
-        )
-        provider = MagicMock()
-        provider.model = MagicMock(return_value=StubProviderModel(model_id="stub-2"))
-        with (
-            patch(
-                "sagent.providers.providers.build_provider",
-                return_value=provider,
-            ),
-            _active(agent),
-        ):
-            if via_tool:
-                _ = await AgentSelf().run({"model_id": "stub-2"})
-            else:
-                _ = agent.change_model(model_id="stub-2")
-            _land_switches(agent)
-        states.append((agent.model_recipe, agent.model.tagged_model_id))
-    assert states[0] == states[1]
-
-
-@pytest.mark.asyncio
-async def test_an_unknown_model_ceiling_accepts_any_limit() -> None:
-    """A ceiling of 0 is unknown, not zero; every limit fits under it."""
-    model = StubProviderModel()
-    model.max_response_tokens = 0
-    agent = Agent(model=model, tools=[])
-    with _active(agent):
-        result = await AgentSelf().run({"max_response_tokens": 1000})
-    assert not result.is_error, result.content
-
-
-@pytest.mark.asyncio
-async def test_model_swap_shrinks_budget_to_new_model_window() -> None:
-    """Swapping to a smaller-window model must narrow the budget to fit.
-
-    Regression: the swap once rejected an oversized budget instead of
-    rescaling it down to the new model's window.
-    """
-    agent = _make_agent(
-        spec=ModelRecipe(provider="StubP", auth="env", model_id="big", account=""),
-    )
-    # Agent's default budget tracks its current 100k-window model.
-    assert agent.budget.max_request_tokens == 100_000
-    fake_provider = MagicMock()
-    fake_provider.model = MagicMock(
-        return_value=StubProviderModel(
-            model_id="small",
-            max_request_tokens=50_000,
-        ),
-    )
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ):
-        t = AgentSelf()
-        with _active(agent):
-            result = await t.run({"model_id": "small"})
-            _land_switches(agent)
-    assert not result.is_error, result.content
-    assert agent.model.tagged_model_id == "small"
-    assert agent.budget.max_request_tokens <= 50_000
-
-
-@pytest.mark.asyncio
-async def test_model_swap_with_explicit_budget_lands_in_one_step() -> None:
-    """Combined ``model_id`` + ``max_request_tokens`` must succeed.
-
-    The patch lands both the swap and the explicit window in a single
-    call: the default budget resolves against the new model first, then
-    the explicit cap is applied, so no intermediate state exceeds the
-    new model's window.
-    """
-    agent = _make_agent(
-        spec=ModelRecipe(provider="StubP", auth="env", model_id="big", account=""),
-    )
-    fake_provider = MagicMock()
-    fake_provider.model = MagicMock(
-        return_value=StubProviderModel(
-            model_id="small",
-            max_request_tokens=50_000,
-        ),
-    )
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ):
-        t = AgentSelf()
-        with _active(agent):
-            result = await t.run({"model_id": "small", "max_request_tokens": 20_000})
-            _land_switches(agent)
-    assert not result.is_error, result.content
-    assert agent.model.tagged_model_id == "small"
-    assert agent.max_request_tokens == 20_000
-
-
-@pytest.mark.asyncio
-async def test_model_swap_clears_effort_and_reports_unset() -> None:
-    """Swap to a model that lacks effort support; report the auto-clear.
-
-    ``Agent.swap_model`` zeroes ``effort`` / ``thinking`` / ``service_tier``
-    when the new model lacks the capability. ``_commit_patch_plan``'s
-    "(unsupported)" line then has to fire so the LLM knows *why* its
-    setting disappeared. The bug: ``_commit_patch_plan`` inspected the
-    fields *after* swap, by which point ``swap_model`` had already
-    cleared them -- silencing every report. Snapshot before swap.
-    """
-
-    @dataclass(slots=True, kw_only=True)
-    class EffortStubModel(StubProviderModel):
-        valid_efforts: tuple[ThinkingEffort, ...] = ("low", "medium", "high")
-
-    agent = Agent(
-        model=EffortStubModel(model_id="rich-stub"),
-        tools=[],
-        model_recipe=ModelRecipe(
-            provider="OpenAISubscription",
-            auth="credentials",
-            model_id="rich-stub",
-            account="",
-        ),
-    )
-    agent.model.settings.thinking_effort = "high"
-    # Target model lacks effort/thinking/service-tier (``MockModelCaps``
-    # defaults). Swap must clear ``effort`` AND mention it in the result.
-    fake_provider = MagicMock()
-    fake_provider.model = MagicMock(
-        return_value=StubProviderModel(model_id="plain-stub"),
-    )
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ):
-        t = AgentSelf()
-        with _active(agent):
-            result = await t.run({"model_id": "plain-stub"})
-            _land_switches(agent)
-    assert not result.is_error, result.content
-    assert agent.model.settings.thinking_effort == "none"
-    assert "thinking_effort=none (unsupported)" in result.content
-
-
-@pytest.mark.asyncio
-async def test_model_id_change_unknown_provider_errors() -> None:
-    agent = _make_agent(
-        spec=ModelRecipe(
-            provider="UnknownProvider",
-            auth="env",
-            model_id="x",
-            account="",
-        ),
-    )
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({"model_id": "newmodel"})
-    assert result.is_error
-    assert "Failed to build model" in result.content
-
-
-@pytest.mark.asyncio
-async def test_provider_catalog_respects_allow_list() -> None:
-    """``catalog=providers`` lists only providers in the allow list."""
-    agent = _make_agent()
-    t = AgentSelf(allow_providers=("OpenAISubscription",))
-    with _active(agent):
-        result = await t.run({"catalog": "providers"})
-    assert not result.is_error
-    assert "OpenAISubscription" in result.content
-    assert "DashScope" not in result.content
-    assert "Moonshot" not in result.content
-
-
-@pytest.mark.asyncio
-async def test_model_catalog_rejects_provider_outside_allow_list() -> None:
-    """``catalog=models, catalog_provider=...`` returns a clear message
-    when the named provider isn't in the allow list.
-    """
-    agent = _make_agent()
-    t = AgentSelf(allow_providers=("OpenAISubscription",))
-    with _active(agent):
-        result = await t.run({"catalog": "models", "catalog_provider": "DashScope"})
-    assert not result.is_error
-    assert "not in the allowed list" in result.content
-
-
-@pytest.mark.asyncio
-async def test_provider_switch_rejected_when_outside_allow_list() -> None:
-    """An ``AgentSelf`` patch that asks to switch ``provider`` to a
-    name not in the allow list returns an error before any
-    ``build_provider`` call. Regression guard for the write surface
-    of the allow-list contract (the read surface is the catalog).
-    """
-    spec = ModelRecipe(
-        provider="OpenAISubscription",
-        auth="credentials",
-        model_id="gpt-stub",
-        account="",
-    )
-    agent = _make_agent(spec=spec)
-    t = AgentSelf(allow_providers=("OpenAISubscription",))
-    with _active(agent):
-        result = await t.run({"provider": "Anthropic", "auth": "env"})
-    assert result.is_error
-    assert "not in the allowed list" in result.content
-    assert "Anthropic" in result.content
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("attr", ["max_request_tokens", "max_response_tokens"])
-async def test_token_limit_rejects_non_integer_float(attr: str) -> None:
-    """Schema declares ``type: integer``; runtime must reject 1.9.
-
-    Pre-fix ``int(1.9) → 1`` and the spawn silently accepted the
-    rounded request. A float here is a directive error.
-    """
-    agent = _make_agent()
-    t = AgentSelf()
-    with _active(agent):
-        result = await t.run({attr: 1.9})
-    assert result.is_error
-    assert "integer" in result.content
-
-
-@pytest.mark.asyncio
-async def test_model_swap_clears_all_capabilities_and_reports_each_unset() -> None:
-    # Swap from a fully-capable model to a plain one: thinking and
-    # service_tier must each be cleared AND reported "(unsupported)". The
-    # snapshot is read before swap, so a post-swap read would silence every
-    # report -- this guards the thinking/service_tier axes the effort test
-    # does not. (Latency needs no clearing: it derives from the model id.)
-    @dataclass(slots=True, kw_only=True)
-    class RichStubModel(StubProviderModel):
-        supports_thinking: bool = True
-        service_tiers: tuple[ServiceTier, ...] = ("priority",)
-
-    agent = Agent(
-        model=RichStubModel(model_id="rich-stub"),
-        tools=[],
-        model_recipe=ModelRecipe(
-            provider="OpenAISubscription",
-            auth="credentials",
-            model_id="rich-stub",
-            account="",
-        ),
-    )
-    agent.model.settings.thinking_budget = "auto"
-    agent.model.settings.thinking_output = "text"
-    agent.model.settings.service_tier = "priority"
-    fake_provider = MagicMock()
-    fake_provider.model = MagicMock(
-        return_value=StubProviderModel(model_id="plain-stub"),
-    )
-    with patch(
-        "sagent.providers.providers.build_provider",
-        return_value=fake_provider,
-    ):
-        t = AgentSelf()
-        with _active(agent):
-            result = await t.run({"model_id": "plain-stub"})
-            _land_switches(agent)
-    assert not result.is_error, result.content
-    assert agent.model.settings.thinking_budget == "none"
-    assert agent.model.settings.service_tier == "auto"
-    assert "thinking_budget=none (unsupported)" in result.content
-    assert "service_tier=auto (unsupported)" in result.content
+    def __call__(
+        self,
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> str:
+        del errors, newline
+        self.encodings[path.name] = encoding
+        return path.read_bytes().decode()
 
 
 if __name__ == "__main__":

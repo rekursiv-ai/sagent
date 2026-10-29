@@ -22,16 +22,22 @@ concurrency:
 
 jobs:
   validate:
-    name: Lint, type-check, test, and build
+    name: Lint, type-check, test, and build (${{ matrix.python-version }})
     runs-on: ubuntu-latest
     # Bounded so a hung step fails in minutes, not at the 6h default.
     timeout-minutes: 45
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          # Outranks the checkout's .python-version, which pins a newer one.
+          python-version: ${{ matrix.python-version }}
       - name: Cache apt packages
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -46,15 +52,19 @@ jobs:
           done
           timeout 300 sudo apt-get install -y --no-install-recommends ripgrep fd-find
       - name: Validate package
+        # The same for every package; a package's own checks are its tests.
         run: |
-          # Lint/type/test checks come from this package's own .pre-commit-config.yaml.
-          # Restating each tool here means a newly added hook silently goes unrun.
-          bash install-libjpeg-turbo.sh
-          uv sync --frozen --all-groups --extra slack
-          uv run pre-commit run --all-files --hook-stage pre-commit
+          uv sync --frozen --all-groups
+          SKIP=superseded-at-pre-push uv run pre-commit run --all-files --hook-stage pre-commit
           uv run pre-commit run --all-files --hook-stage pre-push
-          uv run python -c "import sagent"
-          rm -rf dist
-          uv build --out-dir dist
-          wheels=(dist/sagent-*.whl); wheel="${wheels[0]}"; uv run --isolated --with "$wheel" --with "wesearch @ git+https://github.com/rekursiv-ai/wesearch" python -P -c "import sagent; print(sagent.__file__)"
-          uv run python sagent/bin/check_wheel.py
+
+  validated:
+    name: Lint, type-check, test, and build
+    needs: validate
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every version
+        run: |
+          test "${{ needs.validate.result }}" = success

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
@@ -15,7 +16,6 @@ from sagent.lib.files.glob import GlobError, fd_command, glob
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
-    from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
@@ -321,6 +321,20 @@ def test_a_failed_fd_run_raises_rather_than_answering_empty(tmp_path: Path) -> N
         pytest.raises(subprocess.CalledProcessError),
     ):
         glob(tmp_path, "**/*.py")
+
+
+@pytest.mark.parametrize("fd", [True], ids=["fd"])
+def test_an_fd_that_hangs_is_stopped_at_the_limit(tmp_path: Path) -> None:
+    """A glob run in a thread cannot be cancelled, so only a limit bounds it."""
+    (tmp_path / "a.py").write_text("")
+    pid = tmp_path / "fd.pid"
+    argv = ["/bin/sh", "-c", f'echo $$ > "{pid}"; exec sleep 60']
+    with (
+        patch("sagent.lib.files.glob.fd_command", return_value=argv),
+        pytest.raises(GlobError, match=r"^fd timed out after 0\.05s; narrow"),
+    ):
+        glob(tmp_path, "**/*.py", timeout_sec=0.05)
+    assert not Path(f"/proc/{pid.read_text().strip()}").exists()
 
 
 @pytest.mark.parametrize("name", ["fd", "fdfind"])

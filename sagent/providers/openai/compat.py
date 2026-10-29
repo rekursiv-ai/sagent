@@ -1,837 +1,396 @@
-"""OpenAI chat-completions compatible base.
+"""Any OpenAI-compatible endpoint: a base provider, and the model it serves.
 
-Third-party providers (Kimi, Qwen, MiniMax, any local vLLM/SGLang
-    box) subclass ``OpenAICompat`` and set its catalog and endpoint::
+A vendor subclasses ``OpenAICompatible``, names its catalog and endpoint, and
+overrides ``encode`` for whatever its server reads differently. The model asks
+its provider for every wire decision, so one model class serves every vendor.
 
-    class Kimi(OpenAICompat):
-        ENV_VAR = "MOONSHOT_API_KEY"
-        BASE_URL = "https://api.moonshot.ai/v1"
-        catalog = ModelCatalog(models=models(), transport=openai.compatible())
+Typical usage example:
 
-The model backend (``OpenAICompatModel``) exposes hooks for
-provider-specific tweaks (``_reasoning_field``, ``_transform_body``).
-Overriding one on a subclass is enough for most provider divergence.
+  class Kimi(OpenAICompatible):
+      section = "moonshot"
+      package, document = "sagent.providers.moonshot", "moonshot.yaml"
+      url = "https://api.moonshot.ai/v1"
+      key_variable = "MOONSHOT_API_KEY"
+      reasoning_field = "reasoning_content"
 
-Usage::
-
-    provider = Kimi.from_env()
-    model = provider.model()        # catalog key "default"
-    response = await model.buffer(request)
+  async with Kimi() as kimi:                     # reads MOONSHOT_API_KEY
+      async for event in kimi["default"].stream(request):
+          ...
+  box = Kimi(api_key="none", base_url="http://gpu-box:8000/v1")
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, ClassVar, Self, cast, override
+from functools import cache
+from importlib.resources import files
+from typing import TYPE_CHECKING, ClassVar, Protocol, override
 
 import asyncio
-import base64
-import json
-import logging
+import contextlib
 import os
+
+from treekle import json_dumps, json_loads
+
+from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
+from sagent.providers.openai import chat, token_count, wire
+from sagent.providers.resources import SharedResources
+from sagent.providers.table import ModelTable
+from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping
+
     import httpx2
 
-    from sagent.lib import image
-    from sagent.types.capability import ModelCapability, ModelSettings
+    from sagent.model.capability import ModelCapability, ModelSettings
+    from sagent.model.types import Request, Response, TextChunk
+    from sagent.providers.types import ProviderSharedResources, UsageWindow
+    from sagent.session.types import Attachment
 else:
     from wrapt import lazy_import
 
-    httpx2 = lazy_import("httpx2")  # 100ms cold.
-    image = lazy_import("sagent.lib.image")
-
-from treekle import MutablePlainTree, ReadError, from_plain, json_loads, mutable
-
-from sagent.catalog.openai import compatible
-from sagent.catalog.table import (
-    ModelCatalog,
-    ModelTable,
-    base_model_id,
-)
-from sagent.lib import debug_log
-from sagent.providers.lib.errors import (
-    error_status_code,
-    is_context_overflow_text,
-    is_request_too_large,
-    raise_if_request_too_large,
-)
-from sagent.providers.lib.id_remap import IdRemapper
-from sagent.providers.lib.model_base import ModelDefaults
-from sagent.providers.lib.perloop import PerLoop
-from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.providers.lib.usage import openai_usage
-from sagent.providers.openai import token_count
-from sagent.providers.openai.responses import OpenAIStreamError
-from sagent.types.cost import ServiceTier, TokenCount
-from sagent.types.model import (
-    ModelRequest,
-    ModelResponse,
-    PromptTooLongError,
-    StreamInterruptedError,
-    UsageSnapshot,
-)
-from sagent.types.runtime import (
-    AgentSendMessage,
-    AssistantMessage,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    RuntimeEvent,
-    ToolCall,
-    UserMessage,
-)
+    httpx2 = lazy_import("httpx2")
 
 
-logger = logging.getLogger(__name__)
+__all__ = [
+    "OpenAICompatible",
+    "OpenAIModel",
+    "Reader",
+    "models",
+]
 
-_STREAM_IDLE_TIMEOUT = (
-    600.0  # house-ignore[globals] -- Stream idle timeout, user-retunable.
-)
+
+class Reader(Protocol):
+    """Collects a streamed reply's events into a ``Response``."""
+
+    def feed(self, event: Mapping[str, object]) -> TextChunk | None:
+        """Take one event, and return the text it adds, if any."""
+        ...
+
+    def response(self) -> Response:
+        """Return the finished reply."""
+        ...
 
 
-class OpenAICompatModel(ModelDefaults):
-    """Chat-completions model backend.
+class OpenAICompatible(AsyncResource):
+    """Models of one OpenAI-compatible endpoint, over Chat Completions.
 
-    Hooks (``_reasoning_field``, ``_transform_body``) are cheap overrides for
-    provider quirks.
+    Args:
+      name: The name the catalog knows this provider by; the section by default.
+      resources: What this shares with other providers; ``None`` makes and
+        closes its own.
+      api_key: The key; empty reads ``key_variable``.
+      base_url: The endpoint; empty uses ``url``, as for a self-hosted server
+        that serves a vendor's models.
+
     """
 
-    # Message field carrying reasoning/thinking text on responses.
-    # Kimi/Qwen/DeepSeek use ``reasoning_content``; OpenAI surfaces
-    # reasoning separately via the Responses API only (leave empty).
-    _reasoning_field: ClassVar[str] = ""
+    section: ClassVar[str] = "openai-compatible"
+    """The catalog section whose models and settings this provider serves."""
+
+    package: ClassVar[str] = ""
+    """The package holding the catalog document."""
+
+    document: ClassVar[str] = ""
+    """The catalog document's file name."""
+
+    url: ClassVar[str] = ""
+    """The endpoint, up to and including its version (``.../v1``)."""
+
+    key_variable: ClassVar[str] = ""
+    """The environment variable holding the key; empty for an endpoint with none."""
+
+    path: ClassVar[str] = "/chat/completions"
+    """Where under ``url`` a reply is streamed from."""
+
+    reasoning_field: ClassVar[str] = ""
+    """The message field reasoning streams in and is replayed in; empty for none."""
+
+    temperature: ClassVar[float | None] = 1.0
+    """The sampling temperature every request sends; ``None`` sends none."""
 
     def __init__(
         self,
         *,
-        provider: OpenAICompat,
+        name: str = "",
+        resources: ProviderSharedResources | None = None,
+        api_key: str = "",
+        base_url: str = "",
+    ) -> None:
+        self._name = name or self.section
+        self._owns_resources = resources is None
+        self._resources = SharedResources() if resources is None else resources
+        self._api_key = api_key
+        self._base_url = base_url
+        self._usage: tuple[UsageWindow, ...] = ()
+
+    @property
+    def name(self) -> str:
+        """Return the name the catalog knows this provider by."""
+        return self._name
+
+    @property
+    def resources(self) -> ProviderSharedResources:
+        """Return what this provider shares with others."""
+        return self._resources
+
+    @property
+    def usage(self) -> tuple[UsageWindow, ...]:
+        """Return the account's rate-limit windows, as last reported."""
+        return self._usage
+
+    def __getitem__(self, model: str) -> OpenAIModel:
+        capability, settings = self.models().resolve(model)
+        return OpenAIModel(provider=self, capability=capability, settings=settings)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.models())
+
+    @override
+    async def aclose(self) -> None:
+        if self._owns_resources:
+            await self._resources.aclose()
+
+    def models(self) -> ModelTable:
+        """Return the models this provider's catalog section serves."""
+        return models(self.package, document=self.document, section=self.section)
+
+    async def endpoint(self) -> str:
+        """Return the endpoint to reach, up to and including its version."""
+        return self._base_url or self.url
+
+    async def credentials(self) -> dict[str, str]:
+        """Return the headers that authenticate a request.
+
+        Returns:
+          headers: The bearer key; none for an endpoint that takes no key.
+
+        Raises:
+          AuthError: The key variable is named but not set.
+
+        """
+        key = self._api_key or os.environ.get(self.key_variable, "")
+        if key:
+            return {"authorization": f"Bearer {key}"}
+        if self.key_variable:
+            raise AuthError(f"{self.key_variable} is not set.")
+        return {}
+
+    async def reauthenticate(self) -> bool:
+        """Renew credentials after a 401; ``False`` when there are none to renew."""
+        return False
+
+    def headers(self, request: Request) -> dict[str, str]:
+        """Return the headers one request adds; none by default."""
+        del request
+        return {}
+
+    def answered(
+        self,
+        sent: Mapping[str, str],
+        received: Mapping[str, str],
+    ) -> None:
+        """Note what the server answered a request ``sent`` with; nothing by default."""
+        del sent, received
+
+    def encode(self, request: Request, *, model: OpenAIModel) -> dict[str, object]:
+        """Return the body that asks ``model`` the request.
+
+        Args:
+          request: What the model is asked.
+          model: The model asked, with its settings.
+
+        Returns:
+          body: The request body.
+
+        """
+        return chat.encode(
+            request,
+            capability=model.capability,
+            settings=model.settings,
+            reasoning_field=self.reasoning_field,
+            temperature=self.temperature,
+        )
+
+    def reader(self, *, model: OpenAIModel) -> Reader:
+        """Return what collects ``model``'s streamed reply."""
+        return chat.StreamReader(
+            capability=model.capability,
+            settings=model.settings,
+            reasoning_field=self.reasoning_field,
+        )
+
+    async def count(self, request: Request, *, model: OpenAIModel) -> int:
+        """Return an estimate of the tokens ``request`` would send ``model``."""
+        return token_count.estimate(request, capability=model.capability)
+
+    async def events(
+        self,
+        body: Mapping[str, object],
+        *,
+        headers: Mapping[str, str],
+    ) -> AsyncIterator[dict[str, object]]:
+        """Stream the reply to ``body``, retrying a short failure before the first event.
+
+        Args:
+          body: The request body.
+          headers: Headers beyond the credentials.
+
+        Yields:
+          event: Each server-sent event, as JSON.
+
+        Raises:
+          RetryableError: A failure after the first event, or before it with an
+            advised wait longer than 30 seconds, or after five attempts.
+
+        """
+        attempt = 0
+        while True:
+            started = False
+            try:
+                async with self._reply(
+                    self.path,
+                    body=body,
+                    headers={**headers, "accept": "text/event-stream"},
+                ) as response:
+                    async for event in wire.events(response.aiter_lines()):
+                        started = True
+                        yield event
+                return
+            except RetryableError as failure:
+                # Text the caller already showed cannot be taken back, and a
+                # long wait is the caller's to sit through or not.
+                if started or attempt == 4 or failure.retry_after_sec > 30.0:
+                    raise
+                await asyncio.sleep(max(failure.retry_after_sec, 0.5 * (1 << attempt)))
+                attempt += 1
+
+    async def reply(
+        self,
+        path: str,
+        *,
+        body: Mapping[str, object],
+        headers: Mapping[str, str],
+    ) -> dict[str, object]:
+        """POST ``body`` to ``path`` and return the JSON reply."""
+        async with self._reply(path, body=body, headers=headers) as response:
+            return json_loads(await response.aread(), dict[str, object])
+
+    @contextlib.asynccontextmanager
+    async def _reply(
+        self,
+        path: str,
+        *,
+        body: Mapping[str, object],
+        headers: Mapping[str, str],
+    ) -> AsyncGenerator[httpx2.Response]:
+        """Open the reply to ``body``, renewing the login once on a 401."""
+        renewable = True
+        try:
+            while True:
+                async with self.resources.http.stream(
+                    "POST",
+                    f"{(await self.endpoint()).rstrip('/')}{path}",
+                    content=json_dumps(body),
+                    headers={
+                        **await self.credentials(),
+                        **headers,
+                        "content-type": "application/json",
+                    },
+                ) as response:
+                    self._usage = wire.rate_limits(response.headers) or self._usage
+                    self.answered(headers, response.headers)
+                    if response.status_code == 401 and renewable:
+                        renewable = False
+                        if await self.reauthenticate():
+                            continue
+                    if response.status_code >= 400:
+                        text = (await response.aread()).decode(errors="replace")
+                        raise wire.to_exception(
+                            response.status_code,
+                            body=_error_body(text),
+                            headers=response.headers,
+                        )
+                    yield response
+                    return
+        except httpx2.TransportError as exc:
+            raise DisconnectedError(str(exc)) from exc
+
+
+class OpenAIModel(AsyncResource):
+    """One model, served by ``provider`` with ``settings``."""
+
+    def __init__(
+        self,
+        *,
+        provider: OpenAICompatible,
         capability: ModelCapability,
         settings: ModelSettings,
     ) -> None:
         self._provider = provider
         self._capability = capability
         self._settings = settings
-        # Per loop: an httpx2.AsyncClient holds a connection pool owned by
-        # the loop that opened it, and the guarding lock binds to the loop
-        # that first contends on it. Sharing either across loops raises
-        # "bound to a different event loop" or hangs a waiter.
-        self._clients: PerLoop[httpx2.AsyncClient | None] = PerLoop(lambda: None)
-        self._client_lock: PerLoop[asyncio.Lock] = PerLoop(asyncio.Lock)
-        self._last_usage: UsageSnapshot | None = None
 
     @property
-    @override
+    def provider(self) -> OpenAICompatible:
+        """Return the provider serving this model."""
+        return self._provider
+
+    @property
     def capability(self) -> ModelCapability:
-        """Return the model's capabilities on this transport.
-
-        Returns:
-          capability: Supported model settings, limits, and prices.
-
-        """
+        """Return every setting this model offers."""
         return self._capability
 
     @property
-    @override
     def settings(self) -> ModelSettings:
-        """Return the settings selected for this model instance.
-
-        Returns:
-          settings: Mutable selections validated against the model's capabilities.
-
-        """
+        """Return the settings chosen."""
         return self._settings
 
-    @override
-    def approx_text_tokens(self, text: str) -> int:
-        """Estimate text tokens using the model's local tokenizer.
+    @settings.setter
+    def settings(self, settings: ModelSettings) -> None:
+        """Choose ``settings``; raise unless the capability offers each choice."""
+        self._capability.check(settings)
+        self._settings = settings
+
+    async def count(self, request: Request) -> int:
+        """Return how many tokens ``request`` would send, exact where the server says."""
+        return await self.provider.count(request, model=self)
+
+    def attachment_tokens(self, attachment: Attachment) -> int:
+        """Return about how many tokens ``attachment`` adds, by OpenAI's formula."""
+        return token_count.attachment_tokens(attachment, capability=self.capability)
+
+    async def stream(self, request: Request) -> AsyncIterator[TextChunk | Response]:
+        """Yield the reply as it is written, then the finished ``Response``.
 
         Args:
-          text: Text to count, treating special-token spellings as ordinary text.
+          request: What the model is asked.
 
-        Returns:
-          tokens: Tokenizer count, or chars/4 when the tokenizer is unknown.
-
-        """
-        return token_count.approx_text_tokens(
-            text,
-            model_id=self._wire_model_id,
-            approx_chars_per_token=self.capability.approx_chars_per_token,
-        )
-
-    @override
-    def approx_image_tokens(self, data: bytes) -> int:
-        """Estimate image tokens with the model's patch or tile formula.
-
-        Args:
-          data: Encoded image bytes.
-
-        Returns:
-          tokens: Model-specific estimate, or zero when dimensions are unavailable.
+        Yields:
+          event: Each ``TextChunk`` as the model writes it, then one ``Response``.
 
         """
-        return token_count.approx_image_tokens(
-            data,
-            model_id=self._wire_model_id,
-            max_edge=self.limits.max_image_edge_px,
-        )
-
-    def is_context_overflow(self, error: Exception) -> bool:
-        """Classify token-context overflow separately from request-byte limits.
-
-        Args:
-          error: Provider exception to classify.
-
-        Returns:
-          overflow: Whether shortening the token context can address the error.
-
-        """
-        if is_request_too_large(error_status_code(error), str(error)):
-            return False
-        return is_context_overflow_text(str(error))
-
-    @property
-    def _wire_model_id(self) -> str:
-        """Return the untagged vendor model id sent on the wire."""
-        return base_model_id(
-            self.capability.wire_model_id or self.capability.model_id,
-        )
-
-    def _effective_service_tier(self) -> ServiceTier | None:
-        tier = self.settings.service_tier
-        return tier if tier != "auto" else None
-
-    async def _get_client(self) -> httpx2.AsyncClient:
-        """Return a reused ``AsyncClient`` (per-model). Lazy-created."""
-        client = self._clients.get()
-        if client is not None:
-            return client
-        async with self._client_lock.get():
-            client = self._clients.get()
-            if client is None:
-                client = httpx2.AsyncClient()
-                self._clients.set(client)
-            return client
-
-    @override
-    async def close(self) -> None:
-        """Close this loop's HTTP client.
-
-        This loop's only: a pool belongs to the loop that opened it, so
-        closing another loop's client from here breaks a pool that loop
-        is still using rather than releasing it.
-        """
-        client = self._clients.peek()
-        self._clients.clear()
-        if client is not None:
-            await client.aclose()
-
-    def _transform_body(
-        self,
-        body: dict[str, MutablePlainTree],
-        request: ModelRequest,
-    ) -> dict[str, MutablePlainTree]:
-        """Override: apply provider-specific request-body tweaks."""
-        del request
-        return body
-
-    @property
-    def _endpoint(self) -> str:
-        """Chat-completions URL for the wrapped provider."""
-        return f"{self._provider.base_url.rstrip('/')}/chat/completions"
-
-    @property
-    def _headers(self) -> dict[str, str]:
-        """Request headers (Authorization + JSON content-type)."""
-        return {
-            "Authorization": f"Bearer {self._provider.api_key}",
-            "Content-Type": "application/json",
-        }
-
-    def _build_body(
-        self,
-        request: ModelRequest,
-        *,
-        stream: bool,
-    ) -> dict[str, MutablePlainTree]:
-        """Build the chat-completions request body."""
-        body: dict[str, MutablePlainTree] = {
-            "model": self._wire_model_id,
-            "messages": [
-                *build_messages(
-                    request,
-                    self.limits.max_image_edge_px,
-                    self.limits.max_image_bytes,
-                    reasoning_field=self._reasoning_field,
-                ),
-            ],
-            "temperature": request.temperature,
-        }
-        if request.max_response_tokens is not None:
-            # Chat-completions reasoning rows (o-series and reasoning-capable
-            # vendors) reject ``max_tokens`` with a 400 and require
-            # ``max_completion_tokens``; a row offering an effort is one. A vendor
-            # whose ids differ rewrites the field in ``_transform_body``.
-            field = (
-                "max_completion_tokens"
-                if self.capability.thinking.effort != frozenset({"none"})
-                else "max_tokens"
-            )
-            body[field] = request.max_response_tokens
-        if stream:
-            body["stream"] = True
-            body["stream_options"] = {"include_usage": True}
-        if self.settings.thinking_effort != "none":
-            effort = self.settings.thinking_effort
-            body["reasoning_effort"] = (
-                "minimal"
-                if effort == "min"
-                else "high"
-                if effort in {"xhigh", "max"}
-                else effort
-            )
-        tier = self._effective_service_tier()
-        if tier is not None:
-            body["service_tier"] = tier
-        debug_log.trace(
-            "api_call",
-            kind="openai_chat",
-            model=self._wire_model_id,
-            service_tier=tier,
-        )
-        if request.tools:
-            body["tools"] = [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": t.name,
-                        "description": t.description,
-                        "parameters": mutable(t.directive_schema),
-                    },
-                }
-                for t in request.tools
-            ]
-        return self._transform_body(body, request)
-
-    @override
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        """Stream a chat-completions SSE response.
-
-        An asyncio watchdog resets on every delivered chunk so a server
-        that goes silent mid-stream trips ``asyncio.TimeoutError`` after
-        ``_STREAM_IDLE_TIMEOUT`` rather than hanging for the full HTTP
-        read deadline.
-
-        Args:
-          request: Fully-built model request.
-          publish: Called per streamed ``RuntimeEvent``; ``None`` disables
-              live streaming.
-
-        Returns:
-          response: Parsed ``ModelResponse``.
-
-        Raises:
-          PromptTooLongError: Server reports context overflow.
-
-        """
-        body = self._build_body(request, stream=True)
-        client = await self._get_client()
-        async with client.stream(
-            "POST",
-            self._endpoint,
-            json=body,
-            headers={**self._headers, "Accept": "text/event-stream"},
-            timeout=httpx2.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
-        ) as r:
-            if 400 <= r.status_code < 500:
-                err_body = (await r.aread()).decode(errors="replace")
-                raise_if_request_too_large(r.status_code, err_body)
-                if is_context_overflow_text(err_body):
-                    raise PromptTooLongError(err_body)
-                raise httpx2.HTTPStatusError(err_body, request=r.request, response=r)
-            r.raise_for_status()
-            self._last_usage = openai_usage(r.headers)
-            return await consume_stream(
-                r,
-                publish=publish,
-                model=self,
-                reasoning_field=self._reasoning_field,
-            )
-
-    @override
-    def usage_snapshot(self) -> UsageSnapshot | None:
-        """Return quota telemetry from the latest response headers.
-
-        Returns:
-          usage: Normalized quota windows, or None when unavailable.
-
-        """
-        return self._last_usage
-
-
-class OpenAICompat:
-    """Base provider for OpenAI chat-completions compatible endpoints."""
-
-    ENV_VAR: ClassVar[str] = ""
-    BASE_URL: ClassVar[str] = ""
-    catalog = ModelCatalog(models=ModelTable(rows=()), transport=compatible())
-
-    MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = OpenAICompatModel
-
-    def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
-        self.api_key = api_key
-        self.base_url = base_url or self.BASE_URL
-
-    @classmethod
-    def from_key(cls, api_key: str, *, base_url: str | None = None) -> Self:
-        """Build provider from an API key.
-
-        Args:
-          api_key: API key for the chat-completions endpoint.
-          base_url: Override for the provider's ``BASE_URL``.
-
-        Returns:
-          provider: Configured provider instance.
-
-        """
-        return cls(api_key=api_key, base_url=base_url)
-
-    @classmethod
-    def from_env(cls, *, base_url: str | None = None) -> Self:
-        """Build provider from the class's ``ENV_VAR``.
-
-        Args:
-          base_url: Override for the provider's ``BASE_URL``.
-
-        Returns:
-          provider: Configured provider instance.
-
-        Raises:
-          RuntimeError: If the API key is not configured.
-
-        """
-        if not cls.ENV_VAR:
-            raise RuntimeError(f"{cls.__name__} has no ENV_VAR set.")
-        key = os.environ.get(cls.ENV_VAR, "")
-        if not key:
-            raise RuntimeError(f"{cls.__name__} API key not configured.")
-        return cls(api_key=key, base_url=base_url)
-
-    def model(
-        self,
-        model_id: str | None = None,
-    ) -> OpenAICompatModel:
-        """Create a model backend.
-
-        Args:
-          model_id: Catalog id with optional tags, or a role name.
-
-        Returns:
-          model: Chat-completions model backend.
-
-        Raises:
-          ValueError: If ``model_id`` is not in the catalog or requests an
-              unsupported context.
-
-        """
-        mid = model_id if model_id is not None else "default"
-        capability, settings = self.catalog.resolve(mid)
-        return self.MODEL_CLASS(
-            provider=self,
-            capability=capability,
-            settings=settings,
-        )
-
-    async def close_sdk(self) -> None:
-        """Do nothing: each model owns and closes its own client."""
-
-
-def build_messages(
-    request: ModelRequest,
-    max_image_dim: int = 0,
-    max_image_bytes: int = 0,
-    *,
-    reasoning_field: str = "",
-) -> list[dict[str, MutablePlainTree]]:
-    """Convert history entries to OpenAI chat-completions format.
-
-    Tool-result images can't ride inside a ``role=tool`` message under
-    chat completions; they're hoisted into a synthetic follow-up
-    ``role=user`` message. Consecutive tool result images batch into a
-    single such follow-up to preserve the "tool messages must be
-    contiguous" rule.
-
-    Args:
-      request: Model request with history and optional system prompt.
-      max_image_dim: Maximum image dimension (pixels); larger inputs are
-          resized before encoding.
-      max_image_bytes: Maximum image size in bytes after resize.
-      reasoning_field: Assistant-message field the vendor reads replayed
-          reasoning from; empty drops reasoning from the replay.
-
-    Returns:
-      messages: Chat-completions wire-format messages.
-
-    """
-    ids = IdRemapper("call_")
-    messages: list[dict[str, MutablePlainTree]] = []
-    pending_images: list[dict[str, MutablePlainTree]] = []
-    if request.system_text:
-        messages.append({"role": "system", "content": request.system_text})
-    for entry in request.messages:
-        if isinstance(entry, (AgentSendMessage, UserMessage)):
-            _flush_images(messages, pending_images)
-            messages.append(_build_user_message(entry, max_image_dim, max_image_bytes))
-        elif isinstance(entry, AssistantMessage):
-            _flush_images(messages, pending_images)
-            tool_calls_wire: list[dict[str, MutablePlainTree]] = [
-                {
-                    "id": ids.map(tc.id),
-                    "type": "function",
-                    "function": {
-                        "name": tc.name,
-                        "arguments": json.dumps(dict(tc.args)),
-                    },
-                }
-                for tc in entry.tool_calls
-            ]
-            m: dict[str, MutablePlainTree] = {
-                "role": "assistant",
-                "content": entry.text or None,
-            }
-            reasoning = "".join(
-                str(block.get("text") or "")
-                for block in entry.thinking_blocks
-                if block.get("type") == "reasoning"
-            )
-            if reasoning_field and reasoning:
-                # Kimi/Qwen/MiniMax thinking models expect their own prior
-                # reasoning back on tool-call turns; omitting it degrades or
-                # rejects the continuation.
-                m[reasoning_field] = reasoning
-            if tool_calls_wire:
-                m["tool_calls"] = mutable(tool_calls_wire)
-            messages.append(m)
-        else:
-            # ToolResult: role=tool with text content; image attachments
-            # become a follow-up role=user message (chat-completions has
-            # no in-tool-message image support).
-            content = entry.content
-            if entry.is_error and content:
-                content = f"[Error] {content}"
-            messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": ids.map(entry.call_id),
-                    "content": content,
-                },
-            )
-            for att in entry.attachments:
-                if _is_image_mime(att.descriptor):
-                    raw, mime_type = image.resize(
-                        att.data,
-                        max_dim=max_image_dim,
-                        max_bytes=max_image_bytes,
-                    )
-                    b64 = base64.b64encode(raw).decode()
-                    pending_images.append(
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:{mime_type};base64,{b64}"},
-                        },
-                    )
-                else:
-                    _warn_skipped_attachment(att.descriptor)
-    _flush_images(messages, pending_images)
-    return messages
-
-
-def _flush_images(
-    messages: list[dict[str, MutablePlainTree]],
-    pending: list[dict[str, MutablePlainTree]],
-) -> None:
-    """Emit buffered image blocks as a synthetic user message, then clear."""
-    if pending:
-        messages.append({"role": "user", "content": list(pending)})
-        pending.clear()
-
-
-def _build_user_message(
-    entry: AgentSendMessage | UserMessage,
-    max_image_dim: int,
-    max_image_bytes: int,
-) -> dict[str, MutablePlainTree]:
-    """Build a chat-completions user message from a UserMessage."""
-    image_atts = [att for att in entry.attachments if _is_image_mime(att.descriptor)]
-    non_image_atts = [
-        att for att in entry.attachments if not _is_image_mime(att.descriptor)
-    ]
-    for att in non_image_atts:
-        _warn_skipped_attachment(att.descriptor)
-    if not image_atts:
-        return {"role": "user", "content": entry.text}
-    blocks: list[dict[str, MutablePlainTree]] = []
-    for att in image_atts:
-        raw, mime = image.resize(
-            att.data,
-            max_dim=max_image_dim,
-            max_bytes=max_image_bytes,
-        )
-        b64 = base64.b64encode(raw).decode()
-        blocks.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": f"data:{mime};base64,{b64}"},
-            },
-        )
-    if entry.text:
-        blocks.append({"type": "text", "text": entry.text})
-    image_message: dict[str, MutablePlainTree] = {"role": "user", "content": [*blocks]}
-    return image_message
-
-
-def _is_image_mime(descriptor: str) -> bool:
-    """Check whether a type is an image content type (no descriptor registry needed)."""
-    return descriptor.startswith("image/")
-
-
-def _warn_skipped_attachment(descriptor: str) -> None:
-    logger.warning("OpenAI-compat: skipping non-image attachment (mime=%s)", descriptor)
-
-
-def _extract_usage(usage: dict[str, MutablePlainTree]) -> tuple[int, int, int, int]:
-    """Return total input, output, cache-read, and cache-write token counts."""
-    input_tokens = from_plain(usage.get("prompt_tokens"), int, default=0)
-    output_tokens = from_plain(usage.get("completion_tokens"), int, default=0)
-    raw_details = usage.get("prompt_tokens_details")
-    details = raw_details if isinstance(raw_details, dict) else {}
-    cache_read = from_plain(details.get("cached_tokens"), int, default=0)
-    cache_write = from_plain(details.get("cache_write_tokens"), int, default=0)
-    return input_tokens, output_tokens, cache_read, cache_write
-
-
-async def consume_stream(
-    r: httpx2.Response,
-    *,
-    publish: Callable[[RuntimeEvent], None] | None,
-    model: OpenAICompatModel,
-    reasoning_field: str,
-) -> ModelResponse:
-    """Parse an SSE stream into an assembled ``ModelResponse``.
-
-    Tool-call arguments are streamed as sparse per-index deltas; we
-    accumulate then json.loads at the end. ``reasoning_field`` (when
-    set) captures the provider's reasoning/thinking delta as a string.
-
-    Args:
-      r: Open streaming response from the provider.
-      publish: Called per streamed ``RuntimeEvent``; ``None`` disables
-          live streaming.
-      model: Active model, used to price the reported usage.
-      reasoning_field: Provider-specific reasoning-text field name,
-          or empty when the provider does not surface reasoning.
-
-    Returns:
-      response: Assembled ``ModelResponse`` with usage and cost filled in.
-
-    Raises:
-      OpenAIStreamError: The server sent an in-band error event.
-      StreamInterruptedError: The stream ended without ``[DONE]``.
-
-    """
-    text_parts: list[str] = []
-    thinking_parts: list[str] = []
-    tool_id: dict[int, str] = {}
-    tool_name: dict[int, str] = {}
-    tool_args: dict[int, list[str]] = {}
-    finish_reason: str | None = None
-    saw_refusal = False
-    message_id = ""
-    usage: dict[str, MutablePlainTree] = {}
-
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _STREAM_IDLE_TIMEOUT
-    saw_done = False
-    async with asyncio.timeout_at(deadline) as watchdog:
-        async for raw_line in r.aiter_lines():
-            watchdog.reschedule(loop.time() + _STREAM_IDLE_TIMEOUT)
-            line = raw_line.strip()
-            if not line or not line.startswith("data:"):
-                continue
-            data_str = line[len("data:") :].strip()
-            if data_str == "[DONE]":
-                saw_done = True
-                break
-            try:
-                event = json_loads(data_str, dict[str, object])
-            except (json.JSONDecodeError, ReadError):
-                continue
-            if "error" in event or event.get("object") == "error":
-                raise _stream_error(event)
-            if not message_id:
-                message_id = str(event.get("id") or "")
-            event_usage = event.get("usage")
-            if isinstance(event_usage, dict):
-                usage = cast(dict[str, MutablePlainTree], event_usage)
-            raw_choices = cast(
-                list[dict[str, MutablePlainTree]],
-                event.get("choices") or [],
-            )
-            if not raw_choices:
-                continue
-            choice = raw_choices[0]
-            fr = choice.get("finish_reason")
-            if isinstance(fr, str) and fr:
-                finish_reason = fr
-            delta = cast(dict[str, MutablePlainTree], choice.get("delta") or {})
-            content_chunk = delta.get("content")
-            if isinstance(content_chunk, str) and content_chunk:
-                text_parts.append(content_chunk)
-                if publish is not None:
-                    publish(ModelResponsePartial(content_chunk))
-            refusal_chunk = delta.get("refusal")
-            if isinstance(refusal_chunk, str) and refusal_chunk:
-                saw_refusal = True
-                text_parts.append(refusal_chunk)
-                if publish is not None:
-                    publish(ModelResponsePartial(refusal_chunk))
-            if reasoning_field:
-                think_chunk = delta.get(reasoning_field)
-                if isinstance(think_chunk, str) and think_chunk:
-                    thinking_parts.append(think_chunk)
-                    if publish is not None:
-                        publish(ModelResponseThinking(think_chunk))
-            for tc in cast(
-                list[dict[str, MutablePlainTree]],
-                delta.get("tool_calls") or [],
-            ):
-                idx_raw = tc.get("index")
-                idx = idx_raw if isinstance(idx_raw, int) else 0
-                tc_id = tc.get("id")
-                if isinstance(tc_id, str) and tc_id:
-                    tool_id[idx] = tc_id
-                func = cast(dict[str, MutablePlainTree], tc.get("function") or {})
-                name = func.get("name")
-                if isinstance(name, str) and name:
-                    tool_name[idx] = name
-                args_chunk = func.get("arguments")
-                if isinstance(args_chunk, str) and args_chunk:
-                    tool_args.setdefault(idx, []).append(args_chunk)
-
-    thinking_blocks: list[Mapping[str, object]] = []
-    if thinking_parts:
-        thinking_blocks.append(
-            {"type": "reasoning", "text": "".join(thinking_parts)},
-        )
-    tool_calls: list[ToolCall] = []
-    for idx in sorted(tool_id):
-        args_str = "".join(tool_args.get(idx, []))
-        tc_name = tool_name.get(idx, "")
-        tc_id = tool_id[idx]
-        args = _parse_tool_arguments(
-            args_str,
-            source="delta",
-            tool_name=tc_name,
-            call_id=tc_id,
-        )
-        tool_calls.append(
-            ToolCall(id=tc_id, name=tc_name, args=cast(Mapping[str, object], args)),
-        )
-    asst = AssistantMessage(
-        text="".join(text_parts),
-        thinking_blocks=tuple(thinking_blocks),
-        tool_calls=tuple(tool_calls),
-    )
-
-    total_input, output_tokens, cache_read, cache_write = _extract_usage(usage)
-    # OpenAI-compatible APIs report a cache-inclusive prompt total; store the
-    # non-cached remainder so ``TokenCount.input_tokens`` is disjoint from the
-    # cache pools (the convention the cost contract and consumers rely on).
-    input_tokens = max(0, total_input - cache_read - cache_write)
-    tokens = TokenCount(
-        request=input_tokens,
-        response=output_tokens,
-        cache_write=cache_write,
-        cache_read=cache_read,
-    )
-    if saw_refusal and finish_reason in (None, "stop"):
-        finish_reason = "content_filter"
-    response = ModelResponse(
-        message=asst,
-        tokens=tokens,
-        stop_reason=normalize_stop_reason(
-            finish_reason,
-            kind="openai",
-            has_tool_use=bool(tool_calls),
-        ),
-        message_id=message_id,
-        request_id=message_id,
-        spend=model.spend(tokens),
-    )
-    if not saw_done:
-        raise StreamInterruptedError(response)
-    return response
-
-
-def _stream_error(event: Mapping[str, object]) -> OpenAIStreamError:
-    """Classify an in-band SSE error event, flat or nested under ``error``."""
-    error = from_plain(event.get("error"), dict[str, object], default=None) or event
-    message = from_plain(error.get("message"), str, default=None) or "unknown error"
-    code = from_plain(error.get("code"), str, default="") or from_plain(
-        error.get("type"),
-        str,
-        default="",
-    )
-    details = ["OpenAI-compatible stream error"]
-    if code:
-        details.append(f"code={code}")
-    details.append(message)
-    return OpenAIStreamError(
-        ": ".join(details),
-        code=code,
-        param=from_plain(error.get("param"), str, default=None),
-    )
-
-
-def _parse_tool_arguments(
-    args_str: str,
-    *,
-    source: str,
-    tool_name: str,
-    call_id: str,
-) -> dict[str, MutablePlainTree]:
-    """Parse OpenAI-compatible tool arguments, preserving existing fallback."""
-    if not args_str:
-        logger.warning(
-            "OpenAI-compatible tool arguments were empty: source=%s tool=%s call_id=%s",
-            source,
-            tool_name,
-            call_id,
-        )
-        return {}
+        reader = self.provider.reader(model=self)
+        body = self.provider.encode(request, model=self)
+        headers = self.provider.headers(request)
+        async for event in self.provider.events(body, headers=headers):
+            chunk = reader.feed(event)
+            if chunk is not None:
+                yield chunk
+        yield reader.response()
+
+
+@cache
+def models(package: str, *, document: str, section: str) -> ModelTable:
+    """Return the models one section of a vendor's catalog document serves."""
+    return ModelTable.from_yaml(files(package) / document, provider=section)
+
+
+# A body cut short or not JSON at all is still an error of its status, so it is
+# classified by its text rather than failing to parse.
+def _error_body(text: str) -> object:
     try:
-        parsed = json_loads(args_str)
-    except json.JSONDecodeError:
-        logger.warning(
-            "OpenAI-compatible tool arguments were invalid JSON: "
-            "source=%s tool=%s call_id=%s chars=%d",
-            source,
-            tool_name,
-            call_id,
-            len(args_str),
-        )
-        return {}
-    if isinstance(parsed, dict):
-        return parsed
-    logger.warning(
-        "OpenAI-compatible tool arguments were not a JSON object: "
-        "source=%s tool=%s call_id=%s",
-        source,
-        tool_name,
-        call_id,
-    )
-    return {}
+        return json_loads(text)
+    except ValueError:
+        return text

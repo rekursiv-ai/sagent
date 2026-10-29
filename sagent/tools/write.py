@@ -1,156 +1,155 @@
-"""Write tool: create or overwrite files."""
+"""Write: create a file, or replace one the model has read.
+
+Typical usage example:
+
+  result = await Write().call(context, {"file_path": "notes.md", "content": "hi"})
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
+from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated
 
-import re
+import asyncio
+import os
+import uuid
 
-from treekle import immutable
-
-from sagent.agent.state import get_tool_state
-from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.tools.core import (
-    file_lock_key,
-    load_tool_description,
-    locked_file_write,
-    resolve_tool_path,
-)
-from sagent.tools.display import Toggle, Wrap
-from sagent.tools.tool_spec import CLI_SETTABLE
-from sagent.types.runtime import ToolResult
+from sagent.session.types import FileWriteResult, UncategorizedToolResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import parse, schema_of
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
+
+    from treekle import PlainTree
+
+    from sagent.tools.types import ToolContext
 
 
-# Matches the ``Wrote N bytes to PATH`` confirmation produced by ``_run``.
-_WRITE_OK_RE = re.compile(r"^Wrote (\d+) bytes to ")
+__all__ = [
+    "Write",
+    "write_file",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Write:
-    """Create or overwrite files."""
+    """Create a file, or replace one the model has read."""
+
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        file_path: Annotated[str, "Path to the file."]
+        content: Annotated[str, "File content to write."]
 
     name = "Write"
-    tool_id = "application/x-tool-write"
-    clearable_results = False
-    description = load_tool_description("Write")
-    directive_schema = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "file_path": {"type": "string", "description": "Path to the file."},
-                "content": {"type": "string", "description": "File content to write."},
-            },
-            "required": ["file_path", "content"],
-        },
+    description = (files(__package__) / "assets" / "write.md").read_text(
+        encoding="utf-8",
     )
+    schema = schema_of(Arguments)
 
-    output: Annotated[Toggle, CLI_SETTABLE] = "off"
-    """Whether the result body renders in the pane."""
+    display: ToolDisplay = field(default=ToolDisplay())
 
-    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Leading body rows kept."""
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``Write <path>``."""
+        return f"Write {arguments.get('file_path', '')}"
 
-    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return the file, so calls on one file run in order."""
+        return str(context.path(str(arguments.get("file_path", ""))).resolve())
 
-    output_max_width: Annotated[int, CLI_SETTABLE] = 0
-    """Cell width cap; ``0`` uses the pane width."""
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> FileWriteResult | UncategorizedToolResult:
+        """Write ``content`` to ``file_path``, keeping an existing file's mode.
 
-    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
-    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Serialize same-file Read/Edit/Write within a cohort.
-
-        Args:
-          args: Directive carrying ``file_path``.
-
-        Returns:
-          key: Canonical path, or ``None`` when no path was supplied.
-
-        """
-        path = resolve_tool_path(str(args.get("file_path", "")))
-        return file_lock_key(path) if path else None
-
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short label for this tool invocation.
+        An existing file must have been read first, and not changed since, so
+        the model never overwrites what it has not seen.
 
         Args:
-          args: Directive arguments destined for ``run``.
+          context: The calling agent's state.
+          arguments: ``file_path``, relative to ``context.cwd``, and its new
+            ``content``.
 
         Returns:
-          label: ``Write <basename>`` line shown before invocation.
+          result: What was written, or why not.
 
         """
-        file_path = str(args.get("file_path", ""))
-        fname = Path(file_path).name if file_path else "?"
-        return f"Write {fname}"
-
-    def prompt(self) -> str:
-        """Return supplemental prompt text for this tool.
-
-        Returns:
-          contribution: Empty string (no per-request prompt fragment).
-
-        """
-        return ""
-
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Write content to a file.
-
-        Args:
-          args: Directive with ``file_path`` and ``content`` keys.
-
-        Returns:
-          result: ``ToolResult`` carrying the byte-count confirmation or
-              the failure reason.
-
-        """
-        file_path = resolve_tool_path(str(args.get("file_path", "")))
-        content = str(args.get("content", ""))
-        # Shared registry with Edit: same path → same lock → a concurrent
-        # Edit and Write on the same file serialize against each other.
-        return await locked_file_write(file_path, lambda: self._run(file_path, content))
-
-    def _run(self, file_path: str, content: str) -> ToolResult:
-        """Run the write synchronously with stale-file and mode-preservation checks."""
-        p = Path(file_path)
-        if p.is_dir():
-            return ToolResult(
-                call_id="",
-                content=f"{file_path} is a directory, not a file.",
-                is_error=True,
-            )
-        state = get_tool_state()
-        file_mode: int | None = None
-        if p.exists():
-            error = state.enforce_read(file_path)
-            if error is not None:
-                return ToolResult(call_id="", content=error, is_error=True)
-            if state.check_stale(file_path):
-                return ToolResult(
-                    call_id="",
-                    content=(
-                        "File has been modified since read, either by the user, a"
-                        " linter, or another agent. Read it again before"
-                        " attempting to write it."
-                    ),
-                    is_error=True,
-                )
-            # Preserve the existing file's mode - atomic rename creates
-            # a fresh inode that would otherwise pick up umask defaults
-            # and silently flip e.g. ``0o600`` → ``0o644``.
-            file_mode = p.stat().st_mode & 0o777
-        data = content.encode("utf-8")
-        atomic_write_bytes(p, data, file_mode=file_mode)
-        state.mark_written(file_path)
-        return ToolResult(
-            call_id="",
-            content=f"Wrote {len(data)} bytes to {file_path}",
+        a = parse(arguments, Write.Arguments)
+        return await asyncio.to_thread(
+            _write,
+            context,
+            context.path(a.file_path),
+            a.content,
         )
+
+
+def write_file(path: Path, data: bytes) -> None:
+    """Replace ``path`` with ``data`` at once, keeping its mode.
+
+    A reader sees the old file or the new one, never part of either. The
+    parent directories are made as needed, and a symlink is written through.
+
+    Args:
+      path: The file to write.
+      data: Its new bytes.
+
+    """
+    # A dangling link too: replacing it would turn the link into a plain file.
+    if path.is_symlink():
+        path = path.resolve()
+    # A rename puts a new inode in place, which would otherwise take the
+    # umask's mode and turn a ``0o600`` file into ``0o644``.
+    mode = path.stat().st_mode & 0o777 if path.exists() else None
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        try:
+            if mode is not None:
+                os.fchmod(fd, mode)
+            view = memoryview(data)
+            while view:
+                view = view[os.write(fd, view) :]
+            # Synced before the rename, so a crash cannot leave an empty file.
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def _write(
+    context: ToolContext,
+    path: Path,
+    content: str,
+) -> FileWriteResult | UncategorizedToolResult:
+    """Write ``content`` to ``path`` if the model has seen what it replaces."""
+    if path.is_dir():
+        return _error(f"{path} is a directory, not a file.")
+    if path.exists() and path not in context.files:
+        return _error(f"{path} exists and has not been read. Read it first.")
+    if context.files.changed(path):
+        return _error(
+            f"{path} changed since it was read, by the user, a linter, or"
+            " another agent. Read it again before writing it.",
+        )
+    write_file(path, content.encode())
+    context.files.saw(path)
+    return FileWriteResult(call_id="", path=str(path), content=content)
+
+
+def _error(message: str) -> UncategorizedToolResult:
+    return UncategorizedToolResult(call_id="", content=message, is_error=True)

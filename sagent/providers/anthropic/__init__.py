@@ -1,1 +1,1 @@
-"""Anthropic provider family: transport modules and the model catalog."""
+"""Claude through the API, a subscription, or the claude CLI."""

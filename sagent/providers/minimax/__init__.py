@@ -1,1 +1,1 @@
-"""MiniMax provider family: transport modules and the model catalog."""
+"""MiniMax models, over Chat Completions."""

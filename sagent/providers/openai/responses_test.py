@@ -1,1298 +1,565 @@
-"""Responses transport regressions exercised at the HTTP boundary."""
+"""Tests for the Responses API translation: request bodies and streamed replies."""
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, field
-from types import MappingProxyType
-from typing import TYPE_CHECKING, cast
+from dataclasses import replace
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-import asyncio
-import base64
-import dataclasses
-import json
-import logging
-import os
+import io
 
-from treekle import from_plain, json_loads
+from PIL import Image
+from treekle import mutable
 
-import httpx2
-import openai
 import pytest
 
-from sagent.agent.retry import is_rate_limited, is_retryable
-from sagent.agent.session_io import _entry_from_json, _entry_to_json
-from sagent.catalog.openai import reasoning_effort
-from sagent.providers.lib.id_remap import IdRemapper
-from sagent.providers.openai.api import OpenAI
-from sagent.providers.openai.responses import (
-    _build_input,
-    _build_tool,
-    _build_tool_result_item,
-    _build_tools,
-    _build_user_item,
-    _consume_stream,
-    _OpenAIResponsesModel,
-    _parse_tool_arguments,
+from sagent.model.capability import ModelLimits, ModelSettings
+from sagent.model.cost import TokenCount
+from sagent.model.exceptions import (
+    DisconnectedError,
+    RateLimitedError,
+    RefusedError,
 )
-from sagent.types.capability import (
-    ModelCapability,
-    ModelSettings,
-)
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceKey,
-    TokenPrice,
-)
-from sagent.types.exceptions import UserFacingError
-from sagent.types.model import (
-    ModelRequest,
-    ModelResponse,
-    StreamInterruptedError,
-)
-from sagent.types.runtime import (
+from sagent.model.types import Request, TextChunk
+from sagent.providers.catalog import choose
+from sagent.providers.openai import responses, wire
+from sagent.providers.openai.compat import models
+from sagent.session.types import (
     AssistantMessage,
-    BytesMessage,
-    ModelResponseThinking,
-    RuntimeEvent,
+    Attachment,
+    ContextClear,
+    Thinking,
+    TokenUsage,
     ToolCall,
-    ToolResult,
+    UncategorizedToolResult,
     UserMessage,
 )
+from sagent.tools.read import Read
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from collections.abc import Mapping
 
-    from treekle import MutablePlainTree, PlainTree
-
-
-@dataclass(slots=True, kw_only=True)
-class _Wire:
-    requests: list[dict[str, object]] = field(default_factory=list)
-    paths: list[str] = field(default_factory=list)
-
-    async def send(self, request: httpx2.Request) -> httpx2.Response:
-        self.paths.append(request.url.path)
-        self.requests.append(json_loads(request.content, dict[str, object]))
-        if request.url.path != "/v1/responses":
-            return httpx2.Response(
-                404,
-                request=request,
-                json={"error": {"message": "Responses required"}},
-            )
-        return httpx2.Response(
-            200,
-            request=request,
-            headers={
-                "content-type": "text/event-stream",
-                "x-ratelimit-limit-requests": "100",
-                "x-ratelimit-remaining-requests": "25",
-                "x-ratelimit-reset-requests": "2ms",
-            },
-            content=_response_stream(),
-        )
+    from sagent.model.capability import ModelCapability
+    from sagent.model.cost import ServiceTier
 
 
-def _response_stream() -> bytes:
-    events: list[dict[str, MutablePlainTree]] = [
+def _model(name: str = "luna-6.0") -> tuple[ModelCapability, ModelSettings]:
+    table = models(
+        "sagent.providers.openai",
+        document="openai.yaml",
+        section="openai",
+    )
+    return table.resolve(name)
+
+
+def _png() -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (2, 2), "blue").save(out, format="PNG")
+    return out.getvalue()
+
+
+def _encode(
+    request: Request,
+    name: str = "luna-6.0",
+    **choices: object,
+) -> dict[str, object]:
+    capability, settings = _model(name)
+    for field, value in choices.items():
+        settings = choose(settings, field, value)
+    capability.check(settings)
+    return responses.encode(request, capability=capability, settings=settings)
+
+
+# ---- the request -------------------------------------------------------------
+
+
+def test_encode_sends_the_whole_conversation_statelessly() -> None:
+    capability, settings = _model()
+    settings = replace(settings, thinking_effort="none")
+    request = Request(
+        system=("Be terse.", "", "Mind the tests."),
+        records=(UserMessage(content="hi"),),
+    )
+    assert responses.encode(request, capability=capability, settings=settings) == {
+        "model": "gpt-6-luna",
+        "input": [{"role": "user", "content": "hi"}],
+        "instructions": "Be terse.\n\nMind the tests.",
+        "stream": True,
+        "store": False,
+        "reasoning": {"effort": "none"},
+        "max_output_tokens": 128_000,
+        "prompt_cache_key": wire.cache_key(request),
+    }
+
+
+def test_encode_asks_no_more_than_the_room_the_request_leaves() -> None:
+    body = _encode(Request(max_response_tokens=9_000))
+    assert body["max_output_tokens"] == 9_000
+
+
+def test_encode_renders_each_record_as_its_input_item() -> None:
+    png = _png()
+    url = wire.image_url(
+        Attachment(mime_descriptor="image/png", data=png),
+        limits=_model()[0].limits,
+    )
+    image = Attachment(mime_descriptor="image/png", data=png)
+    pdf = Attachment(mime_descriptor="application/pdf", data=b"%PDF")
+    records = (
+        ContextClear(
+            summary="Earlier: a bug.",
+            history=(UserMessage(content="look", attachments=(image, pdf)),),
+        ),
+        UserMessage(attachments=(image,)),
+        TokenUsage(),
+        Thinking(summary="Plan.", encrypted="sealed-1", extra={"reasoning_id": "rs_1"}),
+        Thinking(encrypted="sealed-2", extra={"reasoning_id": "rs_2"}),
+        # Another vendor's thinking, and thinking that was never sealed.
+        Thinking(content="Claude's", encrypted="signature"),
+        Thinking(summary="unsealed", extra={"reasoning_id": "rs_3"}),
+        Thinking(encrypted="sealed-3", extra={"reasoning_id": ""}),
+        AssistantMessage(content="Reading."),
+        AssistantMessage(content=""),
+        ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a.py"}),
+        ToolCall(call_id="toolu_b", name="Read", arguments={"file_path": "b.py"}),
+        UncategorizedToolResult(call_id="toolu_b", content="missing", is_error=True),
+        UncategorizedToolResult(
+            call_id="toolu_a",
+            content="x = 1",
+            attachments=(image, pdf),
+        ),
+        UncategorizedToolResult(call_id="toolu_c", attachments=(image,)),
+        UncategorizedToolResult(call_id="toolu_d", is_error=True),
+    )
+    assert _encode(Request(records=records))["input"] == [
+        {"role": "user", "content": "Earlier: a bug."},
         {
-            "type": "response.output_text.delta",
-            "delta": "OK",
-            "item_id": "msg_test",
-            "output_index": 0,
-            "content_index": 0,
-            "sequence_number": 0,
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "look"},
+                {"type": "input_image", "detail": "auto", "image_url": url},
+            ],
         },
         {
-            "type": "response.completed",
-            "sequence_number": 1,
-            "response": {
-                "id": "resp_test",
-                "object": "response",
-                "created_at": 0,
-                "model": "gpt-4o",
-                "status": "completed",
-                "output": [],
-                "usage": {
-                    "input_tokens": 12,
-                    "output_tokens": 2,
-                    "total_tokens": 14,
-                    "input_tokens_details": {"cached_tokens": 4},
-                    "output_tokens_details": {"reasoning_tokens": 0},
-                },
-            },
+            "role": "user",
+            "content": [{"type": "input_image", "detail": "auto", "image_url": url}],
+        },
+        {
+            "type": "reasoning",
+            "id": "rs_1",
+            "summary": [{"type": "summary_text", "text": "Plan."}],
+            "encrypted_content": "sealed-1",
+        },
+        {
+            "type": "reasoning",
+            "id": "rs_2",
+            "summary": [],
+            "encrypted_content": "sealed-2",
+        },
+        {"role": "assistant", "content": "Reading."},
+        {
+            "type": "function_call",
+            "id": "fc_0",
+            "call_id": "fc_0",
+            "name": "Read",
+            "arguments": '{"file_path": "a.py"}',
+            "status": "completed",
+        },
+        {
+            "type": "function_call",
+            "id": "fc_1",
+            "call_id": "fc_1",
+            "name": "Read",
+            "arguments": '{"file_path": "b.py"}',
+            "status": "completed",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "fc_1",
+            "output": "[Error] missing",
+            "status": "completed",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "fc_0",
+            "output": [
+                {"type": "input_text", "text": "x = 1"},
+                {"type": "input_image", "detail": "auto", "image_url": url},
+            ],
+            "status": "completed",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "fc_2",
+            "output": [{"type": "input_image", "detail": "auto", "image_url": url}],
+            "status": "completed",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "fc_3",
+            "output": "",
+            "status": "completed",
         },
     ]
-    return "".join(f"data: {json.dumps(event)}\n\n" for event in events).encode()
 
 
-@pytest.fixture
-def wire(monkeypatch: pytest.MonkeyPatch) -> _Wire:
-    return _patch_wire(monkeypatch)
+def test_encode_offers_the_tools_and_gates_which_may_be_called() -> None:
+    read = Read()
+    offered = {
+        "type": "function",
+        "name": "Read",
+        "description": read.description,
+        "parameters": mutable(read.schema),
+        "strict": False,
+    }
+    body = _encode(Request(tools=(read,)))
+    assert body["tools"] == [offered]
+    assert body["parallel_tool_calls"] is True
+    assert "tool_choice" not in body
+    assert _encode(Request(tools=(read,), allowed=frozenset({"Read", "Bash"})))[
+        "tool_choice"
+    ] == {
+        "type": "allowed_tools",
+        "mode": "auto",
+        "tools": [{"type": "function", "name": "Read"}],
+    }
+    assert _encode(Request(tools=(read,), allowed=frozenset()))["tool_choice"] == "none"
+    assert "tools" not in _encode(Request(allowed=frozenset({"Read"})))
 
 
-@pytest.fixture(scope="module")
-def openai_sdk_warm() -> None:
-    """Pay the SDK's per-process first-touch cost as module setup, not as a test.
-
-    ``import openai`` (~0.5s), the client's lazy ``.responses`` import (~0.3s),
-    and the first ``ResponseStreamEvent`` discriminated-union build (~0.4s) are
-    paid once per process. Without this fixture ``--durations`` bills all of it
-    to whichever SDK test happens to run first.
-    """
-    with pytest.MonkeyPatch.context() as monkeypatch:
-        _patch_wire(monkeypatch)
-        asyncio.run(_stream_once())
-
-
-def _patch_wire(monkeypatch: pytest.MonkeyPatch) -> _Wire:
-    result = _Wire()
-
-    async def send(
-        client: httpx2.AsyncClient,
-        request: httpx2.Request,
-        **_kwargs: object,
-    ) -> httpx2.Response:
-        del client
-        return await result.send(request)
-
-    monkeypatch.setattr(httpx2.AsyncClient, "send", send)
-    return result
+def test_encode_asks_for_reasoning_at_the_effort_chosen() -> None:
+    # ``none`` is said, not left out: left out, the model reasons at its default.
+    stopped = _encode(Request(), thinking_effort="none", thinking_output="text")
+    assert stopped["reasoning"] == {"effort": "none"}
+    assert "include" not in stopped
+    # A model that cannot reason is sent no reasoning at all.
+    assert "reasoning" not in _encode(Request(), "gpt-4.1")
+    assert _encode(Request())["reasoning"] == {
+        "effort": "medium",
+        "context": "all_turns",
+    }
+    body = _encode(Request(), thinking_effort="high", thinking_output="text")
+    assert body["reasoning"] == {
+        "effort": "high",
+        "summary": "auto",
+        "context": "all_turns",
+    }
+    assert body["include"] == ["reasoning.encrypted_content"]
+    # No summary unless one is to be shown, and only GPT-5.6 on reasons over every turn.
+    assert _encode(Request(), "gpt-5.5", thinking_effort="low")["reasoning"] == {
+        "effort": "low",
+    }
 
 
-async def _stream_once() -> None:
-    provider = OpenAI.from_key("test-key")
-    try:
-        await provider.model("gpt-4o").stream(
-            ModelRequest(messages=[UserMessage(text="hello")]),
-        )
-    finally:
-        await provider.close_sdk()
-
-
-@pytest.mark.usefixtures("openai_sdk_warm")
-@pytest.mark.anyio
-@pytest.mark.parametrize("model_id", ["gpt-4o", "gpt-6-astra"])
-async def test_api_stream_uses_responses_with_supported_knobs(
-    wire: _Wire,
-    model_id: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    log_path = tmp_path / "debug.jsonl"
-    monkeypatch.setenv("SAGENT_DEBUG", "1")
-    monkeypatch.setenv("SAGENT_DEBUG_LOG", str(log_path))
-    provider = OpenAI.from_key("test-key")
-    model = provider.model(model_id)
-    if model_id == "gpt-6-astra":
-        model.settings.thinking_effort = "high"
-    try:
-        response = await model.stream(
-            ModelRequest(
-                messages=[UserMessage(text="hello")],
-                tools=[_StubTool()],
-                max_response_tokens=123,
-                temperature=0.25,
-            ),
-        )
-    finally:
-        await provider.close_sdk()
-    assert response.message.text == "OK"
-    assert response.tokens.request == 8
-    assert response.tokens.cache_read == 4
-    assert wire.paths == ["/v1/responses"]
-    records = [
-        json_loads(line, dict[str, object])
-        for line in log_path.read_text().splitlines()
-    ]
-    assert any(
-        record.get("event") == "api_call"
-        and record.get("kind") == "openai_responses"
-        and record.get("model") == model_id
-        for record in records
+def test_encode_sends_the_tier_and_a_temperature_only_where_they_apply() -> None:
+    capability, settings = _model("gpt-4.1")
+    body = responses.encode(
+        Request(),
+        capability=capability,
+        settings=settings,
+        temperature=1.0,
     )
-    body = wire.requests[0]
-    assert body["max_output_tokens"] == 123
-    assert body["store"] is False
-    if model_id == "gpt-4o":
-        assert body["temperature"] == 0.25
-        assert "reasoning" not in body
-    else:
-        assert "temperature" not in body
-        assert from_plain(body["reasoning"], dict[str, object])["effort"] == "high"
-        assert body["include"] == ["reasoning.encrypted_content"]
-
-
-@pytest.mark.usefixtures("openai_sdk_warm")
-@pytest.mark.anyio
-async def test_api_responses_preserves_quota_headers(wire: _Wire) -> None:
-    provider = OpenAI.from_key("test-key")
-    model = provider.model("gpt-4o")
-    try:
-        await model.stream(ModelRequest(messages=[UserMessage(text="hello")]))
-        snapshot = model.usage_snapshot()
-    finally:
-        await provider.close_sdk()
-    assert wire.paths == ["/v1/responses"]
-    assert snapshot is not None
-    assert snapshot.windows[0].utilization == 0.75
-    assert snapshot.windows[0].resets_at is not None
-
-
-def test_responses_preserves_image_bearing_tool_results() -> None:
-    request = ModelRequest(
-        messages=[
-            AssistantMessage(
-                tool_calls=(ToolCall(id="foreign", name="Read", args={}),),
-            ),
-            ToolResult(
-                call_id="foreign",
-                content="image",
-                attachments=(BytesMessage(data=_TINY_PNG, descriptor="image/png"),),
-            ),
-        ],
+    assert body["temperature"] == 1.0
+    assert "service_tier" not in body
+    capability, settings = _model()
+    settings = replace(settings, service_tier="priority")
+    body = responses.encode(
+        Request(),
+        capability=capability,
+        settings=settings,
+        temperature=1.0,
     )
-    items = _build_input(request)
-    output = from_plain(items[-1], dict[str, object])["output"]
-    assert isinstance(output, list)
-    assert "data:image/" in json.dumps(output)
+    # A model that can reason rejects a temperature.
+    assert "temperature" not in body
+    assert body["service_tier"] == "priority"
+
+
+# ---- the reply ---------------------------------------------------------------
+
+
+def _reader(
+    name: str = "luna-6.0",
+    tier: ServiceTier = "auto",
+) -> responses.StreamReader:
+    capability, settings = _model(name)
+    settings = replace(settings, service_tier=tier)
+    return responses.StreamReader(capability=capability, settings=settings)
+
+
+def _completed(**response: object) -> dict[str, object]:
+    return {
+        "type": "response.completed",
+        "response": {"status": "completed", **response},
+    }
+
+
+def _done(index: int, item: Mapping[str, object]) -> dict[str, object]:
+    return {"type": "response.output_item.done", "output_index": index, "item": item}
+
+
+def test_feed_returns_the_text_and_reasoning_as_they_arrive() -> None:
+    reader = _reader()
+    assert reader.feed(
+        {"type": "response.output_text.delta", "delta": "Hi"},
+    ) == TextChunk(text="Hi")
+    for kind in (
+        "response.reasoning_summary_text.delta",
+        "response.reasoning_text.delta",
+    ):
+        assert reader.feed({"type": kind, "delta": "hmm"}) == TextChunk(
+            text="hmm",
+            thinking=True,
+        )
+    assert reader.feed({"type": "response.created"}) is None
+    assert reader.feed({"type": "response.output_text.done", "text": "Hi"}) is None
+
+
+def test_a_refusal_is_shown_once_whether_streamed_or_sent_whole() -> None:
+    reader = _reader()
+    streamed = {"type": "response.refusal.delta", "item_id": "msg_1", "delta": "No."}
+    assert reader.feed(streamed) == TextChunk(text="No.")
     assert (
-        from_plain(items[0], dict[str, object])["call_id"]
-        == from_plain(items[-1], dict[str, object])["call_id"]
+        reader.feed(
+            {"type": "response.refusal.done", "item_id": "msg_1", "refusal": "No."},
+        )
+        is None
+    )
+    whole = {"type": "response.refusal.done", "item_id": "msg_2", "refusal": "Never."}
+    assert reader.feed(whole) == TextChunk(text="Never.")
+
+
+def test_the_response_holds_each_finished_item_in_output_order() -> None:
+    reader = _reader()
+    reader.feed(
+        _done(
+            2,
+            {
+                "type": "function_call",
+                "call_id": "call_9",
+                "name": "Read",
+                "arguments": '{"file_path": "a"}',
+            },
+        ),
+    )
+    reader.feed(
+        _done(
+            1,
+            {
+                "type": "message",
+                "content": [
+                    {"type": "output_text", "text": "Reading "},
+                    {"type": "output_text", "text": "a."},
+                ],
+            },
+        ),
+    )
+    reader.feed(
+        _done(
+            0,
+            {
+                "type": "reasoning",
+                "id": "rs_7",
+                "summary": [
+                    {"type": "summary_text", "text": "First."},
+                    {"type": "summary_text", "text": "Then."},
+                ],
+                "content": [{"type": "reasoning_text", "text": "raw"}],
+                "encrypted_content": "sealed",
+            },
+        ),
+    )
+    reader.feed(
+        _done(
+            3,
+            {
+                "type": "function_call",
+                "call_id": "call_8",
+                "name": "Read",
+                "arguments": "{not json",
+            },
+        ),
+    )
+    reader.feed(_done(7, {"type": "function_call", "call_id": "call_7", "name": "Ls"}))
+    reader.feed(_done(4, {"type": "message", "content": []}))
+    reader.feed(_done(5, {"type": "reasoning", "id": "rs_8", "summary": []}))
+    reader.feed(_done(6, {"type": "web_search_call"}))
+    reader.feed(_completed(usage={"input_tokens": 10, "output_tokens": 4}))
+    response = reader.response()
+    assert response.records == (
+        Thinking(
+            content="raw",
+            summary="First.\n\nThen.",
+            encrypted="sealed",
+            extra={"reasoning_id": "rs_7"},
+        ),
+        AssistantMessage(content="Reading a."),
+        ToolCall(call_id="call_9", name="Read", arguments={"file_path": "a"}),
+        # Arguments that do not parse are none, so the tool reports the bad call.
+        ToolCall(call_id="call_8", name="Read", arguments={}),
+        ToolCall(call_id="call_7", name="Ls", arguments={}),
+    )
+    assert response.stop_reason == "tool_use"
+    sealed_only = _reader()
+    sealed_only.feed(
+        _done(0, {"type": "reasoning", "id": "rs_9", "encrypted_content": "s"}),
+    )
+    sealed_only.feed(_completed())
+    assert sealed_only.response().records == (
+        Thinking(encrypted="s", extra={"reasoning_id": "rs_9"}),
     )
 
 
-@pytest.mark.parametrize("model_id", ["gpt-5.4-pro", "gpt-5.5-pro"])
-def test_pro_catalog_has_only_supported_efforts(model_id: str) -> None:
-    assert OpenAI.from_key("test-key").model(
-        model_id,
-    ).capability.thinking.effort == frozenset({"medium", "high", "xhigh"})
+def test_the_tokens_split_the_cached_prompt_from_the_uncached() -> None:
+    reader = _reader()
+    usage = {
+        "input_tokens": 1_000,
+        "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 300},
+        "output_tokens": 50,
+    }
+    reader.feed(_completed(usage=usage))
+    tokens = reader.response().tokens
+    assert tokens == TokenCount(
+        request=100,
+        response=50,
+        cache_write=300,
+        cache_read=600,
+    )
 
 
 @pytest.mark.parametrize(
-    "model_id",
-    ["gpt-5.2", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"],
-)
-def test_earlier_gpt5_catalog_keeps_native_efforts(model_id: str) -> None:
-    model = OpenAI.from_key("test-key").model(model_id)
-    assert model.capability.thinking.effort == frozenset(
-        {"none", "low", "medium", "high", "xhigh"},
-    )
-    assert reasoning_effort("xhigh") == "xhigh"
-
-
-def _free_model() -> _OpenAIResponsesModel:
-    """Return a model whose every rate is zero -- cost is not what these assert."""
-    return _OpenAIResponsesModel(
-        provider=OpenAI.from_key("test-key"),
-        capability=ModelCapability(
-            prices=PriceCatalog(
-                {
-                    PriceKey("auto"): TokenPrice(
-                        request=0.0,
-                        response=0.0,
-                        cache_write=0.0,
-                        cache_write_1h=0.0,
-                        cache_read=0.0,
-                    ),
-                },
-            ),
-        ),
-        settings=ModelSettings(),
-    )
-
-
-def _priced_model() -> _OpenAIResponsesModel:
-    """$1/Mtok standard with the usual 1.25x cache write; flex at half."""
-    standard = TokenPrice(
-        request=1.0,
-        cache_write=1.25,
-        response=0.0,
-        cache_write_1h=0.0,
-        cache_read=0.0,
-    )
-    prices = PriceCatalog(
-        {
-            PriceKey("auto"): standard,
-            PriceKey("flex"): dataclasses.replace(
-                standard,
-                request=0.5,
-                cache_write=0.625,
-            ),
-        },
-    )
-    capability = ModelCapability(prices=prices, service_tier=prices.service_tiers)
-    return _OpenAIResponsesModel(
-        provider=OpenAI.from_key("test-key"),
-        capability=capability,
-        settings=ModelSettings(capability=capability),
-    )
-
-
-class _StubTool:
-    name: str = "Bash"
-    tool_id: str = "application/x-tool-bash"
-    description: str = "Run shell commands"
-    directive_schema: Mapping[str, PlainTree] = MappingProxyType({"type": "object"})
-    clearable_results: bool = False
-
-    def summary(self, args: Mapping[str, object]) -> str:
-        del args
-        return ""
-
-    def summary_result(self, result: ToolResult) -> str | None:
-        del result
-        return None
-
-    def prompt(self) -> str:
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        del args
-        return None
-
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        del args
-        return ToolResult(call_id="", content="")
-
-
-class _NeverYieldingStream:
-    """Responses stream that stays open forever unless the provider closes it."""
-
-    def __init__(self) -> None:
-        self.closed = False
-        self.entered = asyncio.Event()
-
-    def __aiter__(self) -> _NeverYieldingStream:
-        return self
-
-    async def __anext__(self) -> object:
-        self.entered.set()
-        await asyncio.Event().wait()
-        raise StopAsyncIteration
-
-    async def aclose(self) -> None:
-        self.closed = True
-
-
-class _DelayedStream:
-    """Responses stream that yields events slowly but within the idle budget."""
-
-    def __init__(self, events: list[object], *, delay_sec: float) -> None:
-        self._events = events
-        self._delay_sec = delay_sec
-
-    def __aiter__(self) -> _DelayedStream:
-        return self
-
-    async def __anext__(self) -> object:
-        if not self._events:
-            raise StopAsyncIteration
-        await asyncio.sleep(self._delay_sec)
-        return self._events.pop(0)
-
-
-class _TextDeltaEvent:
-    """Small stand-in for OpenAI's text-delta event class."""
-
-    def __init__(self, delta: str) -> None:
-        self.delta = delta
-
-
-class _ReasoningDeltaEvent:
-    """Small stand-in for OpenAI's reasoning-delta event classes."""
-
-    def __init__(self, delta: str) -> None:
-        self.delta = delta
-
-
-class _CompletedEvent:
-    """Small stand-in for OpenAI's completed event class."""
-
-    def __init__(self, response: object | None = None) -> None:
-        self.response = response or _CompletedResponse()
-
-
-class _CompletedResponse:
-    """Small stand-in for OpenAI's completed response payload."""
-
-    def __init__(
-        self,
-        usage: object | None = None,
-        *,
-        service_tier: str | None = None,
-    ) -> None:
-        self.id = "resp_123"
-        self.status = "completed"
-        self.usage = usage
-        self.service_tier = service_tier
-
-
-class _InputTokenDetails:
-    """SDK-shaped details object whose ``to_dict`` exposes new fields."""
-
-    def __init__(self, *, cached_tokens: int, cache_write_tokens: int) -> None:
-        self.cached_tokens = cached_tokens
-        self._cache_write_tokens = cache_write_tokens
-
-    def to_dict(self) -> dict[str, int]:
-        return {
-            "cached_tokens": self.cached_tokens,
-            "cache_write_tokens": self._cache_write_tokens,
-        }
-
-
-class _Usage:
-    def __init__(
-        self,
-        *,
-        input_tokens: int,
-        output_tokens: int,
-        cached_tokens: int = 0,
-        cache_write_tokens: int = 0,
-    ) -> None:
-        self.input_tokens = input_tokens
-        self.output_tokens = output_tokens
-        self.input_tokens_details = _InputTokenDetails(
-            cached_tokens=cached_tokens,
-            cache_write_tokens=cache_write_tokens,
-        )
-
-
-class _ResponseErrorEvent:
-    """Small stand-in for OpenAI's stream error event."""
-
-    code: str = "rate_limit"
-    message: str = "too many requests"
-    param: str = "input"
-
-
-class _FailedEvent:
-    """Small stand-in for OpenAI's failed terminal event."""
-
-    def __init__(self) -> None:
-        self.response = _FailedResponse()
-
-
-class _FailedResponse:
-    """Small stand-in for a failed OpenAI response payload."""
-
-    id: str = "resp_failed"
-    status: str = "failed"
-    error = type(
-        "Error",
-        (),
-        {"code": "server_error", "message": "backend failed"},
-    )()
-    incomplete_details: None = None
-
-
-class _IncompleteEvent:
-    """Small stand-in for OpenAI's incomplete terminal event."""
-
-    def __init__(self, reason: str = "max_output_tokens") -> None:
-        self.response = _IncompleteResponse(reason)
-
-
-class _IncompleteResponse:
-    """Small stand-in for an incomplete OpenAI response payload."""
-
-    id: str = "resp_incomplete"
-    status: str = "incomplete"
-    error: None = None
-
-    def __init__(self, reason: str) -> None:
-        self.incomplete_details = type("Incomplete", (), {"reason": reason})()
-
-
-class _ReasoningOutputItem:
-    type: str = "reasoning"
-
-    def to_dict(self, **_: object) -> dict[str, object]:
-        return {
-            "id": "rs_123",
-            "type": "reasoning",
-            "summary": [],
-            "encrypted_content": "encrypted-reasoning",
-            "status": "completed",
-        }
-
-
-class _ReasoningOutputDoneEvent:
-    def __init__(self) -> None:
-        self.item = _ReasoningOutputItem()
-
-
-class _RefusalDeltaEvent:
-    def __init__(self, delta: str) -> None:
-        self.delta = delta
-
-
-class _RefusalDoneEvent:
-    def __init__(self, refusal: str) -> None:
-        self.refusal = refusal
-
-
-def _stub_request_messages(
-    *items: UserMessage | AssistantMessage | ToolResult,
-) -> ModelRequest:
-    # The builders only iterate ``request.messages``; build a stand-in.
-    return ModelRequest(messages=list(items))
-
-
-def test_build_tool_shape() -> None:
-    out = _build_tool(_StubTool())
-    assert out["type"] == "function"
-    assert out["name"] == "Bash"
-    assert out.get("description") == "Run shell commands"
-    assert out["parameters"] == {"type": "object"}
-    assert out["strict"] is None
-
-
-def test_build_tools_list_passthrough() -> None:
-    out = _build_tools([_StubTool(), _StubTool()])
-    assert len(out) == 2
-    assert all(o["name"] == "Bash" for o in out)
-
-
-def _items_as_list(req: ModelRequest) -> list[Mapping[str, object]]:
-    """View the Responses-API TypedDict union output as a uniform mapping list."""
-    return list(_build_input(req))
-
-
-def test_build_input_user_message() -> None:
-    items = _items_as_list(_stub_request_messages(UserMessage(text="hello")))
-    assert items == [{"role": "user", "content": "hello"}]
-
-
-_TINY_PNG = base64.b64decode(
-    b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgAAIAAAUAAen"
-    b"63NgAAAAASUVORK5CYII=",
-)
-
-
-def test_build_input_preserves_user_image_attachment() -> None:
-    """User-side image attachments survive as Responses ``input_image`` blocks.
-
-    The subscription path historically dropped ``attachments`` because the
-    builder mapped ``UserMessage`` to a bare-string ``content``; vision turns
-    crossing the Codex backend silently regressed.
-    """
-    req = _stub_request_messages(
-        UserMessage(
-            text="what is this?",
-            attachments=(BytesMessage(data=_TINY_PNG, descriptor="image/png"),),
-        ),
-    )
-    items = _items_as_list(req)
-    assert len(items) == 1
-    content = items[0]["content"]
-    assert isinstance(content, list)
-    types = [b.get("type") for b in cast(list[Mapping[str, object]], content)]
-    assert types == ["input_text", "input_image"]
-    image_block = cast(list[Mapping[str, object]], content)[1]
-    image_url = str(image_block["image_url"])
-    assert image_url.startswith("data:image/")
-    assert ";base64," in image_url
-
-
-def test_build_user_item_text_only_keeps_bare_string_content() -> None:
-    """No attachments → no allocation overhead, simple ``content=str`` shape."""
-    item = _build_user_item(
-        UserMessage(text="hi"),
-        max_image_dim=2048,
-        max_image_bytes=20 * 1024 * 1024,
-    )
-    assert item == {"role": "user", "content": "hi"}
-
-
-def test_build_user_item_drops_non_image_attachment_with_warning(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """PDF + other non-image attachments are skipped with a warning.
-
-    The Responses API has no analogue of Anthropic's PDF block; opaque drop
-    would silently lose user intent, so the path logs each skipped descriptor.
-    """
-    with caplog.at_level(
-        "WARNING",
-        logger="sagent.providers.openai.responses",
-    ):
-        item = _build_user_item(
-            UserMessage(
-                text="see attached",
-                attachments=(BytesMessage(data=b"%PDF", descriptor="application/pdf"),),
-            ),
-            max_image_dim=2048,
-            max_image_bytes=20 * 1024 * 1024,
-        )
-    assert item == {"role": "user", "content": "see attached"}
-    assert any("application/pdf" in r.message for r in caplog.records)
-
-
-def test_build_input_assistant_text_and_tool_call() -> None:
-    asst = AssistantMessage(
-        text="thinking",
-        tool_calls=(ToolCall(id="ext-1", name="Bash", args={"cmd": "ls"}),),
-    )
-    items = _items_as_list(_stub_request_messages(asst))
-    assert items[0] == {"role": "assistant", "content": "thinking"}
-    call_item = items[1]
-    assert call_item["type"] == "function_call"
-    assert call_item["call_id"] == "fc_0"
-    assert call_item["id"] == "fc_0"
-    assert call_item["name"] == "Bash"
-    assert call_item["arguments"] == json.dumps({"cmd": "ls"})
-    assert call_item["status"] == "completed"
-
-
-def test_build_input_tool_result_pair_matches_call_id() -> None:
-    asst = AssistantMessage(tool_calls=(ToolCall(id="ext-1", name="N", args={}),))
-    res = ToolResult(call_id="ext-1", content="done")
-    items = _items_as_list(_stub_request_messages(asst, res))
-    out_item = items[-1]
-    assert out_item["type"] == "function_call_output"
-    assert out_item["call_id"] == "fc_0"
-    assert out_item["output"] == "done"
-    assert out_item["status"] == "completed"
-
-
-def test_build_tool_result_item_error_prefixes_marker() -> None:
-    res = ToolResult(call_id="cid", content="boom", is_error=True)
-    out = _build_tool_result_item(res, IdRemapper("fc_"))
-    assert out["output"] == "[Error] boom"
-
-
-def test_build_assistant_items_no_text_only_tool_calls() -> None:
-    """Empty assistant text + tool call → single function_call item."""
-    asst = AssistantMessage(tool_calls=(ToolCall(id="x", name="N", args={}),))
-    items = _items_as_list(_stub_request_messages(asst))
-    assert len(items) == 1
-    assert items[0]["type"] == "function_call"
-
-
-def test_build_assistant_items_replays_encrypted_reasoning() -> None:
-    reasoning: dict[str, object] = {
-        "id": "rs_123",
-        "type": "reasoning",
-        "summary": [],
-        "encrypted_content": "encrypted-reasoning",
-        "status": "completed",
-    }
-    asst = AssistantMessage(text="answer", thinking_blocks=(reasoning,))
-    items = _items_as_list(_stub_request_messages(asst))
-    assert items == [
-        reasoning,
-        {"role": "assistant", "content": "answer"},
-    ]
-
-
-def test_parse_tool_arguments_prefers_done_when_set() -> None:
-    out = _parse_tool_arguments(
-        delta_args='{"a": 1}',
-        done_args='{"b": 2}',
-        tool_name="N",
-        call_id="cid",
-    )
-    assert out == {"b": 2}
-
-
-def test_parse_tool_arguments_falls_back_to_delta() -> None:
-    out = _parse_tool_arguments(
-        delta_args='{"a": 1}',
-        done_args="",
-        tool_name="N",
-        call_id="cid",
-    )
-    assert out == {"a": 1}
-
-
-def test_parse_tool_arguments_both_empty_returns_empty_dict() -> None:
-    out = _parse_tool_arguments("", "", tool_name="N", call_id="cid")
-    assert out == {}
-
-
-def test_parse_tool_arguments_invalid_json_skipped() -> None:
-    out = _parse_tool_arguments(
-        delta_args="not json",
-        done_args='{"x": 1}',
-        tool_name="N",
-        call_id="cid",
-    )
-    assert out == {"x": 1}
-
-
-@pytest.mark.parametrize("done_args", ["[]", "null", "42", '"text"'])
-def test_parse_tool_arguments_non_object_keeps_delta(done_args: str) -> None:
-    assert _parse_tool_arguments(
-        '{"nested": {"items": [1, true, null]}}',
-        done_args,
-        tool_name="N",
-        call_id="cid",
-    ) == {"nested": {"items": [1, True, None]}}
-
-
-def test_parse_tool_arguments_done_empty_object_keeps_delta() -> None:
-    # ``done`` is parsed but falsy; truthy ``delta`` wins via ``if done``.
-    out = _parse_tool_arguments(
-        delta_args='{"a": 1}',
-        done_args="{}",
-        tool_name="N",
-        call_id="cid",
-    )
-    assert out == {"a": 1}
-
-
-class TestStreamIdleTimeout:
-    """Silent Responses streams must not make the runtime wait forever."""
-
-    @pytest.mark.anyio
-    async def test_silent_stream_times_out_and_closes(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        stream = _NeverYieldingStream()
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses._STREAM_IDLE_TIMEOUT",
-            0.01,
-        )
-
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(
-                _consume_stream(
-                    stream,
-                    model=_free_model(),
-                    publish=None,
-                ),
-                timeout=0.2,
-            )
-
-        assert stream.closed is True
-
-    @pytest.mark.anyio
-    async def test_stream_events_reschedule_idle_timeout(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses._STREAM_IDLE_TIMEOUT",
-            0.05,
-        )
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseTextDeltaEvent",
-            _TextDeltaEvent,
-        )
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseCompletedEvent",
-            _CompletedEvent,
-        )
-        stream = _DelayedStream(
-            [_TextDeltaEvent("he"), _TextDeltaEvent("llo"), _CompletedEvent()],
-            delay_sec=0.03,
-        )
-
-        response = await asyncio.wait_for(
-            _consume_stream(
-                stream,
-                model=_free_model(),
-                publish=None,
-            ),
-            timeout=0.2,
-        )
-
-        assert response.message.text == "hello"
-        assert response.message_id == "resp_123"
-
-    @pytest.mark.anyio
-    async def test_truncated_stream_raises_interrupted(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseTextDeltaEvent",
-            _TextDeltaEvent,
-        )
-        stream = _DelayedStream([_TextDeltaEvent("partial")], delay_sec=0.0)
-
-        with pytest.raises(StreamInterruptedError) as raised:
-            await _consume_stream(
-                stream,
-                model=_free_model(),
-                publish=None,
-            )
-
-        assert raised.value.response.message.text == "partial"
-        assert raised.value.response.stop_reason == "model_finished"
-
-    @pytest.mark.anyio
-    async def test_response_error_event_is_user_facing(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseErrorEvent",
-            _ResponseErrorEvent,
-        )
-        stream = _DelayedStream([_ResponseErrorEvent()], delay_sec=0.0)
-
-        with pytest.raises(UserFacingError) as raised:
-            await _consume_stream(
-                stream,
-                model=_free_model(),
-                publish=None,
-            )
-
-        msg = str(raised.value)
-        assert "too many requests" in msg
-        assert "code=rate_limit" in msg
-        assert "param=input" in msg
-        model = OpenAI.from_key("test-key").model("sol-5.6")
-        assert is_retryable(raised.value, model) is True
-        assert is_rate_limited(raised.value) is True
-
-    @pytest.mark.anyio
-    async def test_error_event_closes_stream(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """A mid-stream error event must close the stream before propagating.
-
-        ``ResponseErrorEvent``/``ResponseFailedEvent`` raise from inside the
-        ``async for``; if the only cleanup is the cancellation/timeout ``except``
-        plus the not-completed fallthrough, the raised error skips both and the
-        SSE connection leaks. The stream must be closed on EVERY non-completed
-        exit.
-        """
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseErrorEvent",
-            _ResponseErrorEvent,
-        )
-
-        class _ClosableStream:
-            def __init__(self, events: list[object]) -> None:
-                self._events = events
-                self.closed = False
-
-            def __aiter__(self) -> _ClosableStream:
-                return self
-
-            async def __anext__(self) -> object:
-                if not self._events:
-                    raise StopAsyncIteration
-                return self._events.pop(0)
-
-            async def aclose(self) -> None:
-                self.closed = True
-
-        stream = _ClosableStream([_ResponseErrorEvent()])
-        with pytest.raises(UserFacingError):
-            await _consume_stream(stream, model=_free_model(), publish=None)
-        assert stream.closed, "error-event path leaked the stream (aclose never called)"
-
-    @pytest.mark.anyio
-    async def test_response_failed_event_is_user_facing(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseFailedEvent",
-            _FailedEvent,
-        )
-        stream = _DelayedStream([_FailedEvent()], delay_sec=0.0)
-
-        with pytest.raises(UserFacingError) as raised:
-            await _consume_stream(
-                stream,
-                model=_free_model(),
-                publish=None,
-            )
-
-        msg = str(raised.value)
-        assert "status=failed" in msg
-        assert "response_id=resp_failed" in msg
-        assert "code=server_error" in msg
-        assert "backend failed" in msg
-        model = OpenAI.from_key("test-key").model("sol-5.6")
-        assert is_retryable(raised.value, model) is True
-
-    @pytest.mark.anyio
-    async def test_response_incomplete_event_returns_partial_length_response(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseTextDeltaEvent",
-            _TextDeltaEvent,
-        )
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseIncompleteEvent",
-            _IncompleteEvent,
-        )
-        stream = _DelayedStream(
-            [_TextDeltaEvent("partial answer"), _IncompleteEvent()],
-            delay_sec=0.0,
-        )
-
-        response = await _consume_stream(
-            stream,
-            model=_free_model(),
-            publish=None,
-        )
-
-        assert response.message.text == "partial answer"
-        assert response.message_id == "resp_incomplete"
-        assert response.stop_reason == "max_tokens"
-
-    @pytest.mark.anyio
-    async def test_response_incomplete_content_filter_is_refusal(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseTextDeltaEvent",
-            _TextDeltaEvent,
-        )
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseIncompleteEvent",
-            _IncompleteEvent,
-        )
-        stream = _DelayedStream(
-            [_TextDeltaEvent("partial answer"), _IncompleteEvent("content_filter")],
-            delay_sec=0.0,
-        )
-
-        response = await _consume_stream(
-            stream,
-            model=_free_model(),
-            publish=None,
-        )
-
-        assert response.message.text == "partial answer"
-        assert response.stop_reason == "model_refusal"
-
-    @pytest.mark.anyio
-    async def test_completed_usage_tracks_and_bills_cache_write_tokens(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseCompletedEvent",
-            _CompletedEvent,
-        )
-        event = _CompletedEvent(
-            _CompletedResponse(
-                _Usage(
-                    input_tokens=1309,
-                    output_tokens=2,
-                    cache_write_tokens=1306,
-                ),
-            ),
-        )
-        response = await _consume_stream(
-            _DelayedStream([event], delay_sec=0.0),
-            model=_priced_model(),
-            publish=None,
-        )
-        assert response.tokens.request == 3
-        assert response.tokens.cache_write == 1306
-        assert (
-            response.spend.request
-            + response.spend.cache_write
-            + response.spend.cache_read
-        ) == pytest.approx((3 + 1306 * 1.25) / 1_000_000)
-
-    @pytest.mark.anyio
-    @pytest.mark.parametrize(("served", "rate"), [("flex", 0.5), ("default", 1.0)])
-    async def test_completed_usage_bills_the_tier_the_server_served(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        served: str,
-        rate: float,
-    ) -> None:
-        """A flex request the server served at standard bills standard."""
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseCompletedEvent",
-            _CompletedEvent,
-        )
-        event = _CompletedEvent(
-            _CompletedResponse(
-                _Usage(input_tokens=1_000_000, output_tokens=0),
-                service_tier=served,
-            ),
-        )
-        model = _priced_model()
-        model.settings.service_tier = "flex"
-        response = await _consume_stream(
-            _DelayedStream([event], delay_sec=0.0),
-            model=model,
-            publish=None,
-        )
-        assert response.spend.request == pytest.approx(rate)
-
-    @pytest.mark.anyio
-    @pytest.mark.parametrize(
-        ("served", "warning"),
-        [
-            ("scale", None),
-            ("tier-from-the-future", "unknown service_tier"),
-            ("priority", "has no price"),
-        ],
-    )
-    async def test_a_completed_response_survives_a_tier_it_cannot_price(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        caplog: pytest.LogCaptureFixture,
-        served: str,
-        warning: str | None,
-    ) -> None:
-        """Pricing may degrade; it may never discard a paid-for response."""
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseCompletedEvent",
-            _CompletedEvent,
-        )
-        event = _CompletedEvent(
-            _CompletedResponse(
-                _Usage(input_tokens=1_000_000, output_tokens=0),
-                service_tier=served,
-            ),
-        )
-        model = _priced_model()
-        model.settings.service_tier = "flex"
-        with caplog.at_level(logging.WARNING):
-            response = await _consume_stream(
-                _DelayedStream([event], delay_sec=0.0),
-                model=model,
-                publish=None,
-            )
-        assert response.message_id == "resp_123"
-        assert response.spend.request == pytest.approx(
-            1.0 if served == "scale" else 0.5,
-        )
-        if warning is not None:
-            assert warning in caplog.text
-
-    @pytest.mark.anyio
-    async def test_stream_preserves_and_replays_encrypted_reasoning(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseOutputItemDoneEvent",
-            _ReasoningOutputDoneEvent,
-        )
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseCompletedEvent",
-            _CompletedEvent,
-        )
-        response = await _consume_stream(
-            _DelayedStream(
-                [_ReasoningOutputDoneEvent(), _CompletedEvent()],
-                delay_sec=0.0,
-            ),
-            model=_priced_model(),
-            publish=None,
-        )
-        encrypted = next(
-            block
-            for block in response.message.thinking_blocks
-            if block.get("encrypted_content") == "encrypted-reasoning"
-        )
-        replay = _items_as_list(
-            ModelRequest(messages=[AssistantMessage(thinking_blocks=(encrypted,))]),
-        )
-        assert replay == [encrypted]
-
-    @pytest.mark.anyio
-    async def test_stream_preserves_refusal_without_duplication(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseRefusalDeltaEvent",
-            _RefusalDeltaEvent,
-        )
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseRefusalDoneEvent",
-            _RefusalDoneEvent,
-        )
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseCompletedEvent",
-            _CompletedEvent,
-        )
-        response = await _consume_stream(
-            _DelayedStream(
-                [
-                    _RefusalDeltaEvent("I can’t "),
-                    _RefusalDeltaEvent("help with that."),
-                    _RefusalDoneEvent("I can’t help with that."),
-                    _CompletedEvent(),
-                ],
-                delay_sec=0.0,
-            ),
-            model=_priced_model(),
-            publish=None,
-        )
-        assert response.message.text == "I can’t help with that."
-        assert response.stop_reason == "model_refusal"
-
-    @pytest.mark.anyio
-    async def test_stream_routes_reasoning_deltas_to_thinking(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseTextDeltaEvent",
-            _TextDeltaEvent,
-        )
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseReasoningTextDeltaEvent",
-            _ReasoningDeltaEvent,
-        )
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseReasoningSummaryTextDeltaEvent",
-            _ReasoningDeltaEvent,
-        )
-        monkeypatch.setattr(
-            "sagent.providers.openai.responses.responses.ResponseCompletedEvent",
-            _CompletedEvent,
-        )
-        thinking_chunks: list[str] = []
-
-        def _sink(ev: RuntimeEvent) -> None:
-            if isinstance(ev, ModelResponseThinking):
-                thinking_chunks.append(ev.text)
-
-        stream = _DelayedStream(
+    ("events", "stop_reason"),
+    [
+        ([_completed()], "end_turn"),
+        (
             [
-                _ReasoningDeltaEvent("think "),
-                _TextDeltaEvent("answer"),
-                _ReasoningDeltaEvent("more"),
-                _CompletedEvent(),
+                {
+                    "type": "response.incomplete",
+                    "response": {
+                        "status": "incomplete",
+                        "incomplete_details": {"reason": "max_output_tokens"},
+                    },
+                },
             ],
-            delay_sec=0.0,
-        )
-
-        response = await _consume_stream(
-            stream,
-            model=_priced_model(),
-            publish=_sink,
-        )
-
-        assert thinking_chunks == ["think ", "more"]
-        assert response.message.text == "answer"
-        assert response.message.thinking_blocks == (
-            {"type": "reasoning", "text": "think more"},
-        )
-
-    @pytest.mark.anyio
-    async def test_cancelled_stream_closes(self) -> None:
-        stream = _NeverYieldingStream()
-        task = asyncio.create_task(
-            _consume_stream(
-                stream,
-                model=_priced_model(),
-                publish=None,
-            ),
-        )
-        await asyncio.wait_for(stream.entered.wait(), timeout=0.2)
-
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-        assert stream.closed is True
-
-
-class _VerifyTool(_StubTool):
-    name = "verify"
-    description = "Verify the computed integer n."
-    directive_schema = MappingProxyType(
-        {
-            "type": "object",
-            "properties": {"n": {"type": "integer"}},
-            "required": ["n"],
-            "additionalProperties": False,
-        },
-    )
-
-
-@pytest.mark.network_openai
-@pytest.mark.anyio
-async def test_api_astra_reasoning_tool_roundtrip_and_legacy_replay() -> None:
-    if not os.environ.get("OPENAI_API_KEY", ""):
-        pytest.skip("OPENAI_API_KEY not set")
-    provider = OpenAI.from_env()
-    model = provider.model("gpt-6-astra")
-    model.settings.thinking_effort = "high"
-    user = UserMessage(
-        text="Find the smallest positive integer n with n mod 17=12, n mod 19=7, n mod 23=5. Compute it before calling verify(n). After verification, do not call tools again; report the result.",
-    )
-    try:
-        first = await _stream_with_retry(
-            model,
-            ModelRequest(
-                messages=[user],
-                tools=[_VerifyTool()],
-                max_response_tokens=2048,
-            ),
-        )
-        assert any(
-            isinstance(block.get("encrypted_content"), str)
-            and block["encrypted_content"]
-            for block in first.message.thinking_blocks
-        )
-        assert first.message.tool_calls
-        call = first.message.tool_calls[0]
-        assert call.name == "verify"
-        number = call.args["n"]
-        assert isinstance(number, int)
-        assert (number % 17, number % 19, number % 23) == (12, 7, 5)
-        restored = _entry_from_json(
-            json_loads(json.dumps(_entry_to_json(first.message)), dict[str, object]),
-        )
-        assert isinstance(restored, AssistantMessage)
-        assert restored == first.message
-        result = ToolResult(call_id=call.id, content="Verified successfully.")
-        for history in _replay_variants(restored):
-            response = await _stream_with_retry(
-                model,
-                ModelRequest(
-                    messages=[user, history, result],
-                    tools=[_VerifyTool()],
-                    max_response_tokens=2048,
+            "max_tokens",
+        ),
+        (
+            [
+                {
+                    "type": "response.incomplete",
+                    "response": {
+                        "status": "incomplete",
+                        "incomplete_details": {"reason": "content_filter"},
+                    },
+                },
+            ],
+            "refusal",
+        ),
+        (
+            [
+                _done(
+                    0,
+                    {
+                        "type": "message",
+                        "content": [{"type": "refusal", "refusal": "No."}],
+                    },
                 ),
-            )
-            assert response.message.text
-            assert not response.message.tool_calls
-            assert response.tokens.response > 0
-    finally:
-        await provider.close_sdk()
+                _completed(),
+            ],
+            "refusal",
+        ),
+    ],
+)
+def test_the_stop_reason_is_in_the_shared_vocabulary(
+    events: list[dict[str, object]],
+    stop_reason: str,
+) -> None:
+    reader = _reader()
+    for event in events:
+        reader.feed(event)
+    assert reader.response().stop_reason == stop_reason
 
 
-async def _stream_with_retry(
-    model: _OpenAIResponsesModel,
-    request: ModelRequest,
-    *,
-    max_attempts: int = 3,
-) -> ModelResponse:
-    """Retry ``model.stream`` on transient API timeouts."""
-    for attempt in range(1, max_attempts + 1):
-        try:
-            return await model.stream(request)
-        except openai.APITimeoutError:
-            if attempt == max_attempts:
-                raise
-            await asyncio.sleep(2.0**attempt)
-    raise AssertionError("unreachable")
-
-
-def _replay_variants(message: AssistantMessage) -> Iterator[AssistantMessage]:
-    yield message
-    yield dataclasses.replace(
-        message,
-        thinking_blocks=({"type": "reasoning", "text": "legacy reasoning"},),
+def test_a_refusal_is_kept_as_what_the_model_said() -> None:
+    reader = _reader()
+    reader.feed(
+        _done(
+            0,
+            {
+                "type": "message",
+                "content": [{"type": "refusal", "refusal": "I can't."}],
+            },
+        ),
     )
+    reader.feed(_completed())
+    assert reader.response().records == (AssistantMessage(content="I can't."),)
+
+
+def _cost(name: str, tokens: TokenCount, tier: ServiceTier) -> float:
+    price = _model(name)[0].prices[tier, tokens.prompt, datetime.now(UTC).date()]
+    return (price * tokens).total
+
+
+@pytest.mark.parametrize(
+    ("name", "asked", "served", "billed"),
+    [
+        ("luna-6.0", "auto", "priority", "priority"),
+        ("luna-6.0", "priority", "default", "auto"),
+        ("luna-6.0", "auto", "fast", "priority"),
+        ("luna-6.0", "flex", "brand-new-tier", "flex"),
+        # Served at a tier the model has no card for: billed as asked.
+        ("gpt-pro-5.5", "flex", "priority", "flex"),
+        ("luna-6.0", "flex", None, "auto"),
+    ],
+)
+def test_the_reply_is_priced_at_the_tier_served(
+    name: str,
+    asked: ServiceTier,
+    served: str | None,
+    billed: ServiceTier,
+) -> None:
+    reader = _reader(name, tier=asked)
+    usage = {"input_tokens": 1_000, "output_tokens": 1_000}
+    reader.feed(_completed(usage=usage, service_tier=served))
+    tokens = TokenCount(request=1_000, response=1_000)
+    assert reader.response().spend.total == _cost(name, tokens, billed)
+    assert _cost(name, tokens, billed) != _cost(
+        name,
+        tokens,
+        "auto" if billed != "auto" else "flex",
+    )
+
+
+def test_a_reply_that_never_finished_is_a_disconnect() -> None:
+    reader = _reader()
+    reader.feed({"type": "response.output_text.delta", "delta": "Hal"})
+    with pytest.raises(DisconnectedError):
+        reader.response()
+
+
+def test_a_failed_reply_or_error_event_raises_what_it_means() -> None:
+    failed = {
+        "type": "response.failed",
+        "response": {"error": {"code": "rate_limit_exceeded", "message": "Slow down."}},
+    }
+    with pytest.raises(RateLimitedError, match="Slow down"):
+        _reader().feed(failed)
+    error = {"type": "error", "code": "content_filter", "message": "Blocked."}
+    with pytest.raises(RefusedError, match="Blocked"):
+        _reader().feed(error)
+    with pytest.raises(RuntimeError, match="failed"):
+        _reader().feed({"type": "response.failed", "response": {"status": "failed"}})
+
+
+def test_a_model_of_unknown_reply_length_is_sent_no_cap() -> None:
+    capability, _ = _model()
+    capability = replace(capability, limits=ModelLimits())
+    body = responses.encode(
+        Request(),
+        capability=capability,
+        settings=capability.default,
+    )
+    assert "max_output_tokens" not in body
 
 
 if __name__ == "__main__":

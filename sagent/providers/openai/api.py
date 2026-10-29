@@ -1,116 +1,86 @@
-"""OpenAI API-key provider using the Responses API."""
+"""OpenAI models over the Responses API, billed to an API key.
+
+Typical usage example:
+
+  async with OpenAI() as openai:                # reads OPENAI_API_KEY
+      sol = openai["sol"]
+      await sol.count(request)                   # exact, from the server
+      async for event in sol.stream(request):    # TextChunk..., then Response
+          ...
+"""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Self
+from typing import TYPE_CHECKING, ClassVar, override
 
-import os
+from treekle import from_plain
 
-from sagent.catalog.loader import models
-from sagent.catalog.openai import api
-from sagent.catalog.table import ModelCatalog
-from sagent.providers.lib.perloop import PerLoop
-from sagent.providers.openai.responses import (
-    _STREAM_IDLE_TIMEOUT,
-    _OpenAIResponsesModel,
-)
+from sagent.providers.openai import responses
+from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
-    import httpx2
-    import openai as openai_sdk
-
-else:
-    from wrapt import lazy_import
-
-    httpx2 = lazy_import("httpx2")
-    openai_sdk = lazy_import("openai")
-
-__all__ = ["OpenAI"]
+    from sagent.model.types import Request
+    from sagent.providers.openai.compat import OpenAIModel, Reader
 
 
-class OpenAI:
-    """API-key authentication and loop-local OpenAI SDK ownership."""
+__all__ = [
+    "OpenAI",
+]
 
-    ENV_VAR: ClassVar[str] = "OPENAI_API_KEY"
-    BASE_URL: ClassVar[str] = "https://api.openai.com/v1"
-    catalog = ModelCatalog(models=models("openai"), transport=api())
 
-    def __init__(self, *, api_key: str, base_url: str | None = None) -> None:
-        self.api_key = api_key
-        self.base_url = base_url or self.BASE_URL
-        self._sdks: PerLoop[openai_sdk.AsyncOpenAI] = PerLoop(self._make_sdk)
+class OpenAI(OpenAICompatible):
+    """OpenAI's models, billed to the API key in ``OPENAI_API_KEY``.
 
-    @classmethod
-    def from_key(cls, api_key: str, *, base_url: str | None = None) -> Self:
-        """Construct a provider from an API key.
+    Args:
+      name: The name the catalog knows this provider by; the section by default.
+      resources: What this shares with other providers; ``None`` makes and
+        closes its own.
+      api_key: The key; empty reads ``OPENAI_API_KEY``.
+      base_url: The endpoint; empty uses OpenAI's.
 
-        Args:
-          api_key: OpenAI API key.
-          base_url: Optional Responses endpoint override.
+    """
 
-        Returns:
-          provider: Configured provider.
+    section: ClassVar[str] = "openai"
+    package: ClassVar[str] = "sagent.providers.openai"
+    document: ClassVar[str] = "openai.yaml"
+    url: ClassVar[str] = "https://api.openai.com/v1"
+    key_variable: ClassVar[str] = "OPENAI_API_KEY"
+    path: ClassVar[str] = "/responses"
 
-        """
-        return cls(api_key=api_key, base_url=base_url)
-
-    @classmethod
-    def from_env(cls, *, base_url: str | None = None) -> Self:
-        """Construct a provider from OPENAI_API_KEY.
-
-        Args:
-          base_url: Optional Responses endpoint override.
-
-        Returns:
-          provider: Configured provider.
-
-        """
-        key = os.environ.get(cls.ENV_VAR, "")
-        if not key:
-            raise RuntimeError(f"{cls.__name__} API key not configured.")
-        return cls(api_key=key, base_url=base_url)
-
-    def model(self, model_id: str | None = None) -> _OpenAIResponsesModel:
-        """Resolve a catalog model or role to a Responses backend.
-
-        Args:
-          model_id: Model id, context-tagged id, or role.
-
-        Returns:
-          model: Configured Responses model.
-
-        """
-        capability, settings = self.catalog.resolve(
-            model_id if model_id is not None else "default",
-        )
-        return _OpenAIResponsesModel(
-            provider=self,
-            capability=capability,
-            settings=settings,
+    @override
+    def encode(self, request: Request, *, model: OpenAIModel) -> dict[str, object]:
+        return responses.encode(
+            request,
+            capability=model.capability,
+            settings=model.settings,
+            temperature=self.temperature,
         )
 
-    async def get_sdk(self) -> openai_sdk.AsyncOpenAI:
-        """Get this event loop's SDK client.
-
-        Returns:
-          sdk: Reusable client owned by this provider.
-
-        """
-        return self._sdks.get()
-
-    async def close_sdk(self) -> None:
-        """Close and release this loop's SDK without creating one."""
-        sdk = self._sdks.peek()
-        self._sdks.clear()
-        if sdk is not None:
-            await sdk.close()
-
-    def _make_sdk(self) -> openai_sdk.AsyncOpenAI:
-        return openai_sdk.AsyncOpenAI(
-            api_key=self.api_key,
-            base_url=self.base_url,
-            max_retries=0,
-            # The SDK's 5s connect default fails on one Wi-Fi stall.
-            timeout=httpx2.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
+    @override
+    def reader(self, *, model: OpenAIModel) -> Reader:
+        return responses.StreamReader(
+            capability=model.capability,
+            settings=model.settings,
         )
+
+    @override
+    async def count(self, request: Request, *, model: OpenAIModel) -> int:
+        """Return the tokens ``request`` would send ``model``, as the server counts them."""
+        body = self.encode(request, model=model)
+        # ``input_tokens`` rejects the generation knobs it has no use for.
+        counted = {
+            "model",
+            "input",
+            "instructions",
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "reasoning",
+        }
+        reply = await self.reply(
+            "/responses/input_tokens",
+            body={key: value for key, value in body.items() if key in counted},
+            headers=self.headers(request),
+        )
+        return from_plain(reply.get("input_tokens"), int)

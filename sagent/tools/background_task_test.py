@@ -1,837 +1,349 @@
-"""Tests for ``tools.background_task``: bash-style job control surface."""
+"""Tests for background-job control keys and the BackgroundTask tool."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, cast, override
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
-import asyncio
-import contextlib
-import json
+import re
 import time
 
-from treekle import immutable
+from treekle import PlainTree, from_plain
 
 import pytest
 
-from sagent.agent.agent import Agent
-from sagent.agent.background import (
-    BackgroundAwareTool,
-    BackgroundTaskEntry,
-)
-from sagent.agent.state import agent_registry, current_agent_var
-from sagent.testing import FakeAgent, MockModelCaps, with_fake_agent
+from sagent.session.types import AnyToolResult, ToolCall, UncategorizedToolResult
 from sagent.tools.background_task import (
     BackgroundTask,
-    cancel_persistent_subagent,
+    Offered,
+    background_delay,
+    backgroundable,
+    offered,
+    without_controls,
 )
-from sagent.types.model import (
-    ModelRecipe,
-    ModelRequest,
-    ModelResponse,
-)
-from sagent.types.runtime import (
-    RUNNING_PREFIX,
-    AssistantMessage,
-    DetachedResult,
-    RuntimeEvent,
-    ToolCall,
-    ToolResult,
-    ToolResultKind,
-)
-from sagent.types.tape import ContextSplice
+from sagent.tools.display import DisplaySpec, ToolDisplay
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from sagent.runtime.types import Job
+    from sagent.tools.types import Tool
 
 
-class _PersistentChild(FakeAgent):
-    def __init__(self) -> None:
-        super().__init__()
-        self.shutdown_calls: list[bool] = []
+@dataclass(slots=True, kw_only=True)
+class Echo:
+    """A tool that says its arguments back."""
 
-    @override
-    def shutdown(self, *, force: bool = False) -> None:
-        self.shutdown_calls.append(force)
-
-
-class _StubModel(MockModelCaps):
-    model_id: str = "stub"
-    max_request_tokens: int = 100_000
-
-    async def buffer(self, request: ModelRequest) -> ModelResponse:
-        return await self.stream(request)
-
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        del request, publish
-        return ModelResponse(message=AssistantMessage(text="ok"))
-
-
-class _RecordingAgent(Agent):
-    def __init__(self, *, session_dir: Path | None = None) -> None:
-        super().__init__(
-            model=_StubModel(),
-            model_recipe=ModelRecipe(
-                provider="OpenAISubscription",
-                auth="credentials",
-                model_id="stub",
-                account="default",
-            ),
-            tools=[],
-            session_dir=session_dir,
-        )
-        self.shutdown_calls: list[bool] = []
-
-    @override
-    def shutdown(self, *, force: bool = False) -> None:
-        self.shutdown_calls.append(force)
-
-
-class _DummyInner:
-    name: str = "Dummy"
-    tool_id: str = "application/x-tool-dummy"
-    description: str = "dummy"
-    clearable_results: bool = False
-    directive_schema = immutable(
-        {
+    name: str = "Echo"
+    description: str = "Say it back."
+    schema: Mapping[str, PlainTree] = field(
+        default_factory=lambda: {
             "type": "object",
-            "properties": {"x": {"type": "string"}},
-            "required": ["x"],
+            "properties": {"text": {"type": "string"}},
+            "required": ["text"],
         },
     )
+    display: ToolDisplay = field(
+        default_factory=lambda: ToolDisplay(output=DisplaySpec()),
+    )
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        return f"Dummy {args.get('x', '')}"
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        return f"Echo {sorted(arguments)}"
 
-    def summary_result(self, result: ToolResult) -> str | None:
-        del result
-        return "ok"
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        return f"{context.cwd}:" + ",".join(sorted(arguments))
 
-    def prompt(self) -> str:
-        return "dummy-prompt"
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        del args
-        return None
-
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        return ToolResult(call_id="", content=str(args.get("x", "")))
-
-
-def test_aware_injects_background_and_delay_into_schema() -> None:
-    wrapped = BackgroundAwareTool(_DummyInner())
-    schema = wrapped.directive_schema
-    props = schema["properties"]
-    assert isinstance(props, Mapping)
-    assert "background" in props
-    assert "delay" in props
-    # Original properties survive.
-    assert "x" in props
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> AnyToolResult:
+        return UncategorizedToolResult(
+            call_id="",
+            content=f"{context.cwd}: {sorted(arguments)}",
+        )
 
 
-def test_aware_preserves_metadata_and_delegates() -> None:
-    inner = _DummyInner()
-    wrapped = BackgroundAwareTool(inner)
-    assert wrapped.name == "Dummy"
-    assert wrapped.tool_id == "application/x-tool-dummy"
-    assert wrapped.description == "dummy"
-    assert wrapped.summary({"x": "hi"}) == "Dummy hi"
-    assert wrapped.prompt() == "dummy-prompt"
+@dataclass(slots=True, kw_only=True)
+class FakeJob:
+    """A job as the runtime lists it."""
+
+    call: ToolCall
+    started: float
+    state: Literal["running", "sleeping", "detached"]
+    cancelled: list[bool] = field(default_factory=list)
+
+    def cancel(self) -> None:
+        self.cancelled.append(True)
 
 
-def test_aware_schema_without_properties_injects_background_fields() -> None:
-    """B1: ``type: object`` without ``properties`` still gets BG fields.
+@dataclass(slots=True, kw_only=True)
+class FakeTable:
+    """The runtime's jobs, and the result a foreground call would get."""
 
-    A wrapper that short-circuited to the unmerged schema in this
-    branch silently disabled backgrounding for any tool whose schema
-    declared no parameters.
-    """
+    listed: dict[str, FakeJob] = field(default_factory=dict)
+    results: dict[str, AnyToolResult] = field(default_factory=dict)
+    waited: list[str] = field(default_factory=list)
 
-    class NoProps:
-        name: str = "NP"
-        tool_id: str = "application/x-tool-np"
-        description: str = ""
-        clearable_results: bool = False
-        directive_schema = immutable({"type": "object"})
+    @property
+    def jobs(self) -> Mapping[str, Job]:
+        return self.listed
 
-        def summary(self, args: Mapping[str, object]) -> str:
-            del args
-            return "np"
-
-        def summary_result(self, result: ToolResult) -> str | None:
-            del result
-            return None
-
-        def prompt(self) -> str:
-            return ""
-
-        def serialize_key(self, args: Mapping[str, object]) -> str | None:
-            del args
-            return None
-
-        async def run(self, args: Mapping[str, object]) -> ToolResult:
-            del args
-            return ToolResult(call_id="", content="")
-
-    wrapped = BackgroundAwareTool(NoProps())
-    props = cast(Mapping[str, object], wrapped.directive_schema["properties"])
-    assert "background" in props
-    assert "delay" in props
+    async def foreground(self, call_id: str) -> AnyToolResult | None:
+        self.waited.append(call_id)
+        return self.results.get(call_id)
 
 
-@pytest.mark.asyncio
-async def test_aware_run_forwards_to_inner() -> None:
-    wrapped = BackgroundAwareTool(_DummyInner())
-    r = await wrapped.run({"x": "hello"})
-    assert r.content == "hello"
-
-
-def test_metadata_basics() -> None:
-    t = BackgroundTask()
-    assert t.name == "BackgroundTask"
-    assert t.tool_id == "application/x-tool-backgroundtask"
-    assert "background:" in t.prompt()
-
-
-def test_summary_with_and_without_id() -> None:
-    t = BackgroundTask()
-    assert t.summary({"operation": "list"}) == "BackgroundTask list"
-    assert t.summary({"operation": "cancel", "id": "job-1"}) == (
-        "BackgroundTask cancel job-1"
+def _job(
+    name: str,
+    state: Literal["running", "sleeping", "detached"],
+    age: float,
+) -> FakeJob:
+    return FakeJob(
+        call=ToolCall(call_id="", name=name),
+        started=time.time() - age,
+        state=state,
     )
 
 
-# Uses ``asyncio.Future`` rather than ``asyncio.sleep`` so the autouse ``_fast_sleep``
-# patcher (in ``conftest.py``) can't make the body return early.
-async def _slow() -> ToolResult:
-    """Long-running task body for foreground tests."""
-    await asyncio.get_running_loop().create_future()
-    return ToolResult(call_id="", content="done")
+_CONTEXT = ToolContext(cwd=Path("/"))
+
+
+# --- Control keys ---------------------------------------------------------------
+
+
+def test_an_ordinary_tool_is_backgroundable() -> None:
+    assert backgroundable(Echo())
+
+
+@pytest.mark.parametrize("key", ["background", "delay"])
+def test_a_tool_owning_a_control_key_is_not(key: str) -> None:
+    assert not backgroundable(Echo(schema={"type": "object", "properties": {key: {}}}))
+
+
+def test_background_task_is_not_backgroundable() -> None:
+    assert not backgroundable(BackgroundTask())
+    assert offered(BackgroundTask()).schema is BackgroundTask.schema
+
+
+def test_a_schemaless_tool_is_backgroundable() -> None:
+    tool = Echo(schema={})
+    assert backgroundable(tool)
+    assert set(_properties(offered(tool))) == {"background", "delay"}
+
+
+def test_offered_adds_the_control_keys_and_keeps_the_rest() -> None:
+    tool = Echo()
+    shown = offered(tool)
+    assert isinstance(shown, Offered)
+    assert shown.schema["required"] == ["text"]
+    assert shown.schema["type"] == "object"
+    properties = _properties(shown)
+    assert properties["text"] == {"type": "string"}
+    assert properties["background"] == {
+        "type": "boolean",
+        "description": "Run in the background; the result arrives in a later message.",
+    }
+    assert properties["delay"] == {
+        "type": "number",
+        "minimum": 0,
+        "description": "Seconds to wait before running; implies background.",
+    }
+    assert _properties(tool) == {"text": {"type": "string"}}
+
+
+def test_a_tool_that_owns_a_key_is_offered_as_itself() -> None:
+    tool = Echo(schema={"type": "object", "properties": {"delay": {}}})
+    assert offered(tool) is tool
 
 
 @pytest.mark.asyncio
-async def test_run_no_agent_errors() -> None:
-    token = current_agent_var.set(None)
-    try:
-        t = BackgroundTask()
-        result = await t.run({"operation": "list"})
-    finally:
-        current_agent_var.reset(token)
-    assert result.is_error
-    assert "no active agent" in result.content
+async def test_offered_forwards_everything_without_the_control_keys() -> None:
+    tool = Echo()
+    shown = offered(tool)
+    arguments: dict[str, PlainTree] = {"text": "hi", "background": True, "delay": 2}
+    assert (shown.name, shown.description, shown.display) == (
+        tool.name,
+        tool.description,
+        tool.display,
+    )
+    assert shown.summary(arguments) == "Echo ['text']"
+    assert shown.serialize_key(_CONTEXT, arguments) == "/:text"
+    result = await shown.call(_CONTEXT, arguments)
+    assert result.text() == "/: ['text']"
 
 
-@pytest.mark.asyncio
-async def test_list_empty() -> None:
-    t = BackgroundTask()
-    with with_fake_agent():
-        result = await t.run({"operation": "list"})
-    assert result.content == "No background tasks."
+@pytest.mark.parametrize(
+    ("arguments", "delay"),
+    [
+        ({}, None),
+        ({"background": False}, None),
+        ({"delay": 0}, None),
+        ({"background": True}, 0.0),
+        ({"background": True, "delay": 0}, 0.0),
+        ({"delay": 2}, 2.0),
+        ({"delay": 0.5, "background": False}, 0.5),
+    ],
+)
+def test_background_delay(arguments: dict[str, PlainTree], delay: float | None) -> None:
+    assert background_delay(arguments) == delay
 
 
-@pytest.mark.asyncio
-async def test_list_filters_hidden_and_reports_phases() -> None:
-    t = BackgroundTask()
-    now = time.time()
-    with with_fake_agent() as agent:
-        # Build three tasks: one running, one delayed (sleeping), one hidden.
-        running_task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
-        sleeping_task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
-        hidden_task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
-        try:
-            agent.register_background(
-                "j-run",
-                BackgroundTaskEntry(
-                    task=running_task,
-                    tool_name="Dummy",
-                    queue_id="j-run",
-                    started=now,
-                ),
-            )
-            agent.register_background(
-                "j-sleep",
-                BackgroundTaskEntry(
-                    task=sleeping_task,
-                    tool_name="Dummy",
-                    queue_id="j-sleep",
-                    started=now,
-                    delay_sec=10_000.0,
-                ),
-            )
-            agent.register_background(
-                "j-hide",
-                BackgroundTaskEntry(
-                    task=hidden_task,
-                    tool_name="HiddenInfra",
-                    queue_id="j-hide",
-                    started=now,
-                    hidden=True,
-                ),
-            )
-            result = await t.run({"operation": "list"})
-        finally:
-            for task in (running_task, sleeping_task, hidden_task):
-                _ = task.cancel()
-    assert "j-run" in result.content
-    assert "j-sleep" in result.content
-    # Hidden infra jobs are filtered out.
-    assert "j-hide" not in result.content
-    assert "running" in result.content
-    assert "sleeping" in result.content
-
-
-@pytest.mark.asyncio
-async def test_list_reports_completed_and_cancelled() -> None:
-    t = BackgroundTask()
-
-    async def quick() -> ToolResult:
-        return ToolResult(call_id="", content="ok")
-
-    with with_fake_agent() as agent:
-        done_task: asyncio.Task[ToolResult] = asyncio.create_task(quick())
-        await done_task  # Let it finish.
-        cancelled_task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
-        # Cancel; await with suppression so .cancelled() flips before the
-        # tool inspects the task state.
-        _ = cancelled_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await cancelled_task
-        agent.register_background(
-            "j-done",
-            BackgroundTaskEntry(
-                task=done_task,
-                tool_name="Dummy",
-                queue_id="j-done",
-                started=0.0,
-            ),
-        )
-        agent.register_background(
-            "j-cancel",
-            BackgroundTaskEntry(
-                task=cancelled_task,
-                tool_name="Dummy",
-                queue_id="j-cancel",
-                started=0.0,
-            ),
-        )
-        result = await t.run({"operation": "list"})
-    assert "completed" in result.content
-    assert "cancelled" in result.content
-
-
-@pytest.mark.asyncio
-async def test_cancel_requires_id() -> None:
-    t = BackgroundTask()
-    with with_fake_agent():
-        result = await t.run({"operation": "cancel"})
-    assert result.is_error
-    assert "requires an id" in result.content
-
-
-@pytest.mark.asyncio
-async def test_cancel_unknown_id() -> None:
-    t = BackgroundTask()
-    with with_fake_agent():
-        result = await t.run({"operation": "cancel", "id": "ghost"})
-    assert result.is_error
-    assert "No such job" in result.content
-
-
-@pytest.mark.asyncio
-async def test_cancel_hidden_treated_as_unknown() -> None:
-    t = BackgroundTask()
-    with with_fake_agent() as agent:
-        task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
-        try:
-            agent.register_background(
-                "h",
-                BackgroundTaskEntry(
-                    task=task,
-                    tool_name="HiddenInfra",
-                    queue_id="h",
-                    started=0.0,
-                    hidden=True,
-                ),
-            )
-            result = await t.run({"operation": "cancel", "id": "h"})
-        finally:
-            _ = task.cancel()
-    assert result.is_error
-    assert "No such job" in result.content
-
-
-@pytest.mark.asyncio
-async def test_cancel_success_clears_registry() -> None:
-    t = BackgroundTask()
-    with with_fake_agent() as agent:
-        task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
-        agent.register_background(
-            "j",
-            BackgroundTaskEntry(
-                task=task,
-                tool_name="Dummy",
-                queue_id="j",
-                started=0.0,
-            ),
-        )
-        result = await t.run({"operation": "cancel", "id": "j"})
-        # Yield once so the cancellation is observed by the task.
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-    assert "Cancelled" in result.content
-    assert task.cancelled()
-    assert "j" not in agent.background
-
-
-@pytest.mark.asyncio
-async def test_cancel_persistent_subagent_uses_shutdown_lifecycle() -> None:
-    t = BackgroundTask()
-    with with_fake_agent() as agent:
-        task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
-        child = _PersistentChild()
-        agent_registry["child"] = child
-        try:
-            agent.register_background(
-                "persistent:child",
-                BackgroundTaskEntry(
-                    task=task,
-                    tool_name="persistent-agent",
-                    queue_id="child",
-                    started=0.0,
-                    kind="subagent",
-                    lifecycle="serviced",
-                    persistent_run_id="run-child",
-                ),
-            )
-            result = await t.run({"operation": "cancel", "id": "persistent:child"})
-        finally:
-            agent_registry.pop("child", None)
-            _ = task.cancel()
-    assert "Cancelled" in result.content
-    assert child.shutdown_calls == [True]
-    assert not task.cancelled()
-    assert "persistent:child" not in agent.background
-
-
-@pytest.mark.asyncio
-async def test_cancel_persistent_subagent_writes_cancelled_lifecycle(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("arguments", "kind", "error"),
+    [
+        (
+            {"background": "yes"},
+            TypeError,
+            "'background' must be a boolean, got 'yes'.",
+        ),
+        ({"background": 1}, TypeError, "'background' must be a boolean, got 1."),
+        ({"delay": True}, TypeError, "'delay' must be seconds, at least 0, got True."),
+        ({"delay": "5"}, TypeError, "'delay' must be seconds, at least 0, got '5'."),
+        ({"delay": -0.5}, ValueError, "'delay' must be seconds, at least 0, got -0.5."),
+        (
+            {"delay": float("nan")},
+            ValueError,
+            "'delay' must be seconds, at least 0, got nan.",
+        ),
+    ],
+)
+def test_a_malformed_control_key_is_refused(
+    arguments: dict[str, PlainTree],
+    kind: type[Exception],
+    error: str,
 ) -> None:
-    t = BackgroundTask()
-    parent = _RecordingAgent(session_dir=tmp_path)
-    child = _RecordingAgent()
-    task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
-    agent_registry["child"] = child
-    token = current_agent_var.set(parent)
-    try:
-        parent.register_background(
-            "persistent:child",
-            BackgroundTaskEntry(
-                task=task,
-                tool_name="persistent-agent",
-                queue_id="child",
-                started=0.0,
-                kind="subagent",
-                lifecycle="serviced",
-                persistent_run_id="run-1",
-                notify_on_asleep=False,
-            ),
-        )
-        result = await t.run({"operation": "cancel", "id": "persistent:child"})
-    finally:
-        current_agent_var.reset(token)
-        agent_registry.pop("child", None)
-        _ = task.cancel()
+    with pytest.raises(kind, match=f"^{re.escape(error)}$"):
+        _ = background_delay(arguments)
 
-    assert "Cancelled" in result.content
-    assert child.shutdown_calls == [True]
-    records = [
-        json.loads(line)
-        for line in (tmp_path / "session.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-        if "persistent_agent" in line
+
+def test_without_controls_drops_only_the_control_keys() -> None:
+    assert without_controls({"text": "a", "background": True, "delay": 1}) == {
+        "text": "a",
+    }
+    assert without_controls({}) == {}
+
+
+# --- BackgroundTask --------------------------------------------------------------
+
+
+def test_background_task_describes_itself() -> None:
+    tool = BackgroundTask()
+    assert tool.name == "BackgroundTask"
+    assert "`background: true`" in tool.description
+    assert tool.schema["required"] == ["operation"]
+    assert tool.summary({"operation": "list"}) == "BackgroundTask list"
+    assert (
+        tool.summary({"operation": "cancel", "id": "c1"}) == "BackgroundTask cancel c1"
+    )
+    assert tool.summary({}) == "BackgroundTask ?"
+    assert tool.summary({"operation": "list", "id": ""}) == "BackgroundTask list"
+    assert tool.serialize_key(_CONTEXT, {"operation": "list"}) is None
+
+
+@pytest.mark.asyncio
+async def test_background_task_alone_has_no_jobs_to_manage() -> None:
+    result = await BackgroundTask().call(_CONTEXT, {"operation": "list"})
+    assert result == _error("BackgroundTask runs only inside an agent's runtime.")
+
+
+@pytest.mark.asyncio
+async def test_list_without_jobs() -> None:
+    table = FakeTable(listed={"c1": _job("Bash", "running", 0)})
+    result = await BackgroundTask().manage(table, {"operation": "list"})
+    assert result == UncategorizedToolResult(call_id="", content="No background jobs.")
+
+
+@pytest.mark.asyncio
+async def test_list_shows_each_background_job() -> None:
+    table = FakeTable(
+        listed={
+            "fg": _job("Read", "running", 1),
+            "call_long_id": _job("Bash", "detached", 12.4),
+            "d1": _job("Grep", "sleeping", 3),
+        },
+    )
+    result = await BackgroundTask().manage(table, {"operation": "list"})
+    assert result.call_id == ""
+    assert result.text().splitlines() == [
+        f"{'ID':<12}  {'TOOL':<20}  {'PHASE':<8}  ELAPSED",
+        f"{'call_long_id':<12}  {'Bash':<20}  {'running':<8}  12s",
+        f"{'d1':<12}  {'Grep':<20}  {'sleeping':<8}  3s",
     ]
-    assert len(records) == 1
-    assert records[0]["label"] == "child"
-    assert records[0]["run_id"] == "run-1"
-    assert records[0]["state"] == "cancelled"
-    assert records[0]["notify_on_asleep"] is False
-    assert "persistent:child" not in parent.background
 
 
 @pytest.mark.asyncio
-async def test_cancel_persistent_subagent_helper_with_bg_entry() -> None:
-    """Unified helper writes lifecycle + clears bg + shuts down the child."""
-    with with_fake_agent() as agent:
-        task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
-        child = _PersistentChild()
-        agent_registry["child"] = child
-        try:
-            agent.register_background(
-                "persistent:child",
-                BackgroundTaskEntry(
-                    task=task,
-                    tool_name="persistent-agent",
-                    queue_id="child",
-                    started=0.0,
-                    kind="subagent",
-                    lifecycle="serviced",
-                    persistent_run_id="run-child",
-                ),
-            )
-            cancelled = cancel_persistent_subagent(agent, "child")
-        finally:
-            agent_registry.pop("child", None)
-            _ = task.cancel()
-    assert cancelled is True
-    assert child.shutdown_calls == [True]
-    assert "persistent:child" not in agent.background
-
-
-@pytest.mark.asyncio
-async def test_cancel_persistent_subagent_helper_registry_only_fallback() -> None:
-    """Helper still shuts down a registered child even when no bg entry exists."""
-    with with_fake_agent() as agent:
-        child = _PersistentChild()
-        agent_registry["child"] = child
-        try:
-            cancelled = cancel_persistent_subagent(agent, "child")
-        finally:
-            agent_registry.pop("child", None)
-    assert cancelled is True
-    assert child.shutdown_calls == [True]
-
-
-@pytest.mark.asyncio
-async def test_cancel_persistent_subagent_helper_returns_false_when_missing() -> None:
-    """Helper reports failure when neither bg nor registry knows the label."""
-    with with_fake_agent() as agent:
-        cancelled = cancel_persistent_subagent(agent, "ghost")
-    assert cancelled is False
-
-
-@pytest.mark.asyncio
-async def test_foreground_persistent_subagent_returns_without_detached_result() -> None:
-    t = BackgroundTask()
-    with with_fake_agent() as agent:
-        task: asyncio.Task[ToolResult] = asyncio.create_task(_slow())
-        try:
-            agent.register_background(
-                "persistent:child",
-                BackgroundTaskEntry(
-                    task=task,
-                    tool_name="persistent-agent",
-                    queue_id="child",
-                    started=0.0,
-                    kind="subagent",
-                    lifecycle="serviced",
-                    persistent_run_id="run-child",
-                ),
-            )
-            result = await asyncio.wait_for(
-                t.run({"operation": "foreground", "id": "persistent:child"}),
-                timeout=0.01,
-            )
-        finally:
-            _ = task.cancel()
-    assert result.is_error
-    assert "Serviced subagent jobs cannot be foregrounded" in result.content
-    assert "persistent:child" in agent.background
-
-
-@pytest.mark.asyncio
-async def test_foreground_requires_id() -> None:
-    t = BackgroundTask()
-    with with_fake_agent():
-        result = await t.run({"operation": "foreground"})
-    assert result.is_error
-    assert "requires an id" in result.content
-
-
-@pytest.mark.asyncio
-async def test_foreground_unknown_id() -> None:
-    t = BackgroundTask()
-    with with_fake_agent():
-        result = await t.run({"operation": "foreground", "id": "ghost"})
-    assert result.is_error
-    assert "No such job" in result.content
-
-
-@pytest.mark.asyncio
-async def test_foreground_success_returns_tool_result() -> None:
-    """M6: foreground reads the result from the ``DetachedResult`` event
-    posted by the bg task (cohort-detached and explicit-bg tasks alike
-    return ``None`` from the task itself).
-    """
-    t = BackgroundTask()
-    with with_fake_agent() as agent:
-        task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
-        agent.register_background(
-            "j",
-            BackgroundTaskEntry(
-                task=task,
-                tool_name="Dummy",
-                queue_id="j",
-                started=0.0,
-            ),
-        )
-
-        async def deliver() -> None:
-            # A bare yield, not a timed sleep: this only has to let ``run``
-            # reach its wait before the result is published. A duration would
-            # make the test depend on that duration being faked away.
-            await asyncio.sleep(0)
-            agent.runtime.publish(
-                DetachedResult(result=ToolResult(call_id="j", content="payload")),
-            )
-
-        delivery = asyncio.create_task(deliver())
-        result = await t.run({"operation": "foreground", "id": "j"})
-        await delivery
-    assert result.content == "payload"
-    assert "j" not in agent.background
-
-
-@pytest.mark.asyncio
-async def test_foreground_wait_cancellation_leaves_job_running() -> None:
-    t = BackgroundTask()
-    wait_forever = asyncio.Event()
-    with with_fake_agent() as agent:
-        task: asyncio.Task[bool] = asyncio.create_task(wait_forever.wait())
-        agent.register_background(
-            "j",
-            BackgroundTaskEntry(
-                task=task,
-                tool_name="Dummy",
-                queue_id="j",
-                started=0.0,
-            ),
-        )
-        foreground = asyncio.create_task(t.run({"operation": "foreground", "id": "j"}))
-        await asyncio.sleep(0)
-
-        foreground.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await foreground
-
-        assert not task.done()
-        assert "j" in agent.background
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-
-
-@pytest.mark.asyncio
-async def test_foreground_cancelled_task_returns_tool_error() -> None:
-    t = BackgroundTask()
-    with with_fake_agent() as agent:
-        task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(10.0))
-        task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await task
-        agent.register_background(
-            "j",
-            BackgroundTaskEntry(
-                task=task,
-                tool_name="Dummy",
-                queue_id="j",
-                started=0.0,
-            ),
-        )
-
-        result = await t.run({"operation": "foreground", "id": "j"})
-
-    assert result.is_error
-    assert "cancelled" in result.content
-    assert "j" not in agent.background
-
-
-@pytest.mark.asyncio
-async def test_foreground_crashed_task_returns_tool_error() -> None:
-    async def fail() -> None:
-        raise RuntimeError("boom")
-
-    t = BackgroundTask()
-    with with_fake_agent() as agent:
-        task = asyncio.create_task(fail())
-        with contextlib.suppress(RuntimeError):
-            await task
-        agent.register_background(
-            "j",
-            BackgroundTaskEntry(
-                task=task,
-                tool_name="Dummy",
-                queue_id="j",
-                started=0.0,
-            ),
-        )
-
-        result = await t.run({"operation": "foreground", "id": "j"})
-
-    assert result.is_error
-    assert "RuntimeError: boom" in result.content
-    assert "j" not in agent.background
-
-
-@pytest.mark.asyncio
-async def test_foreground_running_background_job_returns_result_stub_stays() -> None:
-    foreground_waiting = asyncio.Event()
-    finish_background = asyncio.Event()
-
-    t = BackgroundTask()
-    with with_fake_agent() as agent:
-        agent.runtime.append_history(
-            AssistantMessage(
-                tool_calls=(ToolCall(id="j-running", name="Dummy", args={}),),
-            ),
-        )
-        agent.runtime.append_history(
-            ToolResult(
-                call_id="j-running",
-                content=f"{RUNNING_PREFIX}Dummy]",
-                kind=ToolResultKind.PENDING,
-            ),
-        )
-
-        async def finish() -> None:
-            await finish_background.wait()
-            agent.runtime.inbox.push_back(
-                DetachedResult(
-                    result=ToolResult(call_id="j-running", content="queued payload"),
-                ),
-            )
-            agent.cancel_background("j-running")
-
-        task = asyncio.create_task(finish())
-        agent.register_background(
-            "j-running",
-            BackgroundTaskEntry(
-                task=task,
-                tool_name="Dummy",
-                queue_id="j-running",
-                started=0.0,
-            ),
-        )
-
-        class ForegroundAwareObservers(list[Callable[[RuntimeEvent], None]]):
-            @override
-            def append(self, observer: Callable[[RuntimeEvent], None]) -> None:
-                super().append(observer)
-                foreground_waiting.set()
-
-        observers = ForegroundAwareObservers(agent.runtime.observers)
-        agent.runtime.observers = observers
-        foreground = asyncio.create_task(
-            t.run({"operation": "foreground", "id": "j-running"}),
-        )
-        try:
-            await asyncio.wait_for(foreground_waiting.wait(), timeout=1.0)
-            finish_background.set()
-            result = await asyncio.wait_for(foreground, timeout=1.0)
-        finally:
-            agent.runtime.observers = list(observers)
-            if not foreground.done():
-                foreground.cancel()
-    messages = agent.runtime.context().messages
-    # The foregrounder receives the real result as its own tool answer.
-    assert result.content == "queued payload"
-    # The original ``[Running in background]`` placeholder STAYS (it is the
-    # honest record that the call was backgrounded; the result arrived via
-    # foreground). It is not silently back-patched in-slot.
-    assert any(
-        isinstance(message, ToolResult)
-        and message.call_id == "j-running"
-        and message.content == f"{RUNNING_PREFIX}Dummy]"
-        for message in messages
+async def test_cancel_cancels_the_job() -> None:
+    job = _job("Bash", "detached", 0)
+    table = FakeTable(listed={"c1": job})
+    result = await BackgroundTask().manage(table, {"operation": "cancel", "id": "c1"})
+    assert result == UncategorizedToolResult(
+        call_id="",
+        content="Cancelling Bash (c1).",
     )
-    # No foreground back-patch splice was appended.
-    assert not any(
-        isinstance(record, ContextSplice)
-        and record.strategy == "foreground_detached_splice"
-        for record in agent.runtime.tape
+    assert job.cancelled == [True]
+
+
+@pytest.mark.asyncio
+async def test_foreground_returns_the_jobs_result() -> None:
+    real = UncategorizedToolResult(call_id="c1", content="done", is_error=True)
+    table = FakeTable(listed={"c1": _job("Bash", "sleeping", 0)}, results={"c1": real})
+    result = await BackgroundTask().manage(
+        table,
+        {"operation": "foreground", "id": "c1"},
     )
-    assert not agent.events_of(DetachedResult)
-    assert "j-running" not in agent.background
+    assert result is real
+    assert table.waited == ["c1"]
+
+
+@pytest.mark.parametrize("operation", ["cancel", "foreground"])
+@pytest.mark.asyncio
+async def test_an_operation_on_a_job_needs_its_id(operation: str) -> None:
+    result = await BackgroundTask().manage(FakeTable(), {"operation": operation})
+    assert result == _error(f"{operation} requires an id.")
+
+
+@pytest.mark.parametrize("operation", ["cancel", "foreground"])
+@pytest.mark.asyncio
+async def test_only_background_jobs_can_be_managed(operation: str) -> None:
+    job = _job("Read", "running", 0)
+    table = FakeTable(listed={"fg": job})
+    result = await BackgroundTask().manage(table, {"operation": operation, "id": "fg"})
+    assert result == _error("No background job 'fg'; list shows them.")
+    assert job.cancelled == []
+    assert table.waited == []
 
 
 @pytest.mark.asyncio
-async def test_foreground_reads_pre_existing_spliced_result() -> None:
-    """M6: when the splice has already landed in history, foreground
-    returns the spliced result without waiting for another event.
-    """
-    t = BackgroundTask()
-    with with_fake_agent() as agent:
-        task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
-        agent.register_background(
-            "j",
-            BackgroundTaskEntry(
-                task=task,
-                tool_name="Dummy",
-                queue_id="j",
-                started=0.0,
-            ),
-        )
-        agent.runtime.append_history(
-            ToolResult(call_id="j", content="prior result"),
-        )
-        result = await t.run({"operation": "foreground", "id": "j"})
-    assert result.content == "prior result"
-    assert "j" not in agent.background
+async def test_a_job_that_ends_with_no_result_is_unknown() -> None:
+    table = FakeTable(listed={"c1": _job("Bash", "detached", 0)})
+    result = await BackgroundTask().manage(
+        table,
+        {"operation": "foreground", "id": "c1"},
+    )
+    assert result.is_error is True
+    assert table.waited == ["c1"]
 
 
 @pytest.mark.asyncio
-async def test_foreground_propagates_error_via_detached_result() -> None:
-    """M6: a failing bg task posts an ``is_error=True`` ``DetachedResult``;
-    foreground surfaces it as a tool-error result.
-    """
-    t = BackgroundTask()
-    with with_fake_agent() as agent:
-        task: asyncio.Task[None] = asyncio.create_task(asyncio.sleep(0))
-        agent.register_background(
-            "j",
-            BackgroundTaskEntry(
-                task=task,
-                tool_name="Dummy",
-                queue_id="j",
-                started=0.0,
-            ),
-        )
-
-        async def deliver() -> None:
-            # See the sibling foreground test: a yield, not a timed sleep.
-            await asyncio.sleep(0)
-            agent.runtime.publish(
-                DetachedResult(
-                    result=ToolResult(
-                        call_id="j",
-                        content="RuntimeError: boom",
-                        is_error=True,
-                    ),
-                ),
-            )
-
-        delivery = asyncio.create_task(deliver())
-        result = await t.run({"operation": "foreground", "id": "j"})
-        await delivery
-    assert result.is_error
-    assert "RuntimeError" in result.content
-    assert "boom" in result.content
-    assert "j" not in agent.background
+async def test_an_unknown_operation_is_an_argument_error() -> None:
+    with pytest.raises(ValueError, match="'operation' must be one of"):
+        _ = await BackgroundTask().manage(FakeTable(), {"operation": "fg"})
 
 
-@pytest.mark.asyncio
-async def test_run_unknown_operation() -> None:
-    t = BackgroundTask()
-    with with_fake_agent():
-        result = await t.run({"operation": "bogus"})
-    assert result.is_error
-    assert "Unknown operation" in result.content
+def _error(text: str) -> UncategorizedToolResult:
+    return UncategorizedToolResult(call_id="", content=text, is_error=True)
+
+
+def _properties(tool: Tool) -> Mapping[str, PlainTree]:
+    none: dict[str, PlainTree] = {}
+    return from_plain(tool.schema.get("properties"), dict[str, PlainTree], default=none)
 
 
 if __name__ == "__main__":

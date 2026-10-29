@@ -87,15 +87,3 @@ Large tool outputs are stored under:
 On load, Sagent restores messages, status, cost and token counters, compaction state, tool-result replacement state, and Bash cwd. It also repairs dangling tool calls so the next provider request is well-formed.
 
 If saved provider metadata is available, Sagent can restore the provider/model recipe rather than only replaying text history.
-
-## Slack sessions
-
-`sagent-slack` uses a separate session root:
-
-```text
-~/.sagent/slack
-```
-
-It creates timestamped session directories with a manifest of active agents and persona metadata. `sagent-slack --continue` resumes the newest Slack session and exits if none exists.
-
-See [Slack service](slack.md).

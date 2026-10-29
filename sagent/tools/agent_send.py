@@ -1,211 +1,204 @@
-"""AgentSend tool: send a text message to another live agent's inbox."""
+"""AgentSend: put a message in another agent's inbox, now or after a delay.
+
+A message to an agent that is owed nothing is a request, and it owes a reply;
+one to an agent the sender owes is that reply. ``to`` takes a label, ``parent``,
+or ``user``, whose screen shows it. A root with no parent that may call
+``AgentSpawn`` sends to ``parent`` by starting its watcher first, as the TUI's
+``/send parent`` does: the message is the first thing it is asked.
+
+Typical usage example:
+
+  send = AgentSend(team=team)
+  result = await send.call(context, {"to": "reviewer", "content": "look at a.py"})
+"""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field, replace
+from importlib.resources import files
+from typing import TYPE_CHECKING, Annotated
 
 import asyncio
 import logging
 
-from treekle import PlainTree, immutable
-
-from sagent.agent.state import agent_label_var, agent_registry
-from sagent.tools.core import load_tool_description, opt_int
-from sagent.types.runtime import (
-    AgentSendMessage,
-    ToolResult,
-)
+from sagent.agent.team import Team
+from sagent.session.types import UncategorizedToolResult
+from sagent.tools.agent_spawn import AgentSpawn
+from sagent.tools.display import DisplaySpec, ToolDisplay
+from sagent.tools.types import Arg, parse, schema_of
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
+    from treekle import PlainTree
+
+    from sagent.tools.types import ToolContext
+
+
+__all__ = [
+    "AgentSend",
+]
+
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class AgentSend:
-    """Tool: send a text message to another live agent."""
+    """Send another agent of the team a message."""
 
-    name: str = "AgentSend"
-    tool_id: str = "application/x-tool-agentsend"
-    clearable_results: bool = False
-    description: str = load_tool_description("agentsend")
-    directive_schema: Mapping[str, PlainTree] = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "to": {
-                    "type": "string",
-                    "description": "Label of the target agent.",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The message text.",
-                },
-                "delay": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "Seconds to wait before delivering. Must be ≥ 0.",
-                },
-            },
-            "required": ["to", "content"],
-        },
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        to: Annotated[str, "Label of the target agent, parent, or user."]
+        content: Annotated[str, "The message text."]
+        delay: Annotated[
+            int,
+            "Seconds to wait before delivering.",
+            Arg(minimum=0),
+        ] = 0
+
+    name = "AgentSend"
+    description = (files(__package__) / "assets" / "agentsend.md").read_text(
+        encoding="utf-8",
+    )
+    schema = schema_of(Arguments)
+
+    team: Team = field(repr=False)
+    """Who can be reached."""
+
+    display: ToolDisplay = field(
+        default=ToolDisplay(command=DisplaySpec(lines=(4, 2))),
     )
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short label summarizing this send call.
-
-        Args:
-          args: Directive with ``to`` and ``content`` keys.
-
-        Returns:
-          label: ``AgentSend → <target>: <preview>`` line.
-
-        """
-        to = str(args.get("to", ""))
-        preview = str(args.get("content", "")).replace("\n", " ").strip()
-        return f"{self.name} → {to}: {preview}" if to else self.name
-
-    def prompt(self) -> str:
-        """Return no fixed guidance; who this agent is and can reach is a reminder."""
-        return ""
-
-    def reminder(self) -> str:
-        """Return a self-identity + active-agents listing.
-
-        A reminder, not a prompt: the label is this agent's alone and the list
-        changes on every spawn, so in the system blocks either would cost the
-        agent its share of the cached prefix.
-
-        Returns:
-          contribution: ``Your agent label is X. Active agents you can
-              message: ...`` -- surfaces the agent's own label so the LLM
-              can recognize ``[from <self>]:`` messages as self-sourced.
-
-        """
-        my_label = agent_label_var.get("")
-        others = sorted(k for k in agent_registry if k != my_label)
-        identity = f"Your agent label is {my_label!r}." if my_label else ""
-        if not others:
-            return identity
-        listing = f"Active agents you can message: {', '.join(others)}"
-        return f"{identity} {listing}" if identity else listing
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: inbox push is independent per call."""
-        del args
-        return None
-
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Deliver a message to the target agent's inbox.
-
-        Args:
-          args: Directive with ``to``, ``content``, optional ``delay``.
-
-        Returns:
-          result: Delivery confirmation, or an error when the target is
-              unknown or required fields are missing.
-
-        """
-        to = str(args.get("to", ""))
-        content = str(args.get("content", ""))
-        delay = opt_int(args, "delay")
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``AgentSend →<to>``, then the message's lines."""
+        to = str(arguments.get("to", ""))
         if not to:
-            return ToolResult(call_id="", content="'to' is required.", is_error=True)
-        if not content:
-            return ToolResult(
-                call_id="",
-                content="'content' is required.",
-                is_error=True,
-            )
-        if delay is not None and delay < 0:
-            return ToolResult(
-                call_id="",
-                content=f"'delay' must be ≥ 0, got {delay}.",
-                is_error=True,
-            )
+            return "AgentSend"
+        content = str(arguments.get("content", "")).rstrip("\n")
+        return f"AgentSend →{to}" + (f"\n{content}" if content.strip() else "")
 
-        target = agent_registry.get(to)
-        if target is None:
-            available = sorted(agent_registry)
-            return ToolResult(
-                call_id="",
-                content=f"Unknown agent: {to!r}. Active: {available}",
-                is_error=True,
-            )
+    # Sends to ``parent`` go one at a time: two in one reply from a root start one
+    # watcher, not two.
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``parent`` for a send to the parent, else ``None``: each is its own."""
+        del context
+        return "parent" if arguments.get("to") == "parent" else None
 
-        # Empty string sentinel for "no identity established": a tool
-        # call from a context that never set ``agent_label_var`` (root
-        # before serve_forever, FakeAgent test harnesses) lands here.
-        # The ``[from <sender>]:`` envelope still uses ``"unknown"`` so
-        # the recipient sees something readable; the self-send check
-        # below uses the empty sentinel so an agent registered under
-        # the literal label ``"unknown"`` doesn't phantom-match.
-        my_label = agent_label_var.get("")
-        sender = my_label or "unknown"
-        if delay is not None and delay > 0:
+    def reminder(self, context: ToolContext) -> str:
+        """Return the caller's label, who else it can reach, and whom it owes.
+
+        Args:
+          context: The calling agent's state.
+
+        Returns:
+          text: Such as ``Your agent label is 'Agent'. Active agents you can
+            message: reviewer``; ``""`` outside a team.
+
+        """
+        me = context.label
+        others = sorted(label for label in self.team if label != me)
+        parent = self.team.above(me) if me in self.team else None
+        owed = self.team.owes(me)
+        parts = [
+            f"Your agent label is {me!r}." if me else "",
+            f"Your parent is {parent!r}." if parent is not None else "",
+            f"Active agents you can message: {', '.join(others)}." if others else "",
+            "You owe a reply, by AgentSend, to: "
+            + ", ".join(f"{c} ({what!r})" for c, what in owed.items())
+            + "."
+            if owed
+            else "",
+        ]
+        return " ".join(p for p in parts if p)
+
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> UncategorizedToolResult:
+        """Deliver ``content`` to ``to``, from the caller, after ``delay`` seconds.
+
+        Args:
+          context: The calling agent's state; its label signs the message.
+          arguments: What the model passed, as ``AgentSend.Arguments``.
+
+        Returns:
+          result: Delivered or scheduled, or why not.
+
+        Raises:
+          ValueError: ``to`` or ``content`` is empty, or ``to`` is no agent:
+            ``parent`` of a root that may not call ``AgentSpawn``.
+
+        """
+        a = parse(arguments, AgentSend.Arguments)
+        if not a.to or not a.content:
+            raise ValueError("'to' and 'content' are required.")
+        sender = context.label or "unknown"
+        to = a.to
+        started = ""
+        if to == "parent":
+            (to,) = self.team.resolve("parent", by=sender) or (None,)
+            if to is None:
+                to = await self._watcher(sender)
+                started = f"Started your watcher, {to}, now your parent. "
+        elif to != "user" and to not in self.team:
+            raise ValueError(f"Unknown agent {to!r}. Active: {sorted(self.team)}")
+        elif to == "user" and self.team.to_user is None:
+            raise ValueError("No user is watching; there is no one to tell.")
+        a = replace(a, to=to)
+        if a.delay:
+            # Booked now: a reply settles its debt as sent, or the sender is
+            # nudged before it lands and replies again.
+            self.team.book(sender, recipient=a.to, content=a.content)
             asyncio.get_running_loop().call_later(
-                delay,
-                _deliver,
-                to,
+                a.delay,
+                self._deliver,
+                a.to,
                 sender,
-                content,
-                delay,
+                f"[delayed {a.delay}s] {a.content}",
             )
-            return ToolResult(call_id="", content=f"Scheduled for {to} in {delay}s.")
-
-        target.runtime.inbox.push_back(
-            AgentSendMessage(source=sender, text=content),
-        )
-        # Soft nudge on undelayed self-send: legitimate self-messages
-        # carry a ``delay`` (scheduled reminders). Without one, this is
-        # almost certainly an LLM loop -- inform the model so it can
-        # course-correct instead of looping silently. Gate on
-        # ``my_label`` (not ``sender``) so an unidentified context
-        # sending to an agent literally named ``"unknown"`` doesn't
-        # trip the nudge.
-        if my_label and to == my_label:
-            return ToolResult(
+            return UncategorizedToolResult(
                 call_id="",
-                content=(
-                    f"Delivered to {to}. Note: you are sending a message"
-                    " to yourself without delay. This is likely not"
-                    " intentional."
-                ),
+                content=f"{started}Scheduled for {a.to} in {a.delay}s.",
             )
-        return ToolResult(call_id="", content=f"Delivered to {to}.")
+        self.team.send(sender, recipient=a.to, content=a.content)
+        # A reminder to oneself carries a delay; one without is likely a loop.
+        if a.to == context.label:
+            return UncategorizedToolResult(
+                call_id="",
+                content=f"Delivered to {a.to}. Note: you sent yourself a message"
+                " without a delay; this is likely not intentional.",
+            )
+        return UncategorizedToolResult(
+            call_id="",
+            content=f"{started}Delivered to {a.to}.",
+        )
 
+    # A root kept from spawning, such as a watcher gated off AgentSpawn, starts none:
+    # its watcher would be a spawn it may not make.
+    async def _watcher(self, label: str) -> str:
+        """Start the watcher of ``label``, a root with no parent; return its label."""
+        agent = self.team.get(label)
+        spawn = agent.tools.get(AgentSpawn.name) if agent is not None else None
+        allowed = agent.allowed if agent is not None else None
+        if not isinstance(spawn, AgentSpawn) or (
+            allowed is not None and AgentSpawn.name not in allowed
+        ):
+            raise ValueError("You have no parent.")
+        return await spawn.start_watcher(label)
 
-# Re-resolves ``to`` against ``agent_registry`` at delivery time rather than capturing
-# the target object at schedule time: a persistent agent that died, restarted, or was
-# relabelled between schedule and delivery would otherwise receive the message on a
-# stale handle (or worse, a different identity reusing the old object). Re-resolution
-# makes the registry the single source of truth and turns the dead-target case into a
-# soft warning instead of a silent delivery to a defunct inbox.
-#
-# Posts an ``AgentSendMessage`` (preempting) -- the ``call_later`` delay timer alone
-# supplies the "wait before delivery" semantic. Using ``AgentSendDeferredMessage`` here
-# would double-defer the delivery: the runtime parks deferred messages until
-# ``AgentIdle``, so a busy target would not see the wake-up the delay timer was meant to
-# provide.
-#
-# Prepends a ``[delayed Ns]`` marker to the body so the recipient can tell a scheduled
-# reminder from a fresh send (the description tooltip and
-# ``assets/default/tools_agentsend.md`` promise this).
-def _deliver(
-    to: str,
-    sender: str,
-    content: str,
-    delay: int,
-) -> None:
-    """Deliver a delayed message into the target's inbox."""
-    target = agent_registry.get(to)
-    if target is None:
-        logger.warning("Delayed message to dead agent %r from %s", to, sender)
-        return
-    body = f"[delayed {delay}s] {content}" if delay > 0 else content
-    target.runtime.inbox.push_back(
-        AgentSendMessage(source=sender, text=body),
-    )
+    # Looked up at delivery: an agent stopped meanwhile gets nothing, not a dead inbox.
+    def _deliver(self, to: str, sender: str, content: str) -> None:
+        """Deliver the message booked when it was sent, if ``to`` is still there."""
+        try:
+            self.team.deliver(sender, recipient=to, content=content)
+        except ValueError:
+            logger.warning("message from %s to %r, which has left", sender, to)

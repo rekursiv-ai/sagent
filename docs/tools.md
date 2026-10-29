@@ -97,9 +97,6 @@ class EchoTool:
 | `AgentSpawn` | Run child agents. | `prompt`; optional model/tools/depth/session controls. |
 | `AgentSend` | Send to a live named agent inbox. | `to`, `content`; optional `delay`. |
 | `BackgroundTask` | Manage background tool jobs. | `operation=list|cancel|foreground`; optional `id`. |
-| `Slack` | Slack Web API operations. | `operation`. |
-| `Linear` | Linear issue/comment operations. | `operation`. |
-| `Wiki` | Query an initialized llm-wiki. | `operation`. |
 | `Skill` | Load a user-authored skill body. | `skill`; optional `args`. |
 | `PlayAudio` | Play a short local WAV notification. | `path`. |
 
@@ -231,30 +228,7 @@ A backgrounded tool immediately returns a placeholder result. When the tool comp
 
 `delay` implies backgrounding.
 
-## Service tools
-
-`Slack` uses a bot token and supports:
-
-- `send`
-- `list_channels`
-- `list_messages`
-- `read_thread`
-- `list_users`
-- `create_channel`
-
-`Linear` uses `LINEAR_API_KEY` and supports:
-
-- `list_issues`
-- `get_issue`
-- `create_issue`
-- `update_issue`
-- `add_comment`
-
-These tools mutate external services when asked. Give them only to agents that need them.
-
-## Wiki, skills, and audio
-
-`Wiki` operates on an initialized llm-wiki with `SCHEMA.md`. Operations are `locate`, `list`, `read_page`, `read_index`, and `lint`.
+## Skills and audio
 
 `Skill` loads a user-authored skill by name and returns its full body so the agent can follow it. Skill invocations are tracked across compaction.
 

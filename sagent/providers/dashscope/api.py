@@ -1,116 +1,106 @@
-"""DashScope (Alibaba) provider - OpenAI compatible.
+"""Qwen through DashScope's OpenAI-compatible endpoint, billed to an API key.
 
-Usage::
+Every thinking knob is read off the catalog row: ``thinking_budget`` toggles
+``enable_thinking``, and the effort rides as ``reasoning_effort`` on rows that
+take a level, or as a ``thinking_budget`` cap on rows that take tokens.
 
-    from sagent.providers import DashScope
+Typical usage example:
 
-    provider = DashScope.from_env()          # DASHSCOPE_API_KEY
-    model = provider.model()            # qwen-plus-3.7
-    response = await model.buffer(request)
+  async with DashScope() as dashscope:           # reads DASHSCOPE_API_KEY
+      qwen = dashscope["default"]
 
-Self-hosted (vLLM/SGLang on localhost)::
-
-    provider = DashScope.from_key("empty", base_url="http://gpu-box:8000/v1")
-
-Qwen surfaces reasoning via ``reasoning_content``. Every thinking knob is
-read off the catalog row: ``thinking_budget`` toggles ``enable_thinking``,
-and the effort rides as ``reasoning_effort`` on rows that take a level or
-as a ``thinking_budget`` cap on rows that take tokens.
+  box = DashScope(api_key="none", base_url="http://gpu-box:8000/v1")  # vLLM
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, Final, override
+from typing import TYPE_CHECKING, ClassVar, override
 
-from sagent.catalog.dashscope import thinking_budget
-from sagent.catalog.loader import models
-from sagent.catalog.openai import compatible
-from sagent.catalog.table import ModelCatalog
-from sagent.providers.openai.compat import (
-    OpenAICompat,
-    OpenAICompatModel,
-)
+from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
-    from treekle import MutablePlainTree
+    from sagent.model.types import Request
+    from sagent.providers.openai.compat import OpenAIModel
 
-    from sagent.types.model import (
-        ModelRequest,
+
+__all__ = [
+    "DashScope",
+]
+
+
+class DashScope(OpenAICompatible):
+    """Qwen models, billed to the API key in ``DASHSCOPE_API_KEY``.
+
+    Args:
+      name: The name the catalog knows this provider by; the section by default.
+      resources: What this shares with other providers; ``None`` makes and
+        closes its own.
+      api_key: The key; empty reads ``DASHSCOPE_API_KEY``.
+      base_url: The endpoint; empty uses the international one. Mainland China
+        is ``https://dashscope.aliyuncs.com/compatible-mode/v1``.
+
+    """
+
+    section: ClassVar[str] = "dashscope"
+    package: ClassVar[str] = "sagent.providers.dashscope"
+    document: ClassVar[str] = "dashscope.yaml"
+    url: ClassVar[str] = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+    key_variable: ClassVar[str] = "DASHSCOPE_API_KEY"
+    reasoning_field: ClassVar[str] = "reasoning_content"
+
+    completion_cap: ClassVar[frozenset[str]] = frozenset(
+        {
+            "qwen-max-3.8",
+            "qwen-flash-3.8",
+            "qwen-max-3.7",
+            "qwen-plus-3.7",
+            "qwen-flash-3.7",
+            "qwen-plus-3.6",
+            "qwen-flash-3.6",
+        },
     )
+    """Rows the API page lists for ``max_completion_tokens``; the rest take ``max_tokens``.
 
+    Absent: ``qwen3.8-27b`` and ``qwen3.8-2.4t-a95b`` are neither Max, Plus, nor
+    Flash; ``qwen3.6-max-preview`` predates the Max 3.7 floor.
+    """
 
-class _DashScopeModel(OpenAICompatModel):
-    """DashScope backend - reasoning_content, enable_thinking routing."""
-
-    _reasoning_field: ClassVar[str] = "reasoning_content"
-
-    # The base spells effort in OpenAI's vocabulary (``xhigh`` -> ``high``),
-    # which DashScope either rejects or folds differently, so it is dropped
-    # and re-derived from the row.
     @override
-    def _transform_body(
-        self,
-        body: dict[str, MutablePlainTree],
-        request: ModelRequest,
-    ) -> dict[str, MutablePlainTree]:
-        """Map sagent's thinking axes onto DashScope's knobs."""
-        del request
+    def encode(self, request: Request, *, model: OpenAIModel) -> dict[str, object]:
+        body = super().encode(request, model=model)
+        capability, settings = model.capability, model.settings
+        # Spelled in OpenAI's words (``xhigh`` is ``high``), which DashScope
+        # rejects or reads otherwise, so it is derived again from the row.
         body.pop("reasoning_effort", None)
-        # Only the models qwen-api-via-openai-chat-completions lists honor
-        # ``max_completion_tokens``; every other id takes ``max_tokens``.
-        cap = body.pop("max_completion_tokens", None)
+        cap = body.pop("max_completion_tokens", body.pop("max_tokens", None))
         if cap is not None:
             field = (
                 "max_completion_tokens"
-                if self.capability.model_id in _COMPLETION_CAP
+                if capability.model_id in self.completion_cap
                 else "max_tokens"
             )
             body[field] = cap
-        offered = self.capability.thinking.budget
-        # A row offering only ``none`` claims the model REJECTS the toggle
-        # (the ``-instruct`` / ``-coder`` ids); never send one.
-        if offered == frozenset({"none"}):
+        # A row offering only ``none`` rejects the switch (``-instruct``,
+        # ``-coder``); it is never sent one.
+        if capability.thinking_budget == frozenset({"none"}):
             return body
-        settings = self.settings
-        body["enable_thinking"] = settings.thinking_budget != "none"
-        if settings.thinking_budget == "none" or settings.thinking_effort == "none":
+        stopped = "none" in (settings.thinking_budget, settings.thinking_effort)
+        body["enable_thinking"] = not stopped
+        if stopped:
             return body
-        # Qwen 3.8 errors when ``reasoning_effort`` and ``thinking_budget``
+        # Qwen 3.8 fails when ``reasoning_effort`` and ``thinking_budget``
         # arrive together, so a level row never sends the cap.
-        if self.capability.effort_as_level:
+        if capability.effort_as_level:
             body["reasoning_effort"] = settings.thinking_effort
         elif settings.thinking_budget == "fixed":
-            body["thinking_budget"] = int(thinking_budget(settings.thinking_effort))
+            body["thinking_budget"] = {
+                "none": 0,
+                "min": 1024,
+                "low": 4096,
+                "medium": 8192,
+                "high": 16_384,
+                "xhigh": 20_480,
+                "max": 24_576,
+            }[settings.thinking_effort]
         return body
-
-
-_COMPLETION_CAP: Final = frozenset(
-    {
-        "qwen-max-3.8",
-        "qwen-flash-3.8",
-        "qwen-max-3.7",
-        "qwen-plus-3.7",
-        "qwen-flash-3.7",
-        "qwen-plus-3.6",
-        "qwen-flash-3.6",
-    },
-)
-"""Rows the API page lists for ``max_completion_tokens`` (Max 3.7+, Plus/Flash 3.5+).
-
-Absent: ``qwen3.8-27b`` and ``qwen3.8-2.4t-a95b`` are neither Max, Plus, nor
-Flash; ``qwen3.6-max-preview`` predates the Max 3.7 floor.
-"""
-
-
-class DashScope(OpenAICompat):
-    """DashScope (Alibaba) provider."""
-
-    ENV_VAR: ClassVar[str] = "DASHSCOPE_API_KEY"
-    # International endpoint. For mainland China use
-    # dashscope.aliyuncs.com via the ``base_url=`` override.
-    BASE_URL: ClassVar[str] = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
-
-    catalog = ModelCatalog(models=models("dashscope"), transport=compatible())
-
-    MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _DashScopeModel

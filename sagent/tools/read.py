@@ -1,886 +1,544 @@
-"""Read tool: text, image, PDF, and notebook file reading."""
+"""Read: a file's text, line-numbered, or its pictures.
+
+Text comes back numbered, with a note where to resume if cut. An image comes
+back as itself, a PDF as a JPEG per page, a notebook as cells and outputs.
+
+Typical usage example:
+
+  result = await Read().call(context, {"file_path": "a.py", "offset": 10})
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final, cast
+from dataclasses import dataclass, field
+from importlib.resources import files
+from typing import TYPE_CHECKING, Annotated, cast
 
 import asyncio
-import contextlib
+import io
 import json
+import mimetypes
 import re
 
-from treekle import ReadError, from_plain, immutable, json_loads
+from treekle import PlainTree, ReadError, from_plain, json_loads
 
-from sagent.agent.state import (
-    approx_tokens,
-    current_agent_var,
-    get_tool_state,
+from sagent.model.image import PDFIUM
+from sagent.session.types import (
+    Attachment,
+    FileReadResult,
+    UncategorizedToolResult,
 )
-from sagent.tools.core import (
-    bound_by_tokens,
-    file_lock_key,
-    load_tool_description,
-    mark_read,
-    resolve_tool_path,
-    result_token_budget,
-)
-from sagent.tools.display import Toggle, Wrap
-from sagent.tools.lib.bash import (
+from sagent.tools.command_analyzer import (
     Invocation,
     bounding_sink,
-    cwd_is_known,
-    render_command,
     replaceable,
-    resolve_cwd_path,
+    resolve,
     sed_mutates,
-    walk_commands,
 )
-from sagent.tools.lib.pdf import (
-    MAX_INLINE_PAGES,
-    MAX_PDF_BYTES,
-    MAX_RENDERED_BYTES,
-    PdfError,
-    extract_pdf_pages,
-    get_pdf_page_count,
-    is_pdf,
-    parse_page_range,
-)
-from sagent.tools.tool_spec import CLI_SETTABLE
-from sagent.types.runtime import BytesMessage, ToolResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import Arg, parse, schema_of
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
+    from pathlib import Path
 
-    from bashlex.ast import node
+    import pypdfium2 as pdfium
+
+    from sagent.tools.types import ToolContext
+else:
+    from wrapt import lazy_import
+
+    pdfium = lazy_import("pypdfium2")
 
 
-# Single source of truth for image handling: extension -> wire MIME. The set of
-# image extensions is DERIVED from these keys (below) so the two can never drift
-# -- adding a format here is the only edit needed.
-# SVG is intentionally absent: it is XML, sent as text so providers do not
-# reject ``image/svg+xml``.
-_MIME_BY_EXT: Final[dict[str, str]] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".bmp": "image/bmp",
-    ".webp": "image/webp",
-}
-_IMAGE_EXTS = frozenset(_MIME_BY_EXT)
-_PDF_EXT: Final = ".pdf"
-_NOTEBOOK_EXT: Final = ".ipynb"
-_READ_EXES: frozenset[str] = frozenset({"cat", "head", "tail", "sed"})
-
-# ``-c`` windows BYTES, and ``-f``/``-F`` follow a growing file; Read
-# windows LINES of a snapshot, so none round-trips. ``-F`` is ``-f`` plus
-# retry-on-rotate: a different letter for the same reason, and omitting
-# it let a follow shape advertise itself as a snapshot read. ``cat``'s
-# ``-A/-v/-e/-t`` family renders nonprinting characters, which Read does
-# not. Kept per-executable: the same ``-c`` means "count matching lines"
-# to grep, which Grep expresses directly as ``output_mode="count"``.
-# Notably ABSENT: ``cat -n``, since Read numbers every line it returns.
-_READ_DENY: frozenset[str] = frozenset(
-    {
-        "-c",
-        "-f",
-        "-F",
-        "--bytes",
-        "--follow",
-        "--retry",
-        "-A",
-        "-v",
-        "-e",
-        "-E",
-        "-t",
-        "-T",
-        "--show-all",
-        "--show-nonprinting",
-    },
-)
+__all__ = [
+    "Read",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Read:
-    """Read file contents: text, image, PDF, and notebook."""
+    """Read a file's text, line-numbered, or its pictures."""
+
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        file_path: Annotated[str, "Absolute path to the file."]
+        offset: Annotated[
+            int,
+            "Line number to start from (1-based, text files only).",
+            Arg(minimum=1),
+        ] = 1
+        limit: Annotated[
+            int | None,
+            "Max lines to return (text files only). Omit to read until the"
+            " result is full; the reply names the offset to resume from.",
+            Arg(minimum=1),
+        ] = None
+        last_lines: Annotated[
+            int | None,
+            "Read from the final N lines of a text file, such as a log or a"
+            " stack trace. Composes with ``limit``: ``last_lines=100,"
+            " limit=10`` returns the first 10 of the final 100 lines."
+            " ``offset`` is ignored.",
+            Arg(minimum=1),
+        ] = None
+        pages: Annotated[str, 'Page range for PDFs, e.g. "1-5" or "3".'] = ""
 
     name = "Read"
-    tool_id = "application/x-tool-read"
-    clearable_results = True
-    # Never persisted: Read pages itself at ``MAX_RESULT_TOKENS``.
-    max_result_chars = 0
-    description = load_tool_description("Read")
-    directive_schema = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "file_path": {
-                    "type": "string",
-                    "description": "Absolute path to the file.",
-                },
-                "offset": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Line number to start from (1-based, text files only)."
-                        " Must be ≥ 1."
-                    ),
-                },
-                "limit": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Max lines to return (text files only). Omit for a"
-                        " budget-derived default; the reply names the offset"
-                        " to resume from. Must be ≥ 1."
-                    ),
-                },
-                "last_lines": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Read from the final N lines of a text file. Use when"
-                        " the needed content is expected near EOF, such as"
-                        " logs, recent output, appended config, stack traces,"
-                        " or files whose relevant section is at the end."
-                        " Composes with ``limit``: ``last_lines=100,"
-                        " limit=10`` returns the first 10 of the final 100"
-                        " lines. ``offset`` is ignored when ``last_lines`` is"
-                        " set. Must be ≥ 1."
-                    ),
-                },
-                "pages": {
-                    "type": "string",
-                    "description": 'Page range for PDFs, e.g. "1-5" or "3".',
-                },
-            },
-            "required": ["file_path"],
-        },
+    description = (files(__package__) / "assets" / "read.md").read_text(
+        encoding="utf-8",
     )
+    schema = schema_of(Arguments)
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Read a file and return its contents.
+    display: ToolDisplay = field(default=ToolDisplay())
 
-        Args:
-          args: Directive with ``file_path`` and optional windowing keys
-              (``offset``, ``limit``, ``last_lines``, ``pages``).
+    max_pdf_bytes: int = 50 << 20
+    """Largest PDF opened at all."""
 
-        Returns:
-          result: Text content (with line numbers), image/PDF attachments,
-              or an error when the file is missing or unsupported.
+    max_pdf_pages: int = 10
+    """Most pages read when no ``pages`` range is given."""
 
-        """
-        file_path = resolve_tool_path(str(args.get("file_path", "")))
-        offset = from_plain(args.get("offset"), int, default=1)
-        # ``0`` means "to EOF"; the token bound in ``_window_text`` is what
-        # actually stops the read, so no line-count default is needed.
-        limit = from_plain(args.get("limit"), int, default=0)
-        last_lines = from_plain(args.get("last_lines"), int, default=0)
-        pages = str(args.get("pages", ""))
-        # Schema declares ``offset``/``limit``/``last_lines`` as
-        # ``minimum: 1`` integers but ``get(..., int)`` accepts any int
-        # (including 0 and negatives). Reject schema violations at the
-        # entrypoint -- ``offset=0`` previously fell through to the
-        # ``max(1, offset)`` clamp in ``_window_text`` which masked the
-        # error and made ``offset=0`` silently mean ``offset=1``.
-        bounds_err = _check_minimum(
-            ("offset", offset, args.get("offset")),
-            ("limit", limit, args.get("limit")),
-            ("last_lines", last_lines, args.get("last_lines")),
-        )
-        if bounds_err is not None:
-            return bounds_err
-        try:
-            return await asyncio.to_thread(
-                self._run,
-                file_path=file_path,
-                offset=offset,
-                limit=limit,
-                last_lines=last_lines,
-                pages=pages,
-            )
-        except OSError as err:
-            # A mode-000 file raised PermissionError straight out of the
-            # envelope. ``Tool.run`` must RETURN failures: the agent loop
-            # reads a raised exception as a crash, not a tool error.
-            return ToolResult(
-                call_id="",
-                content=f"Error reading {file_path}: {err}",
-                is_error=True,
-            )
+    max_rendered_bytes: int = 12 << 20
+    """Most JPEG bytes one read renders, under the smallest vendor request limit."""
 
-    output: Annotated[Toggle, CLI_SETTABLE] = "off"
-    """Whether the result body renders in the pane."""
+    max_image_bytes: int = 50 << 20
+    """Largest image read; the provider shrinks what it sends."""
 
-    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Leading body rows kept."""
-
-    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
-
-    output_max_width: Annotated[int, CLI_SETTABLE] = 0
-    """Cell width cap; ``0`` uses the pane width."""
-
-    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
-    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Serialize same-file Read/Edit/Write within a cohort.
-
-        Ordering a Read against same-file Edit/Write in one cohort makes
-        a batched Read observe the post-edit content deterministically,
-        and keeps the read-cache stamp consistent with the final write.
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``Read <path>``, with the lines asked for.
 
         Args:
-          args: Directive carrying ``file_path``.
+          arguments: What the model passed to Read.
 
         Returns:
-          key: Canonical path, or ``None`` when no path was supplied.
+          summary: Such as ``Read pkg/a.py:10-19`` or ``Read log:last-50``.
 
         """
-        path = resolve_tool_path(str(args.get("file_path", "")))
-        return file_lock_key(path) if path else None
+        name = str(arguments.get("file_path", ""))
+        offset, limit = arguments.get("offset"), arguments.get("limit")
+        last_lines = arguments.get("last_lines")
+        if isinstance(last_lines, int):
+            return f"Read {name}:last-{last_lines}"
+        if isinstance(offset, int) and isinstance(limit, int):
+            return f"Read {name}:{offset}-{offset + limit - 1}"
+        if isinstance(offset, int):
+            return f"Read {name}:{offset}+"
+        if isinstance(limit, int):
+            return f"Read {name}:1-{limit}"
+        return f"Read {name}"
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short label for this tool invocation.
-
-        Args:
-          args: Directive carrying ``file_path`` and windowing keys.
-
-        Returns:
-          label: ``Read <basename><range>`` line shown before invocation.
-
-        """
-        file_path = str(args.get("file_path", ""))
-        fname = Path(file_path).name if file_path else "?"
-        offset = from_plain(args.get("offset"), int, default=0)
-        limit = from_plain(args.get("limit"), int, default=0)
-        last_lines = from_plain(args.get("last_lines"), int, default=0)
-        if last_lines > 0:
-            suffix = f":last-{last_lines}"
-        elif offset > 0 and limit > 0:
-            # End line is inclusive: ``offset=10, limit=3`` covers lines
-            # 10, 11, 12 -- the last line is ``offset + limit - 1``.
-            suffix = f":{offset}-{offset + limit - 1}"
-        elif offset > 0:
-            suffix = f":{offset}+"
-        elif limit > 0:
-            suffix = f":1-{limit}"
-        else:
-            suffix = ""
-        return f"Read {fname}{suffix}"
-
-    def prompt(self) -> str:
-        """Return supplemental prompt text for this tool.
-
-        Returns:
-          contribution: Empty string (no per-request prompt fragment).
-
-        """
-        return ""
-
-    def bash_match(self, trees: Sequence[node]) -> str | None:
-        """Emit a hint if any command reads a file the Read tool could.
-
-        Detection is :func:`replaceable`; this decides only which
-        executables Read claims and which of their arguments make Bash
-        necessary. A ``sed`` that EDITS belongs to the Edit tool, and a
-        glob positional cannot be expressed by a single ``file_path``.
-
-        Args:
-          trees: Parsed bashlex command trees from the active Bash call.
-
-        Returns:
-          hint: Nudge string redirecting to the Read tool, or ``None``.
-
-        """
-        for inv in walk_commands(trees):
-            if not replaceable(inv, exes=_READ_EXES, deny=_READ_DENY):
-                continue
-            if inv.exe == "sed" and not _sed_reads(inv.args):
-                continue
-            if any(
-                (any(ch in a for ch in "*?["))
-                for a in inv.args
-                if not a.startswith("-")
-            ):
-                continue
-            hint = f"{inv.exe} via Bash is a bad UX. Use the Read tool."
-            return f"{hint} Replaces: `{render_command(inv)}`.{_read_call(inv)}"
-        return None
-
-    def _run(
+    def serialize_key(
         self,
-        *,
-        file_path: str,
-        offset: int = 1,
-        limit: int = 0,  # 0 = read to EOF; the token bound stops the window.
-        last_lines: int = 0,
-        pages: str = "",
-    ) -> ToolResult:
-        """Dispatch to the type-specific reader (text, image, PDF, notebook)."""
-        p = Path(file_path)
-        if not p.exists():
-            return ToolResult(
-                call_id="",
-                content=f"File not found: {file_path}",
-                is_error=True,
-            )
-        if p.is_dir():
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"{file_path} is a directory, not a file."
-                    " Use Glob to inspect directory contents."
-                ),
-                is_error=True,
-            )
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return the file, so a read after an edit of it sees the edit."""
+        return str(context.path(str(arguments.get("file_path", ""))).resolve())
 
-        suffix = p.suffix.lower()
+    def from_shell(
+        self,
+        invocation: Invocation,
+    ) -> Mapping[str, PlainTree] | str | None:
+        """Return the Read call for ``cat``, ``head``, ``tail``, or ``sed -n 'M,Np'``.
 
-        if (
-            suffix not in _IMAGE_EXTS
-            and suffix not in {_PDF_EXT, _NOTEBOOK_EXT}
-            and get_tool_state().check_unchanged(
-                file_path,
-                offset,
-                limit,
-                last_lines=last_lines,
-            )
+        Args:
+          invocation: One simple command, with its pipeline.
+
+        Returns:
+          arguments: The Read call that shows the same lines; a message when
+            the read cannot be translated, such as ``cat`` of many files; or
+            ``None`` when the command is not a plain read.
+
+        """
+        deny = frozenset(
+            {
+                *("-c", "-f", "-F", "--bytes", "--follow", "--retry", "-A", "-v"),
+                *("-e", "-E", "-t", "-T", "--show-all", "--show-nonprinting"),
+            },
+        )
+        counts = frozenset({"-n", "-c", "--lines", "--bytes"})
+        takes_value = {
+            "head": counts,
+            "tail": counts,
+            "sed": frozenset({"-e", "-f", "--expression", "--file"}),
+        }.get(invocation.exe, frozenset[str]())
+        if not replaceable(
+            invocation,
+            exes=frozenset({"cat", "head", "tail", "sed"}),
+            deny=deny,
+            takes_value=takes_value,
         ):
-            return ToolResult(
-                call_id="",
-                content=f"[File unchanged since last read: {file_path}]",
-            )
-
-        if suffix in _IMAGE_EXTS:
-            mark_read(file_path, offset=offset, limit=limit, last_lines=last_lines)
-            return _read_image(p, file_path=file_path, suffix=suffix)
-
-        if suffix == _PDF_EXT:
-            mark_read(file_path, offset=offset, limit=limit, last_lines=last_lines)
-            return _read_pdf(p, pages)
-
-        if suffix == _NOTEBOOK_EXT:
-            mark_read(file_path, offset=offset, limit=limit, last_lines=last_lines)
-            return _read_notebook(p, file_path=file_path)
-
-        return _read_text(
-            p,
-            file_path=file_path,
-            offset=offset,
-            limit=limit,
-            last_lines=last_lines,
+            return None
+        if invocation.exe == "sed" and not _sed_prints(invocation.args):
+            return None
+        refusal = (
+            "Read each file with the Read tool, all in one block: one round trip,"
+            " and lines numbered to cite."
         )
+        window = _window(invocation)
+        if window is None:
+            return refusal
+        path, lines = window
+        target = resolve(invocation.cwd, path)
+        if target is None or any(c in target for c in "*?[$`"):
+            return refusal
+        return {"file_path": target, **lines}
 
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> FileReadResult | UncategorizedToolResult:
+        """Read ``file_path``.
 
-def _read_image(p: Path, *, file_path: str, suffix: str) -> ToolResult:
-    """Return an image file as a ToolResult with a JPEG/PNG attachment."""
-    # Bounded by the same per-read byte budget as a rendered PDF: an unbounded
-    # ``read_bytes`` loads the whole file and ships a request the wire refuses.
-    size = p.stat().st_size
-    budget = _rendered_byte_budget()
-    if size > budget:
-        return ToolResult(
-            call_id="",
-            content=(
-                f"Image too large: {file_path} is {size} bytes, over the"
-                f" {budget}-byte budget for one read. Downscale it with Bash first."
-            ),
-            is_error=True,
-        )
-    return ToolResult(
-        call_id="",
-        content=f"[image: {file_path}]",
-        attachments=(BytesMessage(p.read_bytes(), _image_mime(suffix)),),
-    )
+        Args:
+          context: The calling agent's state.
+          arguments: What the model passed, as ``Read.Arguments``.
 
+        Returns:
+          result: What the file holds, or why it could not be read.
 
-def _read_notebook(p: Path, *, file_path: str) -> ToolResult:
-    """Parse a Jupyter notebook and return cell contents as text."""
-    try:
-        nb_d = json_loads(p.read_text(encoding="utf-8"), dict[str, object])
-    # ``is_error`` on every unreadable shape, matching the missing-file
-    # and not-a-file paths above: a caller branching on the flag -- which
-    # is what it exists for -- otherwise reads a corrupt notebook as a
-    # notebook with unusual contents.
-    except json.JSONDecodeError as e:
-        return ToolResult(
-            call_id="",
-            content=f"[Invalid notebook JSON: {file_path}: {e}]",
-            is_error=True,
-        )
-    except UnicodeDecodeError as e:
-        return ToolResult(
-            call_id="",
-            content=f"[Non-UTF-8 notebook: {file_path}: {e}]",
-            is_error=True,
-        )
-    except ReadError:
-        return ToolResult(
-            call_id="",
-            content=f"[Not a valid Jupyter notebook: {file_path}]",
-            is_error=True,
-        )
-    cells: list[object] = []
-    with contextlib.suppress(ReadError):
-        cells = from_plain(nb_d.get("cells"), list[object], default=cells)
-    parts: list[str] = []
-    for i, cell in enumerate(cells):
-        if not isinstance(cell, dict):
-            continue
-        cell_d = from_plain(cast(object, cell), dict[str, object])
-        ctype = from_plain(cell_d.get("cell_type"), str, default="") or "code"
-        parts.append(f"--- Cell {i + 1} ({ctype}) ---")
-        parts.append(_joined(from_plain(cell_d.get("source"), object, default=None)))
-        _collect_cell_outputs(cell_d, parts)
-    # Bounded like every other Read path. This one never reaches
-    # ``_window_text``, so before the token bound existed a large notebook
-    # -- cells plus every output plus tracebacks -- shipped whole.
-    note = f"\n... ({len(parts)} more notebook sections omitted.)"
-    body, kept = bound_by_tokens(
-        (f"{part}\n" for part in parts),
-        budget=max(1, result_token_budget() - approx_tokens(note)),
-    )
-    if kept < len(parts):
-        body += f"\n... ({len(parts) - kept} more notebook sections omitted.)"
-    return ToolResult(call_id="", content=body or "(empty notebook)")
+        """
+        a = parse(arguments, Read.Arguments)
+        try:
+            return await asyncio.to_thread(self._read, context, a)
+        except OSError as e:
+            return _error(f"Error reading {a.file_path}: {e}")
 
-
-# Notebook formats spell an output three ways, and only ``stream`` uses ``text``:
-# ``execute_result``/``display_data`` put the value under ``data['text/plain']`` and
-# ``error`` puts the failure under ``traceback``. Reading just ``text`` therefore showed
-# neither what a cell returned nor how it failed -- the two things a reader opens a
-# notebook for.
-def _collect_cell_outputs(cell: Mapping[str, object], parts: list[str]) -> None:
-    """Append text outputs from a notebook cell to ``parts``."""
-    outputs: list[object] = []
-    with contextlib.suppress(ReadError):
-        outputs = from_plain(cell.get("outputs"), list[object], default=outputs)
-    for out_d in outputs:
-        if not isinstance(out_d, dict):
-            continue
-        output = from_plain(cast(object, out_d), dict[str, object])
-        text = _joined(from_plain(output.get("text"), object, default=None))
-        if not text:
-            data = from_plain(output.get("data"), object, default=None)
-            if isinstance(data, dict):
-                data_d = from_plain(cast(object, data), dict[str, object])
-                text = _joined(
-                    from_plain(data_d.get("text/plain"), object, default=None),
+    def _read(
+        self,
+        context: ToolContext,
+        a: Read.Arguments,
+    ) -> FileReadResult | UncategorizedToolResult:
+        """Read the file ``a`` names, by its kind."""
+        path = context.path(a.file_path)
+        if not path.exists():
+            return _error(f"File not found: {path}")
+        if path.is_dir():
+            return _error(f"{path} is a directory. Use List or Glob.")
+        if path.suffix.lower() == ".pdf":
+            return self._read_pdf(context, path, pages=a.pages)
+        if path.suffix.lower() == ".ipynb":
+            return _read_notebook(context, path)
+        mime, _ = mimetypes.guess_type(path)
+        # Not SVG: it is XML, and vendors refuse ``image/svg+xml``.
+        if mime in {"image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp"}:
+            size = path.stat().st_size
+            if size > self.max_image_bytes:
+                return _error(
+                    f"{path} is {size:,} bytes, over the {self.max_image_bytes:,}"
+                    " a read takes. Shrink it with Bash first.",
                 )
-        if not text:
-            text = _joined(from_plain(output.get("traceback"), object, default=None))
-        if text:
-            parts.append("[output] " + text)
+            context.files.saw(path)
+            return FileReadResult(
+                call_id="",
+                path=str(path),
+                content=f"[image: {path}]",
+                attachments=(Attachment(mime_descriptor=mime, data=path.read_bytes()),),
+            )
+        return _read_text(
+            context,
+            path,
+            offset=a.offset,
+            limit=a.limit,
+            last_lines=a.last_lines,
+        )
+
+    def _read_pdf(
+        self,
+        context: ToolContext,
+        path: Path,
+        *,
+        pages: str,
+    ) -> FileReadResult | UncategorizedToolResult:
+        """Render a PDF's pages as JPEGs, as many as fit the byte budget."""
+        with path.open("rb") as f:
+            if f.read(5) != b"%PDF-":
+                return _error(f"{path} is not a PDF: it lacks the %PDF- header.")
+        size = path.stat().st_size
+        if size > self.max_pdf_bytes:
+            return _error(
+                f"{path} is {size:,} bytes, over the {self.max_pdf_bytes:,} a read opens.",
+            )
+        match = re.fullmatch(r"(\d+)(?:-(\d*))?", pages.strip())
+        if pages and match is None:
+            return _error(f'Invalid pages {pages!r}: use "N", "N-M", or "N-".')
+        with PDFIUM:
+            try:
+                doc = pdfium.PdfDocument(str(path))
+            except pdfium.PdfiumError as e:
+                return _error(f"{path} is not a readable PDF: {e}")
+            try:
+                total = len(doc)
+                if match is None:
+                    if total > self.max_pdf_pages:
+                        return _error(
+                            f"{path} has {total} pages, over {self.max_pdf_pages}."
+                            ' Pass pages="1-N" to read some.',
+                        )
+                    first, last = 1, total
+                elif match[2] is None:
+                    first = last = int(match[1])
+                else:
+                    first = int(match[1])
+                    last = min(int(match[2]), total) if match[2] else total
+                if first < 1 or last < first or last > total:
+                    return _error(f"{path} has no pages {pages} (it has {total}).")
+                jpegs = _render(
+                    doc,
+                    first=first,
+                    last=last,
+                    max_bytes=self.max_rendered_bytes,
+                )
+            finally:
+                doc.close()
+        if not jpegs:
+            return _error(f"Page {first} of {path} alone is too large to send.")
+        context.files.saw(path)
+        end = first + len(jpegs) - 1
+        note = f"[PDF: {path.name}, pages {first}-{end} of {total}]"
+        if end < last:
+            note += f' Pass pages="{end + 1}-{last}" for the rest.'
+        return FileReadResult(
+            call_id="",
+            path=str(path),
+            content=note,
+            attachments=tuple(
+                Attachment(mime_descriptor="image/jpeg", data=jpeg) for jpeg in jpegs
+            ),
+        )
 
 
-def _joined(raw: object) -> str:
-    """Render a notebook text field, which is a string OR a line list."""
-    if raw is None:
-        return ""
-    if isinstance(raw, (list, tuple)):
-        return "".join(str(x) for x in from_plain(cast(object, raw), list[object]))
-    return from_plain(raw, str)
+def _window(invocation: Invocation) -> tuple[str, Mapping[str, PlainTree]] | None:
+    """Return the one file a read names and the Read window it shows."""
+    args = invocation.args
+    if invocation.exe == "sed":
+        script = next(a for a in args if re.fullmatch(r"\d+(,(\d+|\$))?p", a))
+        paths = [a for a in args if not a.startswith("-") and a != script]
+        first, _, last = script.removesuffix("p").partition(",")
+        if last in {"", first}:
+            lines: dict[str, PlainTree] = {"offset": int(first), "limit": 1}
+        elif last == "$":
+            lines = {"offset": int(first)}
+        elif int(last) >= int(first):
+            lines = {"offset": int(first), "limit": int(last) - int(first) + 1}
+        else:
+            return None
+        return (paths[0], lines) if len(paths) == 1 and int(first) >= 1 else None
+    if invocation.exe == "cat":
+        # ``-n`` only: Read numbers every line anyway.
+        if any(a.startswith("-") and a != "-n" for a in args):
+            return None
+        paths = [a for a in args if a != "-n"]
+        source: tuple[str, int, str] = ("cat", 0, "")
+    else:
+        paths, count, sign = _count(args)
+        source = (invocation.exe, count, sign)
+    sinks = [s for s in invocation.downstream() if s.exe in {"head", "tail"}]
+    # ``-`` names the input, which a Bash call leaves empty, not a file.
+    if paths[:1] == ["-"] or len(paths) != 1 or len(sinks) + (source[0] != "cat") > 1:
+        return None
+    sink = bounding_sink(invocation)
+    exe, count, sign = (sink.exe, *_count(sink.args)[1:]) if sink else source
+    if exe == "cat":
+        return paths[0], dict[str, PlainTree]()
+    # No Read takes a zero count; ``head -n 0`` and ``head -n abc`` show nothing.
+    if count < 1:
+        return None
+    if exe == "head" and sign != "-":
+        return paths[0], {"limit": count}
+    if exe == "tail":
+        return paths[0], {"offset": count} if sign == "+" else {"last_lines": count}
+    return None
+
+
+# The sign picks the end: ``tail -n +5`` starts at line 5; ``head -n -5``
+# drops the last 5, which no Read window expresses.
+def _count(args: tuple[str, ...]) -> tuple[list[str], int, str]:
+    """Return a ``head`` or ``tail``'s operands, line count, and its sign."""
+    paths: list[str] = []
+    count, sign = 10, ""
+    i = 0
+    while i < len(args):
+        arg, raw = args[i], ""
+        if arg in {"-n", "--lines"} and i + 1 < len(args):
+            raw, i = args[i + 1], i + 2
+        elif arg.startswith("--lines="):
+            raw, i = arg.partition("=")[2], i + 1
+        elif arg.startswith("-n") and len(arg) > 2:
+            raw, i = arg[2:], i + 1
+        elif arg.startswith("-") and arg != "-":
+            if arg[1:].isdigit():
+                count, sign = int(arg[1:]), ""
+            i += 1
+            continue
+        else:
+            paths.append(arg)
+            i += 1
+            continue
+        sign = raw[:1] if raw[:1] in {"+", "-"} else ""
+        digits = raw.lstrip("+-")
+        count = int(digits) if digits.isdigit() else 0
+    return paths, count, sign
+
+
+def _sed_prints(args: tuple[str, ...]) -> bool:
+    """Return whether ``sed`` with ``args`` only prints a line range, ``-n 'M,Np'``."""
+    quiet = any(a.startswith("-") and not a.startswith("--") and "n" in a for a in args)
+    scripts = [a for a in args if re.fullmatch(r"\d+(,(\d+|\$))?p", a)]
+    return not sed_mutates(args) and quiet and len(scripts) == 1
 
 
 def _read_text(
-    p: Path,
+    context: ToolContext,
+    path: Path,
     *,
-    file_path: str,
     offset: int,
-    limit: int,
-    last_lines: int,
-) -> ToolResult:
-    """Read a text file with offset/limit/last_lines windowing."""
-    with p.open("rb") as f:
-        head = f.read(8192)
-    if b"\x00" in head:
-        size = p.stat().st_size
-        return ToolResult(
+    limit: int | None,
+    last_lines: int | None,
+) -> FileReadResult | UncategorizedToolResult:
+    """Read ``path`` as numbered lines, windowed and bounded."""
+    lines_asked = (offset, limit, last_lines)
+    if context.files.shown(path, lines=lines_asked):
+        return UncategorizedToolResult(
             call_id="",
-            content=f"[Binary file: {file_path} ({size} bytes). Use Bash to inspect.]",
+            content=f"[File unchanged since last read: {path}]",
         )
+    with path.open("rb") as f:
+        if b"\x00" in f.read(8192):
+            return UncategorizedToolResult(
+                call_id="",
+                content=f"[Binary file: {path} ({path.stat().st_size:,} bytes).]",
+            )
+    # Seen before read, so a write in between shows as a change.
+    context.files.saw(path)
     try:
-        text, mtime = _read_stable(p)
+        text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        size = p.stat().st_size
-        return ToolResult(
+        return UncategorizedToolResult(
             call_id="",
-            content=(
-                f"[Non-UTF-8 file: {file_path} ({size} bytes)."
-                " Use Bash with an explicit decoder to inspect.]"
-            ),
+            content=f"[{path} is not UTF-8. Use Bash with an explicit decoder.]",
         )
-    mark_read(
-        file_path,
-        offset=offset,
-        limit=limit,
-        last_lines=last_lines,
-        content=text,
-        mtime=mtime,
-    )
     if not text:
-        return ToolResult(
+        return UncategorizedToolResult(
             call_id="",
-            content=f"[File exists but is empty: {file_path}]",
+            content=f"[File exists but is empty: {path}]",
         )
-    body = _window_text(
-        text,
-        file_path=file_path,
-        offset=offset,
-        limit=limit,
-        last_lines=last_lines,
-    )
-    return ToolResult(call_id="", content=body)
-
-
-# The cache pairs content with a version, and ``check_stale`` trusts an mtime match
-# without rereading. So the mtime must be one the content was read UNDER: stamping
-# after the read paired a racing write's mtime with the pre-write text, which then
-# read as current forever. Bracketing the read with two stats and retrying until they
-# agree means the cached mtime names exactly the text that was cached.
-def _read_stable(p: Path, *, attempts: int = 3) -> tuple[str, float]:
-    """Read ``p`` as text along with an mtime no write landed inside."""
-    before = p.stat().st_mtime
-    text = p.read_text(encoding="utf-8")
-    for _ in range(attempts):
-        after = p.stat().st_mtime
-        if after == before:
-            return text, before
-        before = after
-        text = p.read_text(encoding="utf-8")
-    # Still being written: an mtime no file carries, so the next read rereads and
-    # the next staleness check compares content.
-    return text, 0.0
-
-
-def _window_text(
-    text: str,
-    *,
-    file_path: str,
-    offset: int,
-    limit: int,
-    last_lines: int,
-) -> str:
-    """Apply offset/limit/last_lines windowing, add line numbers, bound tokens."""
     lines = text.splitlines(keepends=True)
     total = len(lines)
-    if last_lines > 0:
-        start = max(0, total - last_lines)
-    else:
-        offset = max(1, offset)
-        start = offset - 1
+    start = offset - 1 if last_lines is None else max(0, total - last_lines)
     if start >= total:
-        return f"[offset {offset} beyond EOF: {file_path} has {total} lines]"
-    end = total if limit <= 0 else min(start + limit, total)
-
-    # Bound by TOKENS, never by a line count: the caller's ``limit`` is a
-    # window, not a budget, and one line's width is unknown until read.
-    note = f"\n... ({total} more lines. Use offset={total + 1} to continue.)"
-    body, kept = bound_by_tokens(
+        return UncategorizedToolResult(
+            call_id="",
+            content=f"[offset {offset} is past the end: {path} has {total} lines]",
+        )
+    end = total if limit is None else min(start + limit, total)
+    note = f"\n... ({total:,} more lines. Use offset={total + 1} to continue.)"
+    body, kept = context.fit(
         (f"{start + i + 1}\t{line}" for i, line in enumerate(lines[start:end])),
-        budget=max(1, result_token_budget() - approx_tokens(note)),
+        reserve=len(note),
     )
-    # One note whether the budget or the window stopped us: ``start + kept``
-    # is where the reader resumes either way.
-    shown_through = start + kept
-    if shown_through < total:
+    if start + kept < total:
         body += (
-            f"\n... ({total - shown_through} more lines."
-            f" Use offset={shown_through + 1} to continue.)"
+            f"\n... ({total - start - kept:,} more lines."
+            f" Use offset={start + kept + 1} to continue.)"
         )
-    return body
-
-
-# Runs after detection, so an unrecognised flag costs the caller a worked example rather
-# than the nudge itself.
-def _read_call(inv: Invocation) -> str:
-    """Render a concrete Read call for ``inv``, or ``""`` if not derivable."""
-    if inv.exe == "sed":
-        return _sed_call(inv)
-    paths, window, sign = _paths_and_window(inv.args)
-    if len(paths) != 1:
-        return ""
-    # The tools resolve a relative path against the AGENT's cwd, not the
-    # shell's, so a ``cd`` prefix that never reaches here names a
-    # different file -- or none.
-    target = resolve_cwd_path(inv.cwd, paths[0])
-    if not cwd_is_known(inv.cwd):
-        # The ``cd`` went somewhere the text does not name, so the file
-        # cannot be identified. Drop the example rather than invent one.
-        return ""
-    if inv.exe == "cat":
-        # ``cat f | head -20`` asked for 20 lines. ``cat`` itself carries
-        # no window, so the bound lives on the sink -- and omitting it
-        # advertised the whole file, which on a large one is the entire
-        # reason the caller reached for ``| head``.
-        return f" Try: Read file_path={target!r}{_sink_window(inv)}"
-    if window == 0:
-        return ""
-    # Measured against coreutils on a 100-line file: ``head -n +N`` is
-    # ``head -n N``, ``head -n -N`` is all-but-the-last-N (no Read window
-    # expresses it), and ``tail -n +N`` counts from the START.
-    if inv.exe == "head":
-        return "" if sign == "-" else f" Try: Read file_path={target!r} limit={window}"
-    key = "offset" if sign == "+" else "last_lines"
-    return f" Try: Read file_path={target!r} {key}={window}"
-
-
-# Only those two truncate. ``cat``/``less``/``more`` page the whole stream, so reading a
-# count off them would invent a cap the command never asked for.
-def _sink_window(inv: Invocation) -> str:
-    """Render the line bound a ``| head``/``| tail`` sink imposes."""
-    sink = bounding_sink(inv)
-    if sink is None:
-        return ""
-    _, window, sign = _paths_and_window(sink.args)
-    if window == 0 or sign == "-":
-        return ""
-    if sink.exe == "head":
-        return "" if sign == "+" else f" limit={window}"
-    return f" {'offset' if sign == '+' else 'last_lines'}={window}"
-
-
-def _sed_call(inv: Invocation) -> str:
-    """Render ``sed -n 'M,Np' FILE`` as a Read window, or ``""``."""
-    args = inv.args
-    scripts = [a for a in args if _LINE_RANGE_SCRIPT.fullmatch(a)]
-    paths = [a for a in args if not a.startswith("-") and a not in scripts]
-    if len(scripts) != 1 or len(paths) != 1:
-        return ""
-    target = resolve_cwd_path(inv.cwd, paths[0])
-    if not cwd_is_known(inv.cwd):
-        return ""
-    first, comma, last = scripts[0].removesuffix("p").partition(",")
-    if not comma:
-        # ``sed -n '5p'`` prints exactly one line; without the limit the
-        # suggestion returns the rest of the file.
-        return f" Try: Read file_path={target!r} offset={first} limit=1"
-    if last == "$":
-        return f" Try: Read file_path={target!r} offset={first}"
-    limit = int(last) - int(first) + 1
-    return f" Try: Read file_path={target!r} offset={first} limit={limit}"
-
-
-# Every spelling of the count reaches the same place: ``-n N``, ``-nN``, ``--lines=N``,
-# ``--lines N``, and the bare ``-N``. Matching only ``-n`` left the rest falling through
-# to the default 10, so a command asking for 50 lines was advertised as asking for 10.
-#
-# The sign is RETURNED rather than stripped because it selects which end of the file is
-# meant, and the answer differs per executable.
-def _paths_and_window(args: tuple[str, ...]) -> tuple[list[str], int, str]:
-    """Split ``head``/``tail`` args into operands, a line count, and its sign."""
-    paths: list[str] = []
-    window = 10
-    sign = ""
-    i = 0
-    while i < len(args):
-        a = args[i]
-        raw = ""
-        if a in ("-n", "--lines") and i + 1 < len(args):
-            raw = args[i + 1]
-            i += 2
-        elif a.startswith("--lines="):
-            raw = a.partition("=")[2]
-            i += 1
-        elif a.startswith("-n") and len(a) > 2:
-            raw = a[2:]
-            i += 1
-        elif a.startswith("-") and a != "-":
-            # A bare ``-20`` is the obsolete count form; any other flag
-            # leaves the window alone.
-            if a[1:].isdigit():
-                window, sign = int(a[1:]), ""
-            i += 1
-            continue
-        else:
-            paths.append(a)
-            i += 1
-            continue
-        sign = raw[0] if raw[:1] in ("+", "-") else ""
-        digits = raw.lstrip("+-")
-        window = int(digits) if digits.isdigit() else 0
-    return paths, window, sign
-
-
-# Gated hard on a bare print range: a substitution or an in-place edit is Edit's
-# business, and silently nudging those toward Read would send the caller to a tool that
-# cannot do the job.
-def _sed_reads(args: tuple[str, ...]) -> bool:
-    """``sed -n 'M,Np'`` -- the hand-rolled line window Read's args express."""
-    # ``-in`` is quiet PLUS in-place: the file is rewritten, so this is
-    # Edit's business. Share the predicate rather than re-deriving it --
-    # matching only on "a short flag containing n" accepted ``-in`` and
-    # advertised a destructive command as a Read.
-    if sed_mutates(args):
-        return False
-    if not any(a.startswith("-") and not a.startswith("--") and "n" in a for a in args):
-        return False
-    scripts = [a for a in args if _LINE_RANGE_SCRIPT.fullmatch(a)]
-    others = [a for a in args if not a.startswith("-") and a not in scripts]
-    return len(scripts) == 1 and bool(others)
-
-
-# ``sed -n`` scripts that only PRINT a line range: ``5p``, ``1,50p``,
-# ``10,$p``. Anything else (``s/…/…/``, ``d``, ``w file``) transforms or
-# writes, and belongs to Edit rather than Read.
-_LINE_RANGE_SCRIPT: Final = re.compile(r"^\d+(,(\d+|\$))?p$")
-
-
-# The only caller gates on ``_IMAGE_EXTS``, which IS the key set of this table, so a
-# miss cannot happen -- a default would be a branch for an impossible case.
-def _image_mime(suffix: str) -> str:
-    """MIME type for an image file suffix."""
-    return _MIME_BY_EXT[suffix]
-
-
-def _read_pdf(path: Path, pages: str) -> ToolResult:
-    """Rasterize (a range of) a PDF's pages to JPEG attachments."""
-    if not is_pdf(path):
-        return ToolResult(
-            call_id="",
-            content=f"Not a PDF: {path} (missing %PDF- header)",
-            is_error=True,
-        )
-    size = path.stat().st_size
-    if size > MAX_PDF_BYTES:
-        return ToolResult(
-            call_id="",
-            content=(
-                f"PDF too large: {size} bytes > {MAX_PDF_BYTES}."
-                ' Use pages="N-M" to read a range.'
-            ),
-            is_error=True,
-        )
-
-    resolved = _resolve_page_range(path, pages)
-    if isinstance(resolved, ToolResult):
-        return resolved
-    first, last = resolved
-
-    try:
-        page_jpegs, total_pages = _render_pdf_jpegs(path, first=first, last=last)
-    except PdfError as e:
-        return ToolResult(call_id="", content=f"PDF: {e}", is_error=True)
-
-    start = first if first is not None else 1
-    rendered = len(page_jpegs)
-    # The full count comes from the same render call -- no second open that
-    # could transiently fail and silently mark a partial read as complete.
-    # Clamp to ``total_pages``: ``extract_pdf_pages`` renders at most the real
-    # pages (``hi = min(last, n_pages)``), so an over-range ``last`` (e.g.
-    # ``pages="1-9999"`` on a short PDF) is a COMPLETE read, not a truncation.
-    requested_last = min(last, total_pages) if last is not None else total_pages
-    # ``extract_pdf_pages`` returns a prefix when the rendered-byte budget
-    # truncated the read. Make the truncation VISIBLE so the model doesn't
-    # mistake a partial read for a complete one, and name the resume range.
-    truncated = start + rendered - 1 < requested_last
-    if truncated:
-        resume = start + rendered
-        note = (
-            f"[PDF: {path.name} -- rendered pages {start}-{start + rendered - 1} "
-            f"of requested {start}-{requested_last}; output truncated at the "
-            f'request byte budget. Pass pages="{resume}-{requested_last}" to read '
-            f"the remaining pages.]"
-        )
-    else:
-        # Report the clamped end, never the caller's raw over-range ``last``.
-        range_note = f" pages {start}-{requested_last}" if first is not None else ""
-        note = f"[PDF: {path.name} ({rendered} page(s){range_note})]"
-    return ToolResult(
+    context.files.showed(path, lines=lines_asked)
+    whole = start == 0 and kept == total
+    return FileReadResult(
         call_id="",
-        content=note,
-        attachments=tuple(BytesMessage(jpeg, "image/jpeg") for jpeg in page_jpegs),
+        path=str(path),
+        content=body,
+        ranges=() if whole else ((start + 1, kept),),
     )
 
 
-# Returns the rendered JPEGs and the PDF's full page count (for the continuation hint,
-# without a second open).
-def _render_pdf_jpegs(
+def _read_notebook(
+    context: ToolContext,
     path: Path,
+) -> FileReadResult | UncategorizedToolResult:
+    """Render a notebook's cells and their outputs as text."""
+    try:
+        notebook = json_loads(path.read_text(encoding="utf-8"), dict[str, object])
+        cells = from_plain(notebook.get("cells", []), list[dict[str, object]])
+    except (json.JSONDecodeError, UnicodeDecodeError, ReadError) as e:
+        return _error(f"{path} is not a Jupyter notebook: {e}")
+    context.files.saw(path)
+    parts: list[str] = []
+    for i, cell in enumerate(cells):
+        parts.append(f"--- Cell {i + 1} ({cell.get('cell_type') or 'code'}) ---\n")
+        parts.append(f"{_joined(cell.get('source'))}\n")
+        outputs = cell.get("outputs")
+        for output in (
+            cast("list[object]", outputs) if isinstance(outputs, list) else ()
+        ):
+            if isinstance(output, dict):
+                text = _output_text(cast("dict[str, object]", output))
+                if text:
+                    parts.append(f"[output] {text}\n")
+    note = f"\n... ({len(parts):,} more notebook sections omitted.)"
+    body, kept = context.fit(parts, reserve=len(note))
+    if kept < len(parts):
+        body += f"\n... ({len(parts) - kept:,} more notebook sections omitted.)"
+    return FileReadResult(
+        call_id="",
+        path=str(path),
+        content=body or "(empty notebook)",
+    )
+
+
+# An output says what it is three ways: ``stream`` under ``text``, a value under
+# ``data['text/plain']``, and an ``error`` under ``traceback``.
+def _output_text(output: dict[str, object]) -> str:
+    """Return what one cell output shows, as text."""
+    data = output.get("data")
+    plain = (
+        cast("dict[str, object]", data).get("text/plain")
+        if isinstance(data, dict)
+        else None
+    )
+    return (
+        _joined(output.get("text"))
+        or _joined(plain)
+        or _joined(output.get("traceback"))
+    )
+
+
+def _joined(raw: object) -> str:
+    """Return a notebook text field, which is a string or a list of lines."""
+    if isinstance(raw, list):
+        return "".join(str(x) for x in cast("list[object]", raw))
+    return raw if isinstance(raw, str) else ""
+
+
+def _render(
+    doc: pdfium.PdfDocument,
     *,
-    first: int | None,
-    last: int | None,
-) -> tuple[list[bytes], int]:
-    """Rasterize the page range to JPEGs under the rendered-byte budget."""
-    return extract_pdf_pages(
-        path,
-        first=first,
-        last=last,
-        max_total_bytes=_rendered_byte_budget(),
-    )
+    first: int,
+    last: int,
+    max_bytes: int,
+) -> list[bytes]:
+    """Render pages ``first`` to ``last`` as JPEGs, stopping before ``max_bytes``."""
+    jpegs: list[bytes] = []
+    used = 0
+    for i in range(first - 1, last):
+        page = doc[i]
+        try:
+            # Twice 72 DPI: legible to a vision model, small enough to send.
+            image = page.render(scale=2).to_pil().convert("RGB")
+        finally:
+            page.close()
+        buf = io.BytesIO()
+        image.save(buf, format="JPEG", quality=85, optimize=True)
+        if used + buf.tell() > max_bytes:
+            break
+        used += buf.tell()
+        jpegs.append(buf.getvalue())
+    return jpegs
 
 
-# Provider request ceilings vary by orders of magnitude (a small local model may allow
-# far less than a 32 MB Anthropic request), so the bound must follow the ACTIVE model's
-# ``max_request_bytes``, not a single constant. The rendered JPEGs are raw bytes that
-# ship base64-expanded (``4/3``), and the request also carries system prompt + history +
-# text, so reserve headroom: budget the raw render at half the ceiling's base64-deflated
-# size. Falls back to ``MAX_RENDERED_BYTES`` when no agent is in context (standalone
-# tool use / tests) or the model declares no ceiling (``<= 0``).
-def _rendered_byte_budget() -> int:
-    """Per-read cap on cumulative rendered JPEG bytes, from the active model."""
-    agent = current_agent_var.get(None)
-    ceiling = agent.max_request_bytes if agent is not None else 0
-    if ceiling <= 0:
-        return MAX_RENDERED_BYTES
-    # Half the ceiling (headroom for system/history/text), then deflate by
-    # the base64 4/3 expansion to bound the RAW rendered bytes.
-    return max(1, (ceiling // 2) * 3 // 4)
-
-
-def _resolve_page_range(
-    path: Path,
-    pages: str,
-) -> tuple[int | None, int | None] | ToolResult:
-    """Validate page-range spec and return ``(first, last)`` or an error."""
-    if pages:
-        parsed = parse_page_range(pages)
-        if parsed is None:
-            return ToolResult(
-                call_id="",
-                content=(
-                    f"Invalid pages spec {pages!r}: "
-                    'use "N" / "N-M" / "N-" (1-indexed, inclusive)'
-                ),
-                is_error=True,
-            )
-        return parsed
-    count = get_pdf_page_count(path)
-    if count is not None and count > MAX_INLINE_PAGES:
-        return ToolResult(
-            call_id="",
-            content=(
-                f"PDF has {count} pages (> {MAX_INLINE_PAGES})."
-                ' Pass pages="1-N" to read a window.'
-            ),
-            is_error=True,
-        )
-    return None, None
-
-
-# Each tuple is ``(name, coerced, raw)``: ``coerced`` is the ``get(..., int)`` result
-# we'd otherwise pass downstream; ``raw`` is the untouched directive value used to
-# detect "the caller supplied it" (an absent key has ``raw is None`` and is allowed to
-# fall through to the default).
-def _check_minimum(
-    *fields: tuple[str, int, object],
-) -> ToolResult | None:
-    """Reject schema-violating windowing args at the tool entrypoint."""
-    # Defense-in-depth: ``validate_tool_input`` (the JSON-schema gate run by
-    # ``_AgentTool.run``) is the primary enforcer of these minima; this re-check
-    # covers direct ``run()`` callers (tests, internal reuse) that bypass it.
-    for name, coerced, raw in fields:
-        if raw is None:
-            continue
-        if coerced < 1:
-            return ToolResult(
-                call_id="",
-                content=f"'{name}' must be ≥ 1, got {coerced}.",
-                is_error=True,
-            )
-    return None
+def _error(message: str) -> UncategorizedToolResult:
+    return UncategorizedToolResult(call_id="", content=message, is_error=True)

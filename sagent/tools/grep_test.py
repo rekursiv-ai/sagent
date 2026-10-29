@@ -1,1182 +1,540 @@
-"""Tests for ``tools.grep``: ripgrep-first content search."""
+"""Tests for the Grep tool: the query it builds, its paging, and shell searches."""
 
 from __future__ import annotations
 
-from contextlib import ExitStack, contextmanager
 from typing import TYPE_CHECKING
-from unittest.mock import patch
-
-import asyncio
-import subprocess
 
 import pytest
 
-from sagent.lib.tool_validation import validate_tool_input
-from sagent.testing import FakeAgent, with_fake_agent
+from sagent.lib.files.grep import GrepError, Query, Row
+from sagent.tools import grep
+from sagent.tools.command_analyzer import invocations
 from sagent.tools.grep import Grep
-from sagent.tools.lib.bash import parse_bash
-from sagent.types.runtime import ToolResult
+from sagent.tools.types import ToolContext, parse
 
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Generator, Mapping
+    from collections.abc import Sequence
     from pathlib import Path
 
-
-grep = Grep()
-_NUDGE = "grep/rg via Bash is a bad UX. Use the Grep tool."
+    from treekle import PlainTree
 
 
-def _setup_tree(root: Path) -> None:
-    (root / "a.py").write_text("alpha def foo():\n    pass\n")
-    (root / "b.py").write_text("beta def bar():\n    pass\n")
-    (root / "c.txt").write_text("alpha text\n")
-    sub = root / "sub"
-    sub.mkdir()
-    (sub / "d.py").write_text("alpha nested\n")
+def test_summary_quotes_the_pattern_and_names_any_other_path() -> None:
+    assert Grep().summary({"pattern": "def main"}) == "Grep 'def main'"
+    assert Grep().summary({"pattern": "x", "path": "."}) == "Grep 'x'"
+    assert Grep().summary({"pattern": "x", "path": ""}) == "Grep 'x'"
+    assert Grep().summary({"pattern": "x", "path": "src"}) == "Grep 'x' in src"
+    assert Grep().summary({}) == "Grep ''"
 
 
-@contextmanager
-def _no_rg_fake_agent() -> Generator[FakeAgent]:
-    """Force the Python fallback by hiding ripgrep."""
-    with ExitStack() as stack:
-        stack.enter_context(
-            patch("sagent.lib.files.grep.shutil.which", return_value=None),
-        )
-        yield stack.enter_context(with_fake_agent())
+def test_searching_runs_beside_anything(tmp_path: Path) -> None:
+    assert Grep().serialize_key(ToolContext(cwd=tmp_path), {"pattern": "x"}) is None
 
 
-async def _run_grep(args: Mapping[str, object], cwd: Path) -> ToolResult:
-    with with_fake_agent() as agent:
-        agent.tool_state.bash_cwd = str(cwd)
-        return await grep.run(args)
-
-
-async def _run_grep_py(args: Mapping[str, object], cwd: Path) -> ToolResult:
-    with _no_rg_fake_agent() as agent:
-        agent.tool_state.bash_cwd = str(cwd)
-        return await grep.run(args)
+def test_ripgreps_own_flags_are_the_argument_names() -> None:
+    properties = Grep.schema["properties"]
+    assert isinstance(properties, dict)
+    assert {"-B", "-A", "-C", "-i", "-n", "type"} <= set(properties)
+    assert "before" not in properties
 
 
 @pytest.mark.asyncio
-async def test_a_tilde_path_searches_the_home_directory(
+async def test_each_argument_reaches_the_query(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
-    (tmp_path / "home").mkdir()
-    (tmp_path / "home" / "h.py").write_text("needle\n")
-    result = await _run_grep({"pattern": "needle", "path": "~"}, tmp_path)
-    assert "h.py" in result.content, result.content
-
-
-@pytest.mark.asyncio
-async def test_a_long_row_keeps_a_path_holding_dash_digits_whole(
-    tmp_path: Path,
-) -> None:
-    """``a-1-b.py`` has a ``-1-`` that is not the row's line separator."""
-    (tmp_path / "a-1-b.py").write_text("x" * 600 + "needle\n")
-    result = await _run_grep(
-        {"pattern": "needle", "path": str(tmp_path), "output_mode": "content"},
-        tmp_path,
-    )
-    assert f"{tmp_path}/a-1-b.py:1:" in result.content, result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_files_with_matches(tmp_path: Path) -> None:
-    _setup_tree(tmp_path)
-    result = await _run_grep({"pattern": "alpha", "path": str(tmp_path)}, tmp_path)
-    assert "a.py" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_content_mode(tmp_path: Path) -> None:
-    _setup_tree(tmp_path)
-    result = await _run_grep(
-        {"pattern": "alpha", "path": str(tmp_path), "output_mode": "content"},
-        tmp_path,
-    )
-    assert "alpha" in result.content
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("runner", [_run_grep, _run_grep_py])
-async def test_a_wide_line_is_clipped_around_its_match(
-    tmp_path: Path,
-    runner: Callable[[Mapping[str, object], Path], Awaitable[ToolResult]],
-) -> None:
-    """Session ``ca1c4eb5``: one 450,791-character JSONL line came back whole.
-
-    The cut is centred on the match, not the line start, so a needle far
-    right in the line stays visible (``rg --max-columns`` would hide it).
-    """
-    (tmp_path / "wide.jsonl").write_text("a" * 200_000 + "NEEDLE" + "b" * 200_000)
-
-    result = await runner(
-        {"pattern": "NEEDLE", "path": str(tmp_path), "output_mode": "content"},
-        tmp_path,
-    )
-
-    assert "NEEDLE" in result.content
-    assert len(result.content) < 1_000, len(result.content)
-    assert "[200,000 chars]" not in result.content
-    assert "chars]" in result.content
-
-
-@pytest.mark.asyncio
-async def test_a_wide_line_is_clipped_around_a_posix_class_match(
-    tmp_path: Path,
-) -> None:
-    (tmp_path / "wide.txt").write_text("-" * 2_000 + "abc123" + "-" * 2_000)
-    result = await _run_grep(
+    seen = _capture(monkeypatch, rows=[Row(text="hit")])
+    result = await Grep().call(
+        ToolContext(cwd=tmp_path),
         {
-            "pattern": "[[:alpha:]]+[[:digit:]]+",
-            "path": str(tmp_path),
-            "output_mode": "content",
-        },
-        tmp_path,
-    )
-    assert "abc123" in result.content, result.content
-
-
-@pytest.mark.asyncio
-async def test_a_narrow_line_is_not_clipped(tmp_path: Path) -> None:
-    """The path prefix is not text: a long path must not clip a short line."""
-    line = "x" * 400 + "NEEDLE"
-    deep = tmp_path / ("d" * 200)
-    deep.mkdir()
-    (deep / "narrow.txt").write_text(line)
-
-    result = await _run_grep(
-        {"pattern": "NEEDLE", "path": str(tmp_path), "output_mode": "content"},
-        tmp_path,
-    )
-
-    assert line in result.content
-    assert "chars]" not in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_count_mode(tmp_path: Path) -> None:
-    _setup_tree(tmp_path)
-    result = await _run_grep(
-        {"pattern": "alpha", "path": str(tmp_path), "output_mode": "count"},
-        tmp_path,
-    )
-    assert ":" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_glob_filter(tmp_path: Path) -> None:
-    _setup_tree(tmp_path)
-    result = await _run_grep(
-        {"pattern": "alpha", "path": str(tmp_path), "glob": "*.txt"},
-        tmp_path,
-    )
-    assert "c.txt" in result.content
-    assert "a.py" not in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_no_matches(tmp_path: Path) -> None:
-    _setup_tree(tmp_path)
-    result = await _run_grep(
-        {"pattern": "ZZZZ_nothing", "path": str(tmp_path)},
-        tmp_path,
-    )
-    assert "(no matches)" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_relative_path(tmp_path: Path) -> None:
-    _setup_tree(tmp_path)
-    result = await _run_grep({"pattern": "alpha"}, tmp_path)
-    assert "alpha" in result.content or "a.py" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_case_insensitive(tmp_path: Path) -> None:
-    f = tmp_path / "x.py"
-    f.write_text("ALPHA\n")
-    result = await _run_grep(
-        {
-            "pattern": "alpha",
-            "path": str(tmp_path),
-            "-i": True,
-            "output_mode": "content",
-        },
-        tmp_path,
-    )
-    assert "ALPHA" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_keep_first(tmp_path: Path) -> None:
-    for i in range(10):
-        (tmp_path / f"f{i}.txt").write_text("hit\n")
-    result = await _run_grep(
-        {"pattern": "hit", "path": str(tmp_path), "keep_first": 3},
-        tmp_path,
-    )
-    assert result.content.count("\n") <= 2
-
-
-@pytest.mark.asyncio
-async def test_grep_keep_last(tmp_path: Path) -> None:
-    for i in range(10):
-        (tmp_path / f"f{i:02d}.txt").write_text("hit\n")
-    result = await _run_grep(
-        {"pattern": "hit", "path": str(tmp_path), "keep_last": 3},
-        tmp_path,
-    )
-    lines = result.content.splitlines()
-    assert len(lines) <= 3
-
-
-@pytest.mark.asyncio
-async def test_grep_context_lines(tmp_path: Path) -> None:
-    f = tmp_path / "x.py"
-    f.write_text("a\nMATCH\nc\n")
-    result = await _run_grep(
-        {
-            "pattern": "MATCH",
-            "path": str(tmp_path),
-            "output_mode": "content",
-            "-B": 1,
-            "-A": 1,
-        },
-        tmp_path,
-    )
-    assert "MATCH" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_context_symmetric(tmp_path: Path) -> None:
-    f = tmp_path / "x.py"
-    f.write_text("a\nMATCH\nc\n")
-    result = await _run_grep(
-        {
-            "pattern": "MATCH",
-            "path": str(tmp_path),
-            "output_mode": "content",
-            "-C": 1,
-        },
-        tmp_path,
-    )
-    assert "MATCH" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_type_filter(tmp_path: Path) -> None:
-    _setup_tree(tmp_path)
-    result = await _run_grep(
-        {"pattern": "alpha", "path": str(tmp_path), "type": "py"},
-        tmp_path,
-    )
-    assert "a.py" in result.content
-    assert "c.txt" not in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_files_with_matches(tmp_path: Path) -> None:
-    _setup_tree(tmp_path)
-    result = await _run_grep_py({"pattern": "alpha", "path": str(tmp_path)}, tmp_path)
-    assert "a.py" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_content(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("alpha line\n")
-    result = await _run_grep_py(
-        {"pattern": "alpha", "path": str(tmp_path), "output_mode": "content"},
-        tmp_path,
-    )
-    assert "alpha" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_count(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("alpha\nalpha\n")
-    result = await _run_grep_py(
-        {"pattern": "alpha", "path": str(tmp_path), "output_mode": "count"},
-        tmp_path,
-    )
-    assert ":2" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_no_match(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("ok")
-    result = await _run_grep_py({"pattern": "ZZZ", "path": str(tmp_path)}, tmp_path)
-    assert "(no matches)" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_case_insensitive(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("ALPHA\n")
-    result = await _run_grep_py(
-        {
-            "pattern": "alpha",
-            "path": str(tmp_path),
-            "-i": True,
-            "output_mode": "content",
-        },
-        tmp_path,
-    )
-    assert "ALPHA" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_keep_last(tmp_path: Path) -> None:
-    for i in range(5):
-        (tmp_path / f"f{i:02d}.txt").write_text("hit\n")
-    result = await _run_grep_py(
-        {"pattern": "hit", "path": str(tmp_path), "keep_last": 2},
-        tmp_path,
-    )
-    lines = [x for x in result.content.splitlines() if x]
-    assert len(lines) <= 2
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_offset(tmp_path: Path) -> None:
-    for i in range(5):
-        (tmp_path / f"f{i:02d}.txt").write_text("hit\n")
-    result = await _run_grep_py(
-        {
-            "pattern": "hit",
-            "path": str(tmp_path),
-            "offset": 2,
-            "keep_first": 5,
-        },
-        tmp_path,
-    )
-    lines = [x for x in result.content.splitlines() if x]
-    assert len(lines) <= 3
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_invalid_regex_returns_error(tmp_path: Path) -> None:
-    # The ripgrep path returns a clean ``ToolResult(is_error=True)`` for
-    # invalid patterns. The Python fallback must match that contract --
-    # not crash with ``re.error`` -- so callers see the same surface.
-    (tmp_path / "x.py").write_text("alpha\n")
-    result = await _run_grep_py(
-        {"pattern": "(unclosed", "path": str(tmp_path)},
-        tmp_path,
-    )
-    assert result.is_error
-    assert "regex" in result.content.lower() or "pattern" in result.content.lower()
-
-
-@pytest.mark.asyncio
-async def test_grep_invalid_output_mode_returns_error(tmp_path: Path) -> None:
-    # The schema declares an enum {"content", "files_with_matches",
-    # "count"}; the runtime must reject unknown values rather than
-    # silently treating them as the default mode.
-    (tmp_path / "x.py").write_text("alpha\n")
-    result = await _run_grep(
-        {"pattern": "alpha", "path": str(tmp_path), "output_mode": "bogus"},
-        tmp_path,
-    )
-    assert result.is_error
-    assert "output_mode" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_multiline(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("foo\nbar\n")
-    result = await _run_grep_py(
-        {
-            "pattern": r"foo.bar",
-            "path": str(tmp_path),
-            "output_mode": "content",
-            "multiline": True,
-        },
-        tmp_path,
-    )
-    assert "foo" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_context(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("a\nMATCH\nc\n")
-    result = await _run_grep_py(
-        {
-            "pattern": "MATCH",
-            "path": str(tmp_path),
-            "output_mode": "content",
-            "-B": 1,
-            "-A": 1,
-        },
-        tmp_path,
-    )
-    assert "MATCH" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_skips_vcs_dirs(tmp_path: Path) -> None:
-    vcs_dir = tmp_path / ".git"
-    vcs_dir.mkdir()
-    (vcs_dir / "config").write_text("alpha\n")
-    (tmp_path / "x.txt").write_text("beta\n")
-
-    result = await _run_grep_py(
-        {"pattern": "alpha", "path": str(tmp_path)},
-        tmp_path,
-    )
-
-    assert "(no matches)" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_fallback_skips_a_gitignored_dir(tmp_path: Path) -> None:
-    """Rg honours ``.gitignore`` in a repo; the fallback searches the same files."""
-    (tmp_path / ".git").mkdir()
-    (tmp_path / ".gitignore").write_text("build/\n", encoding="utf-8")
-    (tmp_path / "build").mkdir()
-    (tmp_path / "build" / "out.py").write_text("hit\n", encoding="utf-8")
-    (tmp_path / "kept.py").write_text("hit\n", encoding="utf-8")
-    args = {"pattern": "hit", "path": str(tmp_path)}
-    rg = await _run_grep(dict(args), tmp_path)
-    py = await _run_grep_py(dict(args), tmp_path)
-    assert "out.py" not in py.content, py.content
-    assert rg.content == py.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_searches_a_named_file_whatever_its_type(
-    tmp_path: Path,
-) -> None:
-    """``rg --type py x.md`` still searches ``x.md``: a named file is never filtered."""
-    f = tmp_path / "x.md"
-    f.write_text("alpha\n")
-
-    result = await _run_grep_py(
-        {
-            "pattern": "alpha",
-            "path": str(f),
+            "pattern": "p",
+            "path": "src",
+            "glob": "*.py",
             "type": "py",
-            "output_mode": "files_with_matches",
-        },
-        tmp_path,
-    )
-
-    assert str(f) in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_honors_line_number_false(
-    tmp_path: Path,
-) -> None:
-    f = tmp_path / "x.txt"
-    f.write_text("alpha\n")
-
-    result = await _run_grep_py(
-        {
-            "pattern": "alpha",
-            "path": str(f),
-            "output_mode": "content",
-            "-n": False,
-        },
-        tmp_path,
-    )
-
-    assert result.content == f"{f}:alpha"
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_context_matches_rg_format(tmp_path: Path) -> None:
-    f = tmp_path / "x.py"
-    f.write_text("a\nMATCH\nc\n")
-
-    result = await _run_grep_py(
-        {
-            "pattern": "MATCH",
-            "path": str(tmp_path),
+            "exclude": "*_test.py",
             "output_mode": "content",
             "-B": 1,
-            "-A": 1,
-        },
-        tmp_path,
-    )
-
-    assert result.content == f"{f}-1-a\n{f}:2:MATCH\n{f}-3-c"
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_exclude(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("alpha\n")
-    (tmp_path / "x.test.py").write_text("alpha\n")
-    result = await _run_grep_py(
-        {
-            "pattern": "alpha",
-            "path": str(tmp_path),
-            "exclude": "*.test.py",
-        },
-        tmp_path,
-    )
-    assert "x.test.py" not in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_rg_offset(tmp_path: Path) -> None:
-    """``offset`` skips the first N rg matches."""
-    for i in range(5):
-        (tmp_path / f"f{i:02d}.txt").write_text("hit\n")
-    result = await _run_grep(
-        {"pattern": "hit", "path": str(tmp_path), "offset": 2, "keep_first": 10},
-        tmp_path,
-    )
-    lines = [x for x in result.content.splitlines() if x]
-    assert len(lines) <= 3
-
-
-@pytest.mark.asyncio
-async def test_grep_rg_pcre(tmp_path: Path) -> None:
-    """PCRE backend handles lookarounds (rg -P)."""
-    (tmp_path / "x.py").write_text("foo123bar\n")
-    result = await _run_grep(
-        {
-            "pattern": r"(?<=foo)\d+",
-            "path": str(tmp_path),
-            "output_mode": "content",
+            "-A": 4,
+            "-i": True,
+            "-n": False,
+            "multiline": True,
             "pcre": True,
         },
-        tmp_path,
     )
-    assert "123" in result.content or "x.py" in result.content
+    assert result.text() == "hit"
+    assert seen == [
+        (
+            tmp_path / "src",
+            Query(
+                pattern="p",
+                glob="*.py",
+                exclude="*_test.py",
+                file_type="py",
+                output_mode="content",
+                context_before=1,
+                context_after=4,
+                case_insensitive=True,
+                line_numbers=False,
+                multiline=True,
+                pcre=True,
+            ),
+        ),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_grep_rg_multiline(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("foo\nbar\n")
-    result = await _run_grep(
-        {
-            "pattern": r"foo\s+bar",
-            "path": str(tmp_path),
-            "output_mode": "content",
-            "multiline": True,
-        },
-        tmp_path,
-    )
-    assert "foo" in result.content or "x.py" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_rg_exclude(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("alpha\n")
-    (tmp_path / "x.test.py").write_text("alpha\n")
-    result = await _run_grep(
-        {"pattern": "alpha", "path": str(tmp_path), "exclude": "*.test.py"},
-        tmp_path,
-    )
-    assert "x.test.py" not in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_rg_offset_with_context_ignored(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("a\nMATCH\nc\n")
-    result = await _run_grep(
-        {
-            "pattern": "MATCH",
-            "path": str(tmp_path),
-            "output_mode": "content",
-            "offset": 1,
-            "-C": 1,
-        },
-        tmp_path,
-    )
-    assert "MATCH" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_rg_error_invalid_regex(tmp_path: Path) -> None:
-    """Invalid patterns preserve the tool's ripgrep-compatible error surface."""
-    (tmp_path / "x.py").write_text("hi\n")
-    result = await _run_grep(
-        {"pattern": "(unclosed", "path": str(tmp_path)},
-        tmp_path,
-    )
-    assert result.is_error
-    assert "ripgrep error" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_skip_nonfiles(tmp_path: Path) -> None:
-    """The fallback skips directories returned by glob walking."""
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    # A file inside, plus a subdir (must be skipped silently).
-    (sub / "x.py").write_text("alpha\n")
-    result = await _run_grep_py(
-        {"pattern": "alpha", "path": str(tmp_path), "glob": "**/x.py"},
-        tmp_path,
-    )
-    assert "alpha" in result.content or "x.py" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_unicode_skip(tmp_path: Path) -> None:
-    """Non-UTF-8 files are skipped in the python fallback."""
-    (tmp_path / "x.py").write_text("alpha\n")
-    (tmp_path / "bad.py").write_bytes(b"\xff\xfe_not_utf8")
-    result = await _run_grep_py({"pattern": "alpha", "path": str(tmp_path)}, tmp_path)
-    assert "x.py" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_multiline_files_with_matches(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("foo\nbar\n")
-    result = await _run_grep_py(
-        {
-            "pattern": r"foo.bar",
-            "path": str(tmp_path),
-            "multiline": True,
-            "output_mode": "files_with_matches",
-        },
-        tmp_path,
-    )
-    assert "x.py" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_multiline_count(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("foo\nbar\nfoo\nbar\n")
-    result = await _run_grep_py(
-        {
-            "pattern": r"foo.bar",
-            "path": str(tmp_path),
-            "multiline": True,
-            "output_mode": "count",
-        },
-        tmp_path,
-    )
-    assert ":" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_multiline_keeps_long_match(tmp_path: Path) -> None:
-    long = "x" * 300
-    (tmp_path / "x.py").write_text(long)
-    result = await _run_grep_py(
-        {
-            "pattern": r"x+",
-            "path": str(tmp_path),
-            "multiline": True,
-            "output_mode": "content",
-        },
-        tmp_path,
-    )
-    # Uncapped: a 300-char match is content, not a size problem.
-    assert long in result.content
-
-
-def test_bash_match_xargs_no_grep_at_end() -> None:
-    """``xargs -0`` with no ``grep`` token returns None."""
-    trees = parse_bash("find . | xargs -0")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_pipeline_grep_no_pattern() -> None:
-    """Pipeline shape with empty grep args bails."""
-    trees = parse_bash("grep | head")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_pipeline_unsupported_target() -> None:
-    """Grep | awk: ``awk`` is not in the display-shaper set."""
-    trees = parse_bash("grep foo file.txt | awk '{print}'")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_pipeline_cat_grep_with_grep_flag_value_missing() -> None:
-    """``cat FILE | grep -A`` (missing value) bails."""
-    trees = parse_bash("cat file.txt | grep -A")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_summary_short() -> None:
-    assert grep.summary({"pattern": "foo"}) == "Grep 'foo'"
-
-
-def test_summary_with_path() -> None:
-    assert grep.summary({"pattern": "foo", "path": "/x"}) == "Grep 'foo' in /x"
-
-
-def test_summary_keeps_pattern() -> None:
-    assert grep.summary({"pattern": "x" * 100}) == f"Grep {'x' * 100!r}"
-
-
-def test_prompt_empty() -> None:
-    assert grep.prompt() == ""
-
-
 @pytest.mark.parametrize(
-    "command",
+    ("arguments", "before", "after"),
     [
-        "grep foo file.txt",
-        "grep -rln foo /src",
-        "grep --include=*.py foo /src",
-        "grep --include foo /src",
-        "grep -A 2 foo file.txt",
-        "cd /src && grep foo .",
-        "grep foo file.txt | head",
-        "grep foo file.txt | wc -l",
-        "cat file.txt | grep foo",
-        "cat -n file.txt | grep foo",
-        "find . -name '*.py' | xargs grep foo",
-        "find . -type f -print0 | xargs -0 grep foo",
-        # Flags outside the translatable set are still a reach for Grep.
-        "grep foo a.txt b.txt",
-        "grep --weird=val foo",
-        "grep -Z foo file.txt",
-        "rg foo file.txt",
-        "rg -n -i foo /src",
-        "rg foo /src | head",
-        "rg foo /src | wc -l",
-        "cat file.txt | rg foo",
-        "find . -name '*.py' | xargs rg foo",
-        "cd /src && rg foo .",
-        "rg -U 'a\\nb' .",
+        ({"-C": 2}, 2, 2),
+        ({"context": 3}, 3, 3),
+        ({"-C": 2, "context": 3}, 3, 3),
+        ({"-B": 5, "-C": 2}, 5, 2),
+        ({"-A": 5, "context": 2}, 2, 5),
+        ({}, 0, 0),
     ],
 )
-def test_bash_match_nudges(command: str) -> None:
-    trees = parse_bash(command)
-    assert trees is not None
-    assert (grep.bash_match(trees) or "").startswith(_NUDGE), command
-
-
-@pytest.mark.parametrize(
-    ("command", "call"),
-    [
-        ("grep foo file.txt", "Try: Grep pattern='foo' path='file.txt'"),
-        ("grep -rln foo /src", 'output_mode="files_with_matches"'),
-        ("grep --include=*.py foo /src", "glob='*.py'"),
-        ("grep -c foo file.txt", 'output_mode="count"'),
-    ],
-)
-def test_bash_match_grep_suggests_a_concrete_call(command: str, call: str) -> None:
-    trees = parse_bash(command)
-    assert trees is not None
-    assert call in (grep.bash_match(trees) or ""), command
-
-
-@pytest.mark.parametrize("command", ["grep -Z foo file.txt", "grep --weird=val foo"])
-def test_an_untranslatable_flag_drops_only_the_example(command: str) -> None:
-    """Detection must survive what the translator cannot render."""
-    trees = parse_bash(command)
-    assert trees is not None
-    hint = grep.bash_match(trees) or ""
-    assert hint.startswith(_NUDGE)
-    assert "Try: Grep" not in hint
-
-
-@pytest.mark.parametrize(
-    ("command", "fields"),
-    [
-        ("grep foo f.txt | head -5", " keep_first=5"),
-        ("grep foo f.txt | head -n 7", " keep_first=7"),
-        ("grep foo f.txt | tail -3", " keep_last=3"),
-        ("grep foo f.txt | wc -l", ' output_mode="count"'),
-        ("grep foo f.txt | head -5 | wc -l", ' output_mode="count" keep_first=5'),
-        # One field per counting sink, joined with nothing between them.
-        ("grep foo f.txt | wc -l | wc -l", ' output_mode="count" output_mode="count"'),
-        # ``-l`` counts lines only under ``wc``; ``head -l`` is no count.
-        ("grep foo f.txt | head -l", ""),
-        ("grep foo f.txt", ""),
-    ],
-)
-def test_a_folded_sink_renders_exactly_its_fields(command: str, fields: str) -> None:
-    """A bounding or counting sink is part of the search the nudge replaces."""
-    trees = parse_bash(command)
-    assert trees is not None
-    hint = grep.bash_match(trees) or ""
-    assert hint.endswith(f"Try: Grep pattern='foo' path='f.txt'{fields}"), hint
-
-
-def test_bash_match_grep_value_flag_missing_value() -> None:
-    """``grep -A`` has no pattern operand, so no Grep call exists."""
-    trees = parse_bash("grep -A")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        # A search reading STDIN from a non-file producer has no path
-        # operand at all, and every Grep call takes a path.
-        "git log --oneline | grep fix",
-        "uv run pytest -q | grep FAILED",
-        "ps aux | grep python",
-    ],
-)
-def test_bash_match_stdin_fed_search_no_nudge(command: str) -> None:
-    trees = parse_bash(command)
-    assert trees is not None
-    assert grep.bash_match(trees) is None, command
-
-
-def test_bash_match_xargs_unknown_flag_no_nudge() -> None:
-    trees = parse_bash("find . | xargs -I {} grep foo {}")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_xargs_non_grep_no_nudge() -> None:
-    trees = parse_bash("find . | xargs echo")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_find_predicate_no_nudge() -> None:
-    trees = parse_bash("find . -mtime -1 | xargs grep foo")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_find_bad_type_no_nudge() -> None:
-    trees = parse_bash("find . -type x | xargs grep foo")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_grep_wc_c_no_nudge() -> None:
-    trees = parse_bash("grep foo file.txt | wc -c")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_negation_sink_does_not_nudge() -> None:
-    """``| grep -v X`` is NOT the Grep tool's ``exclude``.
-
-    Measured on a file whose second line is ``ERROR DEBUG b``:
-    ``grep ERROR f | grep -v DEBUG`` returns two lines, while
-    ``Grep(pattern='ERROR', exclude='DEBUG')`` returns all three.
-    ``exclude`` becomes ``rg --glob '!PAT'`` -- a PATH filter -- and
-    ``directive_schema`` has no inverted-match property at all.
-    """
-    trees = parse_bash("grep -rn foo /src | grep -v _test")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_env_prefix_no_nudge() -> None:
-    trees = parse_bash("FOO=1 grep foo file.txt")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-def test_bash_match_other_no_nudge() -> None:
-    trees = parse_bash("ls -la")
-    assert trees is not None
-    assert grep.bash_match(trees) is None
-
-
-@pytest.mark.asyncio
-async def test_grep_literal_newline_error_rewritten(tmp_path: Path) -> None:
-    r"""Rg's literal ``\n`` complaint is rewritten to point at ``multiline``."""
-    _setup_tree(tmp_path)
-    result = await _run_grep(
-        {"pattern": "a\\nb", "path": str(tmp_path)},
-        tmp_path,
-    )
-    assert result.is_error
-    assert "multiline=true" in result.content
-    assert "the literal" not in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_python_fallback_ignores_offset_when_context_requested(
+async def test_context_on_each_side_is_the_widest_asked_for(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, PlainTree],
+    before: int,
+    after: int,
 ) -> None:
-    (tmp_path / "x.py").write_text("a\nMATCH\nc\n")
-    result = await _run_grep_py(
-        {
-            "pattern": "MATCH",
-            "path": str(tmp_path),
-            "output_mode": "content",
-            "offset": 1,
-            "-C": 1,
-        },
-        tmp_path,
+    seen = _capture(monkeypatch, rows=[])
+    await Grep().call(
+        ToolContext(cwd=tmp_path),
+        {"pattern": "p", "path": "", **arguments},
     )
-    assert "MATCH" in result.content
+    ((root, query),) = seen
+    assert root == tmp_path
+    assert (query.context_before, query.context_after) == (before, after)
+    assert query.output_mode == "files_with_matches"
+    assert query.line_numbers
 
 
 @pytest.mark.asyncio
-async def test_grep_python_fallback_rejects_literal_newline_without_multiline(
+async def test_a_real_search_finds_matching_files_and_lines(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("alpha\nbeta\n")
+    (tmp_path / "b.py").write_text("gamma\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "c.txt").write_text("ALPHA\n")
+    context = ToolContext(cwd=tmp_path)
+    files = await Grep().call(context, {"pattern": "alpha", "-i": True})
+    assert files.text() == f"{tmp_path / 'a.py'}\n{tmp_path / 'sub' / 'c.txt'}"
+    lines = await Grep().call(
+        context,
+        {"pattern": "alpha", "path": "a.py", "output_mode": "content"},
+    )
+    assert lines.text() == f"{tmp_path / 'a.py'}:1:alpha"
+    assert lines.is_error is None
+    assert lines.call_id == ""
+
+
+@pytest.mark.asyncio
+async def test_nothing_found_says_so(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("alpha\n")
+    result = await Grep().call(ToolContext(cwd=tmp_path), {"pattern": "absent"})
+    assert result.text() == "(no matches)"
+    assert result.is_error is None
+
+
+@pytest.mark.asyncio
+async def test_a_search_that_cannot_run_is_an_error(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    (tmp_path / "x.py").write_text("a\nb\n")
-    result = await _run_grep_py({"pattern": "a\\nb", "path": str(tmp_path)}, tmp_path)
-    assert result.is_error
-    assert "multiline=true" in result.content
-
-
-@pytest.mark.asyncio
-async def test_grep_multiline_newline_pattern_works(tmp_path: Path) -> None:
-    r"""With ``multiline=true``, ``\n`` in the pattern matches."""
-    (tmp_path / "f.txt").write_text("foo\nbar\n")
-    result = await _run_grep(
-        {
-            "pattern": "foo\\nbar",
-            "path": str(tmp_path),
-            "multiline": True,
-            "output_mode": "files_with_matches",
-        },
-        tmp_path,
+    result = await Grep().call(
+        ToolContext(cwd=tmp_path),
+        {"pattern": "x", "path": "missing"},
     )
-    assert not result.is_error
-    assert "f.txt" in result.content
+    assert result.is_error is True
+    assert result.call_id == ""
+    assert result.text() == f"no such file or directory: {tmp_path / 'missing'}"
+
+    def refuse(paths: Path, query: Query) -> list[Row]:
+        del paths, query
+        raise GrepError("bad pattern")
+
+    monkeypatch.setattr(grep, "grep_rows", refuse)
+    result = await Grep().call(ToolContext(cwd=tmp_path), {"pattern": "("})
+    assert (result.is_error, result.text()) == (True, "bad pattern")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "field",
-    ["keep_first", "keep_last", "offset", "-B", "-A", "-C"],
+    ("window", "rows"),
+    [
+        ({}, ["r0", "r1", "r2", "r3", "r4", "r5"]),
+        ({"keep_first": 2}, ["r0", "r1"]),
+        ({"offset": 4}, ["r4", "r5"]),
+        ({"offset": 1, "keep_first": 2}, ["r1", "r2"]),
+        ({"keep_last": 2}, ["r4", "r5"]),
+        ({"keep_last": 2, "keep_first": 1, "offset": 1}, ["r4", "r5"]),
+        ({"keep_last": 10}, ["r0", "r1", "r2", "r3", "r4", "r5"]),
+    ],
 )
-async def test_grep_rejects_negative_pagination(field: str, tmp_path: Path) -> None:
-    """Schema declares ``minimum: 0``; runtime must enforce.
+async def test_a_window_pages_the_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    window: dict[str, PlainTree],
+    rows: list[str],
+) -> None:
+    _capture(monkeypatch, rows=[Row(text=f"r{i}") for i in range(6)])
+    result = await Grep().call(ToolContext(cwd=tmp_path), {"pattern": "r", **window})
+    assert result.text() == "\n".join(rows)
 
-    Pre-fix, ``int_val`` happily returned negatives and the downstream
-    slice (``lines[-N:]``) tail-trimmed instead of erroring, masking
-    the directive bug.
-    """
-    _setup_tree(tmp_path)
-    result = await _run_grep(
-        {"pattern": "alpha", "path": str(tmp_path), field: -1},
-        tmp_path,
+
+@pytest.mark.asyncio
+async def test_a_window_past_the_last_entry_says_matches_lie_before_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _capture(monkeypatch, rows=[Row(text="r0")])
+    result = await Grep().call(ToolContext(cwd=tmp_path), {"pattern": "r", "offset": 5})
+    assert result.text() == "(no matches in this window)"
+    assert result.call_id == ""
+
+
+@pytest.mark.asyncio
+async def test_a_full_result_says_where_to_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _capture(monkeypatch, rows=[Row(text=f"row{i:02d}") for i in range(40)])
+    context = ToolContext(cwd=tmp_path, max_result_chars=120)
+    result = await Grep().call(context, {"pattern": "r", "offset": 10})
+    rows = result.text().splitlines()
+    kept = len(rows) - 1
+    assert rows[0] == "row10"
+    assert 0 < kept < 30
+    assert (
+        rows[-1]
+        == f"... ({30 - kept} more entries; pass offset={10 + kept} to continue)"
     )
-    assert result.is_error, result.content
-    assert field in result.content
+    assert len(result.text()) <= context.max_result_chars
 
 
-@pytest.mark.parametrize("output_mode", ["content", "count", "files_with_matches"])
+@pytest.mark.asyncio
+async def test_grep_s_own_cap_holds_below_the_context_s(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _capture(monkeypatch, rows=[Row(text=f"row{i:02d}") for i in range(40)])
+    result = await Grep(max_result_chars=120).call(
+        ToolContext(cwd=tmp_path),
+        {"pattern": "r"},
+    )
+    assert result.text().endswith("to continue)")
+    assert len(result.text()) <= 120
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "knobs",
+    ("row", "shown"),
+    [
+        (Row(text="f:1:" + "x" * 10, prefix_end=4, column=4), "f:1:" + "x" * 10),
+        (Row(text="f:1:" + "x" * 12, prefix_end=4, column=4), "f:1:" + "x" * 12),
+        (
+            Row(text="f:1:" + "a" * 20 + "NEEDLE" + "b" * 20, prefix_end=4, column=24),
+            "f:1:[14 chars] aaaaaaNEEDLE [20 chars]",
+        ),
+        (
+            Row(text="f:1:NEEDLE" + "b" * 30, prefix_end=4, column=4),
+            "f:1:NEEDLEbbbbbb [24 chars]",
+        ),
+        (
+            Row(text="f:1:" + "a" * 30 + "NEEDLE", prefix_end=4, column=34),
+            "f:1:[24 chars] aaaaaaNEEDLE",
+        ),
+        (
+            Row(text="f:1:" + "a" * 30 + "NEE", prefix_end=4, column=34),
+            "f:1:[21 chars] aaaaaaaaaNEE",
+        ),
+        (
+            Row(text="f-2-" + "c" * 30, prefix_end=4, column=-1),
+            "f-2-cccccccccccc [18 chars]",
+        ),
+    ],
+    ids=["short", "at-cap", "middle", "start", "end", "past-end", "context"],
+)
+async def test_a_long_line_is_cut_around_its_first_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    row: Row,
+    shown: str,
+) -> None:
+    """The ``path:line:`` prefix stays whole: it is how the row is found again."""
+    _capture(monkeypatch, rows=[row])
+    result = await Grep(max_line_chars=12).call(
+        ToolContext(cwd=tmp_path),
+        {"pattern": "NEEDLE", "output_mode": "content"},
+    )
+    assert result.text() == shown
+
+
+@pytest.mark.asyncio
+async def test_a_real_wide_line_is_cut_around_its_match(tmp_path: Path) -> None:
+    (tmp_path / "wide.txt").write_text("a" * 2_000 + "NEEDLE" + "b" * 2_000 + "\n")
+    result = await Grep().call(
+        ToolContext(cwd=tmp_path),
+        {"pattern": "NEEDLE", "path": "wide.txt", "output_mode": "content"},
+    )
+    assert result.text().startswith(f"{tmp_path / 'wide.txt'}:1:[1,750 chars] ")
+    assert "a" * 250 + "NEEDLE" + "b" * 244 + " [1,756 chars]" in result.text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
     [
         {},
-        {"keep_first": 2},
-        {"keep_last": 2},
-        {"offset": 3},
+        {"pattern": 1},
+        {"pattern": "x", "-B": -1},
+        {"pattern": "x", "-C": 2.5},
+        {"pattern": "x", "offset": -1},
+        {"pattern": "x", "output_mode": "lines"},
+        {"pattern": "x", "before": 1},
     ],
-    ids=["plain", "keep_first", "keep_last", "offset"],
 )
-@pytest.mark.asyncio
-async def test_backends_agree(
+async def test_arguments_that_do_not_fit_are_refused(
     tmp_path: Path,
-    output_mode: str,
-    knobs: dict[str, int],
+    arguments: dict[str, PlainTree],
 ) -> None:
-    """Ripgrep and the Python fallback are documented as interchangeable.
-
-    They are not: ``_grep_rg`` post-slices ripgrep's stdout lines while
-    ``_grep_python`` slices an accumulator whose element granularity
-    differs per ``output_mode``. Same query, different answer, no error
-    -- the result depends on whether ``rg`` happens to be installed.
-    """
-    for i in range(6):
-        (tmp_path / f"f{i}.txt").write_text("hit\nhit\n", encoding="utf-8")
-    args: dict[str, object] = {
-        "pattern": "hit",
-        "path": str(tmp_path),
-        "output_mode": output_mode,
-    }
-    args.update(knobs)
-    rg = await _run_grep(dict(args), tmp_path)
-    py = await _run_grep_py(dict(args), tmp_path)
-    assert rg.content == py.content, (
-        f"backend divergence in {output_mode} with {knobs}:\n"
-        f"  rg -> {rg.content!r}\n  py -> {py.content!r}"
-    )
+    with pytest.raises(ValueError, match=r"argument|must be"):
+        await Grep().call(ToolContext(cwd=tmp_path), arguments)
 
 
-@pytest.mark.asyncio
-async def test_an_unknown_type_errors_in_both_backends(tmp_path: Path) -> None:
-    """``type='nosuchtype'`` must not silently widen to every file.
-
-    ``rg`` exits 2 with ``unrecognized file type``; the fallback's
-    ``_TYPE_GLOBS.get`` missed and fell through to ``["*"]``, so the same
-    directive searched the WHOLE tree and returned matches the caller
-    never asked for.
-    """
-    (tmp_path / "a.py").write_text("hit\n", encoding="utf-8")
-    (tmp_path / "b.ts").write_text("hit\n", encoding="utf-8")
-    args = {"pattern": "hit", "path": str(tmp_path), "type": "nosuchtype"}
-    rg = await _run_grep(dict(args), tmp_path)
-    py = await _run_grep_py(dict(args), tmp_path)
-    assert rg.is_error, rg.content
-    assert py.is_error, f"fallback silently searched everything: {py.content!r}"
+_REFUSAL = "Search with Grep: pattern, path, glob, -i, -C, output_mode."
 
 
-@pytest.mark.asyncio
-async def test_a_brace_glob_matches_in_both_backends(tmp_path: Path) -> None:
-    """``"*.{ts,tsx}"`` is advertised in the schema, so it must work.
-
-    ``Path.match`` has no brace expansion, so the fallback matched
-    nothing while ``rg`` matched both files.
-    """
-    (tmp_path / "a.ts").write_text("hit\n", encoding="utf-8")
-    (tmp_path / "b.tsx").write_text("hit\n", encoding="utf-8")
-    (tmp_path / "c.py").write_text("hit\n", encoding="utf-8")
-    args = {"pattern": "hit", "path": str(tmp_path), "glob": "*.{ts,tsx}"}
-    rg = await _run_grep(dict(args), tmp_path)
-    py = await _run_grep_py(dict(args), tmp_path)
-    assert rg.content == py.content, (
-        f"brace-glob divergence:\n  rg -> {rg.content!r}\n  py -> {py.content!r}"
-    )
-    assert "c.py" not in py.content, py.content
-
-
-@pytest.mark.asyncio
-async def test_overlapping_context_groups_are_merged(tmp_path: Path) -> None:
-    """Adjacent matches share context; ripgrep prints each line once.
-
-    The fallback emitted one group per match, so two matches one line
-    apart repeated the overlap -- a caller counting occurrences in the
-    output counts them twice.
-    """
-    (tmp_path / "ctx.txt").write_text("x\nHIT\nHIT\ny\n", encoding="utf-8")
-    args = {
-        "pattern": "HIT",
-        "path": str(tmp_path / "ctx.txt"),
-        "output_mode": "content",
-        "-C": 1,
-    }
-    py = await _run_grep_py(dict(args), tmp_path)
-    body = [ln for ln in py.content.split("\n") if ln and ln != "--"]
-    assert len(body) == len(set(body)), f"context lines repeated:\n{py.content}"
-
-
-@pytest.mark.asyncio
-async def test_long_matching_line_is_not_dropped(tmp_path: Path) -> None:
-    """``--max-columns 500`` replaces the line with a placeholder.
-
-    Without ``--max-columns-preview`` ripgrep emits
-    ``[Omitted long matching line]``, so a minified file yields a match
-    the model cannot read -- while the Python fallback returns it whole.
-    """
-    (tmp_path / "min.js").write_text(
-        "y" * 3000 + "NEEDLE" + "y" * 3000 + "\n",
-        encoding="utf-8",
-    )
-    result = await _run_grep(
-        {"pattern": "NEEDLE", "path": str(tmp_path), "output_mode": "content"},
-        tmp_path,
-    )
-    assert "NEEDLE" in result.content, (
-        f"long matching line dropped by the column cap: {result.content!r}"
-    )
-
-
-@pytest.mark.parametrize("bad", ["abc", {"a": 1}, [1]])
-def test_run_reports_bad_context_arg_as_error(bad: object, tmp_path: Path) -> None:
-    """``Tool.run`` must not raise; it returns ``is_error`` instead.
-
-    ``types.tools`` states the contract outright, and ``Read`` carries
-    an explicit defense-in-depth check for direct ``_run`` callers.
-    Grep coerces with a bare ``int()`` and propagates the exception.
-    """
-    result = asyncio.run(grep.run({"pattern": "x", "path": str(tmp_path), "-B": bad}))
-    assert isinstance(result, ToolResult), "run() must return, not raise"
-
-
-def test_context_knobs_reject_floats() -> None:
-    """Context knobs are line counts; ``2.5`` is not one."""
-    err = validate_tool_input(
-        "Grep",
-        grep.directive_schema,
-        {"pattern": "x", "-B": 2.5},
-    )
-    assert err is not None, "a float context arg passed schema validation"
-
-
-@pytest.mark.asyncio
-async def test_a_missing_root_errors_in_both_backends(tmp_path: Path) -> None:
-    """Rg exits 2 on a missing path; the fallback returned ``(no matches)``.
-
-    Same directive, opposite meaning -- "searched, found nothing" versus
-    "the path does not exist" -- decided by whether rg is installed.
-    """
-    missing = str(tmp_path / "nope")
-    rg = await _run_grep({"pattern": "x", "path": missing}, tmp_path)
-    py = await _run_grep_py({"pattern": "x", "path": missing}, tmp_path)
-    assert rg.is_error, rg.content
-    assert py.is_error, f"fallback hid a missing root: {py.content!r}"
-
-
-@pytest.mark.asyncio
-async def test_pcre_is_not_silently_downgraded_to_python_re(tmp_path: Path) -> None:
-    """``pcre=True`` promises PCRE2; the fallback compiles Python ``re``.
-
-    The schema advertises "PCRE2 regex (rg -P): lookaround, backrefs",
-    and a caller who gets Python-``re`` semantics under that name has no
-    way to notice.
-    """
-    (tmp_path / "a.txt").write_text("ab\n", encoding="utf-8")
-    result = await _run_grep_py(
-        {"pattern": "(?<=a)b", "path": str(tmp_path), "pcre": True},
-        tmp_path,
-    )
-    assert result.is_error, result.content
-    assert "pcre" in result.content.lower(), result.content
-
-
-@pytest.mark.asyncio
-async def test_a_ripgrep_timeout_returns_a_tool_error(tmp_path: Path) -> None:
-    """``Tool.run`` returns failures; ``subprocess.run`` raises them."""
-
-    def _timeout(*_args: object, **_kwargs: object) -> object:
-        raise subprocess.TimeoutExpired(cmd="rg", timeout=30)
-
-    # A tree this small is searched in-process; always using rg reaches it.
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", -1),
-        patch("subprocess.run", _timeout),
-    ):
-        result = await _run_grep({"pattern": "x", "path": str(tmp_path)}, tmp_path)
-    assert result.is_error, result.content
-    assert "timed out" in result.content.lower(), result.content
+@pytest.mark.parametrize(
+    ("command", "arguments"),
+    [
+        (
+            "grep foo f.txt",
+            {"pattern": "foo", "path": "f.txt", "output_mode": "content"},
+        ),
+        ("rg foo f.txt", {"pattern": "foo", "path": "f.txt", "output_mode": "content"}),
+        ("rg foo", {"pattern": "foo", "output_mode": "content"}),
+        ("grep -r foo", {"pattern": "foo", "output_mode": "content"}),
+        ("grep -R foo", {"pattern": "foo", "output_mode": "content"}),
+        ("grep f -e foo", {"pattern": "foo", "path": "f", "output_mode": "content"}),
+        (
+            "find . -print -name '*.py' | xargs grep foo",
+            {"pattern": "foo", "output_mode": "content", "glob": "*.py"},
+        ),
+        ("find . | xargs grep foo | wc -l", {"pattern": "foo", "output_mode": "count"}),
+        (
+            "grep -rln foo /src",
+            {"pattern": "foo", "path": "/src", "output_mode": "files_with_matches"},
+        ),
+        (
+            "grep -c foo f.txt",
+            {"pattern": "foo", "path": "f.txt", "output_mode": "count"},
+        ),
+        (
+            "grep -i foo f.txt",
+            {"pattern": "foo", "path": "f.txt", "output_mode": "content", "-i": True},
+        ),
+        (
+            "grep -P '(?<=a)b' f",
+            {"pattern": "(?<=a)b", "path": "f", "output_mode": "content", "pcre": True},
+        ),
+        ("grep -E 'a|b' f", {"pattern": "a|b", "path": "f", "output_mode": "content"}),
+        ("rg 'a|b' f", {"pattern": "a|b", "path": "f", "output_mode": "content"}),
+        ("grep -e a -e b f", {"pattern": "a|b", "path": "f", "output_mode": "content"}),
+        ("grep --regexp a f", {"pattern": "a", "path": "f", "output_mode": "content"}),
+        (
+            "grep -A 2 -B 1 -C 3 foo f",
+            {
+                "pattern": "foo",
+                "path": "f",
+                "output_mode": "content",
+                "-A": 2,
+                "-B": 1,
+                "-C": 3,
+            },
+        ),
+        (
+            "grep -r --include=*.py foo src",
+            {"pattern": "foo", "path": "src", "output_mode": "content", "glob": "*.py"},
+        ),
+        (
+            "grep -r --include '*.py' foo src",
+            {"pattern": "foo", "path": "src", "output_mode": "content", "glob": "*.py"},
+        ),
+        (
+            "grep -r --exclude=*.md foo .",
+            {"pattern": "foo", "output_mode": "content", "exclude": "*.md"},
+        ),
+        ("grep -nHhs foo f", {"pattern": "foo", "path": "f", "output_mode": "content"}),
+        (
+            "cd /src && grep foo f",
+            {"pattern": "foo", "path": "/src/f", "output_mode": "content"},
+        ),
+        (
+            "grep foo f | head",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "keep_first": 10},
+        ),
+        (
+            "grep foo f | head -n 7",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "keep_first": 7},
+        ),
+        (
+            "grep foo f | tail -3",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "keep_last": 3},
+        ),
+        ("grep foo f | wc -l", {"pattern": "foo", "path": "f", "output_mode": "count"}),
+        (
+            "grep foo f | head -5 | wc -l",
+            {"pattern": "foo", "path": "f", "output_mode": "count", "keep_first": 5},
+        ),
+        ("cat f | grep foo", {"pattern": "foo", "path": "f", "output_mode": "content"}),
+        ("cat f | rg foo", {"pattern": "foo", "path": "f", "output_mode": "content"}),
+        (
+            "cd /src && cat f | grep foo",
+            {"pattern": "foo", "path": "/src/f", "output_mode": "content"},
+        ),
+        (
+            "find . -name '*.py' | xargs grep foo",
+            {"pattern": "foo", "output_mode": "content", "glob": "*.py"},
+        ),
+        (
+            "find src -type f -name '*.py' -print0 | xargs -0 -r grep -l foo",
+            {
+                "pattern": "foo",
+                "path": "src",
+                "output_mode": "files_with_matches",
+                "glob": "*.py",
+            },
+        ),
+        (
+            "find . -print | xargs --null --no-run-if-empty rg foo",
+            {"pattern": "foo", "output_mode": "content"},
+        ),
+    ],
+)
+def test_a_plain_file_search_becomes_the_grep_for_it(
+    command: str,
+    arguments: dict[str, PlainTree],
+) -> None:
+    assert _from_shell(command) == arguments
+    parse(arguments, Grep.Arguments)
 
 
-@pytest.mark.asyncio
-async def test_offset_applies_with_context_lines(tmp_path: Path) -> None:
-    """``offset`` must page context output, not be dropped.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "grep foo a.txt b.txt",
+        "grep --weird=val foo f",
+        "grep -Z foo f",
+        "grep -A2 foo f",
+        "grep -A x foo f",
+        "grep foo f --include",
+        "grep -X foo f",
+        "tail f | grep foo",
+        "sed 1p f | grep foo",
+        "grep foo *.py",
+        "cd - && grep foo f",
+        "cat -n f | grep foo",
+        "cat a b | grep foo",
+        "head -5 f | grep foo",
+        "cat f | grep foo g",
+        "find . -name '*.py' | xargs grep foo extra",
+        "grep foo f | head -c 5",
+        "find . | xargs grep -Z foo",
+    ],
+)
+def test_a_search_no_grep_matches_is_refused_with_advice(command: str) -> None:
+    assert _from_shell(command) == _REFUSAL
 
-    It used to be zeroed whenever context was requested, with a notice
-    saying so -- while the truncation note in the same reply still told
-    the reader to pass ``offset``. One reply both refused the knob and
-    demanded it, so the omitted rows were unreachable either way.
 
-    Pagination slices rendered lines and is agnostic to how they were
-    produced, so context rows page like any others.
-    """
-    (tmp_path / "a.txt").write_text(
-        "".join(f"hit{i}\n" for i in range(10)),
-        encoding="utf-8",
-    )
-    result = await _run_grep(
-        {
-            "pattern": "hit",
-            "path": str(tmp_path),
-            "output_mode": "content",
-            "offset": 5,
-            "-C": 1,
-        },
-        tmp_path,
-    )
-    assert "offset ignored" not in result.content.lower(), result.content
-    # Offset 5 skips the first five rendered rows, so hit0 is gone and
-    # the tail is present.
-    assert "hit0\n" not in result.content, result.content
-    assert "hit9" in result.content, result.content
+@pytest.mark.parametrize(
+    "command",
+    [
+        # A stream, not a file, is searched.
+        "git log --oneline | grep fix",
+        "ps aux | grep python",
+        "echo hi | grep x",
+        # Only the shell does these.
+        "grep -v foo f",
+        "grep --invert-match foo f",
+        "grep -q foo f",
+        "grep foo f | grep -v bar",
+        "grep foo f | wc -c",
+        "grep foo f | sort",
+        "grep foo f > out",
+        "FOO=1 grep foo f",
+        "grep --include",
+        "grep --quiet foo f",
+        "grep --include=*.rb foo",
+        "grep foo -",
+        "xargs grep foo",
+        "find . | xargs grep 'a+'",
+        "find -L | xargs grep foo",
+        "grep 'a\\|b' f",
+        "grep -e",
+        # A search whose matches feed more work is that work, not a search.
+        "find . -name '*.py' | xargs grep -l foo | xargs rm",
+        "find . | xargs grep foo | sort",
+        "FOO=1 find . | FOO=1 xargs grep foo",
+        # Without a file or ``-r``, grep reads its input, which is empty.
+        "grep foo",
+        "grep -i foo",
+        # Basic regular expressions read these characters as themselves.
+        "grep 'a|b' f",
+        "grep 'f(x)' f",
+        "grep 'a+' f",
+        "grep 'colou?r' f",
+        "grep 'a\\{2\\}' f",
+        # Bash fills these in before grep sees them.
+        'grep "$P" f',
+        'grep "x$(date)" f',
+        # ``find`` decides what is searched in ways Grep cannot.
+        "find . -iname '*.py' | xargs grep foo",
+        "find . -type d | xargs grep foo",
+        "find /a /b | xargs grep foo",
+        "find . -name a -name b | xargs grep foo",
+        "find $D | xargs grep foo",
+        "ls | find . | xargs grep foo",
+        "find . | xargs echo",
+        "find . | xargs",
+        "find . | xargs -I {} grep foo {}",
+        "find . | xargs grep foo > out",
+        "find . | xargs grep foo | head > out",
+        "find . | sort | xargs grep foo",
+        "ls -la",
+    ],
+)
+def test_a_command_that_is_no_file_search_is_not_greps_job(command: str) -> None:
+    assert _from_shell(command) is None
+
+
+def _capture(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    rows: Sequence[Row],
+) -> list[tuple[Path, Query]]:
+    """Answer every search with ``rows``; return where each searched, and how."""
+    seen: list[tuple[Path, Query]] = []
+
+    def fake_rows(paths: Path, query: Query) -> list[Row]:
+        seen.append((paths, query))
+        return list(rows)
+
+    monkeypatch.setattr(grep, "grep_rows", fake_rows)
+    return seen
+
+
+def _from_shell(command: str) -> PlainTree:
+    """Return what Grep makes of the last search, ``xargs``, or command in ``command``."""
+    found = invocations(command)
+    assert found is not None
+    searches = [i for i in found if i.exe in {"grep", "rg", "xargs"}]
+    result = Grep().from_shell(searches[0] if searches else found[-1])
+    return result if result is None or isinstance(result, str) else dict(result)
 
 
 if __name__ == "__main__":

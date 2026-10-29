@@ -1,1 +1,1 @@
-"""OpenAI provider family: transport modules and the model catalog."""
+"""OpenAI models through the API or a ChatGPT login, and any compatible endpoint."""

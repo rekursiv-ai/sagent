@@ -10,27 +10,35 @@ The default CLI enables automatic compaction. Disable it with:
 sagent --no-compact
 ```
 
-In Python, pass a compactor explicitly:
+In Python, pass a compactor factory; the agent builds it with itself:
 
 ```python
-from sagent.compaction.summary import SummaryCompactor
+from sagent.agent.agent import Agent
+from sagent.agent.compactor import SummaryCompactor
 
-agent = Agent(
-    model=model,
-    tools=tools,
-    compactor=SummaryCompactor(),
-)
+agent = Agent(model=model, tools=tools, compactor=SummaryCompactor)
 ```
 
-`SummaryCompactor` watches estimated input tokens. It compacts when the conversation approaches:
+`SummaryCompactor` compacts before a model call once the next request, past
+its system prompt, reaches the largest body `B*` whose summary call still
+fits the window:
 
 ```text
-max_request_tokens - max_response_tokens - buffer_tokens
+S(B) = B · 0.05·(10⁶ / clip(B, 62.5k, 10⁶))^¼     # room held for the summary
+B*   = max{B : B + s + p ≤ R,  B + s + p + S(B) ≤ C}
 ```
 
-The default buffer scales with the model's input window instead of being a fixed token count: `default_buffer_tokens(max_request_tokens)` returns `max_request_tokens // 15`, floored at 8,000 tokens and capped at half the window. A 200,000-token window reserves 13,333 tokens; a 400,000-token window reserves 26,666.
+`s` is the system prompt, `p` the summary prompt, `R` the input limit, and
+`C` the window input and output share. `S(B)` assumes a summary needs at most
+10% of its body, 8.4% at 128k, and 5% from 1M on; `summary_tokens` takes the
+cap, the floor, the power, and the context where the floor starts. A model id with a size, such as `opus+200k`,
+caps the window, so the trigger falls with it.
 
-During compaction, Sagent asks a utility model to summarize prior conversation into a continuation message. When `session_dir` exists, Sagent writes a pre-compaction transcript before replacing history.
+The next request's size is the last reply's billed count, plus an estimate of
+what came after it. With no bill yet, as in a new or resumed session, it is an
+estimate of the context and the tools.
+
+The summary replaces the context; the session's journal keeps every window.
 
 ## What is preserved
 
@@ -39,22 +47,20 @@ Compaction preserves the useful state needed to continue:
 - task status and active goals;
 - user instructions and constraints;
 - relevant files and decisions;
-- recent messages when configured;
-- summary pointers from prior compactions;
-- transcript path when one was written.
+- recent messages when configured (`keep_recent`), and the user's unanswered turn;
+- the skills the window loaded, their bodies read again while they fit;
+- the background jobs still running.
 
 Prompt-too-long recovery drops older grouped rounds while preserving tool-use/tool-result pairing.
 
 ## Manual compaction
 
-Agents with `AgentSelf` can request compaction:
+Agents with the `Session` tool can request compaction, with what it must keep:
 
 ```text
-AgentSelf(context="compact")
-AgentSelf(context="recompact", context_prompt="focus on API decisions")
+Session(action="compact", prompt="focus on API decisions")
+Session(action="compact", style="session-audit")
 ```
-
-`recompact` repeats the previous compaction with new guidance.
 
 ## Microcompaction
 
@@ -71,7 +77,7 @@ Poor candidates:
 
 - child-agent final reports;
 - messages sent to external services;
-- skill bodies or wiki content needed verbatim.
+- skill bodies needed verbatim.
 
 Sagent waits for old tool results to leave the prompt-cache hot path, preserves recent clearable results, and invalidates read-cache entries when old `Read` results are cleared.
 

@@ -1,74 +1,58 @@
-"""MiniMax provider - OpenAI chat-completions compatible.
+"""MiniMax models through its OpenAI-compatible endpoint, billed to an API key.
 
-Usage::
+Typical usage example:
 
-    from sagent.providers import MiniMax
+  async with MiniMax() as minimax:               # reads MINIMAX_API_KEY
+      m3 = minimax["default"]
 
-    provider = MiniMax.from_env()       # MINIMAX_API_KEY
-    model = provider.model()            # minimax-3.0
-    response = await model.buffer(request)
-
-Self-hosted::
-
-    provider = MiniMax.from_key("empty", base_url="http://gpu-box:8000/v1")
-
-Reasoning surfaces via ``reasoning_content`` once ``reasoning_split`` is
-set. Tool-calling uses the standard ``tool_calls`` block.
+  box = MiniMax(api_key="none", base_url="http://gpu-box:8000/v1")
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, override
 
-from sagent.catalog.loader import models
-from sagent.catalog.minimax import api
-from sagent.catalog.table import ModelCatalog
-from sagent.providers.openai.compat import (
-    OpenAICompat,
-    OpenAICompatModel,
-)
+from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
-    from treekle import MutablePlainTree
+    from sagent.model.types import Request
+    from sagent.providers.openai.compat import OpenAIModel
 
-    from sagent.types.model import ModelRequest
+
+__all__ = [
+    "MiniMax",
+]
 
 
-class _MiniMaxModel(OpenAICompatModel):
-    """MiniMax backend - reasoning surfaces via ``reasoning_content``."""
+class MiniMax(OpenAICompatible):
+    """MiniMax models, billed to the API key in ``MINIMAX_API_KEY``.
 
-    _reasoning_field: ClassVar[str] = "reasoning_content"
+    Args:
+      name: The name the catalog knows this provider by; the section by default.
+      resources: What this shares with other providers; ``None`` makes and
+        closes its own.
+      api_key: The key; empty reads ``MINIMAX_API_KEY``.
+      base_url: The endpoint; empty uses ``api.minimax.io``.
+
+    """
+
+    section: ClassVar[str] = "minimax"
+    package: ClassVar[str] = "sagent.providers.minimax"
+    document: ClassVar[str] = "minimax.yaml"
+    url: ClassVar[str] = "https://api.minimax.io/v1"
+    key_variable: ClassVar[str] = "MINIMAX_API_KEY"
+    reasoning_field: ClassVar[str] = "reasoning_content"
 
     @override
-    def _transform_body(
-        self,
-        body: dict[str, MutablePlainTree],
-        request: ModelRequest,
-    ) -> dict[str, MutablePlainTree]:
-        """Split reasoning out of ``content`` and send the thinking switch."""
-        del request
-        # Without it, thinking stays "inside ``content`` wrapped in
-        # ``<think>`` tags", which the parser would show as the answer.
+    def encode(self, request: Request, *, model: OpenAIModel) -> dict[str, object]:
+        body = super().encode(request, model=model)
+        # Without it the reasoning stays inside ``content``, wrapped in
+        # ``<think>`` tags, and would show as the answer.
         body["reasoning_split"] = True
-        # Only M3 offers a switch; M2.x accepts ``disabled`` but ignores it,
-        # so its rows offer nothing to send.
-        if self.capability.thinking.budget == frozenset({"none"}):
-            return body
-        body["thinking"] = {
-            "type": "disabled"
-            if self.settings.thinking_budget == "none"
-            else "adaptive",
-        }
+        # Only M3 has a switch; M2.x takes ``disabled`` and ignores it, so its
+        # rows offer nothing to send.
+        if model.capability.thinking_budget != frozenset({"none"}):
+            off = model.settings.thinking_budget == "none"
+            body["thinking"] = {"type": "disabled" if off else "adaptive"}
         return body
-
-
-class MiniMax(OpenAICompat):
-    """MiniMax provider (api.minimax.io)."""
-
-    ENV_VAR: ClassVar[str] = "MINIMAX_API_KEY"
-    BASE_URL: ClassVar[str] = "https://api.minimax.io/v1"
-
-    catalog = ModelCatalog(models=models("minimax"), transport=api())
-
-    MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MiniMaxModel

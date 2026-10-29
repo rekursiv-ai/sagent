@@ -1,199 +1,279 @@
-"""Memory tool: save and forget persistent project memories.
+"""Memory: save and forget the project's persistent memories.
 
-A memory is ``<type>_<name>.md`` with frontmatter in the project's memory
+A memory is ``<type>_<slug>.md`` with frontmatter in the project's memory
 directory, and one line of ``MEMORY.md`` indexes it. The tool keeps the two in
-step, so the model never edits the index by hand. The index the model reads
-sits in the project block of the system prompt, built once per context; a save
-or a forget reaches the model as this tool's call and result instead.
+step, so the model never edits the index by hand. The index is this tool's
+briefing, which the agent reads once a window into the system prompt, so a
+save mid-window changes no cached prefix; the save reaches the model as the
+call and its result instead.
+
+Typical usage example:
+
+  memory = Memory(directory=project_dir(Path.cwd()) / "memory")
+  index = memory.briefing(context)
+  result = await memory.call(context, {"action": "forget", "name": "testing"})
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from dataclasses import dataclass, field
+from importlib.resources import files
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, ClassVar, Literal
 
-import math
+import asyncio
 import re
 
-from treekle import PlainTree, immutable
+from treekle import ReadError, from_plain, json_dumps
 
 import yaml
 
-from sagent.agent.state import get_tool_state
-from sagent.lib.dotsagent import parse_frontmatter
-from sagent.memory import ensure_memory_dir
-from sagent.tools.core import load_tool_description, run_sync
-from sagent.types.runtime import ToolResult
+from sagent.session.types import UncategorizedToolResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import parse, schema_of
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
+
+    from treekle import PlainTree
+
+    from sagent.tools.types import ToolContext
 
 
-_TYPES: Final = ("user", "feedback", "project", "reference")
+__all__ = [
+    "Memory",
+]
 
 
+type Kind = Literal[
+    "user",
+    "feedback",
+    "project",
+    "reference",
+]
+
+
+@dataclass(slots=True, kw_only=True)
 class Memory:
-    """Tool: save or forget one persistent memory of this project."""
+    """Save or forget one persistent memory of this project.
 
-    name: str = "Memory"
-    tool_id: str = "application/x-tool-memory"
-    clearable_results: bool = True
-    description: str = load_tool_description("Memory")
-    directive_schema: Mapping[str, PlainTree] = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "action": {"type": "string", "enum": ["save", "forget"]},
-                "name": {
-                    "type": "string",
-                    "description": "Short name; saving it again replaces it.",
-                },
-                "type": {
-                    "type": "string",
-                    "enum": list(_TYPES),
-                    "description": "Required to save.",
-                },
-                "description": {
-                    "type": "string",
-                    "description": "One line for relevance matching; required to save.",
-                },
-                "content": {
-                    "type": "string",
-                    "description": "The memory itself; required to save.",
-                },
-            },
-            "required": ["action", "name"],
-            "additionalProperties": False,
-        },
+    Args:
+      directory: Where the memories and ``MEMORY.md`` live; made on first use.
+      max_index_lines: The most index lines the briefing carries.
+      max_index_bytes: The most index bytes the briefing carries.
+
+    """
+
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        action: Annotated[Literal["save", "forget"], "What to do."]
+        name: Annotated[str, "Short name; saving it again replaces it."]
+        type: Annotated[Kind | None, "Required to save."] = None
+        description: Annotated[
+            str,
+            "One line for relevance matching; required to save.",
+        ] = ""
+        content: Annotated[str, "The memory itself; required to save."] = ""
+
+    name = "Memory"
+    description = (files(__package__) / "assets" / "memory.md").read_text(
+        encoding="utf-8",
+    )
+    schema = schema_of(Arguments)
+    kinds: ClassVar[tuple[Kind, ...]] = (
+        "user",
+        "feedback",
+        "project",
+        "reference",
     )
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return ``Memory <action> <name>`` for the pending call."""
-        return f"Memory {args.get('action', '')} {args.get('name', '')}".strip()
+    directory: Path
+    max_index_lines: int = 200
+    max_index_bytes: int = 25_000
+    display: ToolDisplay = field(default=ToolDisplay())
 
-    def prompt(self) -> str:
-        """Return nothing; the guidance is the description, the index the project's."""
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Serialize every call: each one rewrites ``MEMORY.md``."""
-        del args
-        return "MEMORY.md"
-
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Save or forget the memory ``args`` names.
+    def briefing(self, context: ToolContext) -> str:
+        """Return where the memories live, and the index as it is now.
 
         Args:
-          args: Directive with ``action`` and ``name``; a save also carries
-            ``type``, ``description``, and ``content``.
+          context: The calling agent's state; unused.
+
+        Returns:
+          text: The ``MEMORY.md`` section of the window's system prompt.
+
+        """
+        del context
+        return (
+            f"## MEMORY.md\n\nThe memories live at `{self.directory}/`; Read one"
+            " when it seems relevant.\n\n"
+            + (self._read_index().strip() or "(no memories yet)")
+        )
+
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``Memory <action> <name>``."""
+        return (
+            f"Memory {arguments.get('action', '')} {arguments.get('name', '')}".strip()
+        )
+
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``MEMORY.md``: every call rewrites it."""
+        del context, arguments
+        return str(self.directory / "MEMORY.md")
+
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> UncategorizedToolResult:
+        """Save or forget the memory ``name``, and its index line.
+
+        Args:
+          context: The calling agent's state.
+          arguments: What the model passed, as ``Memory.Arguments``.
 
         Returns:
           result: What was saved or forgotten, or why nothing was.
 
         """
-        # The index the model reads was built for the project directory, so a save
-        # after a ``cd`` still lands beside it.
-        state = get_tool_state()
-        directory = ensure_memory_dir(state.project_cwd or state.bash_cwd)
-        return await run_sync(self._run, directory=directory, args=args)
+        del context
+        a = parse(arguments, Memory.Arguments)
+        try:
+            text = await asyncio.to_thread(self._apply, a)
+        except ValueError as e:
+            return UncategorizedToolResult(call_id="", content=str(e), is_error=True)
+        return UncategorizedToolResult(call_id="", content=text)
 
-    def _run(self, *, directory: Path, args: Mapping[str, object]) -> str | ToolResult:
-        """Apply the action to ``directory``."""
+    def _apply(self, a: Memory.Arguments) -> str:
+        """Apply the action to the directory; raise ``ValueError`` for a bad call."""
         # Each memory is one index line and one frontmatter value, so a newline in
         # either splits it; a bracket closes the index link early.
-        name = " ".join(str(args.get("name", "")).split())
+        name = " ".join(a.name.split())
         if "[" in name or "]" in name:
-            return _error("name must not contain [ or ].")
+            raise ValueError("name must not contain [ or ].")
         slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_")
         if not slug:
-            return _error("name must contain a letter or digit.")
-        # Names that differ only in punctuation or case share a file.
-        if (taken := _name_on_file(directory, slug)) not in (None, name):
-            return _error(f"{name!r} files as {taken!r}; pick another name.")
-        if args.get("action") == "forget":
-            return _forget(directory, name=name, slug=slug)
-        kind = args.get("type")
-        if kind not in _TYPES:
-            return _error(f"type must be one of {', '.join(_TYPES)}.")
-        description = " ".join(str(args.get("description", "")).split())
-        content = str(args.get("content", "")).strip()
-        if not description or not content:
-            return _error("a save needs a description and content.")
-        for stale in _files(directory, slug):
-            stale.unlink()
-        file = f"{kind}_{slug}.md"
-        meta = yaml.safe_dump(
-            {"name": name, "description": description, "type": kind},
-            sort_keys=False,
-            allow_unicode=True,
-            width=math.inf,
-        )
-        (directory / file).write_text(
-            f"---\n{meta}---\n\n{content}\n",
+            raise ValueError("name must contain a letter or digit.")
+        self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if a.action == "forget":
+            found = self._files(slug)
+            if not found:
+                raise ValueError(f"No memory named {name!r}.")
+            _check_owner(found, name, then="forget it under that name.")
+            for path in found:
+                path.unlink()
+            self._write_index(self._index_lines(without=slug))
+            return f"Forgot {', '.join(p.name for p in found)}."
+        description = " ".join(a.description.split())
+        content = a.content.strip()
+        if a.type is None or not description or not content:
+            raise ValueError("A save needs a type, a description, and content.")
+        stale = self._files(slug)
+        _check_owner(stale, name, then="save it under that name, or another.")
+        for path in stale:
+            path.unlink()
+        file = f"{a.type}_{slug}.md"
+        (self.directory / file).write_text(
+            f"---\nname: {_scalar(name)}\ndescription: {_scalar(description)}\n"
+            f"type: {a.type}\n---\n\n"
+            f"{content}\n",
             encoding="utf-8",
         )
-        # Newest first: the model reads the index cut at its line cap from the end.
-        _write_index(
-            directory,
-            [
-                f"- [{name}]({file}) -- {description}",
-                *_index_lines(directory, without=slug),
-            ],
+        # Newest first: the briefing cuts the index at its line cap.
+        self._write_index(
+            [f"- [{name}]({file}) -- {description}", *self._index_lines(without=slug)],
         )
         return f"Saved {file}."
 
+    # Named exactly, one candidate per type: a glob such as ``*_testing.md`` also
+    # matched ``feedback_unit_testing.md``, so forgetting ``testing`` deleted it.
+    def _files(self, slug: str) -> list[Path]:
+        """Return the memory files named ``slug``, of any type."""
+        return [
+            path
+            for kind in self.kinds
+            if (path := self.directory / f"{kind}_{slug}.md").exists()
+        ]
 
-def _forget(directory: Path, *, name: str, slug: str) -> str | ToolResult:
-    """Delete the memory ``slug`` and its index line."""
-    files = _files(directory, slug)
-    if not files:
-        return _error(f"No memory named {name!r}.")
-    for file in files:
-        file.unlink()
-    _write_index(directory, _index_lines(directory, without=slug))
-    return f"Forgot {', '.join(f.name for f in files)}."
+    def _index_lines(self, *, without: str) -> list[str]:
+        """Return ``MEMORY.md``'s lines, less any pointing at the memory ``without``."""
+        index = self.directory / "MEMORY.md"
+        if not index.exists():
+            return []
+        kinds = "|".join(self.kinds)
+        pointer = re.compile(rf"\]\((?:{kinds})_{re.escape(without)}\.md\)")
+        return [
+            line
+            for line in index.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not pointer.search(line)
+        ]
 
+    def _write_index(self, lines: list[str]) -> None:
+        """Write ``MEMORY.md`` as ``lines``."""
+        (self.directory / "MEMORY.md").write_text(
+            "".join(f"{line}\n" for line in lines),
+            encoding="utf-8",
+        )
 
-# Named exactly, one candidate per type: a glob such as ``*_testing.md`` also matched
-# ``feedback_unit_testing.md``, so saving or forgetting ``testing`` deleted it.
-def _files(directory: Path, slug: str) -> list[Path]:
-    """Return the memory files named ``slug``, of any type."""
-    return [
-        path for kind in _TYPES if (path := directory / f"{kind}_{slug}.md").exists()
-    ]
-
-
-def _name_on_file(directory: Path, slug: str) -> str | None:
-    """Return the name the memory filed as ``slug`` was saved under, if any."""
-    for path in _files(directory, slug):
-        meta, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
-        name = meta.get("name")
-        if isinstance(name, str):
-            return name
-    return None
-
-
-def _index_lines(directory: Path, *, without: str) -> list[str]:
-    """Return ``MEMORY.md``'s lines, less any pointing at the memory ``without``."""
-    index = directory / "MEMORY.md"
-    if not index.exists():
-        return []
-    pointer = re.compile(rf"\]\((?:{'|'.join(_TYPES)})_{re.escape(without)}\.md\)")
-    return [
-        line
-        for line in index.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not pointer.search(line)
-    ]
-
-
-def _write_index(directory: Path, lines: list[str]) -> None:
-    """Write ``MEMORY.md`` as ``lines``."""
-    (directory / "MEMORY.md").write_text(
-        "".join(f"{line}\n" for line in lines),
-        encoding="utf-8",
-    )
+    def _read_index(self) -> str:
+        """Return ``MEMORY.md``, cut at the line and byte caps; ``""`` for none."""
+        try:
+            raw = (self.directory / "MEMORY.md").read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return ""
+        cut: list[str] = []
+        lines = raw.splitlines(keepends=True)
+        if len(lines) > self.max_index_lines:
+            lines = lines[: self.max_index_lines]
+            cut.append(f"over {self.max_index_lines} lines")
+        text = "".join(lines)
+        data = text.encode()
+        if len(data) > self.max_index_bytes:
+            data = data[: self.max_index_bytes]
+            text = data[: max(0, data.rfind(b"\n"))].decode(errors="replace") + "\n"
+            cut.append(f"over {self.max_index_bytes} bytes")
+        return text + (f"\n[MEMORY.md truncated: {'; '.join(cut)}]\n" if cut else "")
 
 
-def _error(text: str) -> ToolResult:
-    return ToolResult(call_id="", content=text, is_error=True)
+# Two names can share a slug, ``Foo Bar`` and ``foo-bar``; saving or forgetting
+# one by the other's file would erase a memory the model never named.
+def _check_owner(paths: list[Path], name: str, *, then: str) -> None:
+    """Raise if a file of ``paths`` holds a memory saved under another name."""
+    for path in paths:
+        other = _stored_name(path)
+        if other is not None and other != name:
+            raise ValueError(f"{name!r} files as the memory {other!r}; {then}")
+
+
+def _stored_name(path: Path) -> str | None:
+    """Return the ``name`` a memory file's frontmatter gives; ``None`` for none."""
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    match = re.match(r"---\n(.*?)\n---\n", raw, re.DOTALL)
+    if match is None:
+        return None
+    try:
+        meta = from_plain(yaml.safe_load(match.group(1)), dict[str, object])
+    except (yaml.YAMLError, ReadError):
+        return None
+    name = meta.get("name")
+    return name if isinstance(name, str) else None
+
+
+# A colon or a leading ``#`` changes what a plain YAML value says, and the
+# frontmatter is read back as YAML; a JSON string is a YAML string too.
+def _scalar(value: str) -> str:
+    """Return ``value`` as a YAML scalar that reads back as itself."""
+    try:
+        plain = yaml.safe_load(f"k: {value}") == {"k": value}
+    except yaml.YAMLError:
+        plain = False
+    return value if plain else json_dumps(value, ensure_ascii=False)

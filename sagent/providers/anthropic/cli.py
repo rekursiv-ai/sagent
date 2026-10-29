@@ -1,572 +1,174 @@
-"""``AnthropicCLI`` provider: wraps the user's installed ``claude`` CLI.
+"""Claude through the ``claude`` CLI, billed to whatever login it holds.
 
-Speaks ``stream-json`` on stdin/stdout to a persistent ``claude --print``
-subprocess that rides the user's CLI subscription. Tool calls are
-routed through an in-process MCP bridge (``providers.lib.mcp_bridge``);
-the CLI's own MCP client invokes the bridge, which dispatches to the
-sagent ``Tool``s and returns results. The CLI handles the full
-tool-use loop internally and emits a single ``result`` event per
-sagent user turn.
+The CLI is only a way to reach the model; it runs no tool of its own. A tool
+call reaches it through our MCP server, which holds the call, and ``stream``
+returns it as a ``ToolCall``. The next ``stream`` hands the caller's results to
+the held calls and the model continues. Anything else -- a new system prompt,
+new tools, a rewritten history -- starts a fresh ``claude``, which reads the
+conversation as text.
+
+Typical usage example:
+
+  async with AnthropicCLI() as anthropic:
+      opus = anthropic["opus"]
+      async for event in opus.stream(request):   # The same events as the API.
+          ...
+
+  work = AnthropicCLI(credentials=Path("~/.claude/.credentials-work.json"))
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from dataclasses import replace
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    ClassVar,
-    Final,
-    NotRequired,
-    TypedDict,
-    cast,
-    override,
-)
+from typing import TYPE_CHECKING, ClassVar, override
 
 import asyncio
-import base64
-import json
-import logging
+import hashlib
 import os
-import re
 import shutil
-import subprocess
+import tempfile
 
-from treekle import MutablePlainTree, PlainTree, ReadError, from_plain, json_loads
+from treekle import from_plain, json_dumps, json_loads, mutable
 
-import fastjsonschema
-
-from sagent.catalog.anthropic import cli
-from sagent.catalog.loader import models
-from sagent.catalog.table import ModelCatalog
-from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.providers.anthropic.api import Anthropic
-from sagent.providers.lib.cli_respawn import (
-    CLISubprocessModel,
-    empty_turn_response,
-    hash_system,
-    merge_user_input,
-    populated_tmpdir,
-)
-from sagent.providers.lib.errors import (
-    error_status_code,
-    is_context_overflow_text,
-    is_request_too_large,
-)
-from sagent.providers.lib.hotspare import HotSpare
-from sagent.providers.lib.mcp_bridge import ToolsBridge
-from sagent.providers.lib.model_base import ModelDefaults
-from sagent.providers.lib.oauth import (
-    credentials_path,
-    resolve_account,
-)
-from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.providers.lib.subproc import (
-    _READ_IDLE_TIMEOUT_SEC,
-    Subproc,
-    SubprocessTransportError,
-)
-from sagent.types.cost import TokenCost, TokenCount
-from sagent.types.model import (
-    ModelRequest,
-    ModelResponse,
-)
-from sagent.types.runtime import (
-    AgentSendMessage,
+from sagent.model import image
+from sagent.model.exceptions import ContextOverflowError, DisconnectedError
+from sagent.providers.anthropic import wire
+from sagent.providers.anthropic.api import models
+from sagent.providers.anthropic.login import ClaudeLogin
+from sagent.providers.resources import SharedResources
+from sagent.session.types import (
+    AgentToAgentMessage,
     AssistantMessage,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    RuntimeEvent,
-    ToolLabel,
+    Attachment,
+    ContextClear,
+    SystemMessage,
+    Thinking,
+    ToolCall,
+    ToolResult,
+    TurnContext,
     UserMessage,
 )
+from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
-    from sagent.lib import image
-    from sagent.types.capability import ModelCapability, ModelSettings
-    from sagent.types.tools import Tool
-else:
-    from wrapt import lazy_import
+    from asyncio.subprocess import Process
+    from collections.abc import AsyncIterator, Iterator, Sequence
 
-    image = lazy_import("sagent.lib.image")
-
-
-logger = logging.getLogger(__name__)
-
-
-_CREDS_PATH = Path("~/.claude/.credentials.json")
-_AUTH_STATUS_TIMEOUT_SEC = (
-    5.0  # house-ignore[globals] -- Retunable auth-status probe timeout.
-)
-_NON_SUBSCRIPTION_AUTH_ENV = frozenset(
-    {
-        "ANTHROPIC_BASE_URL",
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_AUTH_TOKEN",
-        "ANTHROPIC_AWS_API_KEY",
-        "ANTHROPIC_AWS_BASE_URL",
-        "ANTHROPIC_AWS_WORKSPACE_ID",
-        "ANTHROPIC_BEDROCK_BASE_URL",
-        "ANTHROPIC_BEDROCK_MANTLE_API_KEY",
-        "ANTHROPIC_BEDROCK_MANTLE_BASE_URL",
-        "ANTHROPIC_CUSTOM_HEADERS",
-        "ANTHROPIC_FOUNDRY_API_KEY",
-        "ANTHROPIC_FOUNDRY_AUTH_TOKEN",
-        "ANTHROPIC_FOUNDRY_BASE_URL",
-        "ANTHROPIC_FOUNDRY_RESOURCE",
-        "ANTHROPIC_IDENTITY_TOKEN",
-        "ANTHROPIC_IDENTITY_TOKEN_FILE",
-        "ANTHROPIC_UNIX_SOCKET",
-        "ANTHROPIC_VERTEX_BASE_URL",
-        "ANTHROPIC_VERTEX_PROJECT_ID",
-        "AWS_BEARER_TOKEN_BEDROCK",
-        "CLAUDE_CODE_API_BASE_URL",
-        "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR",
-        "CLAUDE_CODE_ASSUME_FIRST_PARTY_BASE_URL",
-        "CLAUDE_CODE_CUSTOM_OAUTH_URL",
-        "CLAUDE_CODE_ENABLE_PROXY_AUTH_HELPER",
-        "CLAUDE_CODE_HFI_BEARER_TOKEN",
-        "CLAUDE_CODE_HOST_AUTH_ENV_VAR",
-        "CLAUDE_CODE_OAUTH_CLIENT_ID",
-        "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
-        "CLAUDE_CODE_OAUTH_SCOPES",
-        "CLAUDE_CODE_OAUTH_TOKEN",
-        "CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR",
-        "CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST",
-        "CLAUDE_CODE_PROXY_AUTHENTICATE",
-        "CLAUDE_CODE_SDK_HAS_HOST_AUTH_REFRESH",
-        "CLAUDE_CODE_SDK_HAS_OAUTH_REFRESH",
-        "CLAUDE_CODE_SESSION_ACCESS_TOKEN",
-        "CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR",
-        "CLAUDE_CODE_USE_ANTHROPIC_AWS",
-        "CLAUDE_CODE_USE_BEDROCK",
-        "CLAUDE_CODE_USE_FOUNDRY",
-        "CLAUDE_CODE_USE_GATEWAY",
-        "CLAUDE_CODE_USE_MANTLE",
-        "CLAUDE_CODE_USE_VERTEX",
-    },
-)
-_CREDENTIALS_SCHEMA: Final[Mapping[str, PlainTree]] = {
-    "type": "object",
-    "required": ["claudeAiOauth"],
-    "properties": {
-        "claudeAiOauth": {
-            "type": "object",
-            "required": ["accessToken", "refreshToken", "expiresAt"],
-            "properties": {
-                "accessToken": {"type": "string"},
-                "refreshToken": {"type": "string"},
-                "expiresAt": {"type": "number"},
-            },
-        },
-    },
-}
-_CREDENTIALS_VALIDATOR = fastjsonschema.compile(_CREDENTIALS_SCHEMA)
-
-
-# Current Claude Code stores credentials in the macOS Keychain, so the historical
-# ``~/.claude/.credentials.json`` file is not an authoritative login check there.
-# ``None`` means the installed CLI predates ``claude auth status --json`` or did not
-# identify its auth method; callers may then fall back to the legacy file check.
-# Console/API/cloud auth returns ``False`` because ``AnthropicCLI`` is the subscription
-# provider.
-def _claude_auth_status(binary: str) -> bool | None:
-    """Return whether the native CLI has a Claude.ai subscription login."""
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in _NON_SUBSCRIPTION_AUTH_ENV
-    }
-    try:
-        proc = subprocess.run(  # noqa: S603 -- The CLI argv is built from fixed provider options and a resolved binary.
-            [binary, "auth", "status", "--json"],
-            capture_output=True,
-            text=True,
-            timeout=_AUTH_STATUS_TIMEOUT_SEC,
-            env=env,
-            check=False,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    try:
-        status = json_loads(proc.stdout, dict[str, object])
-    except (json.JSONDecodeError, ReadError):
-        return None
-    logged_in = status.get("loggedIn")
-    if logged_in is False:
-        return False
-    if logged_in is not True:
-        return None
-    auth_method = status.get("authMethod")
-    if not isinstance(auth_method, str):
-        # Older CLIs that expose only ``loggedIn`` are not enough to prove
-        # subscription billing. Let the caller try the legacy OAuth file.
-        return None
-    api_provider = status.get("apiProvider")
-    return auth_method == "claude.ai" and (
-        api_provider is None or api_provider == "firstParty"
+    from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+    from sagent.model.types import Request, Response, TextChunk
+    from sagent.providers.types import (
+        ProviderSharedResources,
+        ToolMount,
+        UsageWindow,
     )
+    from sagent.session.types import SessionRecord
+    from sagent.tools.types import Tool
 
 
-class AnthropicCLIRetryableError(SubprocessTransportError):
-    """The CLI returned a transient ``is_error`` ``result`` event.
+__all__ = [
+    "AnthropicCLI",
+    "AnthropicCLIModel",
+]
 
-    Distinguished from :class:`SubprocessTransportError` so the model's
-    :meth:`is_retryable_provider_error` can flag the call for in-place
-    retry by ``send_with_retry`` instead of propagating to the runtime
-    as a fatal ``ModelResponseError`` (which would burn a turn boundary
-    + pollute history with a synthetic ``[Error: ...]`` UserMessage).
 
-    **Naming heritage and corrected understanding (2026-06-04 evening).**
-    The ``aborted_streaming`` / ``ede_diagnostic`` shape was originally
-    framed as "Anthropic-side stream instability under load." Live
-    cross-correlation with peer-message timestamps that evening showed
-    the dominant cause is actually our own SIGINT preempt: when the
-    runtime cancels the in-flight model-call task (a peer or operator
-    message arrives while a ``claude --print`` subprocess is mid-turn),
-    ``CancelledError`` reaches ``stream`` and ``_interrupt_active_proc``
-    SIGINTs the subprocess. The CLI subprocess dies and emits a final
-    ``result`` event
-    with ``terminal_reason="aborted_streaming"`` + an ede_diagnostic
-    line -- exactly the shape we'd been attributing to upstream
-    instability. The smoking gun was the 0-input-token events: an API
-    can't abort a request that never reached it; only a local SIGINT
-    can.
+class AnthropicCLI(AsyncResource):
+    """Claude models through the ``claude`` CLI, billed to its login.
 
-    So the dominant retry path here is: "operator typed a correction
-    mid-turn, our preempt killed the in-flight subprocess, retry the
-    delivery via ``--resume`` so the correction lands cleanly without
-    burning a runtime turn boundary." Genuine upstream stream cuts
-    exist but are a minority. The retry behaviour is correct either
-    way; only the framing matters for future debugging.
+    Args:
+      name: The name the catalog knows this provider by; the section by default.
+      resources: What this shares with other providers; ``None`` makes and
+        closes its own.
+      credentials: A login file; ``None`` uses the login ``claude`` keeps.
 
-    See :func:`_is_event_retryable` for the catalog of shapes that are
-    treated as transient. Carries an optional ``retry_after_ms`` hint
-    extracted from the CLI event when present; ``send_with_retry`` will
-    fall back to standard exponential backoff if ``None``.
     """
+
+    section: ClassVar[str] = "anthropic-cli"
+    """The catalog section whose models and settings this provider serves."""
 
     def __init__(
         self,
-        message: str,
         *,
-        retry_after_ms: float | None = None,
-        event: Mapping[str, object] | None = None,
+        name: str = "",
+        resources: ProviderSharedResources | None = None,
+        credentials: Path | None = None,
     ) -> None:
-        super().__init__(message)
-        self.retry_after_ms = retry_after_ms
-        self.event = event
+        self._name = name or self.section
+        self._owns_resources = resources is None
+        self._resources = SharedResources() if resources is None else resources
+        self._credentials = credentials
+        self._login = ClaudeLogin(credentials, resources=self._resources)
 
+    @property
+    def name(self) -> str:
+        """Return the name the catalog knows this provider by."""
+        return self._name
 
-# Validated against ~60 ``is_error`` events captured on 2026-06-03/04 from the live
-# multi-agent server. The retryable shapes share two attributes: (a) claude's session
-# JSONL on disk remains consistent (the next ``--resume`` will pick up cleanly), and (b)
-# re-running the same request usually succeeds without operator intervention.
-#
-# Retryable shapes:
-#
-# * ``terminal_reason == "aborted_streaming"``: dominant pattern, often paired with
-# ``stop_reason == "tool_use"`` and an ``[ede_diagnostic]`` entry in ``errors``.
-# **Historically read as "Anthropic-side mid-stream cut"; the dominant cause is actually
-# our own preempt SIGINT** (see :class:`AnthropicCLIRetryableError` for the diagnosis).
-# 0-input-token instances are unambiguous preempt kills (the API never saw the request).
-# * ``errors`` contains an ``[ede_diagnostic]`` line: same surface shape, occasionally
-# reported with ``terminal_reason == "completed"`` when the SIGINT raced the natural
-# stop.
-#
-# NOT retryable:
-#
-# * ``terminal_reason == "blocking_limit"``: context overflow. The next attempt would
-# hit the same wall; operator must clear the session. Surfacing as a hard error gets the
-# runtime to publish ``ModelResponseError`` so the operator sees ``status=hung``. *
-# ``api_error_status`` in non-429 4xx: client-side issue, retry won't help.
-#
-# The classification doesn't depend on root cause: retryable shapes recover cleanly via
-# ``--resume`` regardless of whether the abort came from upstream or from our own
-# SIGINT. Only the framing in docs/logs matters for future debugging.
-def _is_event_retryable(event: Mapping[str, object]) -> bool:
-    """Classify a CLI ``result`` event as transient."""
-    terminal_reason = event.get("terminal_reason")
-    if terminal_reason == "aborted_streaming":
-        return True
-    if terminal_reason == "blocking_limit":
-        return False
-    errors = event.get("errors", [])
-    if isinstance(errors, list):
-        for err in cast(list[object], errors):
-            if "ede_diagnostic" in str(err):
-                return True
-    return False
+    @property
+    def resources(self) -> ProviderSharedResources:
+        """Return what this provider shares with others."""
+        return self._resources
 
+    @property
+    def usage(self) -> tuple[UsageWindow, ...]:
+        """Return ``()``: the CLI does not report the account's rate limits."""
+        return ()
 
-# The CLI sometimes embeds ``retry_after_ms`` / ``retry_delay_ms`` keys in the result
-# envelope (mirroring the underlying API ``retry-after`` header). When present we
-# forward it to the retry layer so backoff respects the server's hint; when absent
-# ``send_with_retry`` falls back to its standard exponential schedule.
-def _extract_retry_after_ms(event: Mapping[str, object]) -> float | None:
-    """Pull a millisecond retry hint out of the CLI ``result`` event."""
-    for key in ("retry_after_ms", "retry_delay_ms"):
-        val = event.get(key)
-        if isinstance(val, (int, float)) and val >= 0:
-            return float(val)
-    return None
-
-
-class AnthropicCLICredentials(TypedDict):
-    """OAuth credentials from the Claude CLI credentials file."""
-
-    access_token: str
-    refresh_token: str
-    expires_at: float
-    scopes: NotRequired[list[str]]
-    subscription_type: NotRequired[str | None]
-    rate_limit_tier: NotRequired[str | None]
-    account_uuid: NotRequired[str]
-    email: NotRequired[str]
-    organization_uuid: NotRequired[str]
-    billing_type: NotRequired[str | None]
-    account_created_at: NotRequired[str | None]
-    subscription_created_at: NotRequired[str | None]
-    has_extra_usage_enabled: NotRequired[bool | None]
-
-
-class AnthropicCLI:
-    """Provider that drives the user's installed ``claude`` CLI subprocess.
-
-    Shares the Anthropic model catalog. The default account uses the CLI's native login
-    (including macOS Keychain storage); named accounts use the file variant
-    produced by ``providers.lib.oauth.credentials_path``.
-    Cost figures are computed from the per-turn ``modelUsage`` summary
-    the CLI emits on the terminal ``result`` event.
-    """
-
-    catalog = ModelCatalog(models=models("anthropic"), transport=cli())
-
-    supported_options: ClassVar[frozenset[str]] = frozenset[str]()
-    """``from_credentials`` (the CLI wrapper) takes no construction options.
-
-    Declared for the class's primary (credentials) auth. ``from_key``
-    delegates to plain :class:`Anthropic` and technically accepts its
-    options, but that degenerate spelling is not worth an auth-scoped
-    capability surface -- use ``--provider Anthropic`` for key auth.
-    """
-
-    def __init__(self, *, account: str | None = None) -> None:
-        account_name = resolve_account(account)
-        self._account = None if account_name == "default" else account_name
-
-    @classmethod
-    def from_key(
-        cls,
-        api_key: str,
-        *,
-        server_side_context_management: bool = False,
-        redact_thinking: bool = False,
-    ) -> Anthropic:
-        """Create an API-key provider (delegates to :class:`Anthropic`).
-
-        The CLI-wrapping provider is incompatible with API-key auth, so
-        this returns a plain :class:`Anthropic` instance.
-
-        Args:
-          api_key: Anthropic API key (``sk-ant-...``).
-          server_side_context_management: Forwarded to ``Anthropic.from_key``.
-          redact_thinking: Forwarded to ``Anthropic.from_key``.
-
-        Returns:
-          provider: ``Anthropic`` provider instance.
-
-        """
-        return Anthropic.from_key(
-            api_key,
-            server_side_context_management=server_side_context_management,
-            redact_thinking=redact_thinking,
-        )
-
-    @classmethod
-    def from_credentials(cls, *, account: str | None = None) -> AnthropicCLI:
-        """Build a provider that uses the local ``claude`` CLI login.
-
-        Args:
-          account: Named credential slot. ``None`` reads the legacy
-              native CLI login, including the macOS Keychain. Named accounts
-              use Sagent's legacy file-based credential slots.
-
-        Returns:
-          provider: Configured CLI-wrapping provider.
-
-        Raises:
-          FileNotFoundError: If the native CLI is logged out or a named
-              credentials file is absent.
-          RuntimeError: If ``claude`` is not on ``PATH``.
-
-        """
-        binary = shutil.which("claude")
-        if binary is None:
-            raise RuntimeError(
-                "AnthropicCLI: `claude` is not on PATH; install the Claude CLI.",
-            )
-        account_name = resolve_account(account)
-        is_default_account = account_name == "default"
-        if is_default_account:
-            logged_in = _claude_auth_status(binary)
-            if logged_in is True:
-                return cls(account=None)
-            if logged_in is False:
-                raise FileNotFoundError(
-                    "AnthropicCLI: Claude CLI has no active Claude.ai "
-                    "subscription login; run `claude auth login --claudeai`.",
-                )
-        path = credentials_path(_CREDS_PATH.expanduser(), account)
-        if not path.exists():
-            if not is_default_account:
-                raise FileNotFoundError(
-                    f"AnthropicCLI: no named-account credentials at {path}; "
-                    "named accounts require a legacy Claude credentials file "
-                    "at that path.",
-                )
-            raise FileNotFoundError(
-                f"AnthropicCLI: no credentials at {path}; run "
-                "`claude auth login --claudeai`.",
-            )
-        if _load_cli_credentials_file(path) is None:
-            raise ValueError(f"Invalid credentials file: {path}")
-        return cls(account=account)
-
-    @classmethod
-    def login(cls, *, account: str | None = None) -> None:
-        """Run Claude Code's native Claude.ai login for the default account.
-
-        Named AnthropicCLI accounts are legacy file-backed slots and cannot be
-        targeted by Claude Code's interactive login command.
-
-        Args:
-          account: Account slot. ``None`` or ``"default"`` selects the native
-              Claude Code account.
-
-        Raises:
-          RuntimeError: If the Claude CLI is missing, its login command fails,
-              or the resulting Claude.ai login cannot be verified.
-          ValueError: If a named account is requested.
-
-        """
-        account_name = resolve_account(account)
-        if account_name != "default":
-            raise ValueError(
-                "AnthropicCLI named accounts use legacy credential files and "
-                "do not support interactive login.",
-            )
-        binary = shutil.which("claude")
-        if binary is None:
-            raise RuntimeError(
-                "AnthropicCLI: `claude` is not on PATH; install the Claude CLI.",
-            )
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if key not in _NON_SUBSCRIPTION_AUTH_ENV
-        }
-        proc = subprocess.run(  # noqa: S603 -- The CLI argv is built from fixed provider options and a resolved binary.
-            [binary, "auth", "login", "--claudeai"],
-            env=env,
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(
-                f"Claude CLI login failed with exit code {proc.returncode}.",
-            )
-        if _claude_auth_status(binary) is not True:
-            raise RuntimeError(
-                "Claude CLI login completed but no active Claude.ai "
-                "subscription login could be verified.",
-            )
-
-    def model(
-        self,
-        model_id: str | None = None,
-        *,
-        extra_mcp_servers: dict[str, dict[str, object]] | None = None,
-        session_id: str | None = None,
-        subprocess_read_timeout_sec: float | None = None,
-        mcp_connect_timeout_sec: float = 8.0,
-    ) -> _AnthropicCLIModel:
-        """Build a CLI-backed model.
-
-        Args:
-          model_id: Claude model id; ``None`` uses catalog key ``default``.
-          extra_mcp_servers: Additional MCP servers (stdio or HTTP)
-            merged into the CLI's ``--mcp-config`` at subprocess spawn
-            time. Each entry follows Claude Code's mcp.json shape:
-            ``{"command": "...", "args": [...], "env": {...}}`` for
-            stdio or ``{"type": "http", "url": "..."}`` for HTTP. Keys
-            colliding with sagent's own bridge server name are dropped.
-          session_id: When set, the CLI runs in session-persistence
-            mode: ``--session-id <uuid>`` on the first turn, ``--resume
-            <uuid>`` thereafter, so ``claude`` keeps the transcript on
-            disk and the prompt cache stays warm across turns. Sagent's
-            tape remains the single source of truth: on the first call
-            (including the first call after a host restart, when the
-            tape has been rehydrated via ``Agent.resume``) sagent feeds
-            the full history via stdin, which rebuilds the on-disk
-            session; every subsequent turn feeds only the new entries
-            and resumes. ``None`` (default) uses the stateless
-            ``--no-session-persistence`` path. The on-disk file is an
-            internal cache the provider rebuilds from the request --
-            it is never parsed back or treated as a source of truth, so
-            no separate session-file format coupling exists.
-          subprocess_read_timeout_sec: Stdout-idle timeout (seconds)
-            for the ``claude`` subprocess transport. ``None`` keeps
-            the ``Subproc`` default (60s). Set higher when the
-            agent's tools include long-running synchronous Bash
-            commands (e.g. ``pre-commit run --files ...``,
-            ``ty check``, big test suites) that legitimately go
-            silent for >60s while claude awaits the result.
-          mcp_connect_timeout_sec: Cap (seconds) on waiting for the CLI to
-            fetch the MCP catalog (proof the in-process bridge connected)
-            before feeding the first user line. The CLI's MCP connect +
-            catalog fetch is ~2-3s on a cold subprocess locally; this bounds
-            a pathologically slow connect before we give up. Only paid once,
-            on a cold spawn's first turn -- warm subprocesses keep the
-            connection and skip the wait entirely.
-
-        Returns:
-          model: Backend wrapping a managed ``claude`` subprocess.
-
-        Raises:
-          ValueError: If the resolved id is not in the catalog.
-
-        """
-        mid = model_id if model_id is not None else "default"
-        capability, settings = self.catalog.resolve(mid)
-        return _AnthropicCLIModel(
+    def __getitem__(self, model: str) -> AnthropicCLIModel:
+        capability, settings = models(self.section).resolve(model)
+        return AnthropicCLIModel(
             provider=self,
             capability=capability,
             settings=settings,
-            extra_mcp_servers=extra_mcp_servers,
-            session_id=session_id,
-            subprocess_read_timeout_sec=subprocess_read_timeout_sec,
-            mcp_connect_timeout_sec=mcp_connect_timeout_sec,
         )
 
-    async def close_sdk(self) -> None:
-        """Do nothing: each model owns and closes its own subprocess."""
+    def __iter__(self) -> Iterator[str]:
+        return iter(models(self.section))
 
-    @property
-    def account(self) -> str | None:
-        """Per-account credentials slot, ``None`` for the legacy file."""
-        return self._account
+    @override
+    async def aclose(self) -> None:
+        if self._owns_resources:
+            await self._resources.aclose()
+
+    async def login(self, *, headless: bool = False) -> None:
+        """Sign in through the browser, or with a code pasted from it."""
+        await self._login.sign_in(headless=headless)
+
+    async def environment(self) -> dict[str, str]:
+        """Return the environment a ``claude`` process starts in.
+
+        Returns:
+          env: This process's environment, without any variable that points
+            the CLI at another account, and with its telemetry turned off.
+
+        """
+        # Any of these points the CLI at another account or endpoint than the
+        # login it holds.
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))
+            and key != "AWS_BEARER_TOKEN_BEDROCK"
+        }
+        env |= {
+            "DISABLE_TELEMETRY": "1",
+            "DISABLE_ERROR_REPORTING": "1",
+            "DISABLE_AUTOUPDATER": "1",
+            "DISABLE_AUTO_COMPACT": "1",
+            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            "CLAUDE_CODE_SKIP_PROMPT_HISTORY": "1",
+            # A held call waits for the caller's tool, which may run for hours.
+            "MCP_TOOL_TIMEOUT": str(24 * 3600 * 1000),
+        }
+        # ``claude`` keeps one login of its own; a named one arrives as a token.
+        if self._credentials is not None:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = await self._login.token()
+        return env
 
 
-class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
-    """``claude`` CLI subprocess wrapped as a sagent ``Model``.
-
-    Args:
-      provider: Owning :class:`AnthropicCLI`.
-      capability: Resolved model and transport capabilities.
-      settings: Selections validated against ``capability``.
-
-    """
+class AnthropicCLIModel(AsyncResource):
+    """One Claude model, reached through one running ``claude`` at a time."""
 
     def __init__(
         self,
@@ -574,1352 +176,530 @@ class _AnthropicCLIModel(CLISubprocessModel, ModelDefaults):
         provider: AnthropicCLI,
         capability: ModelCapability,
         settings: ModelSettings,
-        extra_mcp_servers: dict[str, dict[str, object]] | None = None,
-        session_id: str | None = None,
-        subprocess_read_timeout_sec: float | None = None,
-        mcp_connect_timeout_sec: float = 8.0,
     ) -> None:
-        super().__init__()
         self._provider = provider
         self._capability = capability
         self._settings = settings
-        # Cap (seconds) on waiting for the CLI to fetch the MCP catalog
-        # before feeding the first user line. See ``AnthropicCLI.model``.
-        self._mcp_connect_timeout_sec = mcp_connect_timeout_sec
-        self._tools_bridge: ToolsBridge | None = None
-        # Stdout-idle timeout (seconds) for the ``claude`` subprocess
-        # transport. ``None`` defers to the ``Subproc`` default (60s).
-        # Set higher (~3-5min) for agents whose tools include
-        # long-running synchronous Bash calls (``pre-commit run`` /
-        # ``ty check`` / heavy tests); without the bump a >60s tool wait
-        # makes the transport read claude's silence as a hang and
-        # raises ``SubprocessTransportError`` on a healthy turn.
-        self._subprocess_read_timeout_sec: float | None = subprocess_read_timeout_sec
-        # Session-persistence mode (see ``AnthropicCLI.model``'s
-        # ``session_id`` arg). When set:
-        #   * ``--session-id <uuid>`` is passed on the first turn,
-        #     ``--resume <uuid>`` thereafter. ``claude`` owns history
-        #     at ``~/.claude/projects/-<encoded-cwd>/<uuid>.jsonl``.
-        #   * Sagent no longer re-feeds history via stdin: only the
-        #     latest user-like inbound is sent per turn.
-        #   * HotSpare is bypassed -- each ``stream`` call spawns a
-        #     fresh subprocess. Pre-warming a spare with
-        #     ``--resume <same-uuid>`` would race against in-flight
-        #     turns updating the session file (see the
-        #     ``/tmp/resume_probe/`` test A from 2026-06-02 evening:
-        #     concurrent ``--resume`` branches the conversation tree).
-        self._session_id: str | None = session_id
-        # Two independent facts about the on-disk session, each with its own
-        # field. ``_session_on_disk``: claude has written this uuid's JSONL, so
-        # the next spawn must ``--resume`` (``--session-id`` on an existing
-        # session fails). It flips as soon as a line reaches stdin, because
-        # claude persists input before answering it. ``_unanswered``: the
-        # merged input claude has stored but not yet answered. A retry with
-        # no new input resends it rather than reporting success with an
-        # empty reply. Never trusts a file a prior process left: the first
-        # turn rebuilds the session from sagent's tape as one merged input,
-        # so the on-disk file stays a cache derived from the request.
-        self._session_on_disk = False
-        self._unanswered: UserMessage | AgentSendMessage | None = None
-        if session_id is None:
-            self._hot_spare: HotSpare | None = HotSpare(
-                self._spawn_spare_initialized,
-                close_partial=self._close_warming_proc,
-            )
-            # Stateless named accounts mint an isolated HOME per spawn.
-            # The default account inherits real HOME so current macOS
-            # Claude Code can read its Keychain-backed login.
-            self._persistent_tmpdir: Path | None = None
-        else:
-            self._hot_spare = None
-            # Session-persistence mode tradeoff on the ``HOME`` env var:
-            #
-            # If we override HOME to a hermetic tmpdir (as stateless
-            # mode does for credential isolation), then claude's
-            # NATIVE tools -- ``Bash``, ``Read``, ``Write``, etc. --
-            # run with that hermetic HOME inside the ``claude --print``
-            # subprocess. They lose visibility into the operator's
-            # ``~/.config/gh/hosts.yml``, ``~/.gitconfig``, ssh keys,
-            # etc. This shows up as ``gh auth status`` reporting "not
-            # authenticated" even though the operator IS authenticated
-            # on the host. (In stateless mode the same tools were
-            # mounted via sagent's HTTP bridge, so their handler ran
-            # IN THE SAGENT SERVER PROCESS with the operator's real
-            # HOME -- mooting the issue.)
-            #
-            # In session-persistence mode + single-account
-            # (``provider.account is None``), we drop the HOME
-            # override entirely. ``claude`` reads its credentials
-            # from the operator's real ``~/.claude/.credentials.json``,
-            # native tools find ``~/.config/gh/``, and session
-            # JSONLs land at the operator's real
-            # ``~/.claude/projects/-<encoded-cwd>/<uuid>.jsonl``,
-            # which survives ``serve.py`` restarts -- so re-running
-            # the server now ``--resume``s the prior conversation
-            # transcripts cleanly.
-            #
-            # For per-account use (``provider.account is not None``)
-            # we still mint a tmpdir + populate the renamed
-            # credentials file, because ``claude``'s creds path is
-            # hardcoded to ``$HOME/.claude/.credentials.json`` --
-            # there's no env var to redirect it. That case keeps the
-            # stateless-mode HOME-override behaviour.
-            account = self._provider.account
-            self._persistent_tmpdir = (
-                None
-                if account is None
-                else populated_tmpdir(
-                    "sagent-anthropic-cli-resume-",
-                    lambda tmpdir: _populate_anthropic_tmpdir(tmpdir, account),
-                )
-            )
-        self._active_proc: Subproc | None = None
-        # Set by ``stream`` before ``_spawn_initialized`` reads them.
-        self._pending_system: str = ""
-        # Tools the stateless ``stream`` stashes so ``_spawn_initialized``
-        # can populate the bridge before launching ``claude`` (the CLI
-        # lists tools right after launch). Empty in session mode, which
-        # syncs the bridge before its own spawn. The gate rides with them: a spare
-        # warmed mid-turn refreshes the bridge, and must not open what it withheld.
-        self._pending_tools: list[Tool] = []
-        self._pending_allowed: frozenset[str] | None = None
-        # Bridge ``list_tools`` count snapshotted per spawned proc (keyed
-        # by ``id(proc)``); the turn's first ``_send_entry`` waits for the
-        # count to exceed that proc's snapshot (proof THIS subprocess's MCP
-        # client connected). Per-proc, not a single field, so a concurrent
-        # HotSpare spare-warm can't clobber the active turn's baseline.
-        # Pruned after the wait succeeds, on spawn failure, and in ``close``.
-        self._mcp_baseline_by_proc: dict[int, int] = {}
-        # Folded text of drained detached tool results, held across a
-        # failed-then-retried delivery turn (``drain_detached_results`` is
-        # destructive). Cleared only when the delivering turn succeeds, so
-        # a transport/retryable failure of that turn's final drain does not
-        # lose the results. See ``_detached_delivery_entry``.
-        self._pending_detached_text: str | None = None
-        # External MCP servers (stdio or HTTP) merged into the CLI's
-        # ``--mcp-config`` at subprocess spawn time. See
-        # :func:`_build_anthropic_argv`.
-        self._extra_mcp_servers = extra_mcp_servers
-        # Session mode: drop any session file a prior process left on
-        # disk. We don't trust it -- the first turn rebuilds the session
-        # from the (possibly rehydrated) tape via ``--session-id``. A
-        # leftover file would make that spawn error "Session ID already
-        # in use".
-        if session_id is not None:
-            self._delete_session_jsonl(reason="construction (rebuild from tape)")
+        self._mount: ToolMount | None = None
+        self._claude: _Claude | None = None
+        self._files: Path | None = None
 
     @property
-    @override
+    def provider(self) -> AnthropicCLI:
+        """Return the provider serving this model."""
+        return self._provider
+
+    @property
     def capability(self) -> ModelCapability:
-        """What this model offers on this transport."""
+        """Return every setting this model offers."""
         return self._capability
 
     @property
-    @override
     def settings(self) -> ModelSettings:
-        """What this instance chose."""
+        """Return the settings chosen."""
         return self._settings
 
-    # Called from ``stream``'s ``CancelledError`` handler: when the runtime cancels the
-    # in-flight model-call task (peer/operator preempt), ``CancelledError`` propagates
-    # into the awaiting ``stream``; we translate it into a subprocess SIGINT so the
-    # opaque CLI tool loop actually stops, then re-raise so the runtime's standard
-    # cancellation path (``_stream_and_post`` -> ``ModelResponseCancelled``) runs. The
-    # full CLI tool loop runs in-process inside the subprocess, so the runtime cannot
-    # ``Detach``/``Kill`` individual tool calls; SIGINT is the only mid-turn
-    # cancellation surface.
-    #
-    # Returns True if a live subprocess was signalled, False otherwise (idle, never
-    # started, already closed). Non-blocking. Partial assistant text + usage telemetry
-    # for the cancelled turn are lost -- intentional, the caller is preempting precisely
-    # because that work is no longer wanted.
-    def _interrupt_active_proc(self) -> bool:
-        """SIGINT the active CLI subprocess to abort the current turn."""
-        if self._hot_spare is not None:
-            active = self._hot_spare.active
-            if active is None:
-                return False
-            return active.interrupt()
-        # Session-persistence mode: HotSpare is bypassed; the active
-        # subprocess (if any) is on ``_active_proc``.
-        if self._active_proc is None:
-            return False
-        return self._active_proc.interrupt()
+    @settings.setter
+    def settings(self, settings: ModelSettings) -> None:
+        """Choose ``settings``; raise unless the capability offers each choice."""
+        self._capability.check(settings)
+        self._settings = settings
 
     @override
-    def approx_text_tokens(self, text: str) -> int:
-        """Local estimate via ``approx_chars_per_token``."""
-        return int(len(text) / self.capability.approx_chars_per_token)
+    async def aclose(self) -> None:
+        await self._stop()
+        mount, self._mount = self._mount, None
+        if mount is not None:
+            await self.provider.resources.tool_server.unmount(mount)
+        files, self._files = self._files, None
+        if files is not None:
+            await asyncio.to_thread(shutil.rmtree, files)
 
-    @override
-    def approx_image_tokens(self, data: bytes) -> int:
-        """Local estimate from image dimensions (``width*height/750``)."""
-        dims = image.get_dimensions(data)
-        return dims[0] * dims[1] // 750 if dims is not None else 0
-
-    def is_context_overflow(self, error: Exception) -> bool:
-        """Classify whether an error means the prompt exceeded the token window.
-
-        Excludes the request-byte wire-limit via the shared classifier first,
-        uniform with the HTTP providers and ``GoogleCLI``: a byte-limit error
-        routes to byte-overflow recovery, not the ``/model`` larger-window
-        remediation the byte ceiling ignores.
+    async def count(self, request: Request) -> int:
+        """Return an estimate of the tokens ``request`` would send; the CLI cannot count.
 
         Args:
-          error: Exception raised by the call path.
+          request: What the model would be asked.
 
         Returns:
-          overflow: ``True`` for known token-overflow markers in the message.
+          tokens: The API request's length, its attachments left out, over the
+            model's characters per token, plus each attachment's tokens.
 
         """
-        if is_request_too_large(error_status_code(error), str(error)):
-            return False
-        return is_context_overflow_text(str(error))
-
-    @override
-    def is_retryable_provider_error(self, error: Exception) -> bool:
-        """Flag transient results as retryable for session-persistent mode.
-
-        Session-persistent mode flags transient ``is_error`` results
-        as retryable so ``send_with_retry`` performs an in-place retry
-        (sleep → spawn fresh ``claude --print --resume`` → resend the
-        stored-but-unanswered input) instead of letting the error
-        propagate up to the runtime as a ``ModelResponseError`` (which
-        appends a synthetic ``[Error: …]`` UserMessage to history and
-        costs a full turn boundary).
-
-        Stateless mode keeps the historical ``return False`` because
-        its warm ``HotSpare`` subprocess has already consumed the
-        stdin line we wrote; same-subprocess retry would either
-        duplicate inbound messages or stall waiting on a CLI that no
-        longer expects more input. The runtime's respawn path handles
-        that case correctly by resetting ``_last_sent_index = 0`` and
-        re-feeding history from scratch.
-
-        Only :class:`AnthropicCLIRetryableError` qualifies; plain
-        :class:`SubprocessTransportError` (subprocess died, stdout
-        closed, blocking_limit context overflow) still propagates so
-        the operator sees the failure.
-        """
-        if isinstance(error, AnthropicCLIRetryableError):
-            return self._session_id is not None
-        return False
-
-    @override
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        """Drive one user turn through the ``claude`` subprocess.
-
-        Sends each new history entry (skipping assistant turns the CLI
-        already emitted itself), reads stream events until the terminal
-        ``result``, and assembles a :class:`ModelResponse`.
-
-        Args:
-          request: Conversation + tools + system prompt for the turn.
-          publish: Runtime event sink. Text chunks are emitted as
-              ``ModelResponsePartial``, thinking as
-              ``ModelResponseThinking``; tool calls routed through the
-              in-process MCP bridge surface as ``ToolLabel``. ``None``
-              disables streaming output.
-
-        Returns:
-          response: Parsed model response with usage and cost filled in.
-
-        Raises:
-          RuntimeError: The subprocess exited before emitting a terminal
-              ``result`` event, or the CLI surfaced an error result.
-
-        """
-        self._pending_system = request.system_text
-        # Clear the bridge sink when the turn ends (any exit) so a
-        # stale runtime publisher never lingers on the long-lived bridge
-        # -- e.g. a detached background ``call_tool`` firing between
-        # turns must not label against a finished turn's publisher.
-        try:
-            if self._session_id is not None:
-                return await self._stream_session_persistent(request, publish)
-            if self._hot_spare is None:  # Stateless path.
-                raise ValueError("Expected self._hot_spare is not None.")
-            # Stash the request's tools so the spawn factory
-            # (``_spawn_initialized``) can populate the bridge BEFORE it
-            # launches ``claude`` -- the CLI issues ``ListToolsRequest``
-            # right after launch, and an empty registry at that moment
-            # makes the model emit "no tools have been provided" instead
-            # of a ``tool_use`` (live 2026-06-16
-            # ``test_bridge_tool_round_trips``). The post-acquire
-            # ``_sync_tools_bridge`` below still refreshes the live
-            # registry for the already-warm subprocess.
-            self._pending_tools = list(request.tools)
-            self._pending_allowed = request.allowed_tools
-            if self._should_respawn(request):
-                if hash_system(request.system_text) != self._system_hash:
-                    await self._hot_spare.discard_spare()
-                await self._hot_spare.respawn()
-                self._reset_active_state()
-            proc = await self._hot_spare.acquire()
-            self._sync_tools_bridge(request, publish)
-            try:
-                response = await self._exchange_turn(proc, request, publish)
-                self._system_hash = hash_system(self._pending_system)
-                self._last_sent_index = len(request.messages)
-                # Detached results (if any) were delivered + answered; drop
-                # the held buffer so they aren't redelivered next turn.
-                self._pending_detached_text = None
-            except asyncio.CancelledError:
-                # Runtime cancelled the model-call task (preempt). Translate
-                # into a subprocess SIGINT so the opaque CLI tool loop
-                # stops, then re-raise so the runtime's cancellation path
-                # runs.
-                self._interrupt_active_proc()
-                self._reset_active_state()
-                await self._hot_spare.respawn_after_transport_failure()
-                raise
-            except SubprocessTransportError:
-                self._reset_active_state()
-                await self._hot_spare.respawn_after_transport_failure()
-                raise
-            self._hot_spare.record_success()
-            self._turn_count += 1
-            return response
-        finally:
-            if self._tools_bridge is not None:
-                self._tools_bridge.set_publish(None)
-
-    # Spawn-on-demand (no HotSpare) because pre-warming a spare with ``--resume <same-
-    # uuid>`` would race against the active subprocess updating the session file (see
-    # ``/tmp/resume_probe/`` test A from 2026-06-02: concurrent ``--resume`` produces a
-    # branched conversation tree).
-    #
-    # Every user-side entry claude has not seen is merged into ONE stdin line, so a turn
-    # (including the first turn after a restart, which rebuilds the session from the
-    # whole tape) costs one model turn. ``_last_sent_index`` counts tape entries claude
-    # has stored; it advances when the line is written, since claude persists input
-    # before answering it, and is preserved across transport-error respawns.
-    async def _stream_session_persistent(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> ModelResponse:
-        """Drive one turn through a ``--session-id`` / ``--resume`` subprocess."""
-        # ``agent.clear()`` empties ``request.messages`` without reaching the
-        # provider; a cumulative count past the history length is only possible
-        # after a clear, so start a fresh session.
-        if self._last_sent_index > len(request.messages):
-            self._reset_for_clear()
-        new_input = merge_user_input(
-            [
-                *request.messages[self._last_sent_index :],
-                *filter(None, [self._detached_delivery_entry()]),
-            ],
+        attachments = [
+            attachment
+            for record in request.records
+            if isinstance(record, (UserMessage, AgentToAgentMessage, ToolResult))
+            for attachment in record.attachments
+        ]
+        bare = [
+            replace(record, attachments=())
+            if isinstance(record, (UserMessage, AgentToAgentMessage, ToolResult))
+            else record
+            for record in request.records
+        ]
+        system = wire.system_blocks(request.system, settings=self.settings)
+        body, _ = wire.encode(
+            replace(request, records=bare),
+            capability=self.capability,
+            settings=self.settings,
+            system=system,
         )
-        # With nothing new, a stored-but-unanswered input (a failed prior
-        # attempt) is resent so the retry yields the answer it is owed.
-        outgoing = new_input or self._unanswered
-        if outgoing is None:
-            return empty_turn_response()
-        # Bridge MUST be populated before the subprocess spawns: the CLI issues
-        # ``ListToolsRequest`` soon after launch, and an empty catalog makes the
-        # model emit tool calls as plain text (Episode 2.7, 2026-06-02).
-        await self._ensure_tools_bridge()
-        self._sync_tools_bridge(request, publish)
-        proc = await self._spawn_initialized()
-        self._active_proc = proc
+        return int(
+            len(json_dumps(body)) / self.capability.approx_chars_per_token,
+        ) + sum(self.attachment_tokens(attachment) for attachment in attachments)
+
+    def attachment_tokens(self, attachment: Attachment) -> int:
+        """Return about how many tokens ``attachment`` adds, by Anthropic's formula."""
+        return wire.attachment_tokens(attachment, limits=self.capability.limits)
+
+    async def stream(self, request: Request) -> AsyncIterator[TextChunk | Response]:
+        """Yield the reply as it is written, then the finished ``Response``.
+
+        Args:
+          request: What the model is asked.
+
+        Yields:
+          event: Each ``TextChunk`` as the model writes it, then one ``Response``.
+
+        """
+        records = tuple(request.records)
+        mount = await self._mounted()
+        mount.offer(request.tools)
+        env = await self.provider.environment()
+        # A process serves one system prompt, one tool set, one login.
+        started_with = (*request.system, _digest(request.tools), json_dumps(env))
         try:
-            await self._send_entry(proc, outgoing)
-            self._session_on_disk = True
-            self._unanswered = outgoing
-            self._last_sent_index = len(request.messages)
-            self._pending_detached_text = None
-            response = await self._drain_until_result(proc, publish)
-        except asyncio.CancelledError:
-            # Preempt: SIGINT so the opaque CLI tool loop stops, then re-raise
-            # so the runtime's cancellation path runs.
-            self._interrupt_active_proc()
+            claude = self._claude
+            unseen = (
+                claude.unseen(records, started_with=started_with)
+                if claude is not None
+                else None
+            )
+            # Read before ``answer`` clears it: answered calls continue the
+            # turn claude is in, and a user line written now would start another.
+            held = claude.held if claude is not None else ()
+            if (
+                claude is None
+                or unseen is None
+                or (
+                    held
+                    and not await claude.answer(
+                        unseen,
+                        mount=mount,
+                        limits=self.capability.limits,
+                    )
+                )
+            ):
+                claude = await self._start(request, started_with=started_with, env=env)
+            elif not held:
+                await claude.say(
+                    _content(
+                        (*claude.waiting, *unseen),
+                        replay=False,
+                        limits=self.capability.limits,
+                    ),
+                )
+                claude.waiting = ()
+            reader = wire.StreamReader(
+                capability=self.capability,
+                settings=self.settings,
+            )
+            async for chunk in claude.read(reader):
+                yield chunk
+            response = reader.response()
+        except BaseException:
+            # The process is mid-turn, so its conversation no longer matches.
+            await self._stop()
             raise
-        finally:
-            await proc.close()
-            self._active_proc = None
-        self._unanswered = None
-        self._turn_count += 1
-        return response
-
-    @override
-    async def close(self) -> None:
-        """Tear down the subprocess pool and the MCP bridge."""
-        if self._hot_spare is not None:
-            await self._hot_spare.close()
-        if self._active_proc is not None:
-            await self._active_proc.close()
-            self._active_proc = None
-        if self._tools_bridge is not None:
-            await self._tools_bridge.stop()
-            self._tools_bridge = None
-        if self._persistent_tmpdir is not None and self._persistent_tmpdir.exists():
-            shutil.rmtree(self._persistent_tmpdir, ignore_errors=True)
-            self._persistent_tmpdir = None
-        self._mcp_baseline_by_proc.clear()
-
-    def _should_respawn(self, request: ModelRequest) -> bool:
-        """Inspect the trigger list (§1.4) for this request."""
-        if self._hot_spare is None:  # Caller is the stateless path.
-            raise ValueError("Expected self._hot_spare is not None.")
-        if self._hot_spare.active is None:
-            return False
-        return self._respawn_due(
-            request.messages,
-            system=request.system_text,
-            max_request_tokens=self.limits.max_request_tokens,
-        )
-
-    # ``publish`` is the runtime sink for this turn; the bridge emits a ``ToolLabel``
-    # through it for each tool call routed through the subprocess. Passed afresh every
-    # turn so a stale runtime publisher never lingers on the long-lived bridge.
-    def _sync_tools_bridge(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> None:
-        """Refresh the MCP bridge's tool registry and runtime event sink."""
-        if self._tools_bridge is not None:
-            self._tools_bridge.update_tools(
-                list(request.tools),
-                allowed=request.allowed_tools,
-            )
-            self._tools_bridge.set_publish(publish)
-
-    # The bridge runs background tool calls (those the model requested with
-    # ``background``/``delay``) as tasks in this Model's loop and hands back finished
-    # results here. We fold them into a single user-side message so the next ``claude
-    # --print`` turn delivers the results the model was promised. ``None`` when nothing
-    # is pending. This is the Model side of the bridge's internal cohort: detached tool
-    # results come back as ordinary turn input.
-    #
-    # ``drain_detached_results`` is a destructive read, so the folded text is held in
-    # ``_pending_detached_text`` until the turn that delivers it completes successfully
-    # (cleared in the ``else`` branch of the stream paths). If that turn's final drain
-    # fails and ``send_with_retry`` re-invokes ``stream``, this returns the SAME
-    # buffered entry rather than ``None`` -- otherwise the results, no longer in
-    # ``_bg_done``, would vanish (the model was promised them).
-    def _detached_delivery_entry(self) -> UserMessage | None:
-        """Drain the bridge's completed detached tool runs into one entry."""
-        if self._pending_detached_text is None:
-            if self._tools_bridge is None:
-                return None
-            results = self._tools_bridge.drain_detached_results()
-            if not results:
-                return None
-            self._pending_detached_text = "\n\n".join(
-                f"[detached tool result{f' {r.call_id}' if r.call_id else ''}]"
-                f" {r.content}" + (" (error)" if r.is_error else "")
-                for r in results
-            )
-        return UserMessage(text=self._pending_detached_text)
-
-    # The bridge MUST exist before the first ``claude --print`` subprocess starts -- the
-    # CLI does ``ListToolsRequest`` against the bridge URL soon after launch, and an
-    # empty bridge produces an empty tool catalog (which then makes opus emit tool calls
-    # as plain text). In the stateless path this is implicit because the HotSpare's
-    # first spawn calls ``_spawn_initialized`` which creates the bridge; in session-
-    # persistent mode we must hoist the bridge creation out so the spawn argv can use a
-    # real ``--mcp-config`` URL.
-    async def _ensure_tools_bridge(self) -> None:
-        """Lazily create the MCP bridge (without spawning the CLI)."""
-        if self._tools_bridge is None:
-            self._tools_bridge = ToolsBridge(tools=[])
-            await self._tools_bridge.start()
-
-    # Unseen user-side entries -- the whole history after a respawn -- plus any
-    # completed detached (background) tool results travel as ONE stdin line: the
-    # bridge advertises ``background``/``delay`` in both modes, so a stateless turn
-    # can stage a detached run whose result must be fed back here.
-    async def _exchange_turn(
-        self,
-        proc: Subproc,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> ModelResponse:
-        """Send the unseen input as one line and return the turn's result."""
-        entry = merge_user_input(
-            [
-                *filter(None, [self._unsent_input(request.messages)]),
-                *filter(None, [self._detached_delivery_entry()]),
-            ],
-        )
-        if entry is None:
-            return empty_turn_response()
-        await self._send_entry(proc, entry)
-        return await self._drain_until_result(proc, publish)
-
-    # Gated on ``proc`` having fetched the bridge catalog (instant after the first
-    # fetch): a cold subprocess's first user line must not race ahead of claude's still-
-    # connecting MCP client, or the model sees no tools and answers "no tools have been
-    # provided".
-    async def _send_entry(
-        self,
-        proc: Subproc,
-        entry: UserMessage | AgentSendMessage,
-    ) -> None:
-        """Write one user-side entry to stdin."""
-        await self._await_mcp_listed(proc)
-        line = json.dumps(
-            _user_line(
-                entry,
-                self.limits.max_image_edge_px,
-                self.limits.max_image_bytes,
+        # Our tools reach the model under the MCP server's name.
+        response = replace(
+            response,
+            records=tuple(
+                replace(record, name=record.name.removeprefix("mcp__sagent__"))
+                if isinstance(record, ToolCall)
+                else record
+                for record in response.records
             ),
         )
-        await proc.write_line(line)
+        claude.saw(records, response=response)
+        yield response
 
-    async def _drain_until_result(
+    async def _mounted(self) -> ToolMount:
+        if self._mount is None:
+            self._mount = await self.provider.resources.tool_server.mount()
+        return self._mount
+
+    async def _start(
         self,
-        proc: Subproc,
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> ModelResponse:
-        """Read stream events until ``result``; assemble a ``ModelResponse``."""
-        text_parts: list[str] = []
-        # One entry per thinking content block, across every internal round:
-        # each block carries the signature Anthropic issued for it alone, so
-        # an API replay of the turn validates block by block.
-        thinking_blocks: list[dict[str, str]] = []
-        # Per-block-index state for tool_use accumulators. Each
-        # ``content_block_start`` for a ``tool_use`` registers
-        # ``{name, id, json_parts: list[str]}`` keyed by block index;
-        # streamed ``input_json_delta`` deltas append to ``json_parts``;
-        # ``content_block_stop`` finalises and emits a ToolLabel with
-        # the parsed args.
-        tool_use_blocks: dict[int, dict[str, object]] = {}
-        usage_event: dict[str, MutablePlainTree] | None = None
-        # Usage of the LAST internal round's request (raw Anthropic API
-        # shape, snake_case). One ``claude --print`` turn runs the whole
-        # tool loop inside the subprocess -- N internal API rounds -- and
-        # the terminal ``result`` event sums input + cache tokens across
-        # ALL of them, so the result usage over-counts the live context
-        # window by ~the round count (observed 2026-06-09: a 69-round
-        # turn reported 5.6M "input" tokens against a 200k window,
-        # spuriously tripping the Agent's proactive compaction gate).
-        # Each round's ``message_start`` carries that round's request
-        # usage; the last one IS the current context footprint -- the
-        # same thing the direct-API provider reports. Captured here and
-        # used to normalize ``ModelResponse.tokens``'s input side; the
-        # output side stays cumulative (output genuinely accumulates
-        # across rounds), and billing is unaffected either way
-        # (``total_cost`` comes from ``modelUsage.costUSD``, summed).
-        last_round_usage: dict[str, MutablePlainTree] | None = None
-        message_id = ""
-        stop_reason: str | None = None
-        while True:
-            event = await proc.read_json_line(skip_non_json=False)
-            if event is None:
-                raise SubprocessTransportError(
-                    "AnthropicCLI: subprocess stdout closed before result",
-                )
-            kind = event.get("type")
-            if kind == "result":
-                usage_event = event
-                stop_reason = cast(str | None, event.get("stop_reason"))
-                if event.get("is_error") is True:
-                    # Classify transient shapes for in-place retry vs
-                    # fatal shapes for runtime escalation. The
-                    # dominant transient shape in practice is the
-                    # ``aborted_streaming`` event the CLI emits when the
-                    # runtime cancels the model-call task and we SIGINT
-                    # the mid-turn subprocess (``_interrupt_active_proc``)
-                    # for an incoming peer/operator message; the retry
-                    # then re-delivers via ``--resume``. See
-                    # :func:`_is_event_retryable`
-                    # for the catalog.
-                    if _is_event_retryable(cast(Mapping[str, object], event)):
-                        raise AnthropicCLIRetryableError(
-                            f"AnthropicCLI: retryable result is_error: {event}",
-                            retry_after_ms=_extract_retry_after_ms(
-                                cast(Mapping[str, object], event),
-                            ),
-                            event=cast(Mapping[str, object], event),
-                        )
-                    raise SubprocessTransportError(
-                        f"AnthropicCLI: result is_error: {event}",
-                    )
-                break
-            if kind == "stream_event":
-                inner = cast(dict[str, MutablePlainTree], event.get("event") or {})
-                if inner.get("type") == "message_start":
-                    msg = cast(dict[str, MutablePlainTree], inner.get("message") or {})
-                    usage = msg.get("usage")
-                    if isinstance(usage, dict):
-                        last_round_usage = usage
-                _dispatch_stream_event(
-                    inner,
-                    text_parts,
-                    thinking_blocks,
-                    tool_use_blocks=tool_use_blocks,
-                    publish=publish,
-                )
-            elif kind == "system" and event.get("subtype") == "init":
-                message_id = cast(str, event.get("session_id") or "")
-        if last_round_usage is not None:
-            # Cache-inclusive context footprint of the last internal round;
-            # feeds the context-fraction respawn heuristic. Only overwrite when
-            # a round was actually observed: a zero-round drain (no
-            # ``message_start``) carries NO footprint signal, and clobbering the
-            # last known value with 0 would read as "context is empty" and
-            # suppress a respawn that a genuinely full context still needs.
-            self._last_input_tokens = _round_context_tokens(last_round_usage)
-        return _build_model_response(
-            usage_event=usage_event,
-            last_round_usage=last_round_usage,
-            text="".join(text_parts),
-            thinking_blocks=thinking_blocks,
-            stop_reason=stop_reason,
-            fallback_message_id=message_id,
-        )
-
-    async def _spawn_spare_initialized(self) -> Subproc:
-        """Spawn a spare ``claude`` subprocess without touching active counters."""
-        return await self._spawn_initialized()
-
-    async def _spawn_initialized(self) -> Subproc:
-        """Spawn a fresh ``claude`` subprocess ready to receive user lines."""
-        if self._tools_bridge is None:
-            self._tools_bridge = ToolsBridge(tools=[])
-            await self._tools_bridge.start()
-        # Populate the bridge registry BEFORE launching ``claude``: the
-        # CLI issues ``ListToolsRequest`` right after launch, so an empty
-        # registry at this moment makes the model see no tools. The
-        # stateless ``stream`` stashes the turn's tools in
-        # ``_pending_tools`` for exactly this; session mode hoists its
-        # own ``_sync_tools_bridge`` before the spawn, leaving
-        # ``_pending_tools`` empty (a no-op refresh).
-        if self._pending_tools:
-            self._tools_bridge.update_tools(
-                list(self._pending_tools),
-                allowed=self._pending_allowed,
-            )
-        spawn_owned_tmpdir: Path | None
-        tmpdir: Path | None
-        if self._persistent_tmpdir is not None:
-            # Session-persistence + per-account: reuse the
-            # construction-time tmpdir so the renamed credentials
-            # file is found by claude (its creds path is hardcoded
-            # to $HOME/.claude/.credentials.json).
-            tmpdir = self._persistent_tmpdir
-            spawn_owned_tmpdir = None
-        elif self._provider.account is None:
-            # Default account, stateless or persistent: NO HOME override.
-            # On macOS the Claude CLI stores its subscription login in the
-            # Keychain rather than ``~/.claude/.credentials.json``. Inheriting
-            # HOME lets the CLI use that native login and also keeps native
-            # tools (``gh``, ``git``, ssh) on the operator's normal config.
-            tmpdir = None
-            spawn_owned_tmpdir = None
-        else:
-            # Named-account stateless mode: hermetic per-spawn HOME holding
-            # the selected legacy file credential. Subproc deletes it on close.
-            account = self._provider.account
-            tmpdir = populated_tmpdir(
-                "sagent-anthropic-cli-",
-                lambda path: _populate_anthropic_tmpdir(path, account),
-            )
-            spawn_owned_tmpdir = tmpdir
-        argv = _build_anthropic_argv(
-            model_id=self.capability.wire_model_id or self.capability.model_id,
-            system_prompt=self._pending_system,
-            bridge_url=self._tools_bridge.url,
-            bridge_server_name=self._tools_bridge.server_name,
-            extra_mcp_servers=self._extra_mcp_servers,
-            session_id=self._session_id,
-            resume_existing=self._session_on_disk,
-        )
-        env = _anthropic_subprocess_env(
-            tmpdir,
-            persist_session=self._session_id is not None,
-        )
-        # ``None`` defers to ``Subproc``'s own default (60s); an explicit
-        # value (set by the plugin for long pre-commit/ty/JAX tool calls)
-        # overrides it. Pass the resolved value either way.
-        read_timeout = (
-            self._subprocess_read_timeout_sec
-            if self._subprocess_read_timeout_sec is not None
-            else _READ_IDLE_TIMEOUT_SEC
-        )
-        proc = Subproc(
-            argv,
-            env=env,
-            tmpdir=spawn_owned_tmpdir,
-            read_timeout_sec=read_timeout,
-            # ``claude --print --output-format stream-json`` emits ONE
-            # NDJSON record per content block; a single Read of a large
-            # file echoes the file's content verbatim into one line
-            # (40+ KiB tool results are routine). Subproc's stock 64 KiB
-            # per-line cap strands ``readline()`` with "ValueError:
-            # Separator is found, but chunk is longer than limit" --
-            # diagnosed live 2026-06-03 after back-to-back ~41 KiB +
-            # ~22 KiB file reads tripped it. 16 MiB is comfortably above
-            # any single stream-json record while keeping memory bounded.
-            stream_limit=16 * 1024 * 1024,
-        )
-        # Snapshot the bridge's ``list_tools`` count BEFORE launch, keyed
-        # to THIS proc, so the turn can later confirm THIS subprocess's
-        # MCP client connected (its fetch bumps the count past the
-        # snapshot). Keyed per-proc (not a single shared field) so a
-        # concurrent HotSpare spare-warm -- which runs this same factory
-        # and would otherwise clobber a shared baseline -- can't make the
-        # active turn wait for the SPARE's connect instead of its own. A
-        # warm spare connects during background warm-up, so by the time it
-        # is promoted its count already exceeds its snapshot and
-        # ``_await_mcp_listed`` returns instantly -- only a genuinely cold
-        # first spawn pays the ~3s connect.
-        # Only record a baseline when the bridge actually advertises tools
-        # -- ``_await_mcp_listed`` is a no-op otherwise and would never prune
-        # the entry, so a long-lived tool-less session would accrete them.
-        if self._tools_bridge.has_tools:
-            self._mcp_baseline_by_proc[id(proc)] = self._tools_bridge.listed_snapshot()
-        self._warming_proc = proc
-        try:
-            await proc.start()
-        except BaseException:
-            self._mcp_baseline_by_proc.pop(id(proc), None)
-            await proc.close()
-            self._warming_proc = None
-            raise
-        self._warming_proc = None
-        return proc
-
-    # The CLI connects to MCP servers asynchronously after launch and does NOT block its
-    # first turn on that handshake; a cold subprocess that generates before the
-    # ``sagent`` server flips from ``pending`` to ``connected`` sees an empty catalog
-    # and answers "no tools have been provided" (live 2026-06-16). Called before the
-    # first user line is written, so the connect overlaps no extra latency; instant
-    # after the first fetch (the per-proc baseline is already exceeded).
-    #
-    # No-op when the bridge has no tools. When tools ARE expected but the catalog is not
-    # fetched within ``_mcp_connect_timeout_sec``, raise
-    # :class:`SubprocessTransportError` rather than silently feeding the turn a tool-
-    # less context: a degraded "no tools have been provided" answer is worse than a
-    # respawn. The standard transport-failure path (HotSpare respawn in stateless mode,
-    # in-place ``--resume`` retry in session mode) then re-attempts the connect on a
-    # fresh subprocess.
-    async def _await_mcp_listed(self, proc: Subproc) -> None:
-        """Wait for ``proc`` to fetch the bridge's tool catalog."""
-        if self._tools_bridge is None or not self._tools_bridge.has_tools:
-            return
-        baseline = self._mcp_baseline_by_proc.get(id(proc), 0)
-        listed = await self._tools_bridge.wait_listed(
-            baseline,
-            self._mcp_connect_timeout_sec,
-        )
-        if not listed:
-            raise SubprocessTransportError(
-                "AnthropicCLI: MCP bridge catalog not fetched within "
-                f"{self._mcp_connect_timeout_sec:.1f}s (CLI MCP client never "
-                "connected); respawning rather than running a tool-less turn",
-            )
-        # Consumed: this proc has connected. Drop the baseline so the map
-        # stays bounded; any later ``_send_entry`` for the same proc reads
-        # the ``0`` default and returns instantly (the count already moved
-        # past it). New spawns re-snapshot under their own ``id(proc)``.
-        self._mcp_baseline_by_proc.pop(id(proc), None)
-
-    @override
-    def _reset_active_state(self) -> None:
-        """Reset active subprocess counters after a respawn boundary."""
-        super()._reset_active_state()
-        # A buffered detached result is promised to the OUTGOING context; a
-        # respawn starts fresh, so drop it rather than inject a phantom
-        # ``[detached tool result]`` referencing calls the new process never saw.
-        self._pending_detached_text = None
-
-    # Wipes the cumulative-sent counter, marks the session as uninitialised (next spawn
-    # will use ``--session-id`` again), DELETES the on-disk session JSONL so the next
-    # ``--session-id <same-uuid>`` call doesn't error with "Session ID is already in
-    # use", and drops any buffered detached result -- the cleared context no longer
-    # knows the tool calls it answered, so re-injecting it would be a phantom result.
-    #
-    # Called from :meth:`_stream_session_persistent` when it detects ``_last_sent_index
-    # > len(request.messages)``, which is the post-``Clear`` shape.
-    def _reset_for_clear(self) -> None:
-        """Reset session-persistent state after ``agent.clear()``."""
-        # The detached buffer is context state, cleared regardless of session
-        # mode (the early-return below only gates the session-file teardown).
-        self._pending_detached_text = None
-        if self._session_id is None:
-            return
-        self._last_sent_index = 0
-        self._session_on_disk = False
-        self._unanswered = None
-        self._delete_session_jsonl(reason="agent.clear()")
-
-    # The on-disk file is a pure cache the provider rebuilds from the request; a stale
-    # copy (left by a prior process, or invalidated by ``agent.clear()``) must be
-    # removed so the next ``--session-id <same-uuid>`` spawn doesn't error with "Session
-    # ID is already in use". Called at construction (drop any prior process's file -- we
-    # rebuild from the rehydrated tape) and from ``_reset_for_clear``.
-    def _delete_session_jsonl(self, *, reason: str) -> None:
-        """Delete the on-disk session JSONL for this uuid, if present."""
-        if self._session_id is None:
-            return
-        path = self._session_jsonl_path()
-        if path is None or not path.exists():
-            return
-        try:
-            path.unlink()
-            logger.info(
-                "AnthropicCLI(session): cleared session JSONL at %s (%s)",
-                path,
-                reason,
-            )
-        except OSError as exc:
-            logger.warning(
-                "AnthropicCLI(session): failed to delete %s: %s",
-                path,
-                exc,
-            )
-
-    # ``None`` in stateless mode. Resolves the config dir the way the spawn does
-    # (per-account tmpdir, else the operator's ``CLAUDE_CONFIG_DIR`` or ``~/.claude``)
-    # and the cwd the way claude encodes it (canonicalized, non-alnum -> ``-``), so the
-    # path the provider computes is the path claude reads/writes.
-    def _session_jsonl_path(self) -> Path | None:
-        """On-disk session-file path for this uuid under the spawn cwd."""
-        if self._session_id is None:
-            return None
-        try:
-            cwd = Path.cwd()
-        except OSError:
-            return None
-        config_dir = (
-            self._persistent_tmpdir / ".claude"
-            if self._persistent_tmpdir is not None
-            else _claude_config_dir()
-        )
-        return _session_jsonl_path(self._session_id, cwd=cwd, config_dir=config_dir)
-
-
-def _parse_cli_credentials(raw: Mapping[str, object]) -> AnthropicCLICredentials:
-    """Extract access/refresh/expiry from Claude CLI credential JSON."""
-    oauth = cast(dict[str, MutablePlainTree], raw["claudeAiOauth"])
-    creds = AnthropicCLICredentials(
-        access_token=str(oauth["accessToken"]),
-        refresh_token=str(oauth["refreshToken"]),
-        expires_at=from_plain(oauth["expiresAt"], float) / 1000.0,
-    )
-    if "scopes" in oauth:
-        creds["scopes"] = from_plain(oauth["scopes"], list[str])
-    if "subscriptionType" in oauth:
-        creds["subscription_type"] = cast(str | None, oauth["subscriptionType"])
-    if "rateLimitTier" in oauth:
-        creds["rate_limit_tier"] = cast(str | None, oauth["rateLimitTier"])
-    token_account_raw = oauth.get("tokenAccount")
-    if isinstance(token_account_raw, dict):
-        token_account = token_account_raw
-        if uuid := str(token_account.get("uuid") or ""):
-            creds["account_uuid"] = uuid
-        if email := str(token_account.get("emailAddress") or ""):
-            creds["email"] = email
-        if organization_uuid := str(token_account.get("organizationUuid") or ""):
-            creds["organization_uuid"] = organization_uuid
-    if "billingType" in oauth:
-        creds["billing_type"] = cast(str | None, oauth["billingType"])
-    if "accountCreatedAt" in oauth:
-        creds["account_created_at"] = cast(str | None, oauth["accountCreatedAt"])
-    if "subscriptionCreatedAt" in oauth:
-        creds["subscription_created_at"] = cast(
-            str | None,
-            oauth["subscriptionCreatedAt"],
-        )
-    if "hasExtraUsageEnabled" in oauth:
-        creds["has_extra_usage_enabled"] = cast(
-            bool | None,
-            oauth["hasExtraUsageEnabled"],
-        )
-    return creds
-
-
-def _load_cli_credentials_file(path: Path) -> AnthropicCLICredentials | None:
-    """Read credentials from a Claude CLI-format JSON file."""
-    if not path.exists():
-        return None
-    try:
-        raw = json_loads(path.read_text(encoding="utf-8"), dict[str, object])
-        _CREDENTIALS_VALIDATOR(raw)
-    except (OSError, json.JSONDecodeError, ReadError):
-        return None
-    except fastjsonschema.JsonSchemaValueException:
-        return None
-    return _parse_cli_credentials(raw)
-
-
-# ``CLAUDE_CONFIG_DIR`` names claude's config dir itself (whatever it is called), and
-# claude keeps ``projects/`` directly under it; unset, the dir is ``~/.claude``.
-def _claude_config_dir() -> Path:
-    """Return the config dir claude uses when sagent doesn't override HOME."""
-    config_dir = os.environ.get("CLAUDE_CONFIG_DIR", "")
-    if config_dir:
-        return Path(config_dir)
-    return (
-        Path(
-            os.environ.get("HOME", "~"),
-        ).expanduser()
-        / ".claude"
-    )  # house-ignore[xdg-literal] -- HOME as the claude CLI itself reads it, not our layout (AGENTS.md rule 3).
-
-
-# Mirrors the CLI's encoding so the path sagent computes is the path claude
-# reads/writes: the cwd is canonicalized (symlinks resolved -- e.g. macOS ``/tmp`` ->
-# ``/private/tmp``) and every non-``[A-Za-z0-9-]`` character becomes ``-``. Must stay
-# cwd-aware: claude indexes sessions per encoded-cwd project dir and ``--resume`` cannot
-# see a session recorded under a different cwd.
-def _session_jsonl_path(session_id: str, *, cwd: Path, config_dir: Path) -> Path:
-    """On-disk session-file path claude uses for ``(session_id, cwd)``."""
-    try:
-        resolved = cwd.resolve()
-    except OSError:
-        resolved = cwd
-    encoded = re.sub(r"[^A-Za-z0-9-]", "-", str(resolved))
-    return config_dir / "projects" / encoded / f"{session_id}.jsonl"
-
-
-def _populate_anthropic_tmpdir(tmpdir: Path, account: str | None) -> None:
-    """Copy the user's credentials into a hermetic ``HOME`` for the CLI."""
-    dot_claude = tmpdir / ".claude"
-    dot_claude.mkdir(parents=True, exist_ok=True)
-    source = credentials_path(_CREDS_PATH.expanduser(), account)
-    if _load_cli_credentials_file(source) is None:
-        raise ValueError(f"Invalid credentials file: {source}")
-    target = dot_claude / _CREDS_PATH.name
-    atomic_write_bytes(target, source.read_bytes(), file_mode=0o600)
-
-
-# When ``persist_session=True`` we keep ``CLAUDE_CODE_SKIP_PROMPT_HISTORY`` unset --
-# that env var (verified by bisect 2026-06-02) causes the CLI to skip writing its
-# session JSONL even when ``--session-id`` / ``--resume`` are passed, which makes
-# session-persistence mode silently no-op and the next ``--resume`` fails with "No
-# conversation found".
-#
-# When ``tmpdir is None`` we don't override ``HOME`` -- the subprocess inherits the
-# operator's real HOME so Claude finds macOS Keychain auth, project session JSONLs, and
-# native-tool config. This is the default-account path in both stateless and persistent
-# modes. Named accounts use ``tmpdir`` because the CLI has no credential-file override.
-#
-# Auto-compact is always disabled: sagent owns history in both modes (stateless re-feeds
-# it each turn; session mode rebuilds the on-disk file from the tape on the first turn
-# and feeds deltas thereafter). Claude's auto-compact would write a
-# ``system/compact_boundary`` to a file sagent overwrites next turn, so sagent's own
-# ``SummaryCompactor`` is the sole compaction authority.
-def _anthropic_subprocess_env(
-    tmpdir: Path | None,
-    *,
-    persist_session: bool = False,
-) -> dict[str, str]:
-    """Build the ``claude`` subprocess env with native or isolated auth."""
-    env = {
-        key: value
-        for key, value in os.environ.items()
-        if key not in _NON_SUBSCRIPTION_AUTH_ENV
-    }
-    if tmpdir is not None:
-        env["HOME"] = str(tmpdir)
-        env["USERPROFILE"] = str(tmpdir)
-        env["CLAUDE_CONFIG_DIR"] = str(tmpdir / ".claude")
-    env.update(
-        {
-            "DISABLE_TELEMETRY": "1",
-            "DISABLE_ERROR_REPORTING": "1",
-            "DISABLE_AUTOUPDATER": "1",
-            "DISABLE_BUG_COMMAND": "1",
-            "DISABLE_FEEDBACK_COMMAND": "1",
-            "DISABLE_COST_WARNINGS": "1",
-            "DISABLE_INSTALLATION_CHECKS": "1",
-            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
-            "CLAUDE_CODE_DISABLE_LEGACY_MODEL_REMAP": "1",
-            "CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS": "1",
-            "DISABLE_AUTO_COMPACT": "1",
-        },
-    )
-    if not persist_session:
-        env["CLAUDE_CODE_SKIP_PROMPT_HISTORY"] = "1"
-    return env
-
-
-# When ``session_id`` is ``None`` (default), passes ``--no-session-persistence`` -- the
-# historical behaviour. Otherwise passes ``--session-id <uuid>``
-# (``resume_existing=False``) or ``--resume <uuid>`` (``resume_existing=True``).
-# Misusing this (``--session-id`` on an existing session, ``--resume`` on a nonexistent
-# one) makes ``claude`` exit non-zero before consuming stdin, which sagent surfaces as
-# ``SubprocessTransportError``.
-#
-# ``extra_mcp_servers``, when provided, is merged into the ``mcpServers`` block of the
-# JSON written to ``--mcp-config``. Use this to register stdio/HTTP MCP servers
-# alongside sagent's own in-process tool bridge. Caller is responsible for ensuring the
-# keys don't collide with ``bridge_server_name``; sagent's bridge wins on conflict.
-def _build_anthropic_argv(
-    *,
-    model_id: str,
-    system_prompt: str,
-    bridge_url: str,
-    bridge_server_name: str,
-    extra_mcp_servers: dict[str, dict[str, object]] | None = None,
-    session_id: str | None = None,
-    resume_existing: bool = False,
-) -> list[str]:
-    """Assemble the ``claude --print --input-format stream-json ...`` argv."""
-    servers: dict[str, dict[str, object]] = {
-        bridge_server_name: {"type": "http", "url": bridge_url},
-    }
-    for name, entry in (extra_mcp_servers or {}).items():
-        if name == bridge_server_name:
-            # Don't let an external entry stomp on the bridge that
-            # exposes sagent-native tools (Read/Bash/etc.).
-            continue
-        servers[name] = entry
-    mcp_config = json.dumps({"mcpServers": servers})
-    base = [
-        "claude",
-        "--print",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--include-partial-messages",
-        "--verbose",
-        "--model",
-        model_id,
-        "--system-prompt",
-        system_prompt,
-    ]
-    if session_id is None:
-        # Stateless: every spawn is a fresh session, history is fed
-        # via stdin by ``_exchange_turn``.
-        base.append("--no-session-persistence")
-    elif resume_existing:
-        # Session-persistence mode, claude has the session on disk.
-        base.extend(["--resume", session_id])
-    else:
-        # Session-persistence mode, first time we see this UUID.
-        base.extend(["--session-id", session_id])
-    base.extend(
-        [
+        request: Request,
+        *,
+        started_with: tuple[str, ...],
+        env: dict[str, str],
+    ) -> _Claude:
+        """Start a fresh ``claude`` and tell it the conversation so far."""
+        await self._stop()
+        mount = await self._mounted()
+        # Any local user can read a process's arguments, so what is private or
+        # long reaches claude in files of our own: the mount's URL is the only
+        # key to its tools, and a long system prompt would overflow argv.
+        argv = [
+            "claude",
+            "--print",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--include-partial-messages",
+            "--verbose",
+            "--model",
+            self.capability.wire_model_id or self.capability.model_id,
+            "--system-prompt-file",
+            str(self._written("system", "\n\n".join(request.system))),
+            "--no-session-persistence",
             "--setting-sources",
             "",
-            "--mcp-config",
-            mcp_config,
             "--strict-mcp-config",
-        ],
-    )
-    # Never pass ``--tools ""``: the CLI reads empty-string as "ALLOW NO
-    # TOOLS, including MCP ones" -- bisect probe 2026-06-03 found:
-    #
-    #   --tools ""              → no tool_use; opus replies "I'll run
-    #                             `ls /tmp`" as plain text.
-    #   (omit --tools entirely) → tool_use(name=Bash) emitted cleanly.
-    #   --tools "Bash"          → tool_use(name=Bash) emitted cleanly.
-    #
-    # This was originally believed to bite only session-persistence mode,
-    # but the stateless path routes tools through the same MCP bridge, so
-    # ``--tools ""`` silently disabled bridge tools there too -- the model
-    # answered "no tools have been provided" for a bridge-mounted tool
-    # (live 2026-06-16 ``test_bridge_tool_round_trips``). Omit ``--tools``
-    # in BOTH modes so the bridge's MCP catalog is always honored.
-    base.extend(
-        [
+            "--mcp-config",
+            str(
+                self._written(
+                    "mcp",
+                    json_dumps(
+                        {"mcpServers": {"sagent": {"type": "http", "url": mount.url}}},
+                    ),
+                ),
+            ),
+            # Its own tools off; ours arrive over MCP.
+            "--tools",
+            "",
             "--disable-slash-commands",
             "--permission-mode",
             "bypassPermissions",
-        ],
-    )
-    # Defensively deny the Claude-Teams / Agent-SDK ``SendMessage``
-    # built-in. Per the CLI source it is gated behind
-    # ``isAgentSwarmsEnabled()`` (``USER_TYPE=ant`` / ``--agent-teams`` /
-    # the experimental env flag) and is therefore NOT in the default
-    # allowlist for ordinary external builds -- so this is usually a
-    # no-op. We keep it because if the flag ever IS on, ``SendMessage``
-    # routes to a private Teams registry that is EMPTY in the sagent
-    # context, silently dropping the message (observed losing a "PR is
-    # open" notification when an ant-flavored CLI was in use). The only
-    # working peer channel is an external MCP tool such as
-    # ``mcp__sagent_chat__sagent_send``.
-    base.extend(["--disallowedTools", "SendMessage"])
-    return base
-
-
-def _user_line(
-    entry: AgentSendMessage | UserMessage,
-    max_image_dim: int,
-    max_image_bytes: int,
-) -> dict[str, MutablePlainTree]:
-    """Build a ``{"type":"user", ...}`` stdin line, attaching images inline."""
-    image_attachments = [
-        att for att in entry.attachments if att.descriptor.startswith("image/")
-    ]
-    if not image_attachments:
-        text_line: dict[str, MutablePlainTree] = {
-            "type": "user",
-            "message": {"role": "user", "content": entry.text},
-        }
-        return text_line
-    content: list[MutablePlainTree] = []
-    for att in image_attachments:
-        raw, mime = image.resize(
-            att.data,
-            max_dim=max_image_dim,
-            max_bytes=max_image_bytes,
+        ]
+        process = await self.provider.resources.process_pool("claude").acquire(
+            argv,
+            env=env,
         )
-        content.append(
-            {
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": mime,
-                    "data": base64.b64encode(raw).decode(),
-                },
-            },
+        self._claude = _Claude(process, started_with=started_with)
+        await self._claude.say(
+            _content(request.records, replay=True, limits=self.capability.limits),
         )
-    if entry.text:
-        content.append({"type": "text", "text": entry.text})
-    image_line: dict[str, MutablePlainTree] = {
-        "type": "user",
-        "message": {"role": "user", "content": content},
-    }
-    return image_line
+        return self._claude
+
+    async def _stop(self) -> None:
+        claude, self._claude = self._claude, None
+        if self._mount is not None:
+            self._mount.cancel()
+        if claude is not None:
+            await self.provider.resources.process_pool("claude").release(claude.process)
+
+    # Named by content, the next ``claude`` started with the same text has the same
+    # command line, and so takes the spare started ahead for it.
+    def _written(self, kind: str, text: str) -> Path:
+        """Return a file only we can read holding ``text``, named by its content."""
+        if self._files is None:
+            self._files = Path(tempfile.mkdtemp(prefix="sagent-claude-"))
+        path = self._files / f"{kind}-{hashlib.sha256(text.encode()).hexdigest()[:16]}"
+        if not path.exists():
+            path.write_text(text)
+        return path
 
 
-# Text deltas publish ``ModelResponsePartial``; thinking deltas publish
-# ``ModelResponseThinking`` and accumulate into the current thinking block, which a
-# thinking ``content_block_start`` opens and ``signature_delta`` signs. Also accumulates ``tool_use`` content blocks across their
-# start / streamed ``input_json_delta`` chunks / stop events, and emits one
-# ``ToolLabel`` per tool call at block-stop with ``name`` plus a short rendering of the
-# JSON args (e.g. ``Bash ls -la`` or ``Read foo.py``) so the trace panel surfaces what
-# tools the model is invoking. Covers both bridge-mounted tools (Bash, Read, ...) and
-# external-MCP tools (``mcp__sagent_chat__sagent_send``, ...) uniformly -- in stateless
-# mode the bridge ALSO publishes labels for its own tools, so bridge-mounted tools get
-# logged twice; the trace renderer treats each ToolLabel as a separate event.
-def _dispatch_stream_event(
-    event: dict[str, MutablePlainTree],
-    text_parts: list[str],
-    thinking_blocks: list[dict[str, str]],
-    *,
-    tool_use_blocks: dict[int, dict[str, object]],
-    publish: Callable[[RuntimeEvent], None] | None,
-) -> None:
-    """Route one stream_event payload to the runtime ``publish`` sink."""
-    event_type = event.get("type")
-    if event_type == "content_block_start":
-        idx = cast(int, event.get("index") or 0)
-        block = cast(dict[str, MutablePlainTree], event.get("content_block") or {})
-        if block.get("type") == "thinking":
-            thinking_blocks.append(_new_thinking_block())
-        elif block.get("type") == "tool_use":
-            tool_use_blocks[idx] = {
-                "name": cast(str, block.get("name") or "?"),
-                "id": cast(str, block.get("id") or ""),
-                "json_parts": [],
-            }
-        return
-    if event_type == "content_block_delta":
-        delta = cast(dict[str, MutablePlainTree], event.get("delta") or {})
-        delta_type = delta.get("type")
-        if delta_type == "input_json_delta":
-            idx = cast(int, event.get("index") or 0)
-            state = tool_use_blocks.get(idx)
-            if state is not None:
-                partial = cast(str, delta.get("partial_json") or "")
-                cast(list[str], state["json_parts"]).append(partial)
-            return
-        if delta_type == "text_delta":
-            text = cast(str, delta.get("text") or "")
-            if text:
-                text_parts.append(text)
-                if publish is not None:
-                    publish(ModelResponsePartial(text))
-            return
-        if delta_type == "thinking_delta":
-            text = cast(str, delta.get("thinking") or "")
-            if text:
-                _current_thinking_block(thinking_blocks)["thinking"] += text
-                if publish is not None:
-                    publish(ModelResponseThinking(text))
-            return
-        if delta_type == "signature_delta":
-            # The opaque signature of the CURRENT thinking block. Anthropic
-            # rejects an unsigned block (HTTP 400 ``thinking.signature: Field
-            # required``) and a block signed for different content, so each
-            # block keeps its own.
-            sig = cast(str, delta.get("signature") or "")
-            if sig:
-                _current_thinking_block(thinking_blocks)["signature"] += sig
-            return
-        return
-    if event_type == "content_block_stop":
-        idx = cast(int, event.get("index") or 0)
-        state = tool_use_blocks.pop(idx, None)
-        if state is None:
-            return
-        tool_name = str(state["name"])
-        tool_id = str(state["id"])
-        json_parts = cast(list[str], state["json_parts"])
-        args_summary = _render_tool_args("".join(json_parts))
-        label_text = f"{tool_name} {args_summary}".rstrip()
-        if publish is not None:
-            try:
-                publish(ToolLabel(call_id=tool_id, text=label_text))
-            except Exception:
-                logger.debug(
-                    "failed to publish ToolLabel for %r",
-                    tool_name,
-                    exc_info=True,
-                )
-        return
+class _Claude:
+    """One running ``claude``, and the conversation it has seen."""
 
+    def __init__(self, process: Process, *, started_with: tuple[str, ...]) -> None:
+        self.process = process
+        self.started_with = started_with
+        self.seen: tuple[SessionRecord, ...] = ()
+        self.held: tuple[ToolCall, ...] = ()
+        self.waiting: tuple[SessionRecord, ...] = ()
+        """Notes that came with tool results, for the next user line to carry."""
 
-def _new_thinking_block() -> dict[str, str]:
-    """Return an empty signed-thinking accumulator."""
-    return {"type": "thinking", "thinking": "", "signature": ""}
+    def unseen(
+        self,
+        records: Sequence[SessionRecord],
+        *,
+        started_with: tuple[str, ...],
+    ) -> Sequence[SessionRecord] | None:
+        """Return what ``records`` adds for this process; ``None`` if it cannot take it.
 
+        It takes the results of the calls it holds, or, holding none, new
+        user messages. Anything else needs a process that hears it all anew.
 
-def _current_thinking_block(thinking_blocks: list[dict[str, str]]) -> dict[str, str]:
-    """Return the open thinking block, opening one for a start-less delta."""
-    if not thinking_blocks:
-        thinking_blocks.append(_new_thinking_block())
-    return thinking_blocks[-1]
+        Args:
+          records: The whole conversation the next turn answers.
+          started_with: What a process for that turn would be started with.
 
+        Returns:
+          unseen: The records this process has not seen, or ``None``.
 
-# Best-effort: if the JSON is incomplete (streaming aborted mid-flight) or unparseable,
-# falls back to the raw form. Common args (``command``, ``file_path``, ``pattern``,
-# ``query``, ``to``, ``content``) get a friendly rendering; unknown tools fall back to
-# the raw arg dict.
-#
-# Known-arg branches return the value whole -- the renderer
-# (``console_pane.write_tool_label``) owns wrapping and the line cap. The unknown-tool
-# fallback keeps its per-value clamp: an arbitrary arg dict can carry a multi-megabyte
-# blob (the CLI's own stdout line limit is 16 MiB for exactly this reason), and unlike
-# the named args it is not a value the operator asked to see.
-def _render_tool_args(raw_json: str) -> str:
-    """Render tool input JSON as a short label suffix."""
-    if not raw_json:
-        return ""
-    try:
-        args = json_loads(raw_json)
-    except (json.JSONDecodeError, ValueError):
-        return f"({raw_json.replace(chr(10), ' ')})"
-    if not isinstance(args, dict):
-        return str(args)
-    arg_map = args
-    for key in ("command", "file_path", "path", "pattern", "query", "to"):
-        val = arg_map.get(key)
-        if isinstance(val, str):
-            return val
-    content = arg_map.get("content")
-    if isinstance(content, str):
-        return content
-    return ", ".join(f"{k}={str(v)[:40]!r}" for k, v in list(arg_map.items())[:3])
-
-
-# ``round_usage`` is the raw Anthropic API ``usage`` object off a ``message_start``
-# stream event (snake_case keys -- unlike the camelCase rows in the CLI's terminal
-# ``result.modelUsage``). The sum of non-cached input plus both cache pools is the full
-# prompt size the server counted for that request -- the same number the direct-API
-# provider's per-request usage reports. Returns 0 when no round was observed (defensive;
-# a successful drain always sees at least one ``message_start``), which downstream
-# consumers treat as "unknown -- estimate instead".
-def _round_context_tokens(round_usage: dict[str, MutablePlainTree] | None) -> int:
-    """Cache-inclusive input footprint of one internal round's request."""
-    if round_usage is None:
-        return 0
-    return (
-        from_plain(round_usage.get("input_tokens"), int, default=0)
-        + from_plain(round_usage.get("cache_creation_input_tokens"), int, default=0)
-        + from_plain(round_usage.get("cache_read_input_tokens"), int, default=0)
-    )
-
-
-# One ``claude --print`` turn is N internal API rounds, so the terminal ``result``
-# event's usage is CUMULATIVE across rounds while the ``Model`` contract (and every
-# direct-API provider) reports per-request numbers. Mixing the two poisons context-size
-# consumers: the Agent's proactive compaction gate anchors on ``tokens.request +
-# cache_*`` as "how full is the window" and a 69-round turn summing to 5.6M against a
-# 200k window trips it spuriously (live 2026-06-09). Normalization at this boundary:
-#
-# - **input side** (``input_tokens``, ``cache_creation_tokens``, ``cache_read_tokens``):
-# the LAST round's request usage -- the true context footprint, matching direct-API
-# semantics. Zeros when no round was observed (consumers fall back to estimates). -
-# **output side** (``output_tokens``): cumulative across rounds -- output genuinely
-# accumulates (every internal round's generation was produced and billed). -
-# **billing**: unaffected -- ``total_cost`` sums ``modelUsage.costUSD``, which the CLI
-# computes from the full cumulative usage, so under-reporting cumulative input *tokens*
-# here loses no cost fidelity.
-def _build_model_response(
-    *,
-    usage_event: dict[str, MutablePlainTree],
-    last_round_usage: dict[str, MutablePlainTree] | None,
-    text: str,
-    thinking_blocks: list[dict[str, str]],
-    stop_reason: str | None,
-    fallback_message_id: str,
-) -> ModelResponse:
-    """Assemble a ``ModelResponse`` with normalized token semantics."""
-    model_usage = cast(dict[str, MutablePlainTree], usage_event.get("modelUsage") or {})
-    output_tokens = 0
-    total_cost = 0.0
-    for row in model_usage.values():
-        if not isinstance(row, dict):
-            continue
-        row_map = row
-        output_tokens += from_plain(row_map.get("outputTokens"), int, default=0)
-        cost = row_map.get("costUSD")
-        if isinstance(cost, (int, float)):
-            total_cost += float(cost)
-    if total_cost == 0.0:
-        # Fall back to top-level total_cost_usd when modelUsage is absent.
-        raw = usage_event.get("total_cost_usd")
-        if isinstance(raw, (int, float)):
-            total_cost = float(raw)
-        elif not model_usage:
-            # Neither cost source present: a genuinely-free turn and a dropped
-            # usage summary both read as 0.0 here. Log so the latter is not
-            # silently indistinguishable from the former.
-            logger.debug(
-                "no cost signal in result event (modelUsage and total_cost_usd"
-                " both absent); reporting total_cost=0.0",
+        """
+        if (
+            started_with != self.started_with
+            or tuple(records[: len(self.seen)]) != self.seen
+        ):
+            return None
+        # Usage and settings records are ours alone; the model never sees them.
+        unseen = [
+            record
+            for record in records[len(self.seen) :]
+            if isinstance(
+                record,
+                (
+                    UserMessage,
+                    AgentToAgentMessage,
+                    SystemMessage,
+                    TurnContext,
+                    AssistantMessage,
+                    Thinking,
+                    ToolCall,
+                    ToolResult,
+                    ContextClear,
+                ),
             )
-    input_tokens = 0
-    cache_creation = 0
-    cache_read = 0
-    if last_round_usage is not None:
-        input_tokens = from_plain(last_round_usage.get("input_tokens"), int, default=0)
-        cache_creation = from_plain(
-            last_round_usage.get("cache_creation_input_tokens"),
-            int,
-            default=0,
+        ]
+        if self.held:
+            answered = {
+                record.call_id for record in unseen if isinstance(record, ToolResult)
+            }
+            # A note that arrives with the results waits for the next user line.
+            results = [
+                r for r in unseen if not isinstance(r, (SystemMessage, TurnContext))
+            ]
+            exact = len(answered) == len(results) and answered == {
+                c.call_id for c in self.held
+            }
+            return unseen if exact else None
+        if unseen and all(
+            isinstance(
+                record,
+                (UserMessage, AgentToAgentMessage, SystemMessage, TurnContext),
+            )
+            for record in unseen
+        ):
+            return unseen
+        return None
+
+    async def answer(
+        self,
+        results: Sequence[SessionRecord],
+        *,
+        mount: ToolMount,
+        limits: ModelLimits,
+    ) -> bool:
+        """Hand each result to the call it answers.
+
+        Args:
+          results: The results of the calls this process holds.
+          mount: Where those calls wait.
+          limits: The model's image limits, which each image is shrunk to.
+
+        Returns:
+          answered: ``False`` when a call never came, as for a tool it lacks.
+
+        """
+        calls = {call.call_id: call for call in self.held}
+        try:
+            for result in results:
+                if isinstance(result, ToolResult):
+                    await mount.answer(
+                        calls[result.call_id],
+                        _shrunk(result, limits=limits),
+                    )
+        except TimeoutError:
+            return False  # A call the CLI never made, as for a tool it lacks.
+        self.held = ()
+        self.waiting += tuple(
+            r for r in results if isinstance(r, (SystemMessage, TurnContext))
         )
-        cache_read = from_plain(
-            last_round_usage.get("cache_read_input_tokens"),
-            int,
-            default=0,
+        return True
+
+    async def say(self, content: list[dict[str, object]]) -> None:
+        stdin = self.process.stdin
+        if stdin is None:
+            raise ValueError("claude was started without stdin")
+        line = {"type": "user", "message": {"role": "user", "content": content}}
+        stdin.write(json_dumps(line).encode() + b"\n")
+        await stdin.drain()
+
+    async def read(self, reader: wire.StreamReader) -> AsyncIterator[TextChunk]:
+        """Feed ``reader`` until the turn ends or the model calls our tools.
+
+        Args:
+          reader: Collects the reply.
+
+        Yields:
+          chunk: Each piece of text or reasoning, as the model writes it.
+
+        Raises:
+          DisconnectedError: ``claude`` exited, or went quiet for ten minutes.
+
+        """
+        stdout = self.process.stdout
+        if stdout is None:
+            raise ValueError("claude was started without stdout")
+        # Which window stopped the turn, and when it resets, as the API's headers say.
+        spent: dict[str, str] = {}
+        while True:
+            # A model that goes quiet this long has dropped the turn.
+            raw = await asyncio.wait_for(stdout.readline(), timeout=600.0)
+            if not raw:
+                raise DisconnectedError("claude exited before its answer")
+            event = json_loads(raw, dict[str, object])
+            if event.get("type") == "rate_limit_event":
+                spent = _spent(event)
+                continue
+            if event.get("type") == "result":
+                if event.get("is_error") is True:
+                    raise _failure(event, headers=spent)
+                return
+            if event.get("type") != "stream_event":
+                continue
+            inner = from_plain(event.get("event"), dict[str, object], default={})
+            chunk = reader.feed(inner)
+            if chunk is not None:
+                yield chunk
+            # It now waits on the held calls, which the caller runs.
+            if (
+                inner.get("type") == "message_delta"
+                and reader.stop_reason == "tool_use"
+            ):
+                return
+
+    def saw(self, records: Sequence[SessionRecord], *, response: Response) -> None:
+        """Record that this process has seen ``records`` and given ``response``."""
+        self.seen = (*records, *response.records)
+        self.held = tuple(
+            record for record in response.records if isinstance(record, ToolCall)
         )
-    message_id = cast(str, usage_event.get("session_id") or fallback_message_id)
-    return ModelResponse(
-        message=AssistantMessage(
-            text=text,
-            thinking_blocks=tuple(b for b in thinking_blocks if b["thinking"]),
-            tool_calls=(),
+
+
+def _content(
+    records: Sequence[SessionRecord],
+    *,
+    replay: bool,
+    limits: ModelLimits,
+) -> list[dict[str, object]]:
+    """Return one user line: the new user messages, or the whole conversation as text."""
+    attachments = [
+        attachment
+        for record in records
+        if isinstance(record, UserMessage)
+        for attachment in record.attachments
+    ]
+    if replay:
+        text = "\n\n".join(_transcript(records))
+    else:
+        text = "\n\n".join(line for record in records if (line := _said(record)))
+    return wire.content(text, attachments, limits=limits)
+
+
+def _shrunk[R: ToolResult](result: R, *, limits: ModelLimits) -> R:
+    """Return ``result`` with each image shrunk to ``limits``, as the API path does."""
+    return replace(
+        result,
+        attachments=tuple(
+            _shrunk_attachment(a, limits=limits) for a in result.attachments
         ),
-        tokens=TokenCount(
-            request=input_tokens,
-            response=output_tokens,
-            cache_write=cache_creation,
-            cache_read=cache_read,
-        ),
-        stop_reason=normalize_stop_reason(
-            stop_reason,
-            kind="anthropic",
-            has_tool_use=False,
-        ),
-        message_id=message_id,
-        request_id=message_id,
-        # The CLI reports one server-computed total per turn with no bucket
-        # breakdown. Booking it to ``request`` keeps ``spend.total`` exact;
-        # the per-bucket split is simply not observable on this transport.
-        spend=TokenCost(request=total_cost),
     )
+
+
+def _shrunk_attachment(attachment: Attachment, *, limits: ModelLimits) -> Attachment:
+    if not attachment.mime_descriptor.startswith("image/"):
+        return attachment
+    data, mime = image.shrink(
+        attachment.data,
+        max_edge_px=limits.max_image_edge_px,
+        max_bytes=limits.max_image_bytes,
+    )
+    return Attachment(mime_descriptor=mime, data=data)
+
+
+def _transcript(records: Sequence[SessionRecord]) -> list[str]:
+    lines: list[str] = []
+    for record in records:
+        match record:
+            case ContextClear(summary=str() as summary, history=history):
+                lines.append(f"Summary of the conversation so far:\n{summary}")
+                lines.extend(_transcript(history))
+            case ContextClear(history=history):
+                lines.extend(_transcript(history))
+            case UserMessage(content=str() as text) if text:
+                lines.append(f"User: {text}")
+            case AgentToAgentMessage(content=str() as text, sender=str() as sender) if (
+                text
+            ):
+                lines.append(f"Agent {sender}: {text}")
+            case AgentToAgentMessage(content=str() as text) if text:
+                lines.append(f"Agent: {text}")
+            case SystemMessage() | TurnContext():
+                if note := _said(record):
+                    lines.append(note)
+            case AssistantMessage(content=str() as text) if text:
+                lines.append(f"Assistant: {text}")
+            case ToolCall(call_id=call_id, name=name, arguments=arguments):
+                lines.append(
+                    f"Assistant called {name} as {call_id}: {json_dumps(mutable(arguments))}",
+                )
+            case ToolResult():
+                lines.append(f"{record.call_id} returned: {record.text()}")
+            case _:
+                pass
+    return lines
+
+
+def _digest(tools: Sequence[Tool]) -> str:
+    offered = [
+        {
+            "name": tool.name,
+            "description": tool.description,
+            "schema": mutable(tool.schema),
+        }
+        for tool in tools
+    ]
+    return hashlib.sha256(json_dumps(offered).encode()).hexdigest()
+
+
+def _spent(event: dict[str, object]) -> dict[str, str]:
+    """Return a ``rate_limit_event`` that stopped the turn as the API's headers say it."""
+    info = from_plain(event.get("rate_limit_info"), dict[str, object], default={})
+    resets_at = info.get("resetsAt")
+    if info.get("status") != "rejected" or not isinstance(resets_at, (int, float)):
+        return {}
+    return {
+        "anthropic-ratelimit-unified-reset": str(resets_at),
+        "anthropic-ratelimit-unified-representative-claim": str(
+            info.get("rateLimitType") or "",
+        ),
+    }
+
+
+def _failure(event: dict[str, object], *, headers: dict[str, str]) -> Exception:
+    """Return the exception a failed ``result`` event means."""
+    text = str(event.get("result") or event.get("errors") or event)
+    reason = event.get("terminal_reason")
+    if reason == "blocking_limit":
+        return ContextOverflowError(text)
+    if reason == "aborted_streaming":
+        return DisconnectedError(text)
+    status = event.get("api_error_status")
+    return (
+        wire.to_exception(status, body=text, headers=headers)
+        if isinstance(status, int)
+        else RuntimeError(text)
+    )
+
+
+def _said(record: SessionRecord) -> str:
+    """Return what a new user line carries for ``record``: words, or a reminder."""
+    if isinstance(record, UserMessage):
+        return record.content or ""
+    if isinstance(record, AgentToAgentMessage):
+        body = record.content or ""
+        return f"[from {record.sender}]: {body}" if record.sender is not None else body
+    if isinstance(record, SystemMessage) and record.content is not None:
+        return f"<system-reminder>\n{record.content}\n</system-reminder>"
+    if isinstance(record, TurnContext) and record.text():
+        return f"<system-reminder>\n{record.text()}\n</system-reminder>"
+    return ""

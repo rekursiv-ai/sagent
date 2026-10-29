@@ -24,6 +24,9 @@ jobs:
           python-version: "3.12"
 
       - uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0
+        with:
+          # Outranks the checkout's .python-version, which pins a newer one.
+          python-version: "3.12"
 
       - name: Build package
         run: uv build --out-dir dist
@@ -31,7 +34,7 @@ jobs:
       - name: Validate built package
         run: |
           uv run python -c "import sagent; print(sagent.__file__)"
-          uv run python sagent/bin/check_wheel.py
+          uv run python sagent/scripts/check_wheel.py
 
       # sagent tracks wesearch's main branch via [tool.uv.sources], so nothing
       # before this point proves the published dependency floor is sufficient.

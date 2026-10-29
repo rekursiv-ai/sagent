@@ -1,437 +1,789 @@
-"""Tests for ``providers.selfhosted``: tool-call parsing + chat-message builder.
+"""Tests for the self-hosted provider, with a stand-in model and tokenizer.
 
-Avoids loading torch/transformers by exercising only the pure helpers.
+No weights load: ``_load`` is replaced by one that returns a tokenizer that
+renders a fixed prompt and a model that "generates" scripted tokens, so each
+test runs in milliseconds and touches neither transformers nor a GPU.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from types import MappingProxyType
-from typing import TYPE_CHECKING, cast
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
-import json
+import asyncio
+import threading
+import time
 
-from treekle import MutablePlainTree, PlainTree, from_plain
+from torch import Tensor, nn
 
-from sagent.providers.selfhosted.server import (
-    SelfHosted,
-    SelfHostedModel,
-    _attention_mask,
-    _build_chat_messages,
-    _context_window,
-    _disable_generate_cache,
-    _extract_tool_calls,
-    _inline_tool_preamble,
-    _input_ids,
-    _parse_deepseek_tool_call,
-    _parse_qwen_tool_call,
-    _tool_allowed,
-    _tool_preamble,
-    _tool_schema,
-)
-from sagent.types.cost import PriceKey
-from sagent.types.model import ModelRequest
-from sagent.types.runtime import (
+import pytest
+import torch
+
+from sagent.model.exceptions import UnknownModelError
+from sagent.model.types import Request, Response, TextChunk
+from sagent.providers.resources import SharedResources
+from sagent.providers.selfhosted import server
+from sagent.providers.selfhosted.server import SelfHosted, SelfHostedModel
+from sagent.session.types import (
     AssistantMessage,
+    Attachment,
+    Thinking,
+    TokenUsage,
     ToolCall,
-    ToolResult,
+    UncategorizedToolResult,
     UserMessage,
 )
+from sagent.tools.read import Read
 
 
-if TYPE_CHECKING:
-    from collections.abc import Mapping
-
-    from sagent.types.tools import Tool
+_REQUEST = Request(system=("Be terse.",), records=(UserMessage(content="hi"),))
 
 
-def test_context_window_top_level_max_position() -> None:
-    config: dict[str, MutablePlainTree] = {"max_position_embeddings": 8192}
-    assert _context_window(config, default=1024) == 8192
+@dataclass(slots=True, kw_only=True)
+class _Tokenizer:
+    """Renders every conversation to the same prompt, and decodes to ``text``."""
 
+    text: str = "Hello."
+    prompt: tuple[int, ...] = (5, 6, 7)
+    rejects: frozenset[str] = frozenset()
+    """Template options that raise, as a template that lacks them does."""
 
-def test_context_window_nested_text_config() -> None:
-    config: dict[str, MutablePlainTree] = {
-        "text_config": {"max_position_embeddings": 4096},
-    }
-    assert _context_window(config, default=1024) == 4096
-
-
-def test_context_window_falls_back_to_default() -> None:
-    empty: dict[str, MutablePlainTree] = {}
-    assert _context_window(empty, default=2048) == 2048
-
-
-def test_context_window_non_integer_top_level_falls_back() -> None:
-    config: dict[str, MutablePlainTree] = {"max_position_embeddings": "weird"}
-    assert _context_window(config, default=512) == 512
-
-
-def test_extract_qwen_tool_call_basic() -> None:
-    text = (
-        'pre-text <tool_call>{"name": "Bash", "arguments": {"cmd": "ls"}}</tool_call>'
-        " post"
-    )
-    calls, cleaned = _extract_tool_calls(text)
-    assert len(calls) == 1
-    assert calls[0].name == "Bash"
-    assert dict(calls[0].args) == {"cmd": "ls"}
-    # Tool call section is stripped from the cleaned text.
-    assert "<tool_call>" not in cleaned
-
-
-def test_extract_qwen_tool_call_no_args_key_defaults_to_empty() -> None:
-    text = '<tool_call>{"name": "Echo"}</tool_call>'
-    calls, _cleaned = _extract_tool_calls(text)
-    assert len(calls) == 1
-    assert dict(calls[0].args) == {}
-
-
-def test_extract_qwen_malformed_preserved() -> None:
-    text = "<tool_call>not json</tool_call>"
-    calls, cleaned = _extract_tool_calls(text)
-    assert calls == []
-    # Malformed call is preserved verbatim in the output.
-    assert "<tool_call>" in cleaned
-
-
-def test_extract_qwen_unadvertised_tool_preserved() -> None:
-    text = '<tool_call>{"name": "Forbidden", "arguments": {}}</tool_call>'
-    calls, cleaned = _extract_tool_calls(text, allowed_tools={"Bash"})
-    assert calls == []
-    assert "<tool_call>" in cleaned
-
-
-def test_extract_qwen_allowed_tools_case_insensitive() -> None:
-    text = '<tool_call>{"name": "bash", "arguments": {}}</tool_call>'
-    calls, _cleaned = _extract_tool_calls(text, allowed_tools={"Bash"})
-    assert len(calls) == 1
-
-
-def test_extract_no_tool_calls_returns_stripped_text() -> None:
-    calls, cleaned = _extract_tool_calls("just text  ")
-    assert calls == []
-    assert cleaned == "just text"
-
-
-def test_extract_deepseek_tool_call_block() -> None:
-    text = (
-        "intro\n"
-        "<│tool▁calls▁begin│>"
-        "<│tool▁call▁begin│>function\n"
-        "Bash\n```json\n"
-        '{"cmd": "ls"}'
-        "\n```\n"
-        "<│tool▁call▁end│>"
-        "<│tool▁calls▁end│>"
-    )
-    calls, cleaned = _extract_tool_calls(text)
-    assert len(calls) == 1
-    assert calls[0].name == "Bash"
-    assert dict(calls[0].args) == {"cmd": "ls"}
-    assert "tool" not in cleaned or "calls" not in cleaned
-
-
-def test_extract_deepseek_invalid_json_preserved() -> None:
-    text = (
-        "<│tool▁calls▁begin│>"
-        "<│tool▁call▁begin│>function\n"
-        "Bash\n```json\n"
-        "not json"
-        "\n```\n"
-        "<│tool▁call▁end│>"
-        "<│tool▁calls▁end│>"
-    )
-    calls, cleaned = _extract_tool_calls(text)
-    assert calls == []
-    # Malformed block stays in the output.
-    assert "tool" in cleaned
-
-
-def test_tool_allowed_none_means_all_allowed() -> None:
-    tc = ToolCall(id="x", name="Bash", args={})
-    assert _tool_allowed(tc, None) is True
-
-
-def test_tool_allowed_case_insensitive_match() -> None:
-    tc = ToolCall(id="x", name="bASh", args={})
-    assert _tool_allowed(tc, {"Bash"}) is True
-
-
-def test_tool_allowed_not_in_set() -> None:
-    tc = ToolCall(id="x", name="Forbidden", args={})
-    assert _tool_allowed(tc, {"Bash"}) is False
-
-
-def test_build_chat_messages_user_only() -> None:
-    req = ModelRequest(messages=[UserMessage(text="hi")])
-    msgs = _build_chat_messages(req)
-    assert msgs == [{"role": "user", "content": "hi"}]
-
-
-def test_build_chat_messages_with_system() -> None:
-    req = ModelRequest(messages=[UserMessage(text="hi")], system=("be brief",))
-    msgs = _build_chat_messages(req)
-    assert msgs[0] == {"role": "system", "content": "be brief"}
-    assert msgs[1] == {"role": "user", "content": "hi"}
-
-
-def test_build_chat_messages_assistant_with_tool_call_remaps_id() -> None:
-    asst = AssistantMessage(
-        text="thinking",
-        tool_calls=(ToolCall(id="orig-1", name="Bash", args={"cmd": "ls"}),),
-    )
-    msgs = _build_chat_messages(ModelRequest(messages=[asst]))
-    asst_msg = msgs[0]
-    assert asst_msg["role"] == "assistant"
-    tcs = from_plain(asst_msg["tool_calls"], list[dict[str, MutablePlainTree]])
-    assert tcs[0]["id"] == "call_0"
-    assert cast(dict[str, MutablePlainTree], tcs[0]["function"])["name"] == "Bash"
-    assert cast(dict[str, MutablePlainTree], tcs[0]["function"])[
-        "arguments"
-    ] == json.dumps(
-        {"cmd": "ls"},
+    eos_token_id: int = 2
+    rendered: list[tuple[list[dict[str, object]], dict[str, object]]] = field(
+        default_factory=list[tuple[list[dict[str, object]], dict[str, object]]],
     )
 
+    def apply_chat_template(
+        self,
+        conversation: list[dict[str, object]],
+        **kwargs: object,
+    ) -> object:
+        self.rendered.append((conversation, kwargs))
+        if self.rejects & kwargs.keys():
+            raise TypeError(
+                f"unexpected keyword {sorted(self.rejects & kwargs.keys())}",
+            )
+        return {"input_ids": torch.tensor(self.prompt), "attention_mask": None}
 
-def test_build_chat_messages_tool_result_emits_tool_role() -> None:
-    asst = AssistantMessage(tool_calls=(ToolCall(id="orig-1", name="N", args={}),))
-    res = ToolResult(call_id="orig-1", content="done")
-    msgs = _build_chat_messages(ModelRequest(messages=[asst, res]))
-    tool_msg = msgs[-1]
-    assert tool_msg["role"] == "tool"
-    assert tool_msg["tool_call_id"] == "call_0"
-    assert tool_msg["content"] == "done"
-
-
-def test_build_chat_messages_tool_result_error_prefixed() -> None:
-    res = ToolResult(call_id="x", content="oops", is_error=True)
-    msgs = _build_chat_messages(ModelRequest(messages=[res]))
-    assert msgs[-1]["content"] == "[Error] oops"
-
-
-def test_inline_tool_preamble_no_tools_noop() -> None:
-    msgs: list[dict[str, MutablePlainTree]] = [{"role": "user", "content": "hi"}]
-    _inline_tool_preamble(msgs, [])
-    assert msgs == [{"role": "user", "content": "hi"}]
+    def decode(self, token_ids: Tensor, *, skip_special_tokens: bool) -> str:
+        assert skip_special_tokens
+        assert token_ids.ndim == 1
+        return self.text
 
 
-class _StubBash:
-    """Full ``Tool`` implementation; the preamble helpers take real tools."""
+@dataclass(slots=True, kw_only=True)
+class _Generator:
+    """Appends ``new`` tokens to the prompt, after ``delay_sec`` or until stopped."""
 
-    name: str = "Bash"
-    tool_id: str = "application/x-tool-bash"
-    description: str = "Run shell"
-    directive_schema: Mapping[str, PlainTree] = MappingProxyType({"type": "object"})
-    clearable_results: bool = True
+    new: int = 2
+    delay_sec: float = 0.0
+    calls: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
+    active: int = 0
+    most_active: int = 0
+    started: threading.Event = field(default_factory=threading.Event)
+    guard: threading.Lock = field(default_factory=threading.Lock)
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        return f"Bash {args}"
+    def generate(self, inputs: Tensor, **kwargs: object) -> Tensor:
+        with self.guard:
+            self.active += 1
+            self.most_active = max(self.most_active, self.active)
+        try:
+            self.calls.append(kwargs)
+            self.started.set()
+            stops = cast(
+                "list[Callable[..., Tensor]]",
+                kwargs.get("stopping_criteria", []),
+            )
+            deadline = time.monotonic() + self.delay_sec
+            while time.monotonic() < deadline:
+                if any(bool(stop(inputs, None).all()) for stop in stops):
+                    break
+                time.sleep(0.001)
+            added = torch.arange(self.new).unsqueeze(0) + 100
+            return torch.cat([inputs, added], dim=-1)
+        finally:
+            with self.guard:
+                self.active -= 1
 
-    def prompt(self) -> str | None:
-        return None
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        del args
-        return None
-
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        del args
-        return ToolResult(call_id="", content="")
+    def parameters(self) -> Iterator[nn.Parameter]:
+        yield nn.Parameter(torch.zeros(1))
 
 
-def test_inline_tool_preamble_no_system_prepends_one() -> None:
-    msgs: list[dict[str, MutablePlainTree]] = [{"role": "user", "content": "hi"}]
-    tools: list[Tool] = [_StubBash()]
-    _inline_tool_preamble(msgs, tools)
-    assert msgs[0]["role"] == "system"
-    assert "tool_call" in str(msgs[0]["content"])
+@pytest.fixture
+def configs(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Replace reading a config with one stating a 40-token window; record each read."""
+    read: list[str] = []
+
+    def window(path: str, *, trust_remote_code: bool) -> int:
+        del trust_remote_code
+        read.append(path)
+        return 40
+
+    monkeypatch.setattr(server, "_window", window)
+    return read
 
 
-def test_inline_tool_preamble_extends_existing_system_message() -> None:
-    msgs: list[dict[str, MutablePlainTree]] = [
-        {"role": "system", "content": "existing system"},
-        {"role": "user", "content": "hi"},
+@pytest.fixture
+def loads(
+    monkeypatch: pytest.MonkeyPatch,
+    configs: list[str],
+) -> list[server._Spec]:
+    """Replace loading with a stand-in, and record each spec loaded."""
+    del configs
+    loaded: list[server._Spec] = []
+
+    def load(spec: server._Spec, *, trust_remote_code: bool) -> server._Loaded:
+        del trust_remote_code
+        loaded.append(spec)
+        return server._Loaded(model=_Generator(), tokenizer=_Tokenizer())
+
+    monkeypatch.setattr(server, "_load", load)
+    return loaded
+
+
+def _served(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tokenizer: _Tokenizer | None = None,
+    model: _Generator | None = None,
+    window: int = 40,
+    name: str = "default",
+) -> SelfHostedModel:
+    """Return a model whose weights are ``model`` and ``tokenizer``."""
+    loaded = server._Loaded(
+        model=model or _Generator(),
+        tokenizer=tokenizer or _Tokenizer(),
+    )
+
+    def load(spec: server._Spec, *, trust_remote_code: bool) -> server._Loaded:
+        del spec, trust_remote_code
+        return loaded
+
+    def stated(path: str, *, trust_remote_code: bool) -> int:
+        del path, trust_remote_code
+        return window
+
+    monkeypatch.setattr(server, "_load", load)
+    monkeypatch.setattr(server, "_window", stated)
+    return SelfHosted()[name]
+
+
+async def _reply(
+    model: SelfHostedModel,
+    request: Request = _REQUEST,
+) -> list[TextChunk | Response]:
+    return [event async for event in model.stream(request)]
+
+
+# ---- naming and loading ------------------------------------------------------
+
+
+def test_a_role_names_the_providers_model_and_lookup_loads_nothing(
+    configs: list[str],
+    loads: list[server._Spec],
+) -> None:
+    local = SelfHosted(model="Org/Model+cpu")
+    assert local.name == "selfhosted"
+    assert SelfHosted(name="gpu").name == "gpu"
+    assert list(local) == ["Org/Model+cpu"]
+    assert local.usage == ()
+    looked_up = [local[role] for role in ("default", "best", "everyday", "utility")]
+    assert configs == []
+    assert {model.capability.model_id for model in looked_up} == {"Org/Model"}
+    assert local["Other/Model"].capability.model_id == "Other/Model"
+    # One config read per repo, when its settings are first asked for.
+    assert configs == ["Org/Model", "Other/Model"]
+    assert loads == []
+
+
+@pytest.mark.parametrize(
+    ("name", "context"),
+    [
+        ("default", 40),
+        ("Org/M+smallcontext", 40),
+        ("Org/M+cpu+30", 30),
+        ("Org/M+2k", 40),
+    ],
+)
+def test_the_window_is_the_configs_and_a_name_may_size_it(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    context: int,
+) -> None:
+    model = _served(monkeypatch, name=name)
+    assert model.capability.limits.max_request_tokens == 40
+    assert model.settings.context_size.tokens == context
+
+
+@pytest.mark.parametrize("name", ["opus", "typo+cuda", ""])
+def test_a_name_that_is_no_repo_id_or_path_is_unknown(name: str) -> None:
+    """Else a catalog looking for who serves ``opus`` would load it from the Hub."""
+    with pytest.raises(UnknownModelError, match="no Hugging Face repo id or path"):
+        SelfHosted()[name]
+
+
+@pytest.mark.parametrize(
+    ("name", "spec"),
+    [
+        ("Org/M", server._Spec(path="Org/M")),
+        (
+            "Org/M+bfloat16+cuda",
+            server._Spec(path="Org/M", device="cuda", dtype="bfloat16"),
+        ),
+        (
+            "Org/M+torch.float16+compile+auto",
+            server._Spec(path="Org/M", device="auto", dtype="float16", compile=True),
+        ),
+        ("Org/M+no-compile+mps", server._Spec(path="Org/M", device="mps")),
+        (
+            "~/w+cpu+float32",
+            server._Spec(
+                path=str(Path("~/w").expanduser()),
+                device="cpu",
+                dtype="float32",
+            ),
+        ),
+    ],
+)
+def test_a_name_carries_its_load_options_in_any_order(
+    name: str,
+    spec: server._Spec,
+) -> None:
+    assert server._spec(name) == (spec, "fullcontext")
+
+
+@pytest.mark.parametrize(
+    ("name", "size"),
+    [
+        ("Org/M+fullcontext", "fullcontext"),
+        ("Org/M+200k+cuda", 200_000),
+        ("Org/M+SmallContext", "smallcontext"),
+        ("Org/M+midcontext", "midcontext"),
+    ],
+)
+def test_a_name_may_carry_a_size_beside_its_load_options(
+    name: str,
+    size: str | int,
+) -> None:
+    spec, named = server._spec(name)
+    assert (spec.path, named) == ("Org/M", size)
+
+
+@pytest.mark.parametrize(
+    ("name", "message"),
+    [
+        ("", "must start with a repo id"),
+        ("+cuda", "must start with a repo id"),
+        ("Org/M+cuda+cpu", "device is given twice"),
+        ("Org/M+bfloat16+float16", "dtype is given twice"),
+        ("Org/M+compile+no-compile", "compile is given twice"),
+        ("Org/M+fullcontext+200k", "size is given twice"),
+        ("Org/M+fast", "Unknown option 'fast'"),
+        ("Org/M+", "Unknown option ''"),
+    ],
+)
+def test_a_bad_name_is_refused(name: str, message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        server._spec(name)
+
+
+@pytest.mark.asyncio
+async def test_shared_resources_outlive_the_provider() -> None:
+    async with SharedResources() as shared:
+        local = SelfHosted(resources=shared)
+        assert local.resources is shared
+        http = shared.http
+        await local.aclose()
+        assert not http.is_closed
+    owned = SelfHosted()
+    http = owned.resources.http
+    await owned.aclose()
+    assert http.is_closed
+
+
+@pytest.mark.asyncio
+async def test_weights_load_once_per_name_and_are_shared(
+    loads: list[server._Spec],
+) -> None:
+    local = SelfHosted()
+    first, second = local["default"], local["default"]
+    other = local["Other/Model"]
+    await asyncio.gather(
+        first.count(_REQUEST),
+        second.count(_REQUEST),
+        other.count(_REQUEST),
+    )
+    assert loads == [
+        server._Spec(path="Qwen/Qwen3.6-27B"),
+        server._Spec(path="Other/Model"),
     ]
-    tools: list[Tool] = [_StubBash()]
-    _inline_tool_preamble(msgs, tools)
-    assert "existing system" in str(msgs[0]["content"])
-    assert "tool_call" in str(msgs[0]["content"])
+    # Closing drops the weights; the next request loads them again.
+    await local.aclose()
+    await first.count(_REQUEST)
+    assert len(loads) == 3
 
 
-def test_tool_schema_wraps_as_function() -> None:
-    schema = _tool_schema(_StubBash())
-    assert schema["type"] == "function"
-    func = cast(dict[str, MutablePlainTree], schema["function"])
-    assert func["name"] == "Bash"
-    assert func["description"] == "Run shell"
+# ---- the reply ---------------------------------------------------------------
 
 
-def test_tool_preamble_contains_marker_and_tool_name() -> None:
-    tools: list[Tool] = [_StubBash()]
-    out = _tool_preamble(tools)
-    assert "<tool_call>" in out
-    assert "Bash" in out
+@pytest.mark.asyncio
+async def test_stream_yields_the_reply_whole_then_the_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _served(monkeypatch)
+    events = await _reply(model)
+    assert events[0] == TextChunk(text="Hello.")
+    response = events[1]
+    assert isinstance(response, Response)
+    assert response.records == (AssistantMessage(content="Hello."),)
+    assert (response.tokens.request, response.tokens.response) == (3, 2)
+    assert response.spend.total == 0.0
+    assert response.stop_reason == "end_turn"
 
 
-def test_parse_qwen_tool_call_valid() -> None:
-    tc = _parse_qwen_tool_call('{"name": "Bash", "arguments": {"cmd": "ls"}}')
-    assert tc is not None
-    assert tc.name == "Bash"
+@pytest.mark.asyncio
+async def test_a_reply_that_calls_a_tool_names_it_as_offered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text = 'Reading. <tool_call>{"name": "read", "arguments": {"file_path": "a"}}</tool_call>'
+    model = _served(monkeypatch, tokenizer=_Tokenizer(text=text))
+    response = (
+        await _reply(model, Request(records=_REQUEST.records, tools=(Read(),)))
+    )[-1]
+    assert isinstance(response, Response)
+    (said, call) = response.records
+    assert said == AssistantMessage(content="Reading.")
+    # The runtime looks the tool up by its exact name.
+    assert isinstance(call, ToolCall)
+    assert (call.name, dict(call.arguments)) == ("Read", {"file_path": "a"})
+    assert response.stop_reason == "tool_use"
 
 
-def test_parse_qwen_tool_call_invalid_json_returns_none() -> None:
-    assert _parse_qwen_tool_call("not json") is None
+@pytest.mark.asyncio
+async def test_a_reply_of_only_a_call_shows_no_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text = '<tool_call>{"name": "Read", "arguments": {}}</tool_call>'
+    model = _served(monkeypatch, tokenizer=_Tokenizer(text=text))
+    events = await _reply(model, Request(tools=(Read(),)))
+    assert len(events) == 1
+    response = events[0]
+    assert isinstance(response, Response)
+    assert [type(record) for record in response.records] == [ToolCall]
 
 
-def test_parse_qwen_tool_call_non_dict_returns_none() -> None:
-    assert _parse_qwen_tool_call('"just a string"') is None
+@pytest.mark.asyncio
+async def test_a_reply_that_spends_its_budget_ran_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    text = '<tool_call>{"name": "Read", "arguments": {}}</tool_call>'
+    # A window of 5 leaves 2 tokens after the 3-token prompt; the model writes 2.
+    model = _served(monkeypatch, tokenizer=_Tokenizer(text=text), window=5)
+    response = (await _reply(model, Request(tools=(Read(),))))[-1]
+    assert isinstance(response, Response)
+    assert response.stop_reason == "max_tokens"
 
 
-def test_parse_qwen_tool_call_missing_name_returns_none() -> None:
-    assert _parse_qwen_tool_call('{"arguments": {}}') is None
+@pytest.mark.asyncio
+async def test_the_reply_is_capped_within_what_the_window_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = _Generator()
+    model = _served(monkeypatch, model=generator, window=1_000)
+    await _reply(model)
+    assert generator.calls[0]["max_new_tokens"] == min(4_096, 1_000 - 3)
 
 
-def test_parse_qwen_tool_call_non_dict_args_returns_none() -> None:
-    assert _parse_qwen_tool_call('{"name": "Bash", "arguments": "x"}') is None
+@pytest.mark.asyncio
+async def test_a_request_may_ask_for_less_than_the_window_leaves(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = _Generator()
+    model = _served(monkeypatch, model=generator, window=1_000)
+    await _reply(model, Request(max_response_tokens=50))
+    assert generator.calls[0]["max_new_tokens"] == 50
 
 
-def test_parse_deepseek_tool_call_valid() -> None:
-    raw = 'function\nBash\n```json\n{"cmd": "ls"}\n```'
-    tc = _parse_deepseek_tool_call(raw)
-    assert tc is not None
-    assert tc.name == "Bash"
-    assert dict(tc.args) == {"cmd": "ls"}
+@pytest.mark.asyncio
+async def test_generation_is_sampled_and_stops_at_the_end_of_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = _Generator()
+    model = _served(monkeypatch, model=generator)
+    await _reply(model)
+    (options,) = generator.calls
+    assert options["eos_token_id"] == 2
+    assert options["pad_token_id"] == 2
+    assert options["do_sample"] is True
+    assert options["temperature"] == 1.0
+    assert "use_cache" not in options
+    mask = options["attention_mask"]
+    assert isinstance(mask, Tensor)
+    assert torch.equal(mask, torch.ones(1, 3, dtype=torch.long))
 
 
-def test_parse_deepseek_tool_call_missing_name_returns_none() -> None:
-    raw = '```json\n{"cmd": "ls"}\n```'
-    assert _parse_deepseek_tool_call(raw) is None
+@pytest.mark.asyncio
+async def test_a_temperature_of_zero_decodes_greedily(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = _Generator()
+    model = _served(monkeypatch, model=generator)
+    monkeypatch.setattr(SelfHostedModel, "temperature", 0.0)
+    await _reply(model)
+    assert "do_sample" not in generator.calls[0]
+    assert "temperature" not in generator.calls[0]
 
 
-def test_parse_deepseek_tool_call_invalid_json_returns_none() -> None:
-    raw = "function\nBash\n```json\nnot json\n```"
-    assert _parse_deepseek_tool_call(raw) is None
+def test_generation_on_mps_runs_without_the_kv_cache() -> None:
+    ids = torch.tensor([[1, 2]])
+    options = server._options(
+        ids,
+        device=torch.device("mps"),
+        eos=0,
+        max_new_tokens=3,
+        temperature=0.0,
+        stop=threading.Event(),
+    )
+    assert options["use_cache"] is False
+    assert "use_cache" not in server._options(
+        ids,
+        device=torch.device("cpu"),
+        eos=0,
+        max_new_tokens=3,
+        temperature=0.0,
+        stop=threading.Event(),
+    )
 
 
-def test_parse_deepseek_tool_call_non_dict_args_returns_none() -> None:
-    raw = 'function\nBash\n```json\n"x"\n```'
-    assert _parse_deepseek_tool_call(raw) is None
+@pytest.mark.asyncio
+async def test_count_is_the_rendered_prompts_length(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _served(monkeypatch, tokenizer=_Tokenizer(prompt=(1, 2, 3, 4, 5)))
+    assert await model.count(_REQUEST) == 5
 
 
-def test_parse_deepseek_tool_call_reads_multiline_arguments() -> None:
-    raw = 'function\nBash\n```json\n{\n  "cmd": "ls"\n}\n```'
-    tc = _parse_deepseek_tool_call(raw)
-    assert tc is not None
-    assert dict(tc.args) == {"cmd": "ls"}
+@pytest.mark.asyncio
+async def test_one_model_generates_one_reply_at_a_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = _Generator(delay_sec=0.02)
+    model = _served(monkeypatch, model=generator)
+    await asyncio.gather(_reply(model), _reply(model), _reply(model))
+    assert len(generator.calls) == 3
+    assert generator.most_active == 1
 
 
-def test_parse_deepseek_tool_call_mints_a_fresh_twelve_character_id() -> None:
-    raw = 'function\nBash\n```json\n{"cmd": "ls"}\n```'
-    first, second = _parse_deepseek_tool_call(raw), _parse_deepseek_tool_call(raw)
-    assert first is not None
-    assert second is not None
-    assert len(first.id) == 12
-    assert first.id != second.id
+@pytest.mark.asyncio
+async def test_a_cancelled_reply_stops_generating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = _Generator(delay_sec=30.0)
+    model = _served(monkeypatch, model=generator)
+    replying = asyncio.create_task(_reply(model))
+    await asyncio.to_thread(generator.started.wait, 5.0)
+    started = time.monotonic()
+    replying.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await replying
+    # Cancelled, it waits for the model to stop, and the model stopped at once.
+    assert generator.active == 0
+    assert time.monotonic() - started < 5.0
 
 
-def test_disable_generate_cache_mps_true() -> None:
-    assert _disable_generate_cache("mps") is True
-    assert _disable_generate_cache("mps:0") is True
+# ---- the prompt --------------------------------------------------------------
 
 
-def test_disable_generate_cache_cuda_false() -> None:
-    assert _disable_generate_cache("cuda") is False
-    assert _disable_generate_cache("cpu") is False
+def test_the_conversation_renders_as_chat_template_messages() -> None:
+    request = Request(
+        system=("Be terse.", "", "Mind the tests."),
+        records=(
+            UserMessage(content="look"),
+            TokenUsage(),
+            Thinking(content="hidden"),
+            AssistantMessage(content="Reading"),
+            AssistantMessage(content=" both."),
+            ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a"}),
+            ToolCall(call_id="toolu_b", name="Read", arguments={"file_path": "b"}),
+            UncategorizedToolResult(call_id="toolu_a", content="x = 1"),
+            UncategorizedToolResult(call_id="toolu_b", content="gone", is_error=True),
+            UncategorizedToolResult(call_id="toolu_c", is_error=True),
+            AssistantMessage(content="Done."),
+        ),
+    )
+    assert server._messages(request) == [
+        {"role": "system", "content": "Be terse.\n\nMind the tests."},
+        {"role": "user", "content": "look"},
+        {
+            "role": "assistant",
+            "content": "Reading both.",
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": '{"file_path": "a"}'},
+                },
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": '{"file_path": "b"}'},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "content": "x = 1"},
+        {"role": "tool", "tool_call_id": "call_1", "content": "[Error] gone"},
+        {"role": "tool", "tool_call_id": "call_2", "content": ""},
+        {"role": "assistant", "content": "Done."},
+    ]
+    assert server._messages(Request()) == []
 
 
-def test_input_ids_from_mapping_with_key() -> None:
-    assert _input_ids({"input_ids": [1, 2, 3]}) == [1, 2, 3]
+@pytest.mark.asyncio
+async def test_the_template_is_asked_for_thinking_and_the_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokenizer = _Tokenizer()
+    model = _served(monkeypatch, tokenizer=tokenizer)
+    model.settings = replace(model.settings, thinking_effort="high")
+    await model.count(Request(records=_REQUEST.records, tools=(Read(),)))
+    ((_, options),) = tokenizer.rendered
+    read = Read()
+    assert options == {
+        "tokenize": True,
+        "add_generation_prompt": True,
+        "return_tensors": "pt",
+        "enable_thinking": True,
+        "tools": [server._schema(read)],
+    }
+    assert server._schema(read) == {
+        "type": "function",
+        "function": {
+            "name": "Read",
+            "description": read.description,
+            "parameters": dict(read.schema),
+        },
+    }
 
 
-def test_input_ids_from_object_with_attr() -> None:
-    class _Obj:
-        def __init__(self) -> None:
-            self.input_ids = [4, 5, 6]
-
-    assert _input_ids(_Obj()) == [4, 5, 6]
-
-
-def test_input_ids_from_nested_data_attr() -> None:
-    class _Obj:
-        def __init__(self) -> None:
-            self.data = {"input_ids": [7]}
-
-    assert _input_ids(_Obj()) == [7]
-
-
-def test_input_ids_fallthrough_returns_value() -> None:
-    sentinel = object()
-    assert _input_ids(sentinel) is sentinel
-
-
-def test_attention_mask_from_mapping() -> None:
-    assert _attention_mask({"attention_mask": [1, 1]}) == [1, 1]
-
-
-def test_attention_mask_absent_returns_none() -> None:
-    # Plain object without ``attention_mask`` → None.
-    assert _attention_mask(object()) is None
-
-
-class _StubProvider:
-    """Minimal provider stand-in to exercise ``SelfHostedModel`` properties."""
-
-    hosted_max_request_tokens: int = 1234
-    hosted_model_id: str = "stub/qwen"
-    hosted_max_response_tokens: int = 567
-
-    @property
-    def tokenizer(self) -> _CountingTokenizer:
-        """``approx_text_tokens`` reads the real tokenizer now, not a ratio."""
-        return _CountingTokenizer()
+@pytest.mark.parametrize(
+    ("rejects", "tried"),
+    [
+        (frozenset({"enable_thinking"}), [{"enable_thinking", "tools"}, {"tools"}]),
+        (
+            frozenset({"tools"}),
+            [{"enable_thinking", "tools"}, {"tools"}, {"enable_thinking"}],
+        ),
+        (
+            frozenset({"enable_thinking", "tools"}),
+            [{"enable_thinking", "tools"}, {"tools"}, {"enable_thinking"}, set[str]()],
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_template_that_lacks_a_feature_is_asked_without_it(
+    monkeypatch: pytest.MonkeyPatch,
+    rejects: frozenset[str],
+    tried: list[set[str]],
+) -> None:
+    tokenizer = _Tokenizer(rejects=rejects)
+    model = _served(monkeypatch, tokenizer=tokenizer)
+    assert await model.count(Request(system=("Sys.",), tools=(Read(),))) == 3
+    assert [
+        set(options) & {"enable_thinking", "tools"} for _, options in tokenizer.rendered
+    ] == tried
+    conversation, options = tokenizer.rendered[-1]
+    if "tools" not in options:
+        # Without native tools, their schemas ride the system prompt.
+        system = conversation[0]["content"]
+        assert isinstance(system, str)
+        assert system.startswith("Sys.\n\nYou have access to the following tools.")
+        assert '"name": "Read"' in system
 
 
-class _CountingTokenizer:
-    """One token per 4 characters, matching the old ratio the test asserts."""
-
-    def encode(self, text: str, **kwargs: object) -> list[int]:
-        del kwargs
-        return list(range(len(text) // 4))
-
-
-def test_self_hosted_model_properties() -> None:
-    # Structural-only stub: the model reads ``hosted_*`` and ``tokenizer``
-    # here, so only ``native_model`` stays absent.
-    stub = _StubProvider()
-    m = SelfHostedModel(provider=stub)  # pyright: ignore[reportArgumentType] -- The test double implements only the provider surface exercised by this constructor.  # ty: ignore[invalid-argument-type] -- The test double implements only the provider surface exercised by this constructor.  # pyrefly: ignore[bad-argument-type] -- The test double implements only the provider surface exercised by this constructor.
-    assert m.limits.max_request_tokens == 1234
-    assert m.capability.model_id == "stub/qwen"
-    assert m.limits.max_response_tokens == 567
-    assert m.capability.thinking.budget == frozenset({"none"})
-    assert m.capability.thinking.effort == frozenset({"none"})
-    assert m.capability.cache_ttl_sec == frozenset({0.0})
-    assert m.capability.manage_context_server_side == frozenset({False})
-    assert m.capability.retries_internally is False
-    assert m.capability.account_auth is False
-    # A local model has no provider-imposed image/wire caps -- all three are
-    # the 0=unlimited sentinel (consistent: no borrowed pixel cap either).
-    assert m.limits.max_image_edge_px == 0
-    assert m.limits.max_image_bytes == 0
-    assert m.limits.max_request_bytes == 0
-    assert m.approx_text_tokens("a" * 16) == 4
-    assert m.is_context_overflow(RuntimeError("x")) is False
-    assert m.is_retryable_provider_error(RuntimeError("x")) is False
-    assert m.capability.prices[PriceKey("auto")].request == 0.0
+@pytest.mark.asyncio
+async def test_a_template_that_fails_every_way_raises_its_last_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokenizer = _Tokenizer(rejects=frozenset({"tokenize"}))
+    model = _served(monkeypatch, tokenizer=tokenizer)
+    with pytest.raises(TypeError, match="tokenize"):
+        await model.count(Request(tools=(Read(),)))
+    with pytest.raises(TypeError, match="tokenize"):
+        await model.count(Request())
+    assert len(tokenizer.rendered) == 4 + 2
 
 
-def test_self_hosted_model_accepts_model_id_by_keyword() -> None:
-    provider = SelfHosted.__new__(SelfHosted)
-    provider._model_id = "stub/qwen"
-    provider._max_request_tokens = 1_234
-    provider._max_response_tokens = 567
-    model = provider.model(model_id="default")
-    assert model.model_id == "stub/qwen"
+def test_a_tool_preamble_opens_a_system_prompt_when_there_is_none() -> None:
+    messages = server._with_preamble(
+        [{"role": "user", "content": "hi"}],
+        tools=(Read(),),
+    )
+    assert messages[0]["role"] == "system"
+    assert str(messages[0]["content"]).startswith(
+        "You have access to the following tools.",
+    )
+    assert messages[1] == {"role": "user", "content": "hi"}
+
+
+@pytest.mark.parametrize(
+    "rendered",
+    [
+        {"input_ids": torch.tensor([[1, 2]])},
+        SimpleNamespace(input_ids=torch.tensor([1, 2])),
+        torch.tensor([1, 2]),
+    ],
+)
+def test_the_prompt_ids_are_read_from_whatever_the_template_returns(
+    rendered: object,
+) -> None:
+    ids = server._field(rendered, "input_ids")
+    assert isinstance(ids, Tensor)
+    assert torch.equal(ids.reshape(1, -1), torch.tensor([[1, 2]]))
+
+
+# ---- loading weights ---------------------------------------------------------
+
+
+@dataclass(slots=True, kw_only=True)
+class _Hub:
+    """Stands in for transformers and torch, recording what loading asked."""
+
+    config: Mapping[str, object] = field(default_factory=dict[str, object])
+    mps: bool = False
+    cuda: bool = False
+    asked: list[tuple[str, object]] = field(default_factory=list[tuple[str, object]])
+
+    def transformers(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            AutoConfig=SimpleNamespace(from_pretrained=self._config),
+            AutoModelForCausalLM=SimpleNamespace(from_pretrained=self._model),
+            AutoTokenizer=SimpleNamespace(from_pretrained=self._tokenizer),
+        )
+
+    def torch(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            backends=SimpleNamespace(
+                mps=SimpleNamespace(is_available=lambda: self.mps),
+            ),
+            cuda=SimpleNamespace(is_available=lambda: self.cuda),
+            compile=self._compile,
+            bfloat16=torch.bfloat16,
+            float16=torch.float16,
+            float32=torch.float32,
+        )
+
+    def _config(self, path: str, **options: object) -> SimpleNamespace:
+        self.asked.append(("config", (path, options)))
+        return SimpleNamespace(to_dict=lambda: dict(self.config))
+
+    def _model(self, path: str, **options: object) -> _Weights:
+        self.asked.append(("model", (path, options)))
+        return _Weights(asked=self.asked)
+
+    def _tokenizer(self, path: str, **options: object) -> str:
+        self.asked.append(("tokenizer", (path, options)))
+        return "tokenizer"
+
+    def _compile(self, model: object) -> str:
+        self.asked.append(("compile", model))
+        return "compiled"
+
+
+@dataclass(slots=True, kw_only=True)
+class _Weights:
+    """A loaded model, recording where it is moved and that it is put in eval."""
+
+    asked: list[tuple[str, object]]
+
+    def to(self, device: str) -> _Weights:
+        self.asked.append(("to", device))
+        return self
+
+    def eval(self) -> None:
+        self.asked.append(("eval", None))
+
+
+def _load(
+    monkeypatch: pytest.MonkeyPatch,
+    hub: _Hub,
+    name: str,
+    *,
+    trust: bool = False,
+) -> server._Loaded:
+    monkeypatch.setattr(server, "transformers", hub.transformers())
+    monkeypatch.setattr(server, "torch", hub.torch())
+    spec, _ = server._spec(name)
+    return server._load(spec, trust_remote_code=trust)
+
+
+@pytest.mark.parametrize(
+    ("config", "window"),
+    [
+        ({"max_position_embeddings": 262_144}, 262_144),
+        ({"text_config": {"max_position_embeddings": 65_536}}, 65_536),
+    ],
+)
+def test_the_window_is_read_from_the_models_config(
+    monkeypatch: pytest.MonkeyPatch,
+    config: Mapping[str, object],
+    window: int,
+) -> None:
+    hub = _Hub(config=config)
+    monkeypatch.setattr(server, "transformers", hub.transformers())
+    assert server._window("Org/M", trust_remote_code=True) == window
+    assert hub.asked == [("config", ("Org/M", {"trust_remote_code": True}))]
+
+
+def test_a_config_that_states_no_window_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(server, "transformers", _Hub().transformers())
+    with pytest.raises(ValueError, match="states no max_position_embeddings"):
+        server._window("Org/M", trust_remote_code=False)
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("Org/M", True, True, "mps", {}),
+        ("Org/M", False, True, "cuda", {}),
+        ("Org/M", False, False, None, {}),
+        ("Org/M+cpu", True, True, "cpu", {}),
+        ("Org/M+auto", False, True, None, {"device_map": "auto"}),
+        ("Org/M+bfloat16", False, False, None, {"dtype": torch.bfloat16}),
+        ("Org/M+float16", False, False, None, {"dtype": torch.float16}),
+        ("Org/M+float32", False, False, None, {"dtype": torch.float32}),
+    ],
+)
+def test_weights_load_onto_the_fastest_device_there_is(
+    monkeypatch: pytest.MonkeyPatch,
+    case: tuple[str, bool, bool, str | None, dict[str, object]],
+) -> None:
+    name, mps, cuda, moved, options = case
+    hub = _Hub(mps=mps, cuda=cuda)
+    loaded = _load(monkeypatch, hub, name, trust=True)
+    assert ("model", ("Org/M", {"trust_remote_code": True, **options})) in hub.asked
+    assert [device for kind, device in hub.asked if kind == "to"] == (
+        [moved] if moved is not None else []
+    )
+    assert ("eval", None) in hub.asked
+    assert "config" not in [kind for kind, _ in hub.asked]
+    assert ("tokenizer", ("Org/M", {"trust_remote_code": True})) in hub.asked
+    assert loaded.tokenizer == "tokenizer"
+
+
+def test_a_compiled_model_is_the_one_served(monkeypatch: pytest.MonkeyPatch) -> None:
+    hub = _Hub()
+    assert _load(monkeypatch, hub, "Org/M+compile").model == "compiled"
+    assert [kind for kind, _ in hub.asked].count("compile") == 1
+
+
+def test_an_attachment_costs_nothing_for_it_is_never_sent() -> None:
+    attached = Attachment(mime_descriptor="image/png", data=b"x" * 40)
+    assert SelfHosted()["default"].attachment_tokens(attached) == 0
 
 
 if __name__ == "__main__":

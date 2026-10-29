@@ -109,8 +109,6 @@ model = LocalProvider.from_env().model("local-model")
 
 `OpenAICompat.from_env(base_url=...)` and `from_key(api_key, base_url=...)` can override the class `BASE_URL` at construction time.
 
-See `examples/openai_compatible_provider.py` for a runnable version.
-
 ## Self-hosted HuggingFace models
 
 Use `SelfHosted` for HuggingFace causal LMs loaded through `transformers`:

@@ -1,522 +1,347 @@
-"""Tests for ``tools.web_fetch``: URL fetcher tool, SSRF guard, cache."""
+"""Tests for WebFetch: arguments, shell takeover, caching, and errors."""
 
 from __future__ import annotations
 
-from typing import cast
-from unittest.mock import patch
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING
 
-import asyncio
-import socket
-
-from treekle import immutable
 from wesearch.fetch import FetchSession, PolicyParams
 from wesearch.types.errors import CloudflareChallengeError, FetchError
+from wesearch.types.params import NO_BODY, NoBody
 from wesearch.web import FetchResult
 
 import pytest
 
-from sagent.tools.lib.bash import parse_bash
-from sagent.tools.web_fetch import (
-    WebFetch,
-    _match_http_fetch,
-    _request_bodies,
-)
-from sagent.types.tools import DEFAULT_MAX_RESULT_CHARS
+from sagent.session.types import UncategorizedToolResult, WebFetchResult
+from sagent.tools import web_fetch
+from sagent.tools.command_analyzer import invocations
+from sagent.tools.types import ToolContext
+from sagent.tools.web_fetch import WebFetch
 
 
-# socket.getaddrinfo returns the canonical 5-tuple
-# (family, type, proto, canonname, sockaddr); only the IP inside
-# sockaddr matters here. ``AddrInfo`` names the shape once so the
-# tests can stop repeating it.
-type AddrInfo = tuple[int, int, int, str, tuple[str, int]]
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from treekle import PlainTree
 
 
-def test_declared_result_cap_is_the_cap_that_applies() -> None:
-    assert WebFetch.max_result_chars <= DEFAULT_MAX_RESULT_CHARS
+@dataclass(slots=True, kw_only=True)
+class Fetches:
+    """Stands in for the network: records each fetch, answers or raises."""
 
+    text: str = "page text\n"
+    error: Exception | None = None
+    seen: list[dict[str, object]] = field(default_factory=list)
 
-def _addrinfo(ip: str) -> list[AddrInfo]:
-    """Build a ``socket.getaddrinfo``-shaped result for a single IP."""
-    fam = socket.AF_INET6 if ":" in ip else socket.AF_INET
-    return [(fam, 0, 0, "", (ip, 0))]
-
-
-def _result(text: str, *, kind: str = "html") -> FetchResult:
-    """Return a ``FetchResult`` stub for patching ``fetch_web`` in ``run`` tests."""
-    return FetchResult(text=text, url="https://x", kind=kind, truncated=False)
-
-
-def test_webfetch_metadata() -> None:
-    t = WebFetch()
-    assert t.name == "WebFetch"
-    assert t.tool_id == "application/x-tool-webfetch"
-
-
-def test_summary_short_url() -> None:
-    t = WebFetch()
-    assert t.summary({"url": "https://example.com"}) == "WebFetch https://example.com"
-
-
-def test_summary_keeps_long_url() -> None:
-    t = WebFetch()
-    long_url = "https://example.com/" + ("x" * 100)
-    assert t.summary({"url": long_url}) == f"WebFetch {long_url}"
-
-
-def test_prompt_empty() -> None:
-    assert WebFetch().prompt() == ""
-
-
-def test_every_fetch_shares_the_tool_session() -> None:
-    sessions: list[object] = []
-
-    def fake_fetch_web(url: str, **kwargs: object) -> FetchResult:
-        del url
-        sessions.append(kwargs.get("session"))
-        return _result("{}")
-
-    tool = WebFetch()
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        side_effect=fake_fetch_web,
-    ):
-        asyncio.run(tool.run({"url": "https://a.example"}))
-        asyncio.run(tool.run({"url": "https://b.example"}))
-    assert isinstance(sessions[0], FetchSession)
-    assert sessions[1] is sessions[0]
-
-
-def test_run_refuses_private_hosts_for_the_agent_url() -> None:
-    """The agent's URL keeps wesearch's default: private hosts are refused."""
-    captured: dict[str, object] = {}
-
-    def fake_fetch_web(url: str, **kwargs: object) -> FetchResult:
-        del url
-        captured["policy"] = kwargs.get("policy")
-        return _result("{}")
-
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        side_effect=fake_fetch_web,
-    ):
-        result = asyncio.run(WebFetch().run({"url": "https://example.com"}))
-    assert not result.is_error
-    policy = captured["policy"]
-    assert isinstance(policy, PolicyParams)
-    assert policy.allow_private_hosts is False
-
-
-def test_run_appends_truncation_notice_when_body_exceeds_limit() -> None:
-    """An over-limit page is cut WITH the truncation notice, not silently.
-
-    Drives the real ``fetch_web`` (only the network layer is mocked) so the
-    regression is exercised end-to-end: ``fetch_web`` must not pre-cap the text
-    such that sagent's ``truncate`` sees an at-limit string and appends nothing.
-    """
-    from wesearch import web  # noqa: PLC0415 -- patch the network below fetch_web.
-
-    from sagent.tools.core import (  # noqa: PLC0415 -- test-local constant.
-        result_token_budget,
-    )
-
-    over = result_token_budget() * 8
-    with (
-        patch.object(
-            web,
-            "fetch_with_reader_fallback",
-            return_value=(b"z" * over, False),
-        ),
-        patch.object(web, "_extract_text", return_value="z" * over),
-        patch("socket.getaddrinfo", return_value=_addrinfo("93.184.216.34")),
-    ):
-        result = asyncio.run(WebFetch().run({"url": "https://example.com"}))
-    assert not result.is_error
-    assert "chars omitted)" in result.content
-
-
-def test_match_http_fetch_simple_curl() -> None:
-    assert _match_http_fetch("curl", ("https://example.com",)) is not None
-
-
-def test_match_http_fetch_simple_wget() -> None:
-    # ``wget`` WRITES by default (measured: bare wget saved index.html),
-    # so only the stream-to-stdout spelling is a WebFetch call. The
-    # previous version of this test passed ``curl``'s argv twice and so
-    # never exercised wget at all.
-    assert _match_http_fetch("wget", ("-O", "-", "https://example.com")) is not None
-
-
-def test_match_http_fetch_no_url_returns_none() -> None:
-    assert _match_http_fetch("curl", ("-v",)) is None
-
-
-def test_match_http_fetch_two_urls_returns_none() -> None:
-    assert _match_http_fetch("curl", ("https://a", "https://b")) is None
-
-
-def test_match_http_fetch_output_flag_bails() -> None:
-    assert _match_http_fetch("curl", ("-o", "f.txt", "https://x")) is None
-
-
-def test_bash_match_simple_curl() -> None:
-    trees = parse_bash("curl https://example.com")
-    assert trees is not None
-    assert WebFetch().bash_match(trees) is not None
-
-
-def test_bash_match_with_cd_prefix() -> None:
-    trees = parse_bash("cd /tmp && curl https://example.com")
-    assert trees is not None
-    assert WebFetch().bash_match(trees) is not None
-
-
-def test_bash_match_with_env_prefix_rejected() -> None:
-    trees = parse_bash("FOO=1 curl https://example.com")
-    assert trees is not None
-    # env_prefix kills the match.
-    assert WebFetch().bash_match(trees) is None
-
-
-def test_bash_match_non_curl_command_rejected() -> None:
-    trees = parse_bash("ls -la")
-    assert trees is not None
-    assert WebFetch().bash_match(trees) is None
-
-
-def test_bash_match_pipeline_rejected() -> None:
-    trees = parse_bash("curl https://x | grep y")
-    assert trees is not None
-    # Unwrap fails; bash_match returns None.
-    assert WebFetch().bash_match(trees) is None
-
-
-def test_run_rejects_bad_method() -> None:
-    result = asyncio.run(
-        WebFetch().run({"url": "https://x", "method": "PUT"}),
-    )
-    assert result.is_error
-    assert "Unsupported method" in result.content
-
-
-def test_run_post_rejects_both_json_and_form() -> None:
-    result = asyncio.run(
-        WebFetch().run(
+    def __call__(
+        self,
+        url: str,
+        *,
+        method: str,
+        json_body: PlainTree | NoBody,
+        form_body: dict[str, str] | None,
+        policy: PolicyParams,
+        session: FetchSession,
+    ) -> FetchResult:
+        self.seen.append(
             {
-                "url": "https://x",
-                "method": "POST",
-                "json": {"a": 1},
-                "form": {"b": "2"},
+                "url": url,
+                "method": method,
+                "json_body": json_body,
+                "form_body": form_body,
+                "transport": policy.transport,
+                "extractor": policy.extractor,
+                "session": session,
             },
+        )
+        if self.error is not None:
+            raise self.error
+        return FetchResult(text=self.text, url=url, kind="html", truncated=False)
+
+
+@pytest.fixture
+def fetches(monkeypatch: pytest.MonkeyPatch) -> Fetches:
+    fake = Fetches()
+    monkeypatch.setattr(web_fetch, "fetch_web", fake)
+    return fake
+
+
+_CONTEXT = ToolContext(cwd=Path("/"))
+
+
+def _error(text: str) -> UncategorizedToolResult:
+    return UncategorizedToolResult(call_id="", content=text, is_error=True)
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        *("-s", "-S", "-L", "-f", "-sS", "-sL", "-fsSL", "-sSL", "-fsS", "-fL"),
+        *("--silent", "--show-error", "--location", "--fail"),
+    ],
+)
+def test_curl_may_be_quiet_follow_and_fail(flag: str) -> None:
+    assert _shell(f"curl {flag} https://example.com/a") == {
+        "url": "https://example.com/a",
+    }
+
+
+def _shell(command: str) -> Mapping[str, PlainTree] | str | None:
+    found = invocations(command)
+    assert found is not None
+    (invocation,) = found
+    return WebFetch(session=FetchSession()).from_shell(invocation)
+
+
+# --- Description ------------------------------------------------------------
+
+
+def test_webfetch_describes_itself() -> None:
+    tool = WebFetch(session=FetchSession())
+    assert tool.name == "WebFetch"
+    assert tool.description.strip()
+    assert tool.schema["required"] == ["url"]
+    assert (
+        tool.summary({"url": "https://a.example/x"}) == "WebFetch https://a.example/x"
+    )
+    assert tool.summary({}) == "WebFetch "
+    assert tool.serialize_key(_CONTEXT, {"url": "https://a.example"}) is None
+
+
+# --- Shell takeover -----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "curl https://example.com/a",
+        "curl -fsSL https://example.com/a",
+        "curl --silent --location https://example.com/a",
+        "wget -qO- https://example.com/a",
+        "wget -q -O - https://example.com/a",
+        "wget -O- https://example.com/a",
+        "curl -s http://8.8.8.8/a",
+        "wget -qO - https://example.com/a",
+        "wget -O - https://example.com/a",
+        (
+            "curl -s -S -L -f -sS -sL -fsSL -sSL -fsS -fL --silent --show-error"
+            " --location --fail https://example.com/a"
         ),
-    )
-    assert result.is_error
-    assert "mutually exclusive" in result.content
-
-
-def test_run_fetch_error_returns_tool_result_error() -> None:
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        side_effect=ValueError("bad url"),
-    ):
-        result = asyncio.run(WebFetch().run({"url": "https://x"}))
-    assert result.is_error
-    assert "Fetch failed" in result.content
-
-
-def test_run_explicit_transport_passes_through() -> None:
-    captured: dict[str, object] = {}
-
-    def fake_fetch_web(url: str, **kwargs: object) -> FetchResult:
-        del url
-        policy = kwargs.get("policy")
-        captured["transport"] = getattr(policy, "transport", None)
-        return _result("{}")
-
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        side_effect=fake_fetch_web,
-    ):
-        result = asyncio.run(
-            WebFetch().run({"url": "https://example.com", "transport": "zendriver"}),
-        )
-    assert not result.is_error
-    assert captured["transport"] == "zendriver"
-
-
-def test_run_rejects_invalid_transport() -> None:
-    result = asyncio.run(
-        WebFetch().run({"url": "https://example.com", "transport": "requests"}),
-    )
-    assert result.is_error
-    assert "Invalid transport" in result.content
-
-
-def test_run_defaults_to_the_html2text_extractor() -> None:
-    """An unspecified extractor keeps every text node, not just article prose.
-
-    Measured by ``scripts/compare_extractors.py`` over an 11-page corpus:
-    ``html2text`` loses 0 of 37 content probes, ``trafilatura`` loses 12. The
-    default is the one that cannot silently drop the answer.
-    """
-    captured: dict[str, object] = {}
-
-    def fake_fetch_web(url: str, **kwargs: object) -> FetchResult:
-        del url
-        captured["extractor"] = getattr(kwargs.get("policy"), "extractor", None)
-        return _result("{}")
-
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        side_effect=fake_fetch_web,
-    ):
-        result = asyncio.run(WebFetch().run({"url": "https://example.com"}))
-    assert not result.is_error
-    assert captured["extractor"] == "html2text"
-
-
-def test_run_explicit_extractor_passes_through() -> None:
-    """A NON-default value proves pass-through.
-
-    Asserting the default here would hold whether or not the directive was
-    read at all, so the test named "passes through" would prove nothing.
-    """
-    captured: dict[str, object] = {}
-
-    def fake_fetch_web(url: str, **kwargs: object) -> FetchResult:
-        del url
-        captured["extractor"] = getattr(kwargs.get("policy"), "extractor", None)
-        return _result("{}")
-
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        side_effect=fake_fetch_web,
-    ):
-        result = asyncio.run(
-            WebFetch().run({"url": "https://example.com", "extractor": "trafilatura"}),
-        )
-    assert not result.is_error
-    assert captured["extractor"] == "trafilatura"
-
-
-def test_run_rejects_non_string_url() -> None:
-    """A schema-invalid url is a directive error, not a fetch of its repr."""
-    with patch("sagent.tools.web_fetch.fetch_web") as mock_web:
-        result = asyncio.run(WebFetch().run({"url": []}))
-    assert result.is_error
-    assert "Invalid url" in result.content
-    mock_web.assert_not_called()
-
-
-def test_run_rejects_invalid_extractor() -> None:
-    result = asyncio.run(
-        WebFetch().run({"url": "https://example.com", "extractor": "readability"}),
-    )
-    assert result.is_error
-    assert "Invalid extractor" in result.content
-
-
-def test_run_returns_extracted_text() -> None:
-    """The tool wraps ``fetch_web``'s text into the ToolResult content."""
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        return_value=_result('{"hello": "world"}'),
-    ):
-        result = asyncio.run(WebFetch().run({"url": "https://api/json"}))
-    assert '"hello"' in result.content
-
-
-def test_run_cloudflare_challenge_yields_specific_guidance_not_bare_403() -> None:
-    # fetch() classifies the block at the boundary and raises a
-    # CloudflareChallengeError (is-a FetchError). The tool's ERROR path must
-    # render its SPECIFIC actionable guidance, not the generic "Fetch failed:
-    # HTTP 403" that the plain FetchError path produces.
-    err = CloudflareChallengeError(
-        url="https://x.com",
-        status=403,
-        headers={"server": "cloudflare", "cf-ray": "a1"},
-        body=b"<title>Just a moment...</title>",
-    )
-    with patch("sagent.tools.web_fetch.fetch_web", side_effect=err):
-        result = asyncio.run(WebFetch().run({"url": "https://x.com"}))
-    assert result.is_error
-    assert "cloudflare" in result.content.lower()
-    assert CloudflareChallengeError.guidance in result.content
-    assert "HTTP 403" not in result.content
-
-
-def test_run_fetch_error_oserror() -> None:
-    err = FetchError(url="https://x", status=500, headers={}, body=b"boom")
-    with patch("sagent.tools.web_fetch.fetch_web", side_effect=err):
-        result = asyncio.run(WebFetch().run({"url": "https://x"}))
-    assert result.is_error
-
-
-def test_run_cache_hit_skips_second_fetch() -> None:
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        return_value=_result("extracted"),
-    ) as mock_web:
-        tool = WebFetch()
-        _ = asyncio.run(tool.run({"url": "https://example.com"}))
-        _ = asyncio.run(tool.run({"url": "https://example.com"}))
-    assert mock_web.call_count == 1
-
-
-def test_run_cache_separates_transports() -> None:
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        return_value=_result("{}"),
-    ) as mock_web:
-        tool = WebFetch()
-        _ = asyncio.run(tool.run({"url": "https://example.com"}))
-        _ = asyncio.run(
-            tool.run({"url": "https://example.com", "transport": "zendriver"}),
-        )
-    assert mock_web.call_count == 2
-
-
-def test_run_cache_separates_extractors() -> None:
-    """Two extractors of one URL are two results, not one replayed twice."""
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        return_value=_result("{}"),
-    ) as mock_web:
-        tool = WebFetch()
-        _ = asyncio.run(tool.run({"url": "https://example.com"}))
-        _ = asyncio.run(
-            tool.run({"url": "https://example.com", "extractor": "trafilatura"}),
-        )
-    assert mock_web.call_count == 2
-
-
-def test_run_post_json_passes_through() -> None:
-    captured: dict[str, object] = {}
-
-    def fake_fetch_web(url: str, **kwargs: object) -> FetchResult:
-        del url
-        captured["method"] = kwargs.get("method")
-        captured["json_body"] = kwargs.get("json_body")
-        captured["form_body"] = kwargs.get("form_body")
-        return _result('{"ok": 1}')
-
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        side_effect=fake_fetch_web,
-    ):
-        result = asyncio.run(
-            WebFetch().run(
-                {
-                    "url": "https://api/x",
-                    "method": "POST",
-                    "json": {"q": "test"},
-                },
-            ),
-        )
-    assert captured["method"] == "POST"
-    assert captured["json_body"] == {"q": "test"}
-    assert "ok" in result.content
-
-
-def test_run_post_form_passes_through() -> None:
-    captured: dict[str, object] = {}
-
-    def fake_fetch_web(url: str, **kwargs: object) -> FetchResult:
-        del url
-        captured["form_body"] = kwargs.get("form_body")
-        return _result("ok")
-
-    with patch(
-        "sagent.tools.web_fetch.fetch_web",
-        side_effect=fake_fetch_web,
-    ):
-        _ = asyncio.run(
-            WebFetch().run(
-                {
-                    "url": "https://api/x",
-                    "method": "POST",
-                    "form": {"a": "b"},
-                },
-            ),
-        )
-    form_body = captured["form_body"]
-    assert isinstance(form_body, dict)
-    body = cast(dict[str, str], form_body)
-    assert body["a"] == "b"
-
-
-def test_post_form_accepts_frozen_arguments() -> None:
-    # The runtime hands tools frozen arguments; a frozen form is still an object.
-    _, form = _request_bodies("POST", immutable({"form": {"a": "b"}}))
-    assert form == {"a": "b"}
-
-
-@pytest.mark.parametrize("bad_form", [[], "stringly", 42])
-def test_post_form_non_object_rejected(bad_form: object) -> None:
-    """``form`` schema declares ``type: object``; reject non-mappings.
-
-    Pre-fix, ``form=[]`` propagated to ``.items()`` and raised
-    ``AttributeError`` outside the tool envelope (escaping ``run``'s
-    ``except ValueError``). Reject at parse time so the directive
-    error surfaces as a normal tool error.
-    """
-    with pytest.raises(ValueError, match="form"):
-        _request_bodies("POST", {"form": bad_form})
-
-
-@pytest.mark.parametrize("body_key", ["json", "form"])
-def test_get_body_rejected(body_key: str) -> None:
-    with pytest.raises(ValueError, match="POST"):
-        _request_bodies("GET", {body_key: {"key": "value"}})
+    ],
+)
+def test_a_plain_download_becomes_a_fetch(command: str) -> None:
+    assert _shell(command) == {"url": command.rsplit(maxsplit=1)[-1]}
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        # MEASURED: ``curl -K opts.conf https://example.com`` with
-        # ``output = "out.html"`` in opts.conf wrote out.html. The flag
-        # that writes never appears in argv -- it is in the config file.
-        "curl -K opts.conf https://example.com",
-        "curl --config opts.conf https://example.com",
-        "curl --config=opts.conf https://example.com",
-        # ``-d @file`` reads the request body from disk, which WebFetch's
-        # inline ``json``/``form`` cannot express.
-        "curl -d @payload.json https://example.com",
-        "curl --data @payload.json https://example.com",
-        # Saves every URL to a file, like ``-O`` for the whole argv.
-        "curl --remote-name-all https://example.com",
-        # MEASURED: bare ``wget https://example.com`` wrote index.html.
-        # wget writes to disk BY DEFAULT, so the bare form is the one
-        # that needs the bail, not the one that earns a nudge.
-        "wget https://example.com",
-        "wget -q https://example.com",
+        "wget https://example.com/a",
+        'curl "https://example.com/$P"',
+        "curl -o page.html https://example.com/a",
+        "curl -H 'X: y' https://example.com/a",
+        "curl https://example.com/a https://example.com/b",
+        "curl -s",
+        "curl http://localhost:8000/a",
+        "curl http://127.0.0.1/a",
+        "curl http://10.0.0.5/a",
+        "curl http://printer.local/a",
+        "curl http://db.internal/a",
+        "ls https://example.com/a",
+        "curl https://example.com/a > page.html",
     ],
 )
-def test_a_fetch_that_writes_a_file_is_silent(command: str) -> None:
-    """A gate reading argv cannot see behavior sourced elsewhere.
+def test_anything_else_stays_a_shell_command(command: str) -> None:
+    assert _shell(command) is None
 
-    Each of these writes a file, yet none carries a write flag the
-    argv scan recognises -- the flag is in a config file, or is the
-    utility's default.
-    """
-    trees = parse_bash(command)
-    assert trees is not None
-    assert WebFetch().bash_match(trees) is None, command
+
+# --- Fetching ---------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_get_returns_the_pages_text(fetches: Fetches) -> None:
+    tool = WebFetch(session=FetchSession())
+    result = await tool.call(_CONTEXT, {"url": "https://example.com"})
+    assert isinstance(result, WebFetchResult)
+    assert (result.url, result.content, result.size) == (
+        "https://example.com",
+        "page text\n",
+        10,
+    )
+    assert result.call_id == ""
+    assert result.duration_sec is not None
+    assert 0 <= result.duration_sec < 1
+    assert fetches.seen == [
+        {
+            "url": "https://example.com",
+            "method": "GET",
+            "json_body": NO_BODY,
+            "form_body": None,
+            "transport": "auto",
+            "extractor": "html2text",
+            "session": tool.session,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_lowercase_method_is_accepted(fetches: Fetches) -> None:
+    result = await WebFetch(session=FetchSession()).call(
+        _CONTEXT,
+        {"url": "https://e.com", "method": "post"},
+    )
+    assert isinstance(result, WebFetchResult)
+    assert fetches.seen[0]["method"] == "POST"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_method_is_an_argument_error(fetches: Fetches) -> None:
+    with pytest.raises(ValueError, match="'method' must be one of"):
+        _ = await WebFetch(session=FetchSession()).call(
+            _CONTEXT,
+            {"url": "https://e.com", "method": "PUT"},
+        )
+    assert fetches.seen == []
 
 
 @pytest.mark.parametrize(
-    "command",
+    ("arguments", "error"),
     [
-        # ``-O -`` sends the body to STDOUT, which is the one wget shape
-        # WebFetch actually matches.
-        "wget -O - https://example.com",
-        "wget -qO- https://example.com",
+        ({"json": {"a": 1}}, "'json' and 'form' require method='POST'."),
+        ({"form": {"a": "1"}}, "'json' and 'form' require method='POST'."),
+        (
+            {"method": "POST", "json": {"a": 1}, "form": {"a": "1"}},
+            "'json' and 'form' are mutually exclusive.",
+        ),
     ],
 )
-def test_a_wget_that_streams_to_stdout_still_nudges(command: str) -> None:
-    """The bail must key on writing a FILE, not on the letter ``O``."""
-    trees = parse_bash(command)
-    assert trees is not None
-    assert WebFetch().bash_match(trees) is not None, command
+@pytest.mark.asyncio
+async def test_a_body_must_fit_the_method(
+    fetches: Fetches,
+    arguments: dict[str, PlainTree],
+    error: str,
+) -> None:
+    result = await WebFetch(session=FetchSession()).call(
+        _CONTEXT,
+        {"url": "https://e.com", **arguments},
+    )
+    assert result == _error(error)
+    assert fetches.seen == []
+
+
+@pytest.mark.asyncio
+async def test_a_post_sends_its_body(fetches: Fetches) -> None:
+    tool = WebFetch(session=FetchSession())
+    _ = await tool.call(
+        _CONTEXT,
+        {"url": "https://e.com", "method": "POST", "json": None},
+    )
+    _ = await tool.call(
+        _CONTEXT,
+        {"url": "https://e.com", "method": "POST", "json": [1]},
+    )
+    _ = await tool.call(
+        _CONTEXT,
+        {"url": "https://e.com", "method": "POST", "form": {"q": "x"}},
+    )
+    assert [(s["json_body"], s["form_body"]) for s in fetches.seen] == [
+        (NO_BODY, None),
+        ([1], None),
+        (NO_BODY, {"q": "x"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_call_may_choose_transport_and_extractor(fetches: Fetches) -> None:
+    tool = WebFetch(
+        session=FetchSession(),
+        policy=PolicyParams(transport="curl", extractor="raw"),
+    )
+    _ = await tool.call(_CONTEXT, {"url": "https://e.com"})
+    _ = await tool.call(
+        _CONTEXT,
+        {"url": "https://e.com", "transport": "stdlib", "extractor": "trafilatura"},
+    )
+    assert [(s["transport"], s["extractor"]) for s in fetches.seen] == [
+        ("curl", "raw"),
+        ("stdlib", "trafilatura"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_get_is_cached_by_url_transport_and_extractor(fetches: Fetches) -> None:
+    tool = WebFetch(session=FetchSession())
+    for arguments in (
+        {"url": "https://e.com"},
+        {"url": "https://e.com"},
+        {"url": "https://e.com", "transport": "curl"},
+        {"url": "https://e.com", "extractor": "raw"},
+        {"url": "https://e.com/other"},
+    ):
+        result = await tool.call(_CONTEXT, arguments)
+        assert isinstance(result, WebFetchResult)
+        assert result.content == "page text\n"
+    assert len(fetches.seen) == 4
+
+
+@pytest.mark.asyncio
+async def test_a_post_is_never_replayed(fetches: Fetches) -> None:
+    tool = WebFetch(session=FetchSession())
+    post: dict[str, PlainTree] = {"url": "https://e.com", "method": "POST"}
+    _ = await tool.call(_CONTEXT, {"url": "https://e.com"})
+    _ = await tool.call(_CONTEXT, post)
+    _ = await tool.call(_CONTEXT, post)
+    _ = await tool.call(_CONTEXT, {"url": "https://e.com"})
+    assert [s["method"] for s in fetches.seen] == ["GET", "POST", "POST"]
+
+
+@pytest.mark.asyncio
+async def test_a_long_page_is_cut_with_a_note(fetches: Fetches) -> None:
+    fetches.text = "".join(f"line {i:03}\n" for i in range(100))
+    context = ToolContext(cwd=Path("/"), max_result_chars=200)
+    result = await WebFetch(session=FetchSession()).call(
+        context,
+        {"url": "https://e.com"},
+    )
+    assert isinstance(result, WebFetchResult)
+    assert result.content is not None
+    body, note = result.content.rsplit("\n... ", 1)
+    kept = body.splitlines()
+    assert kept == [f"line {i:03}" for i in range(len(kept))]
+    assert note == f"({100 - len(kept):,} more lines omitted)"
+    assert len(result.content) <= 200
+    assert result.size == len(fetches.text)
+
+
+@pytest.mark.asyncio
+async def test_a_bot_block_says_how_to_clear_it(fetches: Fetches) -> None:
+    fetches.error = CloudflareChallengeError(url="https://e.com")
+    result = await WebFetch(session=FetchSession()).call(
+        _CONTEXT,
+        {"url": "https://e.com"},
+    )
+    assert result == _error(CloudflareChallengeError.explain("https://e.com"))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        FetchError("https://e.com", 404, {}, b""),
+        ValueError("refusing a private host"),
+        OSError("network unreachable"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_failed_fetch_says_why(fetches: Fetches, error: Exception) -> None:
+    fetches.error = error
+    tool = WebFetch(session=FetchSession())
+    result = await tool.call(_CONTEXT, {"url": "https://e.com"})
+    assert result == _error(f"Fetch failed: {error}")
+    fetches.error = None
+    second = await tool.call(_CONTEXT, {"url": "https://e.com"})
+    assert isinstance(second, WebFetchResult)
+    assert len(fetches.seen) == 2
 
 
 if __name__ == "__main__":

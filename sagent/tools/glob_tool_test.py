@@ -1,170 +1,118 @@
-"""Tests for ``tools.glob_tool``: glob-pattern path matching."""
+"""Tests for the Glob tool, and ``find -name`` taken on."""
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import TYPE_CHECKING
+
+import os
+import time
 
 import pytest
 
-from sagent.lib.tool_validation import validate_tool_input
-from sagent.testing import with_fake_agent
-from sagent.tools import glob_tool
-from sagent.tools.glob_tool import (
-    Glob,
-    _long_line,
-)
-from sagent.tools.lib.bash import parse_bash
-from sagent.types.tools import DEFAULT_MAX_RESULT_CHARS
+from sagent.tools.command_analyzer import invocations
+from sagent.tools.glob_tool import Glob
+from sagent.tools.types import ToolContext, parse
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from pathlib import Path
 
-    from sagent.types.runtime import ToolResult
-
-
-glob_tool_instance = Glob()
+    from treekle import PlainTree
 
 
-async def _run_glob(args: Mapping[str, object], cwd: Path) -> ToolResult:
-    with with_fake_agent() as agent:
-        agent.tool_state.bash_cwd = str(cwd)
-        return await glob_tool_instance.run(args)
+def test_summary_names_the_pattern_and_any_other_directory() -> None:
+    assert Glob().summary({"pattern": "**/*.py"}) == "Glob **/*.py"
+    assert Glob().summary({"pattern": "*.py", "path": "."}) == "Glob *.py"
+    assert Glob().summary({"pattern": "*.py", "path": ""}) == "Glob *.py"
+    assert Glob().summary({"pattern": "*.py", "path": "src"}) == "Glob *.py in src"
+    assert Glob().summary({}) == "Glob "
 
 
-@pytest.mark.asyncio
-async def test_star_excludes_dotfiles_as_documented(tmp_path: Path) -> None:
-    """``*`` must exclude hidden entries, and ``.*`` must find them.
+def test_matching_runs_beside_anything(tmp_path: Path) -> None:
+    assert Glob().serialize_key(ToolContext(cwd=tmp_path), {"pattern": "*"}) is None
 
-    The class docstring makes this the stated difference from List --
-    "Glob's pattern controls dotfile inclusion (``*`` excludes, ``.*``
-    matches only)" -- and it is why List carries a ``show_hidden`` toggle
-    and Glob does not. ``Path.glob`` does not implement that rule, so an
-    unfiltered ``*`` returned ``.env`` and ``.git`` contents to a caller
-    who asked for visible files.
-    """
-    (tmp_path / "visible.py").write_text("", encoding="utf-8")
-    (tmp_path / ".secret").write_text("", encoding="utf-8")
-    shown = await _run_glob({"pattern": "*", "path": str(tmp_path)}, tmp_path)
-    assert "visible.py" in shown.content
-    assert ".secret" not in shown.content, "'*' returned a dotfile"
-    hidden = await _run_glob({"pattern": ".*", "path": str(tmp_path)}, tmp_path)
-    assert ".secret" in hidden.content, "'.*' did not return the dotfile"
+
+def test_the_schema_admits_zero_for_no_cap() -> None:
+    assert parse({"pattern": "*", "max_results": 0}, Glob.Arguments).max_results == 0
 
 
 @pytest.mark.asyncio
-async def test_a_dot_segment_opts_into_its_hidden_directory(tmp_path: Path) -> None:
-    """``.config/*.json`` names a hidden directory, so its contents match."""
-    (tmp_path / ".config").mkdir()
-    (tmp_path / ".config" / "x.json").write_text("", encoding="utf-8")
-    shown = await _run_glob({"pattern": ".config/*.json"}, tmp_path)
-    assert "x.json" in shown.content, shown.content
-
-
-@pytest.mark.asyncio
-async def test_gitignored_paths_never_match(tmp_path: Path) -> None:
-    """``Path.glob`` returned ``.venv/**`` and build output; ``.gitignore`` rules."""
-    (tmp_path / ".git").mkdir()
-    (tmp_path / ".gitignore").write_text("build/\n", encoding="utf-8")
-    (tmp_path / "build").mkdir()
-    (tmp_path / "build" / "out.py").write_text("", encoding="utf-8")
-    (tmp_path / "kept.py").write_text("", encoding="utf-8")
-    shown = await _run_glob({"pattern": "**/*.py", "path": str(tmp_path)}, tmp_path)
-    assert "kept.py" in shown.content
-    assert "out.py" not in shown.content, shown.content
-
-
-@pytest.mark.asyncio
-async def test_glob_returns_files_not_directories(tmp_path: Path) -> None:
+async def test_files_matching_the_pattern_come_back_as_absolute_paths(
+    tmp_path: Path,
+) -> None:
+    for name in ("b.py", "a.py", "c.txt"):
+        (tmp_path / name).write_text("")
     (tmp_path / "sub").mkdir()
-    (tmp_path / "sub" / "x.py").write_text("", encoding="utf-8")
-    shown = await _run_glob({"pattern": "*", "path": str(tmp_path)}, tmp_path)
-    assert shown.content == "(no matches)", shown.content
+    (tmp_path / "sub" / "d.py").write_text("")
+    assert (
+        await _glob(tmp_path, pattern="*.py")
+        == f"{tmp_path / 'a.py'}\n{tmp_path / 'b.py'}"
+    )
+    assert await _glob(tmp_path, pattern="**/*.py") == (
+        f"{tmp_path / 'a.py'}\n{tmp_path / 'b.py'}\n{tmp_path / 'sub' / 'd.py'}"
+    )
+    assert await _glob(tmp_path, pattern="*.py", path="sub") == str(
+        tmp_path / "sub" / "d.py",
+    )
+    assert await _glob(tmp_path, pattern="*.py", path="") == (
+        f"{tmp_path / 'a.py'}\n{tmp_path / 'b.py'}"
+    )
 
 
 @pytest.mark.asyncio
-async def test_glob_basic(tmp_path: Path) -> None:
-    (tmp_path / "a.py").write_text("")
-    (tmp_path / "b.py").write_text("")
-    (tmp_path / "c.txt").write_text("")
-    result = await _run_glob({"pattern": "*.py", "path": str(tmp_path)}, tmp_path)
-    assert "a.py" in result.content
-    assert "b.py" in result.content
-    assert "c.txt" not in result.content
+async def test_star_skips_dotfiles_and_a_dot_segment_opts_in(tmp_path: Path) -> None:
+    (tmp_path / "shown.py").write_text("")
+    (tmp_path / ".secret").write_text("")
+    (tmp_path / ".config").mkdir()
+    (tmp_path / ".config" / "x.json").write_text("")
+    assert await _glob(tmp_path, pattern="*") == str(tmp_path / "shown.py")
+    assert await _glob(tmp_path, pattern=".*") == str(tmp_path / ".secret")
+    assert await _glob(tmp_path, pattern=".config/*.json") == str(
+        tmp_path / ".config" / "x.json",
+    )
 
 
 @pytest.mark.asyncio
-async def test_glob_no_matches(tmp_path: Path) -> None:
-    result = await _run_glob({"pattern": "*.absent", "path": str(tmp_path)}, tmp_path)
-    assert result.content == "(no matches)"
+async def test_what_git_ignores_never_matches(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text("build/\n")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "out.py").write_text("")
+    (tmp_path / "kept.py").write_text("")
+    assert await _glob(tmp_path, pattern="**/*.py") == str(tmp_path / "kept.py")
 
 
 @pytest.mark.asyncio
-async def test_glob_relative_uses_bash_cwd(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("")
-    result = await _run_glob({"pattern": "*.py"}, tmp_path)
-    assert "x.py" in result.content
+async def test_directories_and_absent_files_match_nothing(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
+    assert await _glob(tmp_path, pattern="sub") == "(no matches)"
+    assert await _glob(tmp_path, pattern=str(tmp_path)) == "(no matches)"
+    assert await _glob(tmp_path, pattern="*.absent") == "(no matches)"
+    assert await _glob(tmp_path, pattern="*", path="missing") == "(no matches)"
 
 
 @pytest.mark.asyncio
-async def test_glob_absolute_pattern(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("")
-    pattern = str(tmp_path / "*.py")
-    result = await _run_glob({"pattern": pattern}, tmp_path)
-    assert "x.py" in result.content
-
-
-@pytest.mark.asyncio
-async def test_glob_absolute_no_glob_chars(tmp_path: Path) -> None:
-    f = tmp_path / "exact.txt"
-    f.write_text("v")
-    result = await _run_glob({"pattern": str(f)}, tmp_path)
-    assert "exact.txt" in result.content
-
-
-@pytest.mark.asyncio
-async def test_glob_absolute_no_glob_chars_missing(tmp_path: Path) -> None:
-    result = await _run_glob({"pattern": str(tmp_path / "missing")}, tmp_path)
-    assert result.content == "(no matches)"
-
-
-@pytest.mark.asyncio
-async def test_absolute_and_relative_brace_patterns_agree(tmp_path: Path) -> None:
+async def test_an_absolute_pattern_ignores_the_path(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
     for sub in ("a", "b"):
-        (tmp_path / sub).mkdir()
         (tmp_path / sub / "x.py").write_text("")
-    relative = await _run_glob({"pattern": "{a,b}/x.py"}, tmp_path)
-    absolute = await _run_glob({"pattern": f"{tmp_path}/{{a,b}}/x.py"}, tmp_path)
-    assert relative.content.count("x.py") == 2, relative.content
-    assert absolute.content == relative.content
+    relative = await _glob(tmp_path, pattern="{a,b}/x.py")
+    absolute = await _glob(tmp_path, pattern=f"{tmp_path}/{{a,b}}/x.py", path="a")
+    assert relative == f"{tmp_path / 'a' / 'x.py'}\n{tmp_path / 'b' / 'x.py'}"
+    assert absolute == relative
+    assert await _glob(tmp_path, pattern=str(tmp_path / "a" / "x.py")) == str(
+        tmp_path / "a" / "x.py",
+    )
 
 
 @pytest.mark.asyncio
-async def test_an_absolute_directory_is_not_a_file_match(tmp_path: Path) -> None:
-    """Glob lists only files, so naming a directory matches nothing."""
-    (tmp_path / "f.txt").write_text("")
-    result = await _run_glob({"pattern": str(tmp_path)}, tmp_path)
-    assert result.content == "(no matches)", result.content
-
-
-@pytest.mark.asyncio
-async def test_a_symlink_is_reported_under_its_own_path(tmp_path: Path) -> None:
+async def test_a_link_is_listed_under_its_own_path(tmp_path: Path) -> None:
     (tmp_path / "target.py").write_text("")
     (tmp_path / "link.py").symlink_to(tmp_path / "target.py")
-    result = await _run_glob({"pattern": "*.py"}, tmp_path)
-    assert result.content.splitlines() == [
-        str(tmp_path / "link.py"),
-        str(tmp_path / "target.py"),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_a_malformed_pattern_is_a_tool_error(tmp_path: Path) -> None:
-    """``Tool.run`` must not raise; a ``GlobError`` becomes ``is_error``."""
-    result = await _run_glob({"pattern": "{a"}, tmp_path)
-    assert result.is_error
-    assert "unclosed" in result.content
+    assert await _glob(tmp_path, pattern="*.py") == (
+        f"{tmp_path / 'link.py'}\n{tmp_path / 'target.py'}"
+    )
 
 
 @pytest.mark.asyncio
@@ -175,226 +123,173 @@ async def test_a_tilde_path_is_the_home_directory(
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
     (tmp_path / "home" / "h.py").write_text("")
-    result = await _run_glob({"pattern": "*.py", "path": "~"}, tmp_path)
-    assert result.content == str(tmp_path / "home" / "h.py"), result.content
-
-
-def test_declared_result_cap_is_the_cap_that_applies() -> None:
-    assert Glob.max_result_chars <= DEFAULT_MAX_RESULT_CHARS
+    assert await _glob(tmp_path, pattern="*.py", path="~") == str(
+        tmp_path / "home" / "h.py",
+    )
 
 
 @pytest.mark.asyncio
-async def test_glob_recursive(tmp_path: Path) -> None:
-    (tmp_path / "x.py").write_text("")
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    (sub / "y.py").write_text("")
-    result = await _run_glob({"pattern": "**/*.py", "path": str(tmp_path)}, tmp_path)
-    assert "y.py" in result.content
+async def test_a_malformed_pattern_is_an_error(tmp_path: Path) -> None:
+    result = await Glob().call(ToolContext(cwd=tmp_path), {"pattern": "{a"})
+    assert result.is_error is True
+    assert result.call_id == ""
+    assert result.text() == "unclosed alternate group in glob: '{a'"
 
 
 @pytest.mark.asyncio
-async def test_glob_max_results_truncates(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("window", "names", "note"),
+    [
+        (
+            {"max_results": 3},
+            ["f0", "f1", "f2"],
+            "... (7 more; pass offset=3 to continue)",
+        ),
+        ({"offset": 8}, ["f8", "f9"], ""),
+        (
+            {"offset": 4, "max_results": 2},
+            ["f4", "f5"],
+            "... (4 more; pass offset=6 to continue)",
+        ),
+        ({"max_results": 10}, [f"f{i}" for i in range(10)], ""),
+    ],
+)
+async def test_a_window_pages_through_the_matches(
+    tmp_path: Path,
+    window: dict[str, PlainTree],
+    names: list[str],
+    note: str,
+) -> None:
     for i in range(10):
-        (tmp_path / f"f{i:02d}.py").write_text("")
-    result = await _run_glob(
-        {"pattern": "*.py", "path": str(tmp_path), "max_results": 3},
-        tmp_path,
-    )
-    assert "7 more; pass offset=3 to continue" in result.content
+        (tmp_path / f"f{i}").write_text("")
+    shown = await _glob(tmp_path, pattern="f*", **window)
+    rows = [str(tmp_path / name) for name in names] + ([note] if note else [])
+    assert shown == "\n".join(rows)
 
 
 @pytest.mark.asyncio
-async def test_glob_long_listing(tmp_path: Path) -> None:
-    f = tmp_path / "x.py"
-    f.write_text("v")
-    result = await _run_glob(
-        {"pattern": "*.py", "path": str(tmp_path), "long": True},
-        tmp_path,
-    )
-    # Long format includes size + mtime + path.
-    assert "x.py" in result.content
+async def test_a_window_past_the_end_says_so(tmp_path: Path) -> None:
+    (tmp_path / "f").write_text("")
+    assert await _glob(tmp_path, pattern="f", offset=5) == "(no matches in this window)"
 
 
 @pytest.mark.asyncio
-async def test_glob_sort_mtime_desc(tmp_path: Path) -> None:
-    (tmp_path / "old.py").write_text("")
-    (tmp_path / "new.py").write_text("")
-    # ``mtime_desc`` is a valid sort; just verify it doesn't error.
-    result = await _run_glob(
-        {"pattern": "*.py", "path": str(tmp_path), "sort": "mtime_desc"},
-        tmp_path,
-    )
-    assert "old.py" in result.content
-    assert "new.py" in result.content
+async def test_a_full_result_says_where_to_resume(tmp_path: Path) -> None:
+    for i in range(30):
+        (tmp_path / f"f{i:02d}").write_text("")
+    context = ToolContext(cwd=tmp_path, max_result_chars=len(str(tmp_path)) * 5 + 60)
+    result = await Glob().call(context, {"pattern": "f*"})
+    rows = result.text().splitlines()
+    kept = len(rows) - 1
+    assert 0 < kept < 30
+    assert rows[-1] == f"... ({30 - kept} more; pass offset={kept} to continue)"
+    assert len(result.text()) <= context.max_result_chars
 
 
 @pytest.mark.asyncio
-async def test_glob_max_results_zero_is_unlimited(tmp_path: Path) -> None:
-    """``0`` is the unlimited default, not an error: the pattern IS the filter."""
-    for i in range(5):
-        (tmp_path / f"a{i}.py").write_text("")
-    result = await _run_glob(
-        {"pattern": "*.py", "path": str(tmp_path), "max_results": 0},
-        tmp_path,
+async def test_matches_sort_and_may_carry_size_and_mtime(tmp_path: Path) -> None:
+    for name, size, age in (("a", 3, 100), ("b", 1, 0)):
+        (tmp_path / name).write_bytes(b"x" * size)
+        when = time.time() - age
+        os.utime(tmp_path / name, (when, when))
+    assert await _glob(tmp_path, pattern="?", sort="mtime_desc") == (
+        f"{tmp_path / 'b'}\n{tmp_path / 'a'}"
     )
-    assert not result.is_error
-    assert len(result.content.splitlines()) == 5
+    assert await _glob(tmp_path, pattern="?", sort="size") == (
+        f"{tmp_path / 'b'}\n{tmp_path / 'a'}"
+    )
+    when = time.strftime(
+        "%Y-%m-%d %H:%M",
+        time.localtime((tmp_path / "a").stat().st_mtime),
+    )
+    long = await _glob(tmp_path, pattern="a", long=True)
+    assert long == f"         3  {when}  {tmp_path / 'a'}"
 
 
 @pytest.mark.asyncio
-async def test_glob_max_results_negative_errors(tmp_path: Path) -> None:
-    (tmp_path / "a.py").write_text("")
-    result = await _run_glob(
-        {"pattern": "*.py", "path": str(tmp_path), "max_results": -1},
-        tmp_path,
-    )
-    assert result.is_error
-    assert "max_results" in result.content
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"pattern": "*", "offset": -1},
+        {"pattern": "*", "max_results": -1},
+        {"pattern": "*", "sort": "age"},
+    ],
+)
+async def test_arguments_that_do_not_fit_are_refused(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+) -> None:
+    with pytest.raises(ValueError, match=r"argument|must be"):
+        await Glob().call(ToolContext(cwd=tmp_path), arguments)
 
 
-@pytest.mark.asyncio
-async def test_glob_invalid_sort_errors(tmp_path: Path) -> None:
-    result = await _run_glob(
-        {"pattern": "*.py", "path": str(tmp_path), "sort": "bogus"},
-        tmp_path,
-    )
-    assert result.is_error
-    assert "unknown sort" in result.content
-
-
-def test_summary_basic() -> None:
-    assert glob_tool_instance.summary({"pattern": "*.py"}) == "Glob *.py"
-
-
-def test_summary_with_path() -> None:
-    assert (
-        glob_tool_instance.summary({"pattern": "*.py", "path": "/x"})
-        == "Glob *.py in /x"
-    )
-
-
-def test_prompt_empty() -> None:
-    assert glob_tool_instance.prompt() == ""
-
-
-def test_long_line_format(tmp_path: Path) -> None:
-    f = tmp_path / "x.py"
-    f.write_text("hello")
-    out = _long_line(f)
-    assert "x.py" in out
-    assert "5" in out  # 5 bytes file.
-
-
-def test_long_line_missing_file(tmp_path: Path) -> None:
-    missing = tmp_path / "no.py"
-    # ``_long_line`` tolerates missing files via ``safe_*`` helpers.
-    out = _long_line(missing)
-    assert "no.py" in out
+@pytest.mark.parametrize(
+    ("command", "arguments"),
+    [
+        ("find . -name '*.py'", {"pattern": "**/*.py"}),
+        ("find -name '*.py'", {"pattern": "**/*.py"}),
+        ("find . -type f -name '*.py'", {"pattern": "**/*.py"}),
+        ("find . -name '*.py' -type f", {"pattern": "**/*.py"}),
+        ("find /src -name '*.PY'", {"pattern": "**/*.PY", "path": "/src"}),
+        ("find src -name x.md", {"pattern": "**/x.md", "path": "src"}),
+        ("cd /srv && find . -name '*.py'", {"pattern": "**/*.py", "path": "/srv"}),
+        ("find . -name '*.py' | head -5", {"pattern": "**/*.py", "max_results": 5}),
+        ("find . -name '*.py' | cat | head", {"pattern": "**/*.py", "max_results": 10}),
+    ],
+)
+def test_a_plain_find_by_name_becomes_the_glob_for_the_same_names(
+    command: str,
+    arguments: dict[str, PlainTree],
+) -> None:
+    assert _from_shell(command) == arguments
+    parse(arguments, Glob.Arguments)
 
 
 @pytest.mark.parametrize(
     "command",
     [
-        "find . -name '*.py'",
-        "find /src -iname '*.PY'",
-        "find . -type f -name '*.py'",
-        "cd src && find . -name '*.py'",
-        # No ``-name`` at all: still an enumeration Glob performs.
         "find . -type f",
-        # Predicates Glob cannot express are still a reach for Glob. The
-        # translated call is dropped, not the nudge.
-        "find . -mtime -1 -name '*.py'",
-        "find . -type l -name '*.py'",
-        "find /a /b -name '*.py'",
         "find . -name",
         "find . -type",
-    ],
-)
-def test_bash_match_find_nudges(command: str) -> None:
-    trees = parse_bash(command)
-    assert trees is not None
-    hint = glob_tool_instance.bash_match(trees) or ""
-    assert hint.startswith("find via Bash is a bad UX."), command
-
-
-@pytest.mark.parametrize(
-    ("command", "call"),
-    [
-        ("find . -name '*.py'", "Try: Glob pattern='**/*.py'"),
-        ("find /src -name '*.PY'", "Try: Glob pattern='**/*.PY' path='/src'"),
-        ("find . -type f -name '*.py'", "Try: Glob pattern='**/*.py'"),
-    ],
-)
-def test_bash_match_find_suggests_a_concrete_call(command: str, call: str) -> None:
-    trees = parse_bash(command)
-    assert trees is not None
-    assert call in (glob_tool_instance.bash_match(trees) or ""), command
-
-
-@pytest.mark.parametrize(
-    "command",
-    ["find . -mtime -1 -name '*.py'", "find /a /b -name '*.py'", "find . -type f"],
-)
-def test_an_untranslatable_predicate_drops_only_the_example(command: str) -> None:
-    """Detection must survive what the translator cannot render."""
-    trees = parse_bash(command)
-    assert trees is not None
-    hint = glob_tool_instance.bash_match(trees) or ""
-    assert hint.startswith("find via Bash is a bad UX.")
-    assert "Try: Glob" not in hint
-
-
-@pytest.mark.parametrize(
-    "command",
-    [
-        # These predicates ACT on what they match, so the command's
-        # product is the action rather than the path list.
+        "find . -type d -name x",
+        "find . -iname '*.PY'",
+        "find . -mtime -1 -name '*.py'",
+        "find /a /b -name '*.py'",
+        "find . -name 'a/b'",
+        "find . -name a -name b",
+        "find $D -name '*.py'",
+        'find . -name "$P"',
+        "cd - && find . -name '*.py'",
+        "find . -name '*.py' | tail -3",
+        "find . -name '*.py' | head -n +3",
+        "find . -name '*.py' | xargs grep p",
+        "find . -name '*.py' | sort",
         "find . -name '*.pyc' -delete",
         "find . -name '*.py' -exec wc -l {} +",
-        "find . -name '*.py' -fprint out.txt",
-        "find . -name '*.py' -fprint0 out.txt",
-        "find . -name '*.py' -fls out.txt",
+        "find . -name '*.py' > out",
+        "FOO=1 find . -name '*.py'",
+        "ls -la",
     ],
 )
-def test_bash_match_find_that_acts_is_silent(command: str) -> None:
-    trees = parse_bash(command)
-    assert trees is not None
-    assert glob_tool_instance.bash_match(trees) is None, command
+def test_a_find_glob_cannot_repeat_stays_a_shell_command(command: str) -> None:
+    assert _from_shell(command) is None
 
 
-def test_the_find_denylist_has_exactly_one_definition() -> None:
-    """Two copies of one policy diverge; one definition is what stops that.
-
-    They already had: ``-fprint0`` was added to the classifier's copy and
-    not Glob's, so the same predicate was a writer to ``is_read_only``
-    and a nudgeable listing here.
-    """
-    src = Path(glob_tool.__file__).read_text()
-    assert "FIND_DENY_FLAGS" in src
-    assert "-exec" not in src, "glob_tool re-lists the find denylist"
+async def _glob(cwd: Path, **arguments: PlainTree) -> str:
+    """Return what Glob shows for ``arguments`` in a fresh context at ``cwd``."""
+    result = await Glob().call(ToolContext(cwd=cwd), arguments)
+    assert result.call_id == ""
+    assert result.is_error is None, result.text()
+    return result.text()
 
 
-def test_bash_match_env_prefix_no_nudge() -> None:
-    trees = parse_bash("FOO=1 find . -name '*.py'")
-    assert trees is not None
-    assert glob_tool_instance.bash_match(trees) is None
-
-
-def test_bash_match_non_find_no_nudge() -> None:
-    trees = parse_bash("ls -la")
-    assert trees is not None
-    assert glob_tool_instance.bash_match(trees) is None
-
-
-def test_schema_admits_the_unlimited_default() -> None:
-    """``_run`` implements 0 as unlimited, so the schema must permit it."""
-    err = validate_tool_input(
-        "Glob",
-        Glob.directive_schema,
-        {"pattern": "*.py", "max_results": 0},
-    )
-    assert err is None, f"schema rejects the documented unlimited default: {err}"
+def _from_shell(command: str) -> PlainTree:
+    """Return what Glob makes of the first command in ``command``."""
+    found = invocations(command)
+    assert found is not None
+    result = Glob().from_shell(found[0])
+    return result if result is None or isinstance(result, str) else dict(result)
 
 
 if __name__ == "__main__":

@@ -1,193 +1,207 @@
-"""Tests for ``tools.display``: tool output display policy."""
+"""Tests for how a tool call's input row and output show in the terminal."""
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 
-from sagent.tools.display import (
-    OutputSpec,
-    ToolDisplay,
-    format_output,
-    row_spec,
-)
+from sagent.tools.display import DisplaySpec, ToolDisplay, override
 
 
-def test_hidden_body_renders_nothing() -> None:
-    assert format_output("alpha", OutputSpec(show=False)) == []
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
-def test_blank_text_renders_nothing() -> None:
-    assert format_output("   \n\n", OutputSpec(show=True, unbounded=True)) == []
+def _numbered(n: int) -> str:
+    return "\n".join(str(i) for i in range(n))
 
 
-def test_unbounded_body_keeps_every_line() -> None:
-    assert format_output("a\nb\nc", OutputSpec(show=True, unbounded=True)) == [
+def test_a_hidden_or_blank_block_renders_nothing() -> None:
+    assert DisplaySpec(lines=(0, 0)).render("a\nb", width=80) == []
+    assert DisplaySpec(lines=None).render("   \n\n", width=80) == []
+
+
+def test_keeping_all_lines_shows_every_one() -> None:
+    assert DisplaySpec(lines=None).render("a\nb\nc\n", width=80) == ["a", "b", "c"]
+
+
+def test_head_and_tail_are_kept_with_a_count_between() -> None:
+    assert DisplaySpec(lines=(2, 2)).render(_numbered(10), width=80) == [
+        "0",
+        "1",
+        "⋯ 6 lines ⋯",
+        "8",
+        "9",
+    ]
+
+
+def test_a_tail_alone_keeps_the_last_lines() -> None:
+    assert DisplaySpec(lines=(0, 2)).render(_numbered(10), width=80) == [
+        "⋯ 8 lines ⋯",
+        "8",
+        "9",
+    ]
+
+
+def test_a_head_alone_does_not_repeat_the_block() -> None:
+    """``rows[-0:]`` is every row, so a zero tail must keep none."""
+    assert DisplaySpec(lines=(2, 0)).render(_numbered(10), width=80) == [
+        "0",
+        "1",
+        "⋯ 8 lines ⋯",
+    ]
+
+
+def test_a_block_within_the_budget_is_untouched() -> None:
+    assert DisplaySpec(lines=(2, 2)).render(_numbered(4), width=80) == [
+        "0",
+        "1",
+        "2",
+        "3",
+    ]
+
+
+def test_kept_lines_stay_whole_when_folded() -> None:
+    """Lines are counted before folding, so a kept line never shows as a fragment."""
+    text = "\n".join(f"{i}" + "x" * 19 for i in range(5))
+    rows = DisplaySpec(lines=(1, 1)).render(text, width=10)
+    assert rows == [
+        "0xxxxxxxxx",
+        "xxxxxxxxxx",
+        "⋯ 3 lines ⋯",
+        "4xxxxxxxxx",
+        "xxxxxxxxxx",
+    ]
+
+
+def test_the_count_marker_is_never_folded() -> None:
+    rows = DisplaySpec(lines=(1, 1)).render(_numbered(10), width=4)
+    assert "⋯ 8 lines ⋯" in rows
+
+
+def test_ellipsis_cuts_a_wide_line_and_marks_the_cut() -> None:
+    spec = DisplaySpec(lines=None, overflow="ellipsis")
+    assert spec.render("abcdef", width=4) == ["abc…"]
+    assert spec.render("abcd", width=4) == ["abcd"]
+    assert spec.render("abc", width=1) == ["a…"]
+
+
+def test_folding_counts_cells_not_characters() -> None:
+    assert DisplaySpec(lines=None).render("日本語", width=4) == ["日本", "語"]
+
+
+def test_a_spec_width_overrides_the_panes() -> None:
+    assert DisplaySpec(lines=None, width=2).render("abcdef", width=99) == [
+        "ab",
+        "cd",
+        "ef",
+    ]
+
+
+def test_a_zero_width_does_not_fold() -> None:
+    assert DisplaySpec(lines=None).render("abcdef", width=0) == ["abcdef"]
+
+
+def test_an_empty_line_survives_folding() -> None:
+    assert DisplaySpec(lines=None).render("a\n\nb", width=4) == ["a", "", "b"]
+
+
+def test_every_line_of_an_uncut_block_is_folded() -> None:
+    assert DisplaySpec(lines=(2, 2)).render("a\nbbbbb\nc", width=2) == [
         "a",
+        "bb",
+        "bb",
         "b",
         "c",
     ]
 
 
-def test_head_and_tail_are_kept_with_a_marker_between() -> None:
-    body = "\n".join(str(i) for i in range(10))
-    got = format_output(body, OutputSpec(show=True, head_rows=2, tail_rows=2))
-    assert got == ["0", "1", "\u22ef 6 lines \u22ef", "8", "9"]
+def test_only_trailing_newlines_are_dropped() -> None:
+    assert DisplaySpec(lines=None).render("a  \n\t\n\n", width=0) == ["a  ", "\t"]
 
 
-def test_tail_only_keeps_the_last_rows() -> None:
-    """A test run's answer is its final line; head-only truncation loses it."""
-    body = "\n".join(str(i) for i in range(10))
-    got = format_output(body, OutputSpec(show=True, tail_rows=2))
-    assert got == ["\u22ef 8 lines \u22ef", "8", "9"]
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: DisplaySpec(lines=(-1, 1)),
+        lambda: DisplaySpec(lines=(1, -1)),
+        lambda: DisplaySpec(width=-1),
+    ],
+    ids=["head", "tail", "width"],
+)
+def test_a_negative_count_is_rejected(build: Callable[[], DisplaySpec]) -> None:
+    with pytest.raises(ValueError, match="negative count"):
+        build()
 
 
-def test_head_only_does_not_duplicate_the_body() -> None:
-    """``rows[-0:]`` is the whole list -- a zero tail must slice empty."""
-    body = "\n".join(str(i) for i in range(10))
-    got = format_output(body, OutputSpec(show=True, head_rows=2))
-    assert got == ["0", "1", "\u22ef 8 lines \u22ef"]
+def test_a_tool_shows_its_input_whole_and_hides_its_output_by_default() -> None:
+    display = ToolDisplay()
+    assert display.command == DisplaySpec(lines=None)
+    assert display.output.render("a\nb", width=80) == []
+    assert display.command_language == ""
 
 
-def test_body_within_budget_is_untouched() -> None:
-    got = format_output("a\nb", OutputSpec(show=True, head_rows=2, tail_rows=2))
-    assert got == ["a", "b"]
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [
+        ("output.lines=3,1", ToolDisplay(output=DisplaySpec(lines=(3, 1)))),
+        ("output.lines=all", ToolDisplay(output=DisplaySpec(lines=None))),
+        ("output.width=40", ToolDisplay(output=DisplaySpec(lines=(0, 0), width=40))),
+        (
+            "command.overflow=ellipsis",
+            ToolDisplay(command=DisplaySpec(lines=None, overflow="ellipsis")),
+        ),
+        (
+            "command.overflow=fold",
+            ToolDisplay(command=DisplaySpec(lines=None, overflow="fold")),
+        ),
+        ("command.lines=2,0", ToolDisplay(command=DisplaySpec(lines=(2, 0)))),
+        ("command_language=bash", ToolDisplay(command_language="bash")),
+        ("command_language=a=b", ToolDisplay(command_language="a=b")),
+    ],
+)
+def test_override_changes_one_setting(setting: str, expected: ToolDisplay) -> None:
+    assert override(ToolDisplay(), setting) == expected
 
 
-def test_budget_counts_logical_lines_and_keeps_them_whole() -> None:
-    """A kept line must survive intact, not as a wrapped fragment.
-
-    Slicing already-wrapped rows kept the TAIL of one long line -- the
-    reader saw ``il -2`` where the final command line belonged, which
-    reads as corruption rather than elision.
-    """
-    body = "\n".join(f"{i}" + "x" * 39 for i in range(5))
-    got = format_output(
-        body,
-        OutputSpec(show=True, head_rows=1, tail_rows=1, max_width=10),
+def test_override_keeps_the_other_settings() -> None:
+    display = ToolDisplay(
+        command=DisplaySpec(lines=(3, 1)),
+        output=DisplaySpec(),
+        command_language="bash",
     )
-    assert "".join(got[:4]) == "0" + "x" * 39, got
-    assert got[4].startswith("\u22ef"), got
-    assert "".join(got[5:]) == "4" + "x" * 39, got
+    changed = override(display, "output.width=9")
+    assert changed.output == DisplaySpec(width=9)
+    assert changed.command == display.command
+    assert changed.command_language == "bash"
 
 
-def test_wrapping_still_bounds_each_kept_line() -> None:
-    body = "\n".join("x" * 40 for _ in range(2))
-    got = format_output(body, OutputSpec(show=True, unbounded=True, max_width=10))
-    assert all(len(row) <= 10 for row in got), got
-
-
-def test_the_elision_marker_is_never_wrapped() -> None:
-    """The marker is ours, not content; chopping it hides the count."""
-    body = "\n".join(str(i) for i in range(10))
-    got = format_output(
-        body,
-        OutputSpec(show=True, head_rows=1, tail_rows=1, max_width=4),
-    )
-    assert "\u22ef 8 lines \u22ef" in got, got
-
-
-def test_chop_keeps_the_head_and_marks_the_cut() -> None:
-    assert format_output(
-        "abcdef",
-        OutputSpec(show=True, unbounded=True, wrap="chop"),
-        width=4,
-    ) == ["abc\u2026"]
-
-
-def test_chop_leaves_a_fitting_line_unmarked() -> None:
-    assert format_output(
-        "abc",
-        OutputSpec(show=True, unbounded=True, wrap="chop"),
-        width=4,
-    ) == ["abc"]
-
-
-def test_max_width_overrides_the_caller_width() -> None:
-    got = format_output(
-        "abcdef",
-        OutputSpec(show=True, unbounded=True, max_width=2),
-        width=99,
-    )
-    assert got == ["ab", "cd", "ef"]
-
-
-def test_row_spec_reads_flat_attributes() -> None:
-    class _Tool:
-        output = "on"
-        output_head_rows = 2
-        output_tail_rows = 3
-        output_max_width = 40
-        output_wrap = "chop"
-
-    assert row_spec(_Tool()).output == OutputSpec(
-        show=True,
-        head_rows=2,
-        tail_rows=3,
-        max_width=40,
-        wrap="chop",
-    )
-
-
-def test_row_spec_defaults_to_hidden_for_an_unaware_tool() -> None:
-    """Tools with no knob must not start dumping bodies into the pane."""
-
-    class _Tool:
-        pass
-
-    assert row_spec(_Tool()) == ToolDisplay()
-
-
-def test_command_knobs_bound_the_input_row() -> None:
-    """A heredoc must not flood the pane before the tool even runs."""
-
-    class _Tool:
-        output = "on"
-        output_head_rows = 2
-        output_tail_rows = 2
-        output_max_width = 0
-        output_wrap = "wrap"
-        command_head_rows = 3
-        command_tail_rows = 1
-        command_lang = "bash"
-
-    display = row_spec(_Tool())
-    assert display.command == OutputSpec(
-        show=True,
-        head_rows=3,
-        tail_rows=1,
-        max_width=0,
-        wrap="wrap",
-    )
-    assert display.command_lang == "bash"
-
-
-def test_command_is_unbounded_without_command_knobs() -> None:
-    """A one-line path or receipt needs no budget."""
-
-    class _Tool:
-        output = "on"
-        output_head_rows = 2
-        output_tail_rows = 2
-        output_max_width = 0
-        output_wrap = "wrap"
-
-    assert row_spec(_Tool()).command == OutputSpec(show=True, unbounded=True)
-
-
-def test_a_zero_budget_hides_the_body() -> None:
-    """``head=0 tail=0`` reads as "keep nothing", not "keep everything".
-
-    ``bounded`` being ``head > 0 or tail > 0`` sent an all-zero budget
-    down the UNBOUNDED path, so the knob that looks like the tightest
-    setting produced the loosest output.
-    """
-    assert format_output("a\nb\nc", OutputSpec(show=True)) == []
-
-
-def test_a_negative_budget_is_rejected() -> None:
-    """``head_rows=-1`` silently drops a line and miscounts the elision."""
-    with pytest.raises(ValueError, match="negative"):
-        _ = OutputSpec(show=True, head_rows=-1, tail_rows=1)
+@pytest.mark.parametrize(
+    ("setting", "message"),
+    [
+        ("output.lines", "lacks '='"),
+        (
+            "input.lines=1,1",
+            (
+                r"^Unknown display setting 'input.lines'\. Settable: command_language, and"
+                r" command or output with \.lines, \.width, or \.overflow\.$"
+            ),
+        ),
+        ("output.color=red", "Unknown display setting 'output.color'"),
+        ("output.lines=3", "lines must be HEAD,TAIL or all, not '3'"),
+        ("output.lines=a,1", "lines must be HEAD,TAIL or all"),
+        ("output.lines=1,b", "lines must be HEAD,TAIL or all"),
+        ("output.width=wide", "width must be a whole number, not 'wide'"),
+        ("output.overflow=wrap", "overflow must be fold or ellipsis, not 'wrap'"),
+    ],
+)
+def test_override_rejects_a_setting_that_does_not_fit(
+    setting: str,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        override(ToolDisplay(), setting)
 
 
 if __name__ == "__main__":

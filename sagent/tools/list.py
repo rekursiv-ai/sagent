@@ -1,405 +1,255 @@
-"""List tool: directory listing (replacement for ``ls``)."""
+"""List: a directory's entries, like ``ls``.
+
+Typical usage example:
+
+  result = await List().call(context, {"path": "src", "sort": "mtime_desc"})
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Final
+from dataclasses import dataclass, field
+from importlib.resources import files
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import asyncio
 import time
 
-from treekle import from_plain, immutable
-
-from sagent.tools.core import load_tool_description, resolve_tool_path
-from sagent.tools.display import Toggle, Wrap
-from sagent.tools.lib.bash import (
+from sagent.session.types import UncategorizedToolResult
+from sagent.tools.command_analyzer import (
+    Invocation,
     bounding_sink,
-    cwd_is_known,
+    line_count,
     operands,
-    parse_line_count,
-    render_command,
     replaceable,
-    resolve_cwd_path,
-    walk_commands,
+    resolve,
 )
-from sagent.tools.lib.path_sort import (
-    SORT_VALUES,
-    safe_mtime,
-    safe_size,
-    sort_paths,
-)
-from sagent.tools.tool_spec import CLI_SETTABLE
-from sagent.types.runtime import ToolResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import Arg, parse, schema_of
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
+    from pathlib import Path
 
-    from bashlex.ast import (
-        node as Node,  # noqa: N812 -- PascalCase for the type name; bashlex spells it lowercase.
-    )
+    from treekle import PlainTree
+
+    from sagent.tools.types import ToolContext
 
 
-_LS_EXES: frozenset[str] = frozenset({"ls"})
+__all__ = [
+    "List",
+    "Sort",
+    "ls_row",
+    "sort_paths",
+]
 
-_DEFAULT_SORT: Final = "name"
+
+type Sort = Literal[
+    "name",
+    "name_desc",
+    "mtime",
+    "mtime_desc",
+    "size",
+    "size_desc",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class List:
-    """List directory contents."""
+    """List a directory's entries."""
+
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        path: Annotated[str, "Directory to list (absolute or cwd-relative)."]
+        show_hidden: Annotated[bool, "Include dotfiles. Default false."] = False
+        long: Annotated[
+            bool,
+            "Include size and mtime per entry, like ``ls -l``.",
+        ] = False
+        sort: Annotated[
+            Sort,
+            "Result ordering. Default 'name'. 'mtime_desc' is newest first;"
+            " 'size_desc' largest first.",
+        ] = "name"
+        max_results: Annotated[
+            int,
+            "Most entries. Default 500.",
+            Arg(minimum=1),
+        ] = 500
+        keep_last: Annotated[
+            int | None,
+            "Keep only the last N entries, in listing order, like"
+            " ``| tail -n N``. Overrides max_results.",
+            Arg(minimum=1),
+        ] = None
 
     name = "List"
-    tool_id = "application/x-tool-list"
-    clearable_results = True
-    description = load_tool_description("List")
-    directive_schema = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Directory to list (absolute or cwd-relative).",
-                },
-                "show_hidden": {
-                    "type": "boolean",
-                    "description": "Include dotfiles. Default false.",
-                },
-                "long": {
-                    "type": "boolean",
-                    "description": (
-                        "Include size and mtime per entry (like ``ls -l``)."
-                        " Default false."
-                    ),
-                },
-                "sort": {
-                    "type": "string",
-                    "enum": list(SORT_VALUES),
-                    "description": (
-                        "Result ordering. Default 'name' (alphabetical)."
-                        " 'mtime_desc' = newest first; 'size_desc' = largest first."
-                    ),
-                },
-                "max_results": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": "Maximum number of entries. Default 500.",
-                },
-                "keep_last": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "description": (
-                        "Keep only the trailing N entries, in listing order"
-                        " (like ``| tail -n N``). Takes precedence over"
-                        " max_results."
-                    ),
-                },
-            },
-            "required": ["path"],
-        },
+    description = (files(__package__) / "assets" / "list.md").read_text(
+        encoding="utf-8",
     )
+    schema = schema_of(Arguments)
 
-    output: Annotated[Toggle, CLI_SETTABLE] = "off"
-    """Whether the result body renders in the pane."""
+    display: ToolDisplay = field(default=ToolDisplay())
 
-    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Leading body rows kept."""
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``List <path>``."""
+        return f"List {arguments.get('path') or '.'}"
 
-    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
-
-    output_max_width: Annotated[int, CLI_SETTABLE] = 0
-    """Cell width cap; ``0`` uses the pane width."""
-
-    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
-    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
-
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short label for this directory listing.
-
-        Args:
-          args: Directive carrying ``path``.
-
-        Returns:
-          label: ``List <path>`` line shown before invocation.
-
-        """
-        path = str(args.get("path", "")) or "."
-        return f"List {path}"
-
-    def prompt(self) -> str:
-        """Return no supplemental system-prompt text for List.
-
-        Returns:
-          contribution: Empty string.
-
-        """
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: read-only listing needs no serialization."""
-        del args
-        return None
-
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """List directory entries with optional sort and long-format details.
-
-        Args:
-          args: Directive with ``path`` and optional ``show_hidden`` /
-              ``long`` / ``sort`` / ``max_results`` / ``keep_last``.
-
-        Returns:
-          result: Entry listing (one per line), or an error when the
-              target is missing or not a directory.
-
-        """
-        path = str(args.get("path", ".") or ".")
-        show_hidden = from_plain(args.get("show_hidden"), bool, default=False)
-        long = from_plain(args.get("long"), bool, default=False)
-        sort = str(args.get("sort", _DEFAULT_SORT) or _DEFAULT_SORT)
-        max_results = from_plain(args.get("max_results"), int, default=500)
-        # ``0`` is not "disabled": the schema floor is 1, so a supplied
-        # zero is a malformed directive. Distinguish absent from zero.
-        keep_last = from_plain(args.get("keep_last"), int, default=0)
-        if args.get("keep_last") is not None and keep_last < 1:
-            return ToolResult(
-                call_id="",
-                content=f"keep_last must be >= 1; got {keep_last}.",
-                is_error=True,
-            )
-        return await asyncio.to_thread(
-            self._run,
-            path,
-            show_hidden=show_hidden,
-            long=long,
-            sort=sort,
-            max_results=max_results,
-            keep_last=keep_last,
-        )
-
-    def _run(
+    def serialize_key(
         self,
-        path: str,
-        *,
-        show_hidden: bool,
-        long: bool,
-        sort: str,
-        max_results: int,
-        keep_last: int = 0,
-    ) -> ToolResult:
-        """Run the directory listing synchronously and return the result."""
-        if sort not in SORT_VALUES:
-            return ToolResult(
-                call_id="",
-                content=f"unknown sort: {sort!r} (expected one of {list(SORT_VALUES)})",
-                is_error=True,
-            )
-        if max_results < 1:
-            return ToolResult(
-                call_id="",
-                content=f"max_results must be >= 1; got {max_results}.",
-                is_error=True,
-            )
-        path = resolve_tool_path(path)
-        p = Path(path)
-        if not p.exists():
-            return ToolResult(call_id="", content=f"Not found: {path}", is_error=True)
-        if not p.is_dir():
-            return ToolResult(
-                call_id="",
-                content=f"Not a directory: {path}",
-                is_error=True,
-            )
-        try:
-            entries = list(p.iterdir())
-        except OSError as err:
-            return ToolResult(
-                call_id="",
-                content=f"Error reading {path}: {err}",
-                is_error=True,
-            )
-        if not show_hidden:
-            entries = [e for e in entries if not e.name.startswith(".")]
-        sort_paths(entries, sort)
-        total = len(entries)
-        # ``keep_last`` slices the TAIL without reordering, which is what
-        # ``| tail -n N`` does. Expressing it as a flipped sort returned
-        # the same entries reversed.
-        entries = entries[-keep_last:] if keep_last > 0 else entries[:max_results]
-        lines: list[str] = []
-        for e in entries:
-            name = e.name + ("/" if e.is_dir() else "")
-            if long:
-                size = safe_size(e)
-                mtime_raw = safe_mtime(e)
-                mtime = (
-                    time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime_raw))
-                    if mtime_raw
-                    else "?"
-                )
-                lines.append(f"{size:>10}  {mtime}  {name}")
-            else:
-                lines.append(name)
-        out = "\n".join(lines) or "(empty directory)"
-        if total > len(entries):
-            out += f"\n... ({total - len(entries)} more)"
-        return ToolResult(call_id="", content=out)
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``None``: listing changes nothing."""
+        del context, arguments
+        return None
 
-    def bash_match(self, trees: Sequence[Node]) -> str | None:
-        """Emit a hint when any command is an ``ls`` invocation.
-
-        Policy only: :func:`walk_commands` supplies every simple command
-        with its context, so a leading ``cd``, an enclosing loop, and a
-        trailing ``| head`` all reach this matcher without it re-deriving
-        AST shape.
+    def from_shell(
+        self,
+        invocation: Invocation,
+    ) -> Mapping[str, PlainTree] | str | None:
+        """Return the List call for ``ls`` of one directory.
 
         Args:
-          trees: Parsed bashlex command trees from the active Bash call.
+          invocation: One simple command, with its pipeline.
 
         Returns:
-          hint: Nudge string redirecting to the List tool, or ``None``.
+          arguments: The List call showing the same entries; a message for an
+            ``ls`` no call matches, such as one with a glob; or ``None`` when
+            the command is not ``ls``.
 
         """
-        for inv in walk_commands(trees):
-            if not replaceable(inv, exes=_LS_EXES):
-                continue
-            if _ls_has_glob_positional(operands("ls", inv.args)):
-                return "ls glob via Bash is a bad UX. Use the Glob tool."
-            # Anywhere downstream, not just adjacent: ``ls | cat | head -5``
-            # is the same five rows as ``ls | head -5``, and reading only
-            # the neighbour dropped the bound on the first spelling.
-            sink = bounding_sink(inv)
-            count = parse_line_count(sink.args) if sink else None
-            call = _ls_call(
-                inv.args,
-                cwd=inv.cwd,
-                max_results=count,
-                # ``tail`` keeps the LAST N in listing order. Rendering it
-                # as a reversed sort returned those same entries backwards.
-                keep_last=sink is not None and sink.exe == "tail",
-            )
-            return f"ls via Bash is a bad UX. Use the List tool. Replaces: `{render_command(inv)}`.{call}"
-        return None
+        if not replaceable(invocation, exes=frozenset({"ls"}), bare=True):
+            return None
+        refusal = "List one directory per List call; for a pattern, use Glob."
+        # Past ``--`` every word is a name, however it starts.
+        args = invocation.args
+        options = args[: args.index("--")] if "--" in args else args
+        flags = "".join(a[1:] for a in options if a.startswith("-") and a != "-")
+        paths = operands(args)
+        # ``-1`` and ``-h`` change only how rows look.
+        if (
+            set(flags) - set("laAtSr1h")
+            or ("t" in flags and "S" in flags)
+            or len(paths) > 1
+        ):
+            return refusal
+        target = resolve(invocation.cwd, paths[0] if paths else ".")
+        if target is None or any(c in target for c in "*?[$`"):
+            return refusal
+        key = "mtime" if "t" in flags else "size" if "S" in flags else "name"
+        # ``ls -t`` lists newest first; ``-r`` reverses whichever order.
+        newest_first = key != "name"
+        sort = key if ("r" in flags) == newest_first else f"{key}_desc"
+        arguments: dict[str, PlainTree] = {"path": target or "."}
+        if sort != "name":
+            arguments["sort"] = sort
+        if "l" in flags:
+            arguments["long"] = True
+        if set(flags) & set("aA"):
+            arguments["show_hidden"] = True
+        sink = bounding_sink(invocation)
+        if sink is not None:
+            count = line_count(sink.args)
+            if count is None:
+                return refusal
+            arguments["keep_last" if sink.exe == "tail" else "max_results"] = count
+        return arguments
+
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> UncategorizedToolResult:
+        """List a directory's entries, directories marked with ``/``.
+
+        Args:
+          context: The calling agent's state.
+          arguments: What the model passed, as ``List.Arguments``.
+
+        Returns:
+          result: One entry per line, or why there are none.
+
+        """
+        return await asyncio.to_thread(_list, context, parse(arguments, List.Arguments))
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _LsParse:
-    """Parsed ``ls`` flag state used to build a List-tool nudge."""
+def sort_paths(paths: list[Path], sort: Sort) -> None:
+    """Sort ``paths`` in place.
 
-    long: bool
-    """``-l`` flag was present."""
+    Args:
+      paths: The paths to sort.
+      sort: By ``name`` (as GNU ``ls``), ``mtime``, or ``size``; ``_desc``
+        reverses.
 
-    show_hidden: bool
-    """``-a`` / ``-A`` flag was present."""
-
-    sort: str | None
-    """Sort key derived from ``-t`` / ``-S`` / ``-r``, or ``None``."""
-
-    path: str
-    """The single directory operand; ``"."`` when omitted."""
-
-
-# One parse decides everything: ``_parse_ls`` already rejects several roots and unknown
-# flags, so deriving the path separately handed back a call that same parse had refused
-# -- ``ls a b`` suggested only ``a``, and ``ls -I '*.pyc' /src`` named the ignore-glob
-# as the directory.
-#
-# ``tail`` becomes ``keep_last``, not a flipped sort. Measured in a directory of
-# ``f1``..``f5``: ``ls | tail -n 3`` prints ``f3 f4 f5``, while ``sort='name_desc'
-# max_results=3`` returns ``f5 f4 f3`` -- the same entries in the opposite order.
-def _ls_call(
-    args: tuple[str, ...],
-    *,
-    cwd: str,
-    max_results: int | None,
-    keep_last: bool,
-) -> str:
-    """Render a concrete List call for ``ls`` args, or ``""``."""
-    parsed = _parse_ls(args)
-    if parsed is None:
-        return ""
-    # List resolves a relative path against the AGENT's cwd, not the
-    # shell's, so a ``cd`` prefix dropped here lists a different tree.
-    if not cwd_is_known(cwd):
-        # The ``cd`` destination is not in the command text.
-        return ""
-    target = resolve_cwd_path(cwd, parsed.path) or "."
-    pieces = [f"path={target!r}", *_ls_fields(parsed)]
-    if max_results is not None:
-        pieces.append(
-            f"keep_last={max_results}" if keep_last else f"max_results={max_results}",
-        )
-    return f" Try: List {' '.join(pieces)}"
-
-
-def _ls_fields(parsed: _LsParse) -> list[str]:
-    """Render the non-path List keywords implied by parsed ``ls`` flags."""
-    pieces: list[str] = []
-    if parsed.sort is not None:
-        pieces.append(f"sort={parsed.sort!r}")
-    if parsed.long:
-        pieces.append("long=true")
-    if parsed.show_hidden:
-        pieces.append("show_hidden=true")
-    return pieces
-
-
-def _ls_has_glob_positional(args: tuple[str, ...]) -> bool:
-    """Check whether any non-flag argument contains a glob metacharacter."""
-    for a in args:
-        if a == "--" or (a.startswith("-") and a != "-"):
-            continue
-        if any(c in a for c in "*?["):
-            return True
-    return False
-
-
-def _parse_ls(args: tuple[str, ...]) -> _LsParse | None:
-    """Parse ``ls`` flags. Returns None on unsupported flag or arg shape."""
-    long = False
-    show_hidden = False
-    sort_t = False
-    sort_s = False
-    reverse = False
-    positional: list[str] = []
-    for a in args:
-        if a == "--":
-            continue
-        if a.startswith("-") and a != "-":
-            if a.startswith("--"):
-                return None
-            for c in a[1:]:
-                if c == "l":
-                    long = True
-                elif c in {"a", "A"}:
-                    show_hidden = True
-                elif c == "t":
-                    sort_t = True
-                elif c == "S":
-                    sort_s = True
-                elif c == "r":
-                    reverse = True
-                else:
-                    return None
-            continue
-        positional.append(a)
-    if len(positional) > 1:
-        return None
-    if sort_t and sort_s:
-        return None
-    sort: str | None
-    if sort_t:
-        sort = "mtime" if reverse else "mtime_desc"
-    elif sort_s:
-        sort = "size" if reverse else "size_desc"
-    elif reverse:
-        sort = "name_desc"
+    """
+    key = sort.removesuffix("_desc")
+    if key == "name":
+        paths.sort(key=lambda p: (p.name.casefold(), p.name))
     else:
-        sort = None
-    return _LsParse(
-        long=long,
-        show_hidden=show_hidden,
-        sort=sort,
-        path=positional[0] if positional else ".",
+        paths.sort(key=lambda p: _stat(p, key))
+    if sort.endswith("_desc"):
+        paths.reverse()
+
+
+def ls_row(path: Path, *, name: str) -> str:
+    """Return ``path`` as an ``ls -l`` row: size, mtime, then ``name``.
+
+    Args:
+      path: The file or directory.
+      name: How the row names it.
+
+    Returns:
+      row: ``<size>  <YYYY-mm-dd HH:MM>  <name>``; ``?`` for an unreadable time.
+
+    """
+    mtime = _stat(path, "mtime")
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime)) if mtime else "?"
+    return f"{_stat(path, 'size'):>10}  {when}  {name}"
+
+
+def _list(context: ToolContext, a: List.Arguments) -> UncategorizedToolResult:
+    """List the directory ``a`` names."""
+    directory = context.path(a.path or ".")
+    if not directory.exists():
+        return _error(f"Not found: {directory}")
+    if not directory.is_dir():
+        return _error(f"Not a directory: {directory}")
+    try:
+        entries = list(directory.iterdir())
+    except OSError as e:
+        return _error(f"Error reading {directory}: {e}")
+    if not a.show_hidden:
+        entries = [e for e in entries if not e.name.startswith(".")]
+    sort_paths(entries, a.sort)
+    total = len(entries)
+    # A tail keeps listing order, as ``| tail`` does; a reversed sort would
+    # return the same entries backwards.
+    entries = (
+        entries[: a.max_results] if a.keep_last is None else entries[-a.keep_last :]
     )
+    names = [e.name + ("/" if e.is_dir() else "") for e in entries]
+    rows = (
+        [ls_row(e, name=n) for e, n in zip(entries, names, strict=True)]
+        if a.long
+        else names
+    )
+    out = "\n".join(rows) or "(empty directory)"
+    if total > len(entries):
+        out += f"\n... ({total - len(entries):,} more)"
+    return UncategorizedToolResult(call_id="", content=out)
+
+
+def _stat(path: Path, key: str) -> float:
+    """Return ``path``'s mtime or size, or ``0`` for a broken link."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return 0
+    return stat.st_mtime if key == "mtime" else stat.st_size
+
+
+def _error(message: str) -> UncategorizedToolResult:
+    return UncategorizedToolResult(call_id="", content=message, is_error=True)

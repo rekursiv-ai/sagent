@@ -1,198 +1,207 @@
-"""Managed llama.cpp provider."""
+"""Models in a ``llama-server`` this provider starts, or one already running.
+
+The server starts on the first request, not on lookup, and stops when the
+provider closes, or, if it never closes, when it is collected or Python exits. Settings come from keyword arguments, else the environment:
+``LLAMA_CPP_MODEL`` (a GGUF file), ``LLAMA_CPP_SERVER``, ``LLAMA_CPP_CONTEXT``,
+``LLAMA_CPP_KV``, ``LLAMA_CPP_SPEC_TYPE``, ``LLAMA_CPP_MTP_DRAFT``,
+``LLAMA_CPP_EXTRA_ARGS``, and ``LLAMA_CPP_BASE_URL`` for a server already up.
+
+Typical usage example:
+
+  async with LlamaCpp(model_path="~/models/qwen.gguf") as local:
+      async for event in local["default"].stream(request):   # Starts the server.
+          ...
+
+  running = LlamaCpp(base_url="http://127.0.0.1:8081/v1")
+"""
 
 from __future__ import annotations
 
-from http.client import HTTPResponse
+from collections import deque
 from pathlib import Path
-from queue import Empty, Queue
-from threading import Thread
-from typing import TYPE_CHECKING, ClassVar, Final, Self, cast, override
-from urllib import request
+from typing import TYPE_CHECKING, ClassVar, Protocol, override
 
-import atexit
+import asyncio
+import contextlib
 import os
 import shlex
 import shutil
+import signal
 import socket
-import subprocess
-import time
+import weakref
 
-from sagent.catalog.loader import models
-from sagent.catalog.openai import compatible
-from sagent.catalog.table import ModelCatalog
-from sagent.lib.userdirs import data_dir
-from sagent.providers.openai.compat import (
-    OpenAICompat,
-    OpenAICompatModel,
-)
+from sagent.lib.posix.child import Child, finish
+from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from asyncio.subprocess import Process
+    from collections.abc import Sequence
+
+    import httpx2
+
+    from sagent.providers.types import ProviderSharedResources
+else:
+    from wrapt import lazy_import
+
+    httpx2 = lazy_import("httpx2")
 
 
-class LlamaCpp(OpenAICompat):
-    """OpenAI-compatible provider backed by a managed llama-server process."""
+__all__ = [
+    "LlamaCpp",
+]
 
-    ENV_VAR: ClassVar[str] = "LLAMA_CPP_API_KEY"
-    BASE_URL: ClassVar[str] = "http://127.0.0.1:8081/v1"
 
-    catalog = ModelCatalog(models=models("llamacpp"), transport=compatible())
+class LlamaCpp(OpenAICompatible):
+    """Models in a ``llama-server`` process this provider manages.
+
+    Args:
+      name: The name the catalog knows this provider by; the section by default.
+      resources: What this shares with other providers; ``None`` makes and
+        closes its own.
+      api_key: The key a running server wants; empty reads
+        ``LLAMA_CPP_API_KEY``, else sends ``local``.
+      base_url: A server already running; empty reads ``LLAMA_CPP_BASE_URL``,
+        else starts one.
+      model_path: The GGUF file to serve; empty reads ``LLAMA_CPP_MODEL``.
+      server: The ``llama-server`` binary; empty reads ``LLAMA_CPP_SERVER``,
+        else searches ``PATH`` and Docker Desktop's bundled one.
+      context_tokens: The window to load the model with; ``0`` reads
+        ``LLAMA_CPP_CONTEXT``, else 16384.
+      kv_cache: The KV cache's quantization; empty reads ``LLAMA_CPP_KV``,
+        else ``q4_0``.
+      spec_type: The speculative decoder (``--spec-type``); empty reads
+        ``LLAMA_CPP_SPEC_TYPE``, else none.
+      draft_tokens: The tokens it drafts a step; ``0`` reads
+        ``LLAMA_CPP_MTP_DRAFT``, else 3.
+      extra_args: More flags; empty reads ``LLAMA_CPP_EXTRA_ARGS``.
+      startup_timeout_sec: How long the server may take to come up.
+
+    """
+
+    section: ClassVar[str] = "llamacpp"
+    package: ClassVar[str] = "sagent.providers.llamacpp"
+    document: ClassVar[str] = "llamacpp.yaml"
+    key_variable: ClassVar[str] = "LLAMA_CPP_API_KEY"
+
+    stop_timeout_sec: ClassVar[float] = 10.0
+    """How long a stopped server may take to exit before it is killed."""
 
     def __init__(
         self,
         *,
-        api_key: str = "local",
-        base_url: str | None = None,
+        name: str = "",
+        resources: ProviderSharedResources | None = None,
+        api_key: str = "",
+        base_url: str = "",
         model_path: str = "",
-        server_bin: str = "",
-        context_tokens: int = 16_384,
-        kv_cache: str = "q4_0",
+        server: str = "",
+        context_tokens: int = 0,
+        kv_cache: str = "",
         spec_type: str = "",
-        mtp_draft: int = 3,
+        draft_tokens: int = 0,
         extra_args: Sequence[str] = (),
         startup_timeout_sec: float = 120.0,
     ) -> None:
-        super().__init__(api_key=api_key, base_url=base_url)
-        self._model_path = model_path
-        self._server_bin = server_bin
-        self._context_tokens = context_tokens
-        self._kv_cache = kv_cache
-        self._spec_type = spec_type
-        self._mtp_draft = mtp_draft
-        self._extra_args = tuple(extra_args)
+        env = os.environ
+        super().__init__(
+            name=name,
+            resources=resources,
+            api_key=api_key,
+            base_url=base_url or env.get("LLAMA_CPP_BASE_URL", ""),
+        )
+        self._model_path = model_path or env.get("LLAMA_CPP_MODEL", "")
+        self._server = server or env.get("LLAMA_CPP_SERVER", "")
+        self._context_tokens = context_tokens or int(
+            env.get("LLAMA_CPP_CONTEXT", "16384"),
+        )
+        self._kv_cache = kv_cache or env.get("LLAMA_CPP_KV", "q4_0")
+        self._spec_type = spec_type or env.get("LLAMA_CPP_SPEC_TYPE", "")
+        self._draft_tokens = draft_tokens or int(env.get("LLAMA_CPP_MTP_DRAFT", "3"))
+        self._extra_args = tuple(
+            extra_args or shlex.split(env.get("LLAMA_CPP_EXTRA_ARGS", "")),
+        )
         self._startup_timeout_sec = startup_timeout_sec
-        self._process: subprocess.Popen[str] | None = None
-        self._log: list[str] = []
-        self._log_queue: Queue[str] = Queue()
-        self._started = False
-        atexit.register(self.close)
-
-    @classmethod
-    @override
-    def from_env(cls, *, base_url: str | None = None) -> Self:
-        """Build provider from llama.cpp environment variables.
-
-        Args:
-          base_url: OpenAI-compatible endpoint override.
-
-        Returns:
-          provider: Configured llama.cpp provider.
-
-        """
-        return cls._from_values(
-            base_url=base_url or os.environ.get("LLAMA_CPP_BASE_URL"),
-        )
-
-    @classmethod
-    @override
-    def from_key(cls, api_key: str, *, base_url: str | None = None) -> Self:
-        """Build provider from a GGUF path or dummy local API key.
-
-        Args:
-          api_key: GGUF path when launching a managed server, otherwise API key.
-          base_url: Existing OpenAI-compatible endpoint override.
-
-        Returns:
-          provider: Configured llama.cpp provider.
-
-        """
-        model_path = api_key if _looks_like_path(api_key) else ""
-        key = "local" if model_path else api_key or "local"
-        return cls._from_values(api_key=key, model_path=model_path, base_url=base_url)
-
-    @classmethod
-    def _from_values(
-        cls,
-        *,
-        api_key: str = "",
-        model_path: str = "",
-        base_url: str | None = None,
-    ) -> Self:
-        """Construct provider, defaulting unset values from environment variables."""
-        return cls(
-            api_key=api_key or os.environ.get(cls.ENV_VAR, "local") or "local",
-            base_url=base_url,
-            model_path=model_path or os.environ.get("LLAMA_CPP_MODEL", ""),
-            server_bin=os.environ.get("LLAMA_CPP_SERVER", ""),
-            context_tokens=int(os.environ.get("LLAMA_CPP_CONTEXT", "16384")),
-            kv_cache=os.environ.get("LLAMA_CPP_KV", "q4_0"),
-            spec_type=os.environ.get("LLAMA_CPP_SPEC_TYPE", ""),
-            mtp_draft=int(os.environ.get("LLAMA_CPP_MTP_DRAFT", "3")),
-            extra_args=shlex.split(os.environ.get("LLAMA_CPP_EXTRA_ARGS", "")),
-        )
+        self._process: Process | None = None
+        self._started_url = ""
+        self._reached = False
+        """Whether the running server named by ``base_url`` has answered once."""
+        self._log: _Log = _Log()
+        self._reading: asyncio.Task[None] | None = None
+        self._stopping: weakref.finalize[[Process], LlamaCpp] | None = None
+        self._lock = asyncio.Lock()
 
     @override
-    def model(
-        self,
-        model_id: str | None = None,
-    ) -> OpenAICompatModel:
-        """Start llama-server if needed and return the OpenAI-compatible model.
+    async def endpoint(self) -> str:
+        """Return the server's endpoint, starting the server if it is not up.
 
-        Args:
-          model_id: Model ID exposed to the OpenAI-compatible endpoint.
-
-        Returns:
-          model: Chat-completions model backend.
+        Raises:
+          RuntimeError: No model or binary is named, or the server exited or
+            did not come up in time; the message carries its log.
 
         """
-        self._ensure_started()
-        return super().model(model_id)
+        async with self._lock:
+            if self._process is not None and self._process.returncode is None:
+                return self._started_url
+            if self._base_url:
+                if not self._reached:
+                    await self._ready(self._base_url)
+                    self._reached = True
+                return self._base_url
+            await self._stop()
+            return await self._start()
 
-    def close(self) -> None:
-        """Terminate the managed llama-server process if it is running."""
-        proc = self._process
-        self._process = None
-        self._started = False
-        if proc is not None:
-            self.base_url = self.BASE_URL
-        if proc is None or proc.poll() is not None:
-            return
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=10)
+    @override
+    async def credentials(self) -> dict[str, str]:
+        key = self._api_key or os.environ.get(self.key_variable, "") or "local"
+        return {"authorization": f"Bearer {key}"}
 
-    def _ensure_started(self) -> None:
-        """Launch llama-server if not already running and wait for readiness."""
-        if self._started:
-            proc = self._process
-            if proc is None or proc.poll() is None:
-                return
-            self.close()
-        if self.base_url != self.BASE_URL or os.environ.get("LLAMA_CPP_BASE_URL", ""):
-            self._wait_ready()
-            self._started = True
-            return
+    @override
+    async def aclose(self) -> None:
+        await self._stop()
+        await super().aclose()
+
+    async def _start(self) -> str:
         if not self._model_path:
-            raise RuntimeError(
-                "LLAMA_CPP_MODEL or --auth /path/to/model.gguf is required.",
+            raise RuntimeError("Name a GGUF file with model_path= or LLAMA_CPP_MODEL.")
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = _port(probe)
+        self._process = (
+            await Child.start(
+                *self._argv(port),
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
             )
-        port = _free_port()
-        self.base_url = f"http://127.0.0.1:{port}/v1"
-        argv = self._argv(port)
-        self._process = subprocess.Popen(  # noqa: S603 -- argv is fixed plus explicit user-selected llama.cpp flags.
-            argv,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        _start_log_reader(self._process, self._log_queue)
+        ).process
+        # A provider dropped without ``aclose``, or a Python exiting first,
+        # would leave the server holding its GPU memory.
+        self._stopping = weakref.finalize(self, _terminate, self._process)
+        stdout = self._process.stdout
+        assert isinstance(stdout, asyncio.StreamReader)
+        self._log = _Log()
+        # Not a method: a task holding ``self`` would keep a dropped provider,
+        # and its server, alive.
+        self._reading = asyncio.create_task(_read_log(stdout, into=self._log))
+        self._started_url = f"http://127.0.0.1:{port}/v1"
         try:
-            self._wait_ready()
-        except Exception:
-            self.close()
+            await self._ready(self._started_url)
+        except BaseException:
+            await self._stop()
             raise
-        self._started = True
+        return self._started_url
 
     def _argv(self, port: int) -> list[str]:
-        """Build the llama-server command-line argv for the configured model."""
-        server = self._server_bin or shutil.which("llama-server") or _docker_server()
-        if server is None:
-            raise RuntimeError("llama-server not found; set LLAMA_CPP_SERVER.")
+        """Return the command line that serves the model on ``port``."""
+        docker = Path("~/.docker/bin/inference/llama-server").expanduser()
+        server = (
+            self._server
+            or shutil.which("llama-server")
+            or (str(docker) if docker.exists() else "")
+        )
+        if not server:
+            raise RuntimeError("llama-server was not found; set LLAMA_CPP_SERVER.")
         argv = [
             server,
             "-m",
@@ -203,116 +212,115 @@ class LlamaCpp(OpenAICompat):
             str(port),
         ]
         if self._spec_type:
-            argv.extend(
-                [
-                    "--spec-type",
-                    self._spec_type,
-                    "--spec-draft-n-max",
-                    str(self._mtp_draft),
-                ],
-            )
-        argv.extend(
-            [
-                "--cache-type-k",
-                self._kv_cache,
-                "--cache-type-v",
-                self._kv_cache,
-                "--parallel",
-                "1",
-                "-c",
-                str(self._context_tokens),
-                "-ngl",
-                "12",
-                "--reasoning",
-                "off",
-                *self._extra_args,
-            ],
-        )
-        return argv
+            argv += [
+                "--spec-type",
+                self._spec_type,
+                "--spec-draft-n-max",
+                str(self._draft_tokens),
+            ]
+        return [
+            *argv,
+            "--cache-type-k",
+            self._kv_cache,
+            "--cache-type-v",
+            self._kv_cache,
+            "--parallel",
+            "1",
+            "-c",
+            str(self._context_tokens),
+            "-ngl",
+            "12",
+            "--reasoning",
+            "off",
+            *self._extra_args,
+        ]
 
-    def _wait_ready(self) -> None:
-        """Poll the server's /models endpoint until it responds or timeout fires."""
-        deadline = time.monotonic() + self._startup_timeout_sec
-        while time.monotonic() < deadline:
-            self._drain_log()
-            proc = self._process
-            if proc is not None and proc.poll() is not None:
-                self._drain_log()
-                raise RuntimeError(_startup_error("llama-server exited", self._log))
-            if _http_ok(f"{self.base_url}/models"):
-                return
-            time.sleep(0.05)
-        raise RuntimeError(
-            _startup_error("llama-server did not become ready", self._log),
-        )
-
-    # Keeps the HEAD as well as the tail: llama.cpp names the real startup failure in
-    # its first lines (a missing model file, an impossible GPU layer count), so a tail-
-    # only window reported the generic noise that followed and dropped the diagnosis.
-    def _drain_log(self) -> None:
-        """Drain queued server log lines into the bounded buffer."""
-        while True:
+    async def _ready(self, url: str) -> None:
+        """Wait until the server at ``url`` lists its models."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._startup_timeout_sec
+        while loop.time() < deadline:
+            process = self._process
+            if process is not None and process.returncode is not None:
+                # The log explains the exit, and its reader may still be behind.
+                assert isinstance(self._reading, asyncio.Task)
+                await asyncio.wait({self._reading}, timeout=1.0)
+                raise RuntimeError(self._log.failure("llama-server exited"))
             try:
-                line = self._log_queue.get_nowait()
-            except Empty:
-                return
-            self._log.append(line)
-            if len(self._log) > _LOG_HEAD_LINES + _LOG_TAIL_LINES:
-                del self._log[_LOG_HEAD_LINES:-_LOG_TAIL_LINES]
+                response = await self.resources.http.get(f"{url}/models", timeout=1.0)
+                if response.is_success:
+                    return
+            except httpx2.TransportError:
+                pass
+            await asyncio.sleep(0.05)
+        raise RuntimeError(self._log.failure("llama-server did not come up"))
+
+    async def _stop(self) -> None:
+        """Stop the server: politely, then by force after ``stop_timeout_sec``."""
+        process, self._process = self._process, None
+        reading, self._reading = self._reading, None
+        stopping, self._stopping = self._stopping, None
+        if stopping is not None:
+            stopping.detach()
+        try:
+            if process is not None:
+                await Child(
+                    process=process,
+                    group=False,
+                    grace_sec=self.stop_timeout_sec,
+                ).stop()
+        finally:
+            if reading is not None:
+                reading.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await finish(reading)
 
 
-def _start_log_reader(proc: subprocess.Popen[str], out: Queue[str]) -> None:
-    """Spawn a daemon thread that copies the process stdout into ``out``."""
-    stream = proc.stdout
-    if stream is None:
-        return
-
-    def read_lines(source: Iterable[str]) -> None:
-        """Forward each stripped line from the subprocess stream to ``out``."""
-        for line in source:
-            out.put(line.rstrip())
-
-    Thread(target=read_lines, args=(stream,), daemon=True).start()
+def _port(bound: _Bound) -> int:
+    """Return the port an IPv4 socket is bound to."""
+    match bound.getsockname():
+        case (str(), int() as port):
+            return port
+        case _:
+            raise TypeError("The socket is not bound to an IPv4 address.")
 
 
-def _looks_like_path(value: str) -> bool:
-    """Check whether ``value`` looks like a filesystem path or a GGUF model file."""
-    return value.startswith(("/", "./", "../", "~/")) or value.endswith(".gguf")
+class _Bound(Protocol):
+    """A bound socket, whose address typeshed leaves untyped: its family decides it."""
+
+    def getsockname(self) -> object:
+        """Return the address the socket is bound to."""
+        ...
 
 
-def _docker_server() -> str | None:
-    """Return Docker Desktop's bundled llama-server path if present."""
-    path = data_dir().parents[1] / ".docker/bin/inference/llama-server"
-    return str(path) if path.exists() else None
+async def _read_log(stdout: asyncio.StreamReader, *, into: _Log) -> None:
+    async for line in stdout:
+        into.add(line.decode(errors="replace").rstrip())
 
 
-# Startup-log retention. Head keeps the failure cause (llama.cpp reports
-# it first); tail keeps the symptom that stopped the process.
-_LOG_HEAD_LINES: Final = 20
-_LOG_TAIL_LINES: Final = 40
+def _terminate(process: Process) -> None:
+    """Ask a server whose provider never closed to exit."""
+    if process.returncode is None:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(process.pid, signal.SIGTERM)
 
 
-def _free_port() -> int:
-    """Return an OS-assigned free localhost TCP port."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return cast(tuple[str, int], sock.getsockname())[1]
+class _Log:
+    """The server's output: its first lines and its last."""
 
+    def __init__(self) -> None:
+        self._head: list[str] = []
+        self._tail: deque[str] = deque(maxlen=40)
 
-def _http_ok(url: str) -> bool:
-    """Check whether a GET on ``url`` returns a 2xx response within 200ms."""
-    try:
-        with cast(HTTPResponse, request.urlopen(url, timeout=0.2)) as response:  # noqa: S310 -- local/provider-supplied readiness URL only.
-            return 200 <= response.status < 300
-    except OSError:
-        return False
+    def add(self, line: str) -> None:
+        # llama.cpp names the cause of a failed start (a missing file, a GPU
+        # layer count that cannot fit) in its first lines, before the noise.
+        if len(self._head) < 20:
+            self._head.append(line)
+        else:
+            self._tail.append(line)
 
-
-# ``lines`` is already bounded head-and-tail by :meth:`_drain_log`, so the whole buffer
-# is emitted: the cause is usually in the head and the symptom in the tail, and dropping
-# either loses the diagnosis.
-def _startup_error(prefix: str, lines: Sequence[str]) -> str:
-    """Format a startup-failure message with the captured log appended."""
-    if not lines:
-        return prefix
-    return f"{prefix}; recent log:\n" + "\n".join(lines)
+    def failure(self, prefix: str) -> str:
+        """Return ``prefix`` and the log, for an error that the log explains."""
+        lines = [*self._head, *self._tail]
+        return f"{prefix}; its log:\n" + "\n".join(lines) if lines else prefix

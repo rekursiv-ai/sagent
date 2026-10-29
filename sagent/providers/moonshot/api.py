@@ -1,78 +1,62 @@
-"""Moonshot provider - OpenAI chat-completions compatible.
+"""Kimi through Moonshot AI's OpenAI-compatible endpoint, billed to an API key.
 
-Usage::
+Typical usage example:
 
-    from sagent.providers import Moonshot
+  async with Moonshot() as moonshot:             # reads MOONSHOT_API_KEY
+      kimi = moonshot["default"]
 
-    provider = Moonshot.from_env()          # MOONSHOT_API_KEY
-    model = provider.model()            # kimi-3.0
-    response = await model.buffer(request)
-
-Self-hosted::
-
-    provider = Moonshot.from_key("no-auth", base_url="http://gpu-box:8000/v1")
-
-Moonshot streams reasoning text via ``reasoning_content`` (same as
-DeepSeek/DashScope). Tool-calling uses the standard ``tool_calls`` block.
+  box = Moonshot(api_key="none", base_url="http://gpu-box:8000/v1")
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, override
 
-from sagent.catalog.loader import models
-from sagent.catalog.openai import compatible
-from sagent.catalog.table import ModelCatalog
-from sagent.providers.openai.compat import (
-    OpenAICompat,
-    OpenAICompatModel,
-)
+from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
-    from treekle import MutablePlainTree
+    from sagent.model.types import Request
+    from sagent.providers.openai.compat import OpenAIModel
 
-    from sagent.types.model import ModelRequest
+
+__all__ = [
+    "Moonshot",
+]
 
 
-class _MoonshotModel(OpenAICompatModel):
-    """Moonshot backend - surfaces ``reasoning_content`` as thinking."""
+class Moonshot(OpenAICompatible):
+    """Kimi models, billed to the API key in ``MOONSHOT_API_KEY``.
 
-    _reasoning_field: ClassVar[str] = "reasoning_content"
+    Args:
+      name: The name the catalog knows this provider by; the section by default.
+      resources: What this shares with other providers; ``None`` makes and
+        closes its own.
+      api_key: The key; empty reads ``MOONSHOT_API_KEY``.
+      base_url: The endpoint; empty uses ``api.moonshot.ai``.
+
+    """
+
+    section: ClassVar[str] = "moonshot"
+    package: ClassVar[str] = "sagent.providers.moonshot"
+    document: ClassVar[str] = "moonshot.yaml"
+    url: ClassVar[str] = "https://api.moonshot.ai/v1"
+    key_variable: ClassVar[str] = "MOONSHOT_API_KEY"
+    reasoning_field: ClassVar[str] = "reasoning_content"
+    # K3 fixes its sampler and says to omit it; K2.x says the temperature
+    # cannot be changed and is not to be passed.
+    temperature: ClassVar[float | None] = None
 
     @override
-    def _transform_body(
-        self,
-        body: dict[str, MutablePlainTree],
-        request: ModelRequest,
-    ) -> dict[str, MutablePlainTree]:
-        """Drop the fixed sampler and map thinking onto Kimi's knobs."""
-        del request
-        # K3: "temperature=1.0 ... are fixed; omit them from requests"; K2.x:
-        # "temperature is not modifiable -- use the default and do not pass
-        # it explicitly".
-        body.pop("temperature", None)
-        # The base folds ``max`` onto OpenAI's ``high``; K3 takes the level
-        # verbatim, and its row offers only levels the wire spells.
-        if self.capability.effort_as_level and self.settings.thinking_effort != "none":
-            body["reasoning_effort"] = self.settings.thinking_effort
-        # Only K2.6 offers a switch; K3 and K2.7 Code "should not" be sent
-        # the ``thinking`` parameter at all.
-        if self.capability.thinking.budget == frozenset({"none", "auto"}):
-            body["thinking"] = {
-                "type": "disabled"
-                if self.settings.thinking_budget == "none"
-                else "enabled",
-            }
+    def encode(self, request: Request, *, model: OpenAIModel) -> dict[str, object]:
+        body = super().encode(request, model=model)
+        capability, settings = model.capability, model.settings
+        # The base folds ``max`` into OpenAI's ``high``; K3 takes its levels as
+        # they are, and its row offers only levels the wire spells.
+        if capability.effort_as_level:
+            body["reasoning_effort"] = settings.thinking_effort
+        # Only K2.6 has a switch; K3 and K2.7 Code are not to be sent one.
+        if capability.thinking_budget == frozenset({"none", "auto"}):
+            off = settings.thinking_budget == "none"
+            body["thinking"] = {"type": "disabled" if off else "enabled"}
         return body
-
-
-class Moonshot(OpenAICompat):
-    """Moonshot AI provider."""
-
-    ENV_VAR: ClassVar[str] = "MOONSHOT_API_KEY"
-    BASE_URL: ClassVar[str] = "https://api.moonshot.ai/v1"
-
-    catalog = ModelCatalog(models=models("moonshot"), transport=compatible())
-
-    MODEL_CLASS: ClassVar[type[OpenAICompatModel]] = _MoonshotModel

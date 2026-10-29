@@ -1,505 +1,359 @@
-"""Tests for ``tools.paper_details``: the thin adapter over ``lib.web.paper``.
+"""Tests for PaperDetails: metadata, the citation graph, its cache, and errors.
 
-The adapter owns schema, arg validation, the process cache, and text
-rendering; backend I/O / pagination / record shaping live in
-:mod:`wesearch.paper` and are covered by its own tests. These tests mock
-the library entry points where the adapter binds them
-(``paper_details.metadata`` etc.) and assert only the adapter's behavior.
+``wesearch`` owns every lookup; each is replaced where the tool imports
+it, so nothing reaches the network.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-from unittest.mock import patch
+from dataclasses import MISSING, dataclass, fields
+from typing import TYPE_CHECKING, cast, get_args, get_type_hints
 
-import asyncio
+import re
 
+from wesearch.fetch import FetchSession
 from wesearch.paper.details import Listing
 from wesearch.paper.errors import PaperError
+from wesearch.paper.render import format_block, format_record
 from wesearch.paper.types import PaperRecord
 
 import pytest
 
-from sagent.tools import paper_details
-from sagent.tools.paper_details import (
-    PaperDetails,
-    _render_listing,
-    _validate_details_args,
+from sagent.tools import (
+    paper_details,
 )
+from sagent.tools.paper_details import PaperDetails
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from pathlib import Path
+
+    from treekle import PlainTree
 
 
-@pytest.fixture(autouse=True)
-def clear_cache() -> Iterator[None]:
-    """Clear the module result cache so a key is never pre-warmed by a sibling."""
-    paper_details._cache.clear()
-    yield
-    paper_details._cache.clear()
+_ONE = PaperRecord(title="Attention", year=2017, abstract="All you need, really.")
+_TWO = PaperRecord(title="Diffusion", year=2020)
 
 
-# ---------------------------------------------------------------------------
-# Tool metadata / summary
-# ---------------------------------------------------------------------------
+def test_a_lookup_needs_the_session_it_shares() -> None:
+    (session,) = [f for f in fields(PaperDetails) if f.name == "session"]
+    assert (session.default, session.default_factory) == (MISSING, MISSING)
 
 
-def test_paper_details_metadata() -> None:
-    t = PaperDetails()
-    assert t.name == "PaperDetails"
-    assert t.tool_id == "application/x-tool-paperdetails"
-
-
-def test_summary_default() -> None:
-    t = PaperDetails()
-    assert t.summary({"ids": ["10.1234/abc"]}) == "PaperDetails 10.1234/abc"
-
-
-def test_summary_references() -> None:
-    t = PaperDetails()
-    out = t.summary({"ids": ["10.1234/abc"], "operation": "references"})
-    assert out == "PaperDetails references 10.1234/abc"
-
-
-def test_summary_citations() -> None:
-    out = PaperDetails().summary({"ids": ["10.1234/abc"], "operation": "citations"})
-    assert out == "PaperDetails citations 10.1234/abc"
-
-
-def test_summary_missing_id() -> None:
-    assert PaperDetails().summary({}) == "PaperDetails ?"
-
-
-def test_prompt_empty() -> None:
-    assert PaperDetails().prompt() == ""
-
-
-def test_serialize_key_none() -> None:
-    assert PaperDetails().serialize_key({"ids": ["10.1234/abc"]}) is None
-
-
-# ---------------------------------------------------------------------------
-# Arg validation (_validate_details_args)
-# ---------------------------------------------------------------------------
-
-
-def test_validate_details_args_empty_id() -> None:
-    res = _validate_details_args("", "", influential_only=False, year_from=None)
-    assert hasattr(res, "is_error")
-
-
-def test_validate_details_args_bad_op() -> None:
-    res = _validate_details_args(
-        "10.1234/x",
-        "frobnicate",
-        influential_only=False,
-        year_from=None,
+def test_summary_names_the_operation_and_the_ids() -> None:
+    tool = _tool()
+    assert tool.summary({"ids": "2106.15928"}) == "PaperDetails 2106.15928"
+    assert tool.summary({"ids": ["a", "b"], "operation": "citations"}) == (
+        "PaperDetails citations a (+1 more)"
     )
-    assert hasattr(res, "is_error")
+    assert tool.summary({"ids": "a", "operation": "references"}) == (
+        "PaperDetails references a"
+    )
+    assert tool.summary({"ids": "a", "operation": "other"}) == "PaperDetails a"
+    assert tool.summary({}) == "PaperDetails ?"
 
 
-def test_validate_details_args_filter_without_citations() -> None:
-    res = _validate_details_args(
-        "10.1234/x",
+def test_lookups_run_beside_anything(tmp_path: Path) -> None:
+    assert _tool().serialize_key(ToolContext(cwd=tmp_path), {"ids": "a"}) is None
+
+
+@pytest.mark.asyncio
+async def test_one_id_is_looked_up_alone_with_the_shared_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake(monkeypatch, "metadata", _ONE)
+    tool = _tool()
+    result = await tool.call(ToolContext(cwd=tmp_path), {"ids": "arXiv:2106.15928"})
+    assert result.text() == format_block(_ONE)
+    assert result.call_id == ""
+    assert calls == [
+        _Call(args=("arxiv", "2106.15928"), kwargs={"session": tool.session}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_many_ids_are_looked_up_in_one_batch_in_input_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _fake(monkeypatch, "metadata_batch", [_ONE, None, _TWO])
+    tool = _tool()
+    result = await tool.call(
+        ToolContext(cwd=tmp_path),
+        {"ids": ["2106.15928", "10.1000/gone", "doi:10.1000/b"], "abstract_chars": 4},
+    )
+    assert result.text() == (
+        f"{format_block(_ONE, abstract_chars=4)}\n\n10.1000/gone: not found\n\n"
+        f"{format_block(_TWO, abstract_chars=4)}"
+    )
+    assert calls == [
+        _Call(
+            args=(["ARXIV:2106.15928", "DOI:10.1000/gone", "DOI:10.1000/b"],),
+            kwargs={"session": tool.session},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_metadata_is_kept_by_canonical_id_only_when_every_paper_is_found(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _tool()
+    context = ToolContext(cwd=tmp_path)
+    batch = _fake(monkeypatch, "metadata_batch", [_ONE, None], [_ONE, _TWO])
+    single = _fake(monkeypatch, "metadata", _ONE)
+    await tool.call(context, {"ids": ["2106.15928", "10.1000/x"]})
+    await tool.call(context, {"ids": ["2106.15928", "10.1000/x"]})
+    kept = await tool.call(context, {"ids": ["arXiv:2106.15928", "doi:10.1000/x"]})
+    await tool.call(context, {"ids": "2106.15928"})
+    await tool.call(context, {"ids": "arxiv:2106.15928"})
+    assert kept.text() == f"{format_block(_ONE)}\n\n{format_block(_TWO)}"
+    assert (len(batch), len(single)) == (2, 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "name", "kwargs"),
+    [
+        (
+            {"ids": "10.1000/x", "operation": "references", "limit": 3},
+            "references",
+            {"limit": 3, "source": "s2"},
+        ),
+        (
+            {"ids": "10.1000/x", "operation": "references", "source": "openalex"},
+            "references",
+            {"limit": None, "source": "openalex"},
+        ),
+        (
+            {
+                "ids": "10.1000/x",
+                "operation": "citations",
+                "influential_only": True,
+                "year_from": 2020,
+                "limit": 7,
+            },
+            "citations",
+            {
+                "limit": 7,
+                "source": "s2",
+                "influential_only": True,
+                "year_from": 2020,
+            },
+        ),
+        (
+            {"ids": "10.1000/x", "operation": "citations", "source": "openalex"},
+            "citations",
+            {
+                "limit": None,
+                "source": "openalex",
+                "influential_only": False,
+                "year_from": None,
+            },
+        ),
+    ],
+)
+async def test_the_graph_is_walked_from_one_paper_with_every_filter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, PlainTree],
+    name: str,
+    kwargs: dict[str, object],
+) -> None:
+    calls = _fake(monkeypatch, name, Listing(records=[_ONE, _TWO], complete=True))
+    tool = _tool()
+    result = await tool.call(ToolContext(cwd=tmp_path), arguments)
+    assert result.text() == f"{format_record(_ONE)}\n{format_record(_TWO)}"
+    assert result.call_id == ""
+    assert calls == [
+        _Call(args=("doi", "10.1000/x"), kwargs={**kwargs, "session": tool.session}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_listing_says_when_more_exist_and_when_there_are_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake(
+        monkeypatch,
         "references",
-        influential_only=True,
-        year_from=None,
+        Listing(records=[_ONE], complete=False),
+        Listing(records=[], complete=True),
     )
-    assert hasattr(res, "is_error")
-
-
-def test_validate_details_args_year_from_without_citations() -> None:
-    res = _validate_details_args(
-        "10.1234/x",
-        "",
-        influential_only=False,
-        year_from=2020,
+    context = ToolContext(cwd=tmp_path)
+    more = await _tool().call(
+        context,
+        {"ids": "10.1000/x", "operation": "references", "abstract_chars": 3},
     )
-    assert hasattr(res, "is_error")
-
-
-def test_validate_details_args_unrecognized_id() -> None:
-    res = _validate_details_args(
-        "not-an-id",
-        "",
-        influential_only=False,
-        year_from=None,
+    none = await _tool().call(context, {"ids": "10.1000/y", "operation": "references"})
+    assert more.text() == (
+        format_record(_ONE, abstract_chars=3)
+        + "\n... (more matches exist; raise 'limit' to see them)"
     )
-    assert hasattr(res, "is_error")
+    assert none.text() == "(no results)"
 
 
-def test_validate_details_args_valid_metadata() -> None:
-    res = _validate_details_args(
-        "10.1234/x",
-        "",
-        influential_only=False,
-        year_from=None,
-    )
-    assert isinstance(res, tuple)
-    op, kind, canonical = res
-    assert op == ""
-    assert kind == "doi"
-    assert canonical == "10.1234/x"
-
-
-def test_validate_details_args_valid_citations_with_filters() -> None:
-    res = _validate_details_args(
-        "10.1234/x",
+@pytest.mark.asyncio
+async def test_a_walk_is_kept_by_paper_and_filters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _tool()
+    context = ToolContext(cwd=tmp_path)
+    calls = _fake(
+        monkeypatch,
         "citations",
-        influential_only=True,
-        year_from=2020,
+        Listing(records=[_ONE], complete=True),
+        Listing(records=[_TWO], complete=True),
+        Listing(records=[_TWO], complete=True),
     )
-    assert isinstance(res, tuple)
+    first = await tool.call(context, {"ids": "10.1000/x", "operation": "citations"})
+    again = await tool.call(context, {"ids": "doi:10.1000/x", "operation": "citations"})
+    other = await tool.call(
+        context,
+        {"ids": "10.1000/x", "operation": "citations", "year_from": 2000},
+    )
+    paper = await tool.call(context, {"ids": "10.1000/y", "operation": "citations"})
+    assert first.text() == again.text() == format_record(_ONE)
+    assert again.call_id == ""
+    assert other.text() == paper.text() == format_record(_TWO)
+    assert len(calls) == 3
 
 
-# ---------------------------------------------------------------------------
-# run(): arg-level rejections (no library call)
-# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("metadata", {"ids": "10.1000/x"}),
+        ("metadata_batch", {"ids": ["10.1000/x", "10.1000/y"]}),
+        ("references", {"ids": "10.1000/x", "operation": "references"}),
+    ],
+)
+async def test_a_failed_lookup_is_an_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    arguments: dict[str, PlainTree],
+) -> None:
+    _fake(monkeypatch, name, PaperError("S2 is down"))
+    result = await _tool().call(ToolContext(cwd=tmp_path), arguments)
+    assert (result.is_error, result.text()) == (True, "S2 is down")
 
 
-def test_run_missing_ids() -> None:
-    result = asyncio.run(PaperDetails().run({}))
-    assert result.is_error
-    assert "'ids' is required" in result.content
+@pytest.mark.asyncio
+async def test_an_id_of_no_known_shape_is_an_error(tmp_path: Path) -> None:
+    result = await _tool().call(ToolContext(cwd=tmp_path), {"ids": "not-an-id"})
+    assert result.is_error is True
+    assert "not-an-id" in result.text()
 
 
-def test_run_empty_ids_rejected() -> None:
-    result = asyncio.run(PaperDetails().run({"ids": []}))
-    assert result.is_error
-
-
-def test_run_rejects_zero_limit() -> None:
-    # LIM-001: limit=0 must error, not silently return no results.
-    result = asyncio.run(
-        PaperDetails().run(
-            {"ids": ["10.1234/x"], "operation": "references", "limit": 0},
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"ids": ""}, "'ids' is empty."),
+        ({"ids": []}, "'ids' is empty."),
+        (
+            {"ids": ["a", "b"], "operation": "citations"},
+            "'operation' (references/citations) needs exactly one id.",
         ),
-    )
-    assert result.is_error
-    assert "limit" in result.content
-
-
-def test_run_rejects_zero_abstract_chars() -> None:
-    result = asyncio.run(
-        PaperDetails().run({"ids": ["10.1234/x"], "abstract_chars": 0}),
-    )
-    assert result.is_error
-    assert "abstract_chars" in result.content
-
-
-def test_run_invalid_id_returns_error() -> None:
-    result = asyncio.run(PaperDetails().run({"ids": ["garbage"]}))
-    assert result.is_error
-
-
-def test_run_ids_with_operation_rejected() -> None:
-    result = asyncio.run(
-        PaperDetails().run(
-            {"ids": ["10.1234/a", "10.1234/b"], "operation": "references"},
+        (
+            {"ids": "10.1000/x", "influential_only": True},
+            "'influential_only' and 'year_from' only apply to operation='citations'.",
         ),
-    )
-    assert result.is_error
-    assert "exactly one id" in result.content
-
-
-# ---------------------------------------------------------------------------
-# run(): metadata delegation to the library's metadata()
-# ---------------------------------------------------------------------------
-
-
-def test_run_metadata_success() -> None:
-    rec = PaperRecord(title="T", year=2020, doi="10.1234/cached_meta", authors=("A",))
-    with patch(
-        "sagent.tools.paper_details.metadata",
-        return_value=rec,
-    ) as m:
-        result = asyncio.run(
-            PaperDetails().run({"ids": ["10.1234/meta_ok"]}),
-        )
-    assert not result.is_error
-    assert "title: T" in result.content
-    assert m.call_args.args == ("doi", "10.1234/meta_ok")
-
-
-def test_run_metadata_caches() -> None:
-    rec = PaperRecord(title="C", doi="10.1234/unique_cache_doi_zz")
-    with patch(
-        "sagent.tools.paper_details.metadata",
-        return_value=rec,
-    ) as m:
-        _ = asyncio.run(PaperDetails().run({"ids": ["10.1234/unique_cache_doi_zz"]}))
-        _ = asyncio.run(PaperDetails().run({"ids": ["10.1234/unique_cache_doi_zz"]}))
-    assert m.call_count == 1
-
-
-def test_run_metadata_error_mapped() -> None:
-    with patch(
-        "sagent.tools.paper_details.metadata",
-        side_effect=PaperError("paper 10.1234/notfound_id not found"),
-    ):
-        result = asyncio.run(PaperDetails().run({"ids": ["10.1234/notfound_id"]}))
-    assert result.is_error
-    assert "not found" in result.content
-
-
-# ---------------------------------------------------------------------------
-# run(): references / citations delegation and rendering
-# ---------------------------------------------------------------------------
-
-
-def test_run_references() -> None:
-    listing = Listing(
-        records=[PaperRecord(title="Cited Paper", year=2019)],
-        complete=True,
-    )
-    tool = PaperDetails()
-    with patch(
-        "sagent.tools.paper_details.references",
-        return_value=listing,
-    ) as m:
-        result = asyncio.run(
-            tool.run(
-                {"ids": ["10.1234/ref_target"], "operation": "references"},
-            ),
-        )
-    assert "Cited Paper" in result.content
-    assert m.call_args.args == ("doi", "10.1234/ref_target")
-    assert m.call_args.kwargs == {
-        "limit": None,
-        "source": "s2",
-        "session": tool.session,
-    }
-
-
-def test_run_references_empty() -> None:
-    with patch(
-        "sagent.tools.paper_details.references",
-        return_value=Listing(records=[], complete=True),
-    ):
-        result = asyncio.run(
-            PaperDetails().run(
-                {"ids": ["10.1234/empty_refs"], "operation": "references"},
-            ),
-        )
-    assert result.content == "(no results)"
-
-
-def test_run_citations_delegates_filters() -> None:
-    listing = Listing(records=[PaperRecord(title="New", year=2022)], complete=True)
-    tool = PaperDetails()
-    with patch(
-        "sagent.tools.paper_details.citations",
-        return_value=listing,
-    ) as m:
-        result = asyncio.run(
-            tool.run(
-                {
-                    "ids": ["10.1234/cit_target"],
-                    "operation": "citations",
-                    "year_from": 2020,
-                    "influential_only": True,
-                    "limit": 5,
-                },
-            ),
-        )
-    assert "New" in result.content
-    assert m.call_args.args == ("doi", "10.1234/cit_target")
-    assert m.call_args.kwargs == {
-        "limit": 5,
-        "source": "s2",
-        "influential_only": True,
-        "year_from": 2020,
-        "session": tool.session,
-    }
-
-
-def test_run_citations_openalex_source() -> None:
-    listing = Listing(records=[PaperRecord(title="OA citer")], complete=True)
-    with patch(
-        "sagent.tools.paper_details.citations",
-        return_value=listing,
-    ) as m:
-        result = asyncio.run(
-            PaperDetails().run(
-                {
-                    "ids": ["10.1234/oa_target"],
-                    "operation": "citations",
-                    "source": "openalex",
-                    "limit": 3,
-                },
-            ),
-        )
-    assert "OA citer" in result.content
-    assert m.call_args.kwargs["source"] == "openalex"
-
-
-def test_run_references_openalex_source() -> None:
-    listing = Listing(records=[PaperRecord(title="OA ref")], complete=True)
-    with patch(
-        "sagent.tools.paper_details.references",
-        return_value=listing,
-    ) as m:
-        result = asyncio.run(
-            PaperDetails().run(
-                {
-                    "ids": ["10.1234/oa_ref_target"],
-                    "operation": "references",
-                    "source": "openalex",
-                },
-            ),
-        )
-    assert "OA ref" in result.content
-    assert m.call_args.kwargs["source"] == "openalex"
-
-
-def test_run_invalid_source_rejected() -> None:
-    result = asyncio.run(
-        PaperDetails().run(
-            {"ids": ["10.1/x"], "operation": "citations", "source": "bogus"},
+        (
+            {"ids": "10.1000/x", "operation": "references", "year_from": 2000},
+            "'influential_only' and 'year_from' only apply to operation='citations'.",
         ),
+        ({"ids": "10.1000/x", "limit": 0}, "'limit' must be at least 1, got 0."),
+        (
+            {"ids": "10.1000/x", "abstract_chars": 0},
+            "'abstract_chars' must be at least 1, got 0.",
+        ),
+        (
+            {"ids": "10.1000/x", "operation": "cites"},
+            "'operation' must be one of ['references', 'citations'], got 'cites'.",
+        ),
+        ({"ids": 5}, "'ids' must be array, got 5. 'ids' must be string, got 5."),
+        ({}, "Missing argument 'ids'."),
+    ],
+)
+async def test_arguments_that_contradict_are_refused_before_any_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, PlainTree],
+    message: str,
+) -> None:
+    calls = [
+        _fake(monkeypatch, name)
+        for name in (
+            "metadata",
+            "metadata_batch",
+            "references",
+            "citations",
+        )
+    ]
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        await _tool().call(ToolContext(cwd=tmp_path), arguments)
+    assert not any(calls)
+
+
+@pytest.mark.asyncio
+async def test_a_source_not_offered_is_refused_naming_those_that_are(
+    tmp_path: Path,
+) -> None:
+    hint = cast(
+        object,
+        get_type_hints(PaperDetails.Arguments, include_extras=True)["source"],
     )
-    assert result.is_error
-    assert "Invalid source" in result.content
-
-
-def test_run_citations_incomplete_notice() -> None:
-    listing = Listing(records=[PaperRecord(title="Citing")], complete=False)
-    with patch(
-        "sagent.tools.paper_details.citations",
-        return_value=listing,
+    offered = list(get_args(get_args(hint)[0]))
+    assert offered[:2] == ["s2", "openalex"]
+    with pytest.raises(
+        ValueError,
+        match=f"^{re.escape(f"'source' must be one of {offered}, got 'bing'.")}$",
     ):
-        result = asyncio.run(
-            PaperDetails().run({"ids": ["10.1234/cit_more"], "operation": "citations"}),
+        await _tool().call(
+            ToolContext(cwd=tmp_path),
+            {"ids": "10.1000/x", "source": "bing"},
         )
-    assert "more matches exist; raise 'limit'" in result.content
 
 
-# ---------------------------------------------------------------------------
-# _render_listing (exact strings; bit-for-bit sensitive)
-# ---------------------------------------------------------------------------
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Call:
+    """One lookup the tool asked for."""
+
+    args: tuple[object, ...]
+    kwargs: dict[str, object]
 
 
-def test_render_listing_empty() -> None:
-    assert _render_listing(Listing(records=[], complete=True), None) == "(no results)"
+def _tool() -> PaperDetails:
+    return PaperDetails(session=FetchSession())
 
 
-def test_render_listing_complete_no_notice() -> None:
-    out = _render_listing(
-        Listing(records=[PaperRecord(title="Solo")], complete=True),
-        None,
-    )
-    assert "Solo" in out
-    assert "more matches" not in out
+def _fake(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    *answers: object,
+) -> list[_Call]:
+    """Replace ``paper_details.<name>``: answer in turn, raise an exception given."""
+    calls: list[_Call] = []
+    pending = list(answers)
+
+    def lookup(*args: object, **kwargs: object) -> object:
+        calls.append(_Call(args=args, kwargs=kwargs))
+        answer = pending.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(paper_details, name, lookup)
+    return calls
 
 
-def test_render_listing_incomplete_notice() -> None:
-    out = _render_listing(
-        Listing(records=[PaperRecord(title="Solo")], complete=False),
-        None,
-    )
-    assert out.endswith("\n... (more matches exist; raise 'limit' to see them)")
-
-
-# ---------------------------------------------------------------------------
-# run(): metadata_batch delegation, miss line, cache semantics
-# ---------------------------------------------------------------------------
-
-
-def _batch_records() -> list[PaperRecord | None]:
-    return [
-        PaperRecord(title="First", doi="10.1234/a"),
-        None,
-        PaperRecord(title="Third", doi="10.1234/c"),
-    ]
-
-
-def test_run_ids_batches_one_call() -> None:
-    with patch(
-        "sagent.tools.paper_details.metadata_batch",
-        return_value=_batch_records(),
-    ) as m:
-        result = asyncio.run(
-            PaperDetails().run({"ids": ["10.1234/a", "10.1234/b", "10.1234/c"]}),
-        )
-    assert m.call_count == 1  # One batched call, not three.
-    assert m.call_args.args == (["DOI:10.1234/a", "DOI:10.1234/b", "DOI:10.1234/c"],)
-    assert not result.is_error
-    assert "title: First" in result.content
-    # Miss label must echo the USER's id, not the internal S2 wire id.
-    assert "10.1234/b: not found" in result.content
-    assert "DOI:10.1234/b: not found" not in result.content
-    assert "title: Third" in result.content
-
-
-def test_run_ids_batch_error_mapped() -> None:
-    with patch(
-        "sagent.tools.paper_details.metadata_batch",
-        side_effect=PaperError("batch too big"),
-    ):
-        result = asyncio.run(
-            PaperDetails().run({"ids": ["10.1234/a", "10.1234/b"]}),
-        )
-    assert result.is_error
-    assert "batch too big" in result.content
-
-
-def test_run_ids_batch_caches_when_all_resolved() -> None:
-    records: list[PaperRecord | None] = [
-        PaperRecord(title="X", doi="10.1234/batch_cache_x"),
-        PaperRecord(title="Y", doi="10.1234/batch_cache_y"),
-        PaperRecord(title="Z", doi="10.1234/batch_cache_z"),
-    ]
-    with patch(
-        "sagent.tools.paper_details.metadata_batch",
-        return_value=records,
-    ) as m:
-        ids = [
-            "10.1234/batch_cache_x",
-            "10.1234/batch_cache_y",
-            "10.1234/batch_cache_z",
-        ]
-        _ = asyncio.run(PaperDetails().run({"ids": ids}))
-        _ = asyncio.run(PaperDetails().run({"ids": ids}))
-    assert m.call_count == 1
-
-
-def test_run_ids_batch_with_miss_not_cached() -> None:
-    # A batch containing an unresolved id (indexing lag) must NOT be cached:
-    # with no TTL, a cached "not found" would pin the miss for the whole
-    # process. The repeat call must re-fetch.
-    with patch(
-        "sagent.tools.paper_details.metadata_batch",
-        return_value=_batch_records(),
-    ) as m:
-        ids = ["10.1234/a", "10.1234/b", "10.1234/c"]
-        first = asyncio.run(PaperDetails().run({"ids": ids}))
-        _ = asyncio.run(PaperDetails().run({"ids": ids}))
-    assert "not found" in first.content
-    assert m.call_count == 2  # re-fetched, miss not pinned.
-
-
-def test_run_ids_batch_cache_keys_on_canonical_id() -> None:
-    # Equivalent id spellings (arXiv: prefix vs bare) resolve to the same wire
-    # id, so they share one cache entry -- the second call is a hit.
-    records: list[PaperRecord | None] = [
-        PaperRecord(title="P", arxiv_id="2401.00001"),
-        PaperRecord(title="Q", arxiv_id="2401.00002"),
-    ]
-    with patch(
-        "sagent.tools.paper_details.metadata_batch",
-        return_value=records,
-    ) as m:
-        _ = asyncio.run(
-            PaperDetails().run({"ids": ["arXiv:2401.00001", "arXiv:2401.00002"]}),
-        )
-        _ = asyncio.run(PaperDetails().run({"ids": ["2401.00001", "2401.00002"]}))
-    assert m.call_count == 1
-
-
-# ---------------------------------------------------------------------------
-# Google Scholar cited-by pivot (internal build only)
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 

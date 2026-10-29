@@ -1,190 +1,178 @@
-"""PaperFetch tool - download a research paper PDF by identifier.
+"""PaperFetch: download papers' PDFs by identifier, to a cache on disk.
 
-Thin adapter over :func:`wesearch.paper.fetch.download`: the library owns the
-source cascade (arXiv, open-access, and any source-only providers) and the
-rate-gated open-access lookups; the tool owns schema, the on-disk PDF cache,
-and result rendering.
+``wesearch`` owns the source cascade (arXiv, then an open-access URL) and
+its rate limits; the tool owns its arguments and the cache, keyed by
+identifier, so asking again returns the same path without a download.
 
-Downloads are content-addressed under
-``cache_dir() / "rekursiv-ai" / "wesearch" / "papers"``; repeated calls for
-the same id return the cached path.
+Typical usage example:
+
+  result = await PaperFetch(session=session).call(context, {"ids": ["2106.15928"]})
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from importlib.resources import files
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated
 
 import asyncio
-import logging
 
-from treekle import PlainTree, immutable
 from wesearch.fetch import FetchSession
 from wesearch.paper.errors import PaperError
 from wesearch.paper.fetch import batch_oa_urls, download, looks_like_pdf
-from wesearch.paper.ids import id_slug, s2_wire_id
+from wesearch.paper.ids import id_slug, normalize_id, s2_wire_id
 
-from sagent.lib import userdirs
-from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.tools.core import load_tool_description
-from sagent.tools.paper_common import (
-    normalize_id_arg,
-    resolve_id_args,
-    summary_ids,
-)
-from sagent.types.runtime import ToolResult
+from sagent.lib.userdirs import cache_dir
+from sagent.session.types import UncategorizedToolResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.paper_common import paper_ids, summary_ids
+from sagent.tools.types import parse, schema_of
+from sagent.tools.write import write_file
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
+    from treekle import PlainTree
     from wesearch.paper.types import IdType
 
+    from sagent.tools.types import ToolContext
 
-logger = logging.getLogger(__name__)
+
+__all__ = [
+    "PaperFetch",
+]
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PaperFetch:
-    """Paper-by-identifier PDF downloader with source cascade."""
+    """Download papers' PDFs by identifier."""
 
-    name: str = "PaperFetch"
-    tool_id: str = "application/x-tool-paperfetch"
-    clearable_results: bool = True
-    description: str = load_tool_description("PaperFetch")
-    directive_schema: Mapping[str, PlainTree] = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "ids": {
-                    "type": ["array", "string"],
-                    "items": {"type": "string"},
-                    "description": (
-                        "Paper identifier(s): a single id as a bare string, or "
-                        "several as an array. Each is a DOI (10.xxxx/yyy, "
-                        "optional doi:/https://doi.org/ prefix) or arXiv id "
-                        "(2106.15928, arXiv:2106.15928, or legacy "
-                        "hep-th/9901001). When several are given, the "
-                        "open-access URL lookups are resolved in ONE batched "
-                        "Semantic Scholar request (up to 500) instead of one "
-                        "per id -- markedly more efficient against the 1 "
-                        "request/second rate limit -- then the PDFs download "
-                        "concurrently. Always pass every id you need at once."
-                    ),
-                },
-            },
-            "required": ["ids"],
-        },
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        ids: Annotated[
+            tuple[str, ...] | str,
+            "Paper identifier(s): a single id as a bare string, or several as an"
+            " array. Each is a DOI (10.xxxx/yyy, optional doi:/https://doi.org/"
+            " prefix) or arXiv id (2106.15928, arXiv:2106.15928, or legacy"
+            " hep-th/9901001). When several are given, the open-access URL lookups"
+            " are resolved in ONE batched Semantic Scholar request (up to 500)"
+            " instead of one per id -- markedly more efficient against the 1"
+            " request/second rate limit -- then the PDFs download concurrently."
+            " Always pass every id you need at once.",
+        ]
+
+    name = "PaperFetch"
+    description = (files(__package__) / "assets" / "paperfetch.md").read_text(
+        encoding="utf-8",
     )
+    schema = schema_of(Arguments)
 
-    def __init__(
+    display: ToolDisplay = field(default=ToolDisplay())
+
+    directory: Path = field(
+        default_factory=lambda: cache_dir() / "rekursiv-ai" / "wesearch" / "papers",
+    )
+    """Where PDFs are kept, one per identifier."""
+
+    session: FetchSession = field(repr=False)
+    """Connections, browser, and egress every download reuses; whoever made it closes it."""
+
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``PaperFetch <ids>``."""
+        return f"PaperFetch {summary_ids(arguments)}"
+
+    def serialize_key(
         self,
-        *,
-        cache_dir: Path | None = None,
-        session: FetchSession | None = None,
-    ) -> None:
-        self._cache_dir = (
-            cache_dir or userdirs.cache_dir() / "rekursiv-ai" / "wesearch" / "papers"
-        )
-        self.session = FetchSession() if session is None else session
-
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short display label for this invocation."""
-        return f"PaperFetch {summary_ids(args)}"
-
-    def prompt(self) -> str:
-        """Return supplemental system-prompt text (none)."""
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: independent network fetch, no serialization."""
-        del args
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``None``: downloads are independent."""
+        del context, arguments
         return None
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Download one or many paper PDFs by identifier.
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> UncategorizedToolResult:
+        """Download each paper ``ids`` names, or find it in the cache.
 
         Args:
-          args: Parsed tool arguments.
+          context: The calling agent's state.
+          arguments: What the model passed, as ``PaperFetch.Arguments``.
 
         Returns:
-          result: Download status for each requested paper.
+          result: One line per id: where its PDF is, or why it is not.
+
+        Raises:
+          ValueError: ``ids`` is empty, or names something that is no paper id.
 
         """
-        id_list = resolve_id_args(args)
-        if isinstance(id_list, ToolResult):
-            return id_list
-        parsed_ids: list[tuple[IdType, str]] = []
-        for raw in id_list:
-            parsed = normalize_id_arg(raw)
-            if isinstance(parsed, ToolResult):
-                return parsed
-            parsed_ids.append(parsed)
-
-        if len(parsed_ids) == 1:
-            kind, canonical = parsed_ids[0]
-            return await self._fetch_one(
-                kind,
-                canonical,
-                oa_url=None,
-                oa_looked_up=False,
+        del context
+        ids = paper_ids(parse(arguments, PaperFetch.Arguments).ids)
+        if not ids:
+            raise ValueError("'ids' is empty.")
+        try:
+            parsed = [normalize_id(raw) for raw in ids]
+        except PaperError as e:
+            raise ValueError(str(e)) from e
+        # One batched lookup of open-access URLs; ``None`` means it failed, and
+        # each download looks its own up.
+        urls = (
+            await asyncio.to_thread(
+                batch_oa_urls,
+                [s2_wire_id(*p) for p in parsed],
+                session=self.session,
             )
-
-        # Batch-resolve open-access URLs in one gated request. ``None`` for the
-        # whole list means the batch call failed -- fall back to per-id lookups.
-        wire_ids = [s2_wire_id(kind, canonical) for kind, canonical in parsed_ids]
-        oa_urls = await asyncio.to_thread(
-            batch_oa_urls,
-            wire_ids,
-            session=self.session,
+            if len(parsed) > 1
+            else None
         )
-        looked_up = oa_urls is not None
-        urls = oa_urls if oa_urls is not None else [None] * len(parsed_ids)
-        results = await asyncio.gather(
+        lines = await asyncio.gather(
             *(
-                self._fetch_one(kind, canonical, oa_url=oa, oa_looked_up=looked_up)
-                for (kind, canonical), oa in zip(parsed_ids, urls, strict=True)
+                self._fetch(kind, canonical, url=url, looked_up=urls is not None)
+                for (kind, canonical), url in zip(
+                    parsed,
+                    urls if urls is not None else [None] * len(parsed),
+                    strict=True,
+                )
             ),
         )
-        any_error = any(r.is_error for r in results)
-        return ToolResult(
+        return UncategorizedToolResult(
             call_id="",
-            content="\n".join(r.content for r in results),
-            is_error=any_error,
+            content="\n".join(text for text, _ in lines),
+            is_error=any(failed for _, failed in lines),
         )
 
-    async def _fetch_one(
+    async def _fetch(
         self,
         kind: IdType,
         canonical: str,
         *,
-        oa_url: str | None,
-        oa_looked_up: bool,
-    ) -> ToolResult:
-        """Fetch one paper's PDF via the library cascade, honoring the cache."""
-        slug = id_slug(kind, canonical)
-        cache_path = self._cache_dir / f"{slug}.pdf"
-        if _is_cached_pdf(cache_path):
-            return ToolResult(call_id="", content=f"Cached: {cache_path}")
+        url: str | None,
+        looked_up: bool,
+    ) -> tuple[str, bool]:
+        """Return where one paper's PDF is, and whether getting it failed."""
+        path = self.directory / f"{id_slug(kind, canonical)}.pdf"
+        try:
+            with path.open("rb") as f:
+                if looks_like_pdf(f.read(128)):
+                    return f"Cached: {path}", False
+        except OSError:
+            pass
         try:
             body, source = await asyncio.to_thread(
                 download,
                 kind,
                 canonical,
-                oa_url=oa_url,
-                oa_looked_up=oa_looked_up,
+                oa_url=url,
+                oa_looked_up=looked_up,
                 session=self.session,
             )
         except PaperError as e:
-            return ToolResult(call_id="", content=str(e), is_error=True)
-        atomic_write_bytes(cache_path, body)
-        return ToolResult(call_id="", content=f"Downloaded via {source}: {cache_path}")
-
-
-def _is_cached_pdf(path: Path, *, min_pdf_bytes: int = 128) -> bool:
-    """Check whether ``path`` holds a cached PDF (size + magic, same bar as fresh)."""
-    try:
-        with path.open("rb") as f:
-            return looks_like_pdf(f.read(min_pdf_bytes))
-    except OSError:
-        return False
+            return str(e), True
+        await asyncio.to_thread(write_file, path, body)
+        return f"Downloaded via {source}: {path}", False

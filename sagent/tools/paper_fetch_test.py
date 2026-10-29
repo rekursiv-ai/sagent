@@ -1,369 +1,293 @@
-"""Tests for ``tools.paper_fetch``: the thin adapter over ``paper.fetch``.
+"""Tests for PaperFetch: downloads, the cache on disk, and how they fail.
 
-The source cascade (arXiv/open-access/source-only) and the batched open-access
-URL resolve live in :mod:`wesearch.paper` and are tested there. These tests
-cover only the adapter's concerns: schema/metadata, ``summary``, the on-disk PDF
-cache, the single- and multi-id orchestration, result rendering, and error
-mapping. The library surface is mocked where the adapter binds each name:
-
-- ``patch("...paper_fetch.download", ...)`` -- the per-id download.
-- ``patch("...paper_fetch.batch_oa_urls", ...)`` -- the batched OA resolve.
+``wesearch`` owns every download; each is replaced where the tool imports
+it, so nothing reaches the network.
 """
 
 from __future__ import annotations
 
+from dataclasses import MISSING, dataclass, fields
+from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import patch
 
-import asyncio
+import importlib
 
-from wesearch.paper.errors import NotFoundError
+from wesearch.fetch import FetchSession
+from wesearch.paper.errors import PaperError
 
-from sagent.tools.paper_fetch import PaperFetch, _is_cached_pdf
+import pytest
+
+from sagent.lib.userdirs import cache_dir
+from sagent.tools import paper_fetch
+from sagent.tools.paper_fetch import PaperFetch
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
+    from treekle import PlainTree
 
 
-# A valid PDF: magic prefix + padding past the 128-byte floor _is_cached_pdf
-# and the library's looks_like_pdf both enforce.
-_FAKE_PDF = b"%PDF-1.5" + b"0" * 200
+_PDF = b"%PDF-1.7\n" + b"x" * 200
 
 
-# ---------------------------------------------------------------------------
-# Metadata / summary / prompt
-# ---------------------------------------------------------------------------
+def test_a_download_needs_the_session_it_shares() -> None:
+    (session,) = [f for f in fields(PaperFetch) if f.name == "session"]
+    assert (session.default, session.default_factory) == (MISSING, MISSING)
 
 
-def test_paper_fetch_metadata(tmp_path: Path) -> None:
-    t = PaperFetch(cache_dir=tmp_path)
-    assert t.name == "PaperFetch"
-    assert t.tool_id == "application/x-tool-paperfetch"
+def test_pdfs_are_kept_in_the_users_cache_by_default() -> None:
+    assert _tool().directory == cache_dir() / "rekursiv-ai" / "wesearch" / "papers"
 
 
-def test_summary_id(tmp_path: Path) -> None:
-    out = PaperFetch(cache_dir=tmp_path).summary({"ids": ["10.1234/abc"]})
-    assert "PaperFetch" in out
-    assert "10.1234/abc" in out
+def test_the_description_is_read_as_utf8_whatever_the_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The asset holds an em dash, which a Latin-1 locale would read as three letters."""
+    real = Path.read_text
 
-
-def test_summary_multi_id(tmp_path: Path) -> None:
-    out = PaperFetch(cache_dir=tmp_path).summary({"ids": ["10.1234/a", "10.1234/b"]})
-    assert "PaperFetch" in out
-    assert "+1 more" in out
-
-
-def test_summary_missing_id(tmp_path: Path) -> None:
-    assert PaperFetch(cache_dir=tmp_path).summary({}) == "PaperFetch ?"
-
-
-def test_prompt_empty(tmp_path: Path) -> None:
-    assert PaperFetch(cache_dir=tmp_path).prompt() == ""
-
-
-# ---------------------------------------------------------------------------
-# _is_cached_pdf
-# ---------------------------------------------------------------------------
-
-
-def test_is_cached_pdf_valid(tmp_path: Path) -> None:
-    path = tmp_path / "arxiv_1234.56789.pdf"
-    _ = path.write_bytes(_FAKE_PDF)
-    assert _is_cached_pdf(path) is True
-
-
-def test_is_cached_pdf_too_small(tmp_path: Path) -> None:
-    path = tmp_path / "arxiv_1234.56789.pdf"
-    _ = path.write_bytes(b"%PDF-tiny")
-    assert _is_cached_pdf(path) is False
-
-
-def test_is_cached_pdf_wrong_magic(tmp_path: Path) -> None:
-    path = tmp_path / "arxiv_1234.56789.pdf"
-    _ = path.write_bytes(b"<html>" + b"0" * 300)
-    assert _is_cached_pdf(path) is False
-
-
-def test_is_cached_pdf_missing(tmp_path: Path) -> None:
-    assert _is_cached_pdf(tmp_path / "nope.pdf") is False
-
-
-# ---------------------------------------------------------------------------
-# Argument validation (delegated to paper_common, surfaced by run)
-# ---------------------------------------------------------------------------
-
-
-def test_run_empty_id(tmp_path: Path) -> None:
-    result = asyncio.run(PaperFetch(cache_dir=tmp_path).run({"ids": ["  "]}))
-    assert result.is_error
-    assert "'ids' is empty" in result.content
-
-
-def test_run_invalid_id(tmp_path: Path) -> None:
-    result = asyncio.run(PaperFetch(cache_dir=tmp_path).run({"ids": ["garbage"]}))
-    assert result.is_error
-
-
-def test_run_ids_empty_rejected(tmp_path: Path) -> None:
-    result = asyncio.run(PaperFetch(cache_dir=tmp_path).run({"ids": []}))
-    assert result.is_error
-
-
-# ---------------------------------------------------------------------------
-# Cache short-circuit
-# ---------------------------------------------------------------------------
-
-
-def test_run_cached_existing(tmp_path: Path) -> None:
-    """A valid cached PDF short-circuits to ``Cached: <path>`` without fetching."""
-    cache_file = tmp_path / "arxiv_1234.56789.pdf"
-    _ = cache_file.write_bytes(_FAKE_PDF)
-    with patch("sagent.tools.paper_fetch.download") as download:
-        result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
+    def latin1_default(
+        self: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> str:
+        return real(
+            self,
+            encoding=encoding or "latin-1",
+            errors=errors,
         )
-    download.assert_not_called()
-    assert not result.is_error
-    assert result.content == f"Cached: {cache_file}"
+
+    monkeypatch.setattr(Path, "read_text", latin1_default)
+    try:
+        importlib.reload(paper_fetch)
+        description = paper_fetch.PaperFetch.description
+    finally:
+        monkeypatch.undo()
+        importlib.reload(paper_fetch)
+    assert "\u2014" in description
+    assert "â€" not in description
 
 
-def test_run_cache_too_small_refetches(tmp_path: Path) -> None:
-    """A too-small cache file is not treated as cached; the library is called."""
-    cache_file = tmp_path / "arxiv_1234.56789.pdf"
-    _ = cache_file.write_bytes(b"%PDF-tiny")
-    with patch(
-        "sagent.tools.paper_fetch.download",
-        return_value=(_FAKE_PDF, "arxiv"),
-    ) as download:
-        result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
+def test_summary_names_the_ids() -> None:
+    assert _tool().summary({"ids": ["2106.15928", "10.1000/x"]}) == (
+        "PaperFetch 2106.15928 (+1 more)"
+    )
+    assert _tool().summary({}) == "PaperFetch ?"
+
+
+def test_downloads_run_beside_anything(tmp_path: Path) -> None:
+    assert _tool().serialize_key(ToolContext(cwd=tmp_path), {"ids": "a"}) is None
+
+
+@pytest.mark.asyncio
+async def test_one_paper_is_downloaded_and_kept(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _downloads(monkeypatch, {"2106.15928": (_PDF, "arXiv")})
+    batches = _batches(monkeypatch)
+    tool = _tool(tmp_path)
+    result = await tool.call(ToolContext(cwd=tmp_path), {"ids": "arXiv:2106.15928"})
+    path = tmp_path / "arxiv_2106.15928.pdf"
+    assert result.text() == f"Downloaded via arXiv: {path}"
+    assert result.is_error is False
+    assert result.call_id == ""
+    assert path.read_bytes() == _PDF
+    assert batches == []
+    assert calls == [
+        _Call(
+            args=("arxiv", "2106.15928"),
+            kwargs={"oa_url": None, "oa_looked_up": False, "session": tool.session},
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_kept_pdf_is_returned_without_a_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "doi_10.1000_x.pdf").write_bytes(_PDF)
+    calls = _downloads(monkeypatch)
+    result = await _tool(tmp_path).call(ToolContext(cwd=tmp_path), {"ids": "10.1000/x"})
+    assert result.text() == f"Cached: {tmp_path / 'doi_10.1000_x.pdf'}"
+    assert calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kept",
+    [b"%PDF-1.7", b"<html>" + b"x" * 200],
+    ids=["short", "html"],
+)
+async def test_a_kept_file_that_is_no_pdf_is_downloaded_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    kept: bytes,
+) -> None:
+    path = tmp_path / "doi_10.1000_x.pdf"
+    path.write_bytes(kept)
+    _downloads(monkeypatch, {"10.1000/x": (_PDF, "open access")})
+    result = await _tool(tmp_path).call(ToolContext(cwd=tmp_path), {"ids": "10.1000/x"})
+    assert result.text() == f"Downloaded via open access: {path}"
+    assert path.read_bytes() == _PDF
+
+
+@pytest.mark.asyncio
+async def test_many_papers_share_one_lookup_and_report_in_input_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    batches = _batches(monkeypatch, ["https://oa/a.pdf", None])
+    calls = _downloads(
+        monkeypatch,
+        {
+            "10.1000/a": (_PDF, "open access"),
+            "10.1000/b": PaperError("no copy of 10.1000/b"),
+        },
+    )
+    tool = _tool(tmp_path)
+    result = await tool.call(
+        ToolContext(cwd=tmp_path),
+        {"ids": ["10.1000/a", "10.1000/b"]},
+    )
+    assert result.text() == (
+        f"Downloaded via open access: {tmp_path / 'doi_10.1000_a.pdf'}\n"
+        "no copy of 10.1000/b"
+    )
+    assert result.is_error is True
+    assert batches == [
+        _Call(
+            args=(["DOI:10.1000/a", "DOI:10.1000/b"],),
+            kwargs={"session": tool.session},
+        ),
+    ]
+    assert [c.kwargs["oa_url"] for c in calls] == ["https://oa/a.pdf", None]
+    assert [c.kwargs["oa_looked_up"] for c in calls] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_lookup_leaves_each_download_to_find_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _batches(monkeypatch, None)
+    calls = _downloads(
+        monkeypatch,
+        {"2106.15928": (_PDF, "arXiv"), "2106.15929": (_PDF, "arXiv")},
+    )
+    result = await _tool(tmp_path).call(
+        ToolContext(cwd=tmp_path),
+        {"ids": "2106.15928, 2106.15929"},
+    )
+    assert result.is_error is False
+    assert [(c.kwargs["oa_url"], c.kwargs["oa_looked_up"]) for c in calls] == [
+        (None, False),
+        (None, False),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_every_paper_failing_is_one_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _batches(monkeypatch, [None, None])
+    _downloads(
+        monkeypatch,
+        {"10.1000/a": PaperError("no a"), "10.1000/b": PaperError("no b")},
+    )
+    result = await _tool(tmp_path).call(
+        ToolContext(cwd=tmp_path),
+        {"ids": ["10.1000/a", "10.1000/b"]},
+    )
+    assert (result.is_error, result.text()) == (True, "no a\nno b")
+    assert _names(tmp_path) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({"ids": ""}, "'ids' is empty."),
+        ({"ids": []}, "'ids' is empty."),
+        ({"ids": "not-an-id"}, "not-an-id"),
+        ({"ids": ["10.1000/a", "nope"]}, "nope"),
+        ({"ids": 3}, "'ids' must be"),
+        ({}, "Missing argument 'ids'"),
+    ],
+)
+async def test_ids_that_name_no_paper_are_refused_before_any_download(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, PlainTree],
+    message: str,
+) -> None:
+    calls = _downloads(monkeypatch)
+    batches = _batches(monkeypatch)
+    with pytest.raises(ValueError, match=message):
+        await _tool(tmp_path).call(ToolContext(cwd=tmp_path), arguments)
+    assert (calls, batches) == ([], [])
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Call:
+    """One lookup or download the tool asked for."""
+
+    args: tuple[object, ...]
+    kwargs: dict[str, object]
+
+
+def _tool(directory: Path | None = None) -> PaperFetch:
+    session = FetchSession()
+    return (
+        PaperFetch(session=session)
+        if directory is None
+        else PaperFetch(
+            session=session,
+            directory=directory,
         )
-    download.assert_called_once()
-    assert result.content == f"Downloaded via arxiv: {cache_file}"
-
-
-def test_run_cache_garbage_refetches(tmp_path: Path) -> None:
-    """A big-but-non-PDF cache entry re-triggers the fetch, not a cache hit."""
-    cache_file = tmp_path / "arxiv_1234.56789.pdf"
-    _ = cache_file.write_bytes(b"<html>" + b"0" * 300)
-    with patch(
-        "sagent.tools.paper_fetch.download",
-        return_value=(_FAKE_PDF, "arxiv"),
-    ) as download:
-        result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
-        )
-    download.assert_called_once()
-    assert "Downloaded via arxiv" in result.content
-
-
-# ---------------------------------------------------------------------------
-# Single-id path
-# ---------------------------------------------------------------------------
-
-
-def test_run_single_download_writes_cache(tmp_path: Path) -> None:
-    """A single id fetches once, writes the bytes, and renders the source."""
-    cache_file = tmp_path / "arxiv_1234.56789.pdf"
-    tool = PaperFetch(cache_dir=tmp_path)
-    with patch(
-        "sagent.tools.paper_fetch.download",
-        return_value=(_FAKE_PDF, "arxiv"),
-    ) as download:
-        result = asyncio.run(tool.run({"ids": ["1234.56789"]}))
-    assert not result.is_error
-    assert result.content == f"Downloaded via arxiv: {cache_file}"
-    assert cache_file.read_bytes() == _FAKE_PDF
-    # Single id: no OA pre-resolve, and no completed lookup claimed.
-    download.assert_called_once_with(
-        "arxiv",
-        "1234.56789",
-        oa_url=None,
-        oa_looked_up=False,
-        session=tool.session,
     )
 
 
-def test_run_single_open_access_source(tmp_path: Path) -> None:
-    """The exact rendered source label round-trips from the library."""
-    with patch(
-        "sagent.tools.paper_fetch.download",
-        return_value=(_FAKE_PDF, "open_access"),
-    ):
-        result = asyncio.run(PaperFetch(cache_dir=tmp_path).run({"ids": ["10.1234/x"]}))
-    cache_file = tmp_path / "doi_10.1234_x.pdf"
-    assert result.content == f"Downloaded via open_access: {cache_file}"
+# The downloads run at once, so the order they arrive in is no order at all.
+def _downloads(
+    monkeypatch: pytest.MonkeyPatch,
+    answers: dict[str, tuple[bytes, str] | Exception] | None = None,
+) -> list[_Call]:
+    """Answer each download by its paper's id; return what was asked, in id order."""
+    calls: list[_Call] = []
+
+    def download(*args: object, **kwargs: object) -> tuple[bytes, str]:
+        calls.append(_Call(args=args, kwargs=kwargs))
+        calls.sort(key=lambda c: str(c.args))
+        answer = (answers or {})[str(args[1])]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(paper_fetch, "download", download)
+    return calls
 
 
-def test_run_single_error_maps_to_tool_error(tmp_path: Path) -> None:
-    """A ``PaperError`` becomes an is_error ToolResult carrying its text."""
-    err = NotFoundError("No source returned a PDF for arxiv:1234.56789.")
-    with patch("sagent.tools.paper_fetch.download", side_effect=err):
-        result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.56789"]}),
-        )
-    assert result.is_error
-    assert result.content == "No source returned a PDF for arxiv:1234.56789."
-    assert not (tmp_path / "arxiv_1234.56789.pdf").exists()
+def _batches(
+    monkeypatch: pytest.MonkeyPatch,
+    *answers: list[str | None] | None,
+) -> list[_Call]:
+    """Answer each batched lookup with the next of ``answers``; return what was asked."""
+    calls: list[_Call] = []
+    pending = list(answers)
+
+    def batch_oa_urls(*args: object, **kwargs: object) -> list[str | None] | None:
+        calls.append(_Call(args=args, kwargs=kwargs))
+        return pending.pop(0)
+
+    monkeypatch.setattr(paper_fetch, "batch_oa_urls", batch_oa_urls)
+    return calls
 
 
-# ---------------------------------------------------------------------------
-# Multi-id path: batched OA resolve, concurrent fetch, joined output
-# ---------------------------------------------------------------------------
-
-
-def test_run_multi_batches_oa_then_fetches(tmp_path: Path) -> None:
-    """Several ids resolve OA URLs in ONE batch, then fetch each concurrently."""
-    urls = ["https://oa.example/a.pdf", "https://oa.example/b.pdf"]
-
-    def fake_download(
-        kind: str,
-        canonical: str,
-        *,
-        oa_url: str | None,
-        oa_looked_up: bool,
-        session: object,
-    ) -> tuple[bytes, str]:
-        del session
-        del kind, canonical, oa_url, oa_looked_up
-        return _FAKE_PDF, "open_access"
-
-    with (
-        patch(
-            "sagent.tools.paper_fetch.batch_oa_urls",
-            return_value=urls,
-        ) as batch,
-        patch(
-            "sagent.tools.paper_fetch.download",
-            side_effect=fake_download,
-        ) as download,
-    ):
-        tool = PaperFetch(cache_dir=tmp_path)
-        result = asyncio.run(tool.run({"ids": ["10.1234/aa", "10.1234/bb"]}))
-
-    batch.assert_called_once_with(
-        ["DOI:10.1234/aa", "DOI:10.1234/bb"],
-        session=tool.session,
-    )
-    assert result.content.count("Downloaded via open_access") == 2
-    assert (tmp_path / "doi_10.1234_aa.pdf").exists()
-    assert (tmp_path / "doi_10.1234_bb.pdf").exists()
-    # Batch succeeded: each fetch is told the OA lookup is complete.
-    for c in download.call_args_list:
-        assert c.kwargs["oa_looked_up"] is True
-    passed_urls = {c.kwargs["oa_url"] for c in download.call_args_list}
-    assert passed_urls == set(urls)
-
-
-def test_run_multi_batch_failure_falls_back(tmp_path: Path) -> None:
-    """A ``None`` batch result falls back to per-id lookups (oa_looked_up False)."""
-    with (
-        patch(
-            "sagent.tools.paper_fetch.batch_oa_urls",
-            return_value=None,
-        ),
-        patch(
-            "sagent.tools.paper_fetch.download",
-            return_value=(_FAKE_PDF, "arxiv"),
-        ) as download,
-    ):
-        result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.11111", "1234.22222"]}),
-        )
-    assert not result.is_error
-    for c in download.call_args_list:
-        assert c.kwargs["oa_url"] is None
-        assert c.kwargs["oa_looked_up"] is False
-
-
-def test_run_multi_joined_output_order(tmp_path: Path) -> None:
-    """Per-id lines are newline-joined in input order (not completion order)."""
-    sources = {"1234.11111": "arxiv", "10.1234/bb": "open_access"}
-
-    def fake_download(
-        kind: str,
-        canonical: str,
-        *,
-        oa_url: str | None,
-        oa_looked_up: bool,
-        session: object,
-    ) -> tuple[bytes, str]:
-        del session
-        del kind
-        del oa_url, oa_looked_up
-        return _FAKE_PDF, sources[canonical]
-
-    with (
-        patch(
-            "sagent.tools.paper_fetch.batch_oa_urls",
-            return_value=[None, None],
-        ),
-        patch(
-            "sagent.tools.paper_fetch.download",
-            side_effect=fake_download,
-        ),
-    ):
-        result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.11111", "10.1234/bb"]}),
-        )
-    line_a = f"Downloaded via arxiv: {tmp_path / 'arxiv_1234.11111.pdf'}"
-    line_b = f"Downloaded via open_access: {tmp_path / 'doi_10.1234_bb.pdf'}"
-    assert result.content == f"{line_a}\n{line_b}"
-
-
-def test_run_multi_error_if_any_id_fails(tmp_path: Path) -> None:
-    """is_error is True if ANY id errors; the good id still renders its line."""
-    err = NotFoundError("No source returned a PDF for doi:10.1234/bb.")
-
-    def fake_download(
-        kind: str,
-        canonical: str,
-        *,
-        oa_url: str | None,
-        oa_looked_up: bool,
-        session: object,
-    ) -> tuple[bytes, str]:
-        del session
-        del kind
-        del oa_url, oa_looked_up
-        if canonical == "10.1234/bb":
-            raise err
-        return _FAKE_PDF, "arxiv"
-
-    with (
-        patch(
-            "sagent.tools.paper_fetch.batch_oa_urls",
-            return_value=[None, None],
-        ),
-        patch(
-            "sagent.tools.paper_fetch.download",
-            side_effect=fake_download,
-        ),
-    ):
-        result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["1234.11111", "10.1234/bb"]}),
-        )
-    assert result.is_error
-    assert "Downloaded via arxiv" in result.content
-    assert "No source returned a PDF for doi:10.1234/bb." in result.content
-
-
-def test_run_multi_all_fail(tmp_path: Path) -> None:
-    """Every id failing reports is_error with one error line per id."""
-    err = NotFoundError("No source returned a PDF.")
-    with (
-        patch(
-            "sagent.tools.paper_fetch.batch_oa_urls",
-            return_value=[None, None],
-        ),
-        patch("sagent.tools.paper_fetch.download", side_effect=err),
-    ):
-        result = asyncio.run(
-            PaperFetch(cache_dir=tmp_path).run({"ids": ["10.1234/a", "10.1234/b"]}),
-        )
-    assert result.is_error
-    assert result.content.count("No source returned a PDF.") == 2
+def _names(directory: Path) -> list[str]:
+    """Return the names in ``directory``, sorted."""
+    return sorted(p.name for p in directory.iterdir())
 
 
 if __name__ == "__main__":

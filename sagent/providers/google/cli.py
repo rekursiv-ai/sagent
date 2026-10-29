@@ -1,476 +1,155 @@
-"""``GoogleCLI`` provider: wraps the user's installed ``gemini`` CLI in ACP mode.
+"""Gemini through ``agy`` in headless stream-json mode, billed to the login it holds.
 
-Speaks the Agent Client Protocol (JSON-RPC over NDJSON) to a
-persistent ``gemini --experimental-acp`` subprocess that rides the
-user's Gemini Code Assist subscription. Tool calls flow through the
-in-process MCP bridge (``providers.lib.mcp_bridge``); the CLI
-registers the bridge via ``session/new.params.mcpServers`` with
-``type: "http"`` and dispatches sagent tools by URL.
+``agy`` is only a way to reach the model; it runs no tool of its own. Each process
+runs a custom main agent whose instructions are our system prompt and which has
+none of ``agy``'s tools, in a home of its own that names our MCP server as its one
+tool server. Each turn is a ``user`` line on stdin; its words arrive as
+``step_update`` lines, and a ``result`` line ends it. A tool call reaches our MCP
+server, which holds the call, and ``stream`` returns it as a ``ToolCall``. The
+next ``stream`` hands the caller's result to the held call and the same turn
+continues. Anything else -- a new system prompt, new tools, another model or
+effort, a rewritten history -- starts a fresh ``agy``, which reads the
+conversation as text.
 
-The terminal ACP event for each user turn is the JSON-RPC response to
-``session/prompt`` (matched by id). Streaming chunks arrive as
-``session/update`` notifications with ``agent_message_chunk`` /
-``agent_thought_chunk`` payloads in between.
+``agy`` keeps its own login, in the system keyring, and signs in with
+``agy`` itself: run it once. It takes text alone, so an image is named, not sent.
+
+Typical usage example:
+
+  async with GoogleCLI() as google:
+      flash = google["gemini-flash"]
+      async for event in flash.stream(request):   # The same events as the API.
+          ...
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Final,
-    NotRequired,
-    TypedDict,
-    cast,
-    override,
-)
+from typing import TYPE_CHECKING, ClassVar, override
 
 import asyncio
-import base64
-import contextlib
-import dataclasses
-import json
-import logging
+import hashlib
 import os
+import re
 import shutil
+import tempfile
 
-from treekle import MutablePlainTree, PlainTree, from_plain, json_loads
+from treekle import ReadError, from_plain, json_dumps, json_loads, mutable
 
-import fastjsonschema
-
-from sagent.catalog.google import cli
-from sagent.catalog.loader import models
-from sagent.catalog.table import ModelCatalog
-from sagent.lib.atomic_file import atomic_write_bytes
-from sagent.providers.google.api import Google, gemini_image_tokens
-from sagent.providers.lib.cli_respawn import (
-    CLISubprocessModel,
-    empty_turn_response,
-    hash_system,
-    populated_tmpdir,
-)
-from sagent.providers.lib.errors import (
-    error_status_code,
-    is_context_overflow_text,
-    is_request_too_large,
-)
-from sagent.providers.lib.hotspare import HotSpare
-from sagent.providers.lib.mcp_bridge import ToolsBridge
-from sagent.providers.lib.model_base import ModelDefaults
-from sagent.providers.lib.oauth import (
-    credential_file_lock,
-    credentials_path,
-)
-from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.providers.lib.subproc import (
-    Subproc,
-    SubprocessTransportError,
-)
-from sagent.types.cost import TokenCount
-from sagent.types.model import (
-    ModelRequest,
-    ModelResponse,
-)
-from sagent.types.runtime import (
-    AgentSendMessage,
+from sagent.model.cost import TokenCount
+from sagent.model.exceptions import AuthError, DisconnectedError, RateLimitedError
+from sagent.model.types import Response, TextChunk
+from sagent.providers.google.api import models
+from sagent.providers.resources import SharedResources
+from sagent.session.types import (
+    AgentToAgentMessage,
     AssistantMessage,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    RuntimeEvent,
+    Attachment,
+    ContextClear,
+    SessionRecord,
+    SystemMessage,
+    Thinking,
+    ToolCall,
+    ToolResult,
+    TurnContext,
     UserMessage,
 )
+from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from asyncio.subprocess import Process
+    from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 
-    from sagent.lib import image
-    from sagent.types.capability import ModelCapability, ModelSettings
-else:
-    from wrapt import lazy_import
-
-    image = lazy_import("sagent.lib.image")
-
-
-logger = logging.getLogger(__name__)
-
-
-_GEMINI_DIR = Path("~/.gemini")
-_CREDS_PATH = _GEMINI_DIR / "oauth_creds.json"
-_CREDENTIALS_SCHEMA: Final[Mapping[str, PlainTree]] = {
-    "type": "object",
-    "required": ["access_token", "refresh_token", "expiry_date"],
-    "properties": {
-        "access_token": {"type": "string"},
-        "refresh_token": {"type": "string"},
-        "expiry_date": {"type": "number"},
-    },
-}
-_CREDENTIALS_VALIDATOR = fastjsonschema.compile(_CREDENTIALS_SCHEMA)
+    from sagent.model.capability import ModelCapability, ModelSettings
+    from sagent.model.types import Request
+    from sagent.providers.types import (
+        ProviderSharedResources,
+        ToolMount,
+        UsageWindow,
+    )
+    from sagent.tools.types import Tool
 
 
-class GoogleCLICredentials(TypedDict):
-    """OAuth credentials from the Gemini CLI credentials file."""
-
-    access_token: str
-    refresh_token: str
-    expiry_date: float
-    project_id: NotRequired[str]
-    scope: NotRequired[str]
-    token_type: NotRequired[str]
+__all__ = [
+    "GoogleCLI",
+    "GoogleCLIModel",
+]
 
 
-class GoogleCLI:
-    """Provider that drives the user's installed ``gemini`` CLI subprocess.
+class GoogleCLI(AsyncResource):
+    """Gemini models through ``agy``, billed to its login.
 
-    Shares the Gemini model catalog. Auth is the CLI's own OAuth credentials at
-    ``~/.gemini/oauth_creds.json`` (or the named-account variant).
-    Cost figures are estimated from public per-token pricing since ACP
-    does not surface per-turn usage on ``session/prompt`` responses.
+    Args:
+      name: The name the catalog knows this provider by; the section by default.
+      resources: What this shares with other providers; ``None`` makes and
+        closes its own.
+
     """
 
-    catalog = ModelCatalog(models=models("google"), transport=cli())
+    section: ClassVar[str] = "google-cli"
+    """The catalog section whose models and settings this provider serves."""
 
-    def __init__(self, *, account: str | None = None) -> None:
-        self._account = account
-
-    @classmethod
-    def from_key(cls, api_key: str) -> Google:
-        """Create an API-key provider (delegates to :class:`Google`).
-
-        The CLI-wrapping provider is incompatible with API-key auth, so
-        this returns a plain :class:`Google` instance.
-
-        Args:
-          api_key: Google AI Studio API key.
-
-        Returns:
-          provider: ``Google`` provider instance.
-
-        """
-        return Google.from_key(api_key)
-
-    @classmethod
-    def from_credentials(cls, *, account: str | None = None) -> GoogleCLI:
-        """Build a provider that uses the local ``gemini`` CLI's credentials.
-
-        Args:
-          account: Named credential slot. ``None`` reads the legacy
-              unnamed credentials file.
-
-        Returns:
-          provider: Configured CLI-wrapping provider.
-
-        Raises:
-          FileNotFoundError: If the resolved credentials file is absent.
-          RuntimeError: If ``gemini`` is not on ``PATH``.
-
-        """
-        path = credentials_path(_CREDS_PATH.expanduser(), account)
-        if not path.exists():
-            raise FileNotFoundError(
-                f"GoogleCLI: no credentials at {path}; run `gemini` and authenticate.",
-            )
-        if _load_cli_credentials_file(path) is None:
-            raise ValueError(f"Invalid credentials file: {path}")
-        if shutil.which("gemini") is None:
-            raise RuntimeError(
-                "GoogleCLI: `gemini` is not on PATH; install the Gemini CLI.",
-            )
-        return cls(account=account)
-
-    def model(
+    def __init__(
         self,
-        model_id: str | None = None,
-    ) -> _GoogleCLIModel:
-        """Build a CLI-backed model.
-
-        Args:
-          model_id: Gemini model id; ``None`` uses catalog key ``default``.
-
-        Returns:
-          model: Backend wrapping a managed ``gemini --experimental-acp`` subprocess.
-
-        Raises:
-          ValueError: If the resolved id is not in the catalog.
-
-        """
-        mid = model_id if model_id is not None else "default"
-        capability, settings = self.catalog.resolve(mid)
-        return _GoogleCLIModel(
-            provider=self,
-            capability=capability,
-            settings=settings,
-        )
-
-    async def close_sdk(self) -> None:
-        """Do nothing: each model owns and closes its own subprocess."""
+        *,
+        name: str = "",
+        resources: ProviderSharedResources | None = None,
+    ) -> None:
+        self._name = name or self.section
+        self._owns_resources = resources is None
+        self._resources = SharedResources() if resources is None else resources
+        # Stopped with the provider: a catalog closes providers before the pools
+        # their processes run in.
+        self._started: set[GoogleCLIModel] = set()
 
     @property
-    def account(self) -> str | None:
-        """Per-account credentials slot, ``None`` for the legacy file."""
-        return self._account
+    def name(self) -> str:
+        """Return the name the catalog knows this provider by."""
+        return self._name
+
+    @property
+    def resources(self) -> ProviderSharedResources:
+        """Return what this provider shares with others."""
+        return self._resources
+
+    @property
+    def usage(self) -> tuple[UsageWindow, ...]:
+        """Return ``()``: ``agy`` does not report the account's rate limits."""
+        return ()
+
+    def __getitem__(self, model: str) -> GoogleCLIModel:
+        capability, settings = models(self.section).resolve(model)
+        return GoogleCLIModel(provider=self, capability=capability, settings=settings)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(models(self.section))
+
+    @override
+    async def aclose(self) -> None:
+        for model in tuple(self._started):
+            await model.aclose()
+        if self._owns_resources:
+            await self._resources.aclose()
+
+    def started(self, model: GoogleCLIModel) -> None:
+        """Remember ``model``, which started an ``agy`` this provider stops on closing."""
+        self._started.add(model)
 
 
-@dataclasses.dataclass(frozen=True, slots=True, kw_only=True)
-class _GoogleCLIProcState:
-    """ACP session state owned by one Gemini CLI subprocess."""
+class GoogleCLIModel(AsyncResource):
+    """One Gemini model, reached through one running ``agy`` at a time."""
 
-    proc: Subproc
-    session_id: str
-    tmpdir: Path
-    system_hash: str
+    respawn_turns: ClassVar[int] = 100
+    """Turns one ``agy`` serves before a fresh one replaces it."""
 
+    respawn_fraction: ClassVar[float] = 0.5
+    """Share of the window a conversation may fill before ``agy`` is replaced."""
 
-def save_cli_credentials_file(path: Path, creds: GoogleCLICredentials) -> None:
-    """Persist credentials in Gemini CLI-compatible format.
-
-    Args:
-      path: Credentials file to update.
-      creds: OAuth credentials to persist.
-
-    """
-    existing: dict[str, MutablePlainTree] = {}
-    if path.exists():
-        with contextlib.suppress(json.JSONDecodeError, OSError):
-            raw = json_loads(path.read_text(encoding="utf-8"))
-            if isinstance(raw, dict):
-                existing = raw
-    existing["access_token"] = creds["access_token"]
-    existing["refresh_token"] = creds["refresh_token"]
-    existing["expiry_date"] = creds["expiry_date"]
-    for opt_key in ("project_id", "scope", "token_type"):
-        value = creds.get(opt_key)
-        if isinstance(value, str) and value:
-            existing[opt_key] = value
-    atomic_write_bytes(path, json.dumps(existing).encode(), file_mode=0o600)
-
-
-def _read_expiry(path: Path) -> float:
-    """Return the ``expiry_date`` (JS millis) in ``path``, or ``0`` on any error."""
-    with contextlib.suppress(OSError, json.JSONDecodeError, KeyError, ValueError):
-        stored = json_loads(path.read_text(encoding="utf-8"), dict[str, object])
-        return from_plain(stored["expiry_date"], float, strict=False)
-    return 0.0
-
-
-def _populate_google_tmpdir(
-    tmpdir: Path,
-    account: str | None,
-    system_prompt: str,
-) -> None:
-    """Lay out the hermetic ``HOME`` the spawn recipe (§3.1) expects."""
-    dot_gemini = tmpdir / ".gemini"
-    workdir = tmpdir / "workdir"
-    dot_gemini.mkdir(parents=True, exist_ok=True)
-    workdir.mkdir(parents=True, exist_ok=True)
-    creds_src = credentials_path(_CREDS_PATH.expanduser(), account)
-    if _load_cli_credentials_file(creds_src) is None:
-        raise ValueError(f"Invalid credentials file: {creds_src}")
-    creds_dst = dot_gemini / "oauth_creds.json"
-    shutil.copyfile(creds_src, creds_dst)
-    creds_dst.chmod(
-        0o600,
-    )  # house-ignore[mkdir-mode] -- Credential copy into a hermetic tmp HOME for the vendor CLI.
-    for name in ("google_accounts.json", "installation_id"):
-        src = _GEMINI_DIR.expanduser() / name
-        if src.exists():
-            shutil.copyfile(src, dot_gemini / name)
-    (dot_gemini / "settings.json").write_text(
-        json.dumps(_GEMINI_SETTINGS),
-        encoding="utf-8",
-    )
-    (tmpdir / "system.md").write_text(system_prompt, encoding="utf-8")
-
-
-def _google_subprocess_env(tmpdir: Path) -> dict[str, str]:
-    """Build the env for the ``gemini`` subprocess (hermetic + telemetry off)."""
-    drop = {
-        "GEMINI_API_KEY",
-        "GOOGLE_API_KEY",
-        "GOOGLE_GENAI_USE_VERTEXAI",
-        "GOOGLE_GENAI_USE_GCA",
-        "GEMINI_CLI_USE_COMPUTE_ADC",
-        "GOOGLE_APPLICATION_CREDENTIALS",
-    }
-    env = {k: v for k, v in os.environ.items() if k not in drop}
-    env.update(
-        {
-            "HOME": str(tmpdir),
-            "USERPROFILE": str(tmpdir),
-            "GEMINI_SYSTEM_MD": str(tmpdir / "system.md"),
-            "GEMINI_DEFAULT_AUTH_TYPE": "oauth-personal",
-            "GEMINI_FORCE_FILE_STORAGE": "true",
-            "GEMINI_YOLO_MODE": "true",
-            "GEMINI_FOLDER_TRUST": "true",
-            "GEMINI_CLI_TRUST_WORKSPACE": "true",
-            "GEMINI_CLI_NO_RELAUNCH": "true",
-            "GEMINI_STRICT_TELEMETRY_LIMITS": "true",
-        },
-    )
-    return env
-
-
-_GEMINI_SETTINGS: dict[str, MutablePlainTree] = {
-    "security": {"auth": {"selectedType": "oauth-personal"}},
-    "privacy": {"usageStatisticsEnabled": False},
-    "telemetry": {
-        "enabled": False,
-        "logPrompts": False,
-        "useCollector": False,
-    },
-    "general": {
-        "checkpointing": {"enabled": False},
-        "enableAutoUpdate": False,
-        "enableAutoUpdateNotification": False,
-        "enableNotifications": False,
-    },
-    "ui": {
-        "hideTips": True,
-        "hideBanner": True,
-        "hideContextSummary": True,
-        "hideSandboxStatus": True,
-        "hideModelInfo": True,
-        "showMemoryUsage": False,
-    },
-    "context": {
-        "loadMemoryFromIncludeDirectories": False,
-        "discoveryMaxDirs": 0,
-    },
-    "tools": {
-        "excludeTools": ["*"],
-        "useWriteTodos": False,
-        "toolSandboxing": False,
-        "blockGitExtensions": True,
-        "allowedExtensions": [],
-    },
-    "mcp": {"allowed": [], "excluded": ["*"]},
-    "advanced": {
-        "autoConfigureMemory": False,
-        "agentSessionNoninteractiveEnabled": False,
-        "agentSessionInteractiveEnabled": False,
-        "extensionManagement": False,
-        "extensionConfig": False,
-        "extensionRegistry": False,
-        "extensionReloading": False,
-        "jitContext": False,
-        "taskTracker": False,
-        "modelSteering": False,
-        "memoryV2": False,
-        "autoMemory": False,
-        "contextManagement": False,
-    },
-    "experimental": {"compressionThreshold": 1.0},
-}
-
-
-async def _rpc_call(
-    proc: Subproc,
-    request_id: int,
-    method: str,
-    params: dict[str, object],
-) -> dict[str, MutablePlainTree]:
-    """Send one JSON-RPC request and return the matching ``result`` payload."""
-    await _rpc_send(proc, request_id, method, params)
-    while True:
-        msg = await proc.read_json_line(skip_non_json=True)
-        if msg is None:
-            raise SubprocessTransportError(
-                f"GoogleCLI: stdout closed waiting for {method}",
-            )
-        if msg.get("id") == request_id:
-            if "error" in msg:
-                raise SubprocessTransportError(
-                    f"GoogleCLI: {method} error: {msg['error']}",
-                )
-            return cast(dict[str, MutablePlainTree], msg.get("result") or {})
-
-
-async def _rpc_send(
-    proc: Subproc,
-    request_id: int,
-    method: str,
-    params: dict[str, object],
-) -> None:
-    """Serialise one JSON-RPC request and write it to the subprocess stdin."""
-    payload = {
-        "jsonrpc": "2.0",
-        "id": request_id,
-        "method": method,
-        "params": params,
-    }
-    await proc.write_line(json.dumps(payload))
-
-
-def _user_prompt_blocks(
-    entry: AgentSendMessage | UserMessage,
-    max_image_dim: int,
-    max_image_bytes: int,
-) -> list[dict[str, MutablePlainTree]]:
-    """Build ACP ``[{type:text}|{type:image}]`` blocks for a ``UserMessage``."""
-    blocks: list[dict[str, MutablePlainTree]] = []
-    if entry.text:
-        blocks.append({"type": "text", "text": entry.text})
-    for att in entry.attachments:
-        if not att.descriptor.startswith("image/"):
-            continue
-        raw, mime = image.resize(
-            att.data,
-            max_dim=max_image_dim,
-            max_bytes=max_image_bytes,
-        )
-        blocks.append(
-            {
-                "type": "image",
-                "data": base64.b64encode(raw).decode(),
-                "mimeType": mime,
-            },
-        )
-    if not blocks:
-        blocks.append({"type": "text", "text": ""})
-    return blocks
-
-
-def _dispatch_session_update(
-    params: dict[str, MutablePlainTree],
-    text_parts: list[str],
-    thinking_parts: list[str],
-    publish: Callable[[RuntimeEvent], None] | None,
-) -> None:
-    """Route one ``session/update`` notification payload."""
-    update = cast(dict[str, MutablePlainTree], params.get("update") or {})
-    kind = update.get("sessionUpdate")
-    if kind == "agent_message_chunk":
-        text = cast(
-            str,
-            cast(dict[str, MutablePlainTree], update.get("content") or {}).get("text")
-            or "",
-        )
-        if text:
-            text_parts.append(text)
-            if publish is not None:
-                publish(ModelResponsePartial(text))
-    elif kind == "agent_thought_chunk":
-        text = cast(
-            str,
-            cast(dict[str, MutablePlainTree], update.get("content") or {}).get("text")
-            or "",
-        )
-        if text:
-            thinking_parts.append(text)
-            if publish is not None:
-                publish(ModelResponseThinking(text))
-
-
-class _GoogleCLIModel(CLISubprocessModel, ModelDefaults):
-    """``gemini --experimental-acp`` subprocess wrapped as a sagent ``Model``.
-
-    Args:
-      provider: Owning :class:`GoogleCLI`.
-      capability: Resolved model and transport capabilities.
-      settings: Selections validated against ``capability``.
-
-    """
+    quiet_sec: ClassVar[float] = 600.0
+    """How long ``agy`` may say nothing before the turn counts as dropped."""
 
     def __init__(
         self,
@@ -479,397 +158,659 @@ class _GoogleCLIModel(CLISubprocessModel, ModelDefaults):
         capability: ModelCapability,
         settings: ModelSettings,
     ) -> None:
-        super().__init__()
         self._provider = provider
         self._capability = capability
         self._settings = settings
-        self._tools_bridge: ToolsBridge | None = None
-        self._next_rpc_id = 1
-        self._session_id: str = ""
-        self._tmpdir: Path | None = None
-        self._hot_spare = HotSpare(
-            self._spawn_initialized_proc,
-            close_partial=self._close_warming_proc,
-        )
-        self._writeback_lock = asyncio.Lock()
-        self._pending_system: str = ""
+        self._mount: ToolMount | None = None
+        self._agy: _Agy | None = None
 
     @property
-    @override
+    def provider(self) -> GoogleCLI:
+        """Return the provider serving this model."""
+        return self._provider
+
+    @property
     def capability(self) -> ModelCapability:
-        """What this model offers on this transport."""
+        """Return every setting this model offers."""
         return self._capability
 
     @property
-    @override
     def settings(self) -> ModelSettings:
-        """What this instance chose."""
+        """Return the settings chosen."""
         return self._settings
 
+    @settings.setter
+    def settings(self, settings: ModelSettings) -> None:
+        """Choose ``settings``; raise unless the capability offers each choice."""
+        self._capability.check(settings)
+        self._settings = settings
+
     @override
-    def approx_text_tokens(self, text: str) -> int:
-        """Estimate locally from the catalog's measured character ratio."""
+    async def aclose(self) -> None:
+        await self._stop()
+        mount, self._mount = self._mount, None
+        if mount is not None:
+            await self.provider.resources.tool_server.unmount(mount)
+
+    async def count(self, request: Request) -> int:
+        """Return an estimate of the tokens ``request`` would send; ``agy`` cannot count.
+
+        Args:
+          request: What the model would be asked.
+
+        Returns:
+          tokens: The text ``agy`` is given -- the prompt, the tools, and the
+            conversation as a transcript -- over the model's characters per token.
+
+        """
+        text = "\n\n".join(
+            (
+                *request.system,
+                *_described(request.tools),
+                *_transcript(request.records),
+            ),
+        )
         return int(len(text) / self.capability.approx_chars_per_token)
 
-    @override
-    def approx_image_tokens(self, data: bytes) -> int:
-        """Local estimate via Gemini's tile heuristic."""
-        return gemini_image_tokens(data)
+    def attachment_tokens(self, attachment: Attachment) -> int:
+        """Return the tokens of the line naming ``attachment``: ``agy`` sends text alone."""
+        return int(len(_named(attachment)) / self.capability.approx_chars_per_token)
 
-    def is_context_overflow(self, error: Exception) -> bool:
-        """Classify whether an error means the prompt exceeded the token window.
-
-        Excludes the request-byte wire-limit via the shared classifier first
-        (uniform with the HTTP providers): a byte-limit error routes to
-        byte-overflow recovery, not the ``/model`` larger-window remediation
-        the byte ceiling ignores. Without this guard the bare ``"too large"``
-        marker would swallow a byte-limit error into token overflow.
+    async def stream(self, request: Request) -> AsyncIterator[TextChunk | Response]:
+        """Yield the reply as it is written, then the finished ``Response``.
 
         Args:
-          error: Exception raised by the call path.
+          request: What the model is asked.
 
-        Returns:
-          overflow: ``True`` for known token-overflow markers in the message.
+        Yields:
+          event: Each ``TextChunk`` as the model writes it, then one ``Response``.
 
         """
-        if is_request_too_large(error_status_code(error), str(error)):
-            return False
-        return is_context_overflow_text(str(error))
+        records = tuple(request.records)
+        mount = await self._mounted()
+        mount.offer(request.tools)
+        # A process serves one system prompt, one tool set, one model and effort.
+        started_with = (*request.system, _digest(request.tools), self._model_id())
+        turn = _Turn()
+        try:
+            agy = self._agy
+            unseen = (
+                agy.unseen(records, started_with=started_with)
+                if agy is not None
+                else None
+            )
+            # Read before answering, which empties it: answered calls continue
+            # the turn in flight, and a new prompt would start another.
+            continuing = agy is not None and bool(agy.held)
+            if (
+                agy is None
+                or unseen is None
+                or (not continuing and self._worn(agy))
+                or (continuing and not await agy.answer(unseen, mount=mount))
+            ):
+                agy = await self._start(request, started_with=started_with)
+            elif not continuing:
+                await agy.prompt(_said_text(unseen))
+            async for chunk in agy.read(turn, mount=mount):
+                yield chunk
+            response = turn.response(capability=self.capability)
+        except BaseException:
+            # The process is mid-turn, so its conversation no longer matches.
+            await self._stop()
+            raise
+        agy.saw(records, response=response, context_tokens=await self.count(request))
+        yield response
 
-    @override
-    async def stream(
+    def _model_id(self) -> str:
+        """Return the id ``agy`` takes: the model's, suffixed by its effort."""
+        model = self.capability.wire_model_id or self.capability.model_id
+        return f"{model}-{self.settings.thinking_effort}"
+
+    async def _mounted(self) -> ToolMount:
+        if self._mount is None:
+            self._mount = await self.provider.resources.tool_server.mount()
+        return self._mount
+
+    async def _start(
         self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        """Drive one user turn through the ``gemini`` ACP subprocess.
+        request: Request,
+        *,
+        started_with: tuple[str, ...],
+    ) -> _Agy:
+        """Start a fresh ``agy`` in a home of its own, and tell it the conversation."""
+        await self._stop()
+        mount = await self._mounted()
+        home = Path(tempfile.mkdtemp(prefix="sagent-agy-"))
+        await asyncio.to_thread(
+            _furnish,
+            home,
+            system=request.system,
+            tools=request.tools,
+            url=mount.url,
+        )
+        # Started in the workdir: ``agy`` reads rules and agents from where it
+        # starts, and the caller's directory holds the caller's.
+        argv = [
+            "/bin/sh",
+            "-c",
+            'cd "$0" && exec "$@"',
+            str(home / "workdir"),
+            "agy",
+            "--agent",
+            "sagent",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--disable-slash-commands",
+            "--model",
+            self._model_id(),
+        ]
+        # An API key would send ``agy`` to the Gemini API, not the plan.
+        drop = {"GEMINI_API_KEY", "GOOGLE_API_KEY"}
+        env = {key: value for key, value in os.environ.items() if key not in drop}
+        env |= {"HOME": str(home), "USERPROFILE": str(home)}
+        process = await self.provider.resources.process_pool("agy").acquire(
+            argv,
+            env=env,
+        )
+        self._agy = _Agy(
+            process,
+            home=home,
+            started_with=started_with,
+            quiet_sec=self.quiet_sec,
+        )
+        self.provider.started(self)
+        await self._agy.prompt("\n\n".join(_transcript(request.records)))
+        return self._agy
+
+    async def _stop(self) -> None:
+        agy, self._agy = self._agy, None
+        if self._mount is not None:
+            self._mount.cancel()
+        if agy is not None:
+            agy.close()
+            await self.provider.resources.process_pool("agy").release(agy.process)
+            await asyncio.to_thread(shutil.rmtree, agy.home, ignore_errors=True)
+
+    # A long-lived ``agy`` accretes state of its own (caches, a context it
+    # compresses at will); a fresh one between turns, told the conversation,
+    # starts clean before its window fills.
+    def _worn(self, agy: _Agy) -> bool:
+        """Whether ``agy`` has served enough turns, or context, to retire."""
+        window = self.capability.limits.max_request_tokens
+        return (
+            agy.seen.turns >= self.respawn_turns
+            or agy.seen.context_tokens > window * self.respawn_fraction
+        )
+
+
+class _Agy:
+    """One running ``agy``, its home, and the conversation it has seen."""
+
+    def __init__(
+        self,
+        process: Process,
+        *,
+        home: Path,
+        started_with: tuple[str, ...],
+        quiet_sec: float,
+    ) -> None:
+        self.process = process
+        self.home = home
+        self._quiet_sec = quiet_sec
+        self.started_with = started_with
+        self._seen: _Seen | None = None
+        self._line: asyncio.Task[bytes] | None = None
+        self._call: asyncio.Task[ToolCall] | None = None
+        # What the stream in flight has cost so far. A step reports its own call
+        # before its stream ends; the compactor reads a reply's count as the
+        # context's size, so a turn's calls summed would overstate it.
+        self._spent = TokenCount()
+        # Whether ``agy`` said it is calling our tools and the call has not yet
+        # reached our server: only then is our server waited on beside its output.
+        self._expecting = False
+
+    @property
+    def seen(self) -> _Seen:
+        """Return what this process has heard and said, as of its last reply."""
+        # A process that never replied is stopped, so none is asked this.
+        assert isinstance(self._seen, _Seen)
+        return self._seen
+
+    @property
+    def held(self) -> tuple[ToolCall, ...]:
+        """Return the calls its last reply made, which wait for results."""
+        return self.seen.held
+
+    def unseen(
+        self,
+        records: Sequence[SessionRecord],
+        *,
+        started_with: tuple[str, ...],
+    ) -> Sequence[SessionRecord] | None:
+        """Return what ``records`` adds for this process; ``None`` if it cannot take it.
+
+        It takes the results of the calls it holds, or, holding none, new
+        user messages. Anything else needs a process that hears it all anew.
 
         Args:
-          request: Conversation + tools + system prompt for the turn.
-          publish: Per-chunk event sink; ``None`` disables live streaming.
+          records: The whole conversation the next turn answers.
+          started_with: What a process for that turn would be started with.
 
         Returns:
-          response: Parsed model response with cost estimated from pricing.
+          unseen: The records this process has not seen, or ``None``.
+
+        """
+        if (
+            started_with != self.started_with
+            or tuple(records[: len(self.seen.records)]) != self.seen.records
+        ):
+            return None
+        # Usage and settings records are ours alone; the model never sees them.
+        unseen = [
+            record
+            for record in records[len(self.seen.records) :]
+            if isinstance(
+                record,
+                (
+                    UserMessage,
+                    AgentToAgentMessage,
+                    SystemMessage,
+                    TurnContext,
+                    AssistantMessage,
+                    Thinking,
+                    ToolCall,
+                    ToolResult,
+                    ContextClear,
+                ),
+            )
+        ]
+        if self.held:
+            answered = {
+                record.call_id for record in unseen if isinstance(record, ToolResult)
+            }
+            # A note that arrives with the results waits for the next user line.
+            results = [
+                r for r in unseen if not isinstance(r, (SystemMessage, TurnContext))
+            ]
+            exact = len(answered) == len(results) and answered == {
+                c.call_id for c in self.held
+            }
+            return unseen if exact else None
+        if unseen and all(
+            isinstance(
+                record,
+                (UserMessage, AgentToAgentMessage, SystemMessage, TurnContext),
+            )
+            for record in unseen
+        ):
+            return unseen
+        return None
+
+    async def answer(
+        self,
+        results: Sequence[SessionRecord],
+        *,
+        mount: ToolMount,
+    ) -> bool:
+        """Hand each result to the call it answers.
+
+        Args:
+          results: The results of the calls this process holds.
+          mount: Where those calls wait.
+
+        Returns:
+          answered: ``False`` when a call is no longer waiting.
+
+        """
+        calls = {call.call_id: call for call in self.held}
+        try:
+            for result in results:
+                if isinstance(result, ToolResult):
+                    await mount.answer(calls[result.call_id], result)
+        except TimeoutError:
+            return False
+        return True
+
+    async def prompt(self, text: str) -> None:
+        """Start a turn.
+
+        Args:
+          text: What the user line says.
+
+        """
+        stdin = self.process.stdin
+        # The pool starts every process with pipes.
+        assert isinstance(stdin, asyncio.StreamWriter)
+        line = {"event": "user", "message": {"content": text}}
+        stdin.write(json_dumps(line).encode() + b"\n")
+        await stdin.drain()
+
+    async def read(self, turn: _Turn, *, mount: ToolMount) -> AsyncIterator[TextChunk]:
+        """Collect ``turn`` until it ends or the model calls our tools.
+
+        Args:
+          turn: Collects the reply.
+          mount: Where the model's calls of our tools arrive.
+
+        Yields:
+          chunk: Each piece of text, as the model writes it.
 
         Raises:
-          RuntimeError: The subprocess closed before responding, or the
-              server returned a JSON-RPC ``error`` field.
+          DisconnectedError: ``agy`` exited, or went quiet too long.
 
         """
-        self._pending_system = request.system_text
-        if self._hot_spare.active is not None:
-            self._promote_proc_state(self._hot_spare.active)
-        if self._should_respawn(request):
-            if hash_system(request.system_text) != self._system_hash:
-                await self._hot_spare.discard_spare()
-            await self._hot_spare.respawn()
-            self._reset_active_state()
-        proc = await self._hot_spare.acquire()
-        self._promote_proc_state(proc)
-        self._sync_tools_bridge(request)
-
-        try:
-            response = await self._exchange_turn(proc, request, publish)
-            self._last_sent_index = len(request.messages)
-        except (SubprocessTransportError, asyncio.CancelledError):
-            # A cancelled ``session/prompt`` keeps running in the CLI and its
-            # ``session/update`` chunks would leak into the next turn's read,
-            # so the subprocess is replaced exactly as after a transport error.
-            self._reset_active_state()
-            await self._hot_spare.respawn_after_transport_failure()
-            raise
-        self._hot_spare.record_success()
-        self._turn_count += 1
-        try:
-            await self._writeback_credentials()
-        except Exception:
-            logger.exception("GoogleCLI: credential writeback failed.")
-        return response
-
-    @override
-    async def close(self) -> None:
-        """Tear down the subprocess pool and the MCP bridge."""
-        await self._hot_spare.close()
-        if self._tools_bridge is not None:
-            await self._tools_bridge.stop()
-            self._tools_bridge = None
-
-    def _should_respawn(self, request: ModelRequest) -> bool:
-        """Inspect the trigger list (§1.4) for this request."""
-        if self._hot_spare.active is None:
-            return False
-        return self._respawn_due(
-            request.messages,
-            system=request.system_text,
-            max_request_tokens=self.limits.max_request_tokens,
-        )
-
-    def _sync_tools_bridge(self, request: ModelRequest) -> None:
-        """Refresh the MCP bridge's tool registry and gate to match the request."""
-        if self._tools_bridge is not None:
-            self._tools_bridge.update_tools(
-                list(request.tools),
-                allowed=request.allowed_tools,
-            )
-
-    def _promote_proc_state(self, proc: Subproc) -> None:
-        """Copy state from the active subprocess wrapper onto model fields."""
-        state = self._proc_state(proc)
-        if state is None:
-            return
-        self._session_id = state.session_id
-        self._system_hash = state.system_hash
-        self._tmpdir = state.tmpdir
-
-    @classmethod
-    def _attach_proc_state(cls, state: _GoogleCLIProcState) -> None:
-        """Attach Google CLI state to its subprocess wrapper."""
-        state.proc.sagent_google_cli_state = state
-
-    @classmethod
-    def _proc_state(cls, proc: Subproc) -> _GoogleCLIProcState | None:
-        """Return Google CLI state carried by ``proc``, if any."""
-        state = getattr(proc, "sagent_google_cli_state", None)
-        if isinstance(state, _GoogleCLIProcState):
-            return state
-        return None
-
-    async def _exchange_turn(
-        self,
-        proc: Subproc,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> ModelResponse:
-        """Send the unseen input as one ``session/prompt`` and build the reply."""
-        entry = self._unsent_input(request.messages)
-        if entry is None:
-            return empty_turn_response()
-        text_parts: list[str] = []
-        thinking_parts: list[str] = []
-        stop_reason = await self._send_prompt(
-            proc,
-            _user_prompt_blocks(
-                entry,
-                self.limits.max_image_edge_px,
-                self.limits.max_image_bytes,
-            ),
-            text_parts,
-            thinking_parts,
-            publish,
-        )
-        return self._build_response(text_parts, thinking_parts, stop_reason, request)
-
-    async def _send_prompt(
-        self,
-        proc: Subproc,
-        prompt_blocks: list[dict[str, MutablePlainTree]],
-        text_parts: list[str],
-        thinking_parts: list[str],
-        publish: Callable[[RuntimeEvent], None] | None,
-    ) -> str | None:
-        """Issue one ``session/prompt`` RPC and drain until its response."""
-        request_id = self._allocate_rpc_id()
-        await _rpc_send(
-            proc,
-            request_id,
-            "session/prompt",
-            {"sessionId": self._session_id, "prompt": prompt_blocks},
-        )
         while True:
-            msg = await proc.read_json_line(skip_non_json=True)
-            if msg is None:
-                raise SubprocessTransportError(
-                    "GoogleCLI: subprocess stdout closed before response",
-                )
-            if msg.get("id") == request_id:
-                if "error" in msg:
-                    raise SubprocessTransportError(
-                        f"GoogleCLI: JSON-RPC error: {msg['error']}",
-                    )
-                result = cast(dict[str, MutablePlainTree], msg.get("result") or {})
-                return cast(str | None, result.get("stopReason"))
-            if msg.get("method") == "session/update":
-                _dispatch_session_update(
-                    cast(dict[str, MutablePlainTree], msg.get("params") or {}),
-                    text_parts,
-                    thinking_parts,
-                    publish,
-                )
-
-    def _build_response(
-        self,
-        text_parts: list[str],
-        thinking_parts: list[str],
-        stop_reason: str | None,
-        request: ModelRequest,
-    ) -> ModelResponse:
-        """Assemble a ``ModelResponse`` with estimated token usage and cost."""
-        full_text = "".join(text_parts)
-        input_tokens = self.approx_request_tokens(request)
-        output_tokens = self.approx_text_tokens(full_text)
-        tokens = TokenCount(request=input_tokens, response=output_tokens)
-        self._last_input_tokens = input_tokens
-        thinking_blocks = (
-            ({"type": "thinking", "thinking": "".join(thinking_parts)},)
-            if thinking_parts
-            else ()
-        )
-        return ModelResponse(
-            message=AssistantMessage(
-                text=full_text,
-                thinking_blocks=thinking_blocks,
-                tool_calls=(),
-            ),
-            tokens=tokens,
-            stop_reason=normalize_stop_reason(
-                stop_reason,
-                kind="acp",
-                has_tool_use=False,
-            ),
-            message_id=self._session_id,
-            request_id=self._session_id,
-            spend=self.spend(tokens),
-        )
-
-    async def _spawn_initialized_proc(self) -> Subproc:
-        """Spawn ``gemini`` and attach isolated ACP state to the subprocess."""
-        state = await self._spawn_initialized()
-        self._attach_proc_state(state)
-        return state.proc
-
-    async def _spawn_initialized(self) -> _GoogleCLIProcState:
-        """Spawn ``gemini`` and run the ACP handshake to a live ``sessionId``."""
-        if self._tools_bridge is None:
-            self._tools_bridge = ToolsBridge(tools=[])
-            await self._tools_bridge.start()
-        system = self._pending_system
-        account = self._provider.account
-        tmpdir = populated_tmpdir(
-            "sagent-google-cli-",
-            lambda path: _populate_google_tmpdir(path, account, system),
-        )
-        system_hash = hash_system(system)
-        workdir = tmpdir / "workdir"
-        model_id = self.capability.wire_model_id or self.capability.model_id
-        proc = Subproc(
-            ["gemini", "--experimental-acp", "--model", model_id],
-            env=_google_subprocess_env(tmpdir),
-            tmpdir=tmpdir,
-            cwd=workdir,
-        )
-        self._warming_proc = proc
-        try:
-            await proc.start()
-            session_id = await self._acp_handshake(proc, workdir)
-        except BaseException:
-            await proc.close()
-            self._warming_proc = None
-            raise
-        state = _GoogleCLIProcState(
-            proc=proc,
-            session_id=session_id,
-            tmpdir=tmpdir,
-            system_hash=system_hash,
-        )
-        self._warming_proc = None
-        return state
-
-    async def _acp_handshake(self, proc: Subproc, workdir: Path) -> str:
-        """Run ``initialize`` → ``authenticate`` → ``session/new`` (§3.2)."""
-        if self._tools_bridge is None:
-            raise ValueError("Expected self._tools_bridge is not None.")
-        await _rpc_call(
-            proc,
-            self._allocate_rpc_id(),
-            "initialize",
-            {"protocolVersion": 1, "clientCapabilities": {}},
-        )
-        await _rpc_call(
-            proc,
-            self._allocate_rpc_id(),
-            "authenticate",
-            {"methodId": "oauth-personal"},
-        )
-        result = await _rpc_call(
-            proc,
-            self._allocate_rpc_id(),
-            "session/new",
-            {
-                "cwd": str(workdir),
-                "mcpServers": [
-                    {
-                        "name": self._tools_bridge.server_name,
-                        "type": "http",
-                        "url": self._tools_bridge.url,
-                        "headers": [],
-                    },
-                ],
-            },
-        )
-        session_id = from_plain(result.get("sessionId"), str, default="")
-        if not session_id:
-            raise RuntimeError(
-                f"GoogleCLI: session/new returned no sessionId: {result}",
-            )
-        return session_id
-
-    def _allocate_rpc_id(self) -> int:
-        """Allocate the next JSON-RPC id, incrementing in place."""
-        rid = self._next_rpc_id
-        self._next_rpc_id += 1
-        return rid
-
-    # Skipped if the user's copy is newer than the tmpdir's, so stale in-flight
-    # refreshes never clobber a fresher token from a sibling process or an interactive
-    # ``/login``. Holds the cross-process credential lock around the read-expiry →
-    # compare → write so a concurrent sagent can't read the same stale target and both
-    # race to write back conflicting tokens.
-    async def _writeback_credentials(self) -> None:
-        """Copy refreshed tmpdir creds back to the user's home (newer-wins)."""
-        if self._tmpdir is None:
-            return
-        async with self._writeback_lock:
-            src = self._tmpdir / ".gemini" / "oauth_creds.json"
-            if not src.exists():
+            message = await self._next(mount)
+            if isinstance(message, ToolCall):
+                # It now waits on the held call, which the caller runs.
+                turn.calls.append(message)
+                turn.tokens, self._spent = self._spent, TokenCount()
                 return
-            target = credentials_path(_CREDS_PATH.expanduser(), self._provider.account)
-            async with credential_file_lock(target):
-                # Re-check expiry under the cross-process lock so a sibling
-                # that just wrote a fresher token won't get clobbered.
-                tmpdir_expiry = _read_expiry(src)
-                user_expiry = _read_expiry(target) if target.exists() else 0.0
-                if tmpdir_expiry <= user_expiry:
-                    return
-                atomic_write_bytes(target, src.read_bytes(), file_mode=0o600)
+            event = message.get("event")
+            if event == "result":
+                result = _object(message.get("result"))
+                if result.get("status") != "SUCCESS":
+                    raise _failure(result)
+                turn.tokens, self._spent = self._spent, TokenCount()
+                return
+            if event == "step_update":
+                chunk = self._step(_object(message.get("step_update")), turn=turn)
+                if chunk is not None:
+                    yield chunk
+
+    def saw(
+        self,
+        records: Sequence[SessionRecord],
+        *,
+        response: Response,
+        context_tokens: int,
+    ) -> None:
+        """Record that this process heard ``records`` and replied ``response``.
+
+        Args:
+          records: The conversation it was asked to answer.
+          response: Its reply, which may stop at calls.
+          context_tokens: About how many tokens that conversation fills.
+
+        """
+        held = tuple(r for r in response.records if isinstance(r, ToolCall))
+        turns = self._seen.turns if self._seen is not None else 0
+        self._seen = _Seen(
+            records=(*records, *response.records),
+            held=held,
+            # A turn that stops at calls goes on in the next stream.
+            turns=turns if held else turns + 1,
+            context_tokens=context_tokens,
+        )
+
+    def close(self) -> None:
+        """Stop waiting on the process and on our server."""
+        for task in (self._line, self._call):
+            if task is not None:
+                task.cancel()
+
+    async def _next(self, mount: ToolMount) -> dict[str, object] | ToolCall:
+        """Return the next line from ``agy``, or a call that reached our server."""
+        # A call is taken only once ``agy`` has said it is making one, so every
+        # word the model wrote before the call is read first.
+        stdout = self.process.stdout
+        assert isinstance(stdout, asyncio.StreamReader)
+        # Kept across calls: a read cancelled midway could drop part of a line.
+        if self._line is None:
+            self._line = asyncio.ensure_future(stdout.readline())
+        waiting: set[asyncio.Future[bytes] | asyncio.Future[ToolCall]] = {self._line}
+        if self._expecting:
+            if self._call is None:
+                self._call = asyncio.ensure_future(mount.called())
+            waiting.add(self._call)
+        # A model that goes quiet this long has dropped the turn.
+        done, _ = await asyncio.wait(
+            waiting,
+            timeout=self._quiet_sec,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            raise DisconnectedError(f"agy went quiet for {self._quiet_sec:g} seconds")
+        if self._line not in done and self._call is not None:
+            call, self._call = self._call.result(), None
+            self._expecting = False
+            return call
+        raw, self._line = self._line.result(), None
+        if not raw:
+            raise DisconnectedError("agy exited before its answer")
+        # A line that is no JSON, as a warning, says nothing to us.
+        try:
+            return json_loads(raw, dict[str, object])
+        except ValueError:
+            return {}
+
+    def _step(self, step: Mapping[str, object], *, turn: _Turn) -> TextChunk | None:
+        """Take one ``step_update``; return the text it adds, if any."""
+        usage = _object(step.get("usage"))
+        if usage:
+            self._spent += TokenCount(
+                request=from_plain(usage.get("input_tokens"), int, default=0),
+                response=from_plain(usage.get("output_tokens"), int, default=0),
+                cache_read=from_plain(usage.get("cache_read_tokens"), int, default=0),
+            )
+        kind = step.get("step_type")
+        # Only our tools are offered: a call of one is a call our server will hold.
+        if kind == "tool" and step.get("state") == "ACTIVE":
+            self._expecting = True
+        text = str(step.get("text_delta") or "")
+        if kind != "agent_response" or not text:
+            return None
+        turn.text.append(text)
+        return TextChunk(text=text)
 
 
-def _parse_cli_credentials(raw: dict[str, MutablePlainTree]) -> GoogleCLICredentials:
-    """Extract access/refresh/expiry from Gemini CLI credential JSON."""
-    creds = GoogleCLICredentials(
-        access_token=str(raw["access_token"]),
-        refresh_token=str(raw["refresh_token"]),
-        expiry_date=from_plain(raw["expiry_date"], float),
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Seen:
+    """What one ``agy`` has heard and said, as of its last reply."""
+
+    records: tuple[SessionRecord, ...]
+    held: tuple[ToolCall, ...]
+    """The calls the last reply made, which wait for results."""
+
+    turns: int
+    """Turns it finished."""
+
+    context_tokens: int
+    """About how many tokens the conversation it holds fills."""
+
+
+@dataclass(slots=True, kw_only=True)
+class _Turn:
+    """One stream's share of a turn: its words, and its tokens once it ends."""
+
+    text: list[str] = field(default_factory=list[str])
+    calls: list[ToolCall] = field(default_factory=list[ToolCall])
+    tokens: TokenCount = field(default_factory=TokenCount)
+    """This stream's steps', held at a call or ending the turn."""
+
+    def response(self, *, capability: ModelCapability) -> Response:
+        """Return this stream's reply, costed.
+
+        Args:
+          capability: The model replying, whose prices cost the reply.
+
+        Returns:
+          response: The text and calls, and their tokens and cost.
+
+        """
+        records: list[AssistantMessage | ToolCall] = []
+        if self.text:
+            records.append(AssistantMessage(content="".join(self.text)))
+        records.extend(self.calls)
+        return Response(
+            records=tuple(records),
+            tokens=self.tokens,
+            spend=capability.prices[
+                "auto",
+                self.tokens.prompt,
+                datetime.now(UTC).date(),
+            ]
+            * self.tokens,
+            stop_reason="tool_use" if self.calls else "end_turn",
+        )
+
+
+def _furnish(
+    home: Path,
+    *,
+    system: Sequence[str],
+    tools: Sequence[Tool],
+    url: str,
+) -> None:
+    """Lay out a home for ``agy``: our agent, our tool server, and its settings."""
+    (home / "workdir").mkdir(mode=0o700)
+    config = home / ".gemini" / "config"
+    agent = config / "agents" / "sagent"
+    agent.mkdir(parents=True, mode=0o700)
+    described = _described(tools)
+    preface = (
+        "# Tools\n\nEach tool is on the MCP server `sagent`; call it through"
+        " call_mcp_tool, with arguments as its input schema says. A relative path"
+        " resolves against sagent's working directory, not the workspace agy names."
     )
-    for opt_key in ("project_id", "scope", "token_type"):
-        value = raw.get(opt_key)
-        if isinstance(value, str) and value:
-            creds[opt_key] = value
-    return creds
+    instructions = "\n\n".join(
+        part for part in (*system, preface if tools else "", *described) if part
+    )
+    # ``tools: []`` gives the agent none of ``agy``'s own; its body is the prompt.
+    (agent / "agent.md").write_text(
+        "---\nname: sagent\ndescription: Answers as sagent asks, with sagent's tools.\n"
+        f"mainAgent: true\ntools: []\n---\n{instructions}\n",
+    )
+    (config / "mcp_config.json").write_text(
+        json_dumps({"mcpServers": {"sagent": {"serverUrl": url}}}),
+    )
+    settings = home / ".gemini" / "antigravity-cli"
+    settings.mkdir(mode=0o700)
+    # Our tools ask for no approval; the caller already decided.
+    (settings / "settings.json").write_text(
+        json_dumps(
+            {
+                "permissions": {"allow": ["mcp(sagent/*)"]},
+                "showTips": False,
+                "showFeedbackSurvey": False,
+            },
+        ),
+    )
 
 
-def _load_cli_credentials_file(path: Path) -> GoogleCLICredentials | None:
-    """Read credentials from a Gemini CLI-format JSON file."""
-    if not path.exists():
-        return None
+# ``agy`` names each MCP tool to the model and keeps its schema in a file,
+# so without this the model guesses arguments or spends a call reading it.
+def _described(tools: Sequence[Tool]) -> list[str]:
+    """Return each tool's section of the agent's instructions."""
+    return [
+        f"## {tool.name}\n\n{tool.description}\n\n"
+        "Input schema: "
+        + json_dumps(mutable(tool.schema), separators=(",", ":"), ensure_ascii=False)
+        for tool in tools
+    ]
+
+
+def _said_text(records: Sequence[SessionRecord]) -> str:
+    """Return the prompt that says the new user messages to a running ``agy``."""
+    return "\n\n".join(line for record in records if (line := _said(record)))
+
+
+def _transcript(records: Sequence[SessionRecord]) -> list[str]:
+    lines: list[str] = []
+    for record in records:
+        match record:
+            case ContextClear(summary=str() as summary, history=history):
+                lines.append(f"Summary of the conversation so far:\n{summary}")
+                lines.extend(_transcript(history))
+            case ContextClear(history=history):
+                lines.extend(_transcript(history))
+            case UserMessage(content=str() as text) if text:
+                lines.append(f"User: {_with_attachments(text, record.attachments)}")
+            case AgentToAgentMessage(content=str() as text, sender=str() as sender) if (
+                text
+            ):
+                lines.append(f"Agent {sender}: {text}")
+            case AgentToAgentMessage(content=str() as text) if text:
+                lines.append(f"Agent: {text}")
+            case SystemMessage() | TurnContext():
+                if note := _said(record):
+                    lines.append(note)
+            case AssistantMessage(content=str() as text) if text:
+                lines.append(f"Assistant: {text}")
+            case ToolCall(call_id=call_id, name=name, arguments=arguments):
+                # The id pairs the call with the result line that names it.
+                lines.append(
+                    f"Assistant called {name} as {call_id}: {json_dumps(mutable(arguments))}",
+                )
+            case ToolResult():
+                lines.append(f"{record.call_id} returned: {record.text()}")
+            case _:
+                continue
+    return lines
+
+
+def _said(record: SessionRecord) -> str:
+    """Return what a new prompt carries for ``record``: words, or a reminder."""
+    if isinstance(record, UserMessage):
+        return _with_attachments(record.content or "", record.attachments)
+    if isinstance(record, AgentToAgentMessage):
+        body = record.content or ""
+        return f"[from {record.sender}]: {body}" if record.sender is not None else body
+    if isinstance(record, SystemMessage) and record.content is not None:
+        return f"<system-reminder>\n{record.content}\n</system-reminder>"
+    if isinstance(record, TurnContext) and record.text():
+        return f"<system-reminder>\n{record.text()}\n</system-reminder>"
+    return ""
+
+
+def _with_attachments(text: str, attachments: Sequence[Attachment]) -> str:
+    """Return ``text``, each attachment named after it: ``agy`` takes text alone."""
+    named = [_named(a) for a in attachments]
+    return "\n".join([text, *named]) if named else text
+
+
+def _named(attachment: Attachment) -> str:
+    """Return the line that stands for ``attachment`` in what ``agy`` is sent."""
+    return f"[an {attachment.mime_descriptor} attachment, which agy cannot send]"
+
+
+def _digest(tools: Sequence[Tool]) -> str:
+    offered = [(tool.name, tool.description, mutable(tool.schema)) for tool in tools]
+    return hashlib.sha256(json_dumps(offered).encode()).hexdigest()
+
+
+def _failure(result: Mapping[str, object]) -> Exception:
+    """Return the exception a failed ``result`` from ``agy`` means."""
+    error = str(result.get("error") or result.get("status") or "agy failed")
+    lowered = error.casefold()
+    if "authenticat" in lowered or "sign in" in lowered:
+        return AuthError(f"{error}; run agy once to sign in")
+    if "resource_exhausted" in lowered or "quota" in lowered or "429" in lowered:
+        return RateLimitedError(error, retry_after_sec=_reset_sec(lowered))
+    return RuntimeError(f"agy: {error}")
+
+
+# The server's words, which agy passes on: "Resets in 2h39m52s." from agy 1.2
+# (antigravity-cli#1018), "Your quota will reset after 155h19m17s." before it.
+def _reset_sec(error: str) -> float:
+    """Return the wait a spent quota's message names; ``0`` when it names none."""
+    found = re.search(
+        r"reset(?:s in| after) ((?:\d+h)?(?:\d+m)?(?:\d+(?:\.\d+)?s)?)",
+        error,
+    )
+    if found is None or not found[1]:
+        return 0.0
+    parts = re.fullmatch(r"(?:(\d+)h)?(?:(\d+)m)?(?:(\d+(?:\.\d+)?)s)?", found[1])
+    hours, minutes, seconds = (
+        (float(p or 0) for p in parts.groups()) if parts else (0, 0, 0)
+    )
+    return min(hours * 3_600 + minutes * 60 + seconds, 691_200.0)
+
+
+def _object(value: object) -> dict[str, object]:
     try:
-        data = json_loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    raw = data
-    try:
-        _CREDENTIALS_VALIDATOR(raw)
-    except fastjsonschema.JsonSchemaValueException:
-        return None
-    return _parse_cli_credentials(raw)
+        return from_plain(value, dict[str, object])
+    except ReadError:
+        return {}

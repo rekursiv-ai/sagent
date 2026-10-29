@@ -1,0 +1,244 @@
+sources:
+  models: https://ai.google.dev/gemini-api/docs/models
+  pricing: https://ai.google.dev/gemini-api/docs/pricing
+  thinking: https://ai.google.dev/gemini-api/docs/generate-content/thinking
+
+  deprecations: https://ai.google.dev/gemini-api/docs/deprecations
+
+# Checked against the sources on 2026-10-27. ``gemini-3.7-flash`` and
+# ``gemini-3.5-flash`` only route to 3.8 and 3.6 now, so they are not listed.
+roles:
+  default: gemini-argon
+  everyday: gemini-flash
+  utility: gemini-flash-lite
+  best: gemini-argon
+
+reference:
+  thinking_effort_default: high
+  # Gemini thinks unasked: Gemini 3 at its default level, 2.5 dynamically.
+  thinking_budget_default: auto
+  effort_as_level: true
+  # No image limits: Gemini tiles a large image server-side (768x768 tiles) and
+  # documents no per-image cap, only the whole request's bytes; a client
+  # resize would spend detail to save nothing.
+  # Input and output are limited apart (inputTokenLimit, outputTokenLimit), so no
+  # maxOutputTokens is refused for the input it follows.
+  limits:
+    max_request_tokens: 1_048_576
+    max_response_tokens: 65_536
+    max_request_bytes: 104_857_600
+    truncates_at_context: true
+  # Gemini 3 has no level that stops its thinking; ``min`` is the least.
+  thinking:
+    effort: [min, low, medium, high]
+    budget: [none, auto, fixed]
+    output: [none, text]
+
+profiles:
+  no_minimal:
+    thinking:
+      effort: [low, medium, high]
+      budget: [none, auto, fixed]
+      output: [none, text]
+
+  token_budgets:
+    effort_as_level: false
+    thinking:
+      effort: [none, min, low, medium, high, xhigh, max]
+      budget: [none, auto, fixed]
+      output: [none, text]
+
+models:
+# Implicit caching only; the introductory rates double on 2026-12-01.
+- model_id: gemini-argon-4.0
+  wire_model_id: gemini-4-argon
+  profile: no_minimal
+  thinking_effort_default: medium
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 10.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.1
+  - service_tier: auto
+    effective_date: '2026-12-01'
+    request: 4.0
+    response: 20.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.2
+
+- model_id: gemini-pro-3.1
+  wire_model_id: gemini-3.1-pro-preview
+  profile: no_minimal
+  knowledge_cutoff: January 2025
+  prices:
+  - service_tier: auto
+    request: 2.0
+    response: 12.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.2
+  - service_tier: auto
+    effective_prompt_tokens: 200_000
+    request: 4.0
+    response: 18.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.4
+
+- model_id: gemini-pro-2.5
+  wire_model_id: gemini-2.5-pro
+  profile: token_budgets
+  knowledge_cutoff: January 2025
+  # 2.5 Pro thinks whatever is asked; a budget of 0 is Flash's alone.
+  thinking:
+    effort: [min, low, medium, high, xhigh, max]
+    budget: [none, auto, fixed]
+    output: [none, text]
+  prices:
+  - service_tier: auto
+    request: 1.25
+    response: 10.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.125
+  - service_tier: auto
+    effective_prompt_tokens: 200_000
+    request: 2.5
+    response: 15.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.25
+
+- model_id: gemini-flash-3.8
+  wire_model_id: gemini-3.8-flash
+  profile: no_minimal
+  thinking_effort_default: medium
+  prices:
+  - service_tier: auto
+    request: 0.75
+    response: 3.75
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.075
+  - service_tier: auto
+    effective_date: '2027-01-01'
+    request: 1.5
+    response: 7.5
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.15
+
+- model_id: gemini-flash-3.6
+  wire_model_id: gemini-3.6-flash
+  thinking_effort_default: medium
+  prices:
+  - service_tier: auto
+    request: 0.75
+    response: 3.75
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.075
+  - service_tier: auto
+    effective_date: '2027-01-01'
+    request: 1.5
+    response: 7.5
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.15
+
+- model_id: gemini-flash-3.0
+  wire_model_id: gemini-3-flash-preview
+  knowledge_cutoff: January 2025
+  prices:
+  - service_tier: auto
+    request: 0.5
+    response: 3.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.05
+
+- model_id: gemini-flash-2.5
+  wire_model_id: gemini-2.5-flash
+  profile: token_budgets
+  knowledge_cutoff: January 2025
+  prices:
+  - service_tier: auto
+    request: 0.3
+    response: 2.5
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.03
+
+- model_id: gemini-flash-lite-3.5
+  wire_model_id: gemini-3.5-flash-lite
+  thinking_effort_default: min
+  prices:
+  - service_tier: auto
+    request: 0.3
+    response: 2.5
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.03
+
+- model_id: gemini-flash-lite-3.1
+  wire_model_id: gemini-3.1-flash-lite
+  thinking_effort_default: min
+  knowledge_cutoff: January 2025
+  prices:
+  - service_tier: auto
+    request: 0.25
+    response: 1.5
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.025
+
+- model_id: gemini-flash-lite-2.5
+  wire_model_id: gemini-2.5-flash-lite
+  profile: token_budgets
+  # "Model does not think" unless given a budget.
+  thinking_effort_default: none
+  thinking_budget_default: none
+  knowledge_cutoff: January 2025
+  prices:
+  - service_tier: auto
+    request: 0.1
+    response: 0.4
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.01
+
+providers:
+  google:
+    retries_internally: true
+    models:
+      gemini-argon-4.0:
+      gemini-pro-3.1:
+      gemini-pro-2.5:
+      gemini-flash-3.8:
+      gemini-flash-3.6:
+      gemini-flash-3.0:
+      gemini-flash-2.5:
+      gemini-flash-lite-3.5:
+      gemini-flash-lite-3.1:
+      gemini-flash-lite-2.5:
+  # ``agy``, as ``agy models`` listed them on 2026-10-27: 3.8 Flash alone, its effort
+  # the id's suffix (``gemini-3.8-flash-high``).
+  google-cli:
+    roles:
+      default: gemini-flash
+      best: gemini-flash
+      utility: gemini-flash
+    # ``agy`` starts 3.8 Flash at its first-listed level, high.
+    thinking_effort_default: high
+    thinking_budget_default: none
+    thinking:
+      effort: [low, medium, high]
+      budget: [none]
+      output: [none]
+    manage_context_server_side: [true]
+    account_auth: true
+    models:
+      gemini-flash-3.8:

@@ -1,0 +1,225 @@
+# Which commands only read, so a Bash call of only these runs beside others;
+# see `ReadOnly` in command_analyzer.py. Anything else runs alone.
+#
+# Quoted where YAML would read a name as something else: `true`, `yes`, `:`.
+
+# Commands that only read, unless a `write_flags` entry says otherwise.
+utilities:
+  - find
+  - grep
+  - rg
+  - ag
+  - ack
+  - locate
+  - which
+  - whereis
+  - cat
+  - head
+  - tail
+  - less
+  - more
+  - wc
+  - stat
+  - file
+  - strings
+  - jq
+  - awk
+  - cut
+  - sort
+  - uniq
+  - tr
+  - ls
+  - tree
+  - du
+  - echo
+  - printf
+  - "true"
+  - "false"
+  - ":"
+  - pwd
+  - df
+  - realpath
+  - readlink
+  - basename
+  - dirname
+  - column
+  - fold
+  - nl
+  - tac
+  - "yes"
+  - test
+  - "["
+  - printenv
+  - date
+  - whoami
+  - id
+  - uname
+  - hostname
+  - uptime
+  - tty
+  - groups
+  - users
+  - w
+  - type
+  - alias
+  - rev
+  - paste
+  - join
+  - comm
+  - diff
+  - cmp
+  - sed
+  - md5sum
+  - sha1sum
+  - sha256sum
+  - sha512sum
+  - cksum
+  - b2sum
+  - base64
+  - od  # codespell:ignore od
+  - xxd
+  - hexdump
+  - ps
+  - pgrep
+  - top
+  - htop
+  # Not mypy or basedpyright: each writes a cache on every run.
+  - ty
+  # Not egrep, fgrep, or zgrep: scripts that exec grep and gzip, which a list
+  # of names cannot see.
+
+# Commands that run their arguments as a command: `env FOO=1 rm x` runs `rm x`.
+executors: [env, command, nice, stdbuf]
+
+# Commands whose subcommand runs the rest as a command: `uv run X` is `X`.
+wrappers:
+  uv: run
+
+# Flags before a subcommand that take the next word: `git -C dir log`.
+leading_flags:
+  git: [-C, --git-dir, --work-tree]
+  uv: [--project, --directory, --python, --with]
+
+# Subcommands that only read, by their leading words. `uv cache dir`, not
+# `uv cache`, which would admit `uv cache clean`.
+subcommands:
+  git:
+    - status
+    - log
+    - diff
+    - show
+    - blame
+    - branch
+    - rev-parse
+    - rev-list
+    - ls-files
+    - ls-tree
+    - ls-remote
+    - describe
+    - reflog
+    - shortlog
+    - cat-file
+    - tag
+    - for-each-ref
+    - name-rev
+    - merge-base
+    - symbolic-ref
+    - whatchanged
+    - version
+    - help
+    - grep
+  gh:
+    - status
+    - version
+    - help
+    - auth status
+    - pr view
+    - pr list
+    - pr status
+    - pr checks
+    - pr diff
+    - issue view
+    - issue list
+    - issue status
+    - run view
+    - run list
+    - run watch
+    - release view
+    - release list
+    - repo view
+    - repo list
+    - workflow view
+    - workflow list
+    - label list
+    - search code
+    - search issues
+    - search prs
+    - search repos
+  docker:
+    - ps
+    - images
+    - inspect
+    - logs
+    - version
+    - info
+    - history
+    - search
+    - top
+    - diff
+    - stats
+    - events
+  kubectl:
+    - get
+    - describe
+    - logs
+    - version
+    - top
+    - explain
+    - api-resources
+    - api-versions
+    - cluster-info
+  npm:
+    - list
+    - ls
+    - view
+    - show
+    - outdated
+    - audit
+    - search
+    - doctor
+    - help
+    - ping
+    - root
+    - prefix
+    - explain
+  pip: [list, show, freeze, check, search]
+  uv: [tree, version, cache dir, python list, python find]
+  cargo: [tree, search, version, metadata, verify-project]
+  brew: [list, info, search, outdated, leaves, deps]
+  yarn: [list, info, outdated, why]
+  poetry: [show, check, search, version]
+  go: [version, env, doc, list]
+
+# Flag prefixes that make a command or subcommand write; prefixes, as in `sort -oFILE`.
+write_flags:
+  find: [-delete, -exec, -ok, -fprint, -fls]
+  sort: [-o, --output]
+  tree: [-o]
+  ty: [--createstub, --output, --junit, --gitlab, --writebaseline, --install-types, -o]
+  # Over the whole argv: `git -c core.pager=CMD log` runs CMD before the
+  # subcommand, and `git grep -O CMD` runs it as a pager.
+  git: [--output, --exec-path, -o, -O, -c]
+  go env: [-w, -u]
+
+# Words that make a subcommand write when they follow it.
+write_words:
+  git reflog: [expire, delete, exists]
+  npm audit: [fix]
+
+# Subcommands that list, but write when given a name; with their value flags.
+listings:
+  git branch: &ref_flags [--contains, --no-contains, --points-at, --sort, --format, --merged, --no-merged]
+  git tag: *ref_flags
+
+# Commands whose second operand is a file they write: `uniq in out`.
+output_operands: [uniq, xxd]

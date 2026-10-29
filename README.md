@@ -35,57 +35,103 @@ A coding-agent CLI and strongly-typed Python library -- self-mutating, hot-swapp
   ·
   <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/compaction.md">Compaction</a>
   ·
-  <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/slack.md">Slack</a>
-  ·
   <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/selfhosted.md">Self-hosted</a>
   ·
   <a href="https://github.com/rekursiv-ai/sagent/blob/main/docs/showcase.md">Showcase</a>
-  ·
-  <a href="https://github.com/rekursiv-ai/sagent/tree/main/examples">Examples</a>
 </p>
 
 ## Quick Start
 
 ```bash
-# Mac:
-#   # Required for quick install.
-#   brew install uv
-#   # Optional for improved performance.
-#   brew install ripgrep fd
-
-# Ubuntu/Debian:
-#   # Required for quick install.
-#   sudo apt-get install -y curl
-#   curl -LsSf https://astral.sh/uv/install.sh | sh
-#   # Optional for improved performance.
-#   sudo apt-get install -y ripgrep fd-find
-
-uv tool install sagent
-
-sagent
+uvx sagent
 ```
 
-## Better CLI
+or to install,
 
-Things Claude Code, Codex CLI, and Gemini CLI don't do:
+```bash
+uv tool install sagent && sagent
+```
 
-- **Async REPL.** Chat with agents *about* jobs while those jobs run. No ctrl+b, no manual juggling.
-- **Hot self-mutation.** Switch provider, model, or thinking effort mid-session in plain English. No restart.
-- **One CLI, every provider.** Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, OpenAI-compatible endpoints, self-hosted HuggingFace models, and a managed `llama.cpp` server, all behind one binary.
-- **Unified cost tracking.** One USD total across every provider in a session; sub-agent costs roll up to the root. `--max-budget-usd N` caps the whole tree.
-- **Self-directing agent fleets.** Agents retune their own runtime -- provider, model, thinking, context -- mid-task. A coordinator can do it to its workers over `AgentSend`: *"switch to o1, crank thinking, recompact and drop the file reads."*
-- **Recursive agent messaging.** Any spawned agent can spawn and `AgentSend` to any peer, so coordination is a tree, not a star. Claude Code's experimental Agent Teams is flat (one lead, no nesting); Codex and Gemini have no peer messaging.
-- **Interruptible, detachable tasks.** Tell a stuck task to stop, or detach one and let it keep running.
-- **Richer built-in tools.** `PaperSearch`/`PaperFetch` walk citation graphs and fetch PDFs, multi-backend `WebSearch`, `WebFetch` with markdown extraction, atomic read/write tracking on file tools.
-- **Unix-aligned and pipeable.** `stdin`, `stdout`, exit codes, and `--output-format json` are first-class. Pipe through `jq`, drop into `ipython` (same `prompt_toolkit` underneath).
+If you're missing `uvx`/`uv`,
+
+```
+# Mac
+brew install uv
+
+# Linux
+sudo apt-get install -y curl
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Optionally, install fd-find and ripgrep for faster glob and grep,
+
+```bash
+# Mac
+brew install ripgrep fd
+
+# Linux
+sudo apt-get install -y ripgrep fd-find
+```
+
+## Features
+
+1. Async runtime.
+   - Commands auto-background when you type or when long-lived.
+   - Consequence: Your agent always responds as fast as your service provider.
+   - Tell a stuck task to stop, or detach one and let it keep running.
+
+2. Hot self-mutation.
+   - Conversationally change the model / service provider.
+   - Conversationally have the model edit its own session.
+
+3. Every Provider, every auth.
+   - Anthropic, OpenAI, Google, Moonshot, DashScope, MiniMax, OpenAI-compatible endpoints, self-hosted HuggingFace models, and a managed `llama.cpp` server, all behind one binary.
+   - Subscriptions supported and terms-of-service compliant.
+
+4. Unified cost tracking.
+   - One USD total across every provider in a session.
+   - Pricing base don API costs when on sub.
+   - Sub-agent costs roll up to the root. `--max-budget-usd N` caps the whole tree.
+
+5. Self-directing agent fleets.
+   - Agents retune their own runtime -- provider, model, thinking, context -- mid-task.
+   - A coordinator can do it to its workers over `AgentSend`: *"switch to o1, crank thinking, recompact and drop the file reads."*
+
+6. Recursive agent messaging.
+   - Any spawned agent can spawn and `AgentSend` to any peer, so coordination is a tree, not a star.
+   - Claude Code's experimental Agent Teams is flat (one lead, no nesting); Codex and Gemini have no peer messaging.
+
+7. Richer built-in tools.
+   - WebSearch/Fetch use headed or headless chrome.
+   - `PaperSearch`/`PaperFetch` walk citation graphs and fetch PDFs.
+   - Multi-backend `WebSearch`, `WebFetch` with markdown extraction, atomic read/write tracking on file tools.
+
+8. Unix-aligned and pipeable.
+   - `stdin`, `stdout`, exit codes, and `--output-format json` are first-class.
+   - Pipe through `jq`, drop into `ipython` (same `prompt_toolkit` underneath).
+
+9. Misaligned Bash tool calls are auto promoted to dedicated types.
+   - Example: `ls files/` is auto-promoted to `List(files/)` tool call.
+
+10. Universal session format.
+    - Convert claude/codex sessions to from sagent format and vice versa.
+
+11. All spawns' sessions (ancestors and/or descendants) can be focused.
+
+12. Send a message to parent to autocreate an autopiloting agent.
+
+13. Apache 2 license.
 
 ## Uniquely also an API
 
-- **One runtime, every surface.** The same `Agent` class powers the CLI, your application code, and recursive sub-agents.
-- **Typed Python objects.** `Agent`, `Tool`, `Model`, `Provider`, and `Message` are protocols and dataclasses you import, compose, and unit-test.
-- **Peer-to-peer agent messaging.** Any spawned agent can `AgentSend` to any other named peer -- not just its parent. Like user input, peer messages preempt the receiving agent's tool calls, so no agent blocks waiting on a stuck child.
+14. One runtime, every surface.
+    - The same `Agent` class powers the CLI, your application code, and recursive sub-agents.
 
-Use it as a library:
+15. Typed Python objects.
+    - `Agent`, `Tool`, `Model`, `Provider`, and `Message` are protocols and dataclasses you import, compose, and unit-test.
+    - Passes strict: `basedpyright`, `pyrefly`, and `ty`.
+
+Example:
 
 ```python
 from sagent import tools
@@ -104,11 +150,10 @@ print(result.content)
 
 ## Install
 
-Sagent requires Python 3.12 or newer. `ripgrep` and `fd-find` are
-optional -- sagent has Python fallbacks when absent -- but recommended
-for faster `Grep` / `Glob`. PDF rendering uses the bundled `pypdfium2`
-wheel and needs no system install. The [Quick Start](#quick-start)
-above installs the `sagent` CLI.
+Sagent requires Python 3.12 or newer. `ripgrep` and `fd-find` are optional but
+recommended -- sagent has Python fallbacks when absent. PDF rendering uses the
+bundled `pypdfium2` wheel and needs no system install. The [Quick
+Start](#quick-start) above installs the `sagent` CLI.
 
 Add sagent to your own project as a library:
 
@@ -124,90 +169,9 @@ cd sagent
 uv run sagent --help
 ```
 
-## Run
+## Authorization
 
-Bare `sagent` uses Anthropic and reads `ANTHROPIC_API_KEY`:
-
-```bash
-export ANTHROPIC_API_KEY=...
-sagent
-```
-
-Pick a different provider by setting its key (see
-[Provider setup](#provider-setup)) and passing `--provider`:
-
-```bash
-export OPENAI_API_KEY=...
-sagent --provider OpenAI
-```
-
-`--provider` defaults to the first name in `--allow-providers`, so
-`SAGENT_ALLOW_PROVIDERS` alone picks the default backend and also caps
-which providers spawned sub-agents may use:
-
-```bash
-SAGENT_ALLOW_PROVIDERS=OpenAI sagent   # OpenAI is now the default provider
-```
-
-Pipe a prompt on stdin for non-interactive use:
-
-```bash
-printf 'Say hi in one sentence.' | \
-  sagent --provider OpenAI --output-format json
-```
-
-Use `--continue` to resume the most recent session for this working directory, `--session PATH` for an explicit session directory, or `--ephemeral` when prompts and auto-memory should not be written to disk. Use `--max-budget-usd N` to cap API spend for the current run.
-
-See [CLI](https://github.com/rekursiv-ai/sagent/blob/main/docs/cli.md) and [Sessions](https://github.com/rekursiv-ai/sagent/blob/main/docs/sessions.md) for the full flag set.
-
-## Quickstart: Python
-
-```python
-import asyncio
-
-from sagent import tools
-from sagent.agent import Agent
-from sagent.lib.codec import immutable
-from sagent.providers import Anthropic
-
-
-async def main() -> None:
-    agent = Agent(
-        model=Anthropic.from_env().model("claude-sonnet-4-6"),
-        system="You are a concise coding assistant.",
-        tools=[tools.Read(), tools.Grep(), tools.Glob()],
-    )
-    result = await agent.run(immutable({"prompt": "Summarize README.md"}))
-    print(result.content)
-
-
-asyncio.run(main())
-```
-
-`Agent.run()` accepts a JSON directive with a `prompt` key and returns a `Message`.
-
-See [API](https://github.com/rekursiv-ai/sagent/blob/main/docs/api.md), [Tutorial](https://github.com/rekursiv-ai/sagent/blob/main/docs/tutorial.md), and [Concepts](https://github.com/rekursiv-ai/sagent/blob/main/docs/concepts.md) for more detail.
-
-## Provider setup
-
-Sagent ships API-key providers for Anthropic, OpenAI, OpenAISubscription, Google, Moonshot, DashScope, MiniMax, and generic OpenAI-compatible endpoints, a subscription-backed `AnthropicCLI` that rides your installed `claude` login, plus a managed local `LlamaCpp` provider. Set the key (or run the login) for the provider you plan to use:
-
-```bash
-export ANTHROPIC_API_KEY=...
-export OPENAI_API_KEY=...
-export GOOGLE_API_KEY=...
-export MOONSHOT_API_KEY=...
-export DASHSCOPE_API_KEY=...
-export MINIMAX_API_KEY=...
-```
-
-and
-
-```bash
-export SAGENT_ALLOW_PROVIDERS=...
-```
-
-to set the default value of the `--provider` flag.
+Sagent supports all subscriptions and API KEYs.
 
 | Provider | Environment variable | Example model |
 | --- | --- | --- |
@@ -223,7 +187,7 @@ to set the default value of the `--provider` flag.
 
 See [Providers](https://github.com/rekursiv-ai/sagent/blob/main/docs/providers.md) for the provider matrix, inference rules, and OpenAI-compatible provider setup.
 
-## Self-hosted models
+## Self-Hosted
 
 Install the local runtime extra from a checkout:
 
@@ -260,18 +224,6 @@ endpoint. Point `LLAMA_CPP_SERVER` at a built `llama-server` binary and
 `sagent --provider LlamaCpp --model qwen3.6-27b-12gb`.
 
 See [Self-hosted Models](https://github.com/rekursiv-ai/sagent/blob/main/docs/selfhosted.md) for options, local snapshot paths, and runtime requirements.
-
-## Examples
-
-The [`examples/`](https://github.com/rekursiv-ai/sagent/tree/main/examples/) directory contains small, runnable examples:
-
-- `offline_custom_tool.py`: run an agent/tool/model loop without API keys.
-- `decorator_tool.py`: wrap a function as a tool.
-- `custom_tool.py`: implement the full `Tool` protocol.
-- `multi_agent_reviewer.py`: spawn an isolated reviewer child.
-- `openai_compatible_provider.py`: connect an OpenAI-compatible endpoint.
-
-Start with the [tutorial](https://github.com/rekursiv-ai/sagent/blob/main/docs/tutorial.md), then use the examples as copyable patterns. See [Examples](https://github.com/rekursiv-ai/sagent/tree/main/examples/) and [Tools](https://github.com/rekursiv-ai/sagent/blob/main/docs/tools.md).
 
 ## Security and privacy
 

@@ -30,7 +30,7 @@ class GlobError(Exception):
     """A pattern no backend can answer; the message is written for the caller."""
 
 
-def glob(root: Path, pattern: str, /) -> list[Path]:
+def glob(root: Path, pattern: str, /, *, timeout_sec: float = 30) -> list[Path]:
     """Return the files under ``root`` that ``pattern`` names, sorted.
 
     Args:
@@ -39,12 +39,14 @@ def glob(root: Path, pattern: str, /) -> list[Path]:
       pattern: Glob anchored at ``root``, such as ``**/*.py``. An absolute one is
         anchored at its own literal directory, which, as ``root`` is, is entered
         without asking the ignore rules.
+      timeout_sec: Cap on the ``fd`` run, which a caller in a thread cannot cancel.
 
     Returns:
       paths: Each matching file ripgrep would search, under ``root``.
 
     Raises:
-      GlobError: The pattern is one fd would refuse to parse.
+      GlobError: The pattern is one fd would refuse to parse, or fd ran out of
+        time.
 
     """
     parts = [part for part in pattern.split("/") if part != "."]
@@ -77,7 +79,13 @@ def glob(root: Path, pattern: str, /) -> list[Path]:
         limit=_FD_ENTRIES if fd is not None else None,
     )
     if found is None and fd is not None:
-        return _glob_fd(fd, start, "/".join(rest), hidden=hidden)
+        return _glob_fd(
+            fd,
+            start,
+            "/".join(rest),
+            hidden=hidden,
+            timeout_sec=timeout_sec,
+        )
     return found or []
 
 
@@ -119,14 +127,27 @@ def fd_command(fd: str, root: Path, pattern: str, *, hidden: bool) -> list[str]:
     ]
 
 
-def _glob_fd(fd: str, root: Path, pattern: str, *, hidden: bool) -> list[Path]:
+def _glob_fd(
+    fd: str,
+    root: Path,
+    pattern: str,
+    *,
+    hidden: bool,
+    timeout_sec: float,
+) -> list[Path]:
     """List ``pattern``'s files with fd, as paths under ``root``."""
-    done = subprocess.run(  # noqa: S603 -- Fixed fd argv, no shell.
-        fd_command(fd, root, pattern, hidden=hidden),
-        capture_output=True,
-        text=True,
-        check=True,
-    )
+    try:
+        done = subprocess.run(  # noqa: S603 -- Fixed fd argv, no shell.
+            fd_command(fd, root, pattern, hidden=hidden),
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout_sec,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise GlobError(
+            f"fd timed out after {timeout_sec:g}s; narrow the path or pattern.",
+        ) from error
     base = len(str(root.resolve())) + 1
     # Sorting strings split per component is the ``Path`` order without the
     # cost of comparing ``Path`` objects.

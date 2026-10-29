@@ -1,197 +1,156 @@
-"""PlayAudio tool: play a WAV file on the host, cross-platform.
+"""PlayAudio: play a WAV file on the host, for a short notification.
 
-Primary use case is AGENTS.md's completion-notification directive -
-the agent rings a short WAV to get the user's attention when a task
-finishes or it needs input. Works without external deps: each
-platform's native audio command is shelled out via subprocess, or
-Python's stdlib :mod:`winsound` on Windows.
+Each platform's own player is run: PowerShell's ``SoundPlayer`` on Windows,
+``afplay`` on macOS, and ``aplay``, ``paplay`` or ``play`` elsewhere. Playback is best
+effort: a host with no audio, such as one over SSH, still succeeds.
 
-Format support is WAV only. Other formats would require ``ffmpeg``
-or a playback lib; a deliberate non-feature here.
+Typical usage example:
 
-Silent no-op (logged, tool returns success) when no audio subsystem
-is reachable - typical for headless SSH / CI / container runs. The
-agent shouldn't fail a model request because the host can't beep.
+  result = await PlayAudio().call(context, {"path": "done.wav"})
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from dataclasses import dataclass, field
+from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Annotated
 
-import importlib
+import asyncio
 import logging
 import platform
 import shutil
 import subprocess
 
-from treekle import PlainTree, immutable
-
-from sagent.agent.state import get_tool_state
-from sagent.tools.core import load_tool_description, run_sync
-from sagent.types.runtime import ToolResult
+from sagent.session.types import UncategorizedToolResult
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import parse, schema_of
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Mapping
+
+    from treekle import PlainTree
+
+    from sagent.tools.types import ToolContext
+
+
+__all__ = [
+    "PlayAudio",
+]
 
 
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
 class PlayAudio:
-    """Tool: play a WAV file on the host's audio output."""
+    """Play a WAV file on the host's speakers."""
 
-    name: str = "PlayAudio"
-    tool_id: str = "application/x-tool-playaudio"
-    clearable_results: bool = True
-    description: str = load_tool_description("PlayAudio")
-    directive_schema: Mapping[str, PlainTree] = immutable(
-        {
-            "type": "object",
-            "properties": {
-                "path": {
-                    "type": "string",
-                    "description": "Path to a .wav file (absolute or cwd-relative).",
-                },
-            },
-            "required": ["path"],
-        },
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        path: Annotated[str, "Path to a .wav file (absolute or cwd-relative)."]
+
+    name = "PlayAudio"
+    description = (files(__package__) / "assets" / "playaudio.md").read_text(
+        encoding="utf-8",
     )
+    schema = schema_of(Arguments)
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short label for this audio-playback invocation.
+    display: ToolDisplay = field(default=ToolDisplay())
 
-        Args:
-          args: Directive carrying the ``path`` string.
+    timeout_sec: float = 10.0
+    """How long one player may run."""
 
-        Returns:
-          label: ``PlayAudio <basename>`` line shown before invocation.
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``PlayAudio <name>``."""
+        return f"PlayAudio {Path(str(arguments.get('path', ''))).name}"
 
-        """
-        path = str(args.get("path", ""))
-        name = Path(path).name if path else "?"
-        return f"PlayAudio {name}"
-
-    def prompt(self) -> str:
-        """Return no supplemental system-prompt text for PlayAudio.
-
-        Returns:
-          contribution: Empty string.
-
-        """
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: playback has no shared in-process resource."""
-        del args
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``None``: playback shares nothing."""
+        del context, arguments
         return None
 
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Play a WAV file on the host's audio output.
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> UncategorizedToolResult:
+        """Play the file at ``path``.
 
         Args:
-          args: Directive carrying the ``path`` to a ``.wav`` file.
+          context: The calling agent's state.
+          arguments: ``path``, relative to ``context.cwd``.
 
         Returns:
-          result: Confirmation message, or a non-error best-effort line
-              when no audio subsystem is reachable.
+          result: What played, or why the file could not; a host with no audio
+            still succeeds, saying so.
 
         """
-        path = str(args.get("path", ""))
-        return await run_sync(self._run, path=path)
-
-    def _run(self, *, path: str) -> str | ToolResult:
-        """Validate the path and dispatch to the platform-specific player."""
-        if not path:
-            return ToolResult(call_id="", content="path is required.", is_error=True)
-        p = Path(path).expanduser()
-        if not p.is_absolute():
-            p = Path(get_tool_state().bash_cwd) / p
-        if not p.exists():
-            return ToolResult(call_id="", content=f"Not found: {p}", is_error=True)
-        if not p.is_file():
-            return ToolResult(call_id="", content=f"Not a file: {p}", is_error=True)
-        if p.suffix.lower() != ".wav":
-            return ToolResult(
+        path = context.path(parse(arguments, PlayAudio.Arguments).path)
+        if not path.is_file():
+            return _error(f"Not a file: {path}")
+        if path.suffix.lower() != ".wav":
+            return _error(
+                f"Unsupported format {path.suffix!r}; only .wav is supported.",
+            )
+        failure = await asyncio.to_thread(self._play, path)
+        if failure:
+            logger.warning("PlayAudio: %s", failure)
+            return UncategorizedToolResult(
                 call_id="",
-                content=(f"Unsupported format {p.suffix!r}; only .wav is supported."),
-                is_error=True,
+                content=f"Played {path.name} (best effort): {failure}",
             )
-        err = _play(p)
-        if err is not None:
-            logger.warning("PlayAudio: %s", err)
-            # Audio playback is best-effort; a backend that fails or is
-            # absent (headless host) shouldn't fail the tool call.
-            return f"Played {p.name} (best effort): {err}"
-        return f"Played {p.name}."
+        return UncategorizedToolResult(call_id="", content=f"Played {path.name}.")
+
+    def _play(self, path: Path) -> str:
+        """Play ``path``; return why it did not play, ``""`` when it did."""
+        system = platform.system()
+        if system == "Windows":
+            quoted = str(path).replace("'", "''")
+            players = [
+                [
+                    "powershell",
+                    "-NoProfile",
+                    "-Command",
+                    f"(New-Object Media.SoundPlayer '{quoted}').PlaySync()",
+                ],
+            ]
+        elif system == "Darwin":
+            players = [["afplay", str(path)]]
+        else:
+            players = [
+                ["aplay", "-q", str(path)],
+                ["paplay", str(path)],
+                ["play", "-q", str(path)],
+            ]
+        tried: list[str] = []
+        for argv in players:
+            exe = shutil.which(argv[0])
+            if exe is None:
+                tried.append(f"{argv[0]} (not on PATH)")
+                continue
+            try:
+                done = subprocess.run(  # noqa: S603 -- a fixed player and a checked local path.
+                    [exe, *argv[1:]],
+                    capture_output=True,
+                    timeout=self.timeout_sec,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as e:
+                tried.append(f"{argv[0]} ({e})")
+                continue
+            if done.returncode == 0:
+                return ""
+            tried.append(f"{argv[0]} (exit {done.returncode})")
+        return "no audio backend worked: " + "; ".join(tried)
 
 
-def _play(path: Path) -> str | None:
-    """Play ``path`` on the host. Returns None on success, else a reason."""
-    system = platform.system()
-    if system == "Windows":
-        return _play_windows(path)
-    if system == "Darwin":
-        return _play_via_cmd(path, ["afplay"])
-    # Linux / other Unix - try ALSA first, then PulseAudio, then sox.
-    return _play_via_cmd(path, ["aplay", "-q"], ["paplay"], ["play", "-q"])
-
-
-@runtime_checkable
-class _WinSound(Protocol):
-    """The ``winsound`` members playback uses; the module exists only on Windows."""
-
-    SND_FILENAME: int
-    SND_NODEFAULT: int
-    PlaySound: Callable[[str, int], None]
-
-
-def _play_windows(path: Path) -> str | None:
-    """Play ``path`` via ``winsound`` on Windows hosts."""
-    # Imported lazily so the module still imports on POSIX hosts for
-    # static analysis and cross-platform tests.
-    try:
-        ws: object = importlib.import_module("winsound")
-    except ImportError as e:
-        return f"winsound unavailable: {e}"
-    if not isinstance(ws, _WinSound):
-        return "winsound unavailable: no PlaySound"
-    try:
-        ws.PlaySound(str(path), ws.SND_FILENAME | ws.SND_NODEFAULT)
-    except RuntimeError as e:
-        return f"winsound.PlaySound failed: {e}"
-    return None
-
-
-# Returns None on success, a reason string otherwise. A missing audio subsystem (no
-# command on PATH, or the command exits non-zero because no device) is treated as a soft
-# failure.
-def _play_via_cmd(
-    path: Path,
-    *candidates: list[str],
-    timeout_sec: float = 10.0,
-) -> str | None:
-    """Try each ``[exe, *flags]`` candidate; run the first one on PATH."""
-    tried: list[str] = []
-    for argv in candidates:
-        exe = shutil.which(argv[0])
-        if exe is None:
-            tried.append(f"{argv[0]} (not on PATH)")
-            continue
-        try:
-            result = subprocess.run(  # noqa: S603 -- The player argv uses static candidates and a validated local path.
-                [exe, *argv[1:], str(path)],
-                capture_output=True,
-                text=True,
-                timeout=timeout_sec,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as e:
-            tried.append(f"{argv[0]} ({e})")
-            continue
-        if result.returncode == 0:
-            return None
-        tried.append(f"{argv[0]} (exit {result.returncode})")
-    return "no audio backend worked: " + "; ".join(tried)
+def _error(message: str) -> UncategorizedToolResult:
+    return UncategorizedToolResult(call_id="", content=message, is_error=True)

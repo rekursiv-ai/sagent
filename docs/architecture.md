@@ -14,13 +14,13 @@ while True:
     if inbox is empty and model is done: go idle
 ```
 
-The agent wakes when new work lands in its inbox. REPL input, background task results, child-agent messages, Slack messages, and direct user prompts all enter through the same path.
+The agent wakes when new work lands in its inbox. REPL input, background task results, child-agent messages, and direct user prompts all enter through the same path.
 
-This invariant is what lets Sagent support mid-turn injection, delayed messages, persistent child agents, Slack routing, and background task completion without separate control planes.
+This invariant is what lets Sagent support mid-turn injection, delayed messages, persistent child agents, and background task completion without separate control planes.
 
 ### Inbox semantics: root vs subagent
 
-The drain-run-check loop is the *only* execution model. There is no separate "root agent" mode. The CLI's root agent, every `AgentSpawn` child (ephemeral or `persistent=true`), every Slack-routed agent, and every `Agent.run(...)` call from a Python embedder invoke the same `Agent.serve_forever()` → `AgentRuntime.run_forever()` loop.
+The drain-run-check loop is the *only* execution model. There is no separate "root agent" mode. The CLI's root agent, every `AgentSpawn` child (ephemeral or `persistent=true`), and every `Agent.run(...)` call from a Python embedder invoke the same `Agent.serve_forever()` → `AgentRuntime.run_forever()` loop.
 
 Consequences:
 
@@ -86,4 +86,4 @@ This keeps long sessions usable without making providers or tools know about sto
 
 ## Surfaces
 
-The CLI, REPL, Slack service, parent agents, child agents, and Python applications all use the same `Agent` object. Surfaces differ in how they put messages into the inbox and render events; they do not own separate agent logic.
+The CLI, REPL, parent agents, child agents, and Python applications all use the same `Agent` object. Surfaces differ in how they put messages into the inbox and render events; they do not own separate agent logic.

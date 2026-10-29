@@ -1,958 +1,507 @@
-"""Tests for ``providers.openai.compat``: wire-format conversion + stream parsing."""
+"""Tests for the OpenAI-compatible base provider, against a fake HTTP transport."""
 
 from __future__ import annotations
 
-from dataclasses import replace
-from types import MappingProxyType
-from typing import ClassVar, cast
+from dataclasses import dataclass, field
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, ClassVar, override
 
-import json
-import logging
-
-from treekle import MutablePlainTree, from_plain
+from treekle import json_dumps, json_loads
 
 import httpx2
 import pytest
-import tiktoken
 
-from sagent.catalog.openai import compatible
-from sagent.catalog.table import ModelCatalog, ModelTable
-from sagent.providers.dashscope.api import DashScope
-from sagent.providers.lib.errors import error_status_code
-from sagent.providers.minimax.api import MiniMax
-from sagent.providers.moonshot.api import Moonshot
-from sagent.providers.openai.compat import (
-    OpenAICompat,
-    OpenAICompatModel,
-    _extract_usage,
-    build_messages,
-    consume_stream,
+from sagent.model.exceptions import (
+    AuthError,
+    ContextOverflowError,
+    DisconnectedError,
+    OverloadedError,
+    RateLimitedError,
 )
-from sagent.types.capability import (
-    ModelCapability,
-    ModelLimits,
-    ModelSettings,
-    ThinkingCapability,
-)
-from sagent.types.cost import (
-    PriceCatalog,
-    PriceKey,
-    TokenPrice,
-)
-from sagent.types.exceptions import UserFacingError
-from sagent.types.model import (
-    ModelRequest,
-    PromptTooLongError,
-    RequestTooLargeError,
-    StreamInterruptedError,
-)
-from sagent.types.runtime import (
+from sagent.model.types import Request, Response, TextChunk
+from sagent.providers.openai import chat, compat, token_count
+from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel, models
+from sagent.providers.resources import SharedResources
+from sagent.providers.types import UsageWindow
+from sagent.session.types import (
     AssistantMessage,
-    BytesMessage,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    RuntimeEvent,
-    ToolCall,
-    ToolResult,
+    Attachment,
+    Thinking,
     UserMessage,
-    WireMessage,
 )
 
 
-def _priced_model(prices: PriceCatalog) -> OpenAICompatModel:
-    """Return a model carrying ``prices`` and otherwise every capability default."""
-    capability = ModelCapability(prices=prices)
-    return OpenAICompatModel(
-        provider=OpenAICompat.from_key("k"),
-        capability=capability,
-        settings=ModelSettings.narrowest(capability),
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable, Mapping
+
+
+_REQUEST = Request(system=("Be terse.",), records=(UserMessage(content="hi"),))
+
+
+class _Vendor(OpenAICompatible):
+    """A vendor as a subclass names one: its catalog, endpoint, and key."""
+
+    section: ClassVar[str] = "moonshot"
+    package: ClassVar[str] = "sagent.providers.moonshot"
+    document: ClassVar[str] = "moonshot.yaml"
+    url: ClassVar[str] = "https://api.vendor.test/v1"
+    key_variable: ClassVar[str] = "VENDOR_API_KEY"
+    reasoning_field: ClassVar[str] = "reasoning_content"
+
+
+class _Renewing(_Vendor):
+    """A vendor whose login renews once after a 401."""
+
+    def __init__(self, *, resources: SharedResources) -> None:
+        super().__init__(resources=resources)
+        self.renewals: list[str] = []
+
+    @override
+    async def credentials(self) -> dict[str, str]:
+        return {"authorization": f"Bearer token-{len(self.renewals)}"}
+
+    @override
+    async def reauthenticate(self) -> bool:
+        self.renewals.append("renewed")
+        return True
+
+
+@pytest.fixture(autouse=True)
+def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VENDOR_API_KEY", "sk-vendor")
+
+
+@pytest.fixture
+def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record each backoff instead of waiting it out."""
+    waits: list[float] = []
+
+    async def sleep(delay_sec: float) -> None:
+        waits.append(delay_sec)
+
+    monkeypatch.setattr(compat, "asyncio", SimpleNamespace(sleep=sleep))
+    return waits
+
+
+def _sse(*chunks: Mapping[str, object]) -> bytes:
+    lines = "".join(f"data: {json_dumps(chunk)}\n\n" for chunk in chunks)
+    return f"{lines}data: [DONE]\n\n".encode()
+
+
+def _said(text: str) -> tuple[dict[str, object], ...]:
+    return (
+        {"choices": [{"delta": {"reasoning_content": "Hmm."}, "finish_reason": None}]},
+        {"choices": [{"delta": {"content": text}, "finish_reason": None}]},
+        {"choices": [{"delta": {}, "finish_reason": "stop"}]},
+        {"choices": [], "usage": {"prompt_tokens": 3, "completion_tokens": 1}},
     )
 
 
-def _free_model() -> OpenAICompatModel:
-    """Return a model whose every rate is zero -- cost is not what these assert."""
-    return _priced_model(
-        PriceCatalog(
-            {
-                PriceKey("auto"): TokenPrice(
-                    request=0.0,
-                    response=0.0,
-                    cache_write=0.0,
-                    cache_write_1h=0.0,
-                    cache_read=0.0,
-                ),
-            },
-        ),
-    )
-
-
-def _billed_model() -> OpenAICompatModel:
-    """$1/$2 per Mtok, with the usual 1.25x cache-write multiplier."""
-    return _priced_model(
-        PriceCatalog(
-            {
-                PriceKey("auto"): TokenPrice(
-                    request=1.0,
-                    response=2.0,
-                    cache_write=1.25,
-                    cache_write_1h=0.0,
-                    cache_read=0.0,
-                ),
-            },
-        ),
-    )
-
-
-def _tiktoken_model() -> OpenAICompatModel:
-    """Return an OpenAI model whose text counts use the local tiktoken encoding."""
-    capability = ModelCapability(
-        model_id="gpt-5.6-sol",
-        prices=PriceCatalog(
-            {
-                PriceKey("auto"): TokenPrice(
-                    request=0.0,
-                    response=0.0,
-                    cache_write=0.0,
-                    cache_write_1h=0.0,
-                    cache_read=0.0,
-                ),
-            },
-        ),
-    )
-    return OpenAICompatModel(
-        provider=OpenAICompat.from_key("k"),
-        capability=capability,
-        settings=ModelSettings.narrowest(capability),
-    )
-
-
-def _make_request(
+def _ok(
+    text: str = "Hello",
     *,
-    messages: list[WireMessage],
-    system: str = "",
-) -> ModelRequest:
-    return ModelRequest(messages=messages, system=(system,))
+    headers: Mapping[str, str] | None = None,
+) -> httpx2.Response:
+    return httpx2.Response(200, headers=headers, content=_sse(*_said(text)))
 
 
-def test_build_messages_system_prepended() -> None:
-    req = _make_request(
-        messages=[UserMessage(text="hi")],
-        system="sys",
+def _failed(
+    status: int,
+    message: str,
+    *,
+    code: str = "",
+    headers: Mapping[str, str] | None = None,
+) -> httpx2.Response:
+    body = {"error": {"message": message, "code": code, "type": ""}}
+    return httpx2.Response(status, headers=headers, content=json_dumps(body).encode())
+
+
+async def _stream(
+    model: OpenAIModel,
+    request: Request = _REQUEST,
+) -> list[TextChunk | Response]:
+    return [event async for event in model.stream(request)]
+
+
+def _body(request: httpx2.Request) -> dict[str, object]:
+    return json_loads(request.content, dict[str, object])
+
+
+# ---- the provider ------------------------------------------------------------
+
+
+def test_the_provider_serves_its_sections_models_by_any_name() -> None:
+    vendor = _Vendor()
+    assert vendor.name == "moonshot"
+    assert _Vendor(name="kimi-work").name == "kimi-work"
+    assert list(vendor) == list(
+        models(_Vendor.package, document=_Vendor.document, section="moonshot"),
     )
-    msgs = build_messages(req)
-    assert msgs[0]["role"] == "system"
-    assert msgs[0]["content"] == "sys"
+    model = vendor["default"]
+    assert model.provider is vendor
+    assert model.capability.model_id == "kimi-3.0"
+    assert vendor.usage == ()
 
 
-def test_build_messages_user_plain_text() -> None:
-    req = _make_request(messages=[UserMessage(text="hello")])
-    msgs = build_messages(req)
-    assert msgs == [{"role": "user", "content": "hello"}]
+@pytest.mark.parametrize(
+    ("name", "model_id"),
+    [
+        ("kimi-2.6", "kimi-2.6"),  # Its exact name.
+        ("kimi-k2.6", "kimi-2.6"),  # The vendor's id.
+        ("utility", "kimi-2.6"),  # A role.
+        ("default", "kimi-3.0"),
+        ("kimi", "kimi-3.0"),  # A family: its newest.
+        ("kimi-code", "kimi-code-2.7"),
+        ("kimi-code-2", "kimi-code-2.7"),  # A family and major.
+    ],
+)
+def test_a_model_is_found_by_any_of_its_names(name: str, model_id: str) -> None:
+    assert _Vendor()[name].capability.model_id == model_id
 
 
-def test_build_messages_assistant_with_tool_call_remaps_id() -> None:
-    asst = AssistantMessage(
-        text="thinking...",
-        tool_calls=(ToolCall(id="orig-XYZ", name="Bash", args={"cmd": "ls"}),),
-    )
-    req = _make_request(messages=[asst])
-    msgs = build_messages(req)
-    assert msgs == [
-        {
-            "role": "assistant",
-            "content": "thinking...",
-            "tool_calls": [
-                {
-                    "id": "call_0",
-                    "type": "function",
-                    "function": {
-                        "name": "Bash",
-                        "arguments": json.dumps({"cmd": "ls"}),
-                    },
-                },
-            ],
-        },
-    ]
-
-
-def test_build_messages_assistant_empty_text_drops_content_to_none() -> None:
-    asst = AssistantMessage(text="", tool_calls=(ToolCall(id="x", name="N", args={}),))
-    msgs = build_messages(_make_request(messages=[asst]))
-    assert msgs[0]["content"] is None
-
-
-def test_build_messages_tool_result_pair_matches_call_id() -> None:
-    asst = AssistantMessage(
-        tool_calls=(ToolCall(id="orig-1", name="Bash", args={}),),
-    )
-    tool_res = ToolResult(call_id="orig-1", content="done")
-    msgs = build_messages(_make_request(messages=[asst, tool_res]))
-    # Last message is the tool response with the remapped id matching the call.
-    tool_msg = msgs[-1]
-    assert tool_msg["role"] == "tool"
-    assert tool_msg["tool_call_id"] == "call_0"
-    assert tool_msg["content"] == "done"
-
-
-def test_build_messages_tool_result_error_prefixes_marker() -> None:
-    res = ToolResult(call_id="cid", content="failed", is_error=True)
-    msgs = build_messages(_make_request(messages=[res]))
-    assert msgs[-1]["content"] == "[Error] failed"
-
-
-def test_build_messages_empty_history_returns_empty_list() -> None:
-    assert build_messages(_make_request(messages=[])) == []
-
-
-def _reasoning_turn() -> AssistantMessage:
-    return AssistantMessage(
-        text="",
-        thinking_blocks=(
-            {"type": "reasoning", "text": "t"},
-            {"type": "reasoning", "text": "u"},
-        ),
-        tool_calls=(ToolCall(id="c", name="N", args={}),),
-    )
-
-
-def test_build_messages_replays_reasoning_in_the_vendor_field() -> None:
-    msgs = build_messages(
-        _make_request(messages=[_reasoning_turn()]),
-        reasoning_field="reasoning_content",
-    )
-    assert msgs[0]["reasoning_content"] == "tu"
-
-
-def test_build_messages_omits_reasoning_without_a_vendor_field() -> None:
-    msgs = build_messages(_make_request(messages=[_reasoning_turn()]))
-    assert "reasoning_content" not in msgs[0]
-
-
-@pytest.mark.parametrize("provider", [Moonshot, DashScope, MiniMax])
-def test_reasoning_vendors_replay_reasoning_through_build_body(
-    provider: type[OpenAICompat],
+@pytest.mark.asyncio
+async def test_credentials_are_the_key_given_else_the_keys_variable(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    model = provider.from_key("k").model()
-    body = model._build_body(
-        _make_request(messages=[UserMessage(text="q"), _reasoning_turn()]),
-        stream=True,
-    )
-    messages = from_plain(body["messages"], list[dict[str, MutablePlainTree]])
-    assert messages[-1]["reasoning_content"] == "tu"
-
-
-def test_build_messages_warns_on_a_non_image_tool_attachment(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    result = ToolResult(
-        call_id="c",
-        content="done",
-        attachments=(BytesMessage(data=b"x", descriptor="text/plain"),),
-    )
-    with caplog.at_level(logging.WARNING):
-        msgs = build_messages(_make_request(messages=[result]))
-    assert "skipping non-image attachment (mime=text/plain)" in caplog.text
-    assert msgs == [{"role": "tool", "tool_call_id": "call_0", "content": "done"}]
-
-
-def test_extract_usage_reports_full_input_and_cache_read_separately() -> None:
-    """``_extract_usage`` returns the cache-INCLUSIVE input and cache_read split.
-
-    ``_extract_usage`` does not subtract the cached portion: it returns the raw
-    ``prompt_tokens`` plus ``cached_tokens`` as separate values. The disjoint
-    split (input minus cache) happens later in ``consume_stream`` -- see
-    :func:`test_consume_stream_input_tokens_exclude_cache_read`.
-    """
-    usage: dict[str, MutablePlainTree] = {
-        "prompt_tokens": 1000,
-        "completion_tokens": 100,
-        "prompt_tokens_details": {"cached_tokens": 400},
+    assert await _Vendor().credentials() == {"authorization": "Bearer sk-vendor"}
+    assert await _Vendor(api_key="sk-given").credentials() == {
+        "authorization": "Bearer sk-given",
     }
-    input_tokens, output_tokens, cache_read, cache_write = _extract_usage(usage)
-    assert input_tokens == 1000
-    assert output_tokens == 100
-    assert cache_read == 400
-    assert cache_write == 0
+    monkeypatch.delenv("VENDOR_API_KEY")
+    with pytest.raises(AuthError, match="VENDOR_API_KEY"):
+        await _Vendor().credentials()
+    monkeypatch.setattr(_Vendor, "key_variable", "")
+    assert await _Vendor().credentials() == {}
+    assert await _Vendor().reauthenticate() is False
 
 
 @pytest.mark.asyncio
-async def test_consume_stream_input_tokens_exclude_cache_read() -> None:
-    """``TokenCount.input_tokens`` is the non-cached remainder of the prompt.
-
-    Guards against double-counting the cached portion: OpenAI reports a
-    cache-inclusive ``prompt_tokens``, so the stored ``input_tokens`` must drop
-    ``cached_tokens`` to stay disjoint from ``cache_read_tokens``.
-    """
-    events: list[dict[str, MutablePlainTree]] = [
-        {
-            "id": "stream-1",
-            "choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": 1000,
-                "completion_tokens": 10,
-                "prompt_tokens_details": {"cached_tokens": 400},
-            },
-        },
-    ]
-    resp = await consume_stream(
-        _sse_response(events),
-        publish=None,
-        model=_free_model(),
-        reasoning_field="",
-    )
-    assert resp.tokens.request == 600
-    assert resp.tokens.cache_read == 400
-
-
-@pytest.mark.asyncio
-async def test_consume_stream_tracks_and_bills_cache_write_tokens() -> None:
-    events: list[dict[str, MutablePlainTree]] = [
-        {
-            "id": "stream-cache-write",
-            "choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": 1309,
-                "completion_tokens": 2,
-                "prompt_tokens_details": {
-                    "cached_tokens": 0,
-                    "cache_write_tokens": 1306,
-                },
-            },
-        },
-    ]
-    resp = await consume_stream(
-        _sse_response(events),
-        publish=None,
-        model=_billed_model(),
-        reasoning_field="",
-    )
-    assert resp.tokens.request == 3
-    assert resp.tokens.cache_write == 1306
-    assert resp.tokens.cache_read == 0
+async def test_the_endpoint_is_the_base_url_given_else_the_vendors() -> None:
+    assert await _Vendor().endpoint() == "https://api.vendor.test/v1"
     assert (
-        resp.spend.request + resp.spend.cache_write + resp.spend.cache_read
-    ) == pytest.approx((3 + 1306 * 1.25) / 1_000_000)
-
-
-def _sse_response(events: list[dict[str, MutablePlainTree]]) -> httpx2.Response:
-    """Build an in-memory httpx2 Response carrying SSE lines."""
-    lines = [f"data: {json.dumps(e)}\n\n" for e in events]
-    lines.append("data: [DONE]\n\n")
-    return _sse_response_body("".join(lines).encode())
-
-
-def _sse_response_body(body: bytes) -> httpx2.Response:
-    """Build an in-memory httpx2 Response carrying raw SSE bytes."""
-    return httpx2.Response(
-        200,
-        content=body,
-        headers={"Content-Type": "text/event-stream"},
+        await _Vendor(base_url="http://box:8000/v1").endpoint() == "http://box:8000/v1"
     )
 
 
 @pytest.mark.asyncio
-async def test_consume_stream_text_and_usage() -> None:
-    events: list[dict[str, MutablePlainTree]] = [
-        {
-            "id": "stream-1",
-            "choices": [{"delta": {"content": "he"}, "finish_reason": None}],
-        },
-        {
-            "id": "stream-1",
-            "choices": [{"delta": {"content": "llo"}, "finish_reason": "stop"}],
-            "usage": {"prompt_tokens": 4, "completion_tokens": 2},
-        },
-    ]
-    text_acc: list[str] = []
+async def test_closing_closes_only_resources_the_provider_made() -> None:
+    owned = _Vendor()
+    http = owned.resources.http
+    await owned.aclose()
+    assert http.is_closed
+    async with SharedResources() as shared:
+        async with _Vendor(resources=shared):
+            http = shared.http
+        assert not http.is_closed
 
-    def _sink(ev: RuntimeEvent) -> None:
-        if isinstance(ev, ModelResponsePartial):
-            text_acc.append(ev.text)
 
-    r = _sse_response(events)
-    resp = await consume_stream(
-        r,
-        publish=_sink,
-        model=_free_model(),
-        reasoning_field="",
-    )
-    assert resp.message.text == "hello"
-    assert "".join(text_acc) == "hello"
-    assert resp.tokens.request == 4
-    assert resp.tokens.response == 2
-    assert resp.stop_reason == "model_finished"
-    assert resp.message_id == "stream-1"
+# ---- streaming ---------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_consume_stream_preserves_chat_refusal_text() -> None:
-    events: list[dict[str, MutablePlainTree]] = [
-        {
-            "id": "stream-refusal",
-            "choices": [
-                {
-                    "delta": {"refusal": "I can’t help with that."},
-                    "finish_reason": "stop",
-                },
-            ],
-            "usage": {"prompt_tokens": 4, "completion_tokens": 6},
-        },
-    ]
-    resp = await consume_stream(
-        _sse_response(events),
-        publish=None,
-        model=_free_model(),
-        reasoning_field="",
+async def test_stream_posts_the_request_and_yields_text_then_the_response() -> None:
+    server = _Server(replies=[_ok()])
+    async with _Served(server) as shared:
+        vendor = _Vendor(resources=shared, base_url="http://box:8000/v1/")
+        kimi = vendor["default"]
+        events = await _stream(kimi)
+    (sent,) = server.requests
+    assert (sent.method, str(sent.url)) == (
+        "POST",
+        "http://box:8000/v1/chat/completions",
     )
-    assert resp.message.text == "I can’t help with that."
-    assert resp.stop_reason == "model_refusal"
-
-
-@pytest.mark.asyncio
-async def test_consume_stream_tool_call_accumulates() -> None:
-    events: list[dict[str, MutablePlainTree]] = [
-        {
-            "choices": [
-                {
-                    "delta": {
-                        "tool_calls": [
-                            {
-                                "index": 0,
-                                "id": "call_a",
-                                "function": {"name": "Bash"},
-                            },
-                        ],
-                    },
-                    "finish_reason": None,
-                },
-            ],
-        },
-        {
-            "choices": [
-                {
-                    "delta": {
-                        "tool_calls": [
-                            {"index": 0, "function": {"arguments": '{"cmd"'}},
-                        ],
-                    },
-                    "finish_reason": None,
-                },
-            ],
-        },
-        {
-            "choices": [
-                {
-                    "delta": {
-                        "tool_calls": [
-                            {"index": 0, "function": {"arguments": ': "ls"}'}},
-                        ],
-                    },
-                    "finish_reason": "tool_calls",
-                },
-            ],
-        },
-    ]
-    resp = await consume_stream(
-        _sse_response(events),
-        publish=None,
-        model=_free_model(),
-        reasoning_field="",
-    )
-    assert len(resp.message.tool_calls) == 1
-    tc = resp.message.tool_calls[0]
-    assert tc.id == "call_a"
-    assert tc.name == "Bash"
-    assert dict(tc.args) == {"cmd": "ls"}
-    assert resp.stop_reason == "model_tool_use"
-
-
-@pytest.mark.asyncio
-async def test_consume_stream_reasoning_captured() -> None:
-    events: list[dict[str, MutablePlainTree]] = [
-        {
-            "choices": [
-                {
-                    "delta": {"reasoning_content": "think "},
-                    "finish_reason": None,
-                },
-            ],
-        },
-        {
-            "choices": [
-                {
-                    "delta": {"reasoning_content": "more"},
-                    "finish_reason": "stop",
-                },
-            ],
-        },
-    ]
-    thinking_chunks: list[str] = []
-
-    def _sink(ev: RuntimeEvent) -> None:
-        if isinstance(ev, ModelResponseThinking):
-            thinking_chunks.append(ev.text)
-
-    resp = await consume_stream(
-        _sse_response(events),
-        publish=_sink,
-        model=_free_model(),
+    assert sent.headers["authorization"] == "Bearer sk-vendor"
+    assert sent.headers["content-type"] == "application/json"
+    assert sent.headers["accept"] == "text/event-stream"
+    assert _body(sent) == vendor.encode(_REQUEST, model=kimi)
+    assert _body(sent) == chat.encode(
+        _REQUEST,
+        capability=kimi.capability,
+        settings=kimi.settings,
         reasoning_field="reasoning_content",
+        temperature=1.0,
     )
-    assert thinking_chunks == ["think ", "more"]
-    assert resp.message.thinking_blocks == (
-        {"type": "reasoning", "text": "think more"},
+    assert events[:2] == [
+        TextChunk(text="Hmm.", thinking=True),
+        TextChunk(text="Hello", record=1),
+    ]
+    assert len(events) == 3
+    response = events[2]
+    assert isinstance(response, Response)
+    assert response.records == (
+        Thinking(content="Hmm."),
+        AssistantMessage(content="Hello"),
     )
+    assert (response.tokens.request, response.tokens.response) == (3, 1)
 
 
 @pytest.mark.asyncio
-async def test_consume_stream_skips_malformed_data() -> None:
-    body = (
-        b"data: not json\n\n"
-        b'data: {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}\n\n'
-        b"data: [DONE]\n\n"
-    )
-    resp = await consume_stream(
-        _sse_response_body(body),
-        publish=None,
-        model=_free_model(),
-        reasoning_field="",
-    )
-    assert resp.message.text == "ok"
+async def test_a_request_carries_the_headers_its_provider_adds() -> None:
+    class Tagged(_Vendor):
+        @override
+        def headers(self, request: Request) -> dict[str, str]:
+            return {"x-session": str(len(request.records))}
+
+    server = _Server(replies=[_ok()])
+    async with _Served(server) as shared:
+        await _stream(Tagged(resources=shared)["default"])
+    assert server.requests[0].headers["x-session"] == "1"
+    assert _Vendor().headers(_REQUEST) == {}
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("payload", [b"[1]", b"null", b'"text"', b"42"])
-async def test_consume_stream_skips_well_formed_non_object_data(payload: bytes) -> None:
-    body = (
-        b"data: " + payload + b"\n\n"
-        b'data: {"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]}\n\n'
-        b"data: [DONE]\n\n"
-    )
-    resp = await consume_stream(
-        _sse_response_body(body),
-        publish=None,
-        model=_free_model(),
-        reasoning_field="",
-    )
-    assert resp.message.text == "ok"
+async def test_each_reply_updates_the_accounts_windows() -> None:
+    limits = {"x-ratelimit-limit-requests": "4", "x-ratelimit-remaining-requests": "3"}
+    server = _Server(replies=[_ok(headers=limits), _ok()])
+    async with _Served(server) as shared:
+        vendor = _Vendor(resources=shared)
+        await _stream(vendor["default"])
+        window = UsageWindow(label="requests", utilization=0.25)
+        assert vendor.usage == (window,)
+        # A reply that reports no window leaves the last report standing.
+        await _stream(vendor["default"])
+        assert vendor.usage == (window,)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("event", "status"),
-    [
-        ({"object": "error", "message": "boom", "code": "server_error"}, 500),
-        ({"error": {"message": "boom", "code": "rate_limit_exceeded"}}, 429),
-        ({"error": {"message": "boom"}}, None),
-    ],
-)
-async def test_consume_stream_raises_an_in_band_error_event(
-    event: dict[str, MutablePlainTree],
-    status: int | None,
-) -> None:
-    with pytest.raises(UserFacingError, match="boom") as raised:
-        await consume_stream(
-            _sse_response([event]),
-            publish=None,
-            model=_free_model(),
-            reasoning_field="",
-        )
-    assert error_status_code(raised.value) == status
-
-
-@pytest.mark.asyncio
-async def test_consume_stream_eof_without_done_raises_interrupted() -> None:
-    body = (
-        b'data: {"id": "stream-1", "choices": '
-        b'[{"delta": {"content": "partial"}, "finish_reason": "stop"}], '
-        b'"usage": {"prompt_tokens": 4, "completion_tokens": 2}}\n\n'
-    )
-    with pytest.raises(StreamInterruptedError) as exc_info:
-        await consume_stream(
-            _sse_response_body(body),
-            publish=None,
-            model=_billed_model(),
-            reasoning_field="",
-        )
-    response = exc_info.value.response
-    assert response.message.text == "partial"
-    assert response.message_id == "stream-1"
-    assert response.tokens.request == 4
-    assert response.tokens.response == 2
-    assert response.total_cost == pytest.approx(0.000008)
-
-
-def _stub_limits(request: int) -> ModelLimits:
-    return ModelLimits(
-        max_request_tokens=request,
-        max_response_tokens=200,
-        max_request_bytes=20 * 1024 * 1024,
-        max_image_edge_px=2048,
-        max_image_bytes=20 * 1024 * 1024,
-    )
-
-
-class _DummyProvider(OpenAICompat):
-    ENV_VAR: ClassVar[str] = "DUMMY_PROV_KEY"
-    BASE_URL: ClassVar[str] = "https://stub.test/v1"
-    _row = ModelCapability(
-        model_id="stub-1",
-        context=MappingProxyType(
-            {"": _stub_limits(1000), "+1m": _stub_limits(1_000_000)},
-        ),
-        prices=PriceCatalog(
-            {
-                PriceKey("auto"): TokenPrice(
-                    request=0.0,
-                    response=0.0,
-                    cache_write=0.0,
-                    cache_write_1h=0.0,
-                    cache_read=0.0,
-                ),
-            },
-        ),
-    )
-
-    catalog = ModelCatalog(
-        models=ModelTable(
-            rows=(_row,),
-            roles={"default": "stub-1", "utility": "stub-1"},
-        ),
-        transport=compatible(),
-    )
-
-
-def test_provider_from_env_missing_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("DUMMY_PROV_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="API key not configured"):
-        _DummyProvider.from_env()
-
-
-def test_provider_from_env_reads_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DUMMY_PROV_KEY", "the-key")
-    p = _DummyProvider.from_env()
-    assert p.api_key == "the-key"
-    assert p.base_url == "https://stub.test/v1"
-
-
-def test_provider_from_key_keeps_the_key_and_endpoint() -> None:
-    p = _DummyProvider.from_key("the-key", base_url="https://other.test/v1")
-    assert (p.api_key, p.base_url) == ("the-key", "https://other.test/v1")
-    assert _DummyProvider.from_key("k").base_url == "https://stub.test/v1"
-
-
-def test_provider_from_env_requires_env_var_set() -> None:
-    """A base class without ENV_VAR raises a clean error."""
-    with pytest.raises(RuntimeError, match="has no ENV_VAR"):
-        OpenAICompat.from_env()
-
-
-def test_provider_model_unknown_id_raises() -> None:
-    p = _DummyProvider.from_key("k")
-    with pytest.raises(ValueError, match="Unknown model"):
-        _ = p.model("does-not-exist")
-
-
-def test_provider_model_default_picks_default_model() -> None:
-    p = _DummyProvider.from_key("k")
-    m = p.model()
-    assert m.capability.model_id == "stub-1"
-
-
-def test_provider_utility_alias_uses_the_utility_row() -> None:
-    p = _DummyProvider.from_key("k")
-    m = p.model("utility")
-    assert m.capability.model_id == "stub-1"
-
-
-def test_model_properties_defaults() -> None:
-    p = _DummyProvider.from_key("k")
-    m = p.model()
-    assert m.limits.max_request_tokens == 1000
-    assert m.limits.max_response_tokens == 200
-    assert m.capability.thinking.budget == frozenset({"none"})
-    assert m.capability.thinking.effort == frozenset({"none"})
-    assert m.capability.cache_ttl_sec == frozenset({0.0})
-    assert m.capability.manage_context_server_side == frozenset({False})
-    assert m.capability.retries_internally is False
-    assert m.capability.account_auth is False
-    assert m.approx_text_tokens("x" * 12) == 3
-    assert m.limits.max_image_edge_px == 2048
-    assert m.limits.max_image_bytes == 20 * 1024 * 1024
-
-
-@pytest.mark.compute_large_fixture
-def test_approx_text_tokens_treats_special_token_text_as_ordinary() -> None:
-    model = _tiktoken_model()
-    text = "literal <|endoftext|> marker"
-    expected = len(tiktoken.get_encoding("o200k_base").encode_ordinary(text))
-    assert model.approx_text_tokens(text) == expected
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "context_length_exceeded",
-        "Maximum context length blah",
-        "Request size exceeds model context window",
-        "request size exceeds model context",
-        "input too large",
-    ],
-)
-def test_model_is_context_overflow_detection(message: str) -> None:
-    p = _DummyProvider.from_key("k")
-    m = p.model()
-    assert m.is_context_overflow(RuntimeError(message)) is True
-    assert m.is_retryable_provider_error(RuntimeError("transient")) is False
-
-
-@pytest.mark.parametrize(
-    "message",
-    [
-        "other failure",
-        "internal error: too long traceback",
-        "request took too long",
-    ],
-)
-def test_model_is_context_overflow_rejects_unrelated_errors(message: str) -> None:
-    p = _DummyProvider.from_key("k")
-    m = p.model()
-    assert m.is_context_overflow(RuntimeError(message)) is False
-
-
-@pytest.mark.asyncio
-async def test_actual_text_tokens_falls_back_to_approx_for_unknown_model() -> None:
-    """Non-OpenAI model ids that tiktoken doesn't recognize use ``approx_text_tokens``."""
-    p = _DummyProvider.from_key("k")
-    m = p.model("stub-1")  # `tiktoken` has no encoding for ``stub-1``.
-    assert await m.actual_text_tokens("x" * 12) == m.approx_text_tokens("x" * 12)
-
-
-@pytest.mark.asyncio
-async def test_actual_request_tokens_falls_back_to_approx_for_unknown_model() -> None:
-    """Without a tiktoken encoding, ``actual_request_tokens`` returns ``approx``."""
-    p = _DummyProvider.from_key("k")
-    m = p.model("stub-1")
-    req = ModelRequest(messages=[UserMessage(text="hello world")])
-    assert await m.actual_request_tokens(req) == m.approx_request_tokens(req)
-
-
-@pytest.mark.asyncio
-@pytest.mark.compute_large_fixture
-async def test_actual_request_tokens_treats_special_token_text_as_ordinary() -> None:
-    model = _tiktoken_model()
-    text = "ValueError for literal <|endoftext|> marker"
-    request = ModelRequest(
-        messages=[
-            ToolResult(
-                call_id="read",
-                content=text,
-                is_error=True,
-            ),
+async def test_an_error_reply_raises_what_it_means(slept: list[float]) -> None:
+    server = _Server(
+        replies=[
+            _failed(400, "x", code="context_length_exceeded"),
+            httpx2.Response(400, content=b"<html>Bad Request</html>"),
         ],
     )
-    expected = len(tiktoken.get_encoding("o200k_base").encode_ordinary(text))
-    assert await model.actual_request_tokens(request) == expected
+    async with _Served(server) as shared:
+        kimi = _Vendor(resources=shared)["default"]
+        with pytest.raises(ContextOverflowError):
+            await _stream(kimi)
+        with pytest.raises(RuntimeError, match=r"400 : <html>Bad Request</html>"):
+            await _stream(kimi)
+    assert len(server.requests) == 2
+    assert slept == []
 
 
 @pytest.mark.asyncio
-async def test_model_close_closes_reusable_http_client() -> None:
-    p = _DummyProvider.from_key("k")
-    m = p.model("stub-1")
-    client = httpx2.AsyncClient()
-    m._clients.set(client)
-    await m.close()
-    assert client.is_closed
-    assert m._clients.peek() is None
-
-
-def _make_provider_with_mock(
-    handler: httpx2.MockTransport,
-) -> tuple[_DummyProvider, OpenAICompatModel]:
-    p = _DummyProvider.from_key("test-key")
-    m = p.model()
-    # Inject a pre-built client so ``_get_client`` returns it.
-    m._clients.set(httpx2.AsyncClient(transport=handler))
-    return p, m
-
-
-@pytest.mark.asyncio
-async def test_stream_unrelated_400_propagates_as_http_error() -> None:
-    def handle(request: httpx2.Request) -> httpx2.Response:
-        del request
-        return httpx2.Response(400, text="malformed body")
-
-    transport = httpx2.MockTransport(handle)
-    _, model = _make_provider_with_mock(transport)
-    req = ModelRequest(messages=[UserMessage(text="x")])
-    with pytest.raises(httpx2.HTTPStatusError):
-        await model.stream(req)
-
-
-@pytest.mark.asyncio
-async def test_stream_parses_sse_via_mock_transport() -> None:
-    sse_body = (
-        b'data: {"id": "x", "choices": [{"delta": {"content": "hi"}, '
-        b'"finish_reason": "stop"}]}\n\n'
-        b"data: [DONE]\n\n"
-    )
-
-    def handle(request: httpx2.Request) -> httpx2.Response:
-        del request
-        return httpx2.Response(
-            200,
-            content=sse_body,
-            headers={"Content-Type": "text/event-stream"},
-        )
-
-    transport = httpx2.MockTransport(handle)
-    _, model = _make_provider_with_mock(transport)
-    chunks: list[str] = []
-
-    def _sink(ev: RuntimeEvent) -> None:
-        if isinstance(ev, ModelResponsePartial):
-            chunks.append(ev.text)
-
-    resp = await model.stream(
-        ModelRequest(messages=[UserMessage(text="p")]),
-        publish=_sink,
-    )
-    assert resp.message.text == "hi"
-    assert chunks == ["hi"]
-
-
-@pytest.mark.parametrize(
-    ("status_code", "message"),
-    [
-        (400, "context_length_exceeded"),
-        (400, "input too large"),
-        (413, "context_length_exceeded"),
-        (413, "Request size exceeds model context window"),
-    ],
-)
-@pytest.mark.asyncio
-async def test_stream_4xx_context_overflow_raises_prompt_too_long(
-    status_code: int,
-    message: str,
+async def test_a_failure_whose_body_is_cut_short_still_means_its_status(
+    slept: list[float],
 ) -> None:
-    """A 4xx whose body names the token context window is token overflow.
-
-    Includes a 413 with a context-window body: the body disambiguates it
-    from the byte wire-limit, so it stays ``PromptTooLongError`` (a larger
-    window helps) rather than routing to byte-overflow recovery.
-    """
-
-    def handle(request: httpx2.Request) -> httpx2.Response:
-        del request
-        return httpx2.Response(status_code, text=message)
-
-    transport = httpx2.MockTransport(handle)
-    _, model = _make_provider_with_mock(transport)
-    with pytest.raises(PromptTooLongError):
-        await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
+    cut = httpx2.Response(503, content=b'{"error": ')
+    server = _Server(replies=[cut] * 5)
+    async with _Served(server) as shared:
+        with pytest.raises(OverloadedError, match=r"\{\"error\": "):
+            await _stream(_Vendor(resources=shared)["default"])
+    assert len(server.requests) == 5
+    # Retried as an overload is, not failed as a parse error.
+    assert slept == [0.5, 1.0, 2.0, 4.0]
 
 
 @pytest.mark.asyncio
-async def test_stream_413_byte_body_raises_request_too_large() -> None:
-    """A 413 with a byte-limit body raises ``RequestTooLargeError``.
-
-    The byte ceiling is fixed across models, so it routes to byte-overflow
-    recovery (shed attachment bytes), not token-overflow recovery.
-    """
-
-    def handle(request: httpx2.Request) -> httpx2.Response:
-        del request
-        return httpx2.Response(413, text="Request entity too large")
-
-    transport = httpx2.MockTransport(handle)
-    _, model = _make_provider_with_mock(transport)
-    with pytest.raises(RequestTooLargeError):
-        await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
+async def test_a_short_failure_before_the_first_event_is_retried(
+    slept: list[float],
+) -> None:
+    server = _Server(
+        replies=[
+            _failed(503, "Busy"),
+            _failed(429, "Slow", headers={"retry-after": "2"}),
+            _ok(),
+        ],
+    )
+    async with _Served(server) as shared:
+        events = await _stream(_Vendor(resources=shared)["default"])
+    assert TextChunk(text="Hello", record=1) in events
+    assert len(server.requests) == 3
+    # Doubling backoff, or the server's advice when it is longer.
+    assert slept == [0.5, 2.0]
 
 
 @pytest.mark.asyncio
-async def test_stream_500_with_overflow_keyword_is_http_error_not_overflow() -> None:
-    """5xx server errors are infrastructure, never overflow (stream path)."""
-
-    def handle(request: httpx2.Request) -> httpx2.Response:
-        del request
-        return httpx2.Response(500, text="internal error: too long traceback")
-
-    transport = httpx2.MockTransport(handle)
-    _, model = _make_provider_with_mock(transport)
-    with pytest.raises(httpx2.HTTPStatusError):
-        await model.stream(ModelRequest(messages=[UserMessage(text="x")]))
+async def test_retrying_stops_after_five_attempts(slept: list[float]) -> None:
+    server = _Server(replies=[_failed(503, "Busy")] * 5)
+    async with _Served(server) as shared:
+        with pytest.raises(OverloadedError, match="Busy"):
+            await _stream(_Vendor(resources=shared)["default"])
+    assert len(server.requests) == 5
+    assert slept == [0.5, 1.0, 2.0, 4.0]
 
 
-def test_build_body_strips_window_tag_from_wire_model() -> None:
-    """A ``+1m`` model sends the base id on the wire; the API rejects the tag."""
-    p = _DummyProvider.from_key("k")
-    m = p.model("stub-1+1m")
-    assert m.tagged_model_id == "stub-1+1m"
-    assert m.limits.max_request_tokens == 1_000_000
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")]),
-        stream=False,
+@pytest.mark.asyncio
+async def test_a_long_advised_wait_is_left_to_the_caller(slept: list[float]) -> None:
+    server = _Server(replies=[_failed(429, "Slow", headers={"retry-after": "31"})])
+    async with _Served(server) as shared:
+        with pytest.raises(RateLimitedError) as raised:
+            await _stream(_Vendor(resources=shared)["default"])
+    assert raised.value.retry_after_sec == 31.0
+    assert len(server.requests) == 1
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_connection_is_a_disconnect_and_is_retried(
+    slept: list[float],
+) -> None:
+    refused = httpx2.ConnectError("Connection refused")
+    server = _Server(replies=[refused, _ok()])
+    async with _Served(server) as shared:
+        events = await _stream(_Vendor(resources=shared)["default"])
+    assert TextChunk(text="Hello", record=1) in events
+    assert slept == [0.5]
+    server = _Server(replies=[refused] * 5)
+    async with _Served(server) as shared:
+        with pytest.raises(DisconnectedError, match="Connection refused"):
+            await _stream(_Vendor(resources=shared)["default"])
+    assert len(server.requests) == 5
+
+
+@pytest.mark.asyncio
+async def test_a_failure_after_text_has_streamed_is_not_retried(
+    slept: list[float],
+) -> None:
+    broken = httpx2.Response(200, content=_broken(_said("Hal")[:2]))
+    server = _Server(replies=[broken, _ok()])
+    async with _Served(server) as shared:
+        kimi = _Vendor(resources=shared)["default"]
+        seen: list[TextChunk | Response] = []
+        with pytest.raises(DisconnectedError, match="reset"):
+            await _drain(kimi, into=seen)
+    assert seen == [
+        TextChunk(text="Hmm.", thinking=True),
+        TextChunk(text="Hal", record=1),
+    ]
+    assert len(server.requests) == 1
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_ends_unfinished_is_a_disconnect(
+    slept: list[float],
+) -> None:
+    cut = httpx2.Response(200, content=_sse(*_said("Hal")[:2]))
+    server = _Server(replies=[cut])
+    async with _Served(server) as shared:
+        with pytest.raises(DisconnectedError, match="before it was finished"):
+            await _stream(_Vendor(resources=shared)["default"])
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_a_401_renews_the_login_once_and_asks_again() -> None:
+    server = _Server(
+        replies=[
+            _failed(401, "Expired"),
+            _ok(),
+            _failed(401, "Expired"),
+            _failed(401, "Still"),
+        ],
     )
-    assert body["model"] == "stub-1"
+    async with _Served(server) as shared:
+        renewing = _Renewing(resources=shared)
+        model = renewing["default"]
+        assert TextChunk(text="Hello", record=1) in await _stream(model)
+        with pytest.raises(AuthError, match="Still"):
+            await _stream(model)
+    assert [r.headers["authorization"] for r in server.requests] == [
+        "Bearer token-0",
+        "Bearer token-1",
+        "Bearer token-1",
+        "Bearer token-2",
+    ]
+    assert renewing.renewals == ["renewed", "renewed"]
 
 
-def test_a_reasoning_row_caps_output_with_max_completion_tokens() -> None:
-    """OpenAI reasoning models reject ``max_tokens``; the row says which it is."""
-    p = _DummyProvider.from_key("k")
-    m = p.model()
-    m._capability = replace(
-        m.capability,
-        thinking=ThinkingCapability(effort=frozenset({"none", "low"})),
+@pytest.mark.asyncio
+async def test_a_401_with_nothing_to_renew_is_an_auth_error() -> None:
+    server = _Server(replies=[_failed(401, "Bad key")])
+    async with _Served(server) as shared:
+        with pytest.raises(AuthError, match="Bad key"):
+            await _stream(_Vendor(resources=shared)["default"])
+    assert len(server.requests) == 1
+
+
+# ---- counting and replies ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_count_estimates_from_the_rows_characters_per_token() -> None:
+    kimi = _Vendor()["default"]
+    request = Request(system=("x" * 40,), records=(UserMessage(content="y" * 40),))
+    tokens = await kimi.count(request)
+    assert tokens == int(
+        len("x" * 40 + "\n" + "y" * 40) / kimi.capability.approx_chars_per_token,
     )
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], max_response_tokens=42),
-        stream=False,
+    assert tokens > 0
+
+
+@pytest.mark.asyncio
+async def test_reply_posts_json_and_returns_the_json_answered() -> None:
+    server = _Server(replies=[httpx2.Response(200, content=b'{"answer": 42}')])
+    async with _Served(server) as shared:
+        vendor = _Vendor(resources=shared)
+        answer = await vendor.reply("/things", body={"q": 1}, headers={"x-extra": "1"})
+    assert answer == {"answer": 42}
+    (sent,) = server.requests
+    assert str(sent.url) == "https://api.vendor.test/v1/things"
+    assert sent.headers["x-extra"] == "1"
+    assert sent.headers["accept"] == "*/*"
+    assert _body(sent) == {"q": 1}
+
+
+@dataclass(slots=True, kw_only=True)
+class _Server:
+    """Answers each request with the next scripted reply, and keeps the requests."""
+
+    replies: list[httpx2.Response | Exception]
+    requests: list[httpx2.Request] = field(default_factory=list[httpx2.Request])
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
+        reply = self.replies.pop(0)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+
+class _Served(SharedResources):
+    """Shared resources whose HTTP client answers from ``handler``, never the network."""
+
+    def __init__(self, handler: Callable[[httpx2.Request], httpx2.Response]) -> None:
+        super().__init__()
+        self._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+
+    @property
+    @override
+    def http(self) -> httpx2.AsyncClient:
+        return self._client
+
+    @override
+    async def aclose(self) -> None:
+        await super().aclose()
+        await self._client.aclose()
+
+
+async def _drain(model: OpenAIModel, *, into: list[TextChunk | Response]) -> None:
+    """Collect what ``model`` streams into ``into`` until the stream fails."""
+    stream = model.stream(_REQUEST)
+    while True:
+        into.append(await anext(stream))
+
+
+async def _broken(chunks: tuple[Mapping[str, object], ...]) -> AsyncIterator[bytes]:
+    """Stream ``chunks``, then drop the connection."""
+    yield "".join(f"data: {json_dumps(chunk)}\n\n" for chunk in chunks).encode()
+    raise httpx2.ReadError("Connection reset by peer")
+
+
+def test_an_attachment_is_billed_by_openai_s_formula() -> None:
+    model = _Vendor()["default"]
+    png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+        "1f15c4890000000d49444154789c6360f8cf000000030101005c0d6a1c0000000049454e44ae426082",
     )
-    assert body["max_completion_tokens"] == 42
-    assert "max_tokens" not in body
-
-
-def test_build_body_includes_max_tokens_when_set() -> None:
-    p = _DummyProvider.from_key("k")
-    m = p.model()
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")], max_response_tokens=42),
-        stream=False,
+    attached = Attachment(mime_descriptor="image/png", data=png)
+    assert model.attachment_tokens(attached) == token_count.attachment_tokens(
+        attached,
+        capability=model.capability,
     )
-    assert body["max_tokens"] == 42
-
-
-def test_build_body_stream_options_include_usage() -> None:
-    p = _DummyProvider.from_key("k")
-    m = p.model()
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")]),
-        stream=True,
-    )
-    assert body["stream"] is True
-    stream_options = cast(dict[str, MutablePlainTree], body["stream_options"])
-    assert stream_options["include_usage"] is True
-
-
-def test_build_body_skips_effort_when_not_supported() -> None:
-    p = _DummyProvider.from_key("k")
-    m = p.model()
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")]),
-        stream=False,
-    )
-    assert "reasoning_effort" not in body
-
-
-def test_build_body_skips_service_tier_when_not_supported() -> None:
-    p = _DummyProvider.from_key("k")
-    m = p.model()
-    body = m._build_body(
-        ModelRequest(messages=[UserMessage(text="x")]),
-        stream=False,
-    )
-    assert "service_tier" not in body
 
 
 if __name__ == "__main__":

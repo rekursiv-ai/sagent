@@ -166,5 +166,4 @@ Then pass `word_count` into `Agent(..., tools=[word_count])`.
 - [Providers](providers.md)
 - [Streaming](streaming.md)
 - [Compaction](compaction.md)
-- [Slack service](slack.md)
 - [Security](security.md)

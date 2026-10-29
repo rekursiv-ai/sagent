@@ -1,148 +1,80 @@
-"""Tests for ``providers.moonshot``: Moonshot OpenAI-compat surface."""
+"""Tests for the Moonshot request body: Kimi's fixed sampler and thinking knobs."""
 
 from __future__ import annotations
 
-from dataclasses import replace
-from typing import TYPE_CHECKING, cast
-
 import pytest
 
-from sagent.catalog.openai import compatible
-from sagent.catalog.table import ModelCatalog, ModelTable
-from sagent.providers.moonshot.api import Moonshot, _MoonshotModel
-from sagent.types.capability import (
-    ModelCapability,
-    ModelSettings,
-    ThinkingBudget,
-    ThinkingCapability,
-    ThinkingEffort,
-)
-from sagent.types.model import ModelRequest
-from sagent.types.runtime import UserMessage
+from sagent.model.exceptions import AuthError
+from sagent.model.types import Request
+from sagent.providers.catalog import choose
+from sagent.providers.moonshot.api import Moonshot
+from sagent.session.types import UserMessage
 
 
-if TYPE_CHECKING:
-    from treekle import MutablePlainTree
+_REQUEST = Request(records=(UserMessage(content="hi"),))
 
 
-@pytest.fixture(autouse=True)
-def synthetic_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    row = ModelCapability(
-        model_id="level-1.0",
-        wire_model_id="wire-level",
-        effort_as_level=True,
-        thinking=ThinkingCapability(
-            effort=frozenset({"none", "max"}),
-            output=frozenset({"none", "text"}),
-        ),
-    )
-    switched = replace(
-        row,
-        model_id="switch-1.0",
-        effort_as_level=False,
-        thinking=ThinkingCapability(budget=frozenset({"none", "auto"})),
-    )
-    plain = replace(
-        row,
-        model_id="plain-1.0",
-        wire_model_id="wire-plain",
-        effort_as_level=False,
-        thinking=ThinkingCapability(),
-    )
-    table = ModelTable(rows=(row, switched, plain), roles={"default": "level"})
-    monkeypatch.setattr(
-        Moonshot,
-        "catalog",
-        ModelCatalog(models=table, transport=compatible()),
-    )
+def _body(model_id: str, **choices: object) -> dict[str, object]:
+    moonshot = Moonshot(api_key="k")
+    model = moonshot[model_id]
+    for field, value in choices.items():
+        model.settings = choose(model.settings, field, value)
+    return moonshot.encode(_REQUEST, model=model)
 
 
-def test_moonshot_from_key() -> None:
-    p = Moonshot.from_key("sk-moon-test")
-    assert p.api_key == "sk-moon-test"
-    assert p.base_url == "https://api.moonshot.ai/v1"
+@pytest.mark.asyncio
+async def test_the_provider_is_moonshots_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    moonshot = Moonshot()
+    assert moonshot.name == "moonshot"
+    assert await moonshot.endpoint() == "https://api.moonshot.ai/v1"
+    assert await Moonshot(base_url="http://box/v1").endpoint() == "http://box/v1"
+    assert moonshot.reasoning_field == "reasoning_content"
+    assert moonshot["default"].capability.wire_model_id == "kimi-k3"
+    monkeypatch.setenv("MOONSHOT_API_KEY", "sk-ms")
+    assert await moonshot.credentials() == {"authorization": "Bearer sk-ms"}
+    monkeypatch.delenv("MOONSHOT_API_KEY")
+    with pytest.raises(AuthError, match="MOONSHOT_API_KEY"):
+        await moonshot.credentials()
 
 
-def test_moonshot_from_env_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="API key not configured"):
-        Moonshot.from_env()
-
-
-def test_moonshot_from_env_reads(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MOONSHOT_API_KEY", "sk-moon-env")
-    p = Moonshot.from_env()
-    assert p.api_key == "sk-moon-env"
-
-
-def test_moonshot_default_model() -> None:
-    p = Moonshot.from_key("k")
-    m = p.model()
-    assert m.capability.model_id == p.catalog.resolve("default")[0].model_id
-    assert m.capability.thinking.output == frozenset({"none", "text"})
-
-
-def test_moonshot_unknown_model_raises() -> None:
-    p = Moonshot.from_key("k")
-    with pytest.raises(ValueError, match="Unknown model"):
-        _ = p.model("not-kimi")
-
-
-def test_moonshot_base_url_override_via_from_key() -> None:
-    p = Moonshot.from_key("k", base_url="http://localhost:8000/v1")
-    assert p.base_url == "http://localhost:8000/v1"
-
-
-def test_moonshot_offers_no_prompt_cache() -> None:
-    m = Moonshot.from_key("k").model("switch-1.0")
-    assert m.capability.cache_ttl_sec == frozenset({0.0})
-
-
-def _body(
-    model_id: str,
-    *,
-    budget: ThinkingBudget | None = None,
-    effort: ThinkingEffort | None = None,
-) -> dict[str, MutablePlainTree]:
-    m = cast(_MoonshotModel, Moonshot.from_key("k").model(model_id))
-    settings = ModelSettings.narrowest(m.capability)
-    if budget is not None:
-        settings.thinking_budget = budget
-    if effort is not None:
-        settings.thinking_effort = effort
-    m._settings = settings
-    return m._build_body(ModelRequest(messages=[UserMessage(text="x")]), stream=False)
-
-
-@pytest.mark.parametrize("model_id", ["level", "switch", "plain"])
+@pytest.mark.parametrize("model_id", ["kimi-3.0", "kimi-2.6", "kimi-code-2.7"])
 def test_no_request_carries_the_fixed_temperature(model_id: str) -> None:
-    assert "temperature" not in _body(model_id)
+    body = _body(model_id)
+    assert "temperature" not in body
+    assert body["model"] == Moonshot()[model_id].capability.wire_model_id
 
 
-def test_k3_sends_max_verbatim_rather_than_openais_high() -> None:
-    assert _body("level-1.0", effort="max")["reasoning_effort"] == "max"
-
-
-def test_k3_with_no_effort_leaves_the_server_default() -> None:
-    body = _body("level-1.0")
-    assert "reasoning_effort" not in body
+@pytest.mark.parametrize("effort", ["low", "high", "max"])
+def test_k3_takes_its_effort_as_named(effort: str) -> None:
+    # OpenAI's spelling would fold ``max`` into ``high``.
+    body = _body("kimi-3.0", thinking_effort=effort)
+    assert body["reasoning_effort"] == effort
     assert "thinking" not in body
 
 
+def test_k3_starts_at_the_catalogs_effort() -> None:
+    assert _body("kimi-3.0")["reasoning_effort"] == "high"
+
+
 @pytest.mark.parametrize(
-    ("budget", "wire"),
+    ("budget", "kind"),
     [("none", "disabled"), ("auto", "enabled")],
 )
-def test_k2_6_sends_its_thinking_switch(budget: ThinkingBudget, wire: str) -> None:
-    assert _body("switch-1.0", budget=budget)["thinking"] == {"type": wire}
+def test_k2_6_is_sent_its_thinking_switch(budget: str, kind: str) -> None:
+    body = _body("kimi-2.6", thinking_budget=budget)
+    assert body["thinking"] == {"type": kind}
+    assert "reasoning_effort" not in body
+
+
+def test_k2_6_starts_thinking_as_its_api_does_unasked() -> None:
+    # ``thinking.type`` defaults to ``enabled`` (Kimi API, "Thinking Models").
+    assert _body("kimi-2.6")["thinking"] == {"type": "enabled"}
 
 
 def test_k2_7_code_is_never_sent_the_thinking_parameter() -> None:
-    assert "thinking" not in _body("plain-1.0")
-
-
-def test_the_wire_carries_the_vendor_id() -> None:
-    assert _body("plain-1.0")["model"] == "wire-plain"
+    assert "thinking" not in _body("kimi-code-2.7")
 
 
 if __name__ == "__main__":

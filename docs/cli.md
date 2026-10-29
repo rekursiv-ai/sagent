@@ -1,11 +1,6 @@
 # CLI
 
-Sagent ships two console entry points:
-
-- `sagent`: terminal and scriptable agent interface.
-- `sagent-slack`: Slack Socket Mode service that routes Slack messages to persistent agents.
-
-Both entry points share provider, model, tool, compaction, budget, and prompt flags.
+Sagent ships one console entry point, `sagent`: a terminal and scriptable agent interface.
 
 ## Quick start
 
@@ -94,9 +89,6 @@ AgentSpawn AgentSend AgentSelf Bash Read Write Edit Grep Glob List WebSearch Web
 
 `Memory` is left out where the model is shown no memory index: under
 `--ephemeral`, or a recipe without the `memory` section.
-
-`Wiki` is available only when requested explicitly, for example
-`--tools Read Grep Wiki`.
 
 Use `--tools none` for a model-only run with no tools.
 
@@ -231,57 +223,3 @@ elapsed-seconds reflects real work, not retry sleep.
 The `stream-json` output channel forwards the suspension as a
 `application/x-model-service-suspended` record carrying provider,
 model, retry timestamps, and a sanitized error snapshot.
-
-## Slack service
-
-`sagent-slack` connects to Slack via Socket Mode, listens for messages, and routes work to persistent Sagent agents.
-
-```bash
-export SLACK_APP_TOKEN=xapp-...
-export SLACK_BOT_TOKEN=xoxb-...
-export GOOGLE_API_KEY=...
-sagent-slack --provider Google --model gemini-pro-3.1
-```
-
-Slack app setup:
-
-1. Create a Slack app at <https://api.slack.com/apps>.
-2. Enable Socket Mode.
-3. Generate an app-level token with `connections:write`.
-4. Add bot scopes: `chat:write`, `chat:write.customize`, `channels:manage`, `channels:read`, `channels:history`, `app_mentions:read`, `im:history`, `im:read`, `im:write`, `users:read`, `groups:history`, `reactions:read`.
-5. Subscribe to `app_mention`, `message.im`, and `reaction_added` events.
-
-Slack-specific flags:
-
-| Flag | Behavior |
-| --- | --- |
-| `--app-token TOKEN` | Socket Mode app token. Default: `$SLACK_APP_TOKEN`. |
-| `--bot-token TOKEN` | Bot token. Default: `$SLACK_BOT_TOKEN`. |
-| `--persona-dir DIR` | Directory of persona `.md` files. |
-| `--log-prefix PREFIX` | Prefix for per-agent log channel names. |
-| `--router-log-channel NAME` | Channel for routing decisions. Default: `router-log`; empty disables. |
-| `--cwd PATH` | Change working directory before starting agents. |
-| `--session-dir DIR` | Slack session root. Default: `~/.sagent/slack`. |
-| `--continue` | Resume agents from the newest Slack session. Exits if none exists. |
-
-Slack commands sent to the bot:
-
-```text
-help
-list
-create <persona>
-create <persona> as <label>
-stop <name>
-```
-
-Routing order:
-
-1. Reactions route to the cached owner of the reacted-to agent message.
-2. Messages in an agent log channel route to that owning agent.
-3. A message starting with an agent name routes to that agent.
-4. Thread replies route to the agent that owns the thread.
-5. Human commands are handled by the router.
-6. If exactly one agent is active, ordinary messages route to it.
-7. Otherwise the router replies with guidance.
-
-Slack agents use persona files from `--persona-dir`. `create sara` loads `sara.md`, then `default.md`, then falls back to `You are sara.`

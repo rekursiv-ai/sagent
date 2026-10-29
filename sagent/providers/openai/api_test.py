@@ -1,314 +1,211 @@
-"""OpenAI API-key dispatch and catalog-to-backend wiring."""
+"""Tests for OpenAI over the Responses API, against a fake HTTP transport."""
 
 from __future__ import annotations
 
-from dataclasses import replace
-from io import BytesIO
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, override
 
-import asyncio
-import os
-
-from PIL import Image
+from treekle import json_dumps, json_loads
 
 import httpx2
 import pytest
-import tiktoken
 
-from sagent.catalog import openai
-from sagent.catalog.loader import models
-from sagent.catalog.openai import api
-from sagent.catalog.table import ModelCatalog, ModelTable
+from sagent.model.types import Request, Response
+from sagent.providers.openai import responses
 from sagent.providers.openai.api import OpenAI
-from sagent.tools import tool
-from sagent.types.capability import (
-    ModelCapability,
-    ModelLimits,
-    ThinkingCapability,
+from sagent.providers.openai.sub import OpenAISub
+from sagent.providers.resources import SharedResources
+from sagent.session.types import AssistantMessage, UserMessage
+from sagent.tools.read import Read
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+_REQUEST = Request(
+    system=("Be terse.",),
+    records=(UserMessage(content="hi"),),
+    tools=(Read(),),
 )
-from sagent.types.cost import PriceCatalog, PriceKey, TokenPrice
-from sagent.types.model import ModelRequest
-from sagent.types.runtime import UserMessage
 
 
 @pytest.fixture(autouse=True)
-def synthetic_catalog(monkeypatch: pytest.MonkeyPatch) -> ModelTable:
-    """Keep dispatch tests independent of live catalog facts."""
-    row = ModelCapability(
-        model_id="example-1.0",
-        wire_model_id="wire-example",
-        context={
-            "": ModelLimits(max_request_tokens=600_000, max_response_tokens=50_000),
-            "+272k": ModelLimits(
-                max_request_tokens=272_000,
-                max_response_tokens=20_000,
-            ),
-        },
-        thinking=ThinkingCapability(
-            effort=frozenset({"low", "high"}),
-            budget=frozenset({"none", "auto"}),
-            output=frozenset({"none", "text"}),
-        ),
-        service_tier=frozenset({"auto", "priority"}),
-        prices=PriceCatalog(
-            {
-                PriceKey("auto"): TokenPrice(
-                    request=3.0,
-                    response=7.0,
-                    cache_write=2.0,
-                    cache_write_1h=4.0,
-                    cache_read=0.5,
-                ),
+def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+
+
+def _sse(*events: dict[str, object]) -> bytes:
+    return "".join(
+        f"event: {e['type']}\ndata: {json_dumps(e)}\n\n" for e in events
+    ).encode()
+
+
+def test_the_provider_serves_openais_models_by_any_name() -> None:
+    openai = OpenAI()
+    assert openai.name == "openai"
+    assert "luna-6.0" in list(openai)
+    assert openai["utility"].capability.wire_model_id == "gpt-6-luna"
+    # The API offers every window and tier the model has.
+    assert openai["sol-6.0+smallcontext"].settings.context_size.tokens == 272_000
+    assert "flex" in openai["sol-6.0"].capability.service_tier
+
+
+def test_a_model_that_cannot_reason_is_sent_the_sampling_temperature() -> None:
+    openai = OpenAI()
+    gpt = openai["gpt-4.1"]
+    assert openai.encode(_REQUEST, model=gpt)["temperature"] == 1.0
+    assert "temperature" not in openai.encode(_REQUEST, model=openai["luna-6.0"])
+
+
+@pytest.mark.asyncio
+async def test_stream_posts_a_responses_request_and_reads_its_events() -> None:
+    reply = _sse(
+        {"type": "response.output_text.delta", "delta": "Hi"},
+        {
+            "type": "response.output_item.done",
+            "output_index": 0,
+            "item": {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Hi"}],
             },
-        ),
+        },
+        {
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "usage": {"input_tokens": 9, "output_tokens": 1},
+            },
+        },
     )
-    utility = replace(
-        row,
-        model_id="utility-example-1.0",
-        wire_model_id="wire-utility",
-        thinking=ThinkingCapability(),
+    server = _Server(replies=[httpx2.Response(200, content=reply)])
+    async with _Served(server) as shared:
+        luna = OpenAI(resources=shared)["luna-6.0"]
+        events = [event async for event in luna.stream(_REQUEST)]
+    (sent,) = server.requests
+    assert str(sent.url) == "https://api.openai.com/v1/responses"
+    assert sent.headers["authorization"] == "Bearer sk-openai"
+    assert json_loads(sent.content, dict[str, object]) == responses.encode(
+        _REQUEST,
+        capability=luna.capability,
+        settings=luna.settings,
+        temperature=1.0,
     )
-    table = ModelTable(
-        rows=(
-            row,
-            utility,
-            *(
-                replace(row, model_id=name, wire_model_id=wire)
-                for name, wire in (
-                    ("sol-5.6", "gpt-5.6-sol"),
-                    ("astra-6.0", "gpt-6-astra"),
-                )
-            ),
-        ),
-        roles={"default": "example", "utility": "utility-example"},
-    )
-
-    def lookup(provider: str) -> ModelTable:
-        assert provider == "openai"
-        return table
-
-    monkeypatch.setattr(openai, "models", lookup)
-    monkeypatch.setattr(OpenAI, "catalog", ModelCatalog(models=table, transport=api()))
-    return table
-
-
-@pytest.mark.network_openai
-@pytest.mark.asyncio
-async def test_every_catalog_row_is_a_model_the_vendor_serves() -> None:
-    """Every catalog row must complete a successful Responses request."""
-    key = os.environ.get("OPENAI_API_KEY", "")
-    if not key:
-        pytest.skip("OPENAI_API_KEY not set")
-    model_ids = tuple(
-        row.wire_model_id or name for name, row in models("openai").items()
-    )
-    gate = asyncio.Semaphore(8)
-
-    async def _probe(client: httpx2.AsyncClient, model_id: str) -> bool:
-        async with gate:
-            return await _is_served(client, model_id=model_id, key=key)
-
-    async with httpx2.AsyncClient(timeout=60.0) as client:
-        verdicts = await asyncio.gather(
-            *(_probe(client, model_id) for model_id in model_ids),
-        )
-    assert all(verdicts), "some catalog probes never completed successfully"
-
-
-def test_openai_from_key_constructs() -> None:
-    provider = OpenAI.from_key("sk-test")
-    assert provider.api_key == "sk-test"
-    assert provider.base_url == "https://api.openai.com/v1"
+    response = events[-1]
+    assert isinstance(response, Response)
+    assert response.records == (AssistantMessage(content="Hi"),)
+    assert response.tokens.request == 9
 
 
 @pytest.mark.asyncio
-async def test_openai_sdk_connect_timeout_outlasts_a_network_stall() -> None:
-    provider = OpenAI.from_key("k")
-    sdk = await provider.get_sdk()
-    timeout = sdk.timeout
-    assert isinstance(timeout, httpx2.Timeout)
-    assert (timeout.connect, timeout.read) == (30.0, 600.0)
-    await provider.close_sdk()
-    assert sdk.is_closed()
-
-
-def test_openai_from_env_missing_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    with pytest.raises(RuntimeError, match="API key not configured"):
-        OpenAI.from_env()
-
-
-def test_openai_from_env_reads_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
-    assert OpenAI.from_env().api_key == "sk-env"
-
-
-@pytest.mark.parametrize("role", ["default", "utility"])
-def test_roles_select_catalog_rows(role: str, synthetic_catalog: ModelTable) -> None:
-    model = OpenAI.from_key("k").model(role)
-    assert model.capability == synthetic_catalog[role] & api()
-    assert model.limits == synthetic_catalog[role].context[""]
-
-
-def test_omitted_model_selects_the_default(synthetic_catalog: ModelTable) -> None:
-    model = OpenAI.from_key("k").model()
-    assert model.capability.model_id == synthetic_catalog["default"].model_id
-
-
-@pytest.mark.parametrize("name", ["example-1.0", "wire-example", "example"])
-def test_known_names_dispatch_to_the_same_backend(name: str) -> None:
-    model = OpenAI.from_key("k").model(name)
-    assert model.capability.model_id == "example-1.0"
-    assert model._wire_model_id == "wire-example"
-
-
-def test_unknown_model_raises() -> None:
-    with pytest.raises(ValueError, match="Unknown model"):
-        OpenAI.from_key("k").model("not-a-real-model")
-
-
-def test_context_selection_preserves_prices(synthetic_catalog: ModelTable) -> None:
-    provider = OpenAI.from_key("k")
-    full = provider.model()
-    small = provider.model("example+272k")
-    assert full.limits == synthetic_catalog["example"].context[""]
-    assert small.limits == synthetic_catalog["example"].context["+272k"]
-    assert small.tagged_model_id == "example-1.0+272k"
-    assert small.capability.prices is synthetic_catalog["example"].prices
-    assert full.capability.prices is small.capability.prices
-
-
-def test_unoffered_context_is_rejected() -> None:
-    with pytest.raises(ValueError, match=r"has no \+1m context"):
-        OpenAI.from_key("k").model("example+1m")
-
-
-def test_unoffered_effort_is_rejected() -> None:
-    model = OpenAI.from_key("k").model()
-    assert model.settings.thinking_effort == "low"
-    with pytest.raises(ValueError, match="thinking_effort"):
-        model.settings.thinking_effort = "none"
-
-
-def test_a_cache_key_reaches_the_api_as_prompt_cache_key() -> None:
-    model = OpenAI.from_key("k").model()
-    request = ModelRequest(messages=[UserMessage(text="hi")], cache_key="run-1")
-
-    assert model._build_kwargs(request).get("prompt_cache_key") == "run-1"
-    assert model._headers(request) == {}
-    assert "prompt_cache_key" not in model._build_kwargs(
-        ModelRequest(messages=[UserMessage(text="hi")]),
+async def test_count_asks_the_server_with_only_what_it_counts() -> None:
+    answer = json_dumps(
+        {"object": "response.input_tokens", "input_tokens": 123},
+    ).encode()
+    server = _Server(replies=[httpx2.Response(200, content=answer)])
+    async with _Served(server) as shared:
+        luna = OpenAI(resources=shared)["luna-6.0"]
+        luna.settings = replace(luna.settings, thinking_effort="low")
+        assert await luna.count(_REQUEST) == 123
+    (sent,) = server.requests
+    assert str(sent.url) == "https://api.openai.com/v1/responses/input_tokens"
+    body = json_loads(sent.content, dict[str, object])
+    encoded = responses.encode(
+        _REQUEST,
+        capability=luna.capability,
+        settings=luna.settings,
     )
+    assert sorted(body) == [
+        "input",
+        "instructions",
+        "model",
+        "parallel_tool_calls",
+        "reasoning",
+        "tools",
+    ]
+    assert body == {key: encoded[key] for key in body}
 
 
-def _look(topic: str) -> str:
-    """Look a topic up."""
-    return topic
+@dataclass(slots=True, kw_only=True)
+class _Server:
+    """Answers each request with the next scripted reply, and keeps the requests."""
+
+    replies: list[httpx2.Response]
+    requests: list[httpx2.Request] = field(default_factory=list[httpx2.Request])
+
+    def __call__(self, request: httpx2.Request) -> httpx2.Response:
+        self.requests.append(request)
+        return self.replies.pop(0)
 
 
-def _peek(topic: str) -> str:
-    """Peek at a topic."""
-    return topic
+class _Served(SharedResources):
+    """Shared resources whose HTTP client answers from ``handler``, never the network."""
+
+    def __init__(self, handler: Callable[[httpx2.Request], httpx2.Response]) -> None:
+        super().__init__()
+        self._client = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+
+    @property
+    @override
+    def http(self) -> httpx2.AsyncClient:
+        return self._client
+
+    @override
+    async def aclose(self) -> None:
+        await super().aclose()
+        await self._client.aclose()
 
 
-def _offering(*offers: tuple[str, ...] | None) -> ModelRequest:
-    """Return a request of Look and Peek, one user turn per tool offer."""
-    return ModelRequest(
-        messages=[UserMessage(text="hi", offered_tools=offer) for offer in offers],
-        tools=[tool(_look, name="Look"), tool(_peek, name="Peek")],
-    )
-
-
-def test_a_tool_gate_reaches_the_api_as_allowed_tools_with_every_schema() -> None:
-    """Every schema ships so the prefix caches; the gate says which may be called."""
-    model = OpenAI.from_key("k").model()
-    peek_only = {
-        "type": "allowed_tools",
-        "mode": "auto",
-        "tools": [{"type": "function", "name": "Peek"}],
-    }
-    gated = model._build_kwargs(_offering(("Peek",)))
-    assert [t.get("name") for t in gated.get("tools", [])] == ["Look", "Peek"]
-    assert gated.get("tool_choice") == peek_only
-    assert model._build_kwargs(_offering(())).get("tool_choice") == "none"
-    assert "tool_choice" not in model._build_kwargs(_offering(None))
-    # The latest offer is the gate in force; one naming every tool lifts it.
-    lifted = model._build_kwargs(_offering(("Peek",), ("Look", "Peek")))
-    assert "tool_choice" not in lifted
-    assert (
-        model._build_kwargs(_offering(("Peek",), None)).get("tool_choice") == peek_only
-    )
-    assert model._build_kwargs(_offering(("Nope",))).get("tool_choice") == "none"
-
-
-def test_catalog_controls_effort_and_tier_selection() -> None:
-    provider = OpenAI.from_key("k")
-    reasoning = provider.model("example")
-    utility = provider.model("utility")
-    assert reasoning.capability.thinking.effort == {"low", "high"}
-    assert utility.capability.thinking.effort == {"none"}
-    reasoning.settings.service_tier = "priority"
-    assert reasoning._effective_service_tier() == "priority"
-    with pytest.raises(ValueError, match="service_tier"):
-        reasoning.settings.service_tier = "flex"
-
-
+# Where Codex 0.153.0 serves a model, the effort it picks unasked: the
+# ``default_reasoning_level`` of /backend-api/codex/models, else of its bundled
+# models.json. Elsewhere the effort the API reported using when sent none.
+# Both read on 2026-10-27.
 @pytest.mark.parametrize(
-    ("model_id", "width", "height", "tokens"),
+    ("model", "effort"),
     [
-        ("sol-5.6", 1, 1, 2),
-        ("sol-5.6", 1024, 1024, 1229),
-        ("sol-5.6", 33, 65, 8),
-        ("gpt-6-astra", 96, 96, 11),
-        ("gpt-6-astra", 512, 512, 308),
-        ("gpt-6-astra", 100, 200, 34),
-        ("gpt-6-astra", 2048, 1024, 2458),
+        ("astra-6.0", "medium"),
+        ("sol-6.1", "low"),
+        ("sol-6.0", "medium"),
+        ("luna-6.0", "medium"),
+        ("sol-5.6", "low"),
+        ("gpt-5.6", "medium"),
+        ("luna-5.6", "medium"),
+        ("terra-5.6", "medium"),
+        ("gpt-5.5", "medium"),
+        ("gpt-pro-5.5", "high"),
+        ("gpt-5.4", "none"),
+        ("gpt-pro-5.4", "medium"),
+        ("gpt-mini-5.4", "none"),
+        ("gpt-nano-5.4", "none"),
+        ("gpt-5.2", "none"),
+        ("gpt-pro-5.2", "medium"),
+        ("gpt-5.1", "none"),
+        ("gpt-4.1", "none"),
     ],
 )
-def test_image_token_estimation_reaches_the_model_formula(
-    model_id: str,
-    width: int,
-    height: int,
-    tokens: int,
-) -> None:
-    buffer = BytesIO()
-    Image.new("RGB", (width, height)).save(buffer, format="PNG")
-    model = OpenAI.from_key("k").model(model_id)
-    assert model.approx_image_tokens(buffer.getvalue()) == tokens
+def test_a_model_starts_at_the_effort_codex_gives_it(model: str, effort: str) -> None:
+    for provider in (OpenAI(), OpenAISub()):
+        if model in provider:
+            assert provider[model].settings.thinking_effort == effort
 
 
-@pytest.mark.anyio
-@pytest.mark.compute_large_fixture
-@pytest.mark.parametrize("name", ["sol-5.6", "gpt-6-astra"])
-async def test_text_counting_reaches_the_model_tokenizer(name: str) -> None:
-    model = OpenAI.from_key("k").model(name)
-    text = "Token counting: 東京 and function_call(arg=42)"
-    assert await model.actual_text_tokens(text) == len(
-        tiktoken.get_encoding("o200k_base").encode(text),
-    )
-
-
-async def _is_served(client: httpx2.AsyncClient, *, model_id: str, key: str) -> bool:
-    for attempt in range(3):
-        try:
-            response = await client.post(
-                "https://api.openai.com/v1/responses",
-                headers={"authorization": f"Bearer {key}"},
-                json={
-                    "model": model_id,
-                    "input": [{"role": "user", "content": "."}],
-                    "max_output_tokens": 16,
-                },
-            )
-        except httpx2.TransportError:
-            await asyncio.sleep(1 << attempt)
-            continue
-        if response.status_code == 200:
-            return True
-        if response.status_code >= 500 or response.status_code == 429:
-            await asyncio.sleep(1 << attempt)
-            continue
-        response.raise_for_status()
-    return False
+def test_a_1m_window_takes_input_only_up_to_the_room_its_reply_needs() -> None:
+    """Measured on 2026-10-27 (gpt-5.6-luna, gpt-6-luna): 921,013 input tokens were
+    served and 921,913 refused as past the window, whatever ``max_output_tokens``.
+    """
+    for model in (
+        "astra-6.0",
+        "sol-6.0",
+        "luna-5.6",
+        "gpt-5.5",
+        "gpt-pro-5.5",
+        "gpt-5.4",
+    ):
+        limits = OpenAI()[model].capability.limits
+        assert (limits.max_request_tokens, limits.max_context_tokens) == (
+            921_000,
+            1_050_000,
+        ), model
 
 
 if __name__ == "__main__":

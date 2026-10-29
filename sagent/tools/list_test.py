@@ -1,341 +1,258 @@
-"""Tests for ``tools.list``: directory listing tool."""
+"""Tests for the List tool, its sorting and ``ls -l`` rows, and ``ls`` taken on."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import os
+import time
+
 import pytest
 
-from sagent.testing import with_fake_agent
-from sagent.tools.lib.bash import parse_bash
-from sagent.tools.list import List
+from sagent.tools.command_analyzer import invocations
+from sagent.tools.list import List, ls_row, sort_paths
+from sagent.tools.types import ToolContext, parse
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from pathlib import Path
 
-    from sagent.types.runtime import ToolResult
+    from treekle import PlainTree
 
 
-list_tool = List()
+def test_summary_names_the_directory() -> None:
+    assert List().summary({"path": "src"}) == "List src"
+    assert List().summary({"path": ""}) == "List ."
+    assert List().summary({}) == "List ."
 
 
-async def _run_list(args: Mapping[str, object], cwd: Path) -> ToolResult:
-    with with_fake_agent() as agent:
-        agent.tool_state.bash_cwd = str(cwd)
-        return await list_tool.run(args)
+def test_listing_runs_beside_anything(tmp_path: Path) -> None:
+    assert List().serialize_key(ToolContext(cwd=tmp_path), {"path": "."}) is None
 
 
 @pytest.mark.asyncio
-async def test_a_tilde_path_lists_the_home_directory(
+async def test_entries_are_listed_by_name_with_directories_marked(
+    tmp_path: Path,
+) -> None:
+    for name in ("b.txt", "A.txt", "a.txt", ".hidden"):
+        (tmp_path / name).write_text("")
+    (tmp_path / "sub").mkdir()
+    assert await _list(tmp_path, path=".") == "A.txt\na.txt\nb.txt\nsub/"
+    assert await _list(tmp_path, path="") == "A.txt\na.txt\nb.txt\nsub/"
+    assert await _list(tmp_path, path=".", show_hidden=True) == (
+        ".hidden\nA.txt\na.txt\nb.txt\nsub/"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_relative_or_tilde_path_is_found_from_where_it_says(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``~`` is ``$HOME``, as Read and Bash read it, not ``<cwd>/~``."""
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     (tmp_path / "home").mkdir()
     (tmp_path / "home" / "h.txt").write_text("")
-    result = await _run_list({"path": "~"}, tmp_path)
-    assert result.content == "h.txt", result.content
+    (tmp_path / "work" / "sub").mkdir(parents=True)
+    (tmp_path / "work" / "sub" / "s.txt").write_text("")
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert await _list(tmp_path / "work", path="~") == "h.txt"
+    assert await _list(tmp_path / "work", path="sub") == "s.txt"
 
 
 @pytest.mark.asyncio
-async def test_list_basic(tmp_path: Path) -> None:
-    (tmp_path / "a.txt").write_text("")
-    (tmp_path / "b.txt").write_text("")
-    sub = tmp_path / "sub"
-    sub.mkdir()
-    result = await _run_list({"path": str(tmp_path)}, tmp_path)
-    assert "a.txt" in result.content
-    assert "sub/" in result.content
+@pytest.mark.parametrize(
+    ("sort", "expected"),
+    [
+        ("name", "a\nb\nc"),
+        ("name_desc", "c\nb\na"),
+        ("mtime", "b\nc\na"),
+        ("mtime_desc", "a\nc\nb"),
+        ("size", "c\na\nb"),
+        ("size_desc", "b\na\nc"),
+    ],
+)
+async def test_a_sort_orders_the_entries(
+    tmp_path: Path,
+    sort: str,
+    expected: str,
+) -> None:
+    for name, size, age in (("a", 2, 0), ("b", 3, 200), ("c", 1, 100)):
+        (tmp_path / name).write_bytes(b"x" * size)
+        when = time.time() - age
+        os.utime(tmp_path / name, (when, when))
+    assert await _list(tmp_path, path=".", sort=sort) == expected
 
 
 @pytest.mark.asyncio
-async def test_list_hides_dotfiles_by_default(tmp_path: Path) -> None:
-    (tmp_path / "visible.txt").write_text("")
-    (tmp_path / ".hidden").write_text("")
-    result = await _run_list({"path": str(tmp_path)}, tmp_path)
-    assert "visible.txt" in result.content
-    assert ".hidden" not in result.content
+async def test_a_cap_keeps_the_head_or_the_tail_and_counts_the_rest(
+    tmp_path: Path,
+) -> None:
+    for i in range(1, 6):
+        (tmp_path / f"f{i}").write_text("")
+    assert await _list(tmp_path, path=".", max_results=2) == "f1\nf2\n... (3 more)"
+    assert await _list(tmp_path, path=".", keep_last=2) == "f4\nf5\n... (3 more)"
+    assert await _list(tmp_path, path=".", keep_last=2, sort="name_desc") == (
+        "f2\nf1\n... (3 more)"
+    )
+    assert await _list(tmp_path, path=".", max_results=5) == "f1\nf2\nf3\nf4\nf5"
 
 
 @pytest.mark.asyncio
-async def test_list_show_hidden(tmp_path: Path) -> None:
-    (tmp_path / "visible.txt").write_text("")
-    (tmp_path / ".hidden").write_text("")
-    result = await _run_list({"path": str(tmp_path), "show_hidden": True}, tmp_path)
-    assert ".hidden" in result.content
-
-
-@pytest.mark.asyncio
-async def test_list_relative_uses_bash_cwd(tmp_path: Path) -> None:
-    (tmp_path / "x.txt").write_text("")
-    result = await _run_list({"path": "."}, tmp_path)
-    assert "x.txt" in result.content
-
-
-@pytest.mark.asyncio
-async def test_list_long_format(tmp_path: Path) -> None:
-    f = tmp_path / "x.txt"
-    f.write_text("hello")
-    result = await _run_list({"path": str(tmp_path), "long": True}, tmp_path)
-    assert "x.txt" in result.content
-    assert "5" in result.content  # 5 bytes file.
-
-
-@pytest.mark.asyncio
-async def test_list_empty_dir(tmp_path: Path) -> None:
-    sub = tmp_path / "empty"
-    sub.mkdir()
-    result = await _run_list({"path": str(sub)}, tmp_path)
-    assert result.content == "(empty directory)"
-
-
-@pytest.mark.asyncio
-async def test_list_max_results(tmp_path: Path) -> None:
-    for i in range(10):
-        (tmp_path / f"f{i:02d}.txt").write_text("")
-    result = await _run_list({"path": str(tmp_path), "max_results": 3}, tmp_path)
-    assert "more)" in result.content
-
-
-@pytest.mark.asyncio
-async def test_list_invalid_sort(tmp_path: Path) -> None:
-    result = await _run_list({"path": str(tmp_path), "sort": "bogus"}, tmp_path)
-    assert result.is_error
-    assert "unknown sort" in result.content
-
-
-@pytest.mark.asyncio
-async def test_list_missing_path(tmp_path: Path) -> None:
-    result = await _run_list({"path": str(tmp_path / "missing")}, tmp_path)
-    assert result.is_error
-    assert "Not found" in result.content
-
-
-@pytest.mark.asyncio
-async def test_list_max_results_zero_errors(tmp_path: Path) -> None:
-    # Schema declares minimum=1; the runtime must reject 0/negative
-    # rather than returning an empty listing that looks like an empty
-    # directory.
-    (tmp_path / "a.txt").write_text("")
-    result = await _run_list({"path": str(tmp_path), "max_results": 0}, tmp_path)
-    assert result.is_error
-    assert "max_results" in result.content
-
-
-@pytest.mark.asyncio
-async def test_list_not_a_directory(tmp_path: Path) -> None:
-    f = tmp_path / "x.txt"
-    f.write_text("v")
-    result = await _run_list({"path": str(f)}, tmp_path)
-    assert result.is_error
-    assert "Not a directory" in result.content
-
-
-def test_summary_with_path() -> None:
-    assert list_tool.summary({"path": "/x"}) == "List /x"
-
-
-def test_summary_empty_path() -> None:
-    assert list_tool.summary({}) == "List ."
-
-
-def test_prompt_empty() -> None:
-    assert list_tool.prompt() == ""
-
-
-def test_bash_match_ls_basic() -> None:
-    trees = parse_bash("ls")
-    assert trees is not None
-    assert list_tool.bash_match(trees) == (
-        "ls via Bash is a bad UX. Use the List tool. Replaces: `ls`. Try: List path='.'"
+async def test_long_rows_hold_size_and_mtime(tmp_path: Path) -> None:
+    (tmp_path / "f").write_bytes(b"12345")
+    os.utime(tmp_path / "f", (0, 1_700_000_000))
+    (tmp_path / "d").mkdir()
+    os.utime(tmp_path / "d", (0, 1_700_000_000))
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000))
+    assert await _list(tmp_path, path=".", long=True) == (
+        f"{(tmp_path / 'd').stat().st_size:>10}  {when}  d/\n         5  {when}  f"
     )
 
 
-def test_bash_match_ls_la() -> None:
-    trees = parse_bash("ls -la")
-    assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    assert "long=true" in result
-    assert "show_hidden=true" in result
+def test_a_broken_link_has_no_size_or_time(tmp_path: Path) -> None:
+    (tmp_path / "dead").symlink_to(tmp_path / "nowhere")
+    assert ls_row(tmp_path / "dead", name="dead") == "         0  ?  dead"
 
 
-def test_bash_match_ls_reverse_mtime() -> None:
-    trees = parse_bash("ls -tr")
-    assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    assert "sort='mtime'" in result
+def test_name_sort_folds_case_and_breaks_ties_by_spelling(tmp_path: Path) -> None:
+    paths = [tmp_path / n for n in ("b", "B", "a", "A")]
+    sort_paths(paths, "name")
+    assert [p.name for p in paths] == ["A", "a", "B", "b"]
 
 
-def test_bash_match_ls_mtime_desc() -> None:
-    trees = parse_bash("ls -t")
-    assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    assert "mtime_desc" in result
+@pytest.mark.asyncio
+async def test_an_empty_directory_says_so(tmp_path: Path) -> None:
+    (tmp_path / ".only-hidden").write_text("")
+    assert await _list(tmp_path, path=".") == "(empty directory)"
 
 
-def test_bash_match_ls_size_desc() -> None:
-    trees = parse_bash("ls -S")
-    assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    assert "size_desc" in result
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("setup", "message"),
+    [
+        ("missing", "Not found: {}"),
+        ("file", "Not a directory: {}"),
+        ("locked", "Error reading {}: "),
+    ],
+)
+async def test_a_path_that_lists_nothing_is_an_error(
+    tmp_path: Path,
+    setup: str,
+    message: str,
+) -> None:
+    target = tmp_path / "t"
+    if setup == "file":
+        target.write_text("")
+    elif setup == "locked":
+        target.mkdir(mode=0)
+    try:
+        result = await List().call(ToolContext(cwd=tmp_path), {"path": "t"})
+    finally:
+        if setup == "locked":
+            target.chmod(0o700)
+    assert result.is_error is True
+    assert result.call_id == ""
+    assert result.text().startswith(message.format(target))
 
 
-def test_bash_match_ls_size_reverse() -> None:
-    trees = parse_bash("ls -Sr")
-    assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    assert "sort='size'" in result
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {},
+        {"path": ".", "keep_last": 0},
+        {"path": ".", "max_results": 0},
+        {"path": ".", "sort": "age"},
+    ],
+)
+async def test_arguments_that_do_not_fit_are_refused(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+) -> None:
+    with pytest.raises(ValueError, match=r"argument|must be"):
+        await List().call(ToolContext(cwd=tmp_path), arguments)
 
 
-def test_bash_match_ls_reverse_only() -> None:
-    trees = parse_bash("ls -r")
-    assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    assert "name_desc" in result
+@pytest.mark.parametrize(
+    ("command", "arguments"),
+    [
+        ("ls", {"path": "."}),
+        ("ls src", {"path": "src"}),
+        ("ls -- -odd", {"path": "-odd"}),
+        ("ls -la", {"path": ".", "long": True, "show_hidden": True}),
+        ("ls -A", {"path": ".", "show_hidden": True}),
+        ("ls -1h", {"path": "."}),
+        ("ls -r", {"path": ".", "sort": "name_desc"}),
+        ("ls -t", {"path": ".", "sort": "mtime_desc"}),
+        ("ls -tr", {"path": ".", "sort": "mtime"}),
+        ("ls -S", {"path": ".", "sort": "size_desc"}),
+        ("ls -S -r", {"path": ".", "sort": "size"}),
+        ("ls | head", {"path": ".", "max_results": 10}),
+        ("ls -t | head -n 5", {"path": ".", "sort": "mtime_desc", "max_results": 5}),
+        ("ls | cat | head -3", {"path": ".", "max_results": 3}),
+        ("ls | tail -n 3", {"path": ".", "keep_last": 3}),
+        ("ls -t | tail -n 5", {"path": ".", "sort": "mtime_desc", "keep_last": 5}),
+        ("ls ~", {"path": "~"}),
+    ],
+)
+def test_a_plain_ls_becomes_the_list_that_shows_the_same_entries(
+    command: str,
+    arguments: dict[str, PlainTree],
+) -> None:
+    assert _from_shell(command) == arguments
+    parse(arguments, List.Arguments)
+
+
+def test_an_ls_after_a_cd_lists_where_the_cd_went() -> None:
+    assert _from_shell("cd /srv && ls") == {"path": "/srv"}
+    assert _from_shell("cd /srv && ls sub") == {"path": "/srv/sub"}
 
 
 @pytest.mark.parametrize(
     "command",
-    ["ls --color=auto", "ls -Z", "ls a b", "ls -tS", "ls -R", "ls -lh"],
+    [
+        "ls --color=auto",
+        "ls -I '*.pyc' src",
+        "ls -X",
+        "ls -Z",
+        "ls -R",
+        "ls a b",
+        "ls -tS",
+        "ls *.py",
+        "ls $D",
+        "cd - && ls",
+        "ls | head -c 5",
+        "ls | head -nabc",
+        "ls | head -0",
+    ],
 )
-def test_bash_match_an_untranslatable_ls_still_nudges(command: str) -> None:
-    """A flag List cannot express costs the worked example, not the nudge."""
-    trees = parse_bash(command)
-    assert trees is not None
-    hint = list_tool.bash_match(trees) or ""
-    assert hint.startswith("ls via Bash is a bad UX."), command
-
-
-def test_bash_match_ls_glob_redirect_to_glob() -> None:
-    trees = parse_bash("ls *.py")
-    assert trees is not None
-    assert (
-        list_tool.bash_match(trees)
-        == "ls glob via Bash is a bad UX. Use the Glob tool."
+def test_an_ls_no_list_matches_is_refused_with_advice(command: str) -> None:
+    assert _from_shell(command) == (
+        "List one directory per List call; for a pattern, use Glob."
     )
-
-
-def test_bash_match_ls_pipe_head() -> None:
-    trees = parse_bash("ls -t | head -n 5")
-    assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    assert "max_results=5" in result
-
-
-def test_bash_match_ls_pipe_tail_keeps_the_last_entries_in_order() -> None:
-    """``| tail -n N`` is ``keep_last``, not a flipped sort.
-
-    Measured in a directory of ``f1``..``f5``: ``ls | tail -n 3`` prints
-    ``f3 f4 f5``, while ``sort='name_desc' max_results=3`` returns
-    ``f5 f4 f3``. Same entries, reversed -- and a reader scanning for
-    "the last one" reads the wrong row.
-    """
-    trees = parse_bash("ls -t | tail -n 5")
-    assert trees is not None
-    result = list_tool.bash_match(trees) or ""
-    assert "keep_last=5" in result, result
-    # The listing order is the one ``ls -t`` produced; only the window moved.
-    assert "sort='mtime_desc'" in result, result
-    assert "max_results" not in result, result
-
-
-def test_bash_match_ls_pipe_tail_leaves_the_default_sort_alone() -> None:
-    """``| tail`` windows the listing; it does not reorder it."""
-    trees = parse_bash("ls | tail -n 3")
-    assert trees is not None
-    result = list_tool.bash_match(trees) or ""
-    assert "keep_last=3" in result, result
-    assert "sort=" not in result, result
-
-
-def test_bash_match_ls_pipe_other_no_nudge() -> None:
-    trees = parse_bash("ls | sort")
-    assert trees is not None
-    assert list_tool.bash_match(trees) is None
-
-
-def test_bash_match_ls_pipe_head_no_count() -> None:
-    trees = parse_bash("ls | head")
-    assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    assert "max_results=10" in result
 
 
 @pytest.mark.parametrize(
     "command",
-    ["ls | head -c 5", "ls | head -nabc", "ls | head -n", "ls | head -0"],
+    ["ls | sort", "ls > out", "FOO=1 ls", "ls | wc -l", "echo hi"],
 )
-def test_bash_match_an_unparsable_count_drops_only_the_bound(command: str) -> None:
-    """An unreadable ``head`` count leaves the listing nudge intact."""
-    trees = parse_bash(command)
-    assert trees is not None
-    hint = list_tool.bash_match(trees) or ""
-    assert hint.startswith("ls via Bash is a bad UX.")
-    assert "max_results=" not in hint
+def test_a_command_that_is_no_plain_ls_is_not_lists_job(command: str) -> None:
+    assert _from_shell(command) is None
 
 
-def test_bash_match_cd_ls_prefix() -> None:
-    trees = parse_bash("cd /src && ls")
-    assert trees is not None
-    assert (list_tool.bash_match(trees) or "").startswith("ls via Bash is a bad UX.")
+async def _list(cwd: Path, **arguments: PlainTree) -> str:
+    """Return what List shows for ``arguments`` in a fresh context at ``cwd``."""
+    result = await List().call(ToolContext(cwd=cwd), arguments)
+    assert result.call_id == ""
+    assert result.is_error is None, result.text()
+    return result.text()
 
 
-def test_bash_match_env_prefix_no_nudge() -> None:
-    trees = parse_bash("FOO=1 ls")
-    assert trees is not None
-    assert list_tool.bash_match(trees) is None
-
-
-def test_bash_match_non_ls_no_nudge() -> None:
-    trees = parse_bash("echo hi")
-    assert trees is not None
-    assert list_tool.bash_match(trees) is None
-
-
-def test_bash_match_ls_pipe_head_negative_form() -> None:
-    trees = parse_bash("ls | head -3")
-    assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    assert "max_results=3" in result
-
-
-def test_bash_match_ls_a_show_hidden_only() -> None:
-    trees = parse_bash("ls -a")
-    assert trees is not None
-    result = list_tool.bash_match(trees)
-    assert result is not None
-    assert "show_hidden=true" in result
-
-
-def test_bash_match_ls_double_dash_separator() -> None:
-    trees = parse_bash("ls -- foo")
-    assert trees is not None
-    # ``--`` is skipped; ``foo`` becomes a single positional (treated like a path).
-    assert "Try: List path='foo'" in (list_tool.bash_match(trees) or "")
-
-
-@pytest.mark.asyncio
-async def test_keep_last_zero_is_rejected_like_the_schema_says(tmp_path: Path) -> None:
-    """The schema's floor is 1, so a supplied 0 is a malformed directive.
-
-    Runtime treated it as "disabled", which is a third meaning the schema
-    never advertised -- the sibling tools reject their own floors.
-    """
-    result = await _run_list({"path": str(tmp_path), "keep_last": 0}, tmp_path)
-    assert result.is_error, result.content
-    assert "keep_last" in result.content, result.content
+def _from_shell(command: str) -> PlainTree:
+    """Return what List makes of the first command in ``command``."""
+    found = invocations(command)
+    assert found is not None
+    result = List().from_shell(found[0])
+    return result if result is None or isinstance(result, str) else dict(result)
 
 
 if __name__ == "__main__":

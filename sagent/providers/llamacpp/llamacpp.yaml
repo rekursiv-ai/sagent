@@ -1,0 +1,76 @@
+sources: {}
+
+roles:
+  default: qwen-27b-12gb-3.6
+  utility: qwen-27b-12gb-3.6
+  best: qwen-27b-12gb-3.6
+  everyday: qwen-27b-12gb-3.6
+
+reference:
+  thinking_effort_default: none
+  thinking_budget_default: none
+  # llama-server stops a reply where the context fills, as finish_reason length.
+  limits:
+    max_request_tokens: 16_384
+    max_response_tokens: 1_024
+    truncates_at_context: true
+  thinking:
+    effort: [none]
+    budget: [none]
+    output: [none]
+
+profiles:
+  local:
+    limits:
+      max_request_tokens: 65_536
+      max_response_tokens: 4_096
+      truncates_at_context: true
+
+  local_32k:
+    limits:
+      max_request_tokens: 32_768
+      max_response_tokens: 4_096
+      truncates_at_context: true
+
+models:
+- model_id: qwen-27b-12gb-3.6
+  wire_model_id: qwen3.6-27b-12gb
+  prices:
+  - service_tier: auto
+    request: 0.0
+    response: 0.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: qwen-27b-mtp-64k-3.6
+  wire_model_id: qwen3.6-27b-mtp-64k
+  profile: local
+  prices:
+  - service_tier: auto
+    request: 0.0
+    response: 0.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: local-0.0
+  wire_model_id: local
+  profile: local_32k
+  prices:
+  - service_tier: auto
+    request: 0.0
+    response: 0.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+providers:
+  llamacpp:
+    retries_internally: true
+    service_tier: [auto]
+    manage_context_server_side: [false]
+    models:
+      qwen-27b-12gb-3.6:
+      qwen-27b-mtp-64k-3.6:
+      local-0.0:

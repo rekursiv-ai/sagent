@@ -1,368 +1,227 @@
-"""WebFetch tool: fetch a URL (GET or POST) and extract its content."""
+"""WebFetch: a URL's content as text, by GET or POST.
+
+Text fetched by GET is kept for 15 minutes, keyed by URL, transport, and
+extractor; a POST may have effects, so it is never replayed.
+
+Typical usage example:
+
+  result = await WebFetch(session=FetchSession()).call(context, {"url": "https://peps.python.org/pep-0008/"})
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Annotated, cast, get_args
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
+from importlib.resources import files
+from typing import TYPE_CHECKING, Annotated
+from urllib.parse import urlsplit
 
 import asyncio
+import ipaddress
+import time
 
-from treekle import PlainTree, immutable, mutable
+from treekle import PlainTree, mutable
 from wesearch.fetch import Extractor, FetchSession, PolicyParams, Transport
 from wesearch.mcp.types import FetchBodyParamsSchema, FetchMethod
 from wesearch.types.errors import BotDetectionError, FetchError
+from wesearch.types.params import NO_BODY
 from wesearch.web import fetch_web
 
 import cachetools
 
-from sagent.tools.core import (
-    load_tool_description,
-    truncate_to_budget,
-)
-from sagent.tools.display import Toggle, Wrap
-from sagent.tools.lib.bash import walk_commands
-from sagent.tools.tool_spec import CLI_SETTABLE
-from sagent.types.runtime import ToolResult
-from sagent.types.tools import DEFAULT_MAX_RESULT_CHARS
+from sagent.session.types import UncategorizedToolResult, WebFetchResult
+from sagent.tools.command_analyzer import Invocation, replaceable
+from sagent.tools.display import ToolDisplay
+from sagent.tools.types import parse, schema_of
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from sagent.tools.types import ToolContext
 
-    from bashlex.ast import (
-        node as Node,  # noqa: N812 -- PascalCase for the type name; bashlex spells it lowercase.
-    )
+
+__all__ = [
+    "WebFetch",
+]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class WebFetch:
-    """Fetch a web page and extract its main content as clean text."""
+    """Fetch a URL and return its main content as text."""
+
+    @dataclass(frozen=True, slots=True, kw_only=True)
+    class Arguments:
+        """What the model passes."""
+
+        url: Annotated[str, FetchBodyParamsSchema.url.description]
+        method: Annotated[
+            FetchMethod,
+            FetchBodyParamsSchema.method.description,
+        ] = "GET"
+        transport: Annotated[
+            Transport | None,
+            FetchBodyParamsSchema.transport.description,
+        ] = None
+        extractor: Annotated[
+            Extractor | None,
+            FetchBodyParamsSchema.extractor.description,
+        ] = None
+        json: Annotated[PlainTree, FetchBodyParamsSchema.json.description] = None
+        form: Annotated[
+            Mapping[str, str] | None,
+            FetchBodyParamsSchema.form.description,
+        ] = None
 
     name = "WebFetch"
-    tool_id = "application/x-tool-webfetch"
-    clearable_results = True
-    max_result_chars = DEFAULT_MAX_RESULT_CHARS
-    description = load_tool_description("WebFetch")
-    directive_schema = immutable(FetchBodyParamsSchema.json_schema())
+    description = (files(__package__) / "assets" / "webfetch.md").read_text(
+        encoding="utf-8",
+    )
+    schema = schema_of(Arguments)
 
-    output: Annotated[Toggle, CLI_SETTABLE] = "off"
-    """Whether the result body renders in the pane."""
+    display: ToolDisplay = field(default=ToolDisplay())
 
-    output_head_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Leading body rows kept."""
+    session: FetchSession = field(repr=False)
+    """Connections, browser, and egress every fetch reuses; whoever made it closes it."""
 
-    output_tail_rows: Annotated[int, CLI_SETTABLE] = 2
-    """Trailing body rows kept, after a ``⋯ N lines ⋯`` marker."""
+    policy: PolicyParams = field(default_factory=PolicyParams)
+    """How to fetch when a call does not say."""
 
-    output_max_width: Annotated[int, CLI_SETTABLE] = 0
-    """Cell width cap; ``0`` uses the pane width."""
-
-    output_wrap: Annotated[Wrap, CLI_SETTABLE] = "wrap"
-    """``wrap`` continues an over-wide line, ``chop`` marks the cut."""
-
-    # The cache is per-instance MUTABLE state on a frozen record: the
-    # freeze is about configuration, not about the response cache, and
-    # ``/tool`` rebuilds the instance so a default_factory keeps each
-    # swap from inheriting a stale cache.
-    _cache: cachetools.TTLCache[tuple[Transport, Extractor, str], str] = field(
-        default_factory=lambda: cachetools.TTLCache[
-            tuple[Transport, Extractor, str],
-            str,
-        ](maxsize=128, ttl=15 * 60),
+    _cache: cachetools.TTLCache[tuple[str, str, str], str] = field(
+        default_factory=lambda: cachetools.TTLCache[tuple[str, str, str], str](
+            maxsize=128,
+            ttl=15 * 60,
+        ),
+        init=False,
         repr=False,
-        compare=False,
     )
 
-    session: FetchSession = field(
-        default_factory=FetchSession,
-        repr=False,
-        compare=False,
-    )
+    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
+        """Return ``WebFetch <url>``."""
+        return f"WebFetch {arguments.get('url', '')}"
 
-    def bash_match(self, trees: Sequence[Node]) -> str | None:
-        """Emit a tool-use nudge for ``curl URL`` / ``wget URL``.
-
-        PolicyParams only: :func:`walk_commands` supplies every simple command
-        with its context, so a leading ``cd``, an enclosing loop, and a
-        sequence all reach this matcher without it re-deriving AST shape.
-        Bails on output redirection (``-o``/``-O``/``--output``),
-        ``--data-binary @file`` style file uploads, and any non-http(s)
-        URL -- those are cases WebFetch can't cleanly replace. A piped
-        fetch is feeding another program rather than being read, which
-        WebFetch does not replace either.
-
-        Args:
-          trees: Parsed bashlex command trees from the active Bash call.
-
-        Returns:
-          hint: Nudge string redirecting to the WebFetch tool, or ``None``.
-
-        """
-        for inv in walk_commands(trees):
-            if inv.env_prefix or inv.captures_stdout or inv.piped_into:
-                continue
-            if inv.exe not in {"curl", "wget"}:
-                continue
-            hint = _match_http_fetch(inv.exe, inv.args)
-            if hint is not None:
-                return hint
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        """Return ``None``: fetches are independent."""
+        del context, arguments
         return None
 
-    def summary(self, args: Mapping[str, object]) -> str:
-        """Return a short display label for this invocation.
+    def from_shell(
+        self,
+        invocation: Invocation,
+    ) -> Mapping[str, PlainTree] | str | None:
+        """Return the WebFetch call for a plain ``curl URL`` or ``wget -qO- URL``.
+
+        Any other flag -- a header, a body, an output file -- a word bash
+        expands, or a private host, such as ``localhost``, keeps the command a
+        shell command.
 
         Args:
-          args: Directive carrying ``url``.
+          invocation: One simple command, with its pipeline.
 
         Returns:
-          label: ``WebFetch <url>`` line shown before invocation.
+          arguments: The WebFetch call for the same page, or ``None``.
 
         """
-        return f"WebFetch {args.get('url', '')}"
-
-    def prompt(self) -> str:
-        """Return no supplemental system-prompt text for WebFetch.
-
-        Returns:
-          contribution: Empty string.
-
-        """
-        return ""
-
-    def serialize_key(self, args: Mapping[str, object]) -> str | None:
-        """Run in parallel: independent network fetch, no serialization."""
-        del args
-        return None
-
-    async def run(self, args: Mapping[str, object]) -> ToolResult:
-        """Fetch the URL, extract main content, and return as text.
-
-        GET responses are cached per URL, transport, and extractor for 15
-        minutes. A URL whose server-side extraction path changes during the TTL
-        window (e.g. a Reddit page that starts returning a different shape and
-        falls into a different adapter) continues to serve the
-        previously-extracted body until the entry expires. Switching transport
-        or extractor bypasses that cache entry.
-
-        Args:
-          args: Directive with ``url`` and optional ``method`` / ``transport``
-              / ``extractor`` / ``json`` / ``form`` keys.
-
-        Returns:
-          result: Extracted text body, or a fetch/extraction error.
-
-        """
-        # Case-folded before coercion, not by it: a model writes "get" as
-        # readily as "GET", and the spec's job is to say what the accepted
-        # values ARE, not which spellings of them a directive may use.
-        directive = dict(args)
-        if isinstance(directive.get("method"), str):
-            directive["method"] = str(directive["method"]).upper()  # pyrefly: ignore[unnecessary-type-conversion] -- ty or basedpyright types this value more loosely than pyrefly; the conversion narrows it for them.
-            if directive["method"] not in get_args(FetchMethod):
-                # Named separately from the generic coercion error: a rejected
-                # VERB wants the reason ("this tool does not do PUT") ahead of
-                # the list of accepted values.
-                return ToolResult(
-                    call_id="",
-                    content=(
-                        f"Unsupported method {directive['method']!r};"
-                        " only GET and POST allowed."
-                    ),
-                    is_error=True,
-                )
-        try:
-            # One call replaces a per-parameter validation ladder that restated
-            # every name, type, and default the schema above already declared.
-            params = FetchBodyParamsSchema.coerce(directive)
-        except ValueError as e:
-            return ToolResult(call_id="", content=str(e), is_error=True)
-        raw_url = str(params["url"])
-        method = cast(FetchMethod, params["method"])
-        transport = cast(Transport, params["transport"])
-        extractor = cast(Extractor, params["extractor"])
-
-        try:
-            json_body, form_body = _request_bodies(method, args)
-        except ValueError as e:
-            return ToolResult(call_id="", content=str(e), is_error=True)
-
-        # The extractor is part of the key: two extractors of one URL are two
-        # different results, and omitting it would replay the first one's text
-        # for the second.
-        cache_key = (transport, extractor, raw_url) if method == "GET" else None
-        if cache_key is not None:
-            cached = self._cache.get(cache_key)
-            if cached is not None:
-                # This TTL also hides a local edit to wesearch.web: the
-                # tool replays pre-change text, so a working extraction fix
-                # reads as a failed one. Verify such a change via fetch_web in
-                # a fresh process, not by re-running this tool.
-                return ToolResult(call_id="", content=cached)
-
-        try:
-            # No max_chars: fetch_web returns the full text, and truncate() below
-            # applies sagent's presentation cap WITH the truncation notice. Passing
-            # the cap here would pre-cut the text to exactly the limit, so truncate
-            # would see an at-limit string and append no notice.
-            result = await asyncio.to_thread(
-                fetch_web,
-                raw_url,
-                method=method,
-                json_body=json_body,
-                form_body=form_body,
-                policy=PolicyParams(transport=transport, extractor=extractor),
-                session=self.session,
-            )
-        except BotDetectionError as e:
-            # fetch() classified the block at the boundary: surface the SPECIFIC
-            # kind (Cloudflare vs puzzle vs Google /sorry), each with its own
-            # actionable guidance, rather than a generic "HTTP 403".
-            return ToolResult(call_id="", content=e.explain(raw_url), is_error=True)
-        except (FetchError, ValueError, OSError) as e:
-            return ToolResult(call_id="", content=f"Fetch failed: {e}", is_error=True)
-
-        content = truncate_to_budget(result.text)
-        if cache_key is not None:
-            self._cache[cache_key] = content
-        return ToolResult(call_id="", content=content)
-
-
-def _request_bodies(
-    method: FetchMethod,
-    args: Mapping[str, object],
-) -> tuple[PlainTree, dict[str, str] | None]:
-    """Return POST request bodies from a tool directive."""
-    raw_json = args.get("json")
-    raw_form = args.get("form")
-    if method != "POST":
-        if raw_json is not None or raw_form is not None:
-            raise ValueError("'json' and 'form' require method='POST'.")
-        return None, None
-    if raw_json is not None and raw_form is not None:
-        raise ValueError("'json' and 'form' are mutually exclusive.")
-    if raw_json is not None:
-        return mutable(raw_json), None
-    if raw_form is None:
-        return None, None
-    unfrozen_form = mutable(raw_form)
-    # Schema declares ``form`` as an object, but LLM-supplied
-    # directives can violate the schema (``form=[]`` slipped through
-    # historically). Reject anything not a mapping so the downstream
-    # ``.items()`` call can't AttributeError out of the tool envelope.
-    # ``ValueError`` (not ``TypeError``) so it joins the existing
-    # caller-side ``except ValueError`` envelope in ``WebFetch.run``.
-    if not isinstance(unfrozen_form, dict):
-        raise ValueError(  # noqa: TRY004 -- caller catches ValueError uniformly.
-            f"'form' must be an object of string fields, got {type(unfrozen_form).__name__}.",
-        )
-    # Values checked, not stringified: str() turned {"x": []} into the literal
-    # field "x=[]" and {"x": {"a": 1}} into "x={'a': 1}" -- a request the caller
-    # never described, sent to a real endpoint, while the schema promised
-    # strings. cast() to a value-typed dict so the check narrows rather than
-    # asserting.
-    form: dict[str, str] = {}
-    for key, value in unfrozen_form.items():
-        if not isinstance(value, str):
-            raise ValueError(  # noqa: TRY004 -- caller catches ValueError uniformly.
-                f"'form' field {key!r} must be a string, got {type(value).__name__}.",
-            )
-        form[key] = value
-    return None, form
-
-
-_HTTP_FETCH_BAIL_FLAGS: frozenset[str] = frozenset(
-    {
-        "-o",
-        "-O",
-        "--output",
-        "--output-document",
-        "--data-binary",
-        "--upload-file",
-        "-T",
-        "-F",
-        "--form",
-        # MEASURED: ``curl -K opts.conf URL`` with ``output = "out.html"``
-        # in the file wrote out.html. The flag that writes is IN THE FILE,
-        # so no argv scan can ever see it -- the option source itself has
-        # to be the bail.
-        "-K",
-        "--config",
-        # ``-d @file`` reads the body from disk; WebFetch's ``json``/
-        # ``form`` are inline values only.
-        "-d",
-        "--data",
-        # Saves every URL to a file, as ``-O`` does for one.
-        "--remote-name-all",
-        "-J",
-        "--remote-header-name",
-    },
-)
-
-# Utilities that write to disk BY DEFAULT, so the bare invocation is the
-# one that needs a bail. MEASURED: ``wget https://example.com`` wrote
-# index.html into the cwd. Only an explicit "send it to stdout" spelling
-# makes wget the shape WebFetch replaces.
-_WRITES_BY_DEFAULT: frozenset[str] = frozenset({"wget"})
-
-
-# A fetch that writes a file or uploads one is not something WebFetch can do, so those
-# forms stay with Bash. Exact-string matching missed every spelling but the separated
-# one: ``--output=x``, the bundled ``-sO``, and ``--output-document=x`` all still
-# nudged.
-#
-# Two axes, because a flag denylist alone answers neither: an option FILE can carry the
-# write flag where argv never shows it, and ``wget`` writes with no flag at all.
-def _match_http_fetch(exe: str, args: tuple[str, ...]) -> str | None:
-    """Return a nudge when a shell command is a simple HTTP fetch."""
-    # ``-O -`` is wget's "write the body to stdout", so the output flag
-    # is exactly what makes this shape replaceable. Asked FIRST, because
-    # the generic scan below denies ``-O`` on sight.
-    streams = _streams_to_stdout(args)
-    url_count = 0
-    for arg in args:
-        if not streams and _writes_a_file(arg):
+        # A word bash expands first (``$P``) names a URL only the shell knows.
+        if invocation.expands or not replaceable(
+            invocation,
+            exes=frozenset({"curl", "wget"}),
+        ):
             return None
-        if arg.startswith(("http://", "https://")):
-            url_count += 1
-    if url_count != 1:
-        return None
-    # ``wget`` saves to disk with no flag at all, so a bare invocation is
-    # the one that needs the bail rather than the one that earns a nudge.
-    if exe in _WRITES_BY_DEFAULT and not streams:
-        return None
-    return "curl/wget via Bash is a bad UX. Use the WebFetch tool."
+        urls = [a for a in invocation.args if a.startswith(("http://", "https://"))]
+        flags = [a for a in invocation.args if a not in urls]
+        quiet = {"-s", "-S", "-L", "-f", "-sS", "-sL", "-fsSL", "-sSL", "-fsS", "-fL"}
+        quiet |= {"--silent", "--show-error", "--location", "--fail"}
+        if invocation.exe == "wget":
+            # Bare ``wget`` saves to a file; only ``-O -`` prints the page.
+            plain = flags in (
+                ["-qO-"],
+                ["-qO", "-"],
+                ["-q", "-O", "-"],
+                ["-O", "-"],
+                ["-O-"],
+            )
+        else:
+            plain = set(flags) <= quiet
+        if len(urls) != 1 or not plain:
+            return None
+        host = urlsplit(urls[0]).hostname or ""
+        try:
+            private = not ipaddress.ip_address(host).is_global
+        except ValueError:
+            private = host == "localhost" or host.endswith((".local", ".internal"))
+        return None if private else {"url": urls[0]}
+
+    async def call(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> WebFetchResult | UncategorizedToolResult:
+        """Fetch ``url`` and extract its text.
+
+        A POST carries ``json`` or ``form``, never both; a GET carries neither.
+
+        Args:
+          context: The calling agent's state.
+          arguments: What the model passed, as ``WebFetch.Arguments``.
+
+        Returns:
+          result: The page's text, or why it could not be fetched.
+
+        """
+        # A model writes "get" as readily as "GET".
+        method = arguments.get("method")
+        if isinstance(method, str):
+            arguments = {**arguments, "method": method.upper()}
+        a = parse(arguments, WebFetch.Arguments)
+        has_body = a.json is not None or a.form is not None
+        if a.method == "GET" and has_body:
+            return _error("'json' and 'form' require method='POST'.")
+        if a.json is not None and a.form is not None:
+            return _error("'json' and 'form' are mutually exclusive.")
+        policy = replace(
+            self.policy,
+            transport=a.transport or self.policy.transport,
+            extractor=a.extractor or self.policy.extractor,
+        )
+        key = (a.url, policy.transport, policy.extractor)
+        started = time.monotonic()
+        text = self._cache.get(key) if a.method == "GET" else None
+        if text is None:
+            try:
+                fetched = await asyncio.to_thread(
+                    fetch_web,
+                    a.url,
+                    method=a.method,
+                    json_body=NO_BODY if a.json is None else mutable(a.json),
+                    form_body=None if a.form is None else dict(a.form),
+                    policy=policy,
+                    session=self.session,
+                )
+            except BotDetectionError as e:
+                # Which block it was decides the remedy: Cloudflare, a
+                # puzzle, or Google's /sorry page.
+                return _error(e.explain(a.url))
+            except (FetchError, ValueError, OSError) as e:
+                return _error(f"Fetch failed: {e}")
+            text = fetched.text
+            if a.method == "GET":
+                self._cache[key] = text
+        lines = text.splitlines(keepends=True)
+        note = f"\n... ({len(lines):,} more lines omitted)"
+        body, kept = context.fit(lines, reserve=len(note))
+        if kept < len(lines):
+            body += f"\n... ({len(lines) - kept:,} more lines omitted)"
+        return WebFetchResult(
+            call_id="",
+            url=a.url,
+            content=body,
+            duration_sec=time.monotonic() - started,
+            size=len(text),
+        )
 
 
-# ``-O -`` (and its bundled ``-qO-``) is the only form that does; every other invocation
-# saves a file, so the polarity is the reverse of the ``-O`` denial that applies to
-# ``curl``.
-def _streams_to_stdout(args: tuple[str, ...]) -> bool:
-    """Whether ``wget`` was told to write the body to stdout."""
-    for i, a in enumerate(args):
-        if a in ("-O", "--output-document") and i + 1 < len(args):
-            return args[i + 1] == "-"
-        if a.startswith("--output-document="):
-            return a.partition("=")[2] == "-"
-        if a.startswith("-") and not a.startswith("--") and a.endswith("O-"):
-            return True
-    return False
-
-
-def _writes_a_file(arg: str) -> bool:
-    """Whether one argument makes the fetch write or upload a file."""
-    if arg in _HTTP_FETCH_BAIL_FLAGS:
-        return True
-    # ``--output=out.html`` -- the value is attached, so the flag never
-    # appears as its own token.
-    if arg.startswith("--") and arg.partition("=")[0] in _HTTP_FETCH_BAIL_FLAGS:
-        return True
-    # ``-sO`` / ``-oout`` -- short flags bundle, so the output flag is a
-    # letter inside the cluster rather than the whole token.
-    if arg.startswith("-") and not arg.startswith("--"):
-        return any(letter in arg[1:] for letter in _HTTP_FETCH_BAIL_LETTERS)
-    return False
-
-
-# Short flags whose presence anywhere in a bundle means the fetch writes
-# or uploads a file: ``-o``/``-O`` output, ``-T`` upload, ``-F`` form.
-_HTTP_FETCH_BAIL_LETTERS: frozenset[str] = frozenset({"o", "O", "T", "F"})
+def _error(message: str) -> UncategorizedToolResult:
+    return UncategorizedToolResult(call_id="", content=message, is_error=True)

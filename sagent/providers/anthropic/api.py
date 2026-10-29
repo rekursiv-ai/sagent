@@ -1,636 +1,264 @@
-"""Anthropic provider (API key).
+"""Claude over the Messages API, billed to an API key.
 
-Thin API-key client. Speaks history entries
-(``UserMessage`` / ``AssistantMessage`` / ``ToolResult``) directly.
+Typical usage example:
 
-Usage::
-
-    from sagent.providers import Anthropic
-
-    provider = Anthropic.from_key("sk-ant-...")
-    # or: Anthropic.from_env()  (reads ANTHROPIC_API_KEY)
-    sonnet = provider.model("sonnet-4.6")
-    response = await sonnet.buffer(request)
+  async with Anthropic() as anthropic:          # reads ANTHROPIC_API_KEY
+      opus = anthropic["opus"]
+      await opus.count(request)                  # exact, from the server
+      async for event in opus.stream(request):   # TextChunk..., then Response
+          ...
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final, Protocol, cast, override, runtime_checkable
+from functools import cache
+from importlib.resources import files
+from typing import TYPE_CHECKING, ClassVar, override
 
 import asyncio
-import base64
 import contextlib
-import contextvars
-import json
-import logging
 import os
-import re
 import time
+
+from treekle import from_plain, json_dumps, json_loads
+
+from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
+from sagent.providers.anthropic import wire
+from sagent.providers.resources import SharedResources
+from sagent.providers.table import ModelTable
+from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
-    from anthropic._models import FinalRequestOptions
-    from anthropic._streaming import AsyncStream
-    from anthropic.lib.streaming import AsyncMessageStream
-    from anthropic.types.raw_message_stream_event import RawMessageStreamEvent
+    from collections.abc import (
+        AsyncGenerator,
+        AsyncIterator,
+        Iterator,
+        Mapping,
+        Sequence,
+    )
 
-    import anthropic
-
-    # The SDK's own transport types, not ours: anthropic 1.2 moved off httpx to
-    # httpx2, and these Protocols model its internals (`_build_request`,
-    # `_make_status_error`), so they must name the same package it does.
     import httpx2
 
-    from sagent.lib import image
-    from sagent.types.capability import ModelCapability, ModelSettings
-    from sagent.types.tools import Tool, ToolResultClearable
+    from sagent.model.capability import ModelCapability, ModelSettings
+    from sagent.model.types import Request, Response, TextChunk
+    from sagent.providers.types import ProviderSharedResources, UsageWindow
+    from sagent.session.types import Attachment
 else:
     from wrapt import lazy_import
 
-    anthropic = lazy_import("anthropic")  # 569ms cold.
-    httpx2 = lazy_import("httpx2")  # 168ms cold.
-    AsyncMessageStream = lazy_import("anthropic.lib.streaming", "AsyncMessageStream")
-    AsyncStream = lazy_import("anthropic._streaming", "AsyncStream")
-    image = lazy_import("sagent.lib.image")
+    httpx2 = lazy_import("httpx2")
 
 
-from treekle import MutablePlainTree, from_plain, json_loads, mutable
-
-from sagent.catalog.anthropic import api, usage_tokens
-from sagent.catalog.loader import models
-from sagent.catalog.table import ModelCatalog
-from sagent.lib import debug_log
-from sagent.providers.lib.errors import (
-    PolicyBlockedError,
-    StreamingResponseNotReadError,
-    error_status_code,
-    find_response_not_read,
-    is_context_overflow_text,
-    is_request_too_large,
-    raise_if_request_too_large,
-)
-from sagent.providers.lib.id_remap import IdRemapper
-from sagent.providers.lib.model_base import ModelDefaults
-from sagent.providers.lib.perloop import PerLoop
-from sagent.providers.lib.stop_reason import normalize_stop_reason
-from sagent.providers.lib.usage import anthropic_usage
-from sagent.types.model import (
-    ModelRequest,
-    ModelResponse,
-    PromptTooLongError,
-    UsageSnapshot,
-)
-from sagent.types.runtime import (
-    AgentSendMessage,
-    AssistantMessage,
-    ModelResponsePartial,
-    ModelResponseThinking,
-    RuntimeEvent,
-    ToolCall,
-    ToolResult,
-    UserMessage,
-)
+__all__ = [
+    "Anthropic",
+    "AnthropicModel",
+    "models",
+]
 
 
-logger = logging.getLogger(__name__)
-
-# Carries the latest streamed response's headers from ``_raw_message_stream``
-# (which holds the raw HTTP response) out to ``_AnthropicModel.stream`` (which
-# owns ``_last_usage``). A ContextVar keeps the module-level stream helpers
-# free of model state.
-_response_headers_var: contextvars.ContextVar[Mapping[str, str] | None] = (
-    contextvars.ContextVar("anthropic_response_headers", default=None)
-)
-
-_STREAM_IDLE_TIMEOUT = 600.0  # house-ignore[globals] -- Stream idle timeout dial.
-
-
-class _AnthropicTransportClient(Protocol):
-    async def send(
-        self,
-        request: httpx2.Request,
-        *,
-        stream: bool,
-    ) -> httpx2.Response: ...
-
-
-class _AnthropicRawStreamSDK(Protocol):
-    _client: _AnthropicTransportClient
-
-    def _build_request(self, options: FinalRequestOptions) -> httpx2.Request: ...
-
-    def _make_status_error(
-        self,
-        err_msg: str,
-        *,
-        body: object,
-        response: httpx2.Response,
-    ) -> anthropic.APIStatusError: ...
-
-
-# Shared with the subscription provider, which adds the same beta header.
-REDACT_THINKING_BETA: Final = "redact-thinking-2026-02-12"
-_FAST_MODE_BETA: Final = "fast-mode-2026-02-01"
-_INLINE_TOOLS_BETA: Final = "inline-tools-2026-09-15"
-# The API's 4 cache marks, less the last message's.
-_SYSTEM_MARKS: Final = 3
-_DEFAULT_API_TARGET_INPUT_TOKENS = (
-    40_000  # house-ignore[globals] -- Target input-token dial.
-)
-
-
-def build_context_management(
-    *,
-    has_thinking: bool = False,
-    cache_cold: bool = False,
-    server_side_context_management: bool = False,
-    trigger_tokens: int = 0,
-    target_input_tokens: int = _DEFAULT_API_TARGET_INPUT_TOKENS,
-    tools: Sequence[ToolResultClearable] = (),
-) -> dict[str, list[dict[str, MutablePlainTree]]] | None:
-    """Build ``context_management`` body for the Anthropic API.
+class Anthropic(AsyncResource):
+    """Claude models, billed to the API key in ``ANTHROPIC_API_KEY``.
 
     Args:
-      has_thinking: Whether thinking mode is active.
-      cache_cold: Whether the prompt cache TTL likely expired.
-      server_side_context_management: Opt in to Anthropic's server-side
-          ``clear_tool_uses_20250919`` beta. Off by default.
-      trigger_tokens: Threshold at which the server starts clearing.
-      target_input_tokens: Desired post-clear token count.
-      tools: Advertised tools; ``Tool.clearable_results`` determines which
-          tool results may be cleared.
-
-    Returns:
-      context_management: Context-management config, or ``None`` if no edits
-          apply.
+      name: The name the catalog knows this provider by; the section by default.
+      resources: What this shares with other providers; ``None`` makes and
+        closes its own.
 
     """
-    edits: list[dict[str, MutablePlainTree]] = []
-    if has_thinking:
-        keep: dict[str, MutablePlainTree] | str = (
-            {"type": "thinking_turns", "value": 1} if cache_cold else "all"
-        )
-        edits.append({"type": "clear_thinking_20251015", "keep": keep})
-    if server_side_context_management and trigger_tokens > 0:
-        clearable: list[MutablePlainTree] = [
-            t.name for t in tools if t.clearable_results
-        ]
-        unclearable: list[MutablePlainTree] = [
-            t.name for t in tools if not t.clearable_results
-        ]
-        clear_at_least = max(trigger_tokens - target_input_tokens, 1_000)
-        edits.append(
-            {
-                "type": "clear_tool_uses_20250919",
-                "trigger": {"type": "input_tokens", "value": trigger_tokens},
-                "clear_at_least": {
-                    "type": "input_tokens",
-                    "value": clear_at_least,
-                },
-                "clear_tool_inputs": clearable,
-                "exclude_tools": unclearable,
-            },
-        )
-    return {"edits": edits} if edits else None
 
+    section: ClassVar[str] = "anthropic"
+    """The catalog section whose models and settings this provider serves."""
 
-class Anthropic:
-    """Anthropic provider - API key auth.
-
-    The base class exposes hooks that alternative auth implementations can override:
-    ``get_sdk``, ``build_system``, ``extra_headers``, ``extra_body``,
-    ``handle_auth_error``, ``subscription``.
-    """
-
-    catalog = ModelCatalog(models=models("anthropic"), transport=api())
+    betas: ClassVar[tuple[str, ...]] = ()
+    """Beta features every request names, whatever it asks for."""
 
     def __init__(
         self,
         *,
-        api_key: str,
-        server_side_context_management: bool = False,
-        redact_thinking: bool = False,
+        name: str = "",
+        resources: ProviderSharedResources | None = None,
     ) -> None:
-        self._api_key = api_key
-        self._server_side_context_management = server_side_context_management
-        self._redact_thinking = redact_thinking
-        # Per loop, not per provider: an asyncio.Lock binds to the loop
-        # that first contends on it, and an AsyncAnthropic holds a
-        # connection pool owned by the loop that opened it. A provider
-        # driven from a second loop otherwise raises "bound to a different
-        # event loop" -- or hangs, for the waiter left on a foreign loop.
-        self._lock: PerLoop[asyncio.Lock] = PerLoop(asyncio.Lock)
-        self._sdks: PerLoop[anthropic.AsyncAnthropic | None] = PerLoop(lambda: None)
+        self._name = name or self.section
+        self._owns_resources = resources is None
+        self._resources = SharedResources() if resources is None else resources
+        self._usage: tuple[UsageWindow, ...] = ()
 
     @property
-    def server_side_context_management(self) -> bool:
-        """Whether Anthropic's ``clear_tool_uses_20250919`` beta is enabled."""
-        return self._server_side_context_management
+    def name(self) -> str:
+        """Return the name the catalog knows this provider by."""
+        return self._name
 
-    @classmethod
-    def from_key(
-        cls,
-        api_key: str,
-        *,
-        server_side_context_management: bool = False,
-        redact_thinking: bool = False,
-    ) -> Anthropic:
-        """Create provider from an API key.
+    @property
+    def resources(self) -> ProviderSharedResources:
+        """Return what this provider shares with others."""
+        return self._resources
 
-        Args:
-          api_key: Anthropic API key (``sk-ant-...``).
-          server_side_context_management: Opt in to Anthropic's
-              ``clear_tool_uses_20250919`` beta. Defaults to off; sagent's
-              own client-side compactor handles budget. See the runtime
-              prompt section "Context management" for the rationale.
-          redact_thinking: Request redacted thinking blocks from Anthropic.
+    @property
+    def usage(self) -> tuple[UsageWindow, ...]:
+        """Return the account's rate-limit windows; ``()`` for an API key."""
+        return self._usage
 
-        Returns:
-          provider: Configured Anthropic provider instance.
+    def __getitem__(self, model: str) -> AnthropicModel:
+        capability, settings = models(self.section).resolve(model)
+        return AnthropicModel(provider=self, capability=capability, settings=settings)
 
-        """
-        return cls(
-            api_key=api_key,
-            server_side_context_management=server_side_context_management,
-            redact_thinking=redact_thinking,
-        )
+    def __iter__(self) -> Iterator[str]:
+        return iter(models(self.section))
 
-    @classmethod
-    def from_env(
-        cls,
-        *,
-        server_side_context_management: bool = False,
-        redact_thinking: bool = False,
-    ) -> Anthropic:
-        """Create provider from ``ANTHROPIC_API_KEY`` env var.
+    @override
+    async def aclose(self) -> None:
+        if self._owns_resources:
+            await self._resources.aclose()
 
-        Args:
-          server_side_context_management: Opt in to Anthropic's
-              ``clear_tool_uses_20250919`` beta. Defaults to off.
-          redact_thinking: Request redacted thinking blocks from Anthropic.
-
-        Returns:
-          provider: Configured Anthropic provider instance.
-
-        Raises:
-          RuntimeError: If the API key is not configured.
-
-        """
+    async def credentials(self) -> dict[str, str]:
+        """Return the headers that authenticate a request."""
         key = os.environ.get("ANTHROPIC_API_KEY", "")
         if not key:
-            raise RuntimeError("Anthropic API key not configured.")
-        return cls(
-            api_key=key,
-            server_side_context_management=server_side_context_management,
-            redact_thinking=redact_thinking,
-        )
+            raise AuthError("ANTHROPIC_API_KEY is not set.")
+        return {"x-api-key": key}
 
-    def model(
-        self,
-        model_id: str | None = None,
-    ) -> _AnthropicModel:
-        """Create a model backend.
-
-        Args:
-          model_id: Catalog id with optional tags, or a role name.
-
-        Returns:
-          model: Anthropic model backend.
-
-        Raises:
-          UnknownModelError: ``model_id`` is not in the catalog.
-          UnsupportedTagError: The id asks for a context the model does not
-              offer.
-
-        """
-        mid = model_id if model_id is not None else "default"
-        capability, settings = self.catalog.resolve(mid)
-        return _AnthropicModel(
-            provider=self,
-            capability=capability,
-            settings=settings,
-        )
-
-    # -- Hooks (subclasses override) -----------------------------------
-
-    @property
-    def subscription(self) -> bool:
-        """Whether this provider bills against a subscription."""
+    async def reauthenticate(self) -> bool:
+        """Renew credentials after a 401; ``False`` when there are none to renew."""
         return False
 
-    @property
-    def _sdk(self) -> anthropic.AsyncAnthropic | None:
-        """The running loop's SDK client, if one has been opened."""
-        return self._sdks.peek()
-
-    @_sdk.setter
-    def _sdk(self, value: anthropic.AsyncAnthropic | None) -> None:
-        """Install or clear this loop's SDK client."""
-        self._sdks.set(value)
-
-    async def get_sdk(self) -> anthropic.AsyncAnthropic:
-        """Get or create the underlying Anthropic SDK client.
-
-        Returns:
-          client: Shared ``AsyncAnthropic`` instance.
-
-        """
-        async with self._lock.get():
-            sdk = self._sdks.get()
-            if sdk is None:
-                sdk = anthropic.AsyncAnthropic(
-                    api_key=self._api_key,
-                    # ``send_with_retry`` owns retries: the SDK's two more made
-                    # one stalled attempt three 30s connects.
-                    max_retries=0,
-                    # The SDK's 5s connect default fails on one Wi-Fi stall.
-                    timeout=httpx2.Timeout(_STREAM_IDLE_TIMEOUT, connect=30.0),
-                )
-                self._sdks.set(sdk)
-            return sdk
-
-    async def close_sdk(self) -> None:
-        """Close and clear this loop's SDK client.
-
-        This loop's only: a client's connection pool belongs to the loop
-        that opened it, so closing another loop's client from here breaks
-        a pool that loop is still using rather than releasing it. Each
-        loop closes what it opened; the rest die with their loops.
-        """
-        sdk = self._sdks.peek()
-        self._sdks.clear()
-        if sdk is not None:
-            await sdk.close()
-
-    def build_system(
+    def system(
         self,
-        system: tuple[str, ...],
-        messages: list[anthropic.types.MessageParam] | None = None,
+        request: Request,
         *,
-        cache_ttl: str = "5m",
-    ) -> list[anthropic.types.TextBlockParam] | anthropic.NotGiven:
-        """Build the system prompt for an API call.
-
-        Each block is marked as a cache breakpoint: requests that share the
-        leading blocks but differ after them (sibling agents, one document
-        asked several questions) then reuse them, which the last-message mark
-        alone cannot give them.
-
-        Args:
-          system: System prompt blocks, most stable first; empty ones are dropped.
-          messages: Conversation messages (used by subscription subclass).
-          cache_ttl: Prompt-cache TTL (``5m`` or ``1h``).
-
-        Returns:
-          system_param: Marked system blocks, or ``NOT_GIVEN`` when none.
-
-        """
-        del messages  # Unused in plain API mode.
-        texts = [text for text in system if text]
-        # A request may carry 4 ``cache_control`` marks and the last message takes
-        # one, so only the last three blocks are marked: each mark caches everything
-        # before it, so the earlier blocks stay cached under the first mark kept.
-        marked = len(texts) - _SYSTEM_MARKS
-        blocks = [
-            cast(
-                anthropic.types.TextBlockParam,
-                {"type": "text", "text": text}
-                if index < marked
-                else {
-                    "type": "text",
-                    "text": text,
-                    "cache_control": _cache_mark(cache_ttl),
-                },
-            )
-            for index, text in enumerate(texts)
-        ]
-        return blocks or anthropic.NOT_GIVEN
-
-    def extra_headers(
-        self,
-        capability: ModelCapability,
         settings: ModelSettings,
-    ) -> dict[str, str]:
-        """Return per-request extra headers.
+    ) -> list[dict[str, object]]:
+        """Return the system blocks a request opens with."""
+        return wire.system_blocks(request.system, settings=settings)
+
+    def headers(self, request: Request) -> dict[str, str]:
+        """Return the headers one request adds; none by default."""
+        del request
+        return {}
+
+    async def events(
+        self,
+        body: Mapping[str, object],
+        *,
+        betas: Sequence[str],
+        headers: Mapping[str, str],
+    ) -> AsyncIterator[dict[str, object]]:
+        """Stream the reply to ``body``, retrying a short failure before the first event.
 
         Args:
-          capability: Active model capability.
-          settings: Active model selections.
+          body: The ``/v1/messages`` request body.
+          betas: Beta features this request needs, beyond ``self.betas``.
+          headers: Headers beyond the credentials.
+
+        Yields:
+          event: Each server-sent event, as JSON.
+
+        Raises:
+          RetryableError: A failure after the first event, or before it with an
+            advised wait longer than 30 seconds, or after five attempts.
+
+        """
+        attempt = 0
+        while True:
+            started = False
+            try:
+                async with self._reply(
+                    "/v1/messages",
+                    body=body,
+                    betas=betas,
+                    headers=headers,
+                ) as response:
+                    async for event in wire.events(response.aiter_lines()):
+                        started = True
+                        yield event
+                return
+            except RetryableError as failure:
+                # Text the caller already showed cannot be taken back, and a
+                # long wait is the caller's to sit through or not.
+                if started or attempt == 4 or failure.retry_after_sec > 30.0:
+                    raise
+                await asyncio.sleep(max(failure.retry_after_sec, 0.5 * (1 << attempt)))
+                attempt += 1
+
+    async def reply(
+        self,
+        path: str,
+        *,
+        body: Mapping[str, object],
+        betas: Sequence[str],
+        headers: Mapping[str, str],
+    ) -> dict[str, object]:
+        """POST ``body`` to ``path`` and return the JSON reply.
+
+        Args:
+          path: Where under the API host to post.
+          body: The request body.
+          betas: Beta features this request needs, beyond ``self.betas``.
+          headers: Headers beyond the credentials.
 
         Returns:
-          headers: Header dict (``anthropic-beta`` set when betas apply).
+          reply: The JSON the server answered with.
 
         """
-        betas = list(settings.limits.request_betas)
-        if True in capability.manage_context_server_side:
-            betas.append("context-management-2025-06-27")
-        if self._redact_thinking:
-            betas.append(REDACT_THINKING_BETA)
-        return {"anthropic-beta": ",".join(betas)} if betas else {}
+        async with self._reply(
+            path,
+            body=body,
+            betas=betas,
+            headers=headers,
+        ) as response:
+            return json_loads(await response.aread(), dict[str, object])
 
-    def extra_body(
+    @contextlib.asynccontextmanager
+    async def _reply(
         self,
+        path: str,
         *,
-        has_thinking: bool,
-        cache_cold: bool,
-        trigger_tokens: int,
-        tools: Sequence[Tool],
-    ) -> dict[str, MutablePlainTree] | None:
-        """Return per-request extra body fields.
-
-        Args:
-          has_thinking: True when the request enables extended thinking.
-          cache_cold: True when the cache TTL likely expired.
-          trigger_tokens: Threshold at which server-side clearing starts.
-          tools: Advertised tools, used to derive clearing policy.
-
-        Returns:
-          body: Extra body payload, or ``None`` to skip.
-
-        """
-        cm = build_context_management(
-            has_thinking=has_thinking,
-            cache_cold=cache_cold,
-            server_side_context_management=self._server_side_context_management,
-            trigger_tokens=trigger_tokens,
-            tools=tools,
-        )
-        if cm is None:
-            return None
-        return from_plain(
-            {"context_management": cm},
-            dict[str, MutablePlainTree],
-        )
-
-    async def handle_auth_error(
-        self,
-        *,
-        failed: anthropic.AsyncAnthropic | None = None,
-    ) -> None:
-        """Handle a 401 from the API. No-op for API-key auth.
-
-        Args:
-          failed: The client whose request was rejected; ``None`` forces a
-            reload regardless of which client is cached.
-
-        """
-        del failed
-
-
-# Statusless Anthropic errors with body-declared types in this set are
-# transient retryables that the shared status-code classifier misses.
-_RETRYABLE_BODY_TYPES = frozenset(
-    {"api_error", "overloaded_error", "rate_limit_error", "server_error"},
-)
-
-
-# Prefers the structured ``error.type``/``error.message`` fields on ``error_body`` when
-# present: an Anthropic ``invalid_request_error`` whose ``message`` text mentions
-# overflow phrases is canonical. When ``error_body`` is absent, falls back to substring
-# matching against the stringified error -- which is fragile and matches benign 400s
-# that incidentally mention "context window" (e.g. tool-schema validation errors).
-# Callers with access to the parsed SDK body should always pass ``error_body``.
-def _is_prompt_too_long_text(
-    msg: str,
-    *,
-    error_body: Mapping[str, object] | None = None,
-) -> bool:
-    """Check whether the error describes a context-window overflow."""
-    if error_body is not None:
-        nested = error_body.get("error")
-        if isinstance(nested, Mapping):
-            nested_map = cast(Mapping[str, object], nested)
-            error_type = nested_map.get("type")
-            if error_type != "invalid_request_error":
-                return False
-            inner = nested_map.get("message")
-            return isinstance(inner, str) and is_context_overflow_text(inner)
-    return is_context_overflow_text(msg)
-
-
-def _api_status_body(error: anthropic.APIStatusError) -> Mapping[str, object] | None:
-    """Return the parsed Anthropic error body, if the SDK exposed one."""
-    body = getattr(error, "body", None)
-    return cast(Mapping[str, object], body) if isinstance(body, Mapping) else None
-
-
-def _policy_block_message(error_body: Mapping[str, object] | None) -> str | None:
-    """Return Anthropic's safeguard message from a structured error body."""
-    if error_body is None:
-        return None
-    nested = error_body.get("error")
-    if not isinstance(nested, Mapping):
-        return None
-    nested_map = cast(Mapping[str, object], nested)
-    if nested_map.get("type") != "invalid_request_error":
-        return None
-    message = nested_map.get("message")
-    if not isinstance(message, str):
-        return None
-    lower = message.lower()
-    signals = (
-        "content filtering policy",
-        "safeguards flagged",
-        "usage policy",
-        "cyber-related safeguards",
-    )
-    if any(signal in lower for signal in signals):
-        return message
-    actions = ("block", "flag", "reject", "refus")
-    # Bare "policy" is absent on purpose: caching, retention, and versioning
-    # rejections cite policies too, and a false match tells the user to throw
-    # away a conversation that a corrected request would serve.
-    safety_terms = ("content filter", "safeguard", "safety")
-    return (
-        message
-        if any(a in lower for a in actions)
-        and any(term in lower for term in safety_terms)
-        else None
-    )
-
-
-def _raise_if_policy_blocked(error: anthropic.APIStatusError) -> None:
-    """Raise a user-facing error when Anthropic rejected the conversation."""
-    message = _policy_block_message(_api_status_body(error))
-    if message is None:
-        return
-    raise PolicyBlockedError(
-        provider_name="Anthropic",
-        provider_message=message,
-        request_id=_request_id(error),
-    ) from error
-
-
-def _raise_if_prompt_too_long(e: anthropic.APIStatusError) -> None:
-    """Re-raise as PromptTooLongError if this is a prompt-too-long error."""
-    raw = str(e)
-    if not _is_prompt_too_long_text(raw, error_body=_api_status_body(e)):
-        return
-    actual, limit = None, None
-    m = re.search(r"(\d[\d,]*)\s*tokens?\s*>\s*(\d[\d,]*)", raw)
-    if m:
-        actual = int(m.group(1).replace(",", ""))
-        limit = int(m.group(2).replace(",", ""))
-    raise PromptTooLongError(raw, actual_tokens=actual, limit_tokens=limit) from e
-
-
-def _anthropic_error_type(body: Mapping[object, object]) -> object:
-    """Extract the Anthropic error type from flat or nested error bodies."""
-    error_type = body.get("type")
-    if error_type != "error":
-        return error_type
-    nested = body.get("error")
-    if not isinstance(nested, Mapping):
-        return error_type
-    return cast(Mapping[object, object], nested).get("type")
-
-
-def _tool_names_from_kwargs(kwargs: dict[str, object]) -> list[str | None]:
-    """Extract tool names from a request kwargs dict for logging."""
-    raw: object = kwargs.get("tools") or []
-    if not isinstance(raw, list):
-        return []
-    out: list[str | None] = []
-    for t in cast(list[object], raw):
-        if isinstance(t, dict):
-            name = cast(dict[str, object], t).get("name")
-            out.append(name if isinstance(name, str) else None)
-        else:
-            out.append(None)
-    return out
-
-
-def _request_id(e: BaseException) -> str:
-    """Best-effort request-id extractor for an anthropic error; ``""`` if absent."""
-    rid: object = getattr(e, "request_id", None)
-    if isinstance(rid, str) and rid:
-        return rid
-    resp: object = getattr(e, "response", None)
-    headers: object = getattr(resp, "headers", None)
-    if isinstance(headers, _HeaderLookup):
+        body: Mapping[str, object],
+        betas: Sequence[str],
+        headers: Mapping[str, str],
+    ) -> AsyncGenerator[httpx2.Response]:
+        """Open the reply to ``body``, renewing the login once on a 401."""
+        renewable = True
         try:
-            return headers.get("request-id") or headers.get("x-request-id") or ""
-        except Exception:  # noqa: BLE001 -- best-effort extraction must not mask the original error.
-            return ""
-    return ""
+            while True:
+                async with self.resources.http.stream(
+                    "POST",
+                    f"https://api.anthropic.com{path}",
+                    content=json_dumps(body),
+                    headers={
+                        **await self.credentials(),
+                        **headers,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                        "anthropic-beta": ",".join(
+                            dict.fromkeys((*self.betas, *betas)),
+                        ),
+                    },
+                ) as response:
+                    self._usage = wire.rate_limits(response.headers) or self._usage
+                    if response.status_code == 401 and renewable:
+                        renewable = False
+                        if await self.reauthenticate():
+                            continue
+                    if response.status_code >= 400:
+                        text = (await response.aread()).decode(errors="replace")
+                        raise wire.to_exception(
+                            response.status_code,
+                            body=_error_body(text),
+                            headers=response.headers,
+                        )
+                    yield response
+                    return
+        except httpx2.TransportError as exc:
+            raise DisconnectedError(str(exc)) from exc
 
 
-@runtime_checkable
-class _HeaderLookup(Protocol):
-    """Response headers, as the SDK's ``httpx`` response carries them."""
-
-    def get(self, key: str, /) -> str | None:
-        """Return the header's value, or ``None`` when absent."""
-        ...
-
-
-class _AnthropicModel(ModelDefaults):
-    """Claude model backend - translates ModelRequest/ModelResponse."""
+class AnthropicModel(AsyncResource):
+    """One Claude model, served by ``provider`` with ``settings``."""
 
     def __init__(
         self,
+        *,
         provider: Anthropic,
         capability: ModelCapability,
         settings: ModelSettings,
@@ -638,894 +266,103 @@ class _AnthropicModel(ModelDefaults):
         self._provider = provider
         self._capability = capability
         self._settings = settings
-        self._last_response_time = time.time()
-        self._last_usage: UsageSnapshot | None = None
+        self._answered_at = 0.0
 
     @property
-    @override
+    def provider(self) -> Anthropic:
+        """Return the provider serving this model."""
+        return self._provider
+
+    @property
     def capability(self) -> ModelCapability:
-        """What this model offers on this transport."""
+        """Return every setting this model offers."""
         return self._capability
 
     @property
-    @override
     def settings(self) -> ModelSettings:
-        """What this instance chose."""
+        """Return the settings chosen."""
         return self._settings
 
-    def _cache_ttl_wire(self) -> str:
-        """Anthropic spells the cache TTL as a label, not seconds."""
-        return "1h" if self.settings.cache_ttl_sec >= 3600.0 else "5m"
+    @settings.setter
+    def settings(self, settings: ModelSettings) -> None:
+        """Choose ``settings``; raise unless the capability offers each choice."""
+        self._capability.check(settings)
+        self._settings = settings
 
-    @property
-    def _cache_cold(self) -> bool:
-        """True when prompt cache TTL likely expired (>1h idle)."""
-        return time.time() - self._last_response_time > 3600.0
-
-    @override
-    def approx_text_tokens(self, text: str) -> int:
-        """Local estimate via ``approx_chars_per_token``.
+    async def count(self, request: Request) -> int:
+        """Return the tokens ``request`` would send, as the server counts them.
 
         Args:
-          text: Text to score.
+          request: What the model would be asked.
 
         Returns:
-          tokens: Approximate input token count.
+          tokens: Input tokens, system prompt and tools included.
 
         """
-        return int(len(text) / self.capability.approx_chars_per_token)
+        body, betas = self._encode(request)
+        # ``count_tokens`` rejects the generation knobs it has no use for.
+        for knob in ("max_tokens", "stream", "service_tier", "speed", "output_config"):
+            body.pop(knob, None)
+        reply = await self.provider.reply(
+            "/v1/messages/count_tokens",
+            body=body,
+            betas=betas,
+            headers=self.provider.headers(request),
+        )
+        return from_plain(reply.get("input_tokens"), int)
 
-    @override
-    def approx_image_tokens(self, data: bytes) -> int:
-        """Local estimate from image dimensions (Anthropic's formula).
+    def attachment_tokens(self, attachment: Attachment) -> int:
+        """Return about how many tokens ``attachment`` adds, by Anthropic's formula."""
+        return wire.attachment_tokens(attachment, limits=self.capability.limits)
+
+    async def stream(self, request: Request) -> AsyncIterator[TextChunk | Response]:
+        """Yield the reply as it is written, then the finished ``Response``.
 
         Args:
-          data: Raw image bytes.
+          request: What the model is asked.
 
-        Returns:
-          tokens: Approximate input token count (``width*height/750``).
-
-        References:
-          https://docs.anthropic.com/en/docs/build-with-claude/vision#calculate-image-costs
+        Yields:
+          event: Each ``TextChunk`` as the model writes it, then one ``Response``.
 
         """
-        dims = image.get_dimensions(data)
-        return dims[0] * dims[1] // 750 if dims is not None else 0
-
-    @override
-    async def actual_request_tokens(self, request: ModelRequest) -> int:
-        """Call the server's ``messages.count_tokens`` for an exact count."""
-        messages = _build_messages(
-            request,
-            self.limits.max_image_edge_px,
-            self.limits.max_image_bytes,
-            self._cache_ttl_wire(),
-        )
-        sdk = await self._provider.get_sdk()
-        kwargs = self._build_kwargs(request, messages)
-        # ``count_tokens`` accepts a subset of ``messages.create``'s kwargs.
-        for k in ("max_tokens", "temperature", "stop_sequences", "service_tier"):
-            kwargs.pop(k, None)
-        try:
-            result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType] -- SDK overload omits dynamic kwargs.  # ty: ignore[invalid-argument-type] -- SDK overload cannot model validated dynamic kwargs.  # pyrefly: ignore[bad-argument-type] -- SDK overload cannot model validated dynamic kwargs.
-        except anthropic.AuthenticationError:
-            await self._provider.handle_auth_error(failed=sdk)
-            sdk = await self._provider.get_sdk()
-            kwargs["system"] = self._provider.build_system(
-                request.system,
-                messages,
-                cache_ttl=self._cache_ttl_wire(),
-            )
-            result = await sdk.messages.count_tokens(**kwargs)  # pyright: ignore[reportArgumentType] -- SDK overload omits dynamic kwargs.  # ty: ignore[invalid-argument-type] -- SDK overload cannot model validated dynamic kwargs.  # pyrefly: ignore[bad-argument-type] -- SDK overload cannot model validated dynamic kwargs.
-        return result.input_tokens
-
-    def is_context_overflow(self, error: Exception) -> bool:
-        """Classify an error as a token-context-window overflow.
-
-        The body text is the canonical signal. The HTTP status code
-        carries less information: Anthropic returns 400 with body
-        ``"prompt is too long"``, but other status codes (uncommon but
-        observed in production) can carry the same body text. Trust the
-        body, ignore the status. The byte wire-limit (413
-        ``request_too_large``) is a different condition handled by
-        :meth:`is_request_too_large` and must NOT classify here -- a
-        larger-context model does not relieve the byte ceiling.
-
-        Args:
-          error: Exception raised by the provider call.
-
-        Returns:
-          overflow: True when ``error`` indicates token-context overflow.
-
-        """
-        if isinstance(error, PromptTooLongError):
-            return True
-        if not isinstance(error, anthropic.APIStatusError):
-            return False
-        # Exclude the byte wire-limit first, uniform with every other
-        # provider: a 413 byte error must route to byte-overflow recovery,
-        # not be mis-read as token overflow when its body (or a non-mapping
-        # body that falls to the substring path) incidentally names the
-        # context window.
-        if is_request_too_large(error_status_code(error), str(error)):
-            return False
-        return _is_prompt_too_long_text(str(error), error_body=_api_status_body(error))
-
-    @override
-    async def close(self) -> None:
-        """Release this model's own resources -- it holds none.
-
-        The SDK client belongs to the provider and is shared by every
-        model built from it (``sagent --advisor`` builds two). Closing it
-        from one model's teardown strands the others mid-call, so the
-        provider's owner closes it via ``close_sdk``.
-        """
-        return
-
-    @override
-    def is_retryable_provider_error(self, error: Exception) -> bool:
-        """Statusless Anthropic errors that still declare retryability.
-
-        Args:
-          error: Exception raised by the provider call.
-
-        Returns:
-          retryable: True when the response body declares a known
-              retryable ``type`` (e.g. ``overloaded_error``).
-
-        """
-        body = getattr(error, "body", None)
-        if not isinstance(body, Mapping):
-            return False
-        error_type = _anthropic_error_type(cast(Mapping[object, object], body))
-        return isinstance(error_type, str) and error_type in _RETRYABLE_BODY_TYPES
-
-    def _build_kwargs(
-        self,
-        request: ModelRequest,
-        messages: list[anthropic.types.MessageParam],
-    ) -> dict[str, object]:
-        """Build kwargs for the Anthropic messages API."""
-        budget = self.settings.thinking_budget
-        has_thinking = budget != "none"
-        max_tok = request.max_response_tokens or self.limits.max_response_tokens
-        kwargs: dict[str, object] = {
-            "model": self.capability.wire_model_id or self.capability.model_id,
-            "messages": messages,
-            "max_tokens": max_tok,
-            "temperature": request.temperature,
-            "system": self._provider.build_system(
-                request.system,
-                messages,
-                cache_ttl=self._cache_ttl_wire(),
-            ),
-        }
-        if budget == "auto":
-            kwargs["thinking"] = {"type": "adaptive"}
-            kwargs["temperature"] = 1.0
-        elif budget == "fixed":
-            # Anthropic counts thinking against ``max_tokens``, so the
-            # total must leave room for the visible reply. Double the
-            # request, but clamp to the model cap (opus-4-8's cap equals
-            # the API ceiling, where the raw double overflows). Split the
-            # total so ``budget_tokens`` stays strictly below ``max_tokens``,
-            # and never below the API's 1024-token minimum budget.
-            budget = max(min(max_tok, self.limits.max_response_tokens // 2), 1024)
-            total = min(budget + max_tok, self.limits.max_response_tokens)
-            kwargs["thinking"] = {
-                "type": "enabled",
-                "budget_tokens": budget,
-            }
-            kwargs["max_tokens"] = total
-            kwargs["temperature"] = 1.0
-        # "`display` works in both modes: set it alongside `type: "adaptive"` or
-        # `type: "enabled"`" -- and 4.7+ default to "omitted", so ``text`` must ask.
-        output = self.settings.thinking_output
-        if has_thinking and output != "none":
-            thinking = cast(dict[str, object], kwargs["thinking"])
-            thinking["display"] = "summarized" if output == "text" else "omitted"
-        if request.tools:
-            kwargs["tools"] = [
-                {
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": mutable(t.directive_schema),
-                }
-                for t in request.tools
-            ]
-        # A row advertising only ``none`` claims the model rejects
-        # ``output_config`` (the 4-5 generation); sending one earns a 400.
-        if self.settings.thinking_effort != "none":
-            kwargs["output_config"] = {"effort": self.settings.thinking_effort}
-        # The API's ``service_tier`` takes only ``auto`` / ``standard_only``; the
-        # catalog spells the latter ``default``. ``priority`` is fast mode, which
-        # travels as ``speed`` below -- sending it as a tier is not in the enum.
-        if self.settings.service_tier == "default":
-            kwargs["service_tier"] = "standard_only"
-        body = self._provider.extra_body(
-            has_thinking=has_thinking,
-            cache_cold=self._cache_cold,
-            trigger_tokens=(
-                self.limits.max_request_tokens // 2
-                if True in self.capability.manage_context_server_side
-                else 0
-            ),
-            tools=request.tools,
-        )
-        if body is not None:
-            kwargs["extra_body"] = body
-        headers = self._provider.extra_headers(self.capability, self.settings)
-        if any(m.get("role") == "system" for m in messages):
-            # A tool change rides a ``role: system`` message, which this beta adds.
-            betas = [b for b in headers.get("anthropic-beta", "").split(",") if b]
-            headers = {
-                **headers,
-                "anthropic-beta": ",".join([*betas, _INLINE_TOOLS_BETA]),
-            }
-        if self.settings.service_tier == "priority":
-            # ``speed`` is a first-class parameter only on the SDK's beta
-            # endpoints (``beta.messages.*``); the stream path here is a
-            # custom raw POST to ``/v1/messages`` (see ``_raw_message_stream``),
-            # so we inject ``speed`` via ``extra_body`` plus the research-
-            # preview beta header. That is the wire-equivalent of calling
-            # ``beta.messages.create(speed="fast", betas=[...])`` -- do not
-            # drop this injection without moving the stream onto the beta SDK.
-            body = cast(dict[str, object], kwargs.get("extra_body") or {})
-            body["speed"] = "fast"
-            kwargs["extra_body"] = body
-            betas = headers.get("anthropic-beta", "")
-            beta_list = [b for b in betas.split(",") if b]
-            if _FAST_MODE_BETA not in beta_list:
-                beta_list.append(_FAST_MODE_BETA)
-            headers = {**headers, "anthropic-beta": ",".join(beta_list)}
-        if headers:
-            kwargs["extra_headers"] = headers
-        return kwargs
-
-    @override
-    async def stream(
-        self,
-        request: ModelRequest,
-        publish: Callable[[RuntimeEvent], None] | None = None,
-    ) -> ModelResponse:
-        """Stream a request, calling ``publish`` per chunk event.
-
-        Args:
-          request: Fully-built model request.
-          publish: Called with a ``RuntimeEvent`` per chunk; ``None`` disables
-            streaming.
-
-        Returns:
-          response: Parsed ``ModelResponse`` with usage and cost filled in.
-
-        Raises:
-          PromptTooLongError: Server reports context overflow.
-
-        """
-        messages = _build_messages(
-            request,
-            self.limits.max_image_edge_px,
-            self.limits.max_image_bytes,
-            self._cache_ttl_wire(),
-        )
-        sdk = await self._provider.get_sdk()
-        kwargs = self._build_kwargs(request, messages)
-        extra_body = cast(Mapping[str, object], kwargs.get("extra_body") or {})
-        extra_headers = cast(Mapping[str, str], kwargs.get("extra_headers") or {})
-        debug_log.trace(
-            "api_call",
-            kind="stream",
-            model=self.capability.model_id,
-            roles=debug_log.role_sequence(messages),
-            n_messages=len(messages),
-            n_tools=len(request.tools),
-            thinking=kwargs.get("thinking"),
-            speed=extra_body.get("speed"),
-            fast_beta=_FAST_MODE_BETA in extra_headers.get("anthropic-beta", ""),
-        )
-        auth_retry = True
-        while True:
-            try:
-                raw = await _stream_impl(sdk, kwargs, publish)
-            except anthropic.AuthenticationError:
-                if not auth_retry:
-                    raise
-                auth_retry = False
-                await self._provider.handle_auth_error(failed=sdk)
-                sdk = await self._provider.get_sdk()
-                kwargs["system"] = self._provider.build_system(
-                    request.system,
-                    messages,
-                    cache_ttl=self._cache_ttl_wire(),
-                )
-                continue
-            except anthropic.APIStatusError as e:
-                # Do NOT wrap a status-bearing error as StreamingResponseNotReadError
-                # even when it chains a ResponseNotRead: that would turn a
-                # retryable 429/529 fatal. The status carries the retry signal;
-                # the unread-body crash is handled downstream in
-                # ``retry.py::_response_body_excerpt``. Let the error re-raise so
-                # the classifier sees the status.
-                raise_if_request_too_large(
-                    getattr(e, "status_code", None),
-                    str(e),
-                    cause=e,
-                )
-                _raise_if_policy_blocked(e)
-                if not _is_prompt_too_long_text(
-                    str(e),
-                    error_body=_api_status_body(e),
-                ):
-                    raise
-                debug_log.trace_error(
-                    "bad_request",
-                    kind="stream",
-                    model=self.capability.model_id,
-                    error=str(e),
-                    status=getattr(e, "status_code", None),
-                    request_id=_request_id(e),
-                    roles=debug_log.role_sequence(messages),
-                    messages=debug_log.summarize_messages(messages),
-                    tools=_tool_names_from_kwargs(kwargs),
-                    thinking=kwargs.get("thinking"),
-                    system_preview=str(kwargs.get("system", ""))[:400],
-                )
-                _raise_if_prompt_too_long(e)
-                raise
-            except Exception as e:
-                # A bare or non-status ``ResponseNotRead`` (directly or chained)
-                # is neither an APIStatusError (so the overflow branch misses
-                # it) nor a transport error (so the retry classifier deems it
-                # fatal); re-wrap into a user-facing error with remediation.
-                not_read = find_response_not_read(e)
-                if not_read is not None:
-                    raise StreamingResponseNotReadError(
-                        provider_name="Anthropic",
-                    ) from e
-                raise
-            break
-        resp = _parse_response(raw, self)
-        self._last_response_time = time.time()
-        # Clear stale usage when a path yields no headers, so ``usage_snapshot``
-        # never reports a prior request's windows for the current one.
-        headers = _response_headers_var.get()
-        self._last_usage = anthropic_usage(headers) if headers is not None else None
-        return resp
-
-    @override
-    def usage_snapshot(self) -> UsageSnapshot | None:
-        """Return normalized usage from the latest response's unified headers."""
-        return self._last_usage
-
-
-# Routes ``text_delta`` events to ``publish`` as ``ModelResponsePartial`` and
-# ``thinking_delta`` events as ``ModelResponseThinking`` as they arrive.
-async def _stream_impl(
-    sdk: anthropic.AsyncAnthropic,
-    kwargs: dict[str, object],
-    publish: Callable[[RuntimeEvent], None] | None,
-) -> anthropic.types.Message:
-    """Run the streaming call and return the final message."""
-    stream = await _raw_message_stream(sdk, kwargs)
-    async with AsyncMessageStream(stream, output_format=anthropic.NOT_GIVEN) as s:
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + _STREAM_IDLE_TIMEOUT
-        async with asyncio.timeout_at(deadline) as watchdog:
-            async for event in s:
-                watchdog.reschedule(
-                    loop.time() + _STREAM_IDLE_TIMEOUT,
-                )
-                if event.type != "content_block_delta" or publish is None:
-                    continue
-                if event.delta.type == "text_delta":
-                    publish(ModelResponsePartial(event.delta.text))
-                elif event.delta.type == "thinking_delta":
-                    publish(ModelResponseThinking(event.delta.thinking))
-            return await s.get_final_message()
-
-
-async def _raw_message_stream(
-    sdk: anthropic.AsyncAnthropic,
-    kwargs: dict[str, object],
-) -> AsyncStream[RawMessageStreamEvent]:
-    body = {
-        key: value
-        for key, value in kwargs.items()
-        if key not in {"extra_headers", "extra_body"}
-    }
-    body["stream"] = True
-    body = {
-        key: value
-        for key, value in body.items()
-        if not isinstance(value, anthropic.NotGiven)
-    }
-    options = _final_request_options(kwargs, body)
-    raw_sdk = cast(_AnthropicRawStreamSDK, sdk)
-    request = _build_raw_anthropic_request(raw_sdk, options)
-    response = await _send_raw_anthropic_request(raw_sdk, request)
-    if response.status_code >= 400:
-        await _raise_anthropic_status_error(raw_sdk, response)
-    _response_headers_var.set(response.headers)
-    # ``RawMessageStreamEvent`` is an ``Annotated`` discriminated-union alias, not
-    # a class, so it cannot satisfy the SDK's ``cast_to: type[_T]``. The SDK feeds
-    # its own streams the same alias (``_response._parse`` unwraps ``Annotated``
-    # before use), so narrowing this to one member class would break decoding.
-    stream: AsyncStream[RawMessageStreamEvent] = AsyncStream(  # pyright: ignore[reportUnknownVariableType] -- the Annotated `cast_to` leaves `_T` unsolved.
-        cast_to=anthropic.types.RawMessageStreamEvent,  # ty: ignore[invalid-argument-type] -- SDK alias is Annotated[...], not type[_T]; unwrapped at runtime.  # pyright: ignore[reportArgumentType] -- SDK alias is unwrapped by the SDK at runtime.  # pyrefly: ignore[bad-argument-type] -- SDK alias is Annotated[...], not type[_T]; unwrapped at runtime.
-        response=response,
-        client=sdk,
-    )
-    return stream
-
-
-def _final_request_options(
-    kwargs: dict[str, object],
-    body: dict[str, object],
-) -> FinalRequestOptions:
-    return anthropic._models.FinalRequestOptions.construct(  # noqa: SLF001 -- SDK request builder is the only way to preserve auth/default headers while reading stream errors safely.
-        method="post",
-        url="/v1/messages",
-        json_data=body,
-        headers=cast(Mapping[str, str], kwargs.get("extra_headers") or {}),
-        extra_json=cast(Mapping[str, object], kwargs.get("extra_body") or {}),
-    )
-
-
-def _build_raw_anthropic_request(
-    sdk: _AnthropicRawStreamSDK,
-    options: FinalRequestOptions,
-) -> httpx2.Request:
-    return sdk._build_request(options)  # noqa: SLF001 -- only the SDK request builder preserves auth/default headers for raw stream error handling.
-
-
-async def _send_raw_anthropic_request(
-    sdk: _AnthropicRawStreamSDK,
-    request: httpx2.Request,
-) -> httpx2.Response:
-    return await sdk._client.send(request, stream=True)  # noqa: SLF001 -- raw stream status handling must use the SDK-owned authenticated client.
-
-
-async def _raise_anthropic_status_error(
-    sdk: _AnthropicRawStreamSDK,
-    response: httpx2.Response,
-) -> None:
-    body_text = (await response.aread()).decode(errors="replace")
-    body: object = body_text
-    with contextlib.suppress(json.JSONDecodeError):
-        body = json_loads(body_text)
-    message = body_text or f"Error code: {response.status_code}"
-    raise sdk._make_status_error(message, body=body, response=response)  # noqa: SLF001 -- provider must preserve the SDK's status exception taxonomy.
-
-
-def _cache_mark(ttl: str) -> dict[str, str]:
-    """Build the ``cache_control`` marker for the requested TTL."""
-    if ttl == "1h":
-        return {"type": "ephemeral", "ttl": "1h"}
-    return {"type": "ephemeral"}
-
-
-# A trailing tool change (a ``role: system`` message) is not a turn: the mark goes on
-# the turn before it, which is what the next request repeats.
-def _add_cache_breakpoint(
-    messages: list[anthropic.types.MessageParam],
-    ttl: str = "5m",
-) -> None:
-    """Add cache_control to the last content block of the last turn."""
-    mark = _cache_mark(ttl)
-    at = max(i for i, m in enumerate(messages) if m.get("role") != "system")
-    last = messages[at]
-    raw_content: object = last.get("content")
-    if isinstance(raw_content, str):
-        messages[at] = cast(
-            anthropic.types.MessageParam,
-            {
-                **last,
-                "content": [
-                    {
-                        "type": "text",
-                        "text": raw_content,
-                        "cache_control": mark,
-                    },
-                ],
-            },
-        )
-    else:
-        blocks: list[object] = list(cast(list[object], raw_content))
-        for i in range(len(blocks) - 1, -1, -1):
-            btype = (
-                cast(dict[str, object], blocks[i]).get("type", "")
-                if isinstance(blocks[i], dict)
-                else ""
-            )
-            if btype not in ("thinking", "redacted_thinking"):
-                blocks[i] = {
-                    **cast(dict[str, object], blocks[i]),
-                    "cache_control": mark,
-                }
-                break
-        if blocks:
-            messages[at] = cast(
-                anthropic.types.MessageParam,
-                {**last, "content": blocks},
-            )
-
-
-# Tool-call IDs are remapped to ``toolu_N`` so history from other providers (OpenAI
-# ``fc_*``, etc.) is accepted by the Anthropic API.
-#
-# Anthropic uses alternating user/assistant messages with content blocks. Tool results
-# are content blocks inside user messages; consecutive tool results batch into one user
-# message.
-def _build_messages(
-    request: ModelRequest,
-    max_image_dim: int = 0,
-    max_image_bytes: int = 0,
-    cache_ttl: str = "5m",
-) -> list[anthropic.types.MessageParam]:
-    """Convert history entries to Anthropic message format."""
-    ids = IdRemapper("toolu_")
-    messages: list[anthropic.types.MessageParam] = []
-    pending_tool_results: list[dict[str, object]] = []
-    # The API rejects a request with more than 4 ``cache_control`` blocks. Each
-    # system block and the last message take one; the newest cache points get
-    # what is left, as the ones nearest the reusable end.
-    room = _SYSTEM_MARKS - min(
-        _SYSTEM_MARKS,
-        sum(1 for block in request.system if block),
-    )
-    points = [
-        e.id for e in request.messages if isinstance(e, UserMessage) and e.cache_point
-    ]
-    marked = set(points[len(points) - room :] if room > 0 else ())
-    offered = [t.name for t in request.tools]
-
-    for entry in request.messages:
-        if isinstance(entry, (AgentSendMessage, UserMessage)):
-            blocks = _user_blocks(entry, max_image_dim, max_image_bytes)
-            # Coalesce: when a user message lands mid-cohort (preempt
-            # with detached stubs), append its blocks into the same
-            # role=user wire message that holds the pending tool_results.
-            # Emitting a separate role=user message breaks Anthropic's
-            # strict alternation and triggers HTTP 400.
-            if isinstance(entry, UserMessage) and entry.id in marked and blocks:
-                blocks[-1] = {**blocks[-1], "cache_control": _cache_mark(cache_ttl)}
-            if pending_tool_results:
-                pending_tool_results.extend(blocks)
-                _flush_tool_results(messages, pending_tool_results)
-            elif blocks:
-                messages.append(
-                    cast(
-                        anthropic.types.MessageParam,
-                        {"role": "user", "content": blocks},
-                    ),
-                )
-            # Every schema stays in ``tools``; a gate change withdraws or restores
-            # tools from here on, so nothing before it changes and it stays cached.
-            # Materialization puts the offer on the user turn its system message folded into.
-            if isinstance(entry, UserMessage) and entry.offered_tools is not None:
-                now = [t.name for t in request.tools if t.name in entry.offered_tools]
-                change = _tool_changes(before=offered, after=now)
-                offered = now
-                if change:
-                    messages.append(
-                        cast(
-                            anthropic.types.MessageParam,
-                            {"role": "system", "content": change},
-                        ),
-                    )
-        elif isinstance(entry, AssistantMessage):
-            _flush_tool_results(messages, pending_tool_results)
-            blocks = _assistant_blocks(entry, ids)
-            if blocks:
-                messages.append(
-                    cast(
-                        anthropic.types.MessageParam,
-                        {"role": "assistant", "content": blocks},
-                    ),
-                )
-        else:
-            # TapeEvent is the closed union {UserMessage, AssistantMessage,
-            # ToolResult}; the two branches above consume the first two.
-            pending_tool_results.append(
-                _tool_result_block(entry, ids, max_image_dim, max_image_bytes),
-            )
-
-    _flush_tool_results(messages, pending_tool_results)
-
-    if messages:
-        _add_cache_breakpoint(messages, cache_ttl)
-
-    return messages
-
-
-def _tool_changes(*, before: list[str], after: list[str]) -> list[dict[str, object]]:
-    """Return the ``tool_removal``/``tool_addition`` blocks taking ``before`` to ``after``."""
-    changes: list[dict[str, object]] = []
-    for kind, names, other in (
-        ("tool_removal", before, after),
-        ("tool_addition", after, before),
-    ):
-        changes.extend(
-            {"type": kind, "tool": {"type": "tool_reference", "name": name}}
-            for name in names
-            if name not in other
-        )
-    return changes
-
-
-def _user_blocks(
-    entry: AgentSendMessage | UserMessage,
-    max_image_dim: int,
-    max_image_bytes: int,
-) -> list[dict[str, object]]:
-    """Build Anthropic content blocks from a UserMessage."""
-    blocks: list[dict[str, object]] = []
-    if entry.text:
-        blocks.append({"type": "text", "text": entry.text})
-    for att in entry.attachments:
-        block = _attachment_block(att, max_image_dim, max_image_bytes)
-        if block is not None:
-            blocks.append(block)
-    return blocks
-
-
-# Thinking blocks are emitted verbatim (the wire dict from ``block.model_dump()`` stored
-# on the message), with two exceptions:
-#
-# 1. A ``thinking`` block missing either its ``signature`` or its ``thinking`` body
-# cannot re-validate server-side: a signed block whose body is gone answers HTTP 400
-# ``thinking blocks ... cannot be modified``, and an unsigned one (Gemini and ACP
-# thoughts share the ``thinking`` type but carry no signature) answers
-# ``thinking.signature: Field required``. Such orphans are elided.
-# 2. Non-native thinking-block types (e.g. ``{"type":"reasoning"}`` from OpenAI /
-# Moonshot / MiniMax / OpenAI-subscription) cannot be translated and would trip
-# Anthropic's content-block validator after a cross- provider session switch. They are
-# dropped silently; the underlying reasoning is opaque to other providers and there is
-# no faithful re- encoding.
-#
-# ``redacted_thinking`` has no client-visible body to lose and always passes through.
-# Anthropic rejects assistant messages whose final block is thinking, so we append a
-# placeholder text block when no text or tool_use follows.
-def _assistant_blocks(
-    entry: AssistantMessage,
-    ids: IdRemapper,
-) -> list[dict[str, object]]:
-    """Build Anthropic content blocks from an AssistantMessage."""
-    blocks: list[dict[str, object]] = [
-        dict(tb)
-        for tb in entry.thinking_blocks
-        if (tb.get("type") in ("thinking", "redacted_thinking"))
-        and not _is_orphan_thinking(tb)
-    ]
-    if entry.text:
-        blocks.append({"type": "text", "text": entry.text})
-    blocks.extend(_tool_use_block(tc, ids) for tc in entry.tool_calls)
-    if blocks and blocks[-1].get("type") in ("thinking", "redacted_thinking"):
-        blocks.append({"type": "text", "text": "."})
-    return blocks
-
-
-def _is_orphan_thinking(block: Mapping[str, object]) -> bool:
-    """Check whether a ``thinking`` block lacks a signed body Anthropic can verify."""
-    return block.get("type") == "thinking" and not (
-        block.get("signature") and block.get("thinking")
-    )
-
-
-def _tool_use_block(tc: ToolCall, ids: IdRemapper) -> dict[str, object]:
-    """Wire-shape a ``ToolCall`` for Anthropic's tool_use content block."""
-    return {
-        "type": "tool_use",
-        "id": ids.map(tc.id),
-        "name": tc.name,
-        "input": dict(tc.args),
-    }
-
-
-# Image and PDF attachments inline as blocks alongside the text.
-def _tool_result_block(
-    entry: ToolResult,
-    ids: IdRemapper,
-    max_image_dim: int,
-    max_image_bytes: int,
-) -> dict[str, object]:
-    """Build a single tool_result block for a ToolResult."""
-    attachment_blocks = [
-        block
-        for att in entry.attachments
-        if (block := _attachment_block(att, max_image_dim, max_image_bytes)) is not None
-    ]
-    tool_result_content: object = entry.content
-    if attachment_blocks:
-        text_blocks = [{"type": "text", "text": entry.content}] if entry.content else []
-        tool_result_content = [*text_blocks, *attachment_blocks]
-    return {
-        "type": "tool_result",
-        "tool_use_id": ids.map(entry.call_id),
-        "content": tool_result_content,
-        "is_error": entry.is_error,
-    }
-
-
-def _attachment_block(
-    att: object,
-    max_image_dim: int,
-    max_image_bytes: int,
-) -> dict[str, object] | None:
-    """Translate a ``BytesMessage`` attachment to an Anthropic block."""
-    data = getattr(att, "data", None)
-    descriptor = getattr(att, "descriptor", "")
-    if not isinstance(data, bytes) or not isinstance(descriptor, str):
-        return None
-    is_image = descriptor in {"image/jpeg", "image/png", "image/gif", "image/webp"}
-    is_pdf = descriptor == "application/pdf"
-    if not (is_image or is_pdf):
-        logger.warning(
-            "Anthropic: skipping attachment with unsupported mime=%s",
-            descriptor,
-        )
-        return None
-    raw = data
-    mime = descriptor
-    if is_image:
-        raw, mime = image.resize(raw, max_dim=max_image_dim, max_bytes=max_image_bytes)
-    b64 = base64.b64encode(raw).decode()
-    return {
-        "type": "image" if is_image else "document",
-        "source": {
-            "type": "base64",
-            "media_type": mime,
-            "data": b64,
-        },
-    }
-
-
-def _flush_tool_results(
-    messages: list[anthropic.types.MessageParam],
-    pending: list[dict[str, object]],
-) -> None:
-    """Emit buffered tool_result blocks as a user message, then clear."""
-    if not pending:
-        return
-    messages.append(
-        cast(
-            anthropic.types.MessageParam,
-            {"role": "user", "content": list(pending)},
-        ),
-    )
-    pending.clear()
-
-
-# Filters template placeholders the model can echo back from the Anthropic server's
-# injected tool-use spec (e.g. ``$FUNCTION_NAME``, ``$TOOL_NAME``). The pattern is the
-# API's own tool-name grammar, so every name it accepted at registration (hyphenated
-# MCP names included) passes and ``$``-prefixed placeholders do not.
-def _is_valid_tool_name(name: str) -> bool:
-    """Return True when ``name`` matches Anthropic's tool-name grammar."""
-    return re.fullmatch(r"[A-Za-z0-9_-]{1,128}", name) is not None
-
-
-class _Usage(Protocol):
-    """The usage surface ``_parse_response`` reads off a raw message.
-
-    Read as a whole mapping: ``speed`` and the per-lifetime ``cache_creation``
-    split are SDK extras a typed attribute read would not reach.
-    """
-
-    def model_dump(self) -> dict[str, object]: ...
-
-
-class _RawMessage(Protocol):
-    """The raw-message surface ``_parse_response`` consumes.
-
-    Narrower than ``anthropic.types.Message`` on purpose: the SDK type
-    carries fields this function never touches, and declaring it forced
-    every test building a stand-in to suppress the argument type. Members
-    are read-only properties -- a bare attribute is read-WRITE and so
-    invariant, which the SDK's concrete `list`/`Literal` fields cannot
-    satisfy.
-    """
-
-    @property
-    def content(self) -> Sequence[object]: ...
-    @property
-    def usage(self) -> _Usage: ...
-    @property
-    def stop_reason(self) -> str | None: ...
-    @property
-    def stop_sequence(self) -> str | None: ...
-    @property
-    def id(self) -> str: ...
-
-
-def _parse_response(raw: _RawMessage, model: _AnthropicModel) -> ModelResponse:
-    """Convert Anthropic Message to ModelResponse with AssistantMessage."""
-    text_parts: list[str] = []
-    tool_calls: list[ToolCall] = []
-    thinking_blocks: list[Mapping[str, object]] = []
-    dropped_placeholder = False
-
-    for block in raw.content:
-        if isinstance(block, anthropic.types.TextBlock):
-            text_parts.append(block.text)
-        elif isinstance(block, anthropic.types.ToolUseBlock):
-            if not _is_valid_tool_name(block.name):
-                # Anthropic's API injects its tool-use spec (containing
-                # ``$FUNCTION_NAME`` etc.) into the model's hidden
-                # context when tools are registered. If the user asks
-                # the model to dump its context, the model echoes the
-                # spec verbatim and the server re-parses that echo as a
-                # real ``tool_use`` block. Without this filter the
-                # unmatched call leaks to ``_run_tool_and_post``
-                # ("Unknown tool") and the orphan tool_use poisons the
-                # next request (Anthropic HTTP 400).
-                logger.warning(
-                    "anthropic: skipping tool_use with placeholder name %r",
-                    block.name,
-                )
-                dropped_placeholder = True
-                continue
-            tool_calls.append(
-                ToolCall(
-                    id=block.id,
-                    name=block.name,
-                    args=cast(Mapping[str, object], dict(block.input)),
-                ),
-            )
-        elif isinstance(
-            block,
-            anthropic.types.ThinkingBlock | anthropic.types.RedactedThinkingBlock,
+        reader = wire.StreamReader(capability=self.capability, settings=self.settings)
+        body, betas = self._encode(request)
+        async for event in self.provider.events(
+            body,
+            betas=betas,
+            headers=self.provider.headers(request),
         ):
-            thinking_blocks.append(block.model_dump())
+            chunk = reader.feed(event)
+            if chunk is not None:
+                yield chunk
+        self._answered_at = time.time()
+        yield reader.response()
 
-    message = AssistantMessage(
-        text="".join(text_parts),
-        thinking_blocks=tuple(thinking_blocks),
-        tool_calls=tuple(tool_calls),
-    )
+    def _encode(self, request: Request) -> tuple[dict[str, object], list[str]]:
+        idle_sec = time.time() - self._answered_at
+        return wire.encode(
+            request,
+            capability=self.capability,
+            settings=self.settings,
+            system=self.provider.system(request, settings=self.settings),
+            cache_expired=self._answered_at > 0.0
+            and idle_sec > self.settings.cache_ttl_sec,
+        )
 
-    usage = raw.usage.model_dump()
-    tokens = usage_tokens(usage, cache_ttl_sec=model.settings.cache_ttl_sec)
-    # Server-authoritative: a request that opted into fast mode but fell
-    # back to standard speed reports ``usage.speed == "standard"`` and is
-    # billed at standard rates.
-    served_fast = usage.get("speed") == "fast"
-    spend = model.capability.prices.cost(
-        tokens,
-        service_tier="priority" if served_fast else "auto",
-        at=datetime.now(UTC).date(),
-    )
-    debug_log.trace(
-        "api_response",
-        kind="anthropic",
-        usage_speed=usage.get("speed"),
-        billed_fast=served_fast,
-        input_cost=spend.total - spend.response,
-        output_cost=spend.response,
-    )
-    return ModelResponse(
-        message=message,
-        tokens=tokens,
-        stop_reason=_reconcile_tool_use(
-            normalize_stop_reason(
-                raw.stop_reason,
-                kind="anthropic",
-                has_tool_use=bool(tool_calls),
-            ),
-            dropped_all_calls=dropped_placeholder and not tool_calls,
-        ),
-        stop_sequence=raw.stop_sequence,
-        message_id=raw.id or "",
-        request_id=getattr(raw, "_request_id", "") or "",
-        spend=spend,
+
+@cache
+def models(section: str) -> ModelTable:
+    """Return the models one section of the Anthropic catalog serves."""
+    return ModelTable.from_yaml(
+        files("sagent.providers.anthropic") / "anthropic.yaml",
+        provider=section,
     )
 
 
-# A turn whose every ``tool_use`` was a filtered placeholder still reports
-# ``tool_use``; left as is, the retry layer reads "tool use announced, no calls"
-# as a dropped stream and resends the identical request until its cap.
-def _reconcile_tool_use(reason: str, *, dropped_all_calls: bool) -> str:
-    """Demote ``model_tool_use`` to ``model_finished`` when no call survived."""
-    if dropped_all_calls and reason == "model_tool_use":
-        return "model_finished"
-    return reason
+def _error_body(text: str) -> object:
+    """Return an error reply's JSON, or its text when it is not JSON."""
+    # A proxy's error page, or a reply cut off mid-body, may start like JSON.
+    try:
+        return json_loads(text)
+    except ValueError:
+        return text
