@@ -33,8 +33,8 @@ from treekle import from_plain, json_dumps, json_loads, mutable
 
 from sagent.model import image
 from sagent.model.exceptions import ContextOverflowError, DisconnectedError
+from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
-from sagent.providers.anthropic.api import models
 from sagent.providers.anthropic.login import ClaudeLogin
 from sagent.providers.resources import SharedResources
 from sagent.session.types import (
@@ -59,7 +59,6 @@ if TYPE_CHECKING:
     from sagent.model.capability import (
         ModelCapability,
         ModelLimits,
-        ModelSettingName,
         ModelSettings,
     )
     from sagent.model.types import Request, Response, TextChunk
@@ -92,9 +91,6 @@ class AnthropicCLI(AsyncResource):
 
     section: ClassVar[str] = "anthropic-cli"
     """The catalog section whose models and settings this provider serves."""
-
-    sends: ClassVar[frozenset[ModelSettingName]] = frozenset({"thinking_effort"})
-    """The settings ``claude`` takes on its command line; the rest are its own."""
 
     def __init__(
         self,
@@ -143,7 +139,7 @@ class AnthropicCLI(AsyncResource):
           table: Its section's models, offering only the settings it sends.
 
         """
-        return models(cls.section, sends=cls.sends)
+        return anthropic.models(cls.section)
 
     @override
     async def aclose(self) -> None:

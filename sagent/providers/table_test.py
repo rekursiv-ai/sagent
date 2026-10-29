@@ -17,7 +17,6 @@ import yaml
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
-    ModelSettingName,
     ModelSettings,
     model_setting_names,
 )
@@ -552,6 +551,7 @@ def _write(
         "thinking": _THINKING,
     }
     served = {
+        "sends": list(model_setting_names()),
         "models": {str(model["model_id"]): None for model in models},
         **vendor,
     }
@@ -569,13 +569,8 @@ def _model(model_id: str = "example-1.0", **fields: object) -> dict[str, object]
     return {"model_id": model_id, "prices": [dict(_FREE)]} | fields
 
 
-def _load(
-    path: Path,
-    *,
-    provider: str = "vendor",
-    sends: frozenset[ModelSettingName] = frozenset(model_setting_names()),
-) -> ModelTable:
-    return ModelTable.from_yaml(path, provider=provider, sends=sends)
+def _load(path: Path, *, provider: str = "vendor") -> ModelTable:
+    return ModelTable.from_yaml(path, provider=provider)
 
 
 def test_a_setting_the_provider_does_not_send_offers_only_its_default(
@@ -594,8 +589,9 @@ def test_a_setting_the_provider_does_not_send_offers_only_its_default(
             thinking_budget_default="auto",
             thinking_output_default="text",
         ),
+        vendor={"sends": ["thinking_budget"]},
     )
-    row = _load(path, sends=frozenset({"thinking_budget"}))["example"]
+    row = _load(path)["example"]
     assert (row.thinking_effort, row.thinking_budget, row.thinking_output) == (
         {"high"},
         {"none", "auto"},
@@ -638,6 +634,8 @@ models:
          cache_read: 0.0}
 providers:
   vendor:
+    sends: [thinking_effort, thinking_budget, thinking_output, service_tier,
+            cache_ttl_sec, manage_context_server_side]
     retries_internally: true
     thinking: {effort: [none, low]}
     models:
@@ -976,8 +974,9 @@ def test_a_card_given_twice_is_rejected(tmp_path: Path) -> None:
         ("models: &rows []\nprofiles: {bad: {context: *rows}}", _exactly(_ALIASES)),
         ("", "CatalogDocument"),
         ("models: []", "no provider 'vendor'"),
+        ("models: []\nproviders: {vendor: {}}", "does not say what it sends"),
         (
-            "models: []\nproviders: {vendor: {models: {ghost-1.0: }}}",
+            "models: []\nproviders: {vendor: {sends: [], models: {ghost-1.0: }}}",
             r"lists unknown models: \['ghost-1.0'\]",
         ),
     ],
@@ -1018,7 +1017,7 @@ def test_an_alias_inside_a_list_is_rejected(tmp_path: Path) -> None:
 
 def test_a_section_listing_no_models_serves_none(tmp_path: Path) -> None:
     path = tmp_path / "x.yaml"
-    path.write_text("models: []\nproviders: {vendor: {}}")
+    path.write_text("models: []\nproviders: {vendor: {sends: []}}")
     assert len(_load(path)) == 0
 
 
@@ -1027,7 +1026,7 @@ def test_a_catalog_without_thinking_offers_none(tmp_path: Path) -> None:
     path.write_text(
         "models:\n- {model_id: a-1.0, limits: {}, prices: [{request: 0,"
         " response: 0, cache_write: 0, cache_write_1h: 0, cache_read: 0}]}\n"
-        "providers: {vendor: {models: {a-1.0: }}}\n",
+        "providers: {vendor: {sends: [], models: {a-1.0: }}}\n",
     )
     row = _load(path)["a"]
     assert (row.thinking_effort, row.thinking_budget, row.thinking_output) == (

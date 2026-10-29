@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 
 import os
 import subprocess
@@ -350,7 +350,7 @@ def _tier(
 @pytest.fixture(params=sorted(TIERS))
 def name(request: pytest.FixtureRequest) -> str:
     """Each tier."""
-    return str(request.param)
+    return cast(str, request.param)
 
 
 def test_an_unsharded_local_tier_selects_with_testmon(

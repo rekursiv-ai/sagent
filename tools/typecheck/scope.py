@@ -7,24 +7,40 @@ excludes it, so a gate that names files must drop excluded ones itself.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, NotRequired, TypedDict, cast
 
 import re
 import tomllib
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable
     from pathlib import Path
 
 
 def excludes(root: Path) -> tuple[str, ...]:
-    """Return the project's exclude globs, from ``root/pyproject.toml``."""
+    """Return the project's exclude globs, from ``root/pyproject.toml``.
+
+    Args:
+      root: Directory holding the ``pyproject.toml``.
+
+    Returns:
+      excludes: ``[tool.pyrefly] project-excludes``; empty without the file.
+
+    """
     path = root / "pyproject.toml"
     if not path.is_file():
         return ()
-    tool = tomllib.loads(path.read_text()).get("tool", {})
-    return tuple(map(str, tool.get("pyrefly", {}).get("project-excludes", ())))
+    # Not ``from_plain``: every export ships this module, and not every export
+    # depends on treekle.
+    pyproject = cast(_Pyproject, tomllib.loads(path.read_text()))
+    return tuple(
+        map(
+            str,
+            pyproject.get("tool", {}).get("pyrefly", {}).get("project-excludes", ()),
+        ),
+    )
 
 
 def kept(paths: Iterable[str], *, excludes: Sequence[str]) -> list[str]:
@@ -59,3 +75,14 @@ def _glob(pattern: str) -> re.Pattern[str]:
         )
         + r"\Z",
     )
+
+
+_Pyrefly = TypedDict("_Pyrefly", {"project-excludes": NotRequired[Sequence[str]]})
+
+
+class _Tool(TypedDict):
+    pyrefly: NotRequired[_Pyrefly]
+
+
+class _Pyproject(TypedDict):
+    tool: NotRequired[_Tool]

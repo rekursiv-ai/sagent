@@ -856,6 +856,7 @@ models:
 # model's own window, and no tier but priority beyond the default.
 providers:
   openai:
+    sends: [thinking_effort, thinking_output, service_tier]
     retries_internally: true
     models:
       astra-6.0:
@@ -880,6 +881,7 @@ providers:
       gpt-omni-4.0:
       gpt-omni-mini-4.0:
   openai-sub:
+    sends: [thinking_effort, thinking_output, service_tier]
     retries_internally: true
     account_auth: true
     service_tier: [auto, priority]

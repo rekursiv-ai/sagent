@@ -21,8 +21,6 @@ Typical usage example:
 
 from __future__ import annotations
 
-from functools import cache
-from importlib.resources import files
 from typing import TYPE_CHECKING, ClassVar, Protocol, override
 
 import asyncio
@@ -32,9 +30,9 @@ import os
 from treekle import json_dumps, json_loads
 
 from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
+from sagent.providers import table
 from sagent.providers.openai import chat, token_count, wire
 from sagent.providers.resources import SharedResources
-from sagent.providers.table import ModelTable
 from sagent.types import AsyncResource
 
 
@@ -45,10 +43,10 @@ if TYPE_CHECKING:
 
     from sagent.model.capability import (
         ModelCapability,
-        ModelSettingName,
         ModelSettings,
     )
     from sagent.model.types import Request, Response, TextChunk
+    from sagent.providers.table import ModelTable
     from sagent.providers.types import ProviderSharedResources, UsageWindow
     from sagent.session.types import Attachment
 else:
@@ -61,7 +59,6 @@ __all__ = [
     "OpenAICompatible",
     "OpenAIModel",
     "Reader",
-    "models",
 ]
 
 
@@ -92,11 +89,6 @@ class OpenAICompatible(AsyncResource):
 
     section: ClassVar[str] = "openai-compatible"
     """The catalog section whose models and settings this provider serves."""
-
-    sends: ClassVar[frozenset[ModelSettingName]] = frozenset(
-        {"thinking_effort", "service_tier"},
-    )
-    """The settings ``encode`` puts in a request; the rest are the vendor's."""
 
     package: ClassVar[str] = ""
     """The package holding the catalog document."""
@@ -169,12 +161,7 @@ class OpenAICompatible(AsyncResource):
           table: Its section's models, offering only the settings it sends.
 
         """
-        return models(
-            cls.package,
-            document=cls.document,
-            section=cls.section,
-            sends=cls.sends,
-        )
+        return table.models(cls.package, cls.document, provider=cls.section)
 
     async def endpoint(self) -> str:
         """Return the endpoint to reach, up to and including its version."""
@@ -399,33 +386,6 @@ class OpenAIModel(AsyncResource):
             if chunk is not None:
                 yield chunk
         yield reader.response()
-
-
-@cache
-def models(
-    package: str,
-    *,
-    document: str,
-    section: str,
-    sends: frozenset[ModelSettingName],
-) -> ModelTable:
-    """Return the models one section of a vendor's catalog document serves.
-
-    Args:
-      package: The package holding the document.
-      document: The document's file name.
-      section: The section, as ``openai-sub``.
-      sends: The settings its provider's requests carry.
-
-    Returns:
-      table: Its models, each other setting fixed at what the vendor does.
-
-    """
-    return ModelTable.from_yaml(
-        files(package) / document,
-        provider=section,
-        sends=sends,
-    )
 
 
 # A body cut short or not JSON at all is still an error of its status, so it is

@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING
 
 import gc
 
+from coverage.exceptions import DataError
+
 import coverage
 import pytest
 
@@ -132,7 +134,7 @@ def test_an_unreadable_data_file_fails_and_leaves_nothing_open(
     (tmp_path / ".coverage").write_bytes(b"not a database")
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(coverage.exceptions.DataError):
+    with pytest.raises(DataError):
         coverage_summary.shortfall(["a.py"])
     gc.collect()
 

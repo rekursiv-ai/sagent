@@ -20,7 +20,6 @@ from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
-    from sagent.model.capability import ModelSettingName
     from sagent.model.types import Request
     from sagent.providers.openai.compat import OpenAIModel
 
@@ -49,9 +48,6 @@ class DashScope(OpenAICompatible):
     url: ClassVar[str] = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     key_variable: ClassVar[str] = "DASHSCOPE_API_KEY"
     reasoning_field: ClassVar[str] = "reasoning_content"
-    sends: ClassVar[frozenset[ModelSettingName]] = frozenset(
-        {"thinking_effort", "thinking_budget", "service_tier"},
-    )
 
     completion_cap: ClassVar[frozenset[str]] = frozenset(
         {

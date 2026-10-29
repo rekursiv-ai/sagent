@@ -20,7 +20,6 @@ from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
-    from sagent.model.capability import ModelSettingName
     from sagent.model.types import Request
     from sagent.providers.openai.compat import OpenAIModel, Reader
 
@@ -48,9 +47,6 @@ class OpenAI(OpenAICompatible):
     url: ClassVar[str] = "https://api.openai.com/v1"
     key_variable: ClassVar[str] = "OPENAI_API_KEY"
     path: ClassVar[str] = "/responses"
-    sends: ClassVar[frozenset[ModelSettingName]] = frozenset(
-        {"thinking_effort", "thinking_output", "service_tier"},
-    )
 
     @override
     def encode(self, request: Request, *, model: OpenAIModel) -> dict[str, object]:

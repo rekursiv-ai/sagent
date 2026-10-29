@@ -16,7 +16,6 @@ from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
-    from sagent.model.capability import ModelSettingName
     from sagent.model.types import Request
     from sagent.providers.openai.compat import OpenAIModel
 
@@ -44,9 +43,6 @@ class Moonshot(OpenAICompatible):
     url: ClassVar[str] = "https://api.moonshot.ai/v1"
     key_variable: ClassVar[str] = "MOONSHOT_API_KEY"
     reasoning_field: ClassVar[str] = "reasoning_content"
-    sends: ClassVar[frozenset[ModelSettingName]] = frozenset(
-        {"thinking_effort", "thinking_budget", "service_tier"},
-    )
     # K3 fixes its sampler and says to omit it; K2.x says the temperature
     # cannot be changed and is not to be passed.
     temperature: ClassVar[float | None] = None

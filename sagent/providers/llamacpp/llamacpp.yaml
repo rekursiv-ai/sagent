@@ -67,6 +67,7 @@ models:
 
 providers:
   llamacpp:
+    sends: [thinking_effort, service_tier]
     retries_internally: true
     service_tier: [auto]
     manage_context_server_side: [false]
