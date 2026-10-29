@@ -317,7 +317,8 @@ def _wheel_with_script(tmp_path: Path, cli: str, *, extras: tuple[str, ...]) -> 
 
 def _exec(tmp_path: Path, code: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """Run ``code`` with ``tmp_path``'s ``demo`` package, as the installed wheel's."""
-    monkeypatch.syspath_prepend(str(tmp_path))
+    # Not ``syspath_prepend``: pytest leaves its parameter untyped.
+    monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
     # Another test's ``demo`` must not answer for this one's.
     for name in [name for name in sys.modules if name.split(".")[0] == "demo"]:
         monkeypatch.delitem(sys.modules, name)

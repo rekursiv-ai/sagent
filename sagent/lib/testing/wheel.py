@@ -291,9 +291,10 @@ def _pyproject(project: Path) -> dict[str, object]:
 
 def _table(document: dict[str, object], *keys: str) -> dict[str, object]:
     """Return the table at ``keys``, or an empty one where any is absent."""
-    table: object = document
+    table = document
     for key in keys:
-        table = (
-            cast(dict[str, object], table).get(key) if isinstance(table, dict) else None
-        )
-    return cast(dict[str, object], table) if isinstance(table, dict) else {}
+        child = table.get(key)
+        if not isinstance(child, dict):
+            return {}
+        table = cast(dict[str, object], child)
+    return table
