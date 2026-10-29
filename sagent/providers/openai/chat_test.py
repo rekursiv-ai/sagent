@@ -13,13 +13,15 @@ from treekle import mutable
 
 import pytest
 
-from sagent.model.capability import ModelLimits, ModelSettings
+from sagent.model.capability import ModelLimits, ModelSettings, model_setting_names
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import DisconnectedError, RateLimitedError
 from sagent.model.types import Request, TextChunk
 from sagent.providers.catalog import choose
+from sagent.providers.dashscope.api import DashScope
+from sagent.providers.minimax.api import MiniMax
+from sagent.providers.moonshot.api import Moonshot
 from sagent.providers.openai import chat, wire
-from sagent.providers.openai.compat import models
 from sagent.session.types import (
     AssistantMessage,
     Attachment,
@@ -38,11 +40,7 @@ if TYPE_CHECKING:
 
 def _model(name: str) -> tuple[ModelCapability, ModelSettings]:
     """Return a DashScope row: a vendor whose rows span every thinking shape."""
-    table = models(
-        "sagent.providers.dashscope",
-        document="dashscope.yaml",
-        section="dashscope",
-    )
+    table = DashScope.models()
     return table.resolve(name)
 
 
@@ -55,8 +53,10 @@ def _encode(
     **choices: object,
 ) -> dict[str, object]:
     capability, settings = _model(name)
-    for field, value in choices.items():
-        settings = choose(settings, field, value)
+    for field in model_setting_names():
+        if field in choices:
+            settings = choose(settings, field, choices.pop(field))
+    assert not choices, f"no such setting: {sorted(choices)}"
     capability.check(settings)
     return chat.encode(
         request,
@@ -251,11 +251,7 @@ def test_encode_offers_the_tools_and_names_a_tier_only_when_chosen() -> None:
     ]
     assert "reasoning_effort" not in body
     assert "service_tier" not in body
-    capability, settings = models(
-        "sagent.providers.minimax",
-        document="minimax.yaml",
-        section="minimax",
-    ).resolve("minimax-3.0")
+    capability, settings = MiniMax.models().resolve("minimax-3.0")
     settings = replace(settings, service_tier="priority")
     body = chat.encode(
         Request(),
@@ -303,6 +299,19 @@ def test_feed_returns_the_text_and_reasoning_as_they_arrive() -> None:
         AssistantMessage(content="Hi there"),
     )
     assert response.stop_reason == "end_turn"
+
+
+@pytest.mark.parametrize("provider", [DashScope, MiniMax, Moonshot])
+def test_a_vendor_that_streams_reasoning_unasked_says_its_output_is_text(
+    provider: type[DashScope | MiniMax | Moonshot],
+) -> None:
+    """Its reasoning is read and kept whatever is chosen: ``none`` would be a label."""
+    shown = {
+        name: row.thinking_output
+        for name, row in provider.models().items()
+        if row.thinking_output != {"none"} or row.thinking_budget != {"none"}
+    }
+    assert set(shown.values()) == {frozenset({"text"})}
 
 
 def test_a_server_that_streams_no_reasoning_has_its_field_ignored() -> None:

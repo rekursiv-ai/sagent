@@ -34,7 +34,7 @@ from sagent.model.exceptions import (
 from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.model.types import Request, TextChunk
 from sagent.providers.anthropic import wire
-from sagent.providers.anthropic.api import models
+from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.types import UsageWindow
 from sagent.session.types import (
     AgentToAgentMessage,
@@ -68,9 +68,9 @@ if TYPE_CHECKING:
 def _model(
     name: str = "opus-5.5",
     *,
-    section: str = "anthropic",
+    provider: type[Anthropic] = Anthropic,
 ) -> tuple[ModelCapability, ModelSettings]:
-    return models(section).resolve(name)
+    return provider.models().resolve(name)
 
 
 def _encode(

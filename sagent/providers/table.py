@@ -2,7 +2,7 @@
 
 Typical usage example:
 
-  table = ModelTable.from_yaml(path, provider="anthropic")
+  table = ModelTable.from_yaml(path, provider="anthropic", sends=Anthropic.sends)
   table["opus-5.5"]                         # Its exact name.
   table["claude-opus-5-5"]                  # The vendor's id.
   table["default"]                          # A role: best, default, everyday, utility.
@@ -30,6 +30,7 @@ import yaml
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
+    ModelSettingName,
     ModelSettings,
     ThinkingBudget,
     ThinkingEffort,
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ModelTable",
     "ModelTags",
+    "choice_field",
     "chosen",
     "spelled",
 ]
@@ -101,7 +103,13 @@ class ModelTable(Mapping[str, ModelCapability]):
                 raise ValueError(f"Role {role!r} names no model: {target!r}.")
 
     @classmethod
-    def from_yaml(cls, path: Traversable, *, provider: str) -> Self:
+    def from_yaml(
+        cls,
+        path: Traversable,
+        *,
+        provider: str,
+        sends: frozenset[ModelSettingName],
+    ) -> Self:
         """Read the models one provider serves from a vendor's catalog document.
 
         Layers, lowest first: the reference row, the model's profile, the
@@ -113,6 +121,9 @@ class ModelTable(Mapping[str, ModelCapability]):
         Args:
           path: The vendor's YAML document.
           provider: The name of a section under ``providers``.
+          sends: The settings the provider's requests carry. Each other one
+            offers only the row's default, what the vendor does unasked: a
+            choice nothing sends would change only the label.
 
         Returns:
           table: The section's models, validated, and the document's roles.
@@ -139,11 +150,14 @@ class ModelTable(Mapping[str, ModelCapability]):
         if unknown := sorted(set(listed) - set(ids)):
             raise ValueError(f"Provider {provider!r} lists unknown models: {unknown}.")
         rows = tuple(
-            _model(
-                raw,
-                document=document,
-                section=section,
-                entry=listed[model_id] or {},
+            _unsent_fixed(
+                _model(
+                    raw,
+                    document=document,
+                    section=section,
+                    entry=listed[model_id] or {},
+                ),
+                sends=sends,
             )
             for raw, model_id in zip(document.models, ids, strict=True)
             if model_id in listed
@@ -302,9 +316,13 @@ class ModelTags:
                 )
             if choice in choices:
                 raise UnsupportedTagError(f"{line!r} names {choice!r} twice")
-            if f"thinking_{choice}" not in _choices() and choice not in _choices():
+            try:
+                choice_field(choice)
+            except KeyError:
                 names = ", ".join(c.removeprefix("thinking_") for c in _choices())
-                raise UnsupportedTagError(f"{choice} is no choice; give {names}")
+                raise UnsupportedTagError(
+                    f"{choice} is no choice; give {names}",
+                ) from None
             choices[choice] = value
         model, *words = spec.split("+")
         kept: list[str] = [model]
@@ -409,7 +427,26 @@ class ModelTags:
         )
 
 
-def chosen(settings: ModelSettings, field: str) -> object:
+def choice_field(choice: str) -> ModelSettingName:
+    """Return the field a line's ``CHOICE=VALUE`` sets: ``budget`` is ``thinking_budget``.
+
+    Args:
+      choice: The choice as a line spells it, with or without ``thinking_``.
+
+    Returns:
+      field: The ``ModelSettings`` field it sets.
+
+    Raises:
+      KeyError: A line spells no such choice.
+
+    """
+    for name in _choices():
+        if choice in (name, name.removeprefix("thinking_")):
+            return name
+    raise KeyError(choice)
+
+
+def chosen(settings: ModelSettings, field: ModelSettingName) -> object:
     """Return the choice ``settings`` made on ``field``.
 
     Args:
@@ -444,7 +481,7 @@ def spelled(value: object) -> str:
     return str(value)
 
 
-def _choices() -> tuple[str, ...]:
+def _choices() -> tuple[ModelSettingName, ...]:
     """Return the fields a line spells after its tags, as ``CHOICE=VALUE``."""
     return (
         "thinking_budget",
@@ -560,6 +597,9 @@ class _CapabilityProfile:
     thinking_budget_default: ThinkingBudget | None = None
     """Whether the vendor thinks when told nothing; ``None`` is the lowest offered."""
 
+    thinking_output_default: ThinkingOutput | None = None
+    """What of the reasoning the vendor returns unasked; ``None`` is the lowest offered."""
+
     context_size_default: str | int = "fullcontext"
     """The size a bare id starts at: ``fullcontext`` and the other names, or a count."""
 
@@ -658,7 +698,10 @@ def _model(
             thinking_output=_lowest(
                 "thinking_output",
                 row.thinking.output,
-                literal_members(ThinkingOutput),
+                _default_first(
+                    row.thinking_output_default,
+                    literal_members(ThinkingOutput),
+                ),
             ),
             service_tier=tier,
             cache_ttl_sec=_lowest(
@@ -673,6 +716,36 @@ def _model(
             ),
             context_size=prices[tier, size],
         ),
+    )
+
+
+def _unsent_fixed(
+    capability: ModelCapability,
+    *,
+    sends: frozenset[ModelSettingName],
+) -> ModelCapability:
+    """Return ``capability`` offering only its default on each setting not in ``sends``."""
+    d = capability.default
+    return replace(
+        capability,
+        thinking_effort=capability.thinking_effort
+        if "thinking_effort" in sends
+        else frozenset({d.thinking_effort}),
+        thinking_budget=capability.thinking_budget
+        if "thinking_budget" in sends
+        else frozenset({d.thinking_budget}),
+        thinking_output=capability.thinking_output
+        if "thinking_output" in sends
+        else frozenset({d.thinking_output}),
+        service_tier=capability.service_tier
+        if "service_tier" in sends
+        else frozenset({d.service_tier}),
+        cache_ttl_sec=capability.cache_ttl_sec
+        if "cache_ttl_sec" in sends
+        else frozenset({d.cache_ttl_sec}),
+        manage_context_server_side=capability.manage_context_server_side
+        if "manage_context_server_side" in sends
+        else frozenset({d.manage_context_server_side}),
     )
 
 

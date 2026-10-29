@@ -13,7 +13,7 @@ from treekle import mutable
 
 import pytest
 
-from sagent.model.capability import ModelLimits, ModelSettings
+from sagent.model.capability import ModelLimits, ModelSettings, model_setting_names
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import (
     DisconnectedError,
@@ -23,7 +23,7 @@ from sagent.model.exceptions import (
 from sagent.model.types import Request, TextChunk
 from sagent.providers.catalog import choose
 from sagent.providers.openai import responses, wire
-from sagent.providers.openai.compat import models
+from sagent.providers.openai.api import OpenAI
 from sagent.session.types import (
     AssistantMessage,
     Attachment,
@@ -45,11 +45,7 @@ if TYPE_CHECKING:
 
 
 def _model(name: str = "luna-6.0") -> tuple[ModelCapability, ModelSettings]:
-    table = models(
-        "sagent.providers.openai",
-        document="openai.yaml",
-        section="openai",
-    )
+    table = OpenAI.models()
     return table.resolve(name)
 
 
@@ -65,8 +61,10 @@ def _encode(
     **choices: object,
 ) -> dict[str, object]:
     capability, settings = _model(name)
-    for field, value in choices.items():
-        settings = choose(settings, field, value)
+    for field in model_setting_names():
+        if field in choices:
+            settings = choose(settings, field, choices.pop(field))
+    assert not choices, f"no such setting: {sorted(choices)}"
     capability.check(settings)
     return responses.encode(request, capability=capability, settings=settings)
 

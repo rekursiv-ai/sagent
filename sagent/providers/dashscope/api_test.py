@@ -6,7 +6,7 @@ from dataclasses import replace
 
 import pytest
 
-from sagent.model.capability import ModelLimits
+from sagent.model.capability import ModelLimits, model_setting_names
 from sagent.model.exceptions import AuthError, UnknownModelError
 from sagent.model.types import Request
 from sagent.providers.catalog import choose
@@ -21,8 +21,10 @@ _REQUEST = Request(records=(UserMessage(content="hi"),))
 def _body(model_id: str, **choices: object) -> dict[str, object]:
     dashscope = DashScope(api_key="k")
     model = dashscope[model_id]
-    for field, value in choices.items():
-        model.settings = choose(model.settings, field, value)
+    for field in model_setting_names():
+        if field in choices:
+            model.settings = choose(model.settings, field, choices.pop(field))
+    assert not choices, f"no such setting: {sorted(choices)}"
     return dashscope.encode(_REQUEST, model=model)
 
 

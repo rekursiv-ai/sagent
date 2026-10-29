@@ -23,6 +23,7 @@ import re
 
 from sagent.model.capability import (
     ModelCapability,
+    ModelSettingName,
     ModelSettings,
     ThinkingBudget,
     ThinkingEffort,
@@ -46,7 +47,7 @@ from sagent.providers.openai.login import CodexLogin
 from sagent.providers.openai.sub import OpenAISub
 from sagent.providers.resources import SharedResources, close_all
 from sagent.providers.selfhosted.server import SelfHosted
-from sagent.providers.table import ModelTags, spelled
+from sagent.providers.table import ModelTags, choice_field, spelled
 
 
 if TYPE_CHECKING:
@@ -594,7 +595,11 @@ async def recall(
     return await _built(catalog, memory.model), cache
 
 
-def choose(settings: ModelSettings, field: str, value: object) -> ModelSettings:
+def choose(
+    settings: ModelSettings,
+    field: ModelSettingName,
+    value: object,
+) -> ModelSettings:
     """Return ``settings`` with ``field`` set to ``value``, as ``chosen`` reads it back.
 
     Args:
@@ -626,7 +631,7 @@ def choose(settings: ModelSettings, field: str, value: object) -> ModelSettings:
             raise ValueError(f"{field}={value!r} is no choice")
 
 
-def offered(capability: ModelCapability, field: str) -> tuple[object, ...]:
+def offered(capability: ModelCapability, field: ModelSettingName) -> tuple[object, ...]:
     """Return what ``capability`` offers on ``field``, least committing first.
 
     Args:
@@ -652,7 +657,7 @@ def offered(capability: ModelCapability, field: str) -> tuple[object, ...]:
             return tuple(sorted(capability.manage_context_server_side))
 
 
-def pick(capability: ModelCapability, field: str, typed: str) -> object:
+def pick(capability: ModelCapability, field: ModelSettingName, typed: str) -> object:
     """Return the value ``capability`` offers on ``field`` whose text is ``typed``.
 
     Args:
@@ -687,7 +692,7 @@ def _apply(model: Model, tags: ModelTags) -> None:
         settings = replace(settings, thinking_effort=tags.effort)
     # ``ModelTags.parse`` admits only the choices a line spells.
     for choice, typed in tags.choices.items():
-        field = f"thinking_{choice}" if choice in ("budget", "output") else choice
+        field = choice_field(choice)
         try:
             settings = choose(settings, field, pick(capability, field, typed))
         except ValueError as e:

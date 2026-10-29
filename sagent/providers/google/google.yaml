@@ -28,17 +28,18 @@ reference:
     max_response_tokens: 65_536
     max_request_bytes: 104_857_600
     truncates_at_context: true
-  # Gemini 3 has no level that stops its thinking; ``min`` is the least.
+  # Gemini 3 has no level that stops its thinking; ``min`` is the least. Nor
+  # does it take a token budget: the level alone says how much it thinks.
   thinking:
     effort: [min, low, medium, high]
-    budget: [none, auto, fixed]
+    budget: [auto]
     output: [none, text]
 
 profiles:
   no_minimal:
     thinking:
       effort: [low, medium, high]
-      budget: [none, auto, fixed]
+      budget: [auto]
       output: [none, text]
 
   token_budgets:
@@ -233,10 +234,9 @@ providers:
       utility: gemini-flash
     # ``agy`` starts 3.8 Flash at its first-listed level, high.
     thinking_effort_default: high
-    thinking_budget_default: none
+    # Its thoughts are not passed on; only the answer is.
     thinking:
       effort: [low, medium, high]
-      budget: [none]
       output: [none]
     manage_context_server_side: [true]
     account_auth: true

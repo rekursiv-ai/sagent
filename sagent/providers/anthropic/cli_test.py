@@ -29,7 +29,6 @@ from sagent.model.exceptions import (
 )
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.anthropic import login, wire
-from sagent.providers.anthropic.api import models
 from sagent.providers.anthropic.cli import AnthropicCLI, AnthropicCLIModel
 from sagent.providers.resources import SharedResources
 from sagent.providers.types import Login
@@ -233,6 +232,9 @@ async def test_a_turn_starts_claude_with_our_tools_only(
         "--disable-slash-commands",
         "--permission-mode",
         "bypassPermissions",
+        # opus-5.5 starts where Claude Code starts it.
+        "--effort",
+        "medium",
     ]
     # Any local user can read a process's arguments: the mount's URL is the
     # only key to our tools, and a system prompt may be long or private.
@@ -836,26 +838,31 @@ async def test_count_bills_an_image_by_its_pixels_not_its_bytes() -> None:
     assert added == model.attachment_tokens(picture) == 300 * 300 // 750
 
 
-def test_the_cli_offers_no_effort_and_manages_its_own_context() -> None:
-    row = models("anthropic-cli")["opus"]
-    assert row.thinking_effort == {"none"}
-    assert row.thinking_budget == {"none", "auto"}
-    assert row.thinking_output == {"none", "text"}
+def test_the_cli_offers_the_effort_it_passes_and_the_rest_as_claude_has_them() -> None:
+    """``claude`` takes ``--effort``; its thinking, display, and tier are its own.
+
+    As ``claude`` 2.1.309 sent opus-5.5, captured on 2026-10-29: adaptive
+    thinking, its display omitted, no tier.
+    """
+    row = AnthropicCLI.models()["opus"]
+    assert row.thinking_effort == {"low", "medium", "high", "xhigh", "max"}
+    assert row.thinking_budget == {"auto"}
+    assert row.thinking_output == {"none"}
     assert row.manage_context_server_side == {True}
-    assert row.service_tier == {"auto", "default"}
+    assert row.service_tier == {"auto"}
     assert AnthropicCLI().usage == ()
     assert AnthropicCLI().name == "anthropic-cli"
     assert isinstance(AnthropicCLI(), Login)
-    assert list(AnthropicCLI()) == list(models("anthropic-cli"))
+    assert list(AnthropicCLI()) == list(AnthropicCLI.models())
 
 
 def test_the_cli_model_takes_offered_settings_and_refuses_the_rest() -> None:
     model = AnthropicCLI()["opus"]
-    model.settings = replace(model.settings, thinking_budget="auto")
+    model.settings = replace(model.settings, thinking_effort="max")
+    assert model.settings.thinking_effort == "max"
+    with pytest.raises(ValueError, match="thinking_budget='none' is not offered"):
+        model.settings = replace(model.settings, thinking_budget="none")
     assert model.settings.thinking_budget == "auto"
-    with pytest.raises(ValueError, match="thinking_effort='high' is not offered"):
-        model.settings = replace(model.settings, thinking_effort="high")
-    assert model.settings.thinking_effort == "none"
 
 
 @dataclass(slots=True, kw_only=True)

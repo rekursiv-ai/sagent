@@ -46,32 +46,7 @@ A coding-agent CLI and strongly-typed Python library -- self-mutating, hot-swapp
 uvx sagent
 ```
 
-or to install,
-
-```bash
-uv tool install sagent && sagent
-```
-
-If you're missing `uvx`/`uv`,
-
-```
-# Mac
-brew install uv
-
-# Linux
-sudo apt-get install -y curl
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-Optionally, install fd-find and ripgrep for faster glob and grep,
-
-```bash
-# Mac
-brew install ripgrep fd
-
-# Linux
-sudo apt-get install -y ripgrep fd-find
-```
+See [Install](#install) for additional details.
 
 ## Features
 
@@ -150,19 +125,37 @@ print(result.content)
 
 ## Install
 
-Sagent requires Python 3.12 or newer. `ripgrep` and `fd-find` are optional but
-recommended -- sagent has Python fallbacks when absent. PDF rendering uses the
-bundled `pypdfium2` wheel and needs no system install. The [Quick
-Start](#quick-start) above installs the `sagent` CLI.
+```bash
+uv tool install sagent && sagent
+```
 
-Add sagent to your own project as a library:
+If you're missing `uvx`/`uv`,
+- Mac
+  ```bash
+  brew install uv
+  ```
+- Linux
+  ```bash
+  sudo apt install -y curl
+  curl -LsSf https://astral.sh/uv/install.sh | sh
+  ```
 
+Optionally, for faster glob and grep,
+- Mac
+  ```bash
+  brew install fd ripgrep
+  ```
+- Linux
+  ```bash
+  sudo apt install -y fd-find ripgrep
+  ```
+
+To add sagent to your own project as a library,
 ```bash
 uv add sagent
 ```
 
-Or run from a source checkout:
-
+Or run from a source checkout,
 ```bash
 git clone --depth 1 https://github.com/rekursiv-ai/sagent.git
 cd sagent
@@ -173,17 +166,18 @@ uv run sagent --help
 
 Sagent supports all subscriptions and API KEYs.
 
-| Provider | Environment variable | Example model |
-| --- | --- | --- |
-| `Anthropic` | `ANTHROPIC_API_KEY` | `fable-5.1` |
-| `AnthropicCLI` | none (`claude auth login --claudeai`) | `fable-5.1` |
-| `OpenAI` | `OPENAI_API_KEY` | `sol-6.1` |
-| `Google` | `GOOGLE_API_KEY` | `gemini-pro-3.1` |
-| `Moonshot` | `MOONSHOT_API_KEY` | `kimi-2.6` |
-| `DashScope` | `DASHSCOPE_API_KEY` | `qwen-plus-3.7` |
-| `MiniMax` | `MINIMAX_API_KEY` | `minimax-2.7` |
-| `SelfHosted` | none | `Qwen/Qwen3.6-27B` |
-| `LlamaCpp` | none (uses `LLAMA_CPP_MODEL` + `LLAMA_CPP_SERVER`) | `qwen3.6-27b-12gb` |
+| Provider       | Env variable / Command         |
+| -------------- | ------------------------------ |
+| `Anthropic`    | `ANTHROPIC_API_KEY`            |
+| `AnthropicCLI` | `sagent login --provider acli` |
+| `OpenAI`       | `OPENAI_API_KEY`               |
+| `Google`       | `GOOGLE_API_KEY`               |
+| `GoogleCLI`    | `sagent login --provider gcli` |
+| `Moonshot`     | `MOONSHOT_API_KEY`             |
+| `DashScope`    | `DASHSCOPE_API_KEY`            |
+| `MiniMax`      | `MINIMAX_API_KEY`              |
+| `SelfHosted`   |                                |
+| `LlamaCpp`     | `LLAMA_CPP_MODEL` + `LLAMA_CPP_SERVER` |
 
 See [Providers](https://github.com/rekursiv-ai/sagent/blob/main/docs/providers.md) for the provider matrix, inference rules, and OpenAI-compatible provider setup.
 

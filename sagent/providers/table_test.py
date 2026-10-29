@@ -14,7 +14,13 @@ import re
 import pytest
 import yaml
 
-from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+from sagent.model.capability import (
+    ModelCapability,
+    ModelLimits,
+    ModelSettingName,
+    ModelSettings,
+    model_setting_names,
+)
 from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
 from sagent.model.exceptions import UnknownModelError, UnsupportedTagError
 from sagent.providers.table import ModelTable, ModelTags, chosen, spelled
@@ -521,15 +527,7 @@ def test_chosen_reads_each_field_a_setting_names() -> None:
         cache_ttl_sec=3600.0,
         manage_context_server_side=True,
     )
-    fields = (
-        "thinking_effort",
-        "thinking_budget",
-        "thinking_output",
-        "service_tier",
-        "cache_ttl_sec",
-        "manage_context_server_side",
-    )
-    assert [chosen(settings, f) for f in fields] == [
+    assert [chosen(settings, f) for f in model_setting_names()] == [
         "high",
         "auto",
         "text",
@@ -596,8 +594,39 @@ def _model(model_id: str = "example-1.0", **fields: object) -> dict[str, object]
     return {"model_id": model_id, "prices": [dict(_FREE)]} | fields
 
 
-def _load(path: Path, *, provider: str = "vendor") -> ModelTable:
-    return ModelTable.from_yaml(path, provider=provider)
+def _load(
+    path: Path,
+    *,
+    provider: str = "vendor",
+    sends: frozenset[ModelSettingName] = frozenset(model_setting_names()),
+) -> ModelTable:
+    return ModelTable.from_yaml(path, provider=provider, sends=sends)
+
+
+def test_a_setting_the_provider_does_not_send_offers_only_its_default(
+    tmp_path: Path,
+) -> None:
+    """Choosing another would change the label, not what is sent."""
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(
+            thinking={
+                "effort": ["low", "high"],
+                "budget": ["none", "auto"],
+                "output": ["none", "text"],
+            },
+            thinking_effort_default="high",
+            thinking_budget_default="auto",
+            thinking_output_default="text",
+        ),
+    )
+    row = _load(path, sends=frozenset({"thinking_budget"}))["example"]
+    assert (row.thinking_effort, row.thinking_budget, row.thinking_output) == (
+        {"high"},
+        {"none", "auto"},
+        {"text"},
+    )
+    assert (row.service_tier, row.manage_context_server_side) == ({"auto"}, {False})
 
 
 def test_from_yaml_layers_reference_profile_model_section_and_entry(

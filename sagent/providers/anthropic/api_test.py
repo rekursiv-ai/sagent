@@ -22,7 +22,8 @@ from sagent.model.exceptions import (
 )
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.anthropic import api, wire
-from sagent.providers.anthropic.api import Anthropic, models
+from sagent.providers.anthropic.api import Anthropic
+from sagent.providers.anthropic.cli import AnthropicCLI
 from sagent.providers.catalog import listings
 from sagent.providers.resources import SharedResources
 from sagent.providers.types import Login, UsageWindow
@@ -486,7 +487,7 @@ async def test_a_provider_closes_only_resources_it_made() -> None:
     ],
 )
 def test_every_row_states_its_published_cutoff(model_id: str, cutoff: str) -> None:
-    assert models("anthropic")[model_id].knowledge_cutoff == cutoff
+    assert Anthropic.models()[model_id].knowledge_cutoff == cutoff
 
 
 @pytest.mark.parametrize(
@@ -502,7 +503,7 @@ def test_a_row_bills_the_published_standard_card(
     model_id: str,
     rates: tuple[float, float, float, float, float],
 ) -> None:
-    card = models("anthropic")[model_id].prices["auto", 1, date(2026, 10, 22)]
+    card = Anthropic.models()[model_id].prices["auto", 1, date(2026, 10, 22)]
     assert (
         card.request,
         card.response,
@@ -513,7 +514,7 @@ def test_a_row_bills_the_published_standard_card(
 
 
 def test_only_the_fast_mode_opus_models_offer_priority() -> None:
-    table = models("anthropic")
+    table = Anthropic.models()
     fast = {name for name, row in table.items() if "priority" in row.service_tier}
     assert fast == {"opus-5.5", "opus-5.0", "opus-4.8"}
     card = table["opus-5.0"].prices["priority", 1, date(2026, 10, 22)]
@@ -521,7 +522,7 @@ def test_only_the_fast_mode_opus_models_offer_priority() -> None:
 
 
 def test_dated_and_banded_cards_bill_their_published_rates() -> None:
-    table = models("anthropic")
+    table = Anthropic.models()
     sonnet = table["sonnet-5.5"].prices
     before, after = date(2026, 10, 6), date(2026, 10, 7)
     assert sonnet["auto", 1, before].cache_read == 0.2
@@ -534,14 +535,14 @@ def test_dated_and_banded_cards_bill_their_published_rates() -> None:
 
 @pytest.mark.parametrize("model_id", ["fable-5.1", "opus-5.5", "sonnet-5.0"])
 def test_1m_models_serve_1m(model_id: str) -> None:
-    limits = models("anthropic")[model_id].limits
+    limits = Anthropic.models()[model_id].limits
     assert limits.max_request_tokens == 1_000_000
     assert limits.max_response_tokens == 128_000
 
 
 @pytest.mark.parametrize("model_id", ["opus-4.5", "sonnet-4.5", "haiku-4.5"])
 def test_pre_4_6_models_have_a_200k_window(model_id: str) -> None:
-    limits = models("anthropic")[model_id].limits
+    limits = Anthropic.models()[model_id].limits
     assert limits.max_request_tokens == 200_000
     assert limits.max_response_tokens == 64_000
 
@@ -569,11 +570,11 @@ def test_each_generation_offers_its_measured_budget_modes(
     model_id: str,
     budget: set[ThinkingBudget],
 ) -> None:
-    assert models("anthropic")[model_id].thinking_budget == budget
+    assert Anthropic.models()[model_id].thinking_budget == budget
 
 
 def test_xhigh_effort_is_a_4_7_and_later_level() -> None:
-    table = models("anthropic")
+    table = Anthropic.models()
     assert table["fable-5.1"].thinking_effort == {
         "low",
         "medium",
@@ -593,7 +594,7 @@ def test_image_limits_and_tokenizer_follow_the_generation(
     edge_px: int,
     chars_per_token: float,
 ) -> None:
-    row = models("anthropic")[model_id]
+    row = Anthropic.models()[model_id]
     assert row.approx_chars_per_token == chars_per_token
     assert row.limits.max_image_edge_px == edge_px
     # 10 MB base64-encoded on the wire is 7.5 MB raw.
@@ -602,7 +603,7 @@ def test_image_limits_and_tokenizer_follow_the_generation(
 
 
 def test_the_api_offers_both_cache_lifetimes_and_retries_itself() -> None:
-    row = models("anthropic")["opus"]
+    row = Anthropic.models()["opus"]
     assert row.cache_ttl_sec == {300.0, 3600.0}
     assert row.manage_context_server_side == {False, True}
     assert row.service_tier == {"auto", "default", "priority"}
@@ -612,8 +613,8 @@ def test_the_api_offers_both_cache_lifetimes_and_retries_itself() -> None:
 
 
 def test_the_catalog_is_read_once_per_section() -> None:
-    assert models("anthropic") is models("anthropic")
-    assert models("anthropic") is not models("anthropic-cli")
+    assert Anthropic.models() is Anthropic.models()
+    assert Anthropic.models() is not AnthropicCLI.models()
 
 
 @dataclass(slots=True, kw_only=True)
@@ -713,8 +714,8 @@ def test_a_model_starts_at_the_effort_claude_code_gives_it(
     model: str,
     effort: str,
 ) -> None:
-    for section in _messages_api_sections():
-        capability, settings = models(section).resolve(model)
+    for provider in _claude_code_providers():
+        capability, settings = provider.models().resolve(model)
         assert (capability.model_id, settings.thinking_effort) == (model, effort)
 
 
@@ -734,20 +735,21 @@ def test_a_model_starts_at_the_effort_claude_code_gives_it(
     ],
 )
 def test_a_model_thinks_as_claude_code_has_it(model: str, budget: str) -> None:
-    for section in _messages_api_sections():
-        _, settings = models(section).resolve(model)
+    for provider in _claude_code_providers():
+        _, settings = provider.models().resolve(model)
         assert settings.thinking_budget == budget
 
 
-def _messages_api_sections() -> list[str]:
-    """Return each catalog section served over the Messages API, as ``Anthropic`` is."""
-    sections = [
-        listing.section
+# The Messages API ones send what Claude Code sends; ``claude`` itself is it.
+def _claude_code_providers() -> list[type[Anthropic | AnthropicCLI]]:
+    """Return each provider whose models start as Claude Code starts them."""
+    providers: list[type[Anthropic | AnthropicCLI]] = [
+        listing.factory
         for listing in listings()
         if isinstance(listing.factory, type) and issubclass(listing.factory, Anthropic)
     ]
-    assert "anthropic" in sections
-    return sections
+    assert Anthropic in providers
+    return [*providers, AnthropicCLI]
 
 
 def test_an_attachment_is_billed_by_the_vendor_s_formula() -> None:

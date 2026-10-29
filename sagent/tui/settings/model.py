@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, cast
 from sagent.agent.types import Agent
 from sagent.model.capability import (
     ModelCapability,
+    ModelSettingName,
     ModelSettings,
     ThinkingEffort,
     literal_members,
@@ -128,22 +129,24 @@ class AgentModel:
                 cli=True,
                 inherit=partial(self._thinking, closest=True),
             ),
-            self._axis(("thinking", "effort"), "how hard the model reasons"),
-            self._axis(("thinking", "budget"), "how its reasoning budget is set"),
-            self._axis(("thinking", "output"), "what of its reasoning comes back"),
-            self._axis(("service_tier",), "the serving tier: speed against price"),
-            self._axis(("cache_ttl_sec",), "how long the prompt cache lives"),
+            self._axis("thinking_effort", "how hard the model reasons"),
+            self._axis("thinking_budget", "how its reasoning budget is set"),
+            self._axis("thinking_output", "what of its reasoning comes back"),
+            self._axis("service_tier", "the serving tier: speed against price"),
+            self._axis("cache_ttl_sec", "how long the prompt cache lives"),
             self._axis(
-                ("manage_context_server_side",),
+                "manage_context_server_side",
                 "whether the server rolls the history",
             ),
         ]
 
-    def _axis(self, name: tuple[str, ...], help_short: str) -> Setting:
-        """Return the setting for the ``ModelSettings`` field ``name`` spells."""
-        field = "_".join(name)
+    def _axis(self, field: ModelSettingName, help_short: str) -> Setting:
+        """Return the setting for the ``ModelSettings`` field ``field``."""
         return Setting(
-            name=name,
+            # ``thinking_effort`` is ``thinking.effort``, under ``thinking``.
+            name=tuple(field.split("_", 1))
+            if field.startswith("thinking_")
+            else (field,),
             help_short=help_short,
             usage="VALUE",
             value=partial(self._axis_value, field),
@@ -221,7 +224,7 @@ class AgentModel:
         """Return what this model starts with, in its default window."""
         return self.agent.model.capability.default
 
-    def _axis_value(self, field: str) -> str:
+    def _axis_value(self, field: ModelSettingName) -> str:
         now = chosen(self.agent.model.settings, field)
         return _marked(spelled(now), default=now == chosen(self._fresh(), field))
 
@@ -270,14 +273,19 @@ class AgentModel:
         )
 
     async def _thinking(self, args: str, *, closest: bool = False) -> str:
-        picked: dict[str, object] = {}
+        picked: dict[ModelSettingName, object] = {}
+        axes: dict[str, ModelSettingName] = {
+            "effort": "thinking_effort",
+            "budget": "thinking_budget",
+            "output": "thinking_output",
+        }
         for word in args.split():
             axis, equals, value = word.partition("=")
-            if not equals or axis not in ("effort", "budget", "output"):
+            if not equals or axis not in axes:
                 raise SettingError(
                     f"give AXIS=VALUE for effort, budget, output; not {word!r}",
                 )
-            field = f"thinking_{axis}"
+            field = axes[axis]
             try:
                 picked[field] = self._picked(field, value, closest=closest)
             except SettingError as e:
@@ -287,11 +295,17 @@ class AgentModel:
         self._choose(picked)
         return self._thinking_value()
 
-    async def _set(self, field: str, args: str, *, closest: bool = False) -> str:
+    async def _set(
+        self,
+        field: ModelSettingName,
+        args: str,
+        *,
+        closest: bool = False,
+    ) -> str:
         self._choose({field: self._picked(field, args, closest=closest)})
         return self._axis_value(field)
 
-    def _choose(self, picked: dict[str, object]) -> None:
+    def _choose(self, picked: dict[ModelSettingName, object]) -> None:
         """Set the model's ``picked`` choices; a new tier sizes the context again."""
         model = self.agent.model
         capability = model.capability
@@ -309,7 +323,13 @@ class AgentModel:
 
     # ``default`` is a fresh model's; an effort or a tier reads as its tag does
     # in a model line, ``highthink`` and ``fast`` too.
-    def _picked(self, field: str, typed: str, *, closest: bool = False) -> object:
+    def _picked(
+        self,
+        field: ModelSettingName,
+        typed: str,
+        *,
+        closest: bool = False,
+    ) -> object:
         """Return the value ``typed`` names on ``field``."""
         word = typed.strip().lower()
         if word == "default":
@@ -337,7 +357,11 @@ _EFFORTS = tuple(
 )
 
 
-def _closest(capability: ModelCapability, field: str, typed: str) -> object | None:
+def _closest(
+    capability: ModelCapability,
+    field: ModelSettingName,
+    typed: str,
+) -> object | None:
     """Return the offered value nearest ``typed``, a lower one on a tie."""
     values = offered(capability, field)
     if field == "thinking_effort" and typed in _EFFORTS:

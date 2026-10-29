@@ -33,7 +33,11 @@ if TYPE_CHECKING:
 
     import httpx2
 
-    from sagent.model.capability import ModelCapability, ModelSettings
+    from sagent.model.capability import (
+        ModelCapability,
+        ModelSettingName,
+        ModelSettings,
+    )
     from sagent.model.types import Request, Response, TextChunk
     from sagent.providers.types import ProviderSharedResources, UsageWindow
     from sagent.session.types import Attachment
@@ -63,6 +67,11 @@ class Google(AsyncResource):
     section: ClassVar[str] = "google"
     """The catalog section whose models and settings this provider serves."""
 
+    sends: ClassVar[frozenset[ModelSettingName]] = frozenset(
+        {"thinking_effort", "thinking_budget", "thinking_output"},
+    )
+    """The settings ``wire.encode`` puts in a request; the rest are the vendor's."""
+
     def __init__(
         self,
         *,
@@ -89,11 +98,21 @@ class Google(AsyncResource):
         return ()
 
     def __getitem__(self, model: str) -> GoogleModel:
-        capability, settings = models(self.section).resolve(model)
+        capability, settings = self.models().resolve(model)
         return GoogleModel(provider=self, capability=capability, settings=settings)
 
     def __iter__(self) -> Iterator[str]:
-        return iter(models(self.section))
+        return iter(self.models())
+
+    @classmethod
+    def models(cls) -> ModelTable:
+        """Return the models this provider serves.
+
+        Returns:
+          table: Its section's models, offering only the settings it sends.
+
+        """
+        return models(cls.section, sends=cls.sends)
 
     @override
     async def aclose(self) -> None:
@@ -297,9 +316,13 @@ class GoogleModel(AsyncResource):
 
         """
         return await self.provider.count(
-            wire.encode(request, capability=self.capability, settings=self.settings),
+            self.encode(request),
             capability=self.capability,
         )
+
+    def encode(self, request: Request) -> dict[str, object]:
+        """Return the ``generateContent`` body that asks this model ``request``."""
+        return wire.encode(request, capability=self.capability, settings=self.settings)
 
     def attachment_tokens(self, attachment: Attachment) -> int:
         """Return about how many tokens ``attachment`` adds, by Gemini's formula."""
@@ -316,7 +339,7 @@ class GoogleModel(AsyncResource):
 
         """
         reader = wire.StreamReader(capability=self.capability)
-        body = wire.encode(request, capability=self.capability, settings=self.settings)
+        body = self.encode(request)
         model = self.capability.wire_model_id or self.capability.model_id
         async for event in self.provider.events(body, model=model, request=request):
             for chunk in reader.feed(event):
@@ -325,11 +348,21 @@ class GoogleModel(AsyncResource):
 
 
 @cache
-def models(section: str) -> ModelTable:
-    """Return the models one section of the Google catalog serves."""
+def models(section: str, *, sends: frozenset[ModelSettingName]) -> ModelTable:
+    """Return the models one section of the Google catalog serves.
+
+    Args:
+      section: The section, as ``google-cli``.
+      sends: The settings its provider's requests carry.
+
+    Returns:
+      table: Its models, each other setting fixed at what the vendor does.
+
+    """
     return ModelTable.from_yaml(
         files("sagent.providers.google") / "google.yaml",
         provider=section,
+        sends=sends,
     )
 
 

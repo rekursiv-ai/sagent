@@ -23,7 +23,8 @@ from sagent.model.exceptions import (
 )
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.google import api, wire
-from sagent.providers.google.api import Google, models
+from sagent.providers.google.api import Google
+from sagent.providers.google.cli import GoogleCLI
 from sagent.providers.resources import SharedResources
 from sagent.session.types import AssistantMessage, Attachment, UserMessage
 
@@ -324,7 +325,7 @@ async def test_the_envelope_is_asked_for_the_model_streamed_to() -> None:
     async with _Served(server) as shared:
         provider = _Enveloping(resources=shared)
         await _stream(provider["gemini-flash"].stream(_REQUEST))
-    assert provider.models == ["gemini-3.8-flash"]
+    assert provider.wrapped_models == ["gemini-3.8-flash"]
     assert _body(server.requests[0])["wrapped"] is True
 
 
@@ -375,7 +376,7 @@ def test_the_provider_reports_no_rate_limits() -> None:
 
 def test_the_provider_lists_its_models_and_resolves_roles() -> None:
     provider = Google()
-    assert list(provider) == list(models("google"))
+    assert list(provider) == list(Google.models())
     assert "gemini-pro-3.1" in list(provider)
     model = provider["default"]
     assert (model.provider, model.capability.model_id) == (provider, "gemini-argon-4.0")
@@ -388,7 +389,7 @@ def test_the_api_serves_google_s_current_models_under_their_ids() -> None:
 
     ``gemini-3.7-flash`` and ``gemini-3.5-flash`` only route to 3.8 and 3.6 now.
     """
-    served = {name: models("google")[name].wire_model_id for name in models("google")}
+    served = {name: Google.models()[name].wire_model_id for name in Google.models()}
     assert served == {
         "gemini-argon-4.0": "gemini-4-argon",
         "gemini-pro-3.1": "gemini-3.1-pro-preview",
@@ -401,7 +402,7 @@ def test_the_api_serves_google_s_current_models_under_their_ids() -> None:
         "gemini-flash-lite-3.1": "gemini-3.1-flash-lite",
         "gemini-flash-lite-2.5": "gemini-2.5-flash-lite",
     }
-    assert models("google")["default"].model_id == "gemini-argon-4.0"
+    assert Google.models()["default"].model_id == "gemini-argon-4.0"
 
 
 @pytest.mark.parametrize(
@@ -412,7 +413,7 @@ def test_argon_s_introductory_rates_double_on_december_first(
     day: str,
     rates: tuple[float, float, float],
 ) -> None:
-    argon = models("google")["gemini-argon"]
+    argon = Google.models()["gemini-argon"]
     price = argon.prices["auto", 1, date.fromisoformat(day)]
     assert (price.request, price.response, price.cache_read) == rates
     assert (argon.limits.max_request_tokens, argon.limits.max_response_tokens) == (
@@ -423,8 +424,8 @@ def test_argon_s_introductory_rates_double_on_december_first(
 
 
 def test_the_catalog_is_read_once_per_section() -> None:
-    assert models("google") is models("google")
-    assert models("google") is not models("google-cli")
+    assert Google.models() is Google.models()
+    assert Google.models() is not GoogleCLI.models()
 
 
 @pytest.mark.asyncio
@@ -503,11 +504,7 @@ def _body(request: httpx2.Request) -> dict[str, object]:
 
 def _thinking(model: api.GoogleModel) -> api.GoogleModel:
     """Return ``model`` set to think, so its request needs its capability."""
-    model.settings = replace(
-        model.settings,
-        thinking_budget="fixed",
-        thinking_effort="high",
-    )
+    model.settings = replace(model.settings, thinking_effort="high")
     return model
 
 
@@ -572,7 +569,7 @@ class _Enveloping(Google):
 
     def __init__(self, *, resources: SharedResources) -> None:
         super().__init__(resources=resources)
-        self.models: list[str] = []
+        self.wrapped_models: list[str] = []
 
     @override
     async def envelope(
@@ -583,7 +580,7 @@ class _Enveloping(Google):
         request: Request,
     ) -> Mapping[str, object]:
         del request
-        self.models.append(model)
+        self.wrapped_models.append(model)
         return {**body, "wrapped": True}
 
 
@@ -620,25 +617,25 @@ class _Closing(SharedResources):
 # thinking", read 2026-10-27); 3.1 Pro is Gemini 3 Pro's ``high``. 2.5 Flash-Lite
 # does not think unasked; ``agy`` serves 3.8 Flash at high.
 @pytest.mark.parametrize(
-    ("section", "model", "effort"),
+    ("provider", "model", "effort"),
     [
-        ("google", "gemini-argon-4.0", "medium"),
-        ("google", "gemini-pro-3.1", "high"),
-        ("google", "gemini-flash-3.8", "medium"),
-        ("google", "gemini-flash-3.6", "medium"),
-        ("google", "gemini-flash-3.0", "high"),
-        ("google", "gemini-flash-lite-3.5", "min"),
-        ("google", "gemini-flash-lite-3.1", "min"),
-        ("google", "gemini-flash-lite-2.5", "none"),
-        ("google-cli", "gemini-flash-3.8", "high"),
+        (Google, "gemini-argon-4.0", "medium"),
+        (Google, "gemini-pro-3.1", "high"),
+        (Google, "gemini-flash-3.8", "medium"),
+        (Google, "gemini-flash-3.6", "medium"),
+        (Google, "gemini-flash-3.0", "high"),
+        (Google, "gemini-flash-lite-3.5", "min"),
+        (Google, "gemini-flash-lite-3.1", "min"),
+        (Google, "gemini-flash-lite-2.5", "none"),
+        (GoogleCLI, "gemini-flash-3.8", "high"),
     ],
 )
 def test_a_model_starts_at_the_level_it_thinks_at_unasked(
-    section: str,
+    provider: type[Google | GoogleCLI],
     model: str,
     effort: str,
 ) -> None:
-    assert models(section)[model].default.thinking_effort == effort
+    assert provider.models()[model].default.thinking_effort == effort
 
 
 def test_an_attachment_is_billed_by_the_vendor_s_formula() -> None:

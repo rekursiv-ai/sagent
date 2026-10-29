@@ -67,6 +67,20 @@ def test_every_class_is_default_constructible_and_hashable() -> None:
 # ---- what a model offers ----------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("limits", "tokens"),
+    [
+        (ModelLimits(max_request_tokens=200_000), 200_000),
+        (ModelLimits(max_request_tokens=200_000, max_context_tokens=272_000), 272_000),
+    ],
+)
+def test_the_window_input_and_output_share_is_the_context_else_the_input(
+    limits: ModelLimits,
+    tokens: int,
+) -> None:
+    assert limits.context_tokens == tokens
+
+
 def test_check_passes_what_is_offered() -> None:
     row = _row()
     row.check(row.default)
