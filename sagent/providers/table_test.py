@@ -23,7 +23,7 @@ from sagent.model.capability import (
 from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
 from sagent.model.exceptions import UnknownModelError, UnsupportedTagError
 from sagent.providers import anthropic
-from sagent.providers.table import Catalogued, ModelTable, ModelTags, models
+from sagent.providers.table import HasModels, ModelTable, ModelTags, models
 
 
 if TYPE_CHECKING:
@@ -1162,7 +1162,7 @@ def test_models_refuses_a_section_the_catalog_lacks() -> None:
         models(anthropic, section="nowhere")
 
 
-class _Served(Catalogued):
+class _Served(HasModels):
     """A provider class that names its catalog and section, and nothing else."""
 
     package: ClassVar[ModuleType] = anthropic
