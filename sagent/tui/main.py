@@ -108,6 +108,7 @@ from sagent.tui.slash import Commands, headless_wanted
 from sagent.tui.tree import pick
 from sagent.tui.types import Frame
 from sagent.tui.views import Views
+from sagent.tui.welcome import print_welcome
 
 
 if TYPE_CHECKING:
@@ -552,6 +553,9 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
         if path is not None and is_legacy(path) and not upgrade(path):
             sys.stderr.write("[resume] nothing to resume; starting fresh.\n")
             path = new_session_path(project_dir(cwd))
+        if interactive:
+            resumed = path is not None and path.exists() and path.stat().st_size > 0
+            print_welcome(folder=cwd, resumed=resumed)
         journal = JsonlJournal(path) if path is not None else None
         _logging(flags.log_level, path=path, interactive=interactive)
         agent = _agent(

@@ -11,6 +11,37 @@ sagent --provider Google --model gemini-pro-3.1
 
 The public package defaults to API-key auth with `--auth env`. Provider API keys are read from the provider's environment variable.
 
+Every interactive session shows the Sagent welcome before provider or model
+configuration, including a first launch without credentials and a resumed
+session. The single frame contains the SAGENT identity, project folder, and
+in-session help hints: `/help`, `/tasks` (running tool calls), `/quit`, and
+Left on an empty prompt line (`←`), which opens the agent tree. The greeting
+sits outside the frame.
+
+After successful setup, the resolved provider/model line appears below the
+welcome, followed by the normal chat prompt. Missing credentials keep the
+existing setup error and instructions. No new setup wizard, credential store,
+or provider-selection behavior is introduced. The welcome makes no model
+request and does not verify credentials with the remote service.
+
+The terminal background and body text follow your terminal settings.
+`NO_COLOR=1` disables color. The welcome prints at once, with no animation.
+Narrow, short, dumb, or non-Unicode terminals use a compact SAGENT heading.
+Resumed sessions also use the compact heading to leave room for the saved
+transcript.
+
+Welcome layout follows a terminal-cell grid:
+
+- The icon sits left of the wordmark, separated by three cells.
+- The frame spans the terminal, up to 80 columns, with one empty row above
+  and below its content and two cells of horizontal padding.
+- Long paths mark omitted ancestors with an ellipsis and retain the project
+  suffix. Command descriptions stay with their commands when wrapping.
+- The greeting stays outside the frame, flush with its left border.
+
+Piped input does not show a welcome. Redirected stderr keeps plain error output
+or the provider/model line. `sagent --help` remains plain argparse help.
+
 For non-interactive use, pipe a prompt on stdin:
 
 ```bash

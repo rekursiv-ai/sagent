@@ -493,6 +493,11 @@ def test_piped_input_is_answered_once_and_printed(
     script.replies.append(reply("the answer"))
     _argv(monkeypatch, "--provider", "scripted", "--model", "scripted", "--ephemeral")
     _stdin(monkeypatch, "  the question \n")
+
+    def welcome(**_kwargs: object) -> None:
+        pytest.fail("Piped input must not show the welcome")
+
+    monkeypatch.setattr(main, "print_welcome", welcome)
     assert main.main() == 0
     out, err = capsys.readouterr()
     assert (out, err) == ("the answer\n", "")
@@ -1079,12 +1084,19 @@ def test_an_interactive_run_opens_the_prompt_and_names_the_model(
     )
     _stdin(monkeypatch, tty=True)
     _quick_prints(monkeypatch)
+    welcomed: list[tuple[Path, bool]] = []
+
+    def welcome(*, folder: Path, resumed: bool) -> None:
+        welcomed.append((folder, resumed))
+
+    monkeypatch.setattr(main, "print_welcome", welcome)
     with (
         create_pipe_input() as pipe,
         create_app_session(input=pipe, output=DummyOutput()),
     ):
         pipe.send_text("/quit\r")
         assert main.main() == 0
+    assert welcomed == [(tmp_path, False)]
     err = capsys.readouterr().err
     assert err.startswith(
         "[/model] scripted/scripted+fullcontext+nothink\n",  # codespell:ignore nothink
@@ -2309,12 +2321,19 @@ def test_an_interactive_resume_picks_and_logs_at_the_level_asked(
     )
     _stdin(monkeypatch, "1\n", tty=True)
     _quick_prints(monkeypatch)
+    welcomed: list[tuple[Path, bool]] = []
+
+    def welcome(*, folder: Path, resumed: bool) -> None:
+        welcomed.append((folder, resumed))
+
+    monkeypatch.setattr(main, "print_welcome", welcome)
     with (
         create_pipe_input() as pipe,
         create_app_session(input=pipe, output=PlainTextOutput(screen)),
     ):
         pipe.send_text("/model deep/deep\r/quit\r")
         assert main.main() == 0
+    assert welcomed == [(tmp_path, True)]
     assert f"[resume] {earlier}\n" in capsys.readouterr().err
     assert logging.getLogger("sagent").level == logging.INFO
     shown = screen.getvalue()
