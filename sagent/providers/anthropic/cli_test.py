@@ -14,6 +14,7 @@ import os
 import re
 import stat
 import tempfile
+import time
 
 from PIL import Image
 from treekle import PlainTree, from_plain, json_dumps, json_loads
@@ -609,7 +610,7 @@ async def test_a_spent_window_waits_for_its_reset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The CLI says when the window resets; it was dropped, so the wait was a guess."""
-    monkeypatch.setattr(wire.time, "time", lambda: 1_793_285_478.0)
+    monkeypatch.setattr(time, "time", lambda: 1_793_285_478.0)
     claude.script(
         [
             _rate_limit_event("rejected", resets_at=1_793_451_600, kind="seven_day"),
@@ -630,7 +631,7 @@ async def test_a_throttle_while_the_window_allows_waits_no_reset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An allowed window names its reset too; a 429 under it is a throttle."""
-    monkeypatch.setattr(wire.time, "time", lambda: 1_793_285_478.0)
+    monkeypatch.setattr(time, "time", lambda: 1_793_285_478.0)
     claude.script(
         [
             _rate_limit_event("allowed", resets_at=1_793_451_600, kind="seven_day"),

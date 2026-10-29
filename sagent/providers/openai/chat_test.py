@@ -17,7 +17,6 @@ from sagent.model.capability import ModelLimits, ModelSettings, model_setting_na
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import DisconnectedError, RateLimitedError
 from sagent.model.types import Request, TextChunk
-from sagent.providers.catalog import choose
 from sagent.providers.dashscope.api import DashScope
 from sagent.providers.minimax.api import MiniMax
 from sagent.providers.moonshot.api import Moonshot
@@ -55,7 +54,7 @@ def _encode(
     capability, settings = _model(name)
     for field in model_setting_names():
         if field in choices:
-            settings = choose(settings, field, choices.pop(field))
+            settings = settings.with_value(field, choices.pop(field))
     assert not choices, f"no such setting: {sorted(choices)}"
     capability.check(settings)
     return chat.encode(
@@ -309,7 +308,8 @@ def test_a_vendor_that_streams_reasoning_unasked_says_its_output_is_text(
     shown = {
         name: row.thinking_output
         for name, row in provider.models().items()
-        if row.thinking_output != {"none"} or row.thinking_budget != {"none"}
+        if row.thinking_output != frozenset({"none"})
+        or row.thinking_budget != frozenset({"none"})
     }
     assert set(shown.values()) == {frozenset({"text"})}
 

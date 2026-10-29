@@ -21,7 +21,6 @@ from sagent.model.exceptions import (
     RefusedError,
 )
 from sagent.model.types import Request, TextChunk
-from sagent.providers.catalog import choose
 from sagent.providers.openai import responses, wire
 from sagent.providers.openai.api import OpenAI
 from sagent.session.types import (
@@ -63,7 +62,7 @@ def _encode(
     capability, settings = _model(name)
     for field in model_setting_names():
         if field in choices:
-            settings = choose(settings, field, choices.pop(field))
+            settings = settings.with_value(field, choices.pop(field))
     assert not choices, f"no such setting: {sorted(choices)}"
     capability.check(settings)
     return responses.encode(request, capability=capability, settings=settings)
