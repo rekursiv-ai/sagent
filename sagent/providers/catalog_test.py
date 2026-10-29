@@ -18,6 +18,7 @@ from sagent.model.capability import (
     ModelSettingName,
     ModelSettings,
     model_setting_names,
+    typed_text,
 )
 from sagent.model.cost import PriceCatalog
 from sagent.model.exceptions import UnknownModelError, UnknownProviderError
@@ -32,11 +33,8 @@ from sagent.providers.catalog import (
     ModelMemory,
     account_credentials,
     accounts,
-    choose,
     default_provider,
     listings,
-    offered,
-    pick,
     recall,
     successor,
 )
@@ -45,7 +43,7 @@ from sagent.providers.google.cli import GoogleCLIModel
 from sagent.providers.openai.compat import OpenAIModel
 from sagent.providers.selfhosted import server
 from sagent.providers.selfhosted.server import SelfHostedModel
-from sagent.providers.table import ModelTable, ModelTags, chosen, spelled
+from sagent.providers.table import ModelTable, ModelTags
 from sagent.session.types import UserMessage
 from sagent.types import AsyncResource
 
@@ -148,19 +146,19 @@ async def test_every_setting_a_row_offers_changes_what_is_sent(
         for model_name in provider:
             model = provider[model_name]
             capability = model.capability
-            plural = {
+            plural: dict[ModelSettingName, tuple[object, ...]] = {
                 f: v
                 for f in model_setting_names()
-                if len(v := offered(capability, f)) > 1
+                if len(v := capability.values(f)) > 1
             }
             committed = capability.default
             for field, values in plural.items():
-                committed = choose(committed, field, values[-1])
+                committed = committed.with_value(field, values[-1])
             for field, values in plural.items():
                 sent: dict[object, set[str]] = {value: set[str]() for value in values}
                 for base in (capability.default, committed):
                     for value in values:
-                        model.settings = choose(base, field, value)
+                        model.settings = base.with_value(field, value)
                         sent[value].add(await _sent(model, request))
                 same = [
                     v for v in values if sum(sent[v] == s for s in sent.values()) > 1
@@ -958,29 +956,6 @@ class _Factory:
         return provider
 
 
-@pytest.mark.parametrize("field", model_setting_names())
-def test_each_choice_is_picked_by_how_it_is_spelled(field: ModelSettingName) -> None:
-    model = ModelCatalog()["anthropic"]["opus-5.5"]
-    values = offered(model.capability, field)
-    assert chosen(model.settings, field) in values
-    for value in values:
-        assert pick(model.capability, field, f" {spelled(value).upper()} ") == value
-        assert chosen(choose(model.settings, field, value), field) == value
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [("cache_ttl_sec", "300"), ("manage_context_server_side", 1)],
-)
-def test_choosing_what_no_field_holds_is_refused(
-    field: ModelSettingName,
-    value: object,
-) -> None:
-    settings = ModelCatalog()["anthropic"]["opus-5.5"].settings
-    with pytest.raises(ValueError, match=f"^{field}={value!r} is no choice$"):
-        choose(settings, field, value)
-
-
 def test_a_repo_whose_org_names_a_provider_says_so_only_when_one_hosts_repos() -> None:
     """Without SelfHosted, a refused ``provider/model`` is the provider's refusal."""
     catalog = ModelCatalog(
@@ -1033,9 +1008,10 @@ def test_every_model_setting_name_is_offered_chosen_and_fixed_when_unsent() -> N
     )["opus-5.5"]
     sent = Anthropic.models()["opus-5.5"]
     for name in model_setting_names():
-        first = offered(sent, name)[0]
-        assert chosen(choose(sent.default, name, first), name) == first
-        assert offered(unsent, name) == (chosen(unsent.default, name),)
+        for value in sent.values(name):
+            assert sent.parse_value(name, f" {typed_text(value).upper()} ") == value
+            assert sent.default.with_value(name, value).value(name) == value
+        assert unsent.values(name) == (unsent.default.value(name),)
 
 
 def _stated_window(path: str, *, trust_remote_code: bool) -> int:

@@ -9,7 +9,6 @@ import pytest
 from sagent.model.capability import ModelLimits, model_setting_names
 from sagent.model.exceptions import AuthError, UnknownModelError
 from sagent.model.types import Request
-from sagent.providers.catalog import choose
 from sagent.providers.dashscope.api import DashScope
 from sagent.providers.openai.compat import OpenAIModel
 from sagent.session.types import UserMessage
@@ -23,7 +22,7 @@ def _body(model_id: str, **choices: object) -> dict[str, object]:
     model = dashscope[model_id]
     for field in model_setting_names():
         if field in choices:
-            model.settings = choose(model.settings, field, choices.pop(field))
+            model.settings = model.settings.with_value(field, choices.pop(field))
     assert not choices, f"no such setting: {sorted(choices)}"
     return dashscope.encode(_REQUEST, model=model)
 

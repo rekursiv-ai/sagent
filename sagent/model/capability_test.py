@@ -6,14 +6,18 @@ from dataclasses import replace
 
 import itertools
 import math
+import re
 
 import pytest
 
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
+    ModelSettingName,
     ModelSettings,
     literal_members,
+    model_setting_names,
+    typed_text,
 )
 from sagent.model.context import ContextSize, ContextSizeName
 from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
@@ -190,6 +194,58 @@ def test_fit_falls_back_to_the_default_tier_when_one_is_not_offered() -> None:
 
 
 # ---- names ------------------------------------------------------------------
+
+
+def _offering() -> ModelCapability:
+    return ModelCapability(
+        thinking_effort=frozenset({"high", "none", "low"}),
+        cache_ttl_sec=frozenset({3600.0, 300.0}),
+    )
+
+
+def test_a_setting_is_read_and_set_by_name() -> None:
+    settings = ModelSettings()
+    for name in model_setting_names():
+        value = _offering().values(name)[-1]
+        assert settings.with_value(name, value).value(name) == value
+    assert settings.with_value("cache_ttl_sec", 300).value("cache_ttl_sec") == 300.0
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [("cache_ttl_sec", "300"), ("manage_context_server_side", 1)],
+)
+def test_a_value_no_setting_holds_is_refused(
+    name: ModelSettingName,
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match=f"^{name}={value!r} is no choice$"):
+        ModelSettings().with_value(name, value)
+
+
+def test_values_are_least_committing_first() -> None:
+    capability = _offering()
+    assert capability.values("thinking_effort") == ("none", "low", "high")
+    assert capability.values("cache_ttl_sec") == (300.0, 3600.0)
+    assert capability.values("manage_context_server_side") == (False, True)
+
+
+def test_typed_text_reads_as_the_value_it_spells() -> None:
+    capability = _offering()
+    assert capability.parse_value("thinking_effort", " HIGH ") == "high"
+    assert capability.parse_value("cache_ttl_sec", "300") == 300.0
+    assert capability.parse_value("manage_context_server_side", "True") is True
+    message = "'max' is not one of: none, low, high"
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        capability.parse_value("thinking_effort", "max")
+
+
+@pytest.mark.parametrize(
+    ("value", "text"),
+    [(True, "true"), (False, "false"), (300.0, "300"), (0.5, "0.5"), ("high", "high")],
+)
+def test_a_value_is_typed_as_a_user_types_it(value: object, text: str) -> None:
+    assert typed_text(value) == text
 
 
 def test_literal_members_reads_the_size_names_in_order() -> None:

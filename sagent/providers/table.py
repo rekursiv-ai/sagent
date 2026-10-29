@@ -36,6 +36,7 @@ from sagent.model.capability import (
     ThinkingEffort,
     ThinkingOutput,
     literal_members,
+    typed_text,
 )
 from sagent.model.context import ContextSizeName
 from sagent.model.cost import PriceCatalog, PriceCondition, ServiceTier, TokenPrice
@@ -49,9 +50,6 @@ if TYPE_CHECKING:
 __all__ = [
     "ModelTable",
     "ModelTags",
-    "choice_field",
-    "chosen",
-    "spelled",
 ]
 
 
@@ -281,10 +279,11 @@ class ModelTags:
     service_tier: ServiceTier | None = None
     """The tier it names, ``+fast`` being ``priority``; ``None`` for none."""
 
-    choices: Mapping[str, str] = field(
-        default_factory=lambda: MappingProxyType[str, str]({}),
+    choices: Mapping[ModelSettingName, str] = field(
+        default_factory=lambda: MappingProxyType[ModelSettingName, str]({}),
     )
-    """Each ``CHOICE=VALUE`` after the tags, as typed: ``{"budget": "auto"}``."""
+    """Each ``CHOICE=VALUE`` after the tags, by setting, its value as typed:
+    ``budget=auto`` is ``{"thinking_budget": "auto"}``."""
 
     @classmethod
     def parse(cls, line: str) -> Self:
@@ -307,23 +306,25 @@ class ModelTags:
         """
         # Choices start at the first word holding ``=``: a local path may hold spaces.
         spec, *after = re.split(r"\s+(?=\S*=)", line.strip(), maxsplit=1)
-        choices: dict[str, str] = {}
+        choices: dict[ModelSettingName, str] = {}
+        # A line spells a choice with or without ``thinking_``: ``budget=auto``.
+        spellings: dict[str, ModelSettingName] = {
+            spelling: name
+            for name in _choices()
+            for spelling in (name, name.removeprefix("thinking_"))
+        }
         for word in after[0].split() if after else ():
             choice, equals, value = word.partition("=")
             if not equals:
                 raise UnsupportedTagError(
                     f"{line!r} names {word!r}, not a CHOICE=VALUE",
                 )
-            if choice in choices:
-                raise UnsupportedTagError(f"{line!r} names {choice!r} twice")
-            try:
-                choice_field(choice)
-            except KeyError:
+            if choice not in spellings:
                 names = ", ".join(c.removeprefix("thinking_") for c in _choices())
-                raise UnsupportedTagError(
-                    f"{choice} is no choice; give {names}",
-                ) from None
-            choices[choice] = value
+                raise UnsupportedTagError(f"{choice} is no choice; give {names}")
+            if spellings[choice] in choices:
+                raise UnsupportedTagError(f"{line!r} names {choice!r} twice")
+            choices[spellings[choice]] = value
         model, *words = spec.split("+")
         kept: list[str] = [model]
         # Each kind keeps one entry per value: a value spelled twice is one tag.
@@ -397,9 +398,9 @@ class ModelTags:
             else settings.service_tier,
             choices=MappingProxyType(
                 {
-                    field.removeprefix("thinking_"): spelled(chosen(settings, field))
-                    for field in _choices()
-                    if chosen(settings, field) != chosen(fresh, field)
+                    name: typed_text(settings.value(name))
+                    for name in _choices()
+                    if settings.value(name) != fresh.value(name)
                 },
             ),
         )
@@ -422,63 +423,12 @@ class ModelTags:
         return " ".join(
             [
                 f"{self.name}{''.join(tags)}",
-                *(f"{choice}={value}" for choice, value in self.choices.items()),
+                *(
+                    f"{name.removeprefix('thinking_')}={value}"
+                    for name, value in self.choices.items()
+                ),
             ],
         )
-
-
-def choice_field(choice: str) -> ModelSettingName:
-    """Return the field a line's ``CHOICE=VALUE`` sets: ``budget`` is ``thinking_budget``.
-
-    Args:
-      choice: The choice as a line spells it, with or without ``thinking_``.
-
-    Returns:
-      field: The ``ModelSettings`` field it sets.
-
-    Raises:
-      KeyError: A line spells no such choice.
-
-    """
-    for name in _choices():
-        if choice in (name, name.removeprefix("thinking_")):
-            return name
-    raise KeyError(choice)
-
-
-def chosen(settings: ModelSettings, field: ModelSettingName) -> object:
-    """Return the choice ``settings`` made on ``field``.
-
-    Args:
-      settings: The model's settings.
-      field: A ``ModelSettings`` field.
-
-    Returns:
-      value: What it holds.
-
-    """
-    match field:
-        case "thinking_effort":
-            return settings.thinking_effort
-        case "thinking_budget":
-            return settings.thinking_budget
-        case "thinking_output":
-            return settings.thinking_output
-        case "service_tier":
-            return settings.service_tier
-        case "cache_ttl_sec":
-            return settings.cache_ttl_sec
-        case _:
-            return settings.manage_context_server_side
-
-
-def spelled(value: object) -> str:
-    """Return ``value`` as a user types it: ``true``, ``300``, ``high``."""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, float):
-        return f"{value:g}"
-    return str(value)
 
 
 def _choices() -> tuple[ModelSettingName, ...]:

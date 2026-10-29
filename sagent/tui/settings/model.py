@@ -40,10 +40,11 @@ from sagent.model.capability import (
     ModelSettings,
     ThinkingEffort,
     literal_members,
+    typed_text,
 )
 from sagent.model.cost import ServiceTier
-from sagent.providers.catalog import accounts, choose, offered, pick, successor
-from sagent.providers.table import ModelTags, chosen, spelled
+from sagent.providers.catalog import accounts, successor
+from sagent.providers.table import ModelTags
 from sagent.providers.types import ModelCatalog
 from sagent.tui.settings.types import Setting, SettingError
 
@@ -152,7 +153,7 @@ class AgentModel:
             value=partial(self._axis_value, field),
             options=lambda: (
                 "default",
-                *(spelled(v) for v in offered(self.agent.model.capability, field)),
+                *(typed_text(v) for v in self.agent.model.capability.values(field)),
             ),
             apply=partial(self._set, field),
             cli=True,
@@ -225,8 +226,8 @@ class AgentModel:
         return self.agent.model.capability.default
 
     def _axis_value(self, field: ModelSettingName) -> str:
-        now = chosen(self.agent.model.settings, field)
-        return _marked(spelled(now), default=now == chosen(self._fresh(), field))
+        now = self.agent.model.settings.value(field)
+        return _marked(typed_text(now), default=now == self._fresh().value(field))
 
     def _context_value(self) -> str:
         size = self.agent.model.settings.context_size
@@ -312,7 +313,7 @@ class AgentModel:
         tier = picked.pop("service_tier", None)
         settings = model.settings
         for field, value in picked.items():
-            settings = choose(settings, field, value)
+            settings = settings.with_value(field, value)
         if tier is not None:
             settings = capability.fit(
                 settings,
@@ -333,18 +334,18 @@ class AgentModel:
         """Return the value ``typed`` names on ``field``."""
         word = typed.strip().lower()
         if word == "default":
-            return chosen(self._fresh(), field)
+            return self._fresh().value(field)
         tags = ModelTags.parse(f"+{word}")
         tagged = {"thinking_effort": tags.effort, "service_tier": tags.service_tier}
         word = tagged.get(field) or word
         capability = self.agent.model.capability
         try:
-            return pick(capability, field, word)
+            return capability.parse_value(field, word)
         except ValueError as e:
             if not closest:
                 raise SettingError(str(e)) from e
         near = _closest(capability, field, word)
-        return chosen(self._fresh(), field) if near is None else near
+        return self._fresh().value(field) if near is None else near
 
 
 def _marked(shown: str, *, default: bool) -> str:
@@ -363,7 +364,7 @@ def _closest(
     typed: str,
 ) -> object | None:
     """Return the offered value nearest ``typed``, a lower one on a tie."""
-    values = offered(capability, field)
+    values = capability.values(field)
     if field == "thinking_effort" and typed in _EFFORTS:
         at = _EFFORTS.index(typed)
         rungs = [_EFFORTS.index(str(v)) for v in values]

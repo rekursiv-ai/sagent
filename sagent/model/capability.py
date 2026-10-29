@@ -9,7 +9,7 @@ model.capability.prices["auto", "smallcontext"]         # the size ``smallcontex
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Literal, TypeAliasType, cast, get_args
 
 from sagent.model.context import ContextSize
@@ -17,7 +17,7 @@ from sagent.model.cost import PriceCatalog, ServiceTier
 
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Sequence
 
 
 __all__ = [
@@ -33,6 +33,7 @@ __all__ = [
     "ThinkingOutput",
     "literal_members",
     "model_setting_names",
+    "typed_text",
 ]
 
 
@@ -154,6 +155,63 @@ class ModelSettings:
     context_size: ContextSize = field(default_factory=ContextSize)
     pruning: PruningPolicy | None = field(default_factory=PruningPolicy)
 
+    def value(self, name: ModelSettingName) -> object:
+        """Return the value chosen on the setting ``name``.
+
+        Args:
+          name: The setting.
+
+        Returns:
+          value: What it holds, as ``ModelCapability.values`` lists it.
+
+        """
+        match name:
+            case "thinking_effort":
+                return self.thinking_effort
+            case "thinking_budget":
+                return self.thinking_budget
+            case "thinking_output":
+                return self.thinking_output
+            case "service_tier":
+                return self.service_tier
+            case "cache_ttl_sec":
+                return self.cache_ttl_sec
+            case "manage_context_server_side":
+                return self.manage_context_server_side
+
+    def with_value(self, name: ModelSettingName, value: object) -> ModelSettings:
+        """Return these settings with ``value`` chosen on ``name``; unchecked.
+
+        Args:
+          name: The setting.
+          value: A value ``ModelCapability.values`` lists for it.
+
+        Returns:
+          settings: The new choice made, offered by no model in particular.
+
+        Raises:
+          ValueError: ``value`` is no value of that setting's type.
+
+        """
+        match name:
+            case "thinking_effort":
+                return replace(self, thinking_effort=cast(ThinkingEffort, value))
+            case "thinking_budget":
+                return replace(self, thinking_budget=cast(ThinkingBudget, value))
+            case "thinking_output":
+                return replace(self, thinking_output=cast(ThinkingOutput, value))
+            case "service_tier":
+                return replace(self, service_tier=cast(ServiceTier, value))
+            case "cache_ttl_sec" if isinstance(value, int | float) and not isinstance(
+                value,
+                bool,
+            ):
+                return replace(self, cache_ttl_sec=float(value))
+            case "manage_context_server_side" if isinstance(value, bool):
+                return replace(self, manage_context_server_side=value)
+            case _:
+                raise ValueError(f"{name}={value!r} is no choice")
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelCapability:
@@ -191,19 +249,53 @@ class ModelCapability:
           ValueError: A choice this model does not offer, named with what it does.
 
         """
-        for name, value, offered in (
-            ("thinking_effort", settings.thinking_effort, self.thinking_effort),
-            ("thinking_budget", settings.thinking_budget, self.thinking_budget),
-            ("thinking_output", settings.thinking_output, self.thinking_output),
-            ("service_tier", settings.service_tier, self.service_tier),
-            ("cache_ttl_sec", settings.cache_ttl_sec, self.cache_ttl_sec),
-            (
-                "manage_context_server_side",
-                settings.manage_context_server_side,
-                self.manage_context_server_side,
-            ),
-        ):
-            _check_offered(self.model_id, name, value, offered)
+        for name in model_setting_names():
+            _check_offered(self.model_id, name, settings.value(name), self.values(name))
+
+    def values(self, name: ModelSettingName) -> tuple[object, ...]:
+        """Return the values this model offers on the setting ``name``.
+
+        Args:
+          name: The setting.
+
+        Returns:
+          values: Each one, the least committing first.
+
+        """
+        match name:
+            case "thinking_effort":
+                return _ladder(self.thinking_effort, literal_members(ThinkingEffort))
+            case "thinking_budget":
+                return _ladder(self.thinking_budget, literal_members(ThinkingBudget))
+            case "thinking_output":
+                return _ladder(self.thinking_output, literal_members(ThinkingOutput))
+            case "service_tier":
+                return _ladder(self.service_tier, literal_members(ServiceTier))
+            case "cache_ttl_sec":
+                return tuple(sorted(self.cache_ttl_sec))
+            case "manage_context_server_side":
+                return tuple(sorted(self.manage_context_server_side))
+
+    def parse_value(self, name: ModelSettingName, text: str) -> object:
+        """Return the value this model offers on ``name`` that ``text`` types.
+
+        Args:
+          name: The setting.
+          text: The value as a user types it, in any case.
+
+        Returns:
+          value: The offered value.
+
+        Raises:
+          ValueError: The model offers no such value; the message lists those it does.
+
+        """
+        values = self.values(name)
+        hits = [v for v in values if typed_text(v) == text.strip().lower()]
+        if not hits:
+            texts = ", ".join(typed_text(v) for v in values)
+            raise ValueError(f"{text!r} is not one of: {texts}")
+        return hits[0]
 
     def fit(
         self,
@@ -288,6 +380,28 @@ def literal_members[T](alias: object) -> tuple[T, ...]:
 def model_setting_names() -> tuple[ModelSettingName, ...]:
     """Return each ``ModelSettings`` field a model offers a choice of, in order."""
     return cast(tuple[ModelSettingName, ...], literal_members(ModelSettingName))
+
+
+def typed_text(value: object) -> str:
+    """Return a setting's ``value`` as a user types it: ``true``, ``300``, ``high``.
+
+    Args:
+      value: A value of some setting.
+
+    Returns:
+      text: What reads back as it.
+
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _ladder(offered: Collection[object], order: Sequence[object]) -> tuple[object, ...]:
+    """Return ``offered`` in the order ``order`` lists it."""
+    return tuple(v for v in order if v in offered)
 
 
 def _kept[T](value: T, offered: Collection[T], default: T) -> T:

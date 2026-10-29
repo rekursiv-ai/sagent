@@ -7,7 +7,6 @@ import pytest
 from sagent.model.capability import model_setting_names
 from sagent.model.exceptions import AuthError
 from sagent.model.types import Request
-from sagent.providers.catalog import choose
 from sagent.providers.moonshot.api import Moonshot
 from sagent.session.types import UserMessage
 
@@ -20,7 +19,7 @@ def _body(model_id: str, **choices: object) -> dict[str, object]:
     model = moonshot[model_id]
     for field in model_setting_names():
         if field in choices:
-            model.settings = choose(model.settings, field, choices.pop(field))
+            model.settings = model.settings.with_value(field, choices.pop(field))
     assert not choices, f"no such setting: {sorted(choices)}"
     return moonshot.encode(_REQUEST, model=model)
 

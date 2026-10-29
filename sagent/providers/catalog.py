@@ -17,20 +17,14 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import partial
 from types import MappingProxyType
-from typing import TYPE_CHECKING, ClassVar, Self, cast, override
+from typing import TYPE_CHECKING, ClassVar, Self, override
 
 import re
 
 from sagent.model.capability import (
     ModelCapability,
-    ModelSettingName,
     ModelSettings,
-    ThinkingBudget,
-    ThinkingEffort,
-    ThinkingOutput,
-    literal_members,
 )
-from sagent.model.cost import ServiceTier
 from sagent.model.exceptions import UnknownModelError, UnknownProviderError
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import AnthropicCLI
@@ -47,11 +41,11 @@ from sagent.providers.openai.login import CodexLogin
 from sagent.providers.openai.sub import OpenAISub
 from sagent.providers.resources import SharedResources, close_all
 from sagent.providers.selfhosted.server import SelfHosted
-from sagent.providers.table import ModelTags, choice_field, spelled
+from sagent.providers.table import ModelTags
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Sequence
+    from collections.abc import Callable, Iterable
     from pathlib import Path
 
     from sagent.providers.types import (
@@ -70,11 +64,8 @@ __all__ = [
     "account_credentials",
     "accounts",
     "cache_key",
-    "choose",
     "default_provider",
     "listings",
-    "offered",
-    "pick",
     "recall",
     "successor",
 ]
@@ -595,95 +586,6 @@ async def recall(
     return await _built(catalog, memory.model), cache
 
 
-def choose(
-    settings: ModelSettings,
-    field: ModelSettingName,
-    value: object,
-) -> ModelSettings:
-    """Return ``settings`` with ``field`` set to ``value``, as ``chosen`` reads it back.
-
-    Args:
-      settings: The model's settings.
-      field: A ``ModelSettings`` field ``chosen`` reads.
-      value: What ``offered`` lists for it.
-
-    Returns:
-      settings: The new choice made; unchecked against any capability.
-
-    Raises:
-      ValueError: ``field`` is no choice.
-
-    """
-    match field:
-        case "thinking_effort":
-            return replace(settings, thinking_effort=cast(ThinkingEffort, value))
-        case "thinking_budget":
-            return replace(settings, thinking_budget=cast(ThinkingBudget, value))
-        case "thinking_output":
-            return replace(settings, thinking_output=cast(ThinkingOutput, value))
-        case "service_tier":
-            return replace(settings, service_tier=cast(ServiceTier, value))
-        case "cache_ttl_sec" if isinstance(value, int | float):
-            return replace(settings, cache_ttl_sec=float(value))
-        case "manage_context_server_side" if isinstance(value, bool):
-            return replace(settings, manage_context_server_side=value)
-        case _:
-            raise ValueError(f"{field}={value!r} is no choice")
-
-
-def offered(capability: ModelCapability, field: ModelSettingName) -> tuple[object, ...]:
-    """Return what ``capability`` offers on ``field``, least committing first.
-
-    Args:
-      capability: The model.
-      field: A ``ModelSettings`` field.
-
-    Returns:
-      values: Each value it may take.
-
-    """
-    match field:
-        case "thinking_effort":
-            return _ladder(capability.thinking_effort, literal_members(ThinkingEffort))
-        case "thinking_budget":
-            return _ladder(capability.thinking_budget, literal_members(ThinkingBudget))
-        case "thinking_output":
-            return _ladder(capability.thinking_output, literal_members(ThinkingOutput))
-        case "service_tier":
-            return _ladder(capability.service_tier, literal_members(ServiceTier))
-        case "cache_ttl_sec":
-            return tuple(sorted(capability.cache_ttl_sec))
-        case _:
-            return tuple(sorted(capability.manage_context_server_side))
-
-
-def pick(capability: ModelCapability, field: ModelSettingName, typed: str) -> object:
-    """Return the value ``capability`` offers on ``field`` whose text is ``typed``.
-
-    Args:
-      capability: The model.
-      field: A ``ModelSettings`` field.
-      typed: The value as a user types it, in any case.
-
-    Returns:
-      value: The offered value.
-
-    Raises:
-      ValueError: The model offers no such value; the message lists those it does.
-
-    """
-    values = offered(capability, field)
-    hits = [v for v in values if spelled(v) == typed.strip().lower()]
-    if not hits:
-        texts = ", ".join(spelled(v) for v in values)
-        raise ValueError(f"{typed!r} is not one of: {texts}")
-    return hits[0]
-
-
-def _ladder(offered: Collection[object], order: Sequence[object]) -> tuple[object, ...]:
-    return tuple(v for v in order if v in offered)
-
-
 def _apply(model: Model, tags: ModelTags) -> None:
     """Apply the effort, tier and choices ``tags`` name to ``model``; raise if unoffered."""
     capability = model.capability
@@ -691,12 +593,11 @@ def _apply(model: Model, tags: ModelTags) -> None:
     if tags.effort is not None:
         settings = replace(settings, thinking_effort=tags.effort)
     # ``ModelTags.parse`` admits only the choices a line spells.
-    for choice, typed in tags.choices.items():
-        field = choice_field(choice)
+    for name, typed in tags.choices.items():
         try:
-            settings = choose(settings, field, pick(capability, field, typed))
+            settings = settings.with_value(name, capability.parse_value(name, typed))
         except ValueError as e:
-            raise ValueError(f"{choice}: {e}") from e
+            raise ValueError(f"{name.removeprefix('thinking_')}: {e}") from e
     if tags.service_tier is not None:
         capability.check(replace(settings, service_tier=tags.service_tier))
         settings = capability.fit(

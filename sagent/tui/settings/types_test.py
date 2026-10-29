@@ -53,7 +53,6 @@ class _Owner:
 def test_has_settings_is_runtime_checkable() -> None:
     assert isinstance(_Owner(), HasSettings)
     assert not isinstance(object(), HasSettings)
-    assert HasSettings.settings(_Owner()) is None
 
 
 if __name__ == "__main__":

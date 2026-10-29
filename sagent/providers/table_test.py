@@ -23,7 +23,7 @@ from sagent.model.capability import (
 )
 from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
 from sagent.model.exceptions import UnknownModelError, UnsupportedTagError
-from sagent.providers.table import ModelTable, ModelTags, chosen, spelled
+from sagent.providers.table import ModelTable, ModelTags
 
 
 if TYPE_CHECKING:
@@ -372,7 +372,7 @@ def test_resolve_takes_a_name_and_its_size_alone(tag: str) -> None:
         ("opus+fast+priority", ModelTags(model="opus", service_tier="priority")),
         (
             "/m/My Model+cuda budget=auto",
-            ModelTags(model="/m/My Model+cuda", choices={"budget": "auto"}),
+            ModelTags(model="/m/My Model+cuda", choices={"thinking_budget": "auto"}),
         ),
         (
             "opus+fast+1m+high",
@@ -395,7 +395,7 @@ def test_resolve_takes_a_name_and_its_size_alone(tag: str) -> None:
             ModelTags(
                 model="opus",
                 effort="high",
-                choices={"budget": "auto", "output": "text"},
+                choices={"thinking_budget": "auto", "thinking_output": "text"},
             ),
         ),
     ],
@@ -433,7 +433,7 @@ def test_a_word_of_no_kind_stays_in_the_name(word: str) -> None:
             context=1_000_000,
             effort="low",
             service_tier="flex",
-            choices={"budget": "auto", "cache_ttl_sec": "3600"},
+            choices={"thinking_budget": "auto", "cache_ttl_sec": "3600"},
         ),
     ],
     ids=str,
@@ -463,7 +463,10 @@ def test_a_line_parses_back_to_its_tags(tags: ModelTags) -> None:
         ),
         (ModelTags(model="opus", context=258_123), "opus+258123"),
         (
-            ModelTags(model="opus", choices={"budget": "auto", "output": "text"}),
+            ModelTags(
+                model="opus",
+                choices={"thinking_budget": "auto", "thinking_output": "text"},
+            ),
             "opus budget=auto output=text",
         ),
     ],
@@ -507,34 +510,6 @@ def test_parse_refuses_two_of_one_kind_and_unknown_choices(
 ) -> None:
     with pytest.raises(UnsupportedTagError, match=_exactly(message)):
         ModelTags.parse(line)
-
-
-@pytest.mark.parametrize(
-    ("value", "text"),
-    [(True, "true"), (False, "false"), (300.0, "300"), (0.5, "0.5"), ("high", "high")],
-)
-def test_a_value_is_spelled_as_a_user_types_it(value: object, text: str) -> None:
-    assert spelled(value) == text
-
-
-def test_chosen_reads_each_field_a_setting_names() -> None:
-    settings = replace(
-        _row().default,
-        thinking_effort="high",
-        thinking_budget="auto",
-        thinking_output="text",
-        service_tier="priority",
-        cache_ttl_sec=3600.0,
-        manage_context_server_side=True,
-    )
-    assert [chosen(settings, f) for f in model_setting_names()] == [
-        "high",
-        "auto",
-        "text",
-        "priority",
-        3600.0,
-        True,
-    ]
 
 
 def test_settings_name_their_size_their_effort_and_only_choices_made() -> None:
