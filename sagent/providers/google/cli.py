@@ -43,7 +43,7 @@ from sagent.model.exceptions import AuthError, DisconnectedError, RateLimitedErr
 from sagent.model.types import Response, TextChunk
 from sagent.providers import google
 from sagent.providers.resources import SharedResources
-from sagent.providers.table import Catalogued
+from sagent.providers.table import HasModels
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
@@ -84,7 +84,7 @@ __all__ = [
 ]
 
 
-class GoogleCLI(Catalogued, AsyncResource):
+class GoogleCLI(HasModels, AsyncResource):
     """Gemini models through ``agy``, billed to its login.
 
     Args:

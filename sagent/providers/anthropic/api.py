@@ -24,7 +24,7 @@ from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
 from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
 from sagent.providers.resources import SharedResources
-from sagent.providers.table import Catalogued
+from sagent.providers.table import HasModels
 from sagent.types import AsyncResource
 
 
@@ -56,7 +56,7 @@ __all__ = [
 ]
 
 
-class Anthropic(Catalogued, AsyncResource):
+class Anthropic(HasModels, AsyncResource):
     """Claude models, billed to the API key in ``ANTHROPIC_API_KEY``.
 
     Args:

@@ -37,7 +37,7 @@ from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
 from sagent.providers.anthropic.login import ClaudeLogin
 from sagent.providers.resources import SharedResources
-from sagent.providers.table import Catalogued
+from sagent.providers.table import HasModels
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
@@ -79,7 +79,7 @@ __all__ = [
 ]
 
 
-class AnthropicCLI(Catalogued, AsyncResource):
+class AnthropicCLI(HasModels, AsyncResource):
     """Claude models through the ``claude`` CLI, billed to its login.
 
     Args:

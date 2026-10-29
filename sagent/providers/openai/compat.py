@@ -31,7 +31,7 @@ from treekle import json_dumps, json_loads
 from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
 from sagent.providers.openai import chat, token_count, wire
 from sagent.providers.resources import SharedResources
-from sagent.providers.table import Catalogued
+from sagent.providers.table import HasModels
 from sagent.types import AsyncResource
 
 
@@ -72,7 +72,7 @@ class Reader(Protocol):
         ...
 
 
-class OpenAICompatible(Catalogued, AsyncResource):
+class OpenAICompatible(HasModels, AsyncResource):
     """Models of one OpenAI-compatible endpoint, over Chat Completions.
 
     Args:

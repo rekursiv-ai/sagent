@@ -50,7 +50,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "Catalogued",
+    "HasModels",
     "ModelTable",
     "ModelTags",
     "models",
@@ -448,7 +448,7 @@ def models(package: ModuleType, *, section: str) -> ModelTable:
     return _read(package.__name__, section=section)
 
 
-class Catalogued:
+class HasModels:
     """A provider class whose models are one section of its vendor's catalog."""
 
     package: ClassVar[ModuleType]

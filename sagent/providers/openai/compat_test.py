@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, override
 
@@ -156,6 +156,16 @@ def test_the_provider_serves_its_sections_models_by_any_name() -> None:
 )
 def test_a_model_is_found_by_any_of_its_names(name: str, model_id: str) -> None:
     assert _Vendor()[name].capability.model_id == model_id
+
+
+def test_a_model_takes_only_settings_its_capability_offers() -> None:
+    model = _Vendor()["default"]
+    offered = replace(model.settings, thinking_effort="low")
+    model.settings = offered
+    assert model.settings == offered
+    with pytest.raises(ValueError, match="thinking_effort"):
+        model.settings = replace(model.settings, thinking_effort="min")
+    assert model.settings == offered
 
 
 @pytest.mark.asyncio
