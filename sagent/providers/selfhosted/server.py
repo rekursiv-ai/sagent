@@ -80,6 +80,7 @@ else:
 __all__ = [
     "SelfHosted",
     "SelfHostedModel",
+    "template_options",
 ]
 
 
@@ -236,8 +237,16 @@ class SelfHostedModel(AsyncResource):
                     truncates_at_context=True,
                 ),
                 prices=prices,
-                thinking_effort=frozenset({"none", "low", "medium", "high"}),
-                default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+                # The template takes thinking on or off, nothing between.
+                thinking_effort=frozenset({"none", "high"}),
+                # Nothing here takes a tier or prunes on the client's behalf.
+                service_tier=frozenset({"auto"}),
+                manage_context_server_side=frozenset({False}),
+                # A chat template told nothing thinks.
+                default=ModelSettings(
+                    thinking_effort="high",
+                    context_size=prices["auto", "fullcontext"],
+                ),
             )
         return self._capability
 
@@ -380,130 +389,17 @@ class _Loaded:
     """Held while the model generates: it serves one reply at a time."""
 
 
-def _spec(name: str) -> tuple[_Spec, ContextSizeName | int]:
-    """Return what ``name`` (``repo+option+option``) asks to load, and the size it names."""
-    path, *options = name.split("+")
-    if not path:
-        raise ValueError("A local model's name must start with a repo id or path.")
-    # Each a word of no tag's kind, which a model line keeps in the model: one
-    # spelled as a tag (``auto``, a tier) would be lifted off before it got here.
-    devices: dict[str, Literal["auto", "cpu", "cuda", "mps"]] = {
-        "shard": "auto",
-        "cpu": "cpu",
-        "cuda": "cuda",
-        "mps": "mps",
-    }
-    dtypes = ("bfloat16", "float16", "float32")
-    spec = _Spec(path=str(Path(path).expanduser()))
-    size: ContextSizeName | int = "fullcontext"
-    seen: set[str] = set()
-    for raw in options:
-        option = raw.removeprefix("torch.")
-        named = ModelTags.parse(f"+{raw}").context
-        kind = (
-            "device"
-            if option in devices
-            else "dtype"
-            if option in dtypes
-            else "compile"
-            if option in ("compile", "no-compile")
-            else "size"
-            if named is not None
-            else ""
-        )
-        if not kind:
-            known = ", ".join(
-                (
-                    *devices,
-                    *dtypes,
-                    "compile",
-                    "no-compile",
-                    *literal_members(ContextSizeName),
-                    "200k",
-                ),
-            )
-            raise ValueError(f"Unknown option {raw!r} in {name!r}; use {known}.")
-        if kind in seen:
-            raise ValueError(f"The {kind} is given twice in {name!r}.")
-        seen.add(kind)
-        if named is not None:
-            size = named
-        elif kind == "device":
-            spec = replace(spec, device=devices[option])
-        elif kind == "dtype":
-            spec = replace(
-                spec,
-                dtype=cast(Literal["bfloat16", "float16", "float32"], option),
-            )
-        else:
-            spec = replace(spec, compile=option == "compile")
-    return spec, size
+def template_options(request: Request, *, settings: ModelSettings) -> dict[str, object]:
+    """Return what the chat template is passed for ``request``, settings included.
 
+    Args:
+      request: What the model is asked.
+      settings: The settings chosen.
 
-def _window(path: str, *, trust_remote_code: bool) -> int:
-    """Return the tokens ``path``'s model takes in, as its config states."""
-    config = dict[str, object](
-        transformers.AutoConfig.from_pretrained(
-            path,
-            trust_remote_code=trust_remote_code,
-        ).to_dict(),
-    )
-    text = from_plain(config.get("text_config"), dict[str, object], default={})
-    stated = config.get("max_position_embeddings", text.get("max_position_embeddings"))
-    if stated is None:
-        raise ValueError(f"{path!r}'s config states no max_position_embeddings.")
-    return from_plain(stated, int)
+    Returns:
+      options: The template's keyword arguments.
 
-
-def _load(spec: _Spec, *, trust_remote_code: bool) -> _Loaded:
-    """Load ``spec``'s weights and tokenizer; this blocks for minutes."""
-    device = spec.device or (
-        "mps"
-        if torch.backends.mps.is_available()
-        else "cuda"
-        if torch.cuda.is_available()
-        else ""
-    )
-    options: dict[str, object] = {"trust_remote_code": trust_remote_code}
-    if spec.dtype:
-        options["dtype"] = {
-            "bfloat16": torch.bfloat16,
-            "float16": torch.float16,
-            "float32": torch.float32,
-        }[spec.dtype]
-    # ``auto`` lets accelerate shard the weights across every visible GPU, for
-    # a model larger than one GPU holds.
-    if device == "auto":
-        options["device_map"] = "auto"
-    model = transformers.AutoModelForCausalLM.from_pretrained(spec.path, **options)
-    if device and device != "auto":
-        model = model.to(device)
-    model.eval()
-    compiled = (
-        cast("Callable[[object], object]", torch.compile)(model)
-        if spec.compile
-        else model
-    )
-    return _Loaded(
-        model=cast(_Generator, compiled),
-        tokenizer=cast(
-            _Tokenizer,
-            transformers.AutoTokenizer.from_pretrained(
-                spec.path,
-                trust_remote_code=trust_remote_code,
-            ),
-        ),
-    )
-
-
-def _render(
-    tokenizer: _Tokenizer,
-    request: Request,
-    *,
-    settings: ModelSettings,
-) -> Tensor:
-    """Return the request rendered by the model's chat template, as token ids."""
-    messages = _messages(request)
+    """
     options: dict[str, object] = {
         "tokenize": True,
         "add_generation_prompt": True,
@@ -512,9 +408,7 @@ def _render(
     }
     if request.tools:
         options["tools"] = [_schema(tool) for tool in request.tools]
-    rendered = _templated(tokenizer, messages, options=options, tools=request.tools)
-    ids = cast("Tensor", _field(rendered, "input_ids"))
-    return ids.unsqueeze(0) if ids.ndim == 1 else ids
+    return options
 
 
 # A template that knows neither switch rejects it; each is dropped in turn, and a
@@ -725,3 +619,136 @@ def _with_preamble(
         head = {**messages[0], "content": f"{messages[0]['content']}\n\n{preamble}"}
         return [head, *messages[1:]]
     return [{"role": "system", "content": preamble}, *messages]
+
+
+def _spec(name: str) -> tuple[_Spec, ContextSizeName | int]:
+    """Return what ``name`` (``repo+option+option``) asks to load, and the size it names."""
+    path, *options = name.split("+")
+    if not path:
+        raise ValueError("A local model's name must start with a repo id or path.")
+    # Each a word of no tag's kind, which a model line keeps in the model: one
+    # spelled as a tag (``auto``, a tier) would be lifted off before it got here.
+    devices: dict[str, Literal["auto", "cpu", "cuda", "mps"]] = {
+        "shard": "auto",
+        "cpu": "cpu",
+        "cuda": "cuda",
+        "mps": "mps",
+    }
+    dtypes = ("bfloat16", "float16", "float32")
+    spec = _Spec(path=str(Path(path).expanduser()))
+    size: ContextSizeName | int = "fullcontext"
+    seen: set[str] = set()
+    for raw in options:
+        option = raw.removeprefix("torch.")
+        named = ModelTags.parse(f"+{raw}").context
+        kind = (
+            "device"
+            if option in devices
+            else "dtype"
+            if option in dtypes
+            else "compile"
+            if option in ("compile", "no-compile")
+            else "size"
+            if named is not None
+            else ""
+        )
+        if not kind:
+            known = ", ".join(
+                (
+                    *devices,
+                    *dtypes,
+                    "compile",
+                    "no-compile",
+                    *literal_members(ContextSizeName),
+                    "200k",
+                ),
+            )
+            raise ValueError(f"Unknown option {raw!r} in {name!r}; use {known}.")
+        if kind in seen:
+            raise ValueError(f"The {kind} is given twice in {name!r}.")
+        seen.add(kind)
+        if named is not None:
+            size = named
+        elif kind == "device":
+            spec = replace(spec, device=devices[option])
+        elif kind == "dtype":
+            spec = replace(
+                spec,
+                dtype=cast(Literal["bfloat16", "float16", "float32"], option),
+            )
+        else:
+            spec = replace(spec, compile=option == "compile")
+    return spec, size
+
+
+def _window(path: str, *, trust_remote_code: bool) -> int:
+    """Return the tokens ``path``'s model takes in, as its config states."""
+    config = dict[str, object](
+        transformers.AutoConfig.from_pretrained(
+            path,
+            trust_remote_code=trust_remote_code,
+        ).to_dict(),
+    )
+    text = from_plain(config.get("text_config"), dict[str, object], default={})
+    stated = config.get("max_position_embeddings", text.get("max_position_embeddings"))
+    if stated is None:
+        raise ValueError(f"{path!r}'s config states no max_position_embeddings.")
+    return from_plain(stated, int)
+
+
+def _load(spec: _Spec, *, trust_remote_code: bool) -> _Loaded:
+    """Load ``spec``'s weights and tokenizer; this blocks for minutes."""
+    device = spec.device or (
+        "mps"
+        if torch.backends.mps.is_available()
+        else "cuda"
+        if torch.cuda.is_available()
+        else ""
+    )
+    options: dict[str, object] = {"trust_remote_code": trust_remote_code}
+    if spec.dtype:
+        options["dtype"] = {
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+            "float32": torch.float32,
+        }[spec.dtype]
+    # ``auto`` lets accelerate shard the weights across every visible GPU, for
+    # a model larger than one GPU holds.
+    if device == "auto":
+        options["device_map"] = "auto"
+    model = transformers.AutoModelForCausalLM.from_pretrained(spec.path, **options)
+    if device and device != "auto":
+        model = model.to(device)
+    model.eval()
+    compiled = (
+        cast("Callable[[object], object]", torch.compile)(model)
+        if spec.compile
+        else model
+    )
+    return _Loaded(
+        model=cast(_Generator, compiled),
+        tokenizer=cast(
+            _Tokenizer,
+            transformers.AutoTokenizer.from_pretrained(
+                spec.path,
+                trust_remote_code=trust_remote_code,
+            ),
+        ),
+    )
+
+
+def _render(
+    tokenizer: _Tokenizer,
+    request: Request,
+    *,
+    settings: ModelSettings,
+) -> Tensor:
+    """Return the request rendered by the model's chat template, as token ids."""
+    rendered = _templated(
+        tokenizer,
+        _messages(request),
+        options=template_options(request, settings=settings),
+        tools=request.tools,
+    )
+    ids = cast("Tensor", _field(rendered, "input_ids"))
+    return ids.unsqueeze(0) if ids.ndim == 1 else ids

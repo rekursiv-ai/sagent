@@ -63,8 +63,13 @@ if TYPE_CHECKING:
     from asyncio.subprocess import Process
     from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 
-    from sagent.model.capability import ModelCapability, ModelSettings
+    from sagent.model.capability import (
+        ModelCapability,
+        ModelSettingName,
+        ModelSettings,
+    )
     from sagent.model.types import Request
+    from sagent.providers.table import ModelTable
     from sagent.providers.types import (
         ProviderSharedResources,
         ToolMount,
@@ -91,6 +96,9 @@ class GoogleCLI(AsyncResource):
 
     section: ClassVar[str] = "google-cli"
     """The catalog section whose models and settings this provider serves."""
+
+    sends: ClassVar[frozenset[ModelSettingName]] = frozenset({"thinking_effort"})
+    """The settings ``agy`` takes, in its model id; the rest are its own."""
 
     def __init__(
         self,
@@ -121,11 +129,21 @@ class GoogleCLI(AsyncResource):
         return ()
 
     def __getitem__(self, model: str) -> GoogleCLIModel:
-        capability, settings = models(self.section).resolve(model)
+        capability, settings = self.models().resolve(model)
         return GoogleCLIModel(provider=self, capability=capability, settings=settings)
 
     def __iter__(self) -> Iterator[str]:
-        return iter(models(self.section))
+        return iter(self.models())
+
+    @classmethod
+    def models(cls) -> ModelTable:
+        """Return the models this provider serves.
+
+        Returns:
+          table: Its section's models, offering only the settings it sends.
+
+        """
+        return models(cls.section, sends=cls.sends)
 
     @override
     async def aclose(self) -> None:
@@ -288,24 +306,7 @@ class GoogleCLIModel(AsyncResource):
             tools=request.tools,
             url=mount.url,
         )
-        # Started in the workdir: ``agy`` reads rules and agents from where it
-        # starts, and the caller's directory holds the caller's.
-        argv = [
-            "/bin/sh",
-            "-c",
-            'cd "$0" && exec "$@"',
-            str(home / "workdir"),
-            "agy",
-            "--agent",
-            "sagent",
-            "--input-format",
-            "stream-json",
-            "--output-format",
-            "stream-json",
-            "--disable-slash-commands",
-            "--model",
-            self._model_id(),
-        ]
+        argv = self.command(home / "workdir")
         # An API key would send ``agy`` to the Gemini API, not the plan.
         drop = {"GEMINI_API_KEY", "GOOGLE_API_KEY"}
         env = {key: value for key, value in os.environ.items() if key not in drop}
@@ -323,6 +324,34 @@ class GoogleCLIModel(AsyncResource):
         self.provider.started(self)
         await self._agy.prompt("\n\n".join(_transcript(request.records)))
         return self._agy
+
+    def command(self, workdir: Path) -> list[str]:
+        """Return the command line that starts ``agy`` in ``workdir``.
+
+        Args:
+          workdir: Where it starts; it reads rules and agents from there, and
+            the caller's directory holds the caller's.
+
+        Returns:
+          argv: The command, every chosen setting ``agy`` takes on it.
+
+        """
+        return [
+            "/bin/sh",
+            "-c",
+            'cd "$0" && exec "$@"',
+            str(workdir),
+            "agy",
+            "--agent",
+            "sagent",
+            "--input-format",
+            "stream-json",
+            "--output-format",
+            "stream-json",
+            "--disable-slash-commands",
+            "--model",
+            self._model_id(),
+        ]
 
     async def _stop(self) -> None:
         agy, self._agy = self._agy, None

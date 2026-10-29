@@ -20,7 +20,7 @@ from sagent.model.exceptions import (
 )
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.openai import chat, compat, token_count
-from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel, models
+from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel
 from sagent.providers.resources import SharedResources
 from sagent.providers.types import UsageWindow
 from sagent.session.types import (
@@ -134,9 +134,7 @@ def test_the_provider_serves_its_sections_models_by_any_name() -> None:
     vendor = _Vendor()
     assert vendor.name == "moonshot"
     assert _Vendor(name="kimi-work").name == "kimi-work"
-    assert list(vendor) == list(
-        models(_Vendor.package, document=_Vendor.document, section="moonshot"),
-    )
+    assert list(vendor) == list(_Vendor.models())
     model = vendor["default"]
     assert model.provider is vendor
     assert model.capability.model_id == "kimi-3.0"

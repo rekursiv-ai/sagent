@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ModelCapability",
     "ModelLimits",
+    "ModelSettingName",
     "ModelSettings",
     "Permission",
     "PruningPolicy",
@@ -31,6 +32,7 @@ __all__ = [
     "ThinkingEffort",
     "ThinkingOutput",
     "literal_members",
+    "model_setting_names",
 ]
 
 
@@ -55,6 +57,16 @@ type ThinkingOutput = Literal[
     "text",
     "redacted",
 ]
+
+type ModelSettingName = Literal[
+    "thinking_effort",
+    "thinking_budget",
+    "thinking_output",
+    "service_tier",
+    "cache_ttl_sec",
+    "manage_context_server_side",
+]
+"""A ``ModelSettings`` field a model offers a choice of."""
 
 type SummaryKind = Literal[
     "none",
@@ -145,7 +157,11 @@ class ModelSettings:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ModelCapability:
-    """What one model offers, where it starts, and what it costs."""
+    """What one model offers, where it starts, and what it costs.
+
+    Each setting offers only values that change what is sent; one its provider
+    does not send offers the one thing the vendor does unasked.
+    """
 
     thinking_effort: frozenset[ThinkingEffort] = frozenset({"none"})
     thinking_budget: frozenset[ThinkingBudget] = frozenset({"none"})
@@ -267,6 +283,11 @@ def literal_members[T](alias: object) -> tuple[T, ...]:
         tuple[T, ...],
         get_args(cast(object, cast(TypeAliasType, alias).__value__)),
     )
+
+
+def model_setting_names() -> tuple[ModelSettingName, ...]:
+    """Return each ``ModelSettings`` field a model offers a choice of, in order."""
+    return cast(tuple[ModelSettingName, ...], literal_members(ModelSettingName))
 
 
 def _kept[T](value: T, offered: Collection[T], default: T) -> T:

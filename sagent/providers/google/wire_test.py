@@ -30,7 +30,7 @@ from sagent.model.exceptions import (
 )
 from sagent.model.types import Request, TextChunk
 from sagent.providers.google import wire
-from sagent.providers.google.api import models
+from sagent.providers.google.api import Google
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
@@ -386,7 +386,7 @@ def test_gemini_2_5_auto_sends_a_dynamic_budget() -> None:
 
 @pytest.mark.parametrize("budget", ["auto", "fixed"])
 def test_a_row_offering_no_effort_says_nothing_of_one(budget: ThinkingBudget) -> None:
-    capability, settings = models("google").resolve("gemini-flash-2.5")
+    capability, settings = Google.models().resolve("gemini-flash-2.5")
     capability = replace(capability, thinking_effort=frozenset({"none"}))
     settings = replace(
         settings,
@@ -416,7 +416,7 @@ def test_an_effort_the_wire_cannot_say_is_refused(
     effort: ThinkingEffort,
 ) -> None:
     capability = replace(
-        models("google")["gemini-pro-3.1"],
+        Google.models()["gemini-pro-3.1"],
         effort_as_level=as_level,
         thinking_effort=frozenset({effort, "low"}),
         thinking_budget=frozenset({"fixed"}),
@@ -582,7 +582,7 @@ async def test_a_stream_of_only_malformed_events_raises() -> None:
 
 
 def test_text_and_a_call_stop_as_a_tool_use() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     chunks = reader.feed(
         _event(
             [
@@ -610,7 +610,7 @@ def test_text_and_a_call_stop_as_a_tool_use() -> None:
 
 
 def test_each_call_gets_its_own_id_unless_gemini_names_one() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed(
         _event(
             [
@@ -631,7 +631,7 @@ def test_each_call_gets_its_own_id_unless_gemini_names_one() -> None:
 
 
 def test_a_call_with_no_name_is_dropped_and_an_empty_signature_ignored() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed(
         _event(
             [
@@ -652,7 +652,7 @@ def test_a_call_with_no_name_is_dropped_and_an_empty_signature_ignored() -> None
 
 
 def test_reasoning_and_a_signed_answer_in_fragments() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     chunks = [
         *reader.feed(_event([{"text": "hmm", "thought": True}])),
         *reader.feed(_event([{"text": "He"}])),
@@ -684,7 +684,7 @@ def test_reasoning_and_a_signed_answer_in_fragments() -> None:
     assert response.stop_reason == "end_turn"
     # The prompt count holds the cache; reasoning bills as output.
     assert response.tokens == TokenCount(request=610, response=12, cache_read=400)
-    capability = models("google")["gemini-pro-3.1"]
+    capability = Google.models()["gemini-pro-3.1"]
     assert (
         response.spend
         == capability.prices[
@@ -698,7 +698,7 @@ def test_reasoning_and_a_signed_answer_in_fragments() -> None:
 
 
 def test_a_signature_on_reasoning_alone_stays_with_the_reasoning() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed(_event([{"text": "hmm", "thought": True, "thoughtSignature": "s"}]))
     reader.feed(_event([], finish="STOP"))
     assert reader.response().records == (
@@ -707,7 +707,7 @@ def test_a_signature_on_reasoning_alone_stays_with_the_reasoning() -> None:
 
 
 def test_the_last_usage_report_is_the_total() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed(_event([{"text": "a"}], usage={"promptTokenCount": 3}))
     reader.feed(_event([], finish="STOP"))
     reader.feed({"usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 2}})
@@ -715,7 +715,7 @@ def test_the_last_usage_report_is_the_total() -> None:
 
 
 def test_a_cached_count_above_the_prompt_bills_no_negative_request() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed(
         _event(
             [],
@@ -727,7 +727,7 @@ def test_a_cached_count_above_the_prompt_bills_no_negative_request() -> None:
 
 
 def test_an_event_without_candidates_adds_nothing() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     assert reader.feed({"usageMetadata": {"promptTokenCount": 1}}) == []
     assert reader.feed({"candidates": "garbage"}) == []
     assert reader.feed(_event(["not a part", {"inlineData": {}}], finish="STOP")) == []
@@ -737,7 +737,7 @@ def test_an_event_without_candidates_adds_nothing() -> None:
 
 
 def test_no_usage_report_is_no_tokens() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed(
         _event([{"text": "a", "thought": True}, {"text": "b", "thought": True}]),
     )
@@ -763,20 +763,20 @@ def test_no_usage_report_is_no_tokens() -> None:
     ],
 )
 def test_finish_reasons_speak_the_shared_words(finish: str, stop: str) -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed(_event([{"text": "a"}], finish=finish))
     assert reader.response().stop_reason == stop
 
 
 def test_the_finish_reason_survives_a_later_event_without_one() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed(_event([{"text": "a"}], finish="MAX_TOKENS"))
     reader.feed(_event([{"text": "b"}]))
     assert reader.response().stop_reason == "max_tokens"
 
 
 def test_a_blocked_prompt_is_a_refusal_with_no_records() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed(
         {
             "promptFeedback": {"blockReason": "PROHIBITED_CONTENT"},
@@ -791,14 +791,14 @@ def test_a_blocked_prompt_is_a_refusal_with_no_records() -> None:
 
 @pytest.mark.parametrize("reason", ["", 3])
 def test_an_empty_or_odd_block_reason_blocks_nothing(reason: object) -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed({"promptFeedback": {"blockReason": reason}})
     with pytest.raises(DisconnectedError):
         reader.response()
 
 
 def test_a_stream_that_ends_unfinished_is_a_dropped_connection() -> None:
-    reader = wire.StreamReader(capability=models("google")["gemini-pro-3.1"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-pro-3.1"])
     reader.feed(
         _event(
             [{"text": "part"}],
@@ -818,7 +818,7 @@ def test_a_reply_is_priced_at_the_card_in_force_on_its_utc_day(
 ) -> None:
     monkeypatch.setattr(wire, "datetime", _Clock)
     # gemini-flash-3.8 doubles its rates on 2027-01-01.
-    reader = wire.StreamReader(capability=models("google")["gemini-flash-3.8"])
+    reader = wire.StreamReader(capability=Google.models()["gemini-flash-3.8"])
     reader.feed(_event([], finish="STOP", usage={"promptTokenCount": 1_000_000}))
     assert reader.response().spend.request == 1.5
 
@@ -1026,7 +1026,7 @@ _LEVEL: Mapping[str, object] = {
 
 
 def _capability(*, limits: ModelLimits | None = None) -> ModelCapability:
-    capability = models("google")["gemini-pro-3.1"]
+    capability = Google.models()["gemini-pro-3.1"]
     if limits is None:
         return capability
     return replace(capability, limits=limits)
@@ -1074,7 +1074,7 @@ def _thinking(
     effort: ThinkingEffort = "none",
     output: ThinkingOutput = "none",
 ) -> object:
-    capability, settings = models("google").resolve(model)
+    capability, settings = Google.models().resolve(model)
     settings = replace(
         settings,
         thinking_budget=budget,

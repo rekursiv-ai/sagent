@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Final
 
 import os
+import re
+import sys
 import tempfile
 import zipfile
 
@@ -20,6 +22,7 @@ from sagent.lib.testing.wheel import (
     Wheel,
     built_wheel,
     console_scripts,
+    declared_extras,
     missing_artifacts,
     project_root,
     top_level_modules,
@@ -64,7 +67,6 @@ packages = ["demo"]
 """
 
 
-@pytest.mark.ci_smoke
 @pytest.mark.cli_uv
 def test_the_package_wheel_imports_and_serves_its_scripts_alone() -> None:
     """Every module the wheel ships imports, and every script's target resolves.
@@ -79,7 +81,6 @@ def test_the_package_wheel_imports_and_serves_its_scripts_alone() -> None:
     wheel.run(_import_everything(wheel))
 
 
-@pytest.mark.ci_smoke
 @pytest.mark.cli_uv
 def test_the_package_wheel_ships_every_artifact_it_declares() -> None:
     """An ``artifacts`` entry ships a file the build makes; missing, it ships nothing.
@@ -117,6 +118,19 @@ def test_a_wheel_with_no_artifacts_declared_misses_none(tmp_path: Path) -> None:
     assert missing_artifacts(wheel) == ()
 
 
+# A script may need an extra (``wesearch-mcp`` needs ``mcp``), and the base install
+# lacks it; it must then fail saying which, as ``pip install <pkg>[<extra>]``. Any
+# other import error, or one naming an extra the wheel does not declare, fails.
+_SCRIPT_CHECK: Final = """\
+def _script(module, attr):
+    try:
+        getattr(importlib.import_module(module), attr)
+    except ImportError as err:
+        if not any(f"[{extra}]" in str(err) for extra in EXTRAS):
+            raise
+"""
+
+
 def _import_everything(wheel: Wheel) -> str:
     """Return code importing every top-level module and console-script target."""
     targets = [target.partition(":") for target in console_scripts(wheel).values()]
@@ -128,9 +142,11 @@ def _import_everything(wheel: Wheel) -> str:
                 for name in top_level_modules(wheel)
             ),
             *(
-                f"getattr(importlib.import_module({module!r}), {attr!r})"
-                for module, _, attr in targets
+                (f"EXTRAS = {declared_extras(wheel)!r}", _SCRIPT_CHECK)
+                if targets
+                else ()
             ),
+            *(f"_script({module!r}, {attr!r})" for module, _, attr in targets),
         ),
     )
 
@@ -261,7 +277,8 @@ def test_built_wheel_builds_once_and_runs_outside_the_checkout(
     assert built_wheel(root) is wheel
     assert wheel.read("demo/__init__.py") == "VALUE = 7\n"
     cwd, *argv = wheel.run("import demo").splitlines()
-    assert cwd == tempfile.gettempdir()
+    # ``pwd`` prints the physical path; macOS's temp dir is under ``/var``, a symlink.
+    assert Path(cwd) == Path(tempfile.gettempdir()).resolve()
     assert argv == wheel.argv("import demo")[1:]
 
 
@@ -274,11 +291,82 @@ def test_the_wheel_names_its_top_level_modules_and_scripts(
 
     assert top_level_modules(wheel) == ("demo",)
     assert console_scripts(wheel) == {"demo": "demo.cli:main"}
-    assert _import_everything(wheel).splitlines() == [
-        "import importlib",
-        "importlib.import_module('demo')",
-        "getattr(importlib.import_module('demo.cli'), 'main')",
-    ]
+    code = _import_everything(wheel)
+    assert code.startswith("import importlib\nimportlib.import_module('demo')\n")
+    assert code.endswith("_script('demo.cli', 'main')")
+
+
+def _wheel_with_script(tmp_path: Path, cli: str, *, extras: tuple[str, ...]) -> Wheel:
+    """Return a wheel whose one script runs ``demo.cli:main``, ``cli`` its body."""
+    (tmp_path / "demo").mkdir(parents=True)
+    (tmp_path / "demo" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "demo" / "cli.py").write_text(cli, encoding="utf-8")
+    path = tmp_path / "demo_pkg-0.1.0-py3-none-any.whl"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("demo/__init__.py", "")
+        archive.writestr(
+            "demo_pkg-0.1.0.dist-info/entry_points.txt",
+            "[console_scripts]\ndemo = demo.cli:main\n",
+        )
+        archive.writestr(
+            "demo_pkg-0.1.0.dist-info/METADATA",
+            "Name: demo-pkg\n" + "".join(f"Provides-Extra: {e}\n" for e in extras),
+        )
+    return Wheel(path=path, project=tmp_path)
+
+
+def _exec(tmp_path: Path, code: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run ``code`` with ``tmp_path``'s ``demo`` package, as the installed wheel's."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    # Another test's ``demo`` must not answer for this one's.
+    for name in [name for name in sys.modules if name.split(".")[0] == "demo"]:
+        monkeypatch.delitem(sys.modules, name)
+    exec(compile(code, "<wheel-check>", "exec"), {})  # noqa: S102 -- The check's own generated code.
+
+
+def test_a_script_that_names_the_extra_it_needs_passes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``wesearch-mcp`` needs the ``mcp`` extra and says so; that is correct."""
+    wheel = _wheel_with_script(
+        tmp_path,
+        'raise ImportError("demo needs the mcp extra: pip install demo-pkg[mcp]")\n',
+        extras=("mcp",),
+    )
+
+    _exec(tmp_path, _import_everything(wheel), monkeypatch)
+
+
+@pytest.mark.parametrize(
+    ("message", "extras"),
+    [
+        ("No module named 'requests'", ("mcp",)),
+        ("demo needs: pip install demo-pkg[gpu]", ("mcp",)),
+    ],
+    ids=["unexplained", "undeclared extra"],
+)
+def test_a_script_that_fails_otherwise_fails_the_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    message: str,
+    extras: tuple[str, ...],
+) -> None:
+    wheel = _wheel_with_script(
+        tmp_path,
+        f"raise ImportError({message!r})\n",
+        extras=extras,
+    )
+
+    with pytest.raises(ImportError, match=re.escape(message)):
+        _exec(tmp_path, _import_everything(wheel), monkeypatch)
+
+
+def test_a_wheel_without_metadata_declares_no_extras(tmp_path: Path) -> None:
+    path = tmp_path / "demo_pkg-0.1.0-py3-none-any.whl"
+    _zip(path, "demo/__init__.py")
+
+    assert declared_extras(Wheel(path=path, project=tmp_path)) == ()
 
 
 def test_a_wheel_without_scripts_names_none(tmp_path: Path) -> None:

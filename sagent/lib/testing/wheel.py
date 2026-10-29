@@ -16,6 +16,7 @@ package's pre-push stage runs.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from email import parser
 from fnmatch import fnmatch
 from functools import cache
 from pathlib import Path
@@ -217,6 +218,23 @@ def missing_artifacts(wheel: Wheel) -> tuple[str, ...]:
         for pattern in cast(list[str], patterns)
         if not any(fnmatch(name, pattern) for name in names)
     )
+
+
+def declared_extras(wheel: Wheel) -> tuple[str, ...]:
+    """Return the extras ``wheel``'s metadata declares, in order.
+
+    Args:
+      wheel: The wheel to read.
+
+    Returns:
+      extras: Its ``Provides-Extra`` names.
+
+    """
+    names = [n for n in wheel.names() if n.endswith(".dist-info/METADATA")]
+    if not names:
+        return ()
+    metadata = parser.Parser().parsestr(wheel.read(names[0]), headersonly=True)
+    return tuple(metadata.get_all("Provides-Extra") or ())
 
 
 def console_scripts(wheel: Wheel) -> dict[str, str]:

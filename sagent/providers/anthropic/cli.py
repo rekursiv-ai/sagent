@@ -56,8 +56,14 @@ if TYPE_CHECKING:
     from asyncio.subprocess import Process
     from collections.abc import AsyncIterator, Iterator, Sequence
 
-    from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
+    from sagent.model.capability import (
+        ModelCapability,
+        ModelLimits,
+        ModelSettingName,
+        ModelSettings,
+    )
     from sagent.model.types import Request, Response, TextChunk
+    from sagent.providers.table import ModelTable
     from sagent.providers.types import (
         ProviderSharedResources,
         ToolMount,
@@ -86,6 +92,9 @@ class AnthropicCLI(AsyncResource):
 
     section: ClassVar[str] = "anthropic-cli"
     """The catalog section whose models and settings this provider serves."""
+
+    sends: ClassVar[frozenset[ModelSettingName]] = frozenset({"thinking_effort"})
+    """The settings ``claude`` takes on its command line; the rest are its own."""
 
     def __init__(
         self,
@@ -116,7 +125,7 @@ class AnthropicCLI(AsyncResource):
         return ()
 
     def __getitem__(self, model: str) -> AnthropicCLIModel:
-        capability, settings = models(self.section).resolve(model)
+        capability, settings = self.models().resolve(model)
         return AnthropicCLIModel(
             provider=self,
             capability=capability,
@@ -124,7 +133,17 @@ class AnthropicCLI(AsyncResource):
         )
 
     def __iter__(self) -> Iterator[str]:
-        return iter(models(self.section))
+        return iter(self.models())
+
+    @classmethod
+    def models(cls) -> ModelTable:
+        """Return the models this provider serves.
+
+        Returns:
+          table: Its section's models, offering only the settings it sends.
+
+        """
+        return models(cls.section, sends=cls.sends)
 
     @override
     async def aclose(self) -> None:
@@ -267,8 +286,10 @@ class AnthropicCLIModel(AsyncResource):
         mount = await self._mounted()
         mount.offer(request.tools)
         env = await self.provider.environment()
-        # A process serves one system prompt, one tool set, one login.
-        started_with = (*request.system, _digest(request.tools), json_dumps(env))
+        command = self.command(request, url=mount.url)
+        # A process serves one command line (its prompt and settings), one tool
+        # set, one login.
+        started_with = (*command, _digest(request.tools), json_dumps(env))
         try:
             claude = self._claude
             unseen = (
@@ -291,7 +312,12 @@ class AnthropicCLIModel(AsyncResource):
                     )
                 )
             ):
-                claude = await self._start(request, started_with=started_with, env=env)
+                claude = await self._start(
+                    request,
+                    command=command,
+                    started_with=started_with,
+                    env=env,
+                )
             elif not held:
                 await claude.say(
                     _content(
@@ -334,16 +360,40 @@ class AnthropicCLIModel(AsyncResource):
         self,
         request: Request,
         *,
+        command: list[str],
         started_with: tuple[str, ...],
         env: dict[str, str],
     ) -> _Claude:
-        """Start a fresh ``claude`` and tell it the conversation so far."""
+        """Start a fresh ``claude`` running ``command``; tell it the conversation."""
         await self._stop()
-        mount = await self._mounted()
+        process = await self.provider.resources.process_pool("claude").acquire(
+            command,
+            env=env,
+        )
+        self._claude = _Claude(process, started_with=started_with)
+        await self._claude.say(
+            _content(request.records, replay=True, limits=self.capability.limits),
+        )
+        return self._claude
+
+    def command(self, request: Request, *, url: str) -> list[str]:
+        """Return the command line that starts ``claude`` for ``request``.
+
+        Args:
+          request: What the model is asked.
+          url: Where our tools are served, over MCP.
+
+        Returns:
+          argv: The command, every chosen setting ``claude`` takes on it.
+
+        """
         # Any local user can read a process's arguments, so what is private or
         # long reaches claude in files of our own: the mount's URL is the only
         # key to its tools, and a long system prompt would overflow argv.
-        argv = [
+        effort = self.settings.thinking_effort
+        # A model that takes no effort (the 4.5s) is told none.
+        chosen = ["--effort", effort] if effort != "none" else []
+        return [
             "claude",
             "--print",
             "--input-format",
@@ -365,7 +415,7 @@ class AnthropicCLIModel(AsyncResource):
                 self._written(
                     "mcp",
                     json_dumps(
-                        {"mcpServers": {"sagent": {"type": "http", "url": mount.url}}},
+                        {"mcpServers": {"sagent": {"type": "http", "url": url}}},
                     ),
                 ),
             ),
@@ -375,16 +425,8 @@ class AnthropicCLIModel(AsyncResource):
             "--disable-slash-commands",
             "--permission-mode",
             "bypassPermissions",
+            *chosen,
         ]
-        process = await self.provider.resources.process_pool("claude").acquire(
-            argv,
-            env=env,
-        )
-        self._claude = _Claude(process, started_with=started_with)
-        await self._claude.say(
-            _content(request.records, replay=True, limits=self.capability.limits),
-        )
-        return self._claude
 
     async def _stop(self) -> None:
         claude, self._claude = self._claude, None

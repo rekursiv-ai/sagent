@@ -348,6 +348,8 @@ models:
 providers:
   dashscope:
     retries_internally: true
+    # The reply streams the reasoning unasked, and none of it is dropped.
+    thinking_output_default: text
     service_tier: [auto]
     manage_context_server_side: [false]
     models:

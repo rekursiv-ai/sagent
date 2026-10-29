@@ -40,7 +40,11 @@ if TYPE_CHECKING:
 
     import httpx2
 
-    from sagent.model.capability import ModelCapability, ModelSettings
+    from sagent.model.capability import (
+        ModelCapability,
+        ModelSettingName,
+        ModelSettings,
+    )
     from sagent.model.types import Request, Response, TextChunk
     from sagent.providers.types import ProviderSharedResources, UsageWindow
     from sagent.session.types import Attachment
@@ -69,6 +73,18 @@ class Anthropic(AsyncResource):
 
     section: ClassVar[str] = "anthropic"
     """The catalog section whose models and settings this provider serves."""
+
+    sends: ClassVar[frozenset[ModelSettingName]] = frozenset(
+        {
+            "thinking_effort",
+            "thinking_budget",
+            "thinking_output",
+            "service_tier",
+            "cache_ttl_sec",
+            "manage_context_server_side",
+        },
+    )
+    """The settings ``wire.encode`` puts in a request; the rest are the vendor's."""
 
     betas: ClassVar[tuple[str, ...]] = ()
     """Beta features every request names, whatever it asks for."""
@@ -100,11 +116,21 @@ class Anthropic(AsyncResource):
         return self._usage
 
     def __getitem__(self, model: str) -> AnthropicModel:
-        capability, settings = models(self.section).resolve(model)
+        capability, settings = self.models().resolve(model)
         return AnthropicModel(provider=self, capability=capability, settings=settings)
 
     def __iter__(self) -> Iterator[str]:
-        return iter(models(self.section))
+        return iter(self.models())
+
+    @classmethod
+    def models(cls) -> ModelTable:
+        """Return the models this provider serves.
+
+        Returns:
+          table: Its section's models, offering only the settings it sends.
+
+        """
+        return models(cls.section, sends=cls.sends)
 
     @override
     async def aclose(self) -> None:
@@ -299,7 +325,7 @@ class AnthropicModel(AsyncResource):
           tokens: Input tokens, system prompt and tools included.
 
         """
-        body, betas = self._encode(request)
+        body, betas = self.encode(request)
         # ``count_tokens`` rejects the generation knobs it has no use for.
         for knob in ("max_tokens", "stream", "service_tier", "speed", "output_config"):
             body.pop(knob, None)
@@ -326,7 +352,7 @@ class AnthropicModel(AsyncResource):
 
         """
         reader = wire.StreamReader(capability=self.capability, settings=self.settings)
-        body, betas = self._encode(request)
+        body, betas = self.encode(request)
         async for event in self.provider.events(
             body,
             betas=betas,
@@ -338,7 +364,17 @@ class AnthropicModel(AsyncResource):
         self._answered_at = time.time()
         yield reader.response()
 
-    def _encode(self, request: Request) -> tuple[dict[str, object], list[str]]:
+    def encode(self, request: Request) -> tuple[dict[str, object], list[str]]:
+        """Return the body that asks this model ``request``, and the betas it needs.
+
+        Args:
+          request: What the model is asked.
+
+        Returns:
+          body: The ``/v1/messages`` request body.
+          betas: The beta features the body uses.
+
+        """
         idle_sec = time.time() - self._answered_at
         return wire.encode(
             request,
@@ -351,11 +387,21 @@ class AnthropicModel(AsyncResource):
 
 
 @cache
-def models(section: str) -> ModelTable:
-    """Return the models one section of the Anthropic catalog serves."""
+def models(section: str, *, sends: frozenset[ModelSettingName]) -> ModelTable:
+    """Return the models one section of the Anthropic catalog serves.
+
+    Args:
+      section: The section, as ``anthropic-cli``.
+      sends: The settings its provider's requests carry.
+
+    Returns:
+      table: Its models, each other setting fixed at what the vendor does.
+
+    """
     return ModelTable.from_yaml(
         files("sagent.providers.anthropic") / "anthropic.yaml",
         provider=section,
+        sends=sends,
     )
 
 

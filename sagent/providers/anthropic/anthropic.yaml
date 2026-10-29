@@ -315,12 +315,8 @@ providers:
       haiku-5.5:
       haiku-4.5:
   anthropic-cli:
-    thinking_effort_default: none
-    thinking:
-      effort: [none]
-      output: [none, text]
+    # ``claude`` holds the conversation; what it compacts or prunes is its own.
     manage_context_server_side: [true]
-    service_tier: [auto, default]
     models:
       fable-5.1:
       fable-5.0:

@@ -281,7 +281,7 @@ async def test_a_switch_keeps_every_load_option_the_name_gives(
     local = SelfHosted()
     model = await successor(
         local.__getitem__,
-        "Org/M+shard+bfloat16+compile+lowthink",
+        "Org/M+shard+bfloat16+compile+nothink",  # codespell:ignore nothink
         current=local["Org/N"],
     )
     assert isinstance(model, SelfHostedModel)
@@ -289,7 +289,15 @@ async def test_a_switch_keeps_every_load_option_the_name_gives(
     assert loads == [
         server._Spec(path="Org/M", device="auto", dtype="bfloat16", compile=True),
     ]
-    assert model.settings.thinking_effort == "low"
+    assert model.settings.thinking_effort == "none"
+
+
+def test_a_template_told_nothing_thinks(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Thinking is on or off, and on unless turned off, as the chat template has it."""
+    model = _served(monkeypatch, name="Org/M")
+    assert model.capability.thinking_effort == {"none", "high"}
+    assert model.settings.thinking_effort == "high"
+    assert server.template_options(_REQUEST, settings=model.settings)["enable_thinking"]
 
 
 def test_a_path_may_hold_a_space() -> None:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from sagent.model.capability import model_setting_names
 from sagent.model.exceptions import AuthError
 from sagent.model.types import Request
 from sagent.providers.catalog import choose
@@ -17,8 +18,10 @@ _REQUEST = Request(records=(UserMessage(content="hi"),))
 def _body(model_id: str, **choices: object) -> dict[str, object]:
     moonshot = Moonshot(api_key="k")
     model = moonshot[model_id]
-    for field, value in choices.items():
-        model.settings = choose(model.settings, field, value)
+    for field in model_setting_names():
+        if field in choices:
+            model.settings = choose(model.settings, field, choices.pop(field))
+    assert not choices, f"no such setting: {sorted(choices)}"
     return moonshot.encode(_REQUEST, model=model)
 
 
