@@ -43,6 +43,7 @@ from sagent.model.exceptions import AuthError, DisconnectedError, RateLimitedErr
 from sagent.model.types import Response, TextChunk
 from sagent.providers import google
 from sagent.providers.resources import SharedResources
+from sagent.providers.table import Catalogued
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
@@ -62,13 +63,13 @@ from sagent.types import AsyncResource
 if TYPE_CHECKING:
     from asyncio.subprocess import Process
     from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+    from types import ModuleType
 
     from sagent.model.capability import (
         ModelCapability,
         ModelSettings,
     )
     from sagent.model.types import Request
-    from sagent.providers.table import ModelTable
     from sagent.providers.types import (
         ProviderSharedResources,
         ToolMount,
@@ -83,7 +84,7 @@ __all__ = [
 ]
 
 
-class GoogleCLI(AsyncResource):
+class GoogleCLI(Catalogued, AsyncResource):
     """Gemini models through ``agy``, billed to its login.
 
     Args:
@@ -94,7 +95,7 @@ class GoogleCLI(AsyncResource):
     """
 
     section: ClassVar[str] = "google-cli"
-    """The catalog section whose models and settings this provider serves."""
+    package: ClassVar[ModuleType] = google
 
     def __init__(
         self,
@@ -130,16 +131,6 @@ class GoogleCLI(AsyncResource):
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.models())
-
-    @classmethod
-    def models(cls) -> ModelTable:
-        """Return the models this provider serves.
-
-        Returns:
-          table: Its section's models, offering only the settings it sends.
-
-        """
-        return google.models(cls.section)
 
     @override
     async def aclose(self) -> None:

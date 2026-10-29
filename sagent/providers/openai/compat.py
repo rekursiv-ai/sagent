@@ -7,8 +7,7 @@ its provider for every wire decision, so one model class serves every vendor.
 Typical usage example:
 
   class Kimi(OpenAICompatible):
-      section = "moonshot"
-      package, document = "sagent.providers.moonshot", "moonshot.yaml"
+      package, section = moonshot, "moonshot"
       url = "https://api.moonshot.ai/v1"
       key_variable = "MOONSHOT_API_KEY"
       reasoning_field = "reasoning_content"
@@ -30,9 +29,9 @@ import os
 from treekle import json_dumps, json_loads
 
 from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
-from sagent.providers import table
 from sagent.providers.openai import chat, token_count, wire
 from sagent.providers.resources import SharedResources
+from sagent.providers.table import Catalogued
 from sagent.types import AsyncResource
 
 
@@ -46,7 +45,6 @@ if TYPE_CHECKING:
         ModelSettings,
     )
     from sagent.model.types import Request, Response, TextChunk
-    from sagent.providers.table import ModelTable
     from sagent.providers.types import ProviderSharedResources, UsageWindow
     from sagent.session.types import Attachment
 else:
@@ -74,7 +72,7 @@ class Reader(Protocol):
         ...
 
 
-class OpenAICompatible(AsyncResource):
+class OpenAICompatible(Catalogued, AsyncResource):
     """Models of one OpenAI-compatible endpoint, over Chat Completions.
 
     Args:
@@ -86,15 +84,6 @@ class OpenAICompatible(AsyncResource):
         that serves a vendor's models.
 
     """
-
-    section: ClassVar[str] = "openai-compatible"
-    """The catalog section whose models and settings this provider serves."""
-
-    package: ClassVar[str] = ""
-    """The package holding the catalog document."""
-
-    document: ClassVar[str] = ""
-    """The catalog document's file name."""
 
     url: ClassVar[str] = ""
     """The endpoint, up to and including its version (``.../v1``)."""
@@ -152,16 +141,6 @@ class OpenAICompatible(AsyncResource):
     async def aclose(self) -> None:
         if self._owns_resources:
             await self._resources.aclose()
-
-    @classmethod
-    def models(cls) -> ModelTable:
-        """Return the models this provider serves.
-
-        Returns:
-          table: Its section's models, offering only the settings it sends.
-
-        """
-        return table.models(cls.package, cls.document, provider=cls.section)
 
     async def endpoint(self) -> str:
         """Return the endpoint to reach, up to and including its version."""

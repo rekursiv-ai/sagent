@@ -12,10 +12,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, override
 
+from sagent.providers import minimax
 from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from sagent.model.types import Request
     from sagent.providers.openai.compat import OpenAIModel
 
@@ -38,8 +41,7 @@ class MiniMax(OpenAICompatible):
     """
 
     section: ClassVar[str] = "minimax"
-    package: ClassVar[str] = "sagent.providers.minimax"
-    document: ClassVar[str] = "minimax.yaml"
+    package: ClassVar[ModuleType] = minimax
     url: ClassVar[str] = "https://api.minimax.io/v1"
     key_variable: ClassVar[str] = "MINIMAX_API_KEY"
     reasoning_field: ClassVar[str] = "reasoning_content"

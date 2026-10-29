@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import date
-from types import MappingProxyType
-from typing import TYPE_CHECKING, override
+from types import MappingProxyType, ModuleType
+from typing import TYPE_CHECKING, ClassVar, override
 
 import itertools
 import math
@@ -22,7 +22,8 @@ from sagent.model.capability import (
 )
 from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
 from sagent.model.exceptions import UnknownModelError, UnsupportedTagError
-from sagent.providers.table import ModelTable, ModelTags
+from sagent.providers import anthropic
+from sagent.providers.table import Catalogued, ModelTable, ModelTags, models
 
 
 if TYPE_CHECKING:
@@ -569,8 +570,8 @@ def _model(model_id: str = "example-1.0", **fields: object) -> dict[str, object]
     return {"model_id": model_id, "prices": [dict(_FREE)]} | fields
 
 
-def _load(path: Path, *, provider: str = "vendor") -> ModelTable:
-    return ModelTable.from_yaml(path, provider=provider)
+def _load(path: Path) -> ModelTable:
+    return ModelTable.from_yaml(path, section="vendor")
 
 
 def test_a_setting_the_provider_does_not_send_offers_only_its_default(
@@ -973,7 +974,7 @@ def test_a_card_given_twice_is_rejected(tmp_path: Path) -> None:
         ("models: []\n1: bad", _exactly("Catalog mapping keys must be strings.")),
         ("models: &rows []\nprofiles: {bad: {context: *rows}}", _exactly(_ALIASES)),
         ("", "CatalogDocument"),
-        ("models: []", "no provider 'vendor'"),
+        ("models: []", "no section 'vendor'"),
         ("models: []\nproviders: {vendor: {}}", "does not say what it sends"),
         (
             "models: []\nproviders: {vendor: {sends: [], models: {ghost-1.0: }}}",
@@ -1145,6 +1146,31 @@ class _Plain(yaml.SafeDumper):
     def ignore_aliases(self, data: object) -> bool:
         del data
         return True
+
+
+# ---- models ------------------------------------------------------------------
+
+
+def test_models_reads_a_packages_own_catalog_once() -> None:
+    table = models(anthropic, section="anthropic-cli")
+    assert table is models(anthropic, section="anthropic-cli")
+    assert table["default"].model_id in table
+
+
+def test_models_refuses_a_section_the_catalog_lacks() -> None:
+    with pytest.raises(ValueError, match="no section 'nowhere'"):
+        models(anthropic, section="nowhere")
+
+
+class _Served(Catalogued):
+    """A provider class that names its catalog and section, and nothing else."""
+
+    package: ClassVar[ModuleType] = anthropic
+    section: ClassVar[str] = "anthropic-cli"
+
+
+def test_a_catalogued_class_serves_its_sections_models() -> None:
+    assert _Served.models() is models(anthropic, section="anthropic-cli")
 
 
 if __name__ == "__main__":

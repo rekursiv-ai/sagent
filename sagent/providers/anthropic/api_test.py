@@ -7,7 +7,7 @@ from datetime import date
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, override
 
-from treekle import from_plain, json_dumps, json_loads
+from treekle import ReadError, from_plain, json_dumps, json_loads
 
 import httpx2
 import pytest
@@ -390,6 +390,19 @@ async def test_count_asks_the_server_without_generation_knobs(
     }
     assert body["model"] == "claude-opus-5-5"
     assert sent.headers["anthropic-beta"] == betas
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_is_not_a_json_object_is_refused() -> None:
+    server = _Server(replies=[httpx2.Response(200, content=b"[42]")])
+    async with _Served(server) as shared:
+        with pytest.raises(ReadError):
+            await Anthropic(resources=shared).reply(
+                "/v1/messages/count_tokens",
+                body={},
+                betas=(),
+                headers={},
+            )
 
 
 # ---- the prompt cache --------------------------------------------------------

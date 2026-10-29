@@ -37,6 +37,7 @@ from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
 from sagent.providers.anthropic.login import ClaudeLogin
 from sagent.providers.resources import SharedResources
+from sagent.providers.table import Catalogued
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
@@ -55,6 +56,7 @@ from sagent.types import AsyncResource
 if TYPE_CHECKING:
     from asyncio.subprocess import Process
     from collections.abc import AsyncIterator, Iterator, Sequence
+    from types import ModuleType
 
     from sagent.model.capability import (
         ModelCapability,
@@ -62,7 +64,6 @@ if TYPE_CHECKING:
         ModelSettings,
     )
     from sagent.model.types import Request, Response, TextChunk
-    from sagent.providers.table import ModelTable
     from sagent.providers.types import (
         ProviderSharedResources,
         ToolMount,
@@ -78,7 +79,7 @@ __all__ = [
 ]
 
 
-class AnthropicCLI(AsyncResource):
+class AnthropicCLI(Catalogued, AsyncResource):
     """Claude models through the ``claude`` CLI, billed to its login.
 
     Args:
@@ -90,7 +91,7 @@ class AnthropicCLI(AsyncResource):
     """
 
     section: ClassVar[str] = "anthropic-cli"
-    """The catalog section whose models and settings this provider serves."""
+    package: ClassVar[ModuleType] = anthropic
 
     def __init__(
         self,
@@ -130,16 +131,6 @@ class AnthropicCLI(AsyncResource):
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.models())
-
-    @classmethod
-    def models(cls) -> ModelTable:
-        """Return the models this provider serves.
-
-        Returns:
-          table: Its section's models, offering only the settings it sends.
-
-        """
-        return anthropic.models(cls.section)
 
     @override
     async def aclose(self) -> None:
