@@ -48,7 +48,7 @@ from treekle import from_plain
 
 from sagent.agent.agent import Agent
 from sagent.runtime import types
-from sagent.runtime.exceptions import describe
+from sagent.runtime.exceptions import describe, local_time
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
@@ -639,6 +639,13 @@ class _Dun:
             self._ended(f"[{self.label} failed] {describe(event.exception)}", owed)
         elif isinstance(event, types.ModelResponseCancelled):
             self._ended(f"[{self.label} halted]", owed)
+        # The run goes on after the wait: nothing it owes is answered for it.
+        elif isinstance(event, types.ModelCallSuspended) and event.opens_a_quota_wait:
+            self._tell_parent(
+                f"[{self.label} waiting until {local_time(event.until)}]"
+                f" {describe(event.exception)}",
+                owed,
+            )
         elif isinstance(event, types.AgentIdle) and self._worked:
             # pragma: no mutate start -- only its truth is read; None is as false.
             self._worked = False

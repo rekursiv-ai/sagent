@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import io
+import re
 
 from rich.cells import cell_len
 from rich.console import Console
@@ -111,6 +112,34 @@ def test_print_welcome_writes_to_stderr(capsys: pytest.CaptureFixture[str]) -> N
     assert capsys.readouterr() == ("", "[TestProvider] test-model\n")
 
 
+def test_print_welcome_passes_every_choice_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    console = Console(file=io.StringIO(), force_terminal=True, record=True, width=80)
+
+    def to_stderr(*, stderr: bool) -> Console:
+        assert stderr
+        return console
+
+    monkeypatch.setattr(welcome, "Console", to_stderr)
+    welcome.print_welcome(folder=Path("/research"))
+    bare = console.export_text(styles=False)
+    welcome.print_welcome(model="solo", folder=Path("/research"))
+    assert re.search(r"solo · +│", console.export_text(styles=False))
+    welcome.print_welcome(
+        model="test-model",
+        provider="TestProvider",
+        folder=Path("/elsewhere"),
+        resumed=True,
+    )
+    told = console.export_text(styles=False)
+    assert ("/research" in bare, "model" in bare, "Resuming" in bare) == (
+        True,
+        False,
+        False,
+    )
+    assert ("/elsewhere" in told, "test-model · TestProvider" in told) == (True, True)
+    assert "Resuming your session." in told
+
+
 def test_redirected_output_retains_only_plain_model_line() -> None:
     assert _render(terminal=False) == "[TestProvider] test-model\n"
 
@@ -162,7 +191,7 @@ def test_ascii_terminal_does_not_receive_unicode_blocks() -> None:
 def test_home_abbreviation_respects_path_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(Path, "home", lambda: Path("/people/alex"))
+    monkeypatch.setenv("HOME", "/people/alex")
     assert "~/research" in _render(folder=Path("/people/alex/research"))
     assert "/people/alexander/research" in _render(
         folder=Path("/people/alexander/research"),
@@ -321,16 +350,14 @@ def test_icon_and_wordmark_use_compact_layout_when_the_pair_would_wrap(
 
 
 def test_identity_keeps_a_rectangular_cell_grid() -> None:
-    rows = welcome._banner_rows()
-    assert len(rows) == len(welcome._ICON)
-    assert all(row.cell_len == welcome._IDENTITY_WIDTH for row in rows)
-    wordmark_start = welcome._ICON_WIDTH + welcome._ICON_GAP
-    assert len(welcome._ICON) == len(welcome._BANNER)
-    for row_index, row in enumerate(rows):
-        assert row.plain[welcome._ICON_WIDTH : wordmark_start] == "   "
-        assert (
-            row.plain[wordmark_start:].rstrip() == welcome._BANNER[row_index].rstrip()
-        )
+    rows = welcome._banner_rows(blue="blue", green="green", red="red")
+    assert len(rows) == 6
+    assert {row.cell_len for row in rows} == {66}
+    # The icon's 11 columns, a 3-column gap, then the wordmark.
+    assert {row.plain[11:14] for row in rows} == {"   "}
+    assert rows[0].plain[14:].rstrip() == (
+        "███████╗ █████╗  ██████╗ ███████╗███╗   ██╗████████╗"
+    )
 
 
 def test_frame_has_equal_top_and_bottom_breathing_room() -> None:
@@ -406,3 +433,9 @@ def test_wrapped_greeting_is_flush_with_the_frame_edge() -> None:
     )
     assert lines[greeting_start].startswith("Good news")
     assert lines[greeting_start + 1] == "begins!"
+
+
+if __name__ == "__main__":
+    from sagent.lib.testing.runner import test_main
+
+    test_main(__file__)

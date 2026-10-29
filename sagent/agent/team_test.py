@@ -7,11 +7,13 @@ from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import logging
+import time
 
 import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import ChildSpec, Team
+from sagent.model.exceptions import OverloadedError, RateLimitedError
 from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime import types
@@ -762,6 +764,42 @@ def test_a_child_that_fails_or_halts_owing_no_one_tells_its_parent(
     _did(team["a"], reply("back"))
 
     assert _told(team["Agent"]) == [("a", said), ("a", "[a is idle] back")]
+
+
+def test_an_idle_child_tells_its_parent_all_its_reply_said(tmp_path: Path) -> None:
+    team = _family(tmp_path)
+
+    _idle(team["a"], "one ", None, "two")
+
+    assert _told(team["Agent"]) == [("a", "[a is idle] one two")]
+
+
+# Noon local, so the clock reads the same in any zone.
+_NOON = time.mktime((2026, 10, 28, 12, 0, 0, 0, 0, -1))
+
+
+def test_a_child_waiting_out_a_spent_quota_tells_its_parent_once(
+    tmp_path: Path,
+) -> None:
+    """It may wait a week, saying nothing; a backoff's short waits stay unsaid."""
+    team = _family(tmp_path)
+    a = team["a"].runtime
+    for exception, attempt in (
+        (RateLimitedError("spent"), 1),
+        (RateLimitedError("spent"), 2),
+        (OverloadedError("busy"), 1),
+    ):
+        a.publish(
+            types.ModelCallSuspended(
+                exception=exception,
+                until=_NOON + 5.0,
+                attempt=attempt,
+            ),
+        )
+
+    assert _told(team["Agent"]) == [
+        ("a", "[a waiting until Wed Oct 28 12:00:05] RateLimitedError: spent"),
+    ]
 
 
 def test_a_run_that_says_nothing_tells_nothing_said_before_it(tmp_path: Path) -> None:

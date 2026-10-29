@@ -425,6 +425,18 @@ async def test_an_axis_takes_only_what_the_model_offers() -> None:
         await _apply(owner, "model.thinking.effort", "xhigh")
 
 
+@pytest.mark.asyncio
+async def test_an_effort_or_tier_takes_its_tag_too() -> None:
+    owner, _, _ = _model()
+    assert await _apply(owner, "model.thinking.effort", "LowThink") == "low"
+    assert await _apply(owner, "model.service_tier", "fast") == "priority"
+    said = await _apply(owner, "model.thinking", "effort=maxthink")
+    assert said == "effort=max budget=none output=none"
+    assert await _inherit(owner, "model.thinking.effort", "xhighthink") == (
+        "high (default)"
+    )
+
+
 def test_every_effort_is_a_tag() -> None:
     _, agent, _ = _model()
     model = agent.model

@@ -6,12 +6,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import time
+
 from treekle import PlainTree
 
 import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import Team
+from sagent.model.exceptions import OverloadedError, RateLimitedError
 from sagent.model.scripted import ScriptedProvider, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime import types
@@ -174,6 +177,29 @@ def test_a_failure_or_halt_is_told_at_once(
     feed(event)
 
     assert _told(watcher) == [f"[watch]\n{said}"]
+
+
+def test_a_wait_for_a_spent_quota_is_told_once_at_once() -> None:
+    team, _, watcher = _watched()
+    feed = Feed(team=team, watched="Agent", watcher="watcher")
+    noon = time.mktime((2026, 10, 28, 12, 0, 0, 0, 0, -1))
+
+    for exception, attempt in (
+        (RateLimitedError("spent"), 1),
+        (RateLimitedError("spent"), 2),
+        (OverloadedError("busy"), 1),
+    ):
+        feed(
+            types.ModelCallSuspended(
+                exception=exception,
+                until=noon + 5.0,
+                attempt=attempt,
+            ),
+        )
+
+    assert _told(watcher) == [
+        "[watch]\n[waiting until Wed Oct 28 12:00:05] RateLimitedError: spent",
+    ]
 
 
 @pytest.mark.parametrize(

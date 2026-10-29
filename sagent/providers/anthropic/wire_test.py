@@ -1302,6 +1302,23 @@ def test_a_spent_window_waits_to_its_reset_not_the_rounded_retry_after(
     assert error.retry_after_sec == pytest.approx(166_122.4)
 
 
+@pytest.mark.parametrize("status", ["Rejected", " rejected", "queued"])
+def test_any_status_but_allowed_waits_to_the_reset(
+    status: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """As the usage windows read it: whatever is not ``allowed`` blocks."""
+    monkeypatch.setattr(wire, "time", _Clock(now=1_000.0))
+    headers = {
+        "retry-after": "5",
+        "anthropic-ratelimit-unified-status": status,
+        "anthropic-ratelimit-unified-reset": "1600",
+    }
+    error = wire.to_exception(429, body="limit", headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert error.retry_after_sec == 600.0
+
+
 def test_a_throttle_while_the_window_allows_waits_as_advised(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1314,6 +1331,21 @@ def test_a_throttle_while_the_window_allows_waits_as_advised(
     error = wire.to_exception(429, body="slow", headers=headers)
     assert isinstance(error, RateLimitedError)
     assert error.retry_after_sec == 5.0
+
+
+def test_a_throttle_while_the_window_allows_is_no_wait_for_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The claim and reset name the window nearest its limit, spent or not."""
+    monkeypatch.setattr(wire, "time", _Clock(now=1_000.0))
+    headers = {
+        "anthropic-ratelimit-unified-status": "allowed",
+        "anthropic-ratelimit-unified-reset": "600000",
+        "anthropic-ratelimit-unified-representative-claim": "seven_day",
+    }
+    error = wire.to_exception(429, body="slow", headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert (error.limit, error.retry_after_sec) == ("", 0.0)
 
 
 def test_a_retry_after_date_is_a_wait_until_then(

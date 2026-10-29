@@ -40,7 +40,7 @@ from sagent.model.exceptions import (
     RetryableError,
 )
 from sagent.runtime import types
-from sagent.runtime.exceptions import UserFacingError, describe
+from sagent.runtime.exceptions import UserFacingError, describe, local_time
 from sagent.session.types import (
     AgentStatusResult,
     AgentToAgentMessage,
@@ -571,8 +571,7 @@ def _why(error: RetryableError) -> str:
 # wait reads as the status line's countdown does.
 def _when(at: float) -> str:
     """Return ``at`` as ``Sat Oct 31 06:00:00 (1d 22h 3m 5s)``."""
-    clock = time.strftime("%a %b %d %H:%M:%S", time.localtime(at))
-    return f"{clock} ({elapsed(max(0.0, at - time.time()))})"
+    return f"{local_time(at)} ({elapsed(max(0.0, at - time.time()))})"
 
 
 # The runtime tapes this before a detached call's result, to give the model a turn

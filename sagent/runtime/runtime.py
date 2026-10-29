@@ -1818,8 +1818,11 @@ class Runtime:
                         self.publish(ModelResponseError(exception=exc))
                         awaiting_user = True
                     else:
-                        # Whatever released a failure's wait, the turn goes on.
+                        # Whatever released a failure's wait, or ended a
+                        # suspension's, the turn goes on, on the model asked now.
                         self._failed = False
+                        self.service_suspended_until = None
+                        self._called_model = self.model
                         model_call: asyncio.Task[None] = asyncio.create_task(
                             self._stream_and_post(self._next_generation()),
                         )
@@ -2380,7 +2383,6 @@ class Runtime:
         request = self.sending(self.request())
         # Only the first call after a compaction is told of it.
         self._compaction = ""
-        self._called_model = self.model
         async for event in self._called_model.stream(request):
             if isinstance(event, TextChunk):
                 self._streamed_chars += len(event.text)

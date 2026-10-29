@@ -81,12 +81,11 @@ class AgentModel:
                     "ACCOUNT@ signs providers in as that login. PROVIDER/ names"
                     " the provider; without it, the current one serves the model"
                     " if it can, else the first allowed one that does. Tags follow"
-                    " in any order: a context size (smallcontext, midcontext, fullcontext,"
-                    " each also spelled out as smallcontext and so on, or a count"
-                    " such as 258k), an effort (nothink, lowthink, medthink,"  # codespell:ignore nothink
-                    " highthink, xhighthink, and so on), a tier (auto, default, flex,"
-                    " priority or fast, ultrafast). What the name leaves out is"
-                    " kept from the model before."
+                    " in any order: a context size (smallcontext, midcontext,"
+                    " fullcontext, or a count such as 258k), an effort (nothink,"  # codespell:ignore nothink
+                    " lowthink, medthink, highthink, xhighthink, and so on), a"
+                    " tier (auto, default, flex, priority or fast, ultrafast)."
+                    " What the name leaves out is kept from the model before."
                 ),
                 usage="[ACCOUNT@][PROVIDER/]MODEL[+TAG...]",
                 value=self._described,
@@ -308,18 +307,23 @@ class AgentModel:
             )
         model.settings = settings
 
-    # ``default`` is a fresh model's.
+    # ``default`` is a fresh model's; an effort or a tier reads as its tag does
+    # in a model line, ``highthink`` and ``fast`` too.
     def _picked(self, field: str, typed: str, *, closest: bool = False) -> object:
         """Return the value ``typed`` names on ``field``."""
-        if typed.strip().lower() == "default":
+        word = typed.strip().lower()
+        if word == "default":
             return chosen(self._fresh(), field)
+        tags = ModelTags.parse(f"+{word}")
+        tagged = {"thinking_effort": tags.effort, "service_tier": tags.service_tier}
+        word = tagged.get(field) or word
         capability = self.agent.model.capability
         try:
-            return pick(capability, field, typed)
+            return pick(capability, field, word)
         except ValueError as e:
             if not closest:
                 raise SettingError(str(e)) from e
-        near = _closest(capability, field, typed.strip().lower())
+        near = _closest(capability, field, word)
         return chosen(self._fresh(), field) if near is None else near
 
 

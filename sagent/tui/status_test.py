@@ -11,6 +11,7 @@ import pytest
 
 from sagent.model.capability import ModelCapability
 from sagent.model.cost import TokenCost, TokenCount
+from sagent.model.exceptions import RateLimitedError
 from sagent.model.scripted import ScriptedProvider, reply
 from sagent.runtime import types
 from sagent.runtime.runtime import Await, Runtime
@@ -363,15 +364,26 @@ def test_an_armed_gate_shows_while_idle(clock: _Clock) -> None:
     assert line.frame() == "[2s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; waiting for input.]"
 
 
-def test_a_suspension_counts_down_on_the_wall_clock(clock: _Clock) -> None:
+def test_a_suspension_counts_down_on_the_wall_clock_and_stops_the_call(
+    clock: _Clock,
+) -> None:
+    """A week's wait spun the spinner and counted toward the calls' time."""
     line = _status()
     line(types.ModelCallStarted())
     clock.mono += 10.0
     line.runtime.service_suspended_until = clock.wall + 65.0
-    line.runtime.inbox.push_front(Await(types=(UserMessage,)))
-    assert line.frame() == "c [10s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; retrying in 1m 5s.]"
+    line(
+        types.ModelCallSuspended(
+            exception=RateLimitedError("spent"),
+            until=clock.wall + 65.0,
+            attempt=1,
+        ),
+    )
+    clock.mono += 50.0
+    assert line.frame() == "[10s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; retrying in 1m 5s.]"
     clock.wall += 65.0
-    assert line.frame() == "c [10s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; waiting for input.]"
+    line.runtime.inbox.push_front(Await(types=(UserMessage,)))
+    assert line.frame() == "[10s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; waiting for input.]"
 
 
 def test_compaction_spins_and_outranks_an_armed_gate(clock: _Clock) -> None:

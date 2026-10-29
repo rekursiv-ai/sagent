@@ -5,6 +5,8 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING
 
+import time
+
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -18,6 +20,7 @@ __all__ = [
     "RoundLimitError",
     "UserFacingError",
     "describe",
+    "local_time",
     "log_exception_or_warning",
     "log_task_exception",
 ]
@@ -66,6 +69,11 @@ def describe(error: BaseException, *, status: int | None = None) -> str:
     status_part = f" {status}" if status is not None else ""
     message = str(error)
     return f"{type(error).__name__}{status_part}" + (f": {message}" if message else "")
+
+
+def local_time(at: float) -> str:
+    """Return the epoch time ``at`` as ``date`` prints it here: ``Sat Oct 31 06:00:00``."""
+    return time.strftime("%a %b %d %H:%M:%S", time.localtime(at))
 
 
 # ``exc_info=exc``, not ``True``: called outside an ``except`` block,

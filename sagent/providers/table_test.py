@@ -362,6 +362,12 @@ def test_resolve_takes_a_name_and_its_size_alone(tag: str) -> None:
             ModelTags(model="opus", context="midcontext", effort="medium"),
         ),
         ("opus+1m+1M", ModelTags(model="opus", context=1_000_000)),
+        ("opus+high+HighThink", ModelTags(model="opus", effort="high")),
+        ("opus+fast+priority", ModelTags(model="opus", service_tier="priority")),
+        (
+            "/m/My Model+cuda budget=auto",
+            ModelTags(model="/m/My Model+cuda", choices={"budget": "auto"}),
+        ),
         (
             "opus+fast+1m+high",
             ModelTags(
@@ -472,7 +478,10 @@ def test_the_name_is_the_model_and_its_size() -> None:
     [
         ("opus+high+low", "'opus+high+low' names two efforts: high, low"),
         ("opus+flex+fast", "'opus+flex+fast' names two service tiers: flex, priority"),
-        ("opus auto", "'opus auto' names 'auto', not a CHOICE=VALUE"),
+        (
+            "opus budget=auto auto",
+            "'opus budget=auto auto' names 'auto', not a CHOICE=VALUE",
+        ),
         (
             "opus budget=auto budget=none",
             "'opus budget=auto budget=none' names 'budget' twice",

@@ -205,7 +205,7 @@ def test_a_catalog_is_default_constructible_and_hashable() -> None:
     ],
     ids=["flat", "one-band", "two-bands", "band-past-the-window"],
 )
-def test_small_and_mid_are_the_band_tops_and_large_the_window(
+def test_small_and_mid_are_the_band_tops_and_full_the_window(
     tops: tuple[int, ...],
     sizes: list[ContextSize],
 ) -> None:

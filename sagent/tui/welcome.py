@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,37 +17,6 @@ else:
     Text = lazy_import("rich.text", "Text")
 
 
-# Text cells only: no image protocol, extra font, or background color required.
-# The blue is slightly darker than the logo reference to work on light terminals.
-_BLUE = "#4a90c4"
-_GREEN = "#93c47d"
-_RED = "#e06666"
-_BANNER = (
-    "███████╗ █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
-    "██╔════╝██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝",
-    "███████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║",
-    "╚════██║██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║",
-    "███████║██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║",
-    "╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝",
-)
-_BANNER_WIDTH = max(len(row) for row in _BANNER)
-_OUTLINE = frozenset("╔╗╚╝═║")
-# Terminal adaptation of the supplied document-loop icon, with its three bars.
-_ICON = (
-    "   ╔══════╗",
-    "   ▼      ║",
-    " ██████   ║",
-    " █████    ║",
-    " ███████  ║",
-    "   ╚══════╝",
-)
-_ICON_WIDTH = max(len(row) for row in _ICON)
-_ICON_GAP = 3
-_FRAME_PADDING = 2
-_MAX_WIDTH = 80
-_IDENTITY_WIDTH = _ICON_WIDTH + _ICON_GAP + _BANNER_WIDTH
-
-
 def print_welcome(
     *,
     model: str = "",
@@ -54,7 +24,15 @@ def print_welcome(
     folder: Path,
     resumed: bool = False,
 ) -> None:
-    """Print identity and help before credentials or prompt-toolkit are needed."""
+    """Print identity and help before credentials or prompt-toolkit are needed.
+
+    Args:
+      model: The model line; empty before one is configured.
+      provider: The provider serving it.
+      folder: The project directory.
+      resumed: Whether a saved session is resuming.
+
+    """
     render_welcome(
         Console(stderr=True),
         model=model,
@@ -64,6 +42,8 @@ def print_welcome(
     )
 
 
+# Text cells only: no image protocol, extra font, or background color required.
+# The blue is slightly darker than the logo reference to work on light terminals.
 def render_welcome(
     console: Console,
     *,
@@ -71,6 +51,11 @@ def render_welcome(
     provider: str = "",
     folder: Path,
     resumed: bool = False,
+    blue: str = "#4a90c4",
+    green: str = "#93c47d",
+    red: str = "#e06666",
+    max_width: int = 80,
+    padding: int = 2,
 ) -> None:
     """Render a width-aware welcome without performing any model request.
 
@@ -78,57 +63,63 @@ def render_welcome(
     non-Unicode terminals use a compact text heading. Resumes keep their
     transcript prominent instead of repeating the large fresh-session banner.
     Rich honors NO_COLOR; body text inherits the terminal foreground.
+
+    Args:
+      console: Where the welcome is printed.
+      model: The model line; empty before one is configured.
+      provider: The provider serving it.
+      folder: The project directory.
+      resumed: Whether a saved session is resuming.
+      blue: The wordmark's color, and the first bar's.
+      green: The second bar's color.
+      red: The third bar's color.
+      max_width: The widest the frame grows.
+      padding: Columns between the frame's sides and its content.
+
     """
     if not console.is_terminal:
         if model:
             console.print(Text(f"[{provider}] {model}"))
         return
     unicode_ok = _supports_blocks(console.encoding)
-    frame_width = min(console.width, _MAX_WIDTH)
+    frame_width = min(console.width, max_width)
+    banner = _banner_rows(blue=blue, green=green, red=red)
     large = (
         not resumed
         and not console.is_dumb_terminal
         and unicode_ok
-        and frame_width >= _IDENTITY_WIDTH + 2 * (_FRAME_PADDING + 1)
+        and frame_width >= banner[0].cell_len + 2 * (padding + 1)
         and console.height >= 22
     )
     framed = not console.is_dumb_terminal and frame_width >= 16
-
-    def framed_rows(rows: list[Text]) -> list[Text]:
-        return _frame_rows(
-            console,
-            rows,
-            width=frame_width,
-            framed=framed,
-            unicode_ok=unicode_ok,
-        )
-
-    def print_rows(rows: list[Text]) -> None:
-        for row in framed_rows(rows):
-            console.print(row)
-
+    print_rows = partial(
+        _print_framed,
+        console,
+        width=frame_width,
+        framed=framed,
+        unicode_ok=unicode_ok,
+        padding=padding,
+    )
     console.print()
     if framed:
         left, horizontal, right = ("╭", "─", "╮") if unicode_ok else ("+", "-", "+")
         console.print(Text(left + horizontal * (frame_width - 2) + right, style="dim"))
         print_rows([Text()])
     if large:
-        print_rows(_banner_rows())
+        print_rows(banner)
     else:
-        heading = Text("SAGENT", style=f"bold {_BLUE}")
-        print_rows([heading])
+        print_rows([Text("SAGENT", style=f"bold {blue}")])
     if resumed:
         print_rows([Text("Resuming your session.")])
     print_rows([Text()])
-    home = Path.home()  # noqa: TID251 -- Display abbreviation only, not a per-user storage location.
     # Keep metadata inside the terminal frame.
     # Never crop a model ID; long IDs/providers fold normally. Folder paths
     # explicitly mark omitted ancestors, preserving the project suffix.
-    content_width = frame_width - (2 * (_FRAME_PADDING + 1) if framed else 2)
+    content_width = frame_width - (2 * (padding + 1) if framed else 2)
     value_width = max(1, content_width - 10)
     display_folder = _folder_label(
         folder,
-        home=home,
+        home=Path("~").expanduser(),
         width=value_width,
         unicode_ok=unicode_ok,
     )
@@ -160,54 +151,73 @@ def render_welcome(
     console.print()
 
 
-def _banner_rows() -> list[Text]:
-    """Return the icon beside the wordmark, one row per banner line."""
+def _banner_rows(*, blue: str, green: str, red: str) -> list[Text]:
+    """Return the icon beside the wordmark, one row per banner line, all one width."""
+    # Terminal adaptation of the supplied document-loop icon, with its three bars.
+    icon = (
+        "   ╔══════╗",
+        "   ▼      ║",
+        " ██████   ║",
+        " █████    ║",
+        " ███████  ║",
+        "   ╚══════╝",
+    )
+    wordmark = (
+        "███████╗ █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
+        "██╔════╝██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝",
+        "███████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║",
+        "╚════██║██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║",
+        "███████║██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║",
+        "╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝",
+    )
+    icon_width = max(len(row) for row in icon)
+    width = icon_width + 3 + max(len(row) for row in wordmark)
     rows: list[Text] = []
-    for row_index, icon in enumerate(_ICON):
+    for row_index, (icon_row, letters) in enumerate(zip(icon, wordmark, strict=True)):
         lettering = Text()
-        for char in icon.ljust(_ICON_WIDTH):
+        for char in icon_row.ljust(icon_width):
             # Box glyphs share the wordmark's regular face. Some terminal bold
             # faces lack them; the double-line shape supplies their weight.
             style = "not bold"
             if char == "█" and 2 <= row_index <= 4:
-                style = f"bold {(_BLUE, _GREEN, _RED)[row_index - 2]}"
+                style = f"bold {(blue, green, red)[row_index - 2]}"
             lettering.append(char, style=style)
-        lettering.append(" " * _ICON_GAP)
-        if row_index < len(_BANNER):
-            for char in _BANNER[row_index]:
-                style = f"dim {_BLUE}" if char in _OUTLINE else _BLUE
-                lettering.append(char, style=style)
+        lettering.append("   ")
+        for char in letters:
+            style = f"dim {blue}" if char in "╔╗╚╝═║" else blue
+            lettering.append(char, style=style)
         # Keep the lockup rectangular, including its final alignment row.
-        lettering.append(" " * (_IDENTITY_WIDTH - lettering.cell_len))
+        lettering.append(" " * (width - lettering.cell_len))
         rows.append(lettering)
     return rows
 
 
-def _frame_rows(
+def _print_framed(
     console: Console,
     rows: list[Text],
     *,
     width: int,
     framed: bool,
     unicode_ok: bool,
-) -> list[Text]:
-    """Wrap content inside a quiet border using terminal cell widths."""
+    padding: int,
+) -> None:
+    """Print ``rows`` inside a quiet border, wrapped to terminal cell widths."""
     if not framed:
-        return [Text("  ") + row for row in rows]
+        for row in rows:
+            console.print(Text("  ") + row)
+        return
     side = "│" if unicode_ok else "|"
-    content_width = width - 2 * (_FRAME_PADDING + 1)
-    result: list[Text] = []
+    content_width = width - 2 * (padding + 1)
     for row in rows:
         for line in row.wrap(console, content_width, overflow="fold") or [Text()]:
             framed_line = Text()
-            framed_line.append(side + " " * _FRAME_PADDING, style="dim")
+            framed_line.append(side + " " * padding, style="dim")
             framed_line.append_text(line)
             framed_line.append(
-                " " * (content_width - line.cell_len + _FRAME_PADDING) + side,
+                " " * (content_width - line.cell_len + padding) + side,
                 style="dim",
             )
-            result.append(framed_line)
-    return result
+            console.print(framed_line)
 
 
 def _command_rows(width: int, *, unicode_ok: bool) -> list[Text]:

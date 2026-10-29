@@ -166,11 +166,11 @@ repos:
   # binary -- both fail closed on a fresh checkout, which is how the tool went
   # uninstalled while the docs cited it.
   #
-  # SC2016 only: the export workflows single-quote
-  # `--validation-command 'wheel="$wheel" ...'` deliberately -- those `$` belong
-  # to the inner shell, so "expressions don't expand" inverts the intent. Every
-  # other shellcheck rule stays live, and shellcheck runs only where installed,
-  # so this is stricter on CI than on a dev box.
+  # SC2016 only: `mutation.yml` single-quotes a printf format holding markdown
+  # backticks deliberately -- they are literal text, so "expressions don't
+  # expand" inverts the intent. Every other shellcheck rule stays live, and
+  # shellcheck runs only where installed, so this is stricter on CI than on a
+  # dev box.
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.12
     hooks:
