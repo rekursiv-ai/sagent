@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import contextlib
@@ -10,8 +10,6 @@ import itertools
 import pathlib
 import shutil
 import subprocess
-
-from treekle import from_plain
 
 import pytest
 
@@ -481,11 +479,7 @@ def test_named_files_split_where_the_next_would_pass_the_argv_limit(
     ) as run:
         assert grep(names, Query(pattern="hit")) == list(map(str, names))
     batches = [
-        [
-            arg
-            for arg in from_plain(call.args[0], list[str])
-            if arg.startswith(str(tmp_path))
-        ]
+        [arg for arg in cast(list[str], call.args[0]) if arg.startswith(str(tmp_path))]
         for call in run.call_args_list
     ]
     assert [name for batch in batches for name in batch] == list(map(str, names))
@@ -511,7 +505,7 @@ def test_each_rg_run_gets_the_timeout(tmp_path: Path) -> None:
     assert [call.kwargs for call in run.call_args_list] == [
         {"capture_output": True, "timeout": 7, "check": False},
     ] * 2
-    assert "-P" in from_plain(run.call_args_list[1].args[0], list[str])
+    assert "-P" in cast(list[str], run.call_args_list[1].args[0])
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
@@ -658,7 +652,7 @@ def test_the_default_rg_timeout_is_thirty_seconds(tmp_path: Path) -> None:
     ):
         assert grep(f, Query(pattern="x")) == []
     which.assert_called_once_with("rg")
-    assert from_plain(run.call_args.args[0], list[str])[0] == "/rg"
+    assert cast(list[str], run.call_args.args[0])[0] == "/rg"
     assert run.call_args.kwargs["timeout"] == 30
 
 
@@ -852,7 +846,7 @@ def test_a_batch_may_fill_the_argv_limit_exactly(tmp_path: Path) -> None:
         assert grep(names, Query(pattern="hit")) == list(map(str, names))
     first = [
         arg
-        for arg in from_plain(run.call_args_list[0].args[0], list[str])
+        for arg in cast(list[str], run.call_args_list[0].args[0])
         if arg.startswith(str(tmp_path))
     ]
     assert len(first) == fit
