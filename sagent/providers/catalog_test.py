@@ -181,6 +181,11 @@ def test_a_section_name_builds_its_provider_class(name: str, kind: type) -> None
     assert isinstance(ModelCatalog()[name], kind)
 
 
+@pytest.mark.parametrize("section", [listing.section for listing in listings()])
+def test_every_listed_provider_names_the_models_it_serves(section: str) -> None:
+    assert list(ModelCatalog()[section])
+
+
 def test_the_default_provider_is_the_one_preferred_else_the_first() -> None:
     offered = listings()
     preferred = [listing.section for listing in offered if listing.preferred]
@@ -1013,7 +1018,7 @@ def test_every_model_setting_name_is_offered_chosen_and_fixed_when_unsent(
     assert text.count(sent) == 1
     path = tmp_path / "unsent.yaml"
     path.write_text(text.replace(sent, "\n  anthropic:\n    sends: []\n"))
-    unsent = ModelTable.from_yaml(path, provider="anthropic")["opus-5.5"]
+    unsent = ModelTable.from_yaml(path, section="anthropic")["opus-5.5"]
     sent = Anthropic.models()["opus-5.5"]
     for name in model_setting_names():
         for value in sent.values(name):

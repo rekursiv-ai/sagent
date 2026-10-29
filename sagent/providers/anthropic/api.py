@@ -24,6 +24,7 @@ from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
 from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
 from sagent.providers.resources import SharedResources
+from sagent.providers.table import Catalogued
 from sagent.types import AsyncResource
 
 
@@ -35,12 +36,12 @@ if TYPE_CHECKING:
         Mapping,
         Sequence,
     )
+    from types import ModuleType
 
     import httpx2
 
     from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
-    from sagent.providers.table import ModelTable
     from sagent.providers.types import ProviderSharedResources, UsageWindow
     from sagent.session.types import Attachment
 else:
@@ -55,7 +56,7 @@ __all__ = [
 ]
 
 
-class Anthropic(AsyncResource):
+class Anthropic(Catalogued, AsyncResource):
     """Claude models, billed to the API key in ``ANTHROPIC_API_KEY``.
 
     Args:
@@ -66,7 +67,7 @@ class Anthropic(AsyncResource):
     """
 
     section: ClassVar[str] = "anthropic"
-    """The catalog section whose models and settings this provider serves."""
+    package: ClassVar[ModuleType] = anthropic
 
     betas: ClassVar[tuple[str, ...]] = ()
     """Beta features every request names, whatever it asks for."""
@@ -103,16 +104,6 @@ class Anthropic(AsyncResource):
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.models())
-
-    @classmethod
-    def models(cls) -> ModelTable:
-        """Return the models this provider serves.
-
-        Returns:
-          table: Its section's models, offering only the settings it sends.
-
-        """
-        return anthropic.models(cls.section)
 
     @override
     async def aclose(self) -> None:

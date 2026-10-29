@@ -23,17 +23,18 @@ from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
 from sagent.providers import google
 from sagent.providers.google import wire
 from sagent.providers.resources import SharedResources
+from sagent.providers.table import Catalogued
 from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, AsyncIterator, Iterator, Mapping
+    from types import ModuleType
 
     import httpx2
 
     from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
-    from sagent.providers.table import ModelTable
     from sagent.providers.types import ProviderSharedResources, UsageWindow
     from sagent.session.types import Attachment
 else:
@@ -48,7 +49,7 @@ __all__ = [
 ]
 
 
-class Google(AsyncResource):
+class Google(Catalogued, AsyncResource):
     """Gemini models, billed to the API key in ``GOOGLE_API_KEY`` or ``GEMINI_API_KEY``.
 
     Args:
@@ -59,7 +60,7 @@ class Google(AsyncResource):
     """
 
     section: ClassVar[str] = "google"
-    """The catalog section whose models and settings this provider serves."""
+    package: ClassVar[ModuleType] = google
 
     def __init__(
         self,
@@ -92,16 +93,6 @@ class Google(AsyncResource):
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.models())
-
-    @classmethod
-    def models(cls) -> ModelTable:
-        """Return the models this provider serves.
-
-        Returns:
-          table: Its section's models, offering only the settings it sends.
-
-        """
-        return google.models(cls.section)
 
     @override
     async def aclose(self) -> None:

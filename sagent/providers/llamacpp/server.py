@@ -31,12 +31,14 @@ import socket
 import weakref
 
 from sagent.lib.posix.child import Child, finish
+from sagent.providers import llamacpp
 from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
     from asyncio.subprocess import Process
     from collections.abc import Sequence
+    from types import ModuleType
 
     import httpx2
 
@@ -80,8 +82,7 @@ class LlamaCpp(OpenAICompatible):
     """
 
     section: ClassVar[str] = "llamacpp"
-    package: ClassVar[str] = "sagent.providers.llamacpp"
-    document: ClassVar[str] = "llamacpp.yaml"
+    package: ClassVar[ModuleType] = llamacpp
     key_variable: ClassVar[str] = "LLAMA_CPP_API_KEY"
 
     stop_timeout_sec: ClassVar[float] = 10.0

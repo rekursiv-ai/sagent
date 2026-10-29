@@ -15,11 +15,14 @@ from typing import TYPE_CHECKING, ClassVar, override
 
 from treekle import from_plain
 
+from sagent.providers import openai
 from sagent.providers.openai import responses
 from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from sagent.model.types import Request
     from sagent.providers.openai.compat import OpenAIModel, Reader
 
@@ -42,8 +45,7 @@ class OpenAI(OpenAICompatible):
     """
 
     section: ClassVar[str] = "openai"
-    package: ClassVar[str] = "sagent.providers.openai"
-    document: ClassVar[str] = "openai.yaml"
+    package: ClassVar[ModuleType] = openai
     url: ClassVar[str] = "https://api.openai.com/v1"
     key_variable: ClassVar[str] = "OPENAI_API_KEY"
     path: ClassVar[str] = "/responses"

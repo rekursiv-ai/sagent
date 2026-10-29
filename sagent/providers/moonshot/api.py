@@ -12,10 +12,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, override
 
+from sagent.providers import moonshot
 from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from sagent.model.types import Request
     from sagent.providers.openai.compat import OpenAIModel
 
@@ -38,8 +41,7 @@ class Moonshot(OpenAICompatible):
     """
 
     section: ClassVar[str] = "moonshot"
-    package: ClassVar[str] = "sagent.providers.moonshot"
-    document: ClassVar[str] = "moonshot.yaml"
+    package: ClassVar[ModuleType] = moonshot
     url: ClassVar[str] = "https://api.moonshot.ai/v1"
     key_variable: ClassVar[str] = "MOONSHOT_API_KEY"
     reasoning_field: ClassVar[str] = "reasoning_content"

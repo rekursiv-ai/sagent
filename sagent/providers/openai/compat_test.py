@@ -19,6 +19,7 @@ from sagent.model.exceptions import (
     RateLimitedError,
 )
 from sagent.model.types import Request, Response, TextChunk
+from sagent.providers import moonshot
 from sagent.providers.openai import chat, compat, token_count
 from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel
 from sagent.providers.resources import SharedResources
@@ -33,6 +34,7 @@ from sagent.session.types import (
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping
+    from types import ModuleType
 
 
 _REQUEST = Request(system=("Be terse.",), records=(UserMessage(content="hi"),))
@@ -42,8 +44,7 @@ class _Vendor(OpenAICompatible):
     """A vendor as a subclass names one: its catalog, endpoint, and key."""
 
     section: ClassVar[str] = "moonshot"
-    package: ClassVar[str] = "sagent.providers.moonshot"
-    document: ClassVar[str] = "moonshot.yaml"
+    package: ClassVar[ModuleType] = moonshot
     url: ClassVar[str] = "https://api.vendor.test/v1"
     key_variable: ClassVar[str] = "VENDOR_API_KEY"
     reasoning_field: ClassVar[str] = "reasoning_content"

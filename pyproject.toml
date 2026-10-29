@@ -3,7 +3,7 @@
 
 [project]
 name = "sagent"
-version = "0.1.20"
+version = "0.2.0"
 description = "Python-first Coding Agent API and CLI."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -50,8 +50,8 @@ dependencies = [
     "bashlex>=0.18",
     # media
     "pillow>=11.3.0",
-    # web search/fetch
-    "wesearch>=0.1.11",
+    # web search/fetch; 0.1.15 is the wesearch this release is validated against.
+    "wesearch>=0.1.15",
     # grep (rg fallback needs gitignore-aware tree walks)
     "rignore>=0.8.1",
 ]

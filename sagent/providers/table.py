@@ -2,7 +2,7 @@
 
 Typical usage example:
 
-  table = anthropic.models("anthropic-cli")  # A section of anthropic.yaml.
+  table = models(anthropic, section="anthropic-cli")  # A section of anthropic.yaml.
   table["opus-5.5"]                         # Its exact name.
   table["claude-opus-5-5"]                  # The vendor's id.
   table["default"]                          # A role: best, default, everyday, utility.
@@ -19,8 +19,8 @@ from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from functools import cache
 from importlib.resources import files
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Self, cast, override
+from types import MappingProxyType, ModuleType
+from typing import TYPE_CHECKING, ClassVar, Self, cast, override
 
 import math
 import re
@@ -50,6 +50,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "Catalogued",
     "ModelTable",
     "ModelTags",
     "models",
@@ -104,7 +105,7 @@ class ModelTable(Mapping[str, ModelCapability]):
                 raise ValueError(f"Role {role!r} names no model: {target!r}.")
 
     @classmethod
-    def from_yaml(cls, path: Traversable, *, provider: str) -> Self:
+    def from_yaml(cls, path: Traversable, *, section: str) -> Self:
         """Read the models one provider serves from a vendor's catalog document.
 
         Layers, lowest first: the reference row, the model's profile, the
@@ -118,7 +119,7 @@ class ModelTable(Mapping[str, ModelCapability]):
 
         Args:
           path: The vendor's YAML document.
-          provider: The name of a section under ``providers``.
+          section: The name of a section under ``providers``.
 
         Returns:
           table: The section's models, validated, and the document's roles.
@@ -132,29 +133,27 @@ class ModelTable(Mapping[str, ModelCapability]):
         from_plain(document.reference, _CapabilityProfile)
         for profile in document.profiles.values():
             from_plain(document.reference | profile, _CapabilityProfile)
-        if provider not in document.providers:
-            raise ValueError(f"The catalog has no provider {provider!r}.")
-        section = dict(document.providers[provider])
-        if "sends" not in section:
-            raise ValueError(f"Provider {provider!r} does not say what it sends.")
-        sends = frozenset(
-            from_plain(section.pop("sends"), list[ModelSettingName]),
-        )
+        if section not in document.providers:
+            raise ValueError(f"The catalog has no section {section!r}.")
+        layer = dict(document.providers[section])
+        if "sends" not in layer:
+            raise ValueError(f"Section {section!r} does not say what it sends.")
+        sends = frozenset(from_plain(layer.pop("sends"), list[ModelSettingName]))
         listed = from_plain(
-            section.pop("models", {}),
+            layer.pop("models", {}),
             dict[str, dict[str, object] | None],
         )
         # A provider serving other models than the vendor's own names its own.
-        roles = document.roles | from_plain(section.pop("roles", {}), dict[str, str])
+        roles = document.roles | from_plain(layer.pop("roles", {}), dict[str, str])
         ids = [from_plain(raw.get("model_id"), str) for raw in document.models]
         if unknown := sorted(set(listed) - set(ids)):
-            raise ValueError(f"Provider {provider!r} lists unknown models: {unknown}.")
+            raise ValueError(f"Section {section!r} lists unknown models: {unknown}.")
         rows = tuple(
             _unsent_fixed(
                 _model(
                     raw,
                     document=document,
-                    section=section,
+                    section=layer,
                     entry=listed[model_id] or {},
                 ),
                 sends=sends,
@@ -433,21 +432,43 @@ class ModelTags:
         )
 
 
-@cache
-def models(package: str, document: str, *, provider: str) -> ModelTable:
-    """Return the models one section of a packaged catalog document serves.
+def models(package: ModuleType, *, section: str) -> ModelTable:
+    """Return the models one section of a vendor package's catalog serves.
 
     Args:
-      package: The package holding the document, as ``sagent.providers.openai``.
-      document: The document's file name, as ``openai.yaml``.
-      provider: The section, as ``openai-sub``.
+      package: The vendor's package, which holds its catalog as
+        ``<leaf>.yaml``: ``anthropic`` holds ``anthropic.yaml``.
+      section: The section, as ``anthropic-cli``.
 
     Returns:
       table: Its models, each setting the section does not send fixed at what
         the vendor does.
 
     """
-    return ModelTable.from_yaml(files(package) / document, provider=provider)
+    return _read(package.__name__, section=section)
+
+
+class Catalogued:
+    """A provider class whose models are one section of its vendor's catalog."""
+
+    package: ClassVar[ModuleType]
+    """The vendor's package, holding its catalog."""
+
+    section: ClassVar[str]
+    """The catalog section whose models and settings this provider serves."""
+
+    @classmethod
+    def models(cls) -> ModelTable:
+        """Return the models this provider serves, offering only what it sends."""
+        return models(cls.package, section=cls.section)
+
+
+# Keyed by name: pyrefly rejects a module as a cache key, though it hashes.
+@cache
+def _read(package: str, *, section: str) -> ModelTable:
+    """Return one section of the catalog ``package`` holds, read once."""
+    leaf = package.rpartition(".")[2]
+    return ModelTable.from_yaml(files(package) / f"{leaf}.yaml", section=section)
 
 
 def _choices() -> tuple[ModelSettingName, ...]:

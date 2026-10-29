@@ -16,10 +16,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, override
 
+from sagent.providers import dashscope
 from sagent.providers.openai.compat import OpenAICompatible
 
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from sagent.model.types import Request
     from sagent.providers.openai.compat import OpenAIModel
 
@@ -43,8 +46,7 @@ class DashScope(OpenAICompatible):
     """
 
     section: ClassVar[str] = "dashscope"
-    package: ClassVar[str] = "sagent.providers.dashscope"
-    document: ClassVar[str] = "dashscope.yaml"
+    package: ClassVar[ModuleType] = dashscope
     url: ClassVar[str] = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
     key_variable: ClassVar[str] = "DASHSCOPE_API_KEY"
     reasoning_field: ClassVar[str] = "reasoning_content"
