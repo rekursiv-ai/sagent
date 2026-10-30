@@ -1081,6 +1081,9 @@ async def test_a_turn_after_the_reset_goes_back_to_the_first_login(
         await agent.aclose()
     assert accounts.served == ["personal", "default"]
     assert _switches(seen) == [("default", "personal"), ("personal", "default")]
+    # Off a spent login says it was spent; back onto one says it reset.
+    away, back = (e for e in seen if isinstance(e, types.LoginSwitched))
+    assert (away.window, back.window) == ("5-hour", "")
 
 
 @pytest.mark.asyncio
