@@ -306,7 +306,8 @@ class Harness:
             tool_context=ToolContext(cwd=cwd),
         )
         self.events: list[RuntimeEvent] = []
-        self.runtime.observers.append(self.events.append)
+        self._observed = asyncio.Event()
+        self.runtime.observers.append(self._record)
         self._task: asyncio.Task[None] | None = None
 
     async def __aenter__(self) -> Self:
@@ -331,7 +332,13 @@ class Harness:
         return sum(isinstance(e, kind) for e in self.events)
 
     async def seen(self, kind: type, n: int = 1) -> None:
-        await until(lambda: self.count(kind) >= n)
+        try:
+            async with asyncio.timeout(2):
+                while self.count(kind) < n:
+                    self._observed.clear()
+                    await self._observed.wait()
+        except TimeoutError:
+            pytest.fail("condition never held")
 
     def requests(self) -> list[Request]:
         return self.provider.requests
@@ -365,6 +372,10 @@ class Harness:
         kind: type[UserMessage | AgentToAgentMessage] = UserMessage,
     ) -> list[str]:
         return [e.content or "" for e in self.events if isinstance(e, kind)]
+
+    def _record(self, event: RuntimeEvent) -> None:
+        self.events.append(event)
+        self._observed.set()
 
 
 async def run_once(rt: Runtime, msg: UserMessage) -> list[ModelContextEvent]:
