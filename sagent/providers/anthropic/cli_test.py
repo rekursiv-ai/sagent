@@ -217,6 +217,8 @@ async def test_a_turn_starts_claude_with_our_tools_only(
         "stream-json",
         "--include-partial-messages",
         "--verbose",
+        "--thinking-display",
+        "summarized",
         "--model",
         "claude-opus-5-5",
         "--system-prompt-file",
@@ -368,7 +370,7 @@ async def test_a_tool_results_images_are_shrunk_before_answering(
 
 @pytest.mark.parametrize(
     "change",
-    ["system", "tools", "schema", "environment", "history"],
+    ["system", "tools", "schema", "environment", "history", "display"],
 )
 @pytest.mark.asyncio
 async def test_a_change_the_process_cannot_hear_starts_a_fresh_claude(
@@ -393,6 +395,8 @@ async def test_a_change_the_process_cannot_hear_starts_a_fresh_claude(
         tools = (_Echo(schema=MappingProxyType({"type": "object", "required": []})),)
     if change == "environment":
         monkeypatch.setenv("SAGENT_TEST_ACCOUNT", "other")
+    if change == "display":
+        model.settings = replace(model.settings, thinking_output="none")
     second = Request(
         system=("T",) if change == "system" else first.system,
         tools=tools,
@@ -405,6 +409,8 @@ async def test_a_change_the_process_cannot_hear_starts_a_fresh_claude(
     assert _text(*started[1][1]) == [
         f"User: {greeting}\n\nAssistant: Hello\n\nUser: more",
     ]
+    # Asked for summaries, claude returns them; told nothing, it returns none.
+    assert ("--thinking-display" in started[1][0]) == (change != "display")
 
 
 @pytest.mark.asyncio
@@ -840,15 +846,17 @@ async def test_count_bills_an_image_by_its_pixels_not_its_bytes() -> None:
 
 
 def test_the_cli_offers_the_effort_it_passes_and_the_rest_as_claude_has_them() -> None:
-    """``claude`` takes ``--effort``; its thinking, display, and tier are its own.
+    """``claude`` takes ``--effort`` and a display; its thinking and tier are its own.
 
     As ``claude`` 2.1.309 sent opus-5.5, captured on 2026-10-29: adaptive
-    thinking, its display omitted, no tier.
+    thinking, its display omitted, no tier. Asked, it shows the summary
+    (``--thinking-display summarized``, 2.1.312), which a session keeps.
     """
     row = AnthropicCLI.models()["opus"]
     assert row.thinking_effort == {"low", "medium", "high", "xhigh", "max"}
     assert row.thinking_budget == {"auto"}
-    assert row.thinking_output == {"none"}
+    assert row.thinking_output == {"none", "text"}
+    assert row.default.thinking_output == "text"
     assert row.manage_context_server_side == {True}
     assert row.service_tier == {"auto"}
     assert AnthropicCLI().usage == ()

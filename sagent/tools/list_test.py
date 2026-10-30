@@ -34,13 +34,15 @@ def test_listing_runs_beside_anything(tmp_path: Path) -> None:
 async def test_entries_are_listed_by_name_with_directories_marked(
     tmp_path: Path,
 ) -> None:
-    for name in ("b.txt", "A.txt", "a.txt", ".hidden"):
+    # No two names differ only in case: on a case-insensitive filesystem, as
+    # macOS's, they would name one file.
+    for name in ("b.txt", "C.txt", "a.txt", ".hidden"):
         (tmp_path / name).write_text("")
     (tmp_path / "sub").mkdir()
-    assert await _list(tmp_path, path=".") == "A.txt\na.txt\nb.txt\nsub/"
-    assert await _list(tmp_path, path="") == "A.txt\na.txt\nb.txt\nsub/"
+    assert await _list(tmp_path, path=".") == "a.txt\nb.txt\nC.txt\nsub/"
+    assert await _list(tmp_path, path="") == "a.txt\nb.txt\nC.txt\nsub/"
     assert await _list(tmp_path, path=".", show_hidden=True) == (
-        ".hidden\nA.txt\na.txt\nb.txt\nsub/"
+        ".hidden\na.txt\nb.txt\nC.txt\nsub/"
     )
 
 

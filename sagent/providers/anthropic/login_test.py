@@ -109,6 +109,8 @@ async def test_the_default_login_is_the_one_claude_keeps_in_home(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Off macOS, where the Keychain holds it, ``claude`` keeps it in a file."""
+    monkeypatch.setattr(login, "platform", SimpleNamespace(system=lambda: "Linux"))
     monkeypatch.setenv("HOME", str(tmp_path))
     (tmp_path / ".claude").mkdir()
     _store(

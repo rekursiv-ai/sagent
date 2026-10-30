@@ -155,7 +155,8 @@ def test_encode_names_the_vendor_id_and_streams() -> None:
     assert body["max_tokens"] == 128_000
     assert body["stream"] is True
     # A new model thinks as Claude Code has it: adaptively, at its default
-    # effort, keeping its old thinking; and asks for no optional feature.
+    # effort, keeping its old thinking, its summary shown so the session keeps
+    # it; and asks for no optional feature.
     assert betas == ["context-management-2025-06-27"]
     assert body.keys() == {
         "model",
@@ -166,7 +167,7 @@ def test_encode_names_the_vendor_id_and_streams() -> None:
         "context_management",
         "output_config",
     }
-    assert body["thinking"] == {"type": "adaptive"}
+    assert body["thinking"] == {"type": "adaptive", "display": "summarized"}
     assert body["output_config"] == {"effort": "medium"}
 
 
@@ -184,7 +185,11 @@ def test_encode_asks_no_more_than_the_room_the_request_leaves(
     )
     assert body["max_tokens"] == 9_000
     if budget == "fixed":
-        assert body["thinking"] == {"type": "enabled", "budget_tokens": 4_500}
+        assert body["thinking"] == {
+            "type": "enabled",
+            "budget_tokens": 4_500,
+            "display": "summarized",
+        }
 
 
 def test_encode_sends_the_system_blocks_and_tools_it_is_given() -> None:
@@ -537,7 +542,7 @@ def test_bookkeeping_records_send_nothing() -> None:
 
 def test_adaptive_thinking_shows_the_summary_asked_for() -> None:
     _, settings = _model()
-    settings = replace(settings, thinking_budget="auto")
+    settings = replace(settings, thinking_budget="auto", thinking_output="none")
     body, _ = _encode([UserMessage(content="q")], settings=settings)
     assert body["thinking"] == {"type": "adaptive"}
     settings = replace(settings, thinking_output="text")
@@ -561,7 +566,11 @@ def test_a_fixed_budget_leaves_half_the_reply_for_the_answer() -> None:
         capability=capability,
         settings=replace(settings, thinking_budget="fixed"),
     )
-    assert body["thinking"] == {"type": "enabled", "budget_tokens": 64_000}
+    assert body["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 64_000,
+        "display": "summarized",
+    }
 
 
 def test_a_fixed_budget_never_falls_below_the_api_floor() -> None:
@@ -575,7 +584,11 @@ def test_a_fixed_budget_never_falls_below_the_api_floor() -> None:
         capability=small,
         settings=replace(settings, thinking_budget="fixed"),
     )
-    assert body["thinking"] == {"type": "enabled", "budget_tokens": 1024}
+    assert body["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 1024,
+        "display": "summarized",
+    }
 
 
 def test_effort_is_sent_as_output_config() -> None:
@@ -1567,7 +1580,11 @@ def test_a_fixed_budget_is_a_whole_number_of_tokens() -> None:
         capability=small,
         settings=replace(settings, thinking_budget="fixed"),
     )
-    assert body["thinking"] == {"type": "enabled", "budget_tokens": 2_048}
+    assert body["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 2_048,
+        "display": "summarized",
+    }
 
 
 def test_the_cache_is_held_unexpired_unless_said_otherwise() -> None:

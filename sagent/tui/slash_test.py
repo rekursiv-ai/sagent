@@ -456,7 +456,7 @@ async def test_the_screen_shows_or_hides_reasoning_and_the_model_is_untouched() 
     await desk.commands("/screen.thinking hide")
     assert desk.printer.show_thinking is False
     assert desk.agent.model.settings.thinking_output == "none"
-    assert desk.printer.said == [("note", "[/screen.thinking] hide")]
+    assert desk.printer.said == [("note", "[/screen.thinking] hide (default)")]
 
 
 # ---- session ---------------------------------------------------------------
@@ -1005,11 +1005,11 @@ async def test_default_on_a_root_is_a_fresh_one_and_rolls_down() -> None:
     desk, screens = _rolled(("a", "Agent"))
     team = desk.team
     assert team is not None
-    await desk.commands("/screen.thinking hide")
+    await desk.commands("/screen.thinking show")
 
     await desk.commands("/screen.thinking default")
 
-    assert _shown(screens) == {"Agent": True, "a": True}
+    assert _shown(screens) == {"Agent": False, "a": False}
     assert team.choices["Agent"] == {}
 
 

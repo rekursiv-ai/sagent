@@ -735,6 +735,26 @@ def test_the_default_budget_layers_like_any_field(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("output", "default"),
+    [
+        (["none", "text", "redacted"], "text"),
+        (["none", "text"], "text"),
+        (["none", "redacted"], "none"),
+        (["none"], "none"),
+    ],
+    ids=["every", "text", "redacted-only", "none-only"],
+)
+def test_a_row_asks_for_thinking_text_wherever_it_offers_it(
+    tmp_path: Path,
+    output: list[str],
+    default: str,
+) -> None:
+    """A session keeps every summary a model returns; the TUI hides it instead."""
+    path = _write(tmp_path / "x.yaml", _model(thinking=_EVERY | {"output": output}))
+    assert _load(path)["example"].default.thinking_output == default
+
+
+@pytest.mark.parametrize(
     ("default", "effort"),
     [("medium", "low"), ("max", "high"), ("min", "low")],
     ids=["nearest-below", "nearest-below-top", "nearest-above"],

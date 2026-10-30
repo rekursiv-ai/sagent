@@ -685,11 +685,14 @@ def _model(
                     literal_members(ThinkingBudget),
                 ),
             ),
+            # Readable thinking wherever a row offers it and names no default of its
+            # own, so a session keeps every summary the model returns; the TUI hides
+            # it unless asked.
             thinking_output=_lowest(
                 "thinking_output",
                 row.thinking.output,
                 _default_first(
-                    row.thinking_output_default,
+                    row.thinking_output_default or "text",
                     literal_members(ThinkingOutput),
                 ),
             ),

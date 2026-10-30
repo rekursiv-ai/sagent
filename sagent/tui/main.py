@@ -227,7 +227,7 @@ async def run(
     catalog: Catalog,
     team: Team | None = None,
     history: Path | None = None,
-    show_thinking: bool = True,
+    show_thinking: bool = False,
     print_batch_sec: float = 0.2,
 ) -> None:
     """Show ``agent``'s session and take what the user types, until they quit.
@@ -1088,4 +1088,4 @@ def _positive_float(raw: str) -> float:
 class _Screen:
     """Whether reasoning shows, settled by ``--screen.thinking`` before a screen opens."""
 
-    show_thinking: bool = True
+    show_thinking: bool = False

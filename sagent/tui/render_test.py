@@ -302,6 +302,7 @@ def test_word_sized_thinking_deltas_print_one_heading_and_the_joined_text() -> N
     out = io.StringIO()
     printer = ConsolePrinter(
         Console(file=out, width=200, color_system=None, highlight=False),
+        show_thinking=True,
     )
     render = Scrollback(printer, tools=_tools())
     words = [f"word{i} " for i in range(20)]

@@ -103,7 +103,8 @@ class ConsolePrinter:
     Args:
       console: Where to print; built inside ``patch_stdout`` so its writes
         land above the prompt.
-      show_thinking: Whether reasoning shows.
+      show_thinking: Whether reasoning shows; hidden by default, though the
+        session keeps every summary the model returns.
       max_label_lines: The most rows one call's header and input may take.
       style: The colors; dark-terminal ones when omitted.
 
@@ -117,7 +118,7 @@ class ConsolePrinter:
         self,
         console: Console,
         *,
-        show_thinking: bool = True,
+        show_thinking: bool = False,
         max_label_lines: int = 12,
         style: ConsoleStyle | None = None,
     ) -> None:

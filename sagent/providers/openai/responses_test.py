@@ -232,8 +232,11 @@ def test_encode_asks_for_reasoning_at_the_effort_chosen() -> None:
     assert "include" not in stopped
     # A model that cannot reason is sent no reasoning at all.
     assert "reasoning" not in _encode(Request(), "gpt-4.1")
+    # At its defaults a model is asked for its reasoning summary, so the session
+    # keeps it.
     assert _encode(Request())["reasoning"] == {
         "effort": "medium",
+        "summary": "auto",
         "context": "all_turns",
     }
     body = _encode(Request(), thinking_effort="high", thinking_output="text")
@@ -243,10 +246,13 @@ def test_encode_asks_for_reasoning_at_the_effort_chosen() -> None:
         "context": "all_turns",
     }
     assert body["include"] == ["reasoning.encrypted_content"]
-    # No summary unless one is to be shown, and only GPT-5.6 on reasons over every turn.
-    assert _encode(Request(), "gpt-5.5", thinking_effort="low")["reasoning"] == {
-        "effort": "low",
-    }
+    # No summary unless one is asked for, and only GPT-5.6 on reasons over every turn.
+    assert _encode(
+        Request(),
+        "gpt-5.5",
+        thinking_effort="low",
+        thinking_output="none",
+    )["reasoning"] == {"effort": "low"}
 
 
 def test_encode_sends_the_tier_and_a_temperature_only_where_they_apply() -> None:

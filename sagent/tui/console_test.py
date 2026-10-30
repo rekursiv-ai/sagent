@@ -69,12 +69,12 @@ def _visible(row: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", row)
 
 
-def test_it_is_a_printer_that_shows_thinking_by_default() -> None:
+def test_it_is_a_printer_that_hides_thinking_by_default() -> None:
     printer: Printer = ConsolePrinter(Console(file=io.StringIO()))
-    assert printer.show_thinking is True
+    assert printer.show_thinking is False
     assert (
-        ConsolePrinter(Console(file=io.StringIO()), show_thinking=False).show_thinking
-        is False
+        ConsolePrinter(Console(file=io.StringIO()), show_thinking=True).show_thinking
+        is True
     )
 
 

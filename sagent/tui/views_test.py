@@ -418,18 +418,18 @@ async def test_each_agent_has_its_own_screen_and_the_shown_one_rules(
     views = Views(team["Agent"], team=team, printer=screen.printer, catalog=_catalog())
 
     seen: list[bool] = []
-    await views.current.commands("/send kid /screen.thinking hide")
+    await views.current.commands("/send kid /screen.thinking show")
     seen.append(screen.printer.show_thinking)
     views.focus("kid")
     seen.append(screen.printer.show_thinking)
-    await views.current.commands("/screen.thinking show")
+    await views.current.commands("/screen.thinking hide")
     seen.append(screen.printer.show_thinking)
     views.focus("Agent")
-    await views.current.commands("/send kid /screen.thinking hide")
+    await views.current.commands("/send kid /screen.thinking show")
     seen.append(screen.printer.show_thinking)
 
-    assert seen == [True, False, True, True]
-    assert views.screen("kid").show_thinking is False
+    assert seen == [False, True, False, False]
+    assert views.screen("kid").show_thinking is True
     await views.aclose()
 
 

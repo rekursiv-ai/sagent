@@ -20,6 +20,7 @@ import time
 import pytest
 
 from sagent.lib.posix.child import Child
+from sagent.lib.posix.pids import gone_within, running
 from sagent.tools import bash
 from sagent.tools.bash import Bash, _drain, _guard, _HeldPipe, _stop
 from sagent.tools.command_analyzer import Rewrite
@@ -40,9 +41,13 @@ if TYPE_CHECKING:
 # test can find both again and check that neither survives.
 _SLEEPER: Final = "echo $$ > shell.pid; sleep 60 & echo $! > child.pid; wait"
 
-# A wrapper that starts the shell in a session of its own, outside the group the
-# tool makes, which is where a wrapper that changes the user leaves it.
-_OTHER_SESSION: Final = ("/usr/bin/setsid", "--wait")
+# A wrapper that starts the shell in a process group of its own, outside the group
+# the tool makes, which is where a wrapper that changes the user leaves it. Job
+# control (``set -m``) makes the group, as macOS has no ``setsid`` program. The job
+# runs in the background because bash 5 runs a last foreground command in its own
+# process; ``set +m`` before the ``wait`` keeps bash 3.2 from writing the job's end
+# into the stderr a test reads.
+_OTHER_GROUP: Final = ("/bin/bash", "-c", 'set -m; "$@" & set +m; wait "$!"', "wrapper")
 
 # Runs a Bash call in a process of its own, so a test can kill the caller.
 _CALLER: Final = """\
@@ -421,7 +426,7 @@ async def test_a_timeout_ends_a_job_that_outlives_the_shell(
     started.append(child)
     assert result.stdout == "started\n"
     assert "[timeout after" in result.stderr
-    assert await _gone_within([child])
+    assert await gone_within([child])
 
 
 @pytest.mark.asyncio
@@ -465,7 +470,7 @@ async def test_a_timeout_kills_jobs_that_ignore_terminate(
     pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
     started.extend(pids)
     assert "[timeout after" in result.stderr
-    assert await _gone_within(pids)
+    assert await gone_within(pids)
 
 
 @pytest.mark.asyncio
@@ -474,12 +479,12 @@ async def test_a_job_that_leaves_the_group_cannot_hang_the_call(
     started: list[int],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``setsid`` escapes the group kill; the drain gives up on its pipes."""
+    """A job in its own group escapes the kill; the drain gives up on its pipes."""
     _stop_when(monkeypatch, exited=True)
     result = await asyncio.wait_for(
         _run(
             tmp_path,
-            "setsid sleep 60 & echo $! > child.pid; echo started",
+            "set -m; sleep 60 & set +m; echo $! > child.pid; echo started",
             limit_ms=1,
             tool=Bash(drain_sec=0.05, grace_sec=0.01),
         ),
@@ -498,15 +503,15 @@ async def test_a_stopped_shell_reports_its_exit_status_without_waitid(
 ) -> None:
     """Before 3.13, macOS has no ``os.waitid``; the stop must not need it.
 
-    The ``setsid`` job holds the pipes, so the status comes from the stop, not
-    from the read of what the shell wrote.
+    The job in a group of its own holds the pipes, so the status comes from the
+    stop, not from the read of what the shell wrote.
     """
     monkeypatch.delattr(os, "waitid")
     _stop_when(monkeypatch, exited=True)
     result = await asyncio.wait_for(
         _run(
             tmp_path,
-            "setsid sleep 60 & echo $! > child.pid; echo started",
+            "set -m; sleep 60 & set +m; echo $! > child.pid; echo started",
             limit_ms=1,
             tool=Bash(drain_sec=0.01, grace_sec=0.01),
         ),
@@ -527,7 +532,7 @@ async def test_a_cancelled_call_stops_the_shell_and_its_jobs(
     call.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(call, timeout=5)
-    assert await _gone_within(pids)
+    assert await gone_within(pids)
 
 
 @pytest.mark.asyncio
@@ -573,7 +578,7 @@ async def test_a_call_cancelled_while_the_shell_starts_stops_it_and_its_jobs(
     handed.set()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(call, timeout=5)
-    assert await _gone_within(pids)
+    assert await gone_within(pids)
 
 
 @pytest.mark.asyncio
@@ -646,7 +651,7 @@ async def test_a_wrapped_call_keeps_both_streams_and_the_status(
         _run(
             tmp_path,
             "echo out; echo err 1>&2; exit 3",
-            tool=Bash(exec_prefix=_OTHER_SESSION),
+            tool=Bash(exec_prefix=_OTHER_GROUP),
         ),
         timeout=10,
     )
@@ -659,9 +664,9 @@ async def test_a_wrapped_command_cannot_reach_the_held_pipe(tmp_path: Path) -> N
     result = await _run(
         tmp_path,
         'read -r line; echo "stdin_status=$?";'
-        ' [ -e "/proc/$$/fd/9" ] && echo open || echo closed',
+        " [ -e /dev/fd/9 ] && echo open || echo closed",
         limit_ms=3_000,
-        tool=Bash(exec_prefix=_OTHER_SESSION),
+        tool=Bash(exec_prefix=_OTHER_GROUP),
     )
     assert result.stdout == "stdin_status=1\nclosed\n"
 
@@ -674,7 +679,7 @@ async def test_a_bare_wait_does_not_wait_for_the_guard(tmp_path: Path) -> None:
             tmp_path,
             "sleep 0.02 & sleep 0.04 & wait; echo done",
             limit_ms=3_000,
-            tool=Bash(exec_prefix=_OTHER_SESSION),
+            tool=Bash(exec_prefix=_OTHER_GROUP),
         ),
         timeout=10,
     )
@@ -717,16 +722,16 @@ async def test_a_wrapped_timeout_stops_a_shell_this_process_cannot_signal(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``killpg`` misses a shell in another session; closing the held pipe does not."""
+    """``killpg`` misses a shell in another group; closing the held pipe does not."""
     _stop_when(monkeypatch, written=(tmp_path / "shell.pid", tmp_path / "child.pid"))
     result = await asyncio.wait_for(
-        _run(tmp_path, _SLEEPER, limit_ms=50, tool=Bash(exec_prefix=_OTHER_SESSION)),
+        _run(tmp_path, _SLEEPER, limit_ms=50, tool=Bash(exec_prefix=_OTHER_GROUP)),
         timeout=5,  # A stop that waited on the wrapper would take over five seconds.
     )
     pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
     started.extend(pids)
     assert "[timeout after" in result.stderr
-    assert await _gone_within(pids)
+    assert await gone_within(pids)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
@@ -740,7 +745,7 @@ async def test_a_wrapped_cancel_stops_the_shell_and_its_jobs(
             tmp_path,
             _SLEEPER,
             limit_ms=60_000,
-            tool=Bash(exec_prefix=_OTHER_SESSION),
+            tool=Bash(exec_prefix=_OTHER_GROUP),
         ),
     )
     pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
@@ -748,11 +753,11 @@ async def test_a_wrapped_cancel_stops_the_shell_and_its_jobs(
     call.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(call, timeout=5)
-    assert await _gone_within(pids)
+    assert await gone_within(pids)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("prefix", [(), _OTHER_SESSION], ids=["bare", "wrapped"])
+@pytest.mark.parametrize("prefix", [(), _OTHER_GROUP], ids=["bare", "wrapped"])
 async def test_a_background_job_outlives_a_normal_end(
     tmp_path: Path,
     started: list[int],
@@ -770,7 +775,7 @@ async def test_a_background_job_outlives_a_normal_end(
     # there, no guard fired.
     assert await _alone_within(child)
     assert result.stdout == ""
-    assert _is_running(child)
+    assert running(child)
 
 
 @pytest.mark.asyncio
@@ -786,14 +791,14 @@ async def test_a_shell_that_ignores_terminate_is_killed_after_the_grace(
             tmp_path,
             f"trap '' TERM; {_SLEEPER}",
             limit_ms=50,
-            tool=Bash(exec_prefix=_OTHER_SESSION),
+            tool=Bash(exec_prefix=_OTHER_GROUP),
         ),
         timeout=5,
     )
     pids = await _written_pids(tmp_path, "shell.pid", "child.pid")
     started.extend(pids)
     assert "[timeout after" in result.stderr
-    assert await _gone_within(pids)
+    assert await gone_within(pids)
 
 
 @pytest.mark.asyncio
@@ -986,7 +991,7 @@ async def test_killing_the_calling_process_leaves_no_shell_behind(
         str(script),
         str(tmp_path),
         _SLEEPER,
-        *_OTHER_SESSION,
+        *_OTHER_GROUP,
         env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
     )
     try:
@@ -994,7 +999,7 @@ async def test_killing_the_calling_process_leaves_no_shell_behind(
         started.extend(pids)
         caller.kill()
         await caller.wait()
-        assert await _gone_within(pids, seconds=5)
+        assert await gone_within(pids, seconds=5)
     finally:
         with contextlib.suppress(ProcessLookupError):
             caller.kill()
@@ -1029,7 +1034,7 @@ def _recording_prefix(directory: Path) -> tuple[tuple[str, ...], Path]:
 
 
 def _open_descriptors() -> int:
-    return len(list(Path("/proc/self/fd").iterdir()))
+    return len(list(Path("/dev/fd").iterdir()))
 
 
 def _read_text(path: Path) -> str:
@@ -1057,25 +1062,6 @@ async def _written_text(path: Path) -> str:
             await asyncio.sleep(0.01)
 
 
-def _is_running(pid: int) -> bool:
-    """Whether ``pid`` is alive; a zombie only waits for its parent to reap it."""
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:
-        return False
-    return stat.rpartition(")")[2].split()[0] != "Z"
-
-
-async def _gone_within(pids: Sequence[int], *, seconds: float = 3.0) -> bool:
-    """Whether every process in ``pids`` has ended within ``seconds``."""
-    deadline = time.monotonic() + seconds
-    while any(_is_running(pid) for pid in pids):
-        if time.monotonic() > deadline:
-            return False
-        await asyncio.sleep(0.01)
-    return True
-
-
 async def _collected_within(pid: int, *, seconds: float = 3.0) -> bool:
     """Whether the parent has collected ``pid`` within ``seconds``."""
     deadline = time.monotonic() + seconds
@@ -1088,7 +1074,11 @@ async def _collected_within(pid: int, *, seconds: float = 3.0) -> bool:
 
 def _is_listed(pid: int) -> bool:
     """Whether ``pid`` still has an entry, which its parent's wait removes."""
-    return Path(f"/proc/{pid}").exists()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
 
 
 # The timeout's clock starts with the shell, so on a busy machine it can run out
@@ -1125,31 +1115,36 @@ async def _held_stop(
 
 async def _alone_within(pid: int, *, seconds: float = 3.0) -> bool:
     """Whether, within ``seconds``, no process but ``pid`` runs in its group."""
-    group = _group_of(pid)
+    group = os.getpgid(pid)
     deadline = time.monotonic() + seconds
-    while _running_in(group) - {pid}:
+    while await _running_in(group) - {pid}:
         if time.monotonic() > deadline:
             return False
         await asyncio.sleep(0.005)
     return True
 
 
-def _group_of(pid: int) -> str:
-    """Return the process group ``pid`` is in, as ``/proc`` spells it."""
-    return Path(f"/proc/{pid}/stat").read_text().rpartition(")")[2].split()[2]
-
-
-def _running_in(group: str) -> set[int]:
+# ``ps``, as macOS has no ``/proc`` to read a group's members from.
+async def _running_in(group: int) -> set[int]:
     """Return the processes of process group ``group`` that are not zombies."""
-    running: set[int] = set()
-    for entry in (e for e in Path("/proc").iterdir() if e.name.isdigit()):
-        try:
-            state, _, pgrp, *_ = (entry / "stat").read_text().rpartition(")")[2].split()
-        except OSError:
-            continue
-        if pgrp == group and state != "Z":
-            running.add(int(entry.name))
-    return running
+    ps = await asyncio.create_subprocess_exec(
+        "ps",
+        "-A",
+        "-o",
+        "pid=",
+        "-o",
+        "pgid=",
+        "-o",
+        "stat=",
+        stdout=asyncio.subprocess.PIPE,
+    )
+    out, _ = await ps.communicate()
+    rows = (line.split() for line in out.decode().splitlines())
+    return {
+        int(pid)
+        for pid, pgid, state in rows
+        if int(pgid) == group and not state.startswith("Z")
+    }
 
 
 if __name__ == "__main__":

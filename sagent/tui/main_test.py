@@ -1217,9 +1217,9 @@ async def test_the_named_model_s_tags_win_over_a_flag_it_alone_offers() -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_setting_flag_leaves_the_model_s_own_and_shows_reasoning() -> None:
+async def test_no_setting_flag_leaves_the_model_s_own_and_hides_reasoning() -> None:
     screen, agent = await _set()
-    assert screen.show_thinking is True
+    assert screen.show_thinking is False
     settings = agent.model.settings
     assert (settings.context_size.tokens, settings.thinking_budget) == (
         1_000_000,
@@ -2316,6 +2316,8 @@ def test_an_interactive_resume_picks_and_logs_at_the_level_asked(
         "--resume",
         "--log-level",
         "INFO",
+        "--screen.thinking",
+        "show",
         "--history",
         str(tmp_path / "h"),
     )
@@ -2553,9 +2555,9 @@ async def test_what_the_shown_agent_did_under_the_tree_prints_once_it_closes(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("show", "shown"),
-    [(None, True), (True, True), (False, False)],
+    [(None, False), (True, True), (False, False)],
 )
-async def test_run_shows_reasoning_unless_told_not_to(
+async def test_run_hides_reasoning_unless_told_to_show_it(
     tmp_path: Path,
     show: bool | None,
     shown: bool,
