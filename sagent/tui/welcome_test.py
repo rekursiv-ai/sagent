@@ -55,7 +55,7 @@ def test_fresh_terminal_has_banner_actual_metadata_and_invitation() -> None:
     assert "test-model" in out
     assert "TestProvider" in out
     assert "/research" in out
-    assert "Good news, everyone! The discovering begins!" in out
+    assert "Good news, everyone! The discovering begins." in out
     assert "/help" in out
     assert "/quit" in out
     assert "/tasks" in out
@@ -74,7 +74,7 @@ def test_resume_keeps_transcript_prominent() -> None:
     assert "SAGENT" in out
     assert "Resuming your session." in out
     assert "█" not in out
-    assert "Good news, everyone! The discovering begins!" in out
+    assert "Good news, everyone! The discovering begins." in out
 
 
 def test_welcome_without_configuration_has_identity_and_help() -> None:
@@ -432,7 +432,7 @@ def test_wrapped_greeting_is_flush_with_the_frame_edge() -> None:
         i for i, line in enumerate(lines) if "Good news, everyone!" in line
     )
     assert lines[greeting_start].startswith("Good news")
-    assert lines[greeting_start + 1] == "begins!"
+    assert lines[greeting_start + 1] == "begins."
 
 
 if __name__ == "__main__":

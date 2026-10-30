@@ -21,7 +21,7 @@ import sys
 from sagent.runtime import types
 from sagent.tui.diff import highlight_source, render_diff
 from sagent.tui.markdown import TightMarkdown
-from sagent.tui.types import FILLS, Sticky
+from sagent.tui.types import Sticky, fill
 
 
 if TYPE_CHECKING:
@@ -65,7 +65,7 @@ class ConsoleStyle:
             bgcolor=Color.from_rgb(55, 55, 55),
         ),
     )
-    """The bar, at most 80 wide, of what the user said."""
+    """The bar of what the user said."""
 
     to_agent: Style = field(
         default_factory=lambda: Style(
@@ -141,7 +141,7 @@ class ConsolePrinter:
             self.console.print(Text(row, style=self.style.quiet))
 
     def user(self, text: str) -> None:
-        """Write ``text`` as dark-gray bars at most 80 wide, between blank lines.
+        """Write ``text`` as dark-gray bars, between blank lines.
 
         A user message starts a turn, so the turn's fills narrow again.
 
@@ -283,22 +283,32 @@ class ConsolePrinter:
             )
 
     def halt(self, text: str) -> None:
-        """Write ``text`` bold red between two full-width rules."""
+        """Write ``text`` bold red, wrapped between two rules as wide as a fill.
+
+        Args:
+          text: Why the agent stopped, and what the user can do.
+
+        """
         self._gap()
-        rule = Text("─" * max(20, self.console.width), style=self.style.rule)
+        shown = _shown(text)
+        width = self.sticky.cells(
+            max(cell_len(row) for row in shown.split("\n")),
+            total_padding=0,
+            width=self.console.width,
+        )
+        rule = Text("─" * width, style=self.style.rule)
         self.console.print(rule)
-        self.console.print(Text(_shown(text), style=self.style.halted))
+        self.console.print(Text(shown, style=self.style.halted), width=width)
         self.console.print(rule)
 
     def _bar(self, lead: str, *, text: str, style: Style) -> None:
-        """Write ``lead`` then ``text`` as bars at most 80 wide, between blank lines."""
+        """Write ``lead`` then ``text`` as filled bars, between blank lines."""
         self.gap_owed = False
         self.console.print()
         rows = text.rstrip("\n").split("\n")
-        width = FILLS["user"].cells(
-            max(cell_len(row) for row in rows),
-            width=self.console.width,
-        )
+        # A bar is 80 whatever it holds, outside the turn's edge: what was said
+        # is prose, so it wraps rather than widening.
+        width = fill(0, total_padding=0, width=self.console.width)
         if width <= cell_len(lead):
             self.console.print(Text(lead + text), style=style)
         else:

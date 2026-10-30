@@ -11,9 +11,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import dataclasses
 import difflib
 import re
+import textwrap
 
 from pygments import highlight
 from pygments.formatters import Terminal256Formatter
@@ -33,7 +33,7 @@ from pygments.util import ClassNotFound
 from rich.cells import cell_len
 from rich.text import Text
 
-from sagent.tui.types import FILLS, Sticky
+from sagent.tui.types import Sticky
 
 
 if TYPE_CHECKING:
@@ -98,14 +98,14 @@ def render_diff(
     console.print(
         Text(f"  ⎿  Added {added} lines, removed {removed} lines", style="dim"),
     )
+    body = _dedent(body, hunk)
     changes = [ln for ln in body if not hunk.match(ln)]
     pairs = _word_pairs(changes, threshold=s.word_threshold)
     digits = len(str(_last_number(body, hunk)))
     longest = max((cell_len(ln) for ln in changes), default=0)
-    # The margin ``  N ``: the call's indent, the number, a space.
-    fill = dataclasses.replace(FILLS["diff"], gutter=digits + 3)
     sticky = sticky if sticky is not None else Sticky()
-    width = sticky.cells(fill, longest - 1, width=console.width)
+    # The margin ``  N ``: the call's indent, the number, a space.
+    width = sticky.cells(longest - 1, total_padding=digits + 3, width=console.width)
     hidden = (
         range(lines[0], len(changes) - lines[1])
         if lines is not None and len(changes) > sum(lines)
@@ -210,6 +210,13 @@ def _lexer_for(path: str) -> Lexer:
         return get_lexer_for_filename(path, stripnl=False, ensurenl=False)
     except ClassNotFound:
         return TextLexer(stripnl=False, ensurenl=False)
+
+
+def _dedent(body: list[str], hunk: re.Pattern[str]) -> list[str]:
+    """Return ``body`` without the indent all its non-blank lines share, after the sigil."""
+    lines = [ln for ln in body if not hunk.match(ln)]
+    contents = iter(textwrap.dedent("\n".join(ln[1:] for ln in lines)).split("\n"))
+    return [ln if hunk.match(ln) else ln[:1] + next(contents) for ln in body]
 
 
 def _highlight(code: str, lexer: Lexer) -> Text:

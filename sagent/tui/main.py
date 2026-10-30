@@ -298,13 +298,19 @@ async def run(
             await views.aclose()
     journal = agent.session.journal.path
     if journal is not None:
+        ways = {
+            f"sagent --resume {journal.parent.name}": "this session",
+            "sagent --continue": "the latest in this directory",
+            "sagent --resume": "pick one in this directory",
+            "sagent --continue-all": "the latest anywhere",
+            "sagent --resume-all": "pick one anywhere",
+        }
+        column = max(map(len, ways)) + 3
         printer.line(
-            "Resume this session with:\n"
-            f"sagent --resume {journal.parent.name}   # this session\n"
-            "sagent --continue         # the latest in this directory\n"
-            "sagent --resume           # pick one in this directory\n"
-            "sagent --continue-all     # the latest anywhere\n"
-            "sagent --resume-all       # pick one anywhere",
+            "\n".join(
+                ["Resume this session with:"]
+                + [f"{command:<{column}}# {what}" for command, what in ways.items()],
+            ),
         )
 
 
