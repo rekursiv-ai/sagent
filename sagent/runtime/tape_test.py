@@ -129,9 +129,6 @@ def _texts(
     return out
 
 
-# --- TapeRef and MaskRange ---------------------------------------------
-
-
 def test_tape_ref_rejects_a_negative_ordinal() -> None:
     with pytest.raises(
         InvalidPayloadError,
@@ -249,9 +246,6 @@ def test_merge_mask_ranges_never_joins_across_sessions() -> None:
     a = MaskRange(session_id="a", lo=1, hi=1)
     b = MaskRange(session_id="b", lo=1, hi=1)
     assert merge_mask_ranges((b, a)) == (a, b)
-
-
-# --- ContextSplice validation --------------------------------------------
 
 
 def test_payloads_that_alternate_construct() -> None:
@@ -395,9 +389,6 @@ def test_overlapping_mask_ranges_are_rejected() -> None:
         )
 
 
-# --- pair_and_dedup_tool_calls / splice_safe_repair ----------------------
-
-
 def test_repair_answers_unanswered_calls_in_sorted_order() -> None:
     out = tape._pair_and_dedup_tool_calls(
         [_calling("c2", "c1", "c3"), _result("c3"), _user("done")],
@@ -518,9 +509,6 @@ def test_splice_safe_repair_never_strands_two_model_turns() -> None:
     )
     assert _texts(out)[-1] == "ab"
     assert _splice(payload=out).payload == out
-
-
-# --- coalesce_roles -------------------------------------------------------
 
 
 def test_same_sender_user_turns_merge_with_attachments() -> None:
@@ -645,9 +633,6 @@ def test_coalesce_roles_is_idempotent() -> None:
     assert coalesce_roles(once) == once
 
 
-# --- unpaired_call_ids, same_sender, calls --------------------------------
-
-
 def test_unpaired_call_ids_names_both_missing_sides() -> None:
     payload = (
         _result("tr-only"),
@@ -688,7 +673,6 @@ def test_calls_returns_tool_calls_in_order() -> None:
     assert calls(records) == (a, b)
 
 
-# --- Properties -------------------------------------------------------------
 #
 # Every input shape the repairs and the coalescer may meet: either side's turns,
 # tool results, notes, and call ids drawn from a pool small enough that turns and

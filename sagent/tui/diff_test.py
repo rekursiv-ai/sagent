@@ -6,6 +6,7 @@ import io
 import re
 
 from rich.console import Console
+from rich.text import Text
 
 import pytest
 
@@ -29,7 +30,7 @@ _GUTTER = "38;2;160;160;160"
 def _plain(diff: str, *, path: str = "", width: int = 40) -> list[str]:
     out = io.StringIO()
     console = Console(file=out, width=width, color_system=None, highlight=False)
-    render_diff(console, diff, path=path)
+    render_diff(console, diff, lead=Text("  "), hang="  ", path=path)
     return [row.rstrip() for row in out.getvalue().splitlines()]
 
 
@@ -47,7 +48,7 @@ def _ansi(
         color_system="truecolor",
         force_terminal=True,
     )
-    render_diff(console, diff, path=path, style=style)
+    render_diff(console, diff, lead=Text("  "), hang="  ", path=path, style=style)
     return out.getvalue().splitlines()
 
 
@@ -69,20 +70,40 @@ def _visible(row: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", row)
 
 
-# ---- numbering and counts --------------------------------------------------
+def test_the_first_row_takes_the_lead_and_every_other_the_hang() -> None:
+    out = io.StringIO()
+    console = Console(file=out, width=20, color_system=None, highlight=False)
+    diff = "@@ -0,0 +1,3 @@\n+a\n+" + "b" * 20 + "\n+c\n"
+    render_diff(console, diff, lead=Text("  ⎿  "), hang="     ", lines=(2, 0))
+    assert [row.rstrip() for row in out.getvalue().splitlines()] == [
+        "  ⎿  1 a",
+        "     2 " + "b" * 13,
+        "       " + "b" * 7,
+        "       ⋯ 1 lines ⋯",
+    ]
 
 
-def test_a_dim_header_counts_what_the_diff_adds_and_removes() -> None:
-    diff = "@@ -1,2 +1,3 @@\n-a\n+b\n+c\n d\n"
-    assert _plain(diff)[0] == "  ⎿  Added 2 lines, removed 1 lines"
-    assert _segments(_ansi(diff)[0]) == [("2", "  ⎿  Added 2 lines, removed 1 lines")]
+def test_a_cut_at_the_head_puts_the_lead_on_its_count() -> None:
+    out = io.StringIO()
+    console = Console(file=out, width=20, color_system=None, highlight=False)
+    render_diff(
+        console,
+        "@@ -0,0 +1,2 @@\n+a\n+b\n",
+        lead=Text("  ⎿  "),
+        hang="     ",
+        lines=(0, 1),
+    )
+    assert [row.rstrip() for row in out.getvalue().splitlines()] == [
+        "  ⎿    ⋯ 1 lines ⋯",
+        "     2 b",
+    ]
 
 
 def test_lines_are_numbered_from_the_hunk_header() -> None:
     rows = _plain(
         "@@ -10,3 +20,3 @@\n keep\n-totally different old\n+brand new line here\n tail\n",
     )
-    assert rows[1:] == [
+    assert rows == [
         "  20 keep",
         "  11 totally different old",
         "  21 brand new line here",
@@ -91,30 +112,30 @@ def test_lines_are_numbered_from_the_hunk_header() -> None:
 
 
 def test_an_addition_does_not_advance_the_old_numbering() -> None:
-    assert _plain("@@ -5 +5 @@\n+new\n-old\n")[1:] == ["  5 new", "  5 old"]
+    assert _plain("@@ -5 +5 @@\n+new\n-old\n") == ["  5 new", "  5 old"]
 
 
 def test_a_second_hunk_restarts_the_numbering() -> None:
     rows = _plain("@@ -1 +1 @@\n-x\n@@ -50 +60 @@\n+y\n")
-    assert rows[1:] == ["   1 x", "  60 y"]
+    assert rows == ["   1 x", "  60 y"]
 
 
 def test_a_diff_without_a_hunk_header_numbers_from_zero() -> None:
-    assert _plain("+added\n same\n")[1:] == ["  0 added", "  1 same"]
+    assert _plain("+added\n same\n") == ["  0 added", "  1 same"]
 
 
 def test_the_indent_every_line_shares_is_dropped() -> None:
     diff = "@@ -1,2 +1,2 @@\n-        a = 1\n+        a = 2\n         b\n"
-    assert _plain(diff)[1:] == ["  1 a = 1", "  1 a = 2", "  2 b"]
+    assert _plain(diff) == ["  1 a = 1", "  1 a = 2", "  2 b"]
 
 
 def test_a_dropped_indent_keeps_each_line_s_relative_indent() -> None:
     diff = "@@ -1 +1,2 @@\n-    if x:\n+    if y:\n+        z\n"
-    assert _plain(diff)[1:] == ["  1 if x:", "  1 if y:", "  2     z"]
+    assert _plain(diff) == ["  1 if x:", "  1 if y:", "  2     z"]
 
 
 def test_a_blank_line_does_not_keep_the_indent() -> None:
-    assert _plain("@@ -0,0 +1,3 @@\n+    a\n+\n+    b\n")[1:] == [
+    assert _plain("@@ -0,0 +1,3 @@\n+    a\n+\n+    b\n") == [
         "  1 a",
         "  2",
         "  3 b",
@@ -123,13 +144,12 @@ def test_a_blank_line_does_not_keep_the_indent() -> None:
 
 def test_only_an_identical_prefix_is_dropped_never_tabs_for_spaces() -> None:
     rows = _plain("@@ -1 +1 @@\n-\ta\n+    a\n", width=60)
-    assert rows[1:] == ["  1 " + " " * 8 + "a", "  1     a"]
+    assert rows == ["  1 " + " " * 8 + "a", "  1     a"]
 
 
 def test_file_headers_are_neither_shown_nor_counted() -> None:
     rows = _plain("--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-old\n+new\n")
     assert rows == [
-        "  ⎿  Added 1 lines, removed 1 lines",
         "  1 old",
         "  1 new",
     ]
@@ -137,25 +157,22 @@ def test_file_headers_are_neither_shown_nor_counted() -> None:
 
 def test_a_line_starting_like_a_header_without_a_space_is_content() -> None:
     rows = _plain("@@ -1 +1 @@\n---x\n+++y\n")
-    assert rows[1:] == ["  1 --x", "  1 ++y"]
+    assert rows == ["  1 --x", "  1 ++y"]
 
 
 def test_an_empty_changed_line_renders() -> None:
-    assert _plain("@@ -1 +1 @@\n-\n+\n")[1:] == ["  1", "  1"]
-
-
-# ---- colors ----------------------------------------------------------------
+    assert _plain("@@ -1 +1 @@\n-\n+\n") == ["  1", "  1"]
 
 
 def test_a_short_number_s_padding_fills_like_the_rest_of_its_line() -> None:
-    rows = _ansi("@@ -99 +99 @@\n-a\n-b\n+c\n+d\n")[1:]
+    rows = _ansi("@@ -99 +99 @@\n-a\n-b\n+c\n+d\n")
     for row in rows:
         assert _visible(row).startswith("  ")
         assert len(_styled(row, _REMOVED) + _styled(row, _ADDED)) == 38
 
 
 def test_a_changed_line_fills_from_its_number_to_the_edge_not_the_indent() -> None:
-    removed, added = _ansi("@@ -1 +1 @@\n-abcdefgh\n+uvwxyzst\n")[1:]
+    removed, added = _ansi("@@ -1 +1 @@\n-abcdefgh\n+uvwxyzst\n")
     for row, background, text in (
         (removed, _REMOVED, "abcdefgh"),
         (added, _ADDED, "uvwxyzst"),
@@ -171,17 +188,17 @@ def test_a_changed_line_fills_from_its_number_to_the_edge_not_the_indent() -> No
 
 
 def test_a_changed_line_fills_to_80_in_a_wide_window() -> None:
-    rows = _ansi("@@ -1 +1 @@\n-a\n+b\n", width=200)[1:]
+    rows = _ansi("@@ -1 +1 @@\n-a\n+b\n", width=200)
     assert [len(_visible(r)) for r in rows] == [80, 80]
 
 
 def test_a_long_changed_line_widens_every_fill_to_fit_it() -> None:
-    rows = _ansi(f"@@ -1 +1 @@\n-a\n+{'b' * 100}\n", width=200)[1:]
+    rows = _ansi(f"@@ -1 +1 @@\n-a\n+{'b' * 100}\n", width=200)
     assert [len(_visible(r)) for r in rows] == [104, 104]
 
 
 def test_code_past_100_wraps_under_its_content_not_its_gutter() -> None:
-    rows = _ansi(f"@@ -1 +1 @@\n+{'b' * 150}\n", width=200)[1:]
+    rows = _ansi(f"@@ -1 +1 @@\n+{'b' * 150}\n", width=200)
     visible = [_visible(r) for r in rows]
     assert [len(v) for v in visible] == [104, 104]
     assert visible[0].endswith("b" * 100)
@@ -189,7 +206,7 @@ def test_code_past_100_wraps_under_its_content_not_its_gutter() -> None:
 
 
 def test_a_context_line_has_a_dim_gutter_and_no_background() -> None:
-    (row,) = _ansi("@@ -1 +1 @@\n context\n")[1:]
+    (row,) = _ansi("@@ -1 +1 @@\n context\n")
     segments = _segments(row)
     assert _visible(row).startswith("  1")
     assert segments[0] == ("2", "1 ")
@@ -197,7 +214,7 @@ def test_a_context_line_has_a_dim_gutter_and_no_background() -> None:
 
 
 def test_a_small_change_marks_only_its_changed_words() -> None:
-    removed, added = _ansi("@@ -1 +1 @@\n-value = 1 + 2 + 3\n+value = 1 + 2 + 4\n")[1:]
+    removed, added = _ansi("@@ -1 +1 @@\n-value = 1 + 2 + 3\n+value = 1 + 2 + 4\n")
     assert _styled(removed, _REMOVED_WORD) == "3"
     assert _styled(added, _ADDED_WORD) == "4"
     assert "value = 1 + 2 + " in _styled(removed, _REMOVED)
@@ -212,19 +229,19 @@ def test_a_small_change_marks_only_its_changed_words() -> None:
 def test_a_word_diff_keeps_each_side_s_own_text() -> None:
     diff = "@@ -1 +1 @@\n-result = compute(alpha.beta, 1, 2, 3, 4, 5, 6)\n+result = compute(gamma-delta, 1, 2, 3, 4, 5, 6)\n"
     rows = _plain(diff, width=60)
-    assert rows[1:] == [
+    assert rows == [
         "  1 result = compute(alpha.beta, 1, 2, 3, 4, 5, 6)",
         "  1 result = compute(gamma-delta, 1, 2, 3, 4, 5, 6)",
     ]
-    added = _ansi(diff, width=60)[2]
+    added = _ansi(diff, width=60)[1]
     assert _styled(added, _ADDED_WORD) == "gamma-delta"
 
 
 def test_a_deletion_or_insertion_inside_a_line_is_marked() -> None:
-    removed, added = _ansi("@@ -1 +1 @@\n-x = 1 + 2\n+x = 1\n")[1:]
+    removed, added = _ansi("@@ -1 +1 @@\n-x = 1 + 2\n+x = 1\n")
     assert _styled(removed, _REMOVED_WORD) == " + 2"
     assert _styled(added, _ADDED_WORD) == ""
-    removed, added = _ansi("@@ -1 +1 @@\n-x = 1\n+x = 1 + 2\n")[1:]
+    removed, added = _ansi("@@ -1 +1 @@\n-x = 1\n+x = 1 + 2\n")
     assert _styled(added, _ADDED_WORD) == " + 2"
 
 
@@ -235,7 +252,7 @@ def test_a_deletion_or_insertion_inside_a_line_is_marked() -> None:
 )
 def test_lines_that_differ_mostly_are_not_word_marked(old: str, new: str) -> None:
     """The share is of every changed word together, not of the largest one."""
-    rows = _ansi(f"@@ -1 +1 @@\n-{old}\n+{new}\n")[1:]
+    rows = _ansi(f"@@ -1 +1 @@\n-{old}\n+{new}\n")
     assert not any(_REMOVED_WORD in row or _ADDED_WORD in row for row in rows)
 
 
@@ -250,16 +267,16 @@ def test_the_style_picks_the_colors() -> None:
         "@@ -1 +1 @@\n-all of this goes\n+every bit replaced\n context\n",
         style=style,
     )
-    assert "48;2;4;5;6" in rows[1]
-    assert "48;2;1;2;3" in rows[2]
-    assert "38;2;10;11;12" in rows[2]
+    assert "48;2;4;5;6" in rows[0]
+    assert "48;2;1;2;3" in rows[1]
+    assert "38;2;10;11;12" in rows[1]
     rows = _ansi("@@ -1 +1 @@\n-x = 1 + 2\n+x = 1 + 3\n", style=style)
-    assert _styled(rows[2], "48;2;7;8;9") == "3"
+    assert _styled(rows[1], "48;2;7;8;9") == "3"
 
 
 def test_a_threshold_of_one_marks_words_in_any_change() -> None:
     rows = _ansi("@@ -1 +1 @@\n-alpha\n+omega\n", style=DiffStyle(word_threshold=1.0))
-    assert _styled(rows[1], _REMOVED_WORD) == "alpha"
+    assert _styled(rows[0], _REMOVED_WORD) == "alpha"
 
 
 @pytest.mark.parametrize("word", [False, True])
@@ -277,47 +294,41 @@ def test_a_narrow_console_wraps_without_padding() -> None:
     assert "".join(rows).replace(" ", "").endswith("1contextthatiswiderthantheconsole")
 
 
-# ---- pairing ---------------------------------------------------------------
-
-
 def test_a_run_of_removals_pairs_in_order_with_the_additions_after_it() -> None:
     diff = "@@ -1,3 +1,1 @@\n-alpha one\n-beta two\n-gamma three\n+alpha one!\n"
-    assert _plain(diff)[1:] == [
+    assert _plain(diff) == [
         "  1 alpha one",
         "  2 beta two",
         "  3 gamma three",
         "  1 alpha one!",
     ]
     rows = _ansi(diff)
-    assert _styled(rows[4], _ADDED_WORD) == "!"
+    assert _styled(rows[3], _ADDED_WORD) == "!"
     assert not any(_REMOVED_WORD in row for row in rows)
 
 
 def test_pairs_are_found_after_context_and_between_runs() -> None:
     rows = _ansi("@@ -1,4 +1,4 @@\n keep\n-a b c\n+a b d\n mid\n-x y 1\n+x y 2\n")
-    assert _styled(rows[3], _ADDED_WORD) == "d"
-    assert _styled(rows[6], _ADDED_WORD) == "2"
+    assert _styled(rows[2], _ADDED_WORD) == "d"
+    assert _styled(rows[5], _ADDED_WORD) == "2"
 
 
 def test_a_removal_at_the_end_pairs_with_nothing() -> None:
     rows = _ansi("@@ -1,2 +1,1 @@\n keep\n-gone\n")
-    assert _styled(rows[2], _REMOVED) != ""
-    assert _REMOVED_WORD not in rows[2]
+    assert _styled(rows[1], _REMOVED) != ""
+    assert _REMOVED_WORD not in rows[1]
 
 
 def test_an_unchanged_line_in_a_run_pairs_with_its_twin() -> None:
     rows = _ansi("@@ -1,2 +1,2 @@\n-same\n-tail b\n+same\n+tail c\n")
-    assert _styled(rows[2], _REMOVED_WORD) == "b"
-    assert _styled(rows[4], _ADDED_WORD) == "c"
+    assert _styled(rows[1], _REMOVED_WORD) == "b"
+    assert _styled(rows[3], _ADDED_WORD) == "c"
 
 
 def test_an_inserted_line_does_not_stop_the_pairing_after_it() -> None:
     rows = _ansi("@@ -1,2 +1,3 @@\n-same\n-tail b\n+new\n+same\n+tail c\n")
-    assert _styled(rows[5], _ADDED_WORD) == "c"
-    assert _styled(rows[2], _REMOVED_WORD) == "b"
-
-
-# ---- highlighting ----------------------------------------------------------
+    assert _styled(rows[4], _ADDED_WORD) == "c"
+    assert _styled(rows[1], _REMOVED_WORD) == "b"
 
 
 def test_the_file_name_picks_the_highlighting() -> None:
@@ -347,9 +358,6 @@ def test_highlight_source_is_plain_for_an_unknown_language_or_no_code() -> None:
     unknown = highlight_source("ls", "no-such-language")
     assert (unknown.plain, unknown.spans) == ("ls", [])
     assert highlight_source("", "bash").plain == ""
-
-
-# ---- splice_diff -----------------------------------------------------------
 
 
 def test_splice_diff_numbers_each_hunk_for_the_file_after_the_edit() -> None:
@@ -392,15 +400,14 @@ def test_a_cut_diff_keeps_its_head_and_tail_and_counts_every_line() -> None:
     diff = "@@ -0,0 +1,5 @@\n+a\n+b\n+c\n+d\n+e"
     out = io.StringIO()
     console = Console(file=out, width=40, color_system=None, highlight=False)
-    render_diff(console, diff, lines=(1, 2))
+    render_diff(console, diff, lead=Text("  "), hang="  ", lines=(1, 2))
     assert [row.rstrip() for row in out.getvalue().splitlines()] == [
-        "  ⎿  Added 5 lines, removed 0 lines",
         "  1 a",
         "    ⋯ 2 lines ⋯",
         "  4 d",
         "  5 e",
     ]
-    assert _plain(diff)[1:] == [f"  {i} {c}" for i, c in enumerate("abcde", 1)]
+    assert _plain(diff) == [f"  {i} {c}" for i, c in enumerate("abcde", 1)]
 
 
 if __name__ == "__main__":

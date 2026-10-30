@@ -112,9 +112,6 @@ def _texts(tape: Sequence[TapeRecord]) -> list[str]:
     return out
 
 
-# --- Resolver ------------------------------------------------------------
-
-
 def test_empty_tape_resolves_to_nothing() -> None:
     resolved = resolve_context([])
     assert (resolved.messages, resolved.origins, resolved.version) == ([], [], 0)
@@ -375,9 +372,6 @@ def test_a_duplicate_ref_is_refused() -> None:
     tape = [_event(0, _user("a")), _event(0, _user("b"))]
     with pytest.raises(InvalidContextError, match="duplicate tape ref"):
         _ = resolve_context(tape)
-
-
-# --- Validator -------------------------------------------------------------
 
 
 @pytest.mark.parametrize(

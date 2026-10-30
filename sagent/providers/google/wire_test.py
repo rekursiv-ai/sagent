@@ -63,9 +63,6 @@ if TYPE_CHECKING:
     from sagent.tools.types import ToolContext
 
 
-# ---- encode: contents ----------------------------------------------------------
-
-
 def test_a_user_message_is_one_user_content_and_nothing_else() -> None:
     assert _encode(UserMessage(content="hello")) == {
         "contents": [{"role": "user", "parts": [{"text": "hello"}]}],
@@ -333,9 +330,6 @@ def test_tools_are_declared_without_additional_properties() -> None:
     ]
 
 
-# ---- encode: thinking ----------------------------------------------------------
-
-
 def test_no_budget_sends_a_token_budget_row_no_thinking_config() -> None:
     assert _thinking("gemini-flash-2.5", budget="none", effort="high") is None
 
@@ -434,9 +428,6 @@ def test_an_effort_the_wire_cannot_say_is_refused(
         _thinking_of(capability, settings)
 
 
-# ---- estimate ------------------------------------------------------------------
-
-
 def test_the_estimate_is_text_over_characters_per_token_plus_image_tiles() -> None:
     capability = _capability()
     text = {"parts": [{"text": "x" * 400}]}
@@ -499,9 +490,6 @@ def test_inline_data_without_an_image_is_no_tile() -> None:
     odd = {"parts": [{"inlineData": {"mimeType": "image/png"}}]}
     base = wire.estimate({"parts": [dict[str, object]()]}, capability=capability)
     assert wire.estimate(odd, capability=capability) == base
-
-
-# ---- events --------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -576,9 +564,6 @@ async def test_a_stream_of_only_malformed_events_raises() -> None:
         await _events("data: {not-json}", "", "data: nope", "", "data: [1")
     # The last bad event is the cause, for whoever debugs the vendor.
     assert "delimiter" in str(raised.value.__cause__)
-
-
-# ---- StreamReader --------------------------------------------------------------
 
 
 def test_text_and_a_call_stop_as_a_tool_use() -> None:
@@ -823,9 +808,6 @@ def test_a_reply_is_priced_at_the_card_in_force_on_its_utc_day(
     assert reader.response().spend.request == 1.5
 
 
-# ---- to_exception --------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("status", "message", "kind"),
     [
@@ -1014,9 +996,6 @@ def test_an_unknown_error_names_its_status_and_kind() -> None:
         body={"error": {"status": "INVALID_ARGUMENT", "message": "m"}},
     )
     assert str(error) == "Gemini replied 400 INVALID_ARGUMENT: m"
-
-
-# ---- helpers -------------------------------------------------------------------
 
 
 # What Gemini 3.1 is sent at its defaults: its level, as it cannot stop thinking,

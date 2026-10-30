@@ -60,9 +60,6 @@ async def _lines(*lines: str) -> AsyncIterator[str]:
         yield line
 
 
-# ---- events ------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_events_are_each_data_line_until_done() -> None:
     lines = _lines(
@@ -84,9 +81,6 @@ async def test_events_are_each_data_line_until_done() -> None:
     assert [event async for event in wire.events(_lines('data: {"type": "c"}'))] == [
         {"type": "c"},
     ]
-
-
-# ---- the user side -----------------------------------------------------------
 
 
 def test_flatten_replaces_each_clear_with_its_summary_and_history() -> None:
@@ -177,9 +171,6 @@ def test_cache_key_is_one_uuid_per_conversation() -> None:
     assert (
         wire.cache_key(Request(system=("Be brief.",), records=opening.records)) != key
     )
-
-
-# ---- errors ------------------------------------------------------------------
 
 
 def _error(message: str, *, code: str = "", kind: str = "") -> dict[str, object]:
@@ -399,9 +390,6 @@ def test_an_overload_carries_the_advised_wait() -> None:
     error = wire.to_exception(503, body="busy", headers={"retry-after": "3"})
     assert isinstance(error, OverloadedError)
     assert error.retry_after_sec == 3.0
-
-
-# ---- rate limits -------------------------------------------------------------
 
 
 def test_rate_limits_are_an_api_keys_request_and_token_windows(now: float) -> None:

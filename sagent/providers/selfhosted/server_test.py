@@ -179,9 +179,6 @@ async def _reply(
     return [event async for event in model.stream(request)]
 
 
-# ---- naming and loading ------------------------------------------------------
-
-
 def test_a_role_names_the_providers_model_and_lookup_loads_nothing(
     configs: list[str],
     loads: list[server._Spec],
@@ -360,9 +357,6 @@ async def test_weights_load_once_per_name_and_are_shared(
     assert len(loads) == 3
 
 
-# ---- the reply ---------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_stream_yields_the_reply_whole_then_the_response(
     monkeypatch: pytest.MonkeyPatch,
@@ -528,9 +522,6 @@ async def test_a_cancelled_reply_stops_generating(
     assert time.monotonic() - started < 5.0
 
 
-# ---- the prompt --------------------------------------------------------------
-
-
 def test_the_conversation_renders_as_chat_template_messages() -> None:
     request = Request(
         system=("Be terse.", "", "Mind the tests."),
@@ -676,9 +667,6 @@ def test_the_prompt_ids_are_read_from_whatever_the_template_returns(
     ids = server._field(rendered, "input_ids")
     assert isinstance(ids, Tensor)
     assert torch.equal(ids.reshape(1, -1), torch.tensor([[1, 2]]))
-
-
-# ---- loading weights ---------------------------------------------------------
 
 
 @dataclass(slots=True, kw_only=True)

@@ -40,9 +40,6 @@ if TYPE_CHECKING:
     from sagent.tools.types import ToolContext
 
 
-# ---- a mount, without a server -------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_held_calls_are_reported_once_each_oldest_first() -> None:
     mount = McpMount("http://x/1")
@@ -223,9 +220,6 @@ def test_offered_tools_replace_those_offered_before() -> None:
     )
 
 
-# ---- the server ------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_cli_lists_a_mounts_tools_and_its_call_waits_for_the_caller() -> None:
     async with McpToolServer() as server:
@@ -353,9 +347,6 @@ def test_a_listener_is_bound_to_a_free_loopback_port() -> None:
         assert port > 0
         with socket.create_connection(("127.0.0.1", port), timeout=1.0):
             pass
-
-
-# ---- helpers ---------------------------------------------------------------------
 
 
 def _texts(reply: mcp_types.CallToolResult) -> list[str]:

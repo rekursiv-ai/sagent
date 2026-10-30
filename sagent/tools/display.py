@@ -96,7 +96,7 @@ class DisplaySpec:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolDisplay:
-    """How one tool's calls show: the ``⎿`` input row, then the output."""
+    """How one tool's calls show: the marked input row, then the output."""
 
     command: DisplaySpec = DisplaySpec(lines=None)
     """The input row, such as a Bash command or an Edit receipt."""
@@ -129,14 +129,17 @@ def override(display: ToolDisplay, setting: str) -> ToolDisplay:
         raise ValueError(f"Setting {setting!r} lacks '='.")
     if path == "command_language":
         return replace(display, command_language=value)
-    part, _, name = path.partition(".")
-    if part not in {"command", "output"} or name not in {
-        f.name for f in fields(DisplaySpec)
-    }:
+    settable = {
+        f"{part}.{f.name}": (part, f.name)
+        for part in ("command", "output")
+        for f in fields(DisplaySpec)
+    }
+    if path not in settable:
         raise ValueError(
             f"Unknown display setting {path!r}. Settable: command_language, and"
             " command or output with .lines, .width, or .overflow.",
         )
+    part, name = settable[path]
     spec = display.command if part == "command" else display.output
     if name == "lines":
         changed = replace(spec, lines=_lines(value))

@@ -179,9 +179,6 @@ def test_a_catalog_is_default_constructible_and_hashable() -> None:
     assert hash(PriceCatalog()) == hash(PriceCatalog())
 
 
-# ---- the sizes a catalog names ----------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("tops", "sizes"),
     [
@@ -245,9 +242,6 @@ def test_default_names_and_bills_as_auto() -> None:
     assert catalog["default", "smallcontext"] == catalog["auto", "smallcontext"]
     assert catalog["default", 1, date.min] == catalog["auto", 1, date.min]
     assert catalog.service_tiers == {"auto", "default"}
-
-
-# ---- what a prompt costs ----------------------------------------------------
 
 
 @pytest.mark.parametrize(

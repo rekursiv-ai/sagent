@@ -59,16 +59,10 @@ def _row(prices: PriceCatalog | None = None) -> ModelCapability:
     )
 
 
-# ---- default construction ---------------------------------------------------
-
-
 def test_every_class_is_default_constructible_and_hashable() -> None:
     capability = ModelCapability()
     assert capability.default == ModelSettings()
     assert hash(capability) == hash(ModelCapability())
-
-
-# ---- what a model offers ----------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -120,9 +114,6 @@ def test_check_names_what_is_not_offered_and_what_is(
 ) -> None:
     with pytest.raises(ValueError, match=match):
         _row().check(settings)
-
-
-# ---- moving choices onto another model --------------------------------------
 
 
 def test_fit_keeps_each_choice_offered_and_defaults_the_rest() -> None:
@@ -191,9 +182,6 @@ def test_fit_to_a_tier_sizes_the_context_at_that_tier() -> None:
 def test_fit_falls_back_to_the_default_tier_when_one_is_not_offered() -> None:
     row = _row()
     assert row.fit(row.default, was=row, service_tier="flex").service_tier == "auto"
-
-
-# ---- names ------------------------------------------------------------------
 
 
 def _offering() -> ModelCapability:

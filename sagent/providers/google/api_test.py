@@ -57,9 +57,6 @@ def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     return waits
 
 
-# ---- credentials -------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("google", "gemini", "key"),
@@ -84,9 +81,6 @@ async def test_no_key_is_an_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
         match=r"^Neither GOOGLE_API_KEY nor GEMINI_API_KEY is set\.$",
     ):
         await Google().credentials()
-
-
-# ---- stream ------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -294,9 +288,6 @@ async def test_a_dropped_stream_keeps_its_advised_wait() -> None:
     assert seen == [TextChunk(text="so far")]
 
 
-# ---- count -------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_count_asks_the_server() -> None:
     server = _Server(replies=[httpx2.Response(200, content=b'{"totalTokens": 42}')])
@@ -357,9 +348,6 @@ async def test_a_stream_names_a_model_without_a_vendor_id_by_its_own() -> None:
         )
         await _stream(bare.stream(_REQUEST))
     assert str(server.requests[0].url).startswith(f"{_BASE}/gemini-pro-3.1:")
-
-
-# ---- the provider ------------------------------------------------------------
 
 
 def test_the_provider_is_named_by_its_section_unless_named() -> None:
@@ -439,9 +427,6 @@ async def test_a_provider_closes_only_resources_it_made() -> None:
     client = resources.http
     await owned.aclose()
     assert client.is_closed
-
-
-# ---- helpers -----------------------------------------------------------------
 
 
 def _event(text: str, *, finish: str = "") -> dict[str, object]:

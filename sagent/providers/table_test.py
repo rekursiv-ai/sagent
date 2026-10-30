@@ -95,9 +95,6 @@ def _table() -> ModelTable:
     )
 
 
-# ---- lookup ------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("key", "model_id"),
     [
@@ -196,9 +193,6 @@ def test_an_unversioned_id_is_an_exact_name_only() -> None:
     assert "local" not in table
 
 
-# ---- the table's invariants --------------------------------------------------
-
-
 def test_best_and_everyday_fall_back_to_the_default() -> None:
     table = _table()
     assert table.roles["best"] == table.roles["everyday"] == "opus"
@@ -246,9 +240,6 @@ def test_rows_listed_oldest_first_are_rejected(ids: tuple[str, ...]) -> None:
 def test_families_may_interleave() -> None:
     table = ModelTable(rows=(_row("a-2.0"), _row("b-1.0"), _row("a-1.0")))
     assert table["a"].model_id == "a-2.0"
-
-
-# ---- resolve -----------------------------------------------------------------
 
 
 def test_resolve_returns_the_row_and_settings_for_its_size() -> None:
@@ -535,9 +526,6 @@ def test_an_unknown_model_names_the_known_models_and_roles() -> None:
         "Unknown model 'nope+1m'; known models: opus-5.5, opus-5.0, opus-4.8,"
         " sonnet-5.5, sonnet-5.0, sonnet-4.6, default, utility, best, everyday."
     )
-
-
-# ---- from_yaml ---------------------------------------------------------------
 
 
 def _write(
@@ -1166,9 +1154,6 @@ class _Plain(yaml.SafeDumper):
     def ignore_aliases(self, data: object) -> bool:
         del data
         return True
-
-
-# ---- models ------------------------------------------------------------------
 
 
 def test_models_reads_a_packages_own_catalog_once() -> None:

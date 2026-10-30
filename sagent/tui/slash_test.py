@@ -308,9 +308,6 @@ def _teamed(*labels: str) -> tuple[_Desk, dict[str, Agent]]:
     return desk, members
 
 
-# ---- lines -----------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("line", ["", "   ", "\n"])
 async def test_a_blank_line_does_nothing(line: str) -> None:
@@ -459,9 +456,6 @@ async def test_the_screen_shows_or_hides_reasoning_and_the_model_is_untouched() 
     assert desk.printer.said == [("note", "[/screen.thinking] hide (default)")]
 
 
-# ---- session ---------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_clear_runs_as_a_task_and_empties_the_context() -> None:
     journal = RecordingJournal()
@@ -561,9 +555,6 @@ async def test_aclose_cancels_running_commands_quietly() -> None:
     assert desk.printer.said == [("note", "[/clear] history cleared")]
 
 
-# ---- runtime ---------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_bare_halt_halts_this_agent() -> None:
     desk = _Desk()
@@ -649,9 +640,6 @@ async def test_tasks_with_nothing_running_says_so() -> None:
     assert desk.printer.said == [
         ("note", "[/tasks] 0 running tool call(s), 0 persistent agent(s)"),
     ]
-
-
-# ---- the team --------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1174,9 +1162,6 @@ async def test_a_failed_stop_prints_under_its_name(
     ]
 
 
-# ---- model -----------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_bare_model_names_what_each_name_resolved_to() -> None:
     desk = _Desk(provider="wide")
@@ -1292,9 +1277,6 @@ async def test_an_unknown_model_leaves_the_model_alone(line: str, error: str) ->
     assert desk.printer.said == [("error", error)]
 
 
-# ---- thinking and effort ---------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_thinking_sets_the_catalog_s_axes_and_the_model_shows_them() -> None:
     desk = _Desk(provider="deep")
@@ -1316,9 +1298,6 @@ async def test_thinking_sets_the_catalog_s_axes_and_the_model_shows_them() -> No
             ),
         ]
     )
-
-
-# ---- tools -----------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1355,9 +1334,6 @@ async def test_tool_says_what_it_cannot_change(line: str, error: str) -> None:
     await desk.commands(line)
     assert desk.agent.tools["Echo"] is before
     assert desk.printer.said == [("error", error)]
-
-
-# ---- login -----------------------------------------------------------------
 
 
 @pytest.mark.asyncio

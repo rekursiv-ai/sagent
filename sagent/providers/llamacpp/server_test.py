@@ -86,9 +86,6 @@ def _port(argv: list[str]) -> str:
     return argv[argv.index("--port") + 1]
 
 
-# ---- settings ----------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_key_is_the_one_given_else_its_variable_else_local(
     monkeypatch: pytest.MonkeyPatch,
@@ -283,9 +280,6 @@ async def test_docker_desktops_server_is_found_when_none_is_on_path(
     assert _argv(tmp_path)[:2] == ["-m", "/m.gguf"]
 
 
-# ---- what fails to start -----------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_no_model_named_is_an_error_before_anything_starts() -> None:
     with pytest.raises(RuntimeError, match="LLAMA_CPP_MODEL"):
@@ -355,9 +349,6 @@ async def test_a_server_that_died_is_started_again(bare: Path) -> None:
         assert again.returncode is None
 
 
-# ---- stopping ----------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_server_that_ignores_the_request_to_stop_is_killed(
     bare: Path,
@@ -422,9 +413,6 @@ async def test_a_server_already_gone_is_left_alone() -> None:
     assert gone.returncode == 0
 
 
-# ---- a server already running ------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_running_server_is_checked_once_and_never_started(
     monkeypatch: pytest.MonkeyPatch,
@@ -471,9 +459,6 @@ def test_a_port_is_read_only_from_an_ipv4_socket(
     with socket.socket() as ipv4:
         ipv4.bind(("127.0.0.1", 0))
         assert 0 < server._port(ipv4) < 65_536
-
-
-# ---- the log -----------------------------------------------------------------
 
 
 def test_the_log_keeps_its_first_lines_and_its_last() -> None:

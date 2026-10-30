@@ -180,9 +180,6 @@ def _kind(value: object) -> str:
     return "" if isinstance(value, str) else type(value).__name__
 
 
-# ---- the streamed reply ----------------------------------------------------
-
-
 def test_a_block_renders_once_the_next_one_starts() -> None:
     render, printer = _renderer()
     render(types.ModelResponsePartial(text="first para"))
@@ -265,9 +262,6 @@ def test_events_with_nothing_to_show_neither_print_nor_flush(
     render(types.ModelResponsePartial(text="held"))
     render(event)
     assert printer.said == []
-
-
-# ---- thinking, titles, children --------------------------------------------
 
 
 def test_thinking_shows_only_while_the_printer_shows_it() -> None:
@@ -542,9 +536,6 @@ def test_a_child_s_work_does_not_end_the_reply_being_streamed() -> None:
         ("error", "c: ValueError: x"),
         ("note", "[c done: 1m 5s, 12K tokens, $0.43]"),
     ]
-
-
-# ---- messages, calls, results ----------------------------------------------
 
 
 def test_messages_show_as_bars() -> None:
@@ -947,9 +938,6 @@ def test_a_rate_limit_that_ends_the_turn_says_when_it_resets(
 ) -> None:
     monkeypatch.setattr(time, "time", lambda: _NOON)
     assert error_text(error) == text
-
-
-# ---- show_call, show_result, error_text ------------------------------------
 
 
 def _label_id(value: object) -> str:

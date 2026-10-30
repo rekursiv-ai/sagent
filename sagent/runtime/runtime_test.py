@@ -121,9 +121,6 @@ from sagent.tools.read import Read
 from sagent.tools.types import Tool, ToolContext
 
 
-# --- Fakes and harness -------------------------------------------------------
-
-
 @dataclass(slots=True, kw_only=True)
 class Gated:
     """A tool whose calls finish when the test releases them."""
@@ -513,9 +510,6 @@ def _rescued(h: Harness) -> bool:
     )
 
 
-# --- One turn ------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_text_reply_ends_the_round() -> None:
     async with Harness(reply("hello back")) as h:
@@ -740,9 +734,6 @@ async def test_stream_events_are_published(event: RuntimeEvent) -> None:
         await until(lambda: event in h.events)
 
 
-# --- Logging ---------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("error", "level", "traced"),
     [
@@ -766,9 +757,6 @@ async def test_a_failed_model_call_is_logged_by_policy(
     ]
     assert record.levelno == level
     assert (record.exc_info is not None) is traced
-
-
-# --- Cohorts and the model gate ----------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -1067,9 +1055,6 @@ async def test_a_halted_cohort_the_user_resumes_never_completes() -> None:
         assert set(h.runtime.detached) == {"t1"}
     assert h.count(CohortStarted) == 1
     assert h.count(CohortComplete) == 0
-
-
-# --- Detach and kill ------------------------------------------------------------
 
 
 def _replies(n: int) -> list[Response]:
@@ -1501,9 +1486,6 @@ async def test_quit_cancels_running_and_detached_tools() -> None:
     assert not h.runtime.detached
 
 
-# --- Detached delivery -------------------------------------------------------
-
-
 async def _with_stub(
     h: Harness,
     call_id: str = "c1",
@@ -1777,9 +1759,6 @@ async def test_a_waking_commit_keeps_the_agent_from_idling_and_a_pairing_does_no
     assert rt._fully_drained()
 
 
-# --- Forged DetachedArrived calls ----------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_forged_arrival_call_is_answered_on_the_next_real_turn() -> None:
     async with Harness(
@@ -1909,12 +1888,6 @@ async def test_a_forged_rename_skips_ids_a_resumed_history_holds() -> None:
         if isinstance(e, Response)
         for c in calls(e.records)
     ] == [taken, f"{Markers().mimic}1"]
-
-
-# --- LazyEvent ---------------------------------------------------------------
-
-
-# --- Mid-stream input ------------------------------------------------------
 
 
 def _pushing(h: Harness, *events: RuntimeEvent, answer: Response) -> Reply:
@@ -2119,9 +2092,6 @@ async def test_input_buffered_mid_stream_is_answered_before_the_agent_idles(
     assert kinds.index(AgentIdle) > last_model_idle
 
 
-# --- Halt ----------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_halt_discards_the_reply_and_waits_for_the_user() -> None:
     h = Harness()
@@ -2259,9 +2229,6 @@ async def test_halt_cancels_a_blocked_stream_and_says_so_before_any_input(
     assert h.texts() == ["go", "resume", "after halt"]
 
 
-# --- Model errors ------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_model_error_waits_for_the_user_and_stays_out_of_context() -> None:
     async with Harness(RuntimeError("model exploded"), reply("recovered")) as h:
@@ -2345,9 +2312,6 @@ async def test_a_rate_limit_is_an_error_unless_persistent() -> None:
         assert h.runtime.inbox.gate_armed
     assert h.count(ModelCallSuspended) == 0
     assert h.runtime.service_suspended_until is None
-
-
-# --- Overflow and compaction at the gate ---------------------------------------
 
 
 @pytest.mark.asyncio
@@ -2449,9 +2413,6 @@ async def test_each_request_asks_for_no_more_reply_than_the_room_left() -> None:
     assert [r.max_response_tokens for r in h.requests()] == [9_000]
 
 
-# --- Context updates ---------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_context_updates_are_noted_before_each_round() -> None:
     asked: list[int] = []
@@ -2506,9 +2467,6 @@ async def test_context_updates_wait_while_compacting_first() -> None:
         h.push(_user("go"))
         await h.seen(ModelIdle)
     assert asked == [True]
-
-
-# --- Queued and deferred input -----------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -2630,9 +2588,6 @@ async def test_two_peers_queued_together_keep_both_names() -> None:
     assert h.said(0) == ["[from A]: from-a\n\n[from B]: from-b"]
 
 
-# --- Clear ---------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_clear_wipes_history_and_waits_for_the_user() -> None:
     async with Harness(reply("before clear"), reply("fresh start")) as h:
@@ -2718,9 +2673,6 @@ async def test_clear_forgets_delivered_calls() -> None:
         h.push(DetachedResult(result=_result("c1", "second")), _user("go"))
         await h.seen(ModelIdle, 2)
     assert [r.text() for r in _arrival(h, "c1")] == ["second"]
-
-
-# --- Compaction --------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -2982,9 +2934,6 @@ async def test_a_compaction_fallback_reaches_its_completion_event() -> None:
     )
 
 
-# --- Observers, events, run ---------------------------------------------------
-
-
 def test_a_raising_observer_does_not_stop_the_others() -> None:
     h = Harness()
 
@@ -3052,9 +3001,6 @@ async def test_run_returns_on_a_model_error() -> None:
     assert [_text(e) for e in history] == ["go"]
     assert h.count(ModelResponseError) == 1
     assert tuple(h.runtime.observers) == before
-
-
-# --- AgentIdle -----------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -3137,9 +3083,6 @@ async def test_an_observer_answering_idle_gets_one_idle_per_cycle() -> None:
     assert len(h.requests()) == 2
 
 
-# --- Dispatch predicates ---------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_dispatch_predicates_by_state() -> None:
     tool = Gated(hold=True)
@@ -3178,9 +3121,6 @@ async def test_dispatch_predicates_by_state() -> None:
         rt.push(_user("release"))
         tool.release.set()
         await h.seen(ModelIdle)
-
-
-# --- schedule and jobs -------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -3300,9 +3240,6 @@ async def test_jobs_list_running_calls_and_cancel_them() -> None:
         await h.seen(ModelIdle)
         assert h.runtime.jobs == {}
     assert [r.text() for r in h.results("t1")] == [Markers().cancelled]
-
-
-# --- Bash rewrites -----------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -3476,9 +3413,6 @@ async def test_a_bash_command_that_is_several_reads_is_refused(tmp_path: Path) -
     assert not isinstance(result, FileReadResult)
 
 
-# --- Gate repair -------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_gate_answers_an_orphan_call() -> None:
     h = Harness(reply("acknowledged"))
@@ -3586,9 +3520,6 @@ async def test_a_recovery_pushed_on_the_error_releases_the_gate(
         await h.seen(ClearComplete)
 
 
-# --- User-side messages ---------------------------------------------------------
-
-
 async def _commit(h: Harness, *messages: UserMessage | AgentToAgentMessage) -> None:
     """Push ``messages`` on a model that has nothing to say, and let them land."""
     async with h:
@@ -3617,9 +3548,6 @@ async def test_messages_stay_apart_in_history_and_merge_in_the_request() -> None
     assert h.published() == ["first"]
     assert h.published(AgentToAgentMessage) == ["second"]
     assert h.said(0) == ["first\n\n[from peer]: second"]
-
-
-# --- Tape operations ---------------------------------------------------------
 
 
 def test_a_runtime_defaults_to_the_unnamed_session_and_this_directory() -> None:
@@ -3886,9 +3814,6 @@ async def test_a_tape_the_loop_cannot_read_stops_it(
         await h.runtime.run_forever()
 
 
-# --- widen_barrier_mask --------------------------------------------------------
-
-
 def _tape(*refs: TapeRef) -> tuple[TapeRecord, ...]:
     return tuple(ReferrableTapeEvent(ref=r, event=_user(str(r.ordinal))) for r in refs)
 
@@ -3950,9 +3875,6 @@ def test_widening_a_covering_mask_returns_the_override() -> None:
     assert widen_barrier_mask(override, tape) is override
     empty = _summary_splice()
     assert widen_barrier_mask(empty, ()) is empty
-
-
-# --- GatedDeque --------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -4023,9 +3945,6 @@ def test_drain_nowait_takes_everything_queued() -> None:
     dq.push_back(2)
     assert dq.drain_nowait() == [1, 2]
     assert dq.empty()
-
-
-# --- Scheduling edge cases -----------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -4103,9 +4022,6 @@ async def test_cancelling_the_loop_during_scheduled_work_stops_it() -> None:
     assert loop_task.cancelled()
     waiting.cancel()
     await asyncio.gather(waiting, return_exceptions=True)
-
-
-# --- Remaining loop arms -------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -4424,9 +4340,6 @@ def test_widening_skips_runs_of_gap_positions() -> None:
     )
 
 
-# --- Background jobs -----------------------------------------------------------
-
-
 def _offered_schema(h: Harness, name: str, index: int = 0) -> Mapping[str, PlainTree]:
     (tool,) = [t for t in h.requests()[index].tools if t.name == name]
     return tool.schema
@@ -4662,9 +4575,6 @@ async def test_kill_all_reports_background_jobs_cancelled() -> None:
     assert [r.stub for r in _arrival(h, "b1")] == ["cancelled"]
 
 
-# --- BackgroundTask through the runtime ---------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_background_task_lists_the_background_jobs() -> None:
     tool = Gated(hold=True)
@@ -4820,9 +4730,6 @@ async def test_background_task_names_what_was_wrong(
 @pytest.mark.asyncio
 async def test_foreground_of_no_such_call_is_none() -> None:
     assert await Harness().runtime.foreground("nope") is None
-
-
-# --- Review findings -----------------------------------------------------------
 
 
 def _recording_timers(
@@ -5189,9 +5096,6 @@ async def test_run_returns_its_reply_after_compacting() -> None:
     h.runtime.compact_due = lambda: due.pop() if due else False
     history = await run_once(h.runtime, _user("four"))
     assert [_text(e) for e in history] == ["[summary]", "answered"]
-
-
-# --- Assertions the mutation run asked for ---------------------------------------
 
 
 @pytest.mark.asyncio
@@ -5603,8 +5507,6 @@ async def test_tool_results_are_published_as_they_land() -> None:
         await h.seen(ModelIdle)
     assert [e for e in h.events if isinstance(e, ToolResult)] == h.results("t1")
 
-
-# ---- properties ---------------------------------------------------------------
 
 # Each property ports one from the experimental runtime onto the runtime-level code
 # that now does the job; the tape-level repairs underneath have their own properties
