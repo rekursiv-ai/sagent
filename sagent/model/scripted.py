@@ -64,6 +64,8 @@ class ScriptedProvider(AsyncResource):
     section: ClassVar[str] = "scripted"
     """The catalog section this provider would serve."""
 
+    aliases: ClassVar[tuple[str, ...]] = ()
+
     def __init__(
         self,
         *,

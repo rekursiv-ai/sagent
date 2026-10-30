@@ -152,6 +152,9 @@ class _Signing(_Picky):
         self.signed_in += 1
         self.headless.append(headless)
 
+    def accounts(self) -> tuple[str, ...]:
+        return ()
+
 
 @dataclass(slots=True, kw_only=True)
 class _Script:

@@ -19,7 +19,7 @@ import stat
 import time
 import webbrowser
 
-from treekle import json_dumps, json_loads
+from treekle import from_plain, json_dumps, json_loads
 
 import httpx2
 import pytest
@@ -832,6 +832,30 @@ async def test_a_device_sign_in_runs_one_step_per_call() -> None:
     assert (
         _form(server.requests[-1])["redirect_uri"] == f"{_ISSUER}/deviceauth/callback"
     )
+    assert [str(r.url) for r in server.requests[1:]] == [
+        f"{_ISSUER}/api/accounts/deviceauth/token",
+        f"{_ISSUER}/api/accounts/deviceauth/token",
+        f"{_ISSUER}/oauth/token",
+    ]
+    assert {
+        timeout
+        for r in server.requests
+        for timeout in from_plain(r.extensions["timeout"], dict[str, float]).values()
+    } == {15.0}
+
+
+@pytest.mark.asyncio
+async def test_an_approval_that_is_no_object_is_refused() -> None:
+    server = _Server(
+        replies=[
+            _reply({"user_code": "W", "device_auth_id": "d"}),
+            httpx2.Response(200, content=b'["auth-code"]'),
+        ],
+    )
+    async with _http(server) as http:
+        code = await request_device_code(http, issuer=_ISSUER)
+        with pytest.raises(ValueError, match="dict"):
+            _ = await poll_device_code(http, code, issuer=_ISSUER)
 
 
 @pytest.mark.asyncio

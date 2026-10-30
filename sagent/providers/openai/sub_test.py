@@ -42,7 +42,9 @@ def _jwt(name: str, *, expires_in_sec: float = 3_600.0) -> str:
 
 
 @pytest.fixture
-def auth(tmp_path: Path) -> Path:
+def auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Return the default login, kept where ``$CODEX_HOME`` points: ``tmp_path``."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
     path = tmp_path / "auth.json"
     tokens = {
         "access_token": _jwt("first"),
@@ -88,7 +90,7 @@ def test_the_subscription_serves_its_sections_clamped_models() -> None:
 async def test_stream_reaches_the_codex_endpoint_as_codex_does(auth: Path) -> None:
     server = _Server(replies=[_ok()])
     async with _Served(server) as shared:
-        sub = OpenAISub(resources=shared, credentials=auth)
+        sub = OpenAISub(resources=shared)
         luna = sub["utility"]
         events = [event async for event in luna.stream(_REQUEST)]
         assert [window.label for window in sub.usage] == ["7d"]
@@ -120,10 +122,11 @@ async def test_stream_reaches_the_codex_endpoint_as_codex_does(auth: Path) -> No
 
 # As Codex 0.153.0 sent it, captured on 2026-10-27.
 @pytest.mark.asyncio
-async def test_a_request_names_its_kind_as_codex_does(auth: Path) -> None:
+@pytest.mark.usefixtures("auth")
+async def test_a_request_names_its_kind_as_codex_does() -> None:
     server = _Server(replies=[_ok(), _ok()])
     async with _Served(server) as shared:
-        luna = OpenAISub(resources=shared, credentials=auth)["utility"]
+        luna = OpenAISub(resources=shared)["utility"]
         [event async for event in luna.stream(_REQUEST)]
         [event async for event in luna.stream(replace(_REQUEST, purpose="compaction"))]
     kinds = [
@@ -135,9 +138,8 @@ async def test_a_request_names_its_kind_as_codex_does(auth: Path) -> None:
     assert kinds == ["turn", "compaction"]
 
 
-def test_the_turn_metadata_names_the_session_window_and_compaction(
-    auth: Path,
-) -> None:
+@pytest.mark.usefixtures("auth")
+def test_the_turn_metadata_names_the_session_window_and_compaction() -> None:
     asked = replace(
         _REQUEST,
         purpose="compaction",
@@ -150,7 +152,7 @@ def test_the_turn_metadata_names_the_session_window_and_compaction(
         step=1,
         turn_started_ms=1_793_135_007_400,
     )
-    sent = OpenAISub(credentials=auth).headers(asked)
+    sent = OpenAISub().headers(asked)
     assert sent["session-id"] == "s-1"
     assert sent["x-codex-window-id"] == "s-1:2"
     assert sent["x-client-request-id"] == asked.call_id
@@ -170,7 +172,8 @@ def test_the_turn_metadata_names_the_session_window_and_compaction(
 
 
 # As Codex 0.153.0 sent a spawned agent's calls, captured on 2026-10-27.
-def test_a_spawned_agents_calls_name_its_thread_and_its_parents(auth: Path) -> None:
+@pytest.mark.usefixtures("auth")
+def test_a_spawned_agents_calls_name_its_thread_and_its_parents() -> None:
     asked = replace(
         _REQUEST,
         session="s-1",
@@ -181,7 +184,7 @@ def test_a_spawned_agents_calls_name_its_thread_and_its_parents(auth: Path) -> N
         name="/root/helper",
         turn=1,
     )
-    sent = OpenAISub(credentials=auth).headers(asked)
+    sent = OpenAISub().headers(asked)
     assert sent["session-id"] == "s-1"
     assert sent["x-openai-subagent"] == "collab_spawn"
     assert sent["x-codex-parent-thread-id"] == "s-1"
@@ -206,15 +209,14 @@ def test_a_spawned_agents_calls_name_its_thread_and_its_parents(auth: Path) -> N
 # Codex replays the token a reply sets on every later request of that turn
 # (codex-rs core/src/client.rs, ``x-codex-turn-state``).
 @pytest.mark.asyncio
-async def test_a_turns_routing_token_is_sent_back_within_that_turn_only(
-    auth: Path,
-) -> None:
+@pytest.mark.usefixtures("auth")
+async def test_a_turns_routing_token_is_sent_back_within_that_turn_only() -> None:
     routed = _ok()
     routed.headers["x-codex-turn-state"] = "tok-1"
     server = _Server(replies=[routed, _ok(), _ok()])
     turn = replace(_REQUEST, session="s-1", agent="s-1", turn=1)
     async with _Served(server) as shared:
-        luna = OpenAISub(resources=shared, credentials=auth)["utility"]
+        luna = OpenAISub(resources=shared)["utility"]
         for asked in (turn, turn, replace(turn, turn=2)):
             [event async for event in luna.stream(asked)]
     sent = [r.headers.get("x-codex-turn-state") for r in server.requests]
@@ -222,12 +224,11 @@ async def test_a_turns_routing_token_is_sent_back_within_that_turn_only(
 
 
 @pytest.mark.asyncio
-async def test_no_temperature_is_sent_even_to_a_model_that_cannot_reason(
-    auth: Path,
-) -> None:
+@pytest.mark.usefixtures("auth")
+async def test_no_temperature_is_sent_even_to_a_model_that_cannot_reason() -> None:
     server = _Server(replies=[_ok()])
     async with _Served(server) as shared:
-        model = OpenAISub(resources=shared, credentials=auth)["gpt-4.1"]
+        model = OpenAISub(resources=shared)["gpt-4.1"]
         [event async for event in model.stream(_REQUEST)]
     assert "temperature" not in json_loads(
         server.requests[0].content,
@@ -236,7 +237,8 @@ async def test_no_temperature_is_sent_even_to_a_model_that_cannot_reason(
 
 
 @pytest.mark.asyncio
-async def test_a_401_renews_the_login_and_asks_again(auth: Path) -> None:
+@pytest.mark.usefixtures("auth")
+async def test_a_401_renews_the_login_and_asks_again() -> None:
     renewed = _jwt("renewed")
     server = _Server(
         replies=[
@@ -251,7 +253,7 @@ async def test_a_401_renews_the_login_and_asks_again(auth: Path) -> None:
         ],
     )
     async with _Served(server) as shared:
-        model = OpenAISub(resources=shared, credentials=auth)["utility"]
+        model = OpenAISub(resources=shared)["utility"]
         events = [event async for event in model.stream(_REQUEST)]
     assert isinstance(events[-1], Response)
     first, refresh, again = server.requests
@@ -261,8 +263,8 @@ async def test_a_401_renews_the_login_and_asks_again(auth: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("auth")
 async def test_count_estimates_with_the_models_tokenizer(
-    auth: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     asked: list[str] = []
@@ -277,15 +279,15 @@ async def test_count_estimates_with_the_models_tokenizer(
         SimpleNamespace(get_encoding=get_encoding),
     )
     async with SharedResources() as shared:
-        sub = OpenAISub(resources=shared, credentials=auth)
+        sub = OpenAISub(resources=shared)
         assert await sub["utility"].count(_REQUEST) == len("Be terse.\nhi")
     assert asked == ["o200k_base"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("headless", [True, False])
+@pytest.mark.usefixtures("auth")
 async def test_login_signs_in_through_the_codex_login(
-    auth: Path,
     monkeypatch: pytest.MonkeyPatch,
     headless: bool,
 ) -> None:
@@ -295,11 +297,29 @@ async def test_login_signs_in_through_the_codex_login(
         del self
         signed.append(headless)
 
-    sub = OpenAISub(credentials=auth)
+    sub = OpenAISub()
     monkeypatch.setattr(type(sub._login), "sign_in", sign_in)
     await sub.login(headless=headless)
     assert signed == [headless]
     await sub.aclose()
+
+
+@pytest.fixture
+def work_auth(auth: Path) -> Path:
+    """Return the login of the account ``work``, beside ``codex``'s, and none of its own."""
+    return auth.rename(auth.with_name("auth-work.json"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("work_auth")
+async def test_an_account_signs_in_with_codex_s_file_for_that_account() -> None:
+    server = _Server(replies=[_ok()])
+    async with _Served(server) as shared:
+        luna = OpenAISub(resources=shared, account="work")["utility"]
+        [event async for event in luna.stream(_REQUEST)]
+    (sent,) = server.requests
+    assert sent.headers["chatgpt-account-id"] == "acct-1"
+    assert OpenAISub.accounts() == ("work",)
 
 
 @pytest.mark.asyncio

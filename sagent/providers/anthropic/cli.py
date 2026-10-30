@@ -14,7 +14,7 @@ Typical usage example:
       async for event in opus.stream(request):   # The same events as the API.
           ...
 
-  work = AnthropicCLI(credentials=Path("~/.claude/.credentials-work.json"))
+  work = AnthropicCLI(account="work")           # ~/.claude/.credentials-work.json
 """
 
 from __future__ import annotations
@@ -36,6 +36,7 @@ from sagent.model.exceptions import ContextOverflowError, DisconnectedError
 from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
 from sagent.providers.anthropic.login import ClaudeLogin
+from sagent.providers.login import account_path, saved_accounts
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import HasModels
 from sagent.session.types import (
@@ -86,7 +87,8 @@ class AnthropicCLI(HasModels, AsyncResource):
       name: The name the catalog knows this provider by; the section by default.
       resources: What this shares with other providers; ``None`` makes and
         closes its own.
-      credentials: A login file; ``None`` uses the login ``claude`` keeps.
+      account: A named account, its login kept beside ``claude``'s; ``None``
+        uses the login ``claude`` keeps.
 
     """
 
@@ -99,13 +101,18 @@ class AnthropicCLI(HasModels, AsyncResource):
         *,
         name: str = "",
         resources: ProviderSharedResources | None = None,
-        credentials: Path | None = None,
+        account: str | None = None,
     ) -> None:
         self._name = name or self.section
         self._owns_resources = resources is None
         self._resources = SharedResources() if resources is None else resources
-        self._credentials = credentials
-        self._login = ClaudeLogin(credentials, resources=self._resources)
+        self._account = account
+        self._login = ClaudeLogin(
+            None
+            if account is None
+            else account_path(ClaudeLogin.default_path(), account),
+            resources=self._resources,
+        )
 
     @property
     def name(self) -> str:
@@ -142,6 +149,11 @@ class AnthropicCLI(HasModels, AsyncResource):
         """Sign in through the browser, or with a code pasted from it."""
         await self._login.sign_in(headless=headless)
 
+    @classmethod
+    def accounts(cls) -> tuple[str, ...]:
+        """Return each named account with a login saved beside ``claude``'s."""
+        return saved_accounts(ClaudeLogin.default_path())
+
     async def environment(self) -> dict[str, str]:
         """Return the environment a ``claude`` process starts in.
 
@@ -169,7 +181,7 @@ class AnthropicCLI(HasModels, AsyncResource):
             "MCP_TOOL_TIMEOUT": str(24 * 3600 * 1000),
         }
         # ``claude`` keeps one login of its own; a named one arrives as a token.
-        if self._credentials is not None:
+        if self._account is not None:
             env["CLAUDE_CODE_OAUTH_TOKEN"] = await self._login.token()
         return env
 

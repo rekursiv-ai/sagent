@@ -40,7 +40,7 @@ import webbrowser
 from treekle import ReadError, from_plain, json_dumps, json_loads
 
 from sagent.model.exceptions import AuthError
-from sagent.providers.lock import file_lock
+from sagent.providers.login import file_lock
 from sagent.providers.openai.lease import LeasedToken
 
 
