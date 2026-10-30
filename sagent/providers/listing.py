@@ -34,6 +34,11 @@ class _Sectioned(Protocol):
         """Return the catalog section it serves."""
         ...
 
+    @property
+    def aliases(self) -> tuple[str, ...]:
+        """Return the other names it answers to, as ``acli``."""
+        ...
+
     def __call__(
         self,
         *,
@@ -50,6 +55,11 @@ class _SigningIn(Protocol):
     @property
     def section(self) -> str:
         """Return the catalog section it serves."""
+        ...
+
+    @property
+    def aliases(self) -> tuple[str, ...]:
+        """Return the other names it answers to, as ``acli``."""
         ...
 
     def __call__(
@@ -73,6 +83,9 @@ class Listing:
     factory: ProviderFactory
     """How it is built, signed in with its default login if it signs in."""
 
+    aliases: tuple[str, ...]
+    """The other names its class says it answers to."""
+
     default_login: Callable[[], Path] | None = None
     """Where its default login is kept; ``None`` for one that signs in as no one."""
 
@@ -88,7 +101,11 @@ class Listing:
     @classmethod
     def of(cls, provider: _Sectioned) -> Listing:
         """Return the listing of ``provider``, which signs in as no one."""
-        return cls(section=provider.section, factory=provider)
+        return cls(
+            section=provider.section,
+            factory=provider,
+            aliases=provider.aliases,
+        )
 
     @classmethod
     def signing_in(
@@ -114,6 +131,7 @@ class Listing:
         return cls(
             section=provider.section,
             factory=provider,
+            aliases=provider.aliases,
             default_login=default,
             signed_in=lambda credentials: partial(provider, credentials=credentials),
             former_names=former_names,

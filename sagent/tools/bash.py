@@ -33,6 +33,8 @@ from sagent.tools.types import Arg, parse, schema_of
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from treekle import PlainTree
 
     from sagent.tools.types import ToolContext
@@ -80,7 +82,8 @@ class Bash:
     """A wrapper before ``/bin/bash``, such as ``sudo -u agent``; it must pass streams through."""
 
     env: Mapping[str, str] | None = field(default=None, repr=False)
-    """The environment, or ``None`` to inherit; kept out of ``repr`` for secrets."""
+    """The environment, or ``None`` to inherit; kept out of ``repr`` for secrets. A
+    ``COLUMNS`` here wins over the context's."""
 
     drain_sec: float = 1.0
     """How long to wait for a stopped command's output."""
@@ -199,7 +202,7 @@ class Bash:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=context.cwd if held is None else "/",
-                env=self.env,
+                env=_environment(self.env, columns=context.columns),
             )
             proc = child.process
             # Shielded, so a timeout cancels the wait, not the read of what was written.
@@ -350,6 +353,17 @@ def _spill(path: Path, stdout: Sequence[str]) -> None:
     """Write the whole of ``stdout`` to ``path``."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("".join(stdout), encoding="utf-8")
+
+
+def _environment(
+    env: Mapping[str, str] | None,
+    *,
+    columns: int | Callable[[], int],
+) -> dict[str, str]:
+    """Return ``env``, or this process's, with ``COLUMNS`` unless ``env`` sets it."""
+    shown = {"COLUMNS": str(columns() if callable(columns) else columns)}
+    # An inherited COLUMNS is the terminal's, not where the output is shown.
+    return {**os.environ, **shown} if env is None else {**shown, **env}
 
 
 def _existing(path: Path) -> Path:

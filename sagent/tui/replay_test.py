@@ -513,10 +513,10 @@ async def test_live_scrollback_equals_the_replay_of_its_journal() -> None:
         "∴ Thinking",
         "  Then fix line three.",
         "Reading a.py.",
-        "  Echo a\n  ⎿  a\n  Fix a.py\n",
+        "  Echo a\n  ⎿ a\n  Fix a.py\n",
         " x = 2",
-        "  Slow\n  ⎿  [detached; #1]",
-        "  Slow\n  ⎿  [undetached; #1]\n     finally done",
+        "  Slow\n  ⎿ [detached; #1]",
+        "  Slow\n  ⎿ [undetached; #1]\n    finally done",
         "The slow one finished.",
     ):
         assert shown in live

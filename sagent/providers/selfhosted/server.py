@@ -100,6 +100,9 @@ class SelfHosted(AsyncResource):
     section: ClassVar[str] = "selfhosted"
     """The catalog section whose models and settings this provider serves."""
 
+    aliases: ClassVar[tuple[str, ...]] = ()
+    """The other names it answers to."""
+
     def __init__(
         self,
         *,

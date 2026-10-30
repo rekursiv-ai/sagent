@@ -91,6 +91,7 @@ class AnthropicCLI(HasModels, AsyncResource):
     """
 
     section: ClassVar[str] = "anthropic-cli"
+    aliases: ClassVar[tuple[str, ...]] = ("acli",)
     package: ClassVar[ModuleType] = anthropic
 
     def __init__(

@@ -18,6 +18,7 @@ def test_a_provider_listed_plainly_signs_in_as_no_one() -> None:
         Anthropic,
         (),
     )
+    assert listed.aliases == ("anthropic-api", "aapi")
     assert listed.default_login is None
     assert listed.signed_in is None
     assert listed.preferred is False
@@ -42,6 +43,7 @@ def test_a_provider_that_signs_in_is_built_with_the_file_it_is_given() -> None:
         AnthropicCLI,
         ("Old",),
     )
+    assert listed.aliases == ("acli",)
     assert listed.default_login is default
     assert isinstance(built, partial)
     assert (built.func, built.keywords) == (

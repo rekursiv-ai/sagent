@@ -257,6 +257,14 @@ async def run(
         contextlib.redirect_stderr(proxy),
     ):
         printer = ConsolePrinter(Console(stderr=True), show_thinking=show_thinking)
+
+        def shown() -> int:
+            return printer.output_width
+
+        # Children resumed before the printer existed copied the default; later
+        # spawns inherit this from their parent.
+        for member in (agent, *(team.values() if team is not None else ())):
+            member.runtime.tool_context.columns = shown
         entry = Input()
         views = Views(
             agent,
@@ -560,8 +568,7 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
             sys.stderr.write("[resume] nothing to resume; starting fresh.\n")
             path = new_session_path(project_dir(cwd))
         if interactive:
-            resumed = path is not None and path.exists() and path.stat().st_size > 0
-            print_welcome(folder=cwd, resumed=resumed)
+            print_welcome(folder=cwd)
         journal = JsonlJournal(path) if path is not None else None
         _logging(flags.log_level, path=path, interactive=interactive)
         agent = _agent(

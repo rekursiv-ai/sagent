@@ -457,6 +457,9 @@ class HasModels:
     section: ClassVar[str]
     """The catalog section whose models and settings this provider serves."""
 
+    aliases: ClassVar[tuple[str, ...]]
+    """The other names it answers to; each class names its own, never inherits."""
+
     @classmethod
     def models(cls) -> ModelTable:
         """Return the models this provider serves, offering only what it sends."""

@@ -16,8 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import partial
-from types import MappingProxyType
-from typing import TYPE_CHECKING, ClassVar, Self, override
+from typing import TYPE_CHECKING, Self, override
 
 import re
 
@@ -162,10 +161,11 @@ class ModelCatalog(SharedResources):
     """Providers by name, each built on first use and closed with the catalog.
 
     A provider answers to its name in any case and with or without separators
-    (``OpenAISub``, ``openai_sub``), to an alias (``anthropic-api``), to a
-    former name (``OpenAISubscription``), and to an abbreviation: its letters
-    in order, from the first (``antcli``, ``oaisub``, ``aapi``). A name or an
-    alias abbreviated wins over a former name abbreviated, so ``oapi`` is
+    (``OpenAISub``, ``openai_sub``), to each alias its class declares
+    (``anthropic-api``, ``acli``), to a former name (``OpenAISubscription``),
+    and to an abbreviation: its letters in order, from the first (``antcli``,
+    ``anthsub``). A declared alias wins over any abbreviation; a name or an
+    alias abbreviated wins over a former name abbreviated, so ``opai`` is
     ``openai``, not ``OpenAISubscription``.
 
     Args:
@@ -181,15 +181,6 @@ class ModelCatalog(SharedResources):
         and ``account`` names one.
 
     """
-
-    aliases: ClassVar[Mapping[str, str]] = MappingProxyType(
-        {
-            "anthropic-api": "anthropic",
-            "google-api": "google",
-            "openai-api": "openai",
-        },
-    )
-    """Other names a provider goes by: each vendor's API is its bare name."""
 
     def __init__(
         self,
@@ -335,18 +326,17 @@ class ModelCatalog(SharedResources):
         if provider in self.factories:
             return provider
         wanted = _key(provider)
+        offered = {listing.section: listing for listing in listings()}
+        # A fixed catalog's own names (``anthropic-work``) are listed nowhere.
+        listed = {name: offered.get(name) for name in self.factories}
         current = {
-            name: {
-                _key(name),
-                *(_key(other) for other, to in self.aliases.items() if to == name),
-            }
-            for name in self.factories
+            name: {_key(name), *(_key(a) for a in (lst.aliases if lst else ()))}
+            for name, lst in listed.items()
         }
-        renamed = {
-            listing.section: {_key(old) for old in listing.former_names}
-            for listing in listings()
+        former = {
+            name: {_key(old) for old in (lst.former_names if lst else ())}
+            for name, lst in listed.items()
         }
-        former = {name: renamed.get(name, set[str]()) for name in self.factories}
         for spellings, exact in (
             (current, True),
             (former, True),

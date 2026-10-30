@@ -26,7 +26,6 @@ def _render(
     width: int = 80,
     height: int = 24,
     terminal: bool = True,
-    resumed: bool = False,
     folder: Path = Path("/research"),
 ) -> str:
     stream = io.StringIO()
@@ -42,7 +41,6 @@ def _render(
         model="test-model",
         provider="TestProvider",
         folder=folder,
-        resumed=resumed,
     )
     # Rich still emits bold/dim when no_color is set; export recorded text in
     # the dedicated NO_COLOR test below instead of assuming ANSI-free output.
@@ -67,14 +65,6 @@ def test_small_terminal_has_compact_heading(width: int, height: int) -> None:
     assert "SAGENT" in out
     assert "█" not in out
     assert "test-model" in out
-
-
-def test_resume_keeps_transcript_prominent() -> None:
-    out = _render(resumed=True)
-    assert "SAGENT" in out
-    assert "Resuming your session." in out
-    assert "█" not in out
-    assert "Good news, everyone! The discovering begins." in out
 
 
 def test_welcome_without_configuration_has_identity_and_help() -> None:
@@ -128,16 +118,10 @@ def test_print_welcome_passes_every_choice_on(monkeypatch: pytest.MonkeyPatch) -
         model="test-model",
         provider="TestProvider",
         folder=Path("/elsewhere"),
-        resumed=True,
     )
     told = console.export_text(styles=False)
-    assert ("/research" in bare, "model" in bare, "Resuming" in bare) == (
-        True,
-        False,
-        False,
-    )
+    assert ("/research" in bare, "model" in bare) == (True, False)
     assert ("/elsewhere" in told, "test-model · TestProvider" in told) == (True, True)
-    assert "Resuming your session." in told
 
 
 def test_redirected_output_retains_only_plain_model_line() -> None:

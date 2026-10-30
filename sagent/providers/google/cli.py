@@ -95,6 +95,7 @@ class GoogleCLI(HasModels, AsyncResource):
     """
 
     section: ClassVar[str] = "google-cli"
+    aliases: ClassVar[tuple[str, ...]] = ("gcli",)
     package: ClassVar[ModuleType] = google
 
     def __init__(

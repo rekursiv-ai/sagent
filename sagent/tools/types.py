@@ -40,7 +40,7 @@ Typical usage example:
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import MISSING, dataclass, field, fields, replace
 from pathlib import Path
 from types import NoneType, UnionType
@@ -408,6 +408,10 @@ class ToolContext:
 
     spill_dir: Path | None = None
     """Where a tool writes the whole of an output it cut; ``None`` for nowhere."""
+
+    columns: int | Callable[[], int] = 80
+    """The width a command's output is shown in, as ``COLUMNS``; a callable is read
+    as each command starts, so a frontend's window can change size between them."""
 
     @property
     def origin(self) -> Path:

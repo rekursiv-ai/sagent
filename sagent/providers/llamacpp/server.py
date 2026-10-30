@@ -82,6 +82,7 @@ class LlamaCpp(OpenAICompatible):
     """
 
     section: ClassVar[str] = "llamacpp"
+    aliases: ClassVar[tuple[str, ...]] = ("lcpp",)
     package: ClassVar[ModuleType] = llamacpp
     key_variable: ClassVar[str] = "LLAMA_CPP_API_KEY"
 

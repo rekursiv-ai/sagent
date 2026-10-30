@@ -24,6 +24,7 @@ from sagent.agent.agent import (
     NoShrinker,
     RuntimeSession,
     default_system_prompt,
+    spent,
 )
 from sagent.agent.agents_md import AgentsMdConfig, directives
 from sagent.agent.compactor import SummaryCompactor
@@ -1683,6 +1684,37 @@ async def test_messages_from_other_agents_start_the_round_count_over(
             await seen.idle()
 
     assert seen.count(types.Halt) == 0
+
+
+@pytest.mark.parametrize(
+    ("records", "usd"),
+    [
+        ((), 0.0),
+        ((TokenUsage(),), 0.0),
+        ((TokenUsage(info={"spend_usd": 0.5}), TokenUsage()), 0.5),
+        ((TokenUsage(info={"spend_usd": 0.5}), ContextClear()), 0.0),
+        (
+            (
+                ContextClear(extra={"spend_usd": 2.0}),
+                TokenUsage(info={"spend_usd": 0.5}),
+            ),
+            2.5,
+        ),
+    ],
+    ids=[
+        "nothing",
+        "unpriced",
+        "priced-then-unpriced",
+        "unstated-clear",
+        "clear-then-turn",
+    ],
+)
+def test_what_a_journal_says_was_spent(
+    records: tuple[SessionRecord, ...],
+    usd: float,
+) -> None:
+    got = spent(records)
+    assert got == usd
 
 
 @pytest.mark.asyncio

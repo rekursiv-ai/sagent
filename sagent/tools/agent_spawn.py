@@ -59,7 +59,7 @@ from sagent.tools.watch import Feed
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
+    from collections.abc import Callable, Collection, Mapping
 
     from treekle import PlainTree
 
@@ -341,22 +341,14 @@ class AgentSpawn:
         )
         stack = AsyncExitStack()
         opened = JsonlJournal(journal) if journal is not None else None
-        agent = Agent(
+        agent = _agent_from_parent(
+            target,
             model=model,
-            tools=list(target.tools.values()),
+            journal=opened,
             allowed=target.allowed,
             system_prompt=target.system_prompt,
-            journal=opened,
-            compactor=target.compactor_factory,
-            cwd=target.runtime.tool_context.cwd,
-            root=target.root,
-            agents_md=target.agents_md,
-            max_result_chars=target.runtime.tool_context.max_result_chars,
-            environment=target.environment,
             account=target.account,
-            persistent_retry=target.runtime.persistent_retry,
         )
-        agent.model_cache = dict(target.model_cache)
         self.team.join(agent, label=label, closing=stack)
         try:
             if opened is not None:
@@ -514,24 +506,16 @@ class AgentSpawn:
             for payer in payers
             if payer.max_spend_usd is not None
         ]
-        child = Agent(
+        child = _agent_from_parent(
+            parent,
             model=model,
-            tools=list(parent.tools.values()),
+            journal=opened,
             allowed=allowed,
             system_prompt=system if system is not None else parent.system_prompt,
-            journal=opened,
-            compactor=parent.compactor_factory,
-            cwd=parent.runtime.tool_context.cwd,
-            root=parent.root,
+            account=account,
             max_rounds=max_rounds,
             max_spend_usd=min(left, default=None),
-            agents_md=parent.agents_md,
-            max_result_chars=parent.runtime.tool_context.max_result_chars,
-            environment=parent.environment,
-            account=account,
-            persistent_retry=parent.runtime.persistent_retry,
         )
-        child.model_cache = dict(parent.model_cache)
         # One conversation to vendors: the child keeps its own id, from its
         # journal, and takes its root's.
         above, below = parent.runtime, child.runtime
@@ -686,6 +670,43 @@ def _allowed(parent: Agent, names: tuple[str, ...] | None) -> frozenset[str] | N
             f"Unknown tools {', '.join(unknown)}; yours: {', '.join(sorted(mine))}",
         )
     return frozenset(names) if set(names) != set(parent.tools) else None
+
+
+# The one list of what an agent derived from another inherits; a child and a
+# watcher differ only in what they are given.
+def _agent_from_parent(
+    parent: Agent,
+    *,
+    model: Model,
+    journal: JsonlJournal | None,
+    allowed: Collection[str] | None,
+    system_prompt: str | None,
+    account: str | None,
+    max_rounds: int | None = None,
+    max_spend_usd: float | None = None,
+) -> Agent:
+    """Return a new agent with ``parent``'s settings, but those it is given."""
+    context = parent.runtime.tool_context
+    agent = Agent(
+        model=model,
+        tools=list(parent.tools.values()),
+        allowed=allowed,
+        system_prompt=system_prompt,
+        journal=journal,
+        compactor=parent.compactor_factory,
+        cwd=context.cwd,
+        root=parent.root,
+        max_rounds=max_rounds,
+        max_spend_usd=max_spend_usd,
+        agents_md=parent.agents_md,
+        max_result_chars=context.max_result_chars,
+        environment=parent.environment,
+        account=account,
+        persistent_retry=parent.runtime.persistent_retry,
+        columns=context.columns,
+    )
+    agent.model_cache = dict(parent.model_cache)
+    return agent
 
 
 async def _answer(

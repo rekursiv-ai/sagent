@@ -53,6 +53,7 @@ if TYPE_CHECKING:
 
     import httpx2
 
+    from sagent.providers.listing import Listing
     from sagent.providers.types import Model, ProviderSharedResources, UsageWindow
 
 
@@ -432,6 +433,37 @@ def test_a_provider_answers_to_every_spelling_of_its_name(
     catalog = ModelCatalog()
     assert catalog.name(spelling) == name
     assert catalog[spelling] is catalog[name]
+
+
+@pytest.mark.parametrize("listing", listings(), ids=lambda listing: listing.section)
+def test_each_provider_declares_its_own_aliases(listing: Listing) -> None:
+    # Inherited, a subclass's aliases would be its parent's: ``oapi`` naming
+    # ``openai-sub``.
+    assert "aliases" in vars(listing.factory)
+
+
+@pytest.mark.parametrize(
+    ("alias", "section"),
+    [(alias, listing.section) for listing in listings() for alias in listing.aliases],
+)
+def test_a_provider_answers_to_each_alias_it_declares(
+    alias: str,
+    section: str,
+) -> None:
+    """Two providers declaring one alias would both match, and neither answer."""
+    assert ModelCatalog().name(alias) == section
+
+
+def test_a_declared_alias_wins_over_another_providers_abbreviation() -> None:
+    # ``acli`` abbreviates ``anthropicclinic`` too; only the declaration
+    # keeps a new provider from making it ambiguous.
+    catalog = ModelCatalog(
+        factories={
+            "anthropic-cli": AnthropicCLI,
+            "anthropic-clinic": AnthropicCLI,
+        },
+    )
+    assert catalog.name("acli") == "anthropic-cli"
 
 
 _VENDORS = {

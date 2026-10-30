@@ -49,6 +49,7 @@ from sagent.tools import agent_spawn
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.display import ToolDisplay
+from sagent.tools.skill import Skill
 from sagent.tools.types import ToolContext
 
 
@@ -627,6 +628,38 @@ async def test_a_persistent_child_inherits_from_its_parent_unless_told(
         assert not setup.team.can_spawn("told")
         assert setup.team.persistent() == ["Agent_0", "told"]
     assert list(setup.team) == ["Agent"]
+
+
+@pytest.mark.asyncio
+async def test_a_child_and_a_watcher_inherit_every_setting_alike(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("ready"),
+        compactor=SummaryCompactor,
+        other=[reply("ready")],
+    )
+    parent = setup.parent
+    width = lambda: 61  # noqa: E731 -- the same callable must reach each heir.
+    parent.runtime.tool_context.columns = width
+    parent.runtime.tool_context.max_result_chars = 4321
+    parent.runtime.persistent_retry = True
+    parent.environment = False
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "wait"})
+        assert await setup.spawn.watch("Agent") == "watcher"
+        for heir in (setup.team["Agent_0"], setup.team["watcher"]):
+            context = heir.runtime.tool_context
+            assert context.columns is width
+            assert context.max_result_chars == 4321
+            assert context.cwd == parent.runtime.tool_context.cwd
+            assert heir.root == parent.root
+            assert heir.runtime.persistent_retry is True
+            assert heir.environment is False
+            assert heir.agents_md is parent.agents_md
+            assert isinstance(heir.session.compactor, SummaryCompactor)
+            assert context.files is not parent.runtime.tool_context.files
 
 
 @pytest.mark.asyncio
@@ -1260,6 +1293,34 @@ async def test_a_child_knows_the_account_it_signed_in_as(
     async with setup.team:
         _ = await _spawn(setup, tmp_path, arguments)
         assert setup.team["Agent_0"].account == account
+
+
+@pytest.mark.asyncio
+async def test_a_started_watcher_is_told_the_watched_agent_s_own_watch_skill(
+    tmp_path: Path,
+) -> None:
+    skills = tmp_path / "skills"
+    (skills / "watch").mkdir(parents=True)
+    (skills / "watch" / "SKILL.md").write_text(
+        "---\nname: watch\ndescription: Watch.\n---\nThis root's own way to watch.\n",
+        encoding="utf-8",
+    )
+    team = Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider}))
+    spawn = AgentSpawn(team=team)
+    root = Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=[spawn, Skill(builtin_dir=skills)],
+        cwd=tmp_path,
+    )
+    _ = team.join(root)
+    async with team:
+        assert await spawn.start_watcher("Agent") == "watcher"
+        told = [
+            m.content or ""
+            for m in team["watcher"].runtime.inbox.drain_nowait()
+            if isinstance(m, AgentToAgentMessage)
+        ]
+        assert "This root's own way to watch." in told[0]
 
 
 @pytest.mark.asyncio

@@ -67,6 +67,7 @@ class Anthropic(HasModels, AsyncResource):
     """
 
     section: ClassVar[str] = "anthropic"
+    aliases: ClassVar[tuple[str, ...]] = ("anthropic-api", "aapi")
     package: ClassVar[ModuleType] = anthropic
 
     betas: ClassVar[tuple[str, ...]] = ()
