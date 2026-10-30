@@ -16,7 +16,8 @@ unchanged puts its message back; leaving it edited or cleared empties the
 pane for good, the edit riding the cursor.
 
 Keys: Enter sends or queues (``foo\`` Enter is a newline), Tab defers,
-Alt+Enter is a newline, Shift+Up/Down search history by prefix, Ctrl+X Ctrl+E
+Alt+Enter is a newline, as is Shift+Enter where the terminal tells it from Enter,
+Shift+Up/Down search history by prefix, Ctrl+X Ctrl+E
 opens ``$EDITOR``, Ctrl+C halts a busy agent and clears the line, Ctrl+Z
 suspends, Ctrl+_ undoes, Left on an empty line opens the team's tree.
 
@@ -37,7 +38,9 @@ import functools
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import is_done
 from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 
 from sagent.runtime import types
 from sagent.session.types import Attachment, UserMessage
@@ -418,6 +421,11 @@ def key_bindings(runtime: Runtime, panes: Panes, nav: Navigation) -> KeyBindings
 
     """
     keys = KeyBindings()
+    # Shift+Enter as kitty-style CSI u and xterm's modifyOtherKeys send it, read
+    # as Alt+Enter: prompt_toolkit has no Shift+Enter key, and takes xterm's for
+    # plain Enter. A terminal sending plain CR for it is left as it is.
+    for shift_enter in ("\x1b[13;2u", "\x1b[27;2;13~"):
+        ANSI_SEQUENCES[shift_enter] = (Keys.Escape, Keys.ControlM)
     # Not once the prompt is accepted: the buffer is no longer the user's.
     keys.add("enter", filter=~is_done)(functools.partial(_enter, runtime, panes, nav))
     keys.add("tab", filter=~is_done)(functools.partial(_tab, runtime, panes, nav))

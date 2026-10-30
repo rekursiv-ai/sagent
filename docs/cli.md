@@ -27,8 +27,6 @@ request and does not verify credentials with the remote service.
 The terminal background and body text follow your terminal settings.
 `NO_COLOR=1` disables color. The welcome prints at once, with no animation.
 Narrow, short, dumb, or non-Unicode terminals use a compact SAGENT heading.
-Resumed sessions also use the compact heading to leave room for the saved
-transcript.
 
 Welcome layout follows a terminal-cell grid:
 

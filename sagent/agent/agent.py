@@ -59,6 +59,7 @@ from sagent.types import AsyncResource
 if TYPE_CHECKING:
     from collections.abc import (
         AsyncIterator,
+        Callable,
         Collection,
         Iterable,
         Iterator,
@@ -172,6 +173,8 @@ class Agent(AsyncResource):
         host's details are not for.
       account: The named login ``model``'s provider signs in as; ``None`` for
         its default. Whoever switches the model keeps it current.
+      columns: The width a command's output is shown in, as ``COLUMNS``; a
+        frontend whose window resizes passes a callable, read per command.
 
     Raises:
       ValueError: ``allowed`` names a tool not in ``tools``.
@@ -197,6 +200,7 @@ class Agent(AsyncResource):
         max_result_chars: int | None = None,
         environment: bool = True,
         account: str | None = None,
+        columns: int | Callable[[], int] = 80,
     ) -> None:
         self.agents_md: AgentsMdConfig = (
             agents_md if agents_md is not None else AgentsMdConfig()
@@ -210,6 +214,7 @@ class Agent(AsyncResource):
                 cwd=start,
                 root=root if root is not None else start,
                 spill_dir=kept.parent if kept is not None else None,
+                columns=columns,
             ),
         )
         # Named by its journal, which a resume reopens, so vendors see one

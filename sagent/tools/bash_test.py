@@ -190,6 +190,38 @@ async def test_a_command_reports_what_it_printed_and_how_it_exited(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("columns", "env", "seen"),
+    [
+        (80, None, "80"),  # No frontend: the default.
+        (75, None, "75"),
+        (lambda: 61, None, "61"),  # Read when the command starts.
+        (75, {"COLUMNS": "120", "PATH": os.environ["PATH"]}, "120"),  # Bash.env wins.
+    ],
+)
+async def test_a_command_sees_the_columns_its_output_is_shown_in(
+    tmp_path: Path,
+    columns: int | Callable[[], int],
+    env: dict[str, str] | None,
+    seen: str,
+) -> None:
+    context = ToolContext(cwd=tmp_path, columns=columns)
+    result = await Bash(env=env).call(context, {"command": 'printf %s "$COLUMNS"'})
+    assert result.stdout == f"{seen}\n"
+
+
+@pytest.mark.asyncio
+async def test_columns_leave_the_rest_of_the_environment_inherited(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SAGENT_MARKER", "kept")
+    context = ToolContext(cwd=tmp_path, columns=75)
+    result = await Bash().call(context, {"command": 'printf %s "$SAGENT_MARKER"'})
+    assert result.stdout == "kept\n"
+
+
+@pytest.mark.asyncio
 async def test_a_silent_command_reports_nothing(tmp_path: Path) -> None:
     result = await _run(tmp_path, "true")
     assert (result.stdout, result.stderr, result.exit_code) == ("", "", 0)

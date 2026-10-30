@@ -24,7 +24,6 @@ def print_welcome(
     model: str = "",
     provider: str = "",
     folder: Path,
-    resumed: bool = False,
 ) -> None:
     """Print identity and help before credentials or prompt-toolkit are needed.
 
@@ -32,7 +31,6 @@ def print_welcome(
       model: The model line; empty before one is configured.
       provider: The provider serving it.
       folder: The project directory.
-      resumed: Whether a saved session is resuming.
 
     """
     render_welcome(
@@ -40,7 +38,6 @@ def print_welcome(
         model=model,
         provider=provider,
         folder=folder,
-        resumed=resumed,
     )
 
 
@@ -52,7 +49,6 @@ def render_welcome(
     model: str = "",
     provider: str = "",
     folder: Path,
-    resumed: bool = False,
     blue: str = "#4a90c4",
     green: str = "#93c47d",
     red: str = "#e06666",
@@ -70,7 +66,6 @@ def render_welcome(
       model: The model line; empty before one is configured.
       provider: The provider serving it.
       folder: The project directory.
-      resumed: Whether a saved session is resuming.
       blue: The wordmark's color, and the first bar's.
       green: The second bar's color.
       red: The third bar's color.
@@ -85,8 +80,7 @@ def render_welcome(
     frame_width = fill(0, total_padding=0, width=console.width)
     banner = _banner_rows(blue=blue, green=green, red=red)
     large = (
-        not resumed
-        and not console.is_dumb_terminal
+        not console.is_dumb_terminal
         and unicode_ok
         and frame_width >= banner[0].cell_len + 2 * (padding + 1)
         and console.height >= 22
@@ -109,8 +103,6 @@ def render_welcome(
         print_rows(banner)
     else:
         print_rows([Text("SAGENT", style=f"bold {blue}")])
-    if resumed:
-        print_rows([Text("Resuming your session.")])
     print_rows([Text()])
     # Keep metadata inside the terminal frame.
     # Never crop a model ID; long IDs/providers fold normally. Folder paths
@@ -204,7 +196,7 @@ def _print_framed(
     """Print ``rows`` inside a quiet border, wrapped to terminal cell widths."""
     if not framed:
         for row in rows:
-            console.print(Text("  ") + row)
+            console.print(Text(" " * padding) + row)
         return
     side = "│" if unicode_ok else "|"
     content_width = width - 2 * (padding + 1)

@@ -906,6 +906,20 @@ async def test_left_on_a_typed_line_moves_the_cursor_and_opens_nothing() -> None
     assert await _line(f"/ac{_LEFT}b\r", bound=keys) == ("/abc", [])
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "shift_enter",
+    ["\x1b[13;2u", "\x1b[27;2;13~", "\x1b\r"],
+    ids=["csi-u", "xterm-modify-other-keys", "alt-enter"],
+)
+async def test_shift_enter_as_a_terminal_sends_it_is_a_newline(
+    shift_enter: str,
+) -> None:
+    keys = key_bindings(_runtime(), Panes(), Navigation())
+    # A command, so Enter returns the line rather than sending it.
+    assert await _line(f"/a{shift_enter}b\r", bound=keys) == ("/a\nb", [])
+
+
 def test_an_unchanged_frame_never_repaints_and_a_changed_one_does() -> None:
     frames = iter(["idle", "idle", "idle", "busy", "busy"])
     repaints: list[None] = []

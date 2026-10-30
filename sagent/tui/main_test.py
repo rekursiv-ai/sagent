@@ -1075,10 +1075,10 @@ def test_an_interactive_run_opens_the_prompt_and_names_the_model(
     )
     _stdin(monkeypatch, tty=True)
     _quick_prints(monkeypatch)
-    welcomed: list[tuple[Path, bool]] = []
+    welcomed: list[Path] = []
 
-    def welcome(*, folder: Path, resumed: bool) -> None:
-        welcomed.append((folder, resumed))
+    def welcome(*, folder: Path) -> None:
+        welcomed.append(folder)
 
     monkeypatch.setattr(main, "print_welcome", welcome)
     with (
@@ -1087,7 +1087,7 @@ def test_an_interactive_run_opens_the_prompt_and_names_the_model(
     ):
         pipe.send_text("/quit\r")
         assert main.main() == 0
-    assert welcomed == [(tmp_path, False)]
+    assert welcomed == [tmp_path]
     err = capsys.readouterr().err
     assert err.startswith(
         "[/model] scripted/scripted+fullcontext+nothink\n",  # codespell:ignore nothink
@@ -2041,7 +2041,7 @@ async def test_run_reports_a_failing_command_and_goes_on(
                 ),
                 timeout=5,
             )
-    assert "✗  RuntimeError: kaboom" in screen.getvalue()
+    assert "✗ RuntimeError: kaboom" in screen.getvalue()
 
 
 @pytest.mark.asyncio
@@ -2290,10 +2290,10 @@ def test_an_interactive_resume_picks_and_logs_at_the_level_asked(
     )
     _stdin(monkeypatch, "1\n", tty=True)
     _quick_prints(monkeypatch)
-    welcomed: list[tuple[Path, bool]] = []
+    welcomed: list[Path] = []
 
-    def welcome(*, folder: Path, resumed: bool) -> None:
-        welcomed.append((folder, resumed))
+    def welcome(*, folder: Path) -> None:
+        welcomed.append(folder)
 
     monkeypatch.setattr(main, "print_welcome", welcome)
     with (
@@ -2302,7 +2302,7 @@ def test_an_interactive_resume_picks_and_logs_at_the_level_asked(
     ):
         pipe.send_text("/model deep/deep\r/quit\r")
         assert main.main() == 0
-    assert welcomed == [(tmp_path, True)]
+    assert welcomed == [tmp_path]
     assert f"[resume] {earlier}\n" in capsys.readouterr().err
     assert logging.getLogger("sagent").level == logging.INFO
     shown = screen.getvalue()
@@ -2645,6 +2645,41 @@ async def test_run_says_every_way_to_resume(
         "sagent --continue-all   # the latest anywhere",
         "sagent --resume-all     # pick one anywhere",
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_gives_every_agent_s_commands_the_width_output_shows_in(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COLUMNS", "100")
+    catalog = _Script().catalog()
+    async with (
+        Team(catalog=catalog) as team,
+        Agent(model=ScriptedProvider()["scripted"]) as agent,
+    ):
+        team.join(agent)
+        resumed = Agent(model=ScriptedProvider()["scripted"])
+        team.join(resumed, label="kid", parent="Agent")
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("\x04")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=catalog,
+                    team=team,
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+        for member in (agent, resumed):
+            columns = member.runtime.tool_context.columns
+            assert callable(columns)
+            assert columns() == 96
 
 
 @pytest.mark.asyncio

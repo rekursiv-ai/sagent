@@ -112,8 +112,9 @@ class ConsolePrinter:
     """
 
     indent = "  "
-    hang = "     "
-    """What starts every row under a call's header but the first."""
+    hang = indent + "  "
+    """What starts every row under a call's header but the first: the header's
+    indent, a cell for the mark, and a space."""
 
     def __init__(
         self,
@@ -133,6 +134,11 @@ class ConsolePrinter:
         self.gap_owed = False
         self.mark_owed = False
         """Whether a call's header printed last, so the next row takes ``mark``."""
+
+    @property
+    def output_width(self) -> int:
+        """Return the cells a row under a call's header has after ``hang``."""
+        return self.console.width - len(self.hang)
 
     def line(self, text: str) -> None:
         """Write ``text`` as it is, with no markup read in it."""
@@ -196,7 +202,7 @@ class ConsolePrinter:
         if opens:
             self.console.print(Text("∴ Thinking", style=self.style.heading))
         for row in _shown(text).splitlines():
-            self.console.print(Text(f"  {row}", style=self.style.quiet))
+            self.console.print(Text(f"{self.indent}{row}", style=self.style.quiet))
 
     def call(self, label: str, *, display: ToolDisplay) -> None:
         """Write the header, wrapped, then its input rows, the first after ``mark``.
@@ -219,7 +225,7 @@ class ConsolePrinter:
         for row in self._wrap(header, width, hang):
             self.console.print(Text(f"{self.indent}{row}", style=self.style.quiet))
         self.mark_owed = True
-        rows = display.command.render(rest, width=self.console.width - len(self.hang))
+        rows = display.command.render(rest, width=self.output_width)
         for row in rows if rest else []:
             # An unknown or empty language highlights as plain text.
             body = highlight_source(row, display.command_language)
@@ -237,7 +243,7 @@ class ConsolePrinter:
         self._gap()
         for row in display.output.render(
             _shown(text),
-            width=self.console.width - len(self.hang),
+            width=self.output_width,
         ):
             self.console.print(Text(f"{self._lead()}{row}", style=self.style.quiet))
 
@@ -316,10 +322,11 @@ class ConsolePrinter:
         else:
             first, *_ = chop_cells(rows[0], width - cell_len(lead)) or [""]
             chunks = [lead + first]
+            rest = width - len(self.indent)
             if tail := rows[0][len(first) :]:
-                chunks += ["  " + c for c in chop_cells(tail, width - 2)]
+                chunks += [self.indent + c for c in chop_cells(tail, rest)]
             for raw in rows[1:]:
-                chunks += ["  " + c for c in chop_cells(raw, width - 2) or [""]]
+                chunks += [self.indent + c for c in chop_cells(raw, rest) or [""]]
             for chunk in chunks:
                 row = Text(chunk)
                 row.append(" " * max(0, width - row.cell_len))
@@ -330,7 +337,7 @@ class ConsolePrinter:
         """Return what starts the next row under a header, and spend the owed mark."""
         shown = glyph or (self.mark if self.mark_owed else "")
         self.mark_owed = False
-        return f"  {shown}  " if shown else self.hang
+        return f"{self.indent}{shown} " if shown else self.hang
 
     def _gap(self) -> None:
         """Print the blank line owed after a user bar or before a reply block."""

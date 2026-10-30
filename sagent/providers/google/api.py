@@ -60,6 +60,7 @@ class Google(HasModels, AsyncResource):
     """
 
     section: ClassVar[str] = "google"
+    aliases: ClassVar[tuple[str, ...]] = ("google-api", "gapi")
     package: ClassVar[ModuleType] = google
 
     def __init__(

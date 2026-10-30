@@ -56,6 +56,7 @@ class OpenAISub(OpenAI):
     """
 
     section: ClassVar[str] = "openai-sub"
+    aliases: ClassVar[tuple[str, ...]] = ("osub", "oaisub")
     url: ClassVar[str] = "https://chatgpt.com/backend-api/codex"
     key_variable: ClassVar[str] = ""
     # The endpoint answers 400 "Unsupported parameter: temperature" for any model.
