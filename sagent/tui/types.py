@@ -40,6 +40,8 @@ if TYPE_CHECKING:
         CompactFailed,
         CompactStarted,
         DetachedResult,
+        LoginsSpent,
+        LoginSwitched,
         ModelCallSuspended,
         ModelResponseCancelled,
         ModelResponseComplete,
@@ -110,6 +112,8 @@ type Live = (
     | ModelResponseCancelled
     | ModelResponseError
     | ModelCallSuspended
+    | LoginSwitched
+    | LoginsSpent
     | CompactStarted
     | CompactComplete
     | CompactFailed

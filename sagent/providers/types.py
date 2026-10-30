@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
+    from sagent.providers.login import Logins
     from sagent.session.types import AnyToolResult, Attachment, ToolCall
     from sagent.tools.types import Tool
 
@@ -247,6 +248,7 @@ class HasLogin(Protocol):
         """Sign in, interactively; ``headless`` skips the browser and takes a pasted code."""
         ...
 
-    def accounts(self) -> tuple[str, ...]:
-        """Return each named account with a login saved, sorted."""
+    @property
+    def logins(self) -> Logins:
+        """Return every account kept beside this provider's default login."""
         ...

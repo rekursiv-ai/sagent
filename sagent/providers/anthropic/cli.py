@@ -36,7 +36,7 @@ from sagent.model.exceptions import ContextOverflowError, DisconnectedError
 from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
 from sagent.providers.anthropic.login import ClaudeLogin
-from sagent.providers.login import account_path, saved_accounts
+from sagent.providers.login import Logins
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import HasModels
 from sagent.session.types import (
@@ -107,12 +107,8 @@ class AnthropicCLI(HasModels, AsyncResource):
         self._owns_resources = resources is None
         self._resources = SharedResources() if resources is None else resources
         self._account = account
-        self._login = ClaudeLogin(
-            None
-            if account is None
-            else account_path(ClaudeLogin.default_path(), account),
-            resources=self._resources,
-        )
+        self._logins = Logins(ClaudeLogin.default_path())
+        self._login = ClaudeLogin(self._logins.path(account), resources=self._resources)
 
     @property
     def name(self) -> str:
@@ -145,14 +141,15 @@ class AnthropicCLI(HasModels, AsyncResource):
         if self._owns_resources:
             await self._resources.aclose()
 
+    @property
+    def logins(self) -> Logins:
+        """Return every account kept beside ``claude``'s login."""
+        return self._logins
+
     async def login(self, *, headless: bool = False) -> None:
         """Sign in through the browser, or with a code pasted from it."""
         await self._login.sign_in(headless=headless)
-
-    @classmethod
-    def accounts(cls) -> tuple[str, ...]:
-        """Return each named account with a login saved beside ``claude``'s."""
-        return saved_accounts(ClaudeLogin.default_path())
+        await self._logins.added(self._account)
 
     async def environment(self) -> dict[str, str]:
         """Return the environment a ``claude`` process starts in.

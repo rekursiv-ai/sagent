@@ -1004,6 +1004,75 @@ def test_a_suspension_shows_why_when_it_resumes_and_what_to_do(
     assert printer.said == [("error", reason), ("halt", _WAITING)]
 
 
+@pytest.mark.parametrize(
+    ("switched", "note"),
+    [
+        (
+            types.LoginSwitched(
+                provider="acli",
+                was="default",
+                now="personal",
+                window="5-hour",
+                until=_NOON + 3_600.0,
+            ),
+            "[default spent (5-hour, resets Wed Oct 28 13:00:00 (1h 0m 0s)); now on personal]",
+        ),
+        (
+            types.LoginSwitched(provider="acli", was="work", now="default"),
+            "[default reset; back on default]",
+        ),
+        (
+            types.LoginSwitched(
+                provider="acli",
+                was="work",
+                now="default",
+                window="signed out",
+            ),
+            "[work signed out; now on default]",
+        ),
+    ],
+    ids=["spent", "reset", "signed-out"],
+)
+def test_a_login_switch_says_why_and_what_signs_in_now(
+    monkeypatch: pytest.MonkeyPatch,
+    switched: types.LoginSwitched,
+    note: str,
+) -> None:
+    monkeypatch.setattr(time, "time", lambda: _NOON)
+    render, printer = _renderer()
+    render(switched)
+    assert printer.said == [("note", note)]
+
+
+def test_every_login_spent_says_when_each_resets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(time, "time", lambda: _NOON)
+    render, printer = _renderer()
+    render(
+        types.LoginsSpent(
+            provider="acli",
+            resets=(("work", _NOON + 60.0), ("default", _NOON + 3_600.0)),
+        ),
+    )
+    assert printer.said == [
+        (
+            "note",
+            (
+                "[every acli login spent: work Wed Oct 28 12:01:00 (1m 0s),"
+                " default Wed Oct 28 13:00:00 (1h 0m 0s)]"
+            ),
+        ),
+    ]
+
+
+def test_a_child_s_login_switch_is_noted_under_its_label() -> None:
+    render, printer = _renderer()
+    switched = types.LoginSwitched(provider="acli", was="work", now="default")
+    render(types.ChildEvent(label="Agent_0", inner=switched))
+    assert printer.said == [("note", "Agent_0: [default reset; back on default]")]
+
+
 def test_a_suspension_failing_again_says_why_without_the_banner(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

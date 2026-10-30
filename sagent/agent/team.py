@@ -43,10 +43,15 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, override
 
 import logging
+import time
 
 from treekle import from_plain
 
 from sagent.agent.agent import Agent
+from sagent.model.exceptions import AuthError, RateLimitedError
+from sagent.providers.catalog import successor
+from sagent.providers.login import Spent
+from sagent.providers.types import HasLogin
 from sagent.runtime import types
 from sagent.runtime.exceptions import describe, local_time
 from sagent.session.types import (
@@ -64,6 +69,7 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
+    from sagent.providers.login import Logins
     from sagent.providers.types import ModelCatalog
 
 
@@ -210,6 +216,9 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             dun=dun,
         )
         agent.runtime.observers.append(dun)
+        precedence = _Precedence(agent, catalog=self.catalog)
+        agent.runtime.before_call = precedence.before_call
+        agent.runtime.after_failure = precedence.after_failure
         agent.runtime.tool_context.label = label
         self.restore(label)
         if spec is not None and parent is not None:
@@ -764,3 +773,177 @@ class _Member:
 
     dun: _Dun
     """What holds it to the replies it owes."""
+
+
+class _Precedence:
+    """Moves ``agent``'s model to the first login of its provider with quota left.
+
+    A provider that signs in keeps its accounts in a ``Logins``: their order,
+    and which have spent a quota window. An account the user chose for the
+    agent comes first; the rest follow in that order. When a call spends a
+    window, the next account with quota left takes the call at once, the same
+    provider and model; a short throttle is waited as ever. At a turn's first
+    call the first account with quota left takes over again, so a login whose
+    window reset is used once more, and the prompt cache is given up only
+    between turns. The agent's ``account`` stays the one chosen, so a resumed
+    session starts there.
+
+    Args:
+      agent: The agent whose model it moves.
+      catalog: Where each login's provider is built.
+      quota_wait_sec: A wait longer than this, its window unnamed, is a spent
+        quota, not a throttle.
+      untold_reset_sec: How long a window that named no reset stays spent.
+
+    """
+
+    def __init__(
+        self,
+        agent: Agent,
+        *,
+        catalog: ModelCatalog,
+        quota_wait_sec: float = 300.0,
+        untold_reset_sec: float = 3_600.0,
+    ) -> None:
+        self._agent = agent
+        self._catalog = catalog
+        self._quota_wait_sec = quota_wait_sec
+        self._untold_reset_sec = untold_reset_sec
+        # The login the model signs in as, and what it was taken from: a switch
+        # the user made since, of provider or account, starts it over.
+        self._serving = agent.account or "default"
+        self._chosen = (agent.account, agent.model.provider.name)
+        # Logins that failed to sign in this session, after a move onto them.
+        self._signed_out: set[str] = set()
+
+    async def before_call(self, turn_start: bool) -> None:
+        """At a turn's first call, move to the first login with quota left.
+
+        Args:
+          turn_start: Whether the call is the turn's first.
+
+        """
+        logins = self._logins()
+        if not turn_start or logins is None:
+            return
+        want = self._first_live(logins, now=time.time())
+        if want is not None and want != self._serving:
+            await self._move(logins)
+
+    async def after_failure(self, exc: BaseException) -> None:
+        """Move off a login that spent a window, or that a move found signed out.
+
+        Args:
+          exc: Why the model in use failed its call.
+
+        """
+        logins = self._logins()
+        if logins is None:
+            return
+        now = time.time()
+        if isinstance(exc, AuthError) and self._serving != self._chosen_login():
+            self._signed_out.add(self._serving)
+            window, until = "signed out", 0.0
+        elif isinstance(exc, RateLimitedError) and (
+            exc.limit or exc.retry_after_sec > self._quota_wait_sec
+        ):
+            until = now + (exc.retry_after_sec or self._untold_reset_sec)
+            window = exc.limit
+            model = self._agent.model.capability.model_id
+            await logins.spend(
+                self._serving,
+                Spent(window=window, model=model, until=until),
+            )
+        else:
+            return
+        if not await self._move(logins, window=window, until=until):
+            self._agent.runtime.publish(
+                types.LoginsSpent(
+                    provider=self._agent.model.provider.name,
+                    resets=self._resets(logins, now=now),
+                ),
+            )
+
+    def _logins(self) -> Logins | None:
+        """Return the provider's logins, the user's switches since taken up; else ``None``."""
+        provider = self._agent.model.provider
+        if not isinstance(provider, HasLogin):
+            return None
+        chosen = (self._agent.account, provider.name)
+        if chosen != self._chosen:
+            self._chosen = chosen
+            self._serving = self._chosen_login()
+        return provider.logins
+
+    def _chosen_login(self) -> str:
+        return self._agent.account or "default"
+
+    def _order(self, logins: Logins) -> tuple[str, ...]:
+        """Return the logins to try: the one chosen, if any, then the provider's order."""
+        chosen = self._agent.account
+        order = logins.order()
+        if chosen is not None:
+            order = (chosen, *(a for a in order if a != chosen))
+        return tuple(a for a in order if a not in self._signed_out)
+
+    def _first_live(self, logins: Logins, *, now: float) -> str | None:
+        model = self._agent.model.capability.model_id
+        return next(
+            (a for a in self._order(logins) if logins.spent(a, model, now=now) is None),
+            None,
+        )
+
+    def _resets(self, logins: Logins, *, now: float) -> tuple[tuple[str, float], ...]:
+        """Return each login's reset, soonest first."""
+        model = self._agent.model.capability.model_id
+        resets = (
+            (account, spent.until)
+            for account in self._order(logins)
+            if (spent := logins.spent(account, model, now=now)) is not None
+        )
+        return tuple(sorted(resets, key=lambda reset: reset[1]))
+
+    # The same provider, model and choices; a login that cannot is passed over for the
+    # session.
+    async def _move(
+        self,
+        logins: Logins,
+        *,
+        window: str = "",
+        until: float = 0.0,
+    ) -> bool:
+        """Sign the model in as the first login with quota left that serves it."""
+        agent = self._agent
+        current = agent.model
+        provider = current.provider.name
+        while (account := self._first_live(logins, now=time.time())) is not None:
+            if account == self._serving:
+                return False
+            try:
+                agent.model = await successor(
+                    self._catalog.signed_in(provider, account=account).__getitem__,
+                    current.capability.model_id,
+                    current=current,
+                    model_cache=agent.model_cache,
+                )
+            except ValueError:
+                logger.warning(
+                    "cannot sign %s in as %s",
+                    provider,
+                    account,
+                    exc_info=True,
+                )
+                self._signed_out.add(account)
+                continue
+            agent.runtime.publish(
+                types.LoginSwitched(
+                    provider=provider,
+                    was=self._serving,
+                    now=account,
+                    window=window,
+                    until=until,
+                ),
+            )
+            self._serving = account
+            return True
+        return False

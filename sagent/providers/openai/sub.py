@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, ClassVar, NotRequired, Protocol, TypedDict, ov
 from treekle import json_dumps, json_loads
 
 from sagent.model.types import Request
-from sagent.providers.login import account_path, saved_accounts
+from sagent.providers.login import Logins
 from sagent.providers.openai import token_count, wire
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.lease import BorrowedLogin
@@ -80,27 +80,25 @@ class OpenAISub(OpenAI):
         lease: TokenLease | None = None,
     ) -> None:
         super().__init__(name=name, resources=resources)
+        self._account = account
+        self._logins = Logins(CodexLogin.default_path())
         self._login: _Login = (
-            CodexLogin(
-                None
-                if account is None
-                else account_path(CodexLogin.default_path(), account),
-                resources=self.resources,
-            )
+            CodexLogin(self._logins.path(account), resources=self.resources)
             if lease is None
             else BorrowedLogin(lease)
         )
         # By agent: its turn's id, and the token the server routes that turn by.
         self._turn_states: dict[str, tuple[str, str]] = {}
 
+    @property
+    def logins(self) -> Logins:
+        """Return every account kept beside ``codex``'s login."""
+        return self._logins
+
     async def login(self, *, headless: bool = False) -> None:
         """Sign in through the browser, or with the redirect pasted from it."""
         await self._login.sign_in(headless=headless)
-
-    @classmethod
-    def accounts(cls) -> tuple[str, ...]:
-        """Return each named account with a login saved beside ``codex``'s."""
-        return saved_accounts(CodexLogin.default_path())
+        await self._logins.added(self._account)
 
     @override
     async def credentials(self) -> dict[str, str]:

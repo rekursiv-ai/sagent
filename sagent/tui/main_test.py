@@ -37,7 +37,7 @@ import pytest
 from sagent.agent.agent import Agent, NoShrinker, default_system_prompt
 from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.team import Team
-from sagent.lib.userdirs import data_dir, state_dir
+from sagent.lib.userdirs import config_dir, data_dir, state_dir
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog
 from sagent.model.exceptions import (
@@ -53,6 +53,7 @@ from sagent.model.scripted import (
     reply,
 )
 from sagent.providers.catalog import ModelCatalog, default_provider
+from sagent.providers.login import Logins
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
 from sagent.runtime.exceptions import BudgetExhaustedError
@@ -87,7 +88,7 @@ from sagent.tools.session import Session
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
 from sagent.tui import main
-from sagent.tui.console import ConsolePrinter
+from sagent.tui.console import ConsolePrinter, Screen
 from sagent.tui.prompt import Input, prompt_text
 from sagent.tui.settings.flags import flags
 from sagent.tui.settings.types import SettingError
@@ -152,8 +153,9 @@ class _Signing(_Picky):
         self.signed_in += 1
         self.headless.append(headless)
 
-    def accounts(self) -> tuple[str, ...]:
-        return ()
+    @property
+    def logins(self) -> Logins:
+        return Logins(config_dir() / "rekursiv-ai" / "secrets" / "signing.json")
 
 
 @dataclass(slots=True, kw_only=True)
@@ -1896,6 +1898,10 @@ def test_records_streams_each_kind_of_event_and_drops_the_rest() -> None:
     ((record,),) = [main._records(suspended, tools=tools)]
     assert record["descriptor"] == "text/x-notice"
     assert str(record["content"]).startswith("Weekly limit reached. Resumes ")
+    switched = types.LoginSwitched(provider="acli", was="work", now="default")
+    assert main._records(switched, tools=tools) == [
+        {"descriptor": "text/x-notice", "content": "[default reset; back on default]"},
+    ]
     result = ShellCommandResult(call_id="1", stdout="out", exit_code=2, is_error=True)
     assert main._records(result, tools=tools) == [
         {
@@ -2011,6 +2017,55 @@ async def test_run_says_how_to_resume_a_journaled_session(
         "sagent --resume abc123   # this session",
     ]
     assert (state_dir() / "rekursiv-ai" / "sagent").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_a_write_to_stderr_during_a_session_ends_the_last_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    made: list[ConsolePrinter] = []
+    seen: list[str | None] = []
+
+    class _Kept(ConsolePrinter):
+        def __init__(
+            self,
+            console: Console,
+            *,
+            show_thinking: bool = False,
+            screen: Screen | None = None,
+        ) -> None:
+            super().__init__(console, show_thinking=show_thinking, screen=screen)
+            made.append(self)
+
+    class _Warns(Commands):
+        @override
+        async def __call__(self, line: str) -> bool:
+            if line == "/warn":
+                made[0].call("Read a.py", display=ToolDisplay(), key="1")
+                print("a library warning", file=sys.stderr)  # noqa: T201 -- A library writing to stderr is what is tested.
+                seen.append(made[0].last_call)
+                return False
+            return await super().__call__(line)
+
+    monkeypatch.setattr(main, "ConsolePrinter", _Kept)
+    monkeypatch.setattr(main, "Commands", _Warns)
+    async with Agent(model=ScriptedProvider()["scripted"]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(io.StringIO())),
+        ):
+            pipe.send_text("/warn\r/exit\r")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+    assert seen == [None]
 
 
 @pytest.mark.asyncio

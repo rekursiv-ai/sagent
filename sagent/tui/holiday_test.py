@@ -4,11 +4,16 @@ from __future__ import annotations
 
 from datetime import date
 from random import Random
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from sagent.tui import holiday
 from sagent.tui.holiday import Icon, holiday_icon, holidays, icon_rows
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 # From the `holidays` package 0.107 (China, India, Iran, Israel, Singapore) and
@@ -32,7 +37,7 @@ PUBLISHED = {
 
 @pytest.mark.parametrize("name", sorted(PUBLISHED))
 def test_computed_dates_match_published_dates(name: str) -> None:
-    starts = getattr(holiday, name)
+    starts = cast("Callable[[int], tuple[date, ...]]", getattr(holiday, name))
     published = [
         date.fromisoformat(f"{year}-{month_day}")
         for year, month_day in zip(
@@ -162,7 +167,7 @@ def test_window_runs_from_the_weekday_before_through_the_last_day(
     day: date,
     holiday_name: str | None,
 ) -> None:
-    expected = set() if holiday_name is None else _names_of(holiday_name)
+    expected = set[str]() if holiday_name is None else _names_of(holiday_name)
     assert _icon_names(day, draws=20) == expected
 
 

@@ -319,7 +319,7 @@ async def test_an_account_signs_in_with_codex_s_file_for_that_account() -> None:
         [event async for event in luna.stream(_REQUEST)]
     (sent,) = server.requests
     assert sent.headers["chatgpt-account-id"] == "acct-1"
-    assert OpenAISub.accounts() == ("work",)
+    assert OpenAISub().logins.accounts() == ("work",)
 
 
 @pytest.mark.asyncio

@@ -534,6 +534,12 @@ class Runtime:
         # Asked before each model round, ahead of compaction: drops what the
         # context no longer needs when that pays.
         self.prune: Callable[[], bool] | None = None
+        # Asked just before each model call, ``True`` for a turn's first: it may
+        # assign another model, as a login whose quota reset.
+        self.before_call: Callable[[bool], Awaitable[None]] | None = None
+        # Asked when the model in use fails a call: it may assign another that can
+        # get past the failure, which is then called at once.
+        self.after_failure: Callable[[BaseException], Awaitable[None]] | None = None
         self.running_tools: dict[str, asyncio.Task[None]] = {}
         self.cohort: set[str] = set()
         # A cohort started and not preempted, so its draining is published.
@@ -1358,6 +1364,11 @@ class Runtime:
                             break
 
                         case ModelResponseError(exception=exc):
+                            if (
+                                self._called_model is self.model
+                                and self.after_failure is not None
+                            ):
+                                await self.after_failure(exc)
                             # A failure of a model switched away from says nothing
                             # of the one in use: the gate asks it, at once.
                             if self._called_model is not self.model:
@@ -1822,6 +1833,8 @@ class Runtime:
                         # suspension's, the turn goes on, on the model asked now.
                         self._failed = False
                         self.service_suspended_until = None
+                        if self.before_call is not None:
+                            await self.before_call(self._steps == 0)
                         self._called_model = self.model
                         model_call: asyncio.Task[None] = asyncio.create_task(
                             self._stream_and_post(self._next_generation()),

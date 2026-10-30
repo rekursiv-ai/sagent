@@ -239,7 +239,9 @@ class AgentModel:
     def _accounts(self) -> tuple[str, ...]:
         """Return ``default``, then each login this provider keeps and the one in use."""
         provider = self.agent.model.provider
-        saved = set(provider.accounts() if isinstance(provider, HasLogin) else ())
+        saved = set(
+            provider.logins.accounts() if isinstance(provider, HasLogin) else (),
+        )
         if self.catalog.account is not None:
             saved.add(self.catalog.account)
         return ("default", *sorted(saved))

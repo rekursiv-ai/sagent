@@ -18,6 +18,7 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import Team
+from sagent.lib.userdirs import config_dir
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
@@ -28,6 +29,7 @@ from sagent.model.cost import PriceCatalog
 from sagent.model.exceptions import AuthError, UnknownModelError
 from sagent.model.scripted import ScriptedModel, ScriptedProvider, call
 from sagent.providers.catalog import ModelCatalog
+from sagent.providers.login import Logins
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
 from sagent.session.recording import RecordingJournal
@@ -255,8 +257,9 @@ class _Signing(_Picky):
         if self.error is not None:
             raise self.error
 
-    def accounts(self) -> tuple[str, ...]:
-        return ()
+    @property
+    def logins(self) -> Logins:
+        return Logins(config_dir() / "rekursiv-ai" / "secrets" / "signing.json")
 
 
 def _wide(*, name: str, resources: ProviderSharedResources) -> Provider:
@@ -363,7 +366,7 @@ def _names(desk: _Desk) -> list[str]:
 
 def test_actions_come_first_then_the_model_the_tools_and_the_screen() -> None:
     names = _names(_Desk())
-    assert names[:13] == [
+    assert names[:14] == [
         "quit",
         "exit",
         "help",
@@ -377,8 +380,9 @@ def test_actions_come_first_then_the_model_the_tools_and_the_screen() -> None:
         "defer",
         "tasks",
         "login",
+        "login.precedence",
     ]
-    assert names[13:15] == ["model", "model.provider"]
+    assert names[14:16] == ["model", "model.provider"]
     assert names.index("tool.Echo.display.command.lines") < names.index(
         "tool.Plain.display.command.lines",
     )
@@ -1367,6 +1371,42 @@ async def test_login_signs_in_and_sends_what_waited() -> None:
     assert desk.pushed() == [types.UserDeferredMessage(text="after login")]
     assert desk.panes.deferred is None
     assert desk.printer.said == [("note", "[/login] signing signed in")]
+
+
+@pytest.mark.asyncio
+async def test_login_precedence_orders_the_logins_of_the_model_s_provider() -> None:
+    desk = _Desk(provider="signing")
+    provider = desk.agent.model.provider
+    assert isinstance(provider, _Signing)
+    for account in ("default", "work", "home"):
+        provider.logins.path(account).parent.mkdir(parents=True, exist_ok=True)
+        provider.logins.path(account).write_text("{}")
+    await desk.commands("/login.precedence")
+    await desk.commands("/login.precedence work,default")
+    assert provider.logins.precedence() == ("work", "default")
+    await desk.commands("/login.precedence signing home")
+    assert provider.logins.order() == ("home",)
+    await desk.commands("/login.precedence off")
+    assert provider.logins.precedence() is None
+    assert desk.printer.said == [
+        ("note", "[/login.precedence] default,home,work"),
+        ("note", "[/login.precedence] signing: work,default"),
+        ("note", "[/login.precedence] signing: home"),
+        ("note", "[/login.precedence] signing: default,home,work"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_login_precedence_refuses_a_provider_that_keeps_no_logins() -> None:
+    desk = _Desk()
+    await desk.commands("/login.precedence")
+    await desk.commands("/login.precedence work")
+    await desk.commands("/login.precedence a b c")
+    assert desk.printer.said == [
+        ("note", "[/login.precedence] "),
+        ("error", "[/login.precedence] scripted keeps no logins to order"),
+        ("error", "[/login.precedence] give [PROVIDER] ACCOUNT,... or [PROVIDER] off"),
+    ]
 
 
 @pytest.mark.asyncio

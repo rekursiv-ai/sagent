@@ -49,8 +49,8 @@ class ClaudeLogin:
     """A login to a Claude subscription, kept fresh.
 
     Args:
-      path: A credentials file; ``None`` uses the store ``claude`` keeps its
-        own login in, which is the Keychain on macOS.
+      path: A credentials file; ``None`` or ``default_path()`` uses the store
+        ``claude`` keeps its own login in, which is the Keychain on macOS.
       resources: Where the HTTP client comes from.
 
     """
@@ -61,7 +61,8 @@ class ClaudeLogin:
         *,
         resources: ProviderSharedResources,
     ) -> None:
-        if path is None and platform.system() == "Darwin":
+        default = path is None or path == self.default_path()
+        if default and platform.system() == "Darwin":
             self._store: _File | _Keychain = _Keychain()
         else:
             self._store = _File(path or self.default_path())
