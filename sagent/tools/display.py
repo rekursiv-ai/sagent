@@ -71,7 +71,7 @@ class DisplaySpec:
           rows: What to print; empty when the block is hidden or blank.
 
         """
-        if not text.strip() or self.lines == (0, 0):
+        if not self.shows(text):
             return []
         rows = text.rstrip("\n").split("\n")
         marker = -1
@@ -92,6 +92,10 @@ class DisplaySpec:
                 [row] if i == marker else _fit(row, width=fit, overflow=self.overflow)
             )
         ]
+
+    def shows(self, text: str) -> bool:
+        """Return whether ``text`` prints a row: it is not blank, and not hidden."""
+        return bool(text.strip()) and self.lines != (0, 0)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

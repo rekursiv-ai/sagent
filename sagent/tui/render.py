@@ -65,7 +65,7 @@ from sagent.tui.types import CommandOutput, Printed
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
     from treekle import PlainTree
@@ -119,10 +119,9 @@ class Scrollback:
         """Messages, replies, and results drawn: what a replay's footer counts."""
 
         self._printed = Printed()
+        # The calls not yet answered, by the key their label printed under: a
+        # result printed below anything else names its call again.
         self._calls: dict[str, ToolCall] = {}
-        # The call whose label printed last: its result needs no label, while one
-        # printed below anything else names its call again.
-        self._tail: str | None = None
         # Each detached call's number, by call id, in the order they detached.
         self._jobs: dict[str, int] = {}
         # A turn's calls, labelled once the stubs that follow the turn are in, so
@@ -136,16 +135,13 @@ class Scrollback:
         for call in held:
             show_call(self.printer, call, tools=self.tools, home=self.home)
             job = self._jobs.get(call.call_id)
-            if job is None:
-                self._tail = call.call_id
-                continue
-            self.printer.output(f"[detached; #{job}]", display=_NOTED)
-            self._tail = None
+            if job is not None:
+                self.printer.output(f"[detached; #{job}]", display=_NOTED)
 
-    def _labelled(self, call: ToolCall | None, *, call_id: str) -> None:
-        """Print ``call``'s label, unless it is what printed last."""
-        if call is not None and call_id != self._tail:
-            show_call(self.printer, call, tools=self.tools, home=self.home)
+    def _labelled(self, call: ToolCall | None, *, agent: str = "") -> None:
+        """Print ``call``'s label, unless its label is the last thing printed."""
+        if call is not None and self.printer.last_call != _key(call.call_id, agent):
+            show_call(self.printer, call, tools=self.tools, home=self.home, agent=agent)
 
     def _holds(self, record: Record) -> bool:
         """Return whether ``record`` belongs with the held labels: a call, or its stub."""
@@ -221,7 +217,6 @@ class Scrollback:
             ),
         ):
             self.show_held()
-            self._tail = None
         match given:
             case types.ModelResponsePartial(text=text):
                 self._delta("reply", text)
@@ -295,25 +290,21 @@ class Scrollback:
                 self._flush()
                 p.user(content or "")
                 self.shown += 1
-                self._tail = None
             # What the user sent by ``/send`` shows as that command does.
             case AgentToAgentMessage(sender="user", content=content):
                 self._flush()
                 p.note(f"[/send] user→me: {content or ''}")
                 self.shown += 1
-                self._tail = None
             case AgentToAgentMessage(sender=sender, content=content):
                 self._flush()
                 p.agent(sender or "agent", recipient=None, text=content or "")
                 self.shown += 1
-                self._tail = None
             case Thinking(content=content):
                 if index in streamed:
                     self._close("thinking")
                 elif p.show_thinking and (content or "").strip():
                     self._flush()
                     p.thinking(content or "", opens=True, closes=True)
-                self._tail = None
             case AssistantMessage(content=content):
                 text = (content or "").rstrip("\n")
                 if index in streamed:
@@ -322,7 +313,6 @@ class Scrollback:
                     self._flush()
                     p.markdown(text)
                 self.shown += bool(text.strip())
-                self._tail = None
             case ToolCall(call_id=call_id):
                 # A delivery draws only its result, under the call it answers.
                 if call_id.endswith(self.markers.arrival):
@@ -334,6 +324,9 @@ class Scrollback:
                 self._flush()
                 call_id = record.call_id.removesuffix(self.markers.arrival)
                 call = self._calls.get(call_id)
+                if call is None:
+                    self._uncalled(record)
+                    return
                 # A detached call is numbered under its label; its result, when it
                 # lands, is shown under the label again with the same number. A
                 # held call's number prints when its label does.
@@ -341,17 +334,21 @@ class Scrollback:
                     job = self._jobs.setdefault(call_id, len(self._jobs) + 1)
                     self.shown += 1
                     if not self._held:
-                        self._labelled(call, call_id=call_id)
+                        self._labelled(call)
                         p.output(f"[detached; #{job}]", display=_NOTED)
-                        self._tail = None
                     return
                 self._calls.pop(call_id, None)
                 job = self._jobs.get(call_id)
-                self._labelled(call, call_id=call_id)
-                if job is not None and record.stub is None:
+                noted = job is not None and record.stub is None
+                if noted:
+                    self._labelled(call)
                     p.output(f"[undetached; #{job}]", display=_NOTED)
-                show_result(p, record, display=_display(call, tools=self.tools))
-                self._tail = None
+                show_result(
+                    p,
+                    record,
+                    display=_display(call, tools=self.tools),
+                    before=(lambda: None) if noted else (lambda: self._labelled(call)),
+                )
                 self.shown += 1
             case _:
                 assert_never(record)
@@ -371,19 +368,39 @@ class Scrollback:
                 ):
                     p.note(f"{label}: {record.content}")
                 elif isinstance(record, ToolCall):
-                    tool = self.tools.get(record.name)
-                    p.call(
-                        f"{label}: {_label(record, tools=self.tools, home=self.home)}",
-                        display=tool.display if tool else ToolDisplay(),
+                    self._calls[_key(record.call_id, label)] = record
+                    show_call(
+                        p,
+                        record,
+                        tools=self.tools,
+                        home=self.home,
+                        agent=label,
                     )
-        elif isinstance(event, ToolResult) and event.is_error is True:
-            p.error(f"{label}: {_without_reminders(event.text())}")
+        elif isinstance(event, ToolResult) and event.stub != "pending":
+            call_id = event.call_id.removesuffix(self.markers.arrival)
+            call = self._calls.pop(_key(call_id, label), None)
+            if call is None:
+                self._uncalled(event, agent=label)
+            elif event.is_error is True:
+                self._labelled(call, agent=label)
+                p.failed(f"{label}: {_without_reminders(event.text())}")
         elif isinstance(event, types.ModelResponseError):
             p.error(f"{label}: {error_text(event.exception)}")
         elif isinstance(event, types.ModelCallSuspended):
             p.error(f"{label}: {suspended_text(event)}")
         elif isinstance(event, AgentToAgentMessage):
             p.agent(event.sender or "agent", recipient=label, text=event.content or "")
+
+    # The runtime hides a result with no call from the model
+    # (``Runtime._repair_history_record_orphans``); under the call printed last it
+    # would read as that call's. Only its failure shows, at the indent.
+    def _uncalled(self, result: ToolResult, *, agent: str = "") -> None:
+        """Print a result whose call this scrollback never saw: a failure, at the indent."""
+        if result.is_error is not True:
+            return
+        text = _without_reminders(result.text())
+        self.printer.error(f"{agent}: {text}" if agent else text)
+        self.shown += not agent
 
     def _reaches(self, record: int) -> bool:
         """Return whether a delta for ``record`` prints now, as ``Printed.last`` says."""
@@ -470,6 +487,7 @@ def show_call(
     *,
     tools: Mapping[str, Tool],
     home: Path | None = None,
+    agent: str = "",
 ) -> None:
     """Print a tool call, labelled by its tool's ``summary``.
 
@@ -478,16 +496,26 @@ def show_call(
       call: The call.
       tools: The agent's tools; an unknown name labels the call by its name.
       home: Where sagent was started; a path below it shows relative to it.
+      agent: The child that made the call, which leads its label; ``""`` for
+        the agent this scrollback shows.
 
     """
     tool = tools.get(call.name)
+    label = _label(call, tools=tools, home=home)
     printer.call(
-        _label(call, tools=tools, home=home),
+        f"{agent}: {label}" if agent else label,
         display=tool.display if tool is not None else ToolDisplay(),
+        key=_key(call.call_id, agent),
     )
 
 
-def show_result(printer: Printer, result: ToolResult, *, display: ToolDisplay) -> None:
+def show_result(
+    printer: Printer,
+    result: ToolResult,
+    *,
+    display: ToolDisplay,
+    before: Callable[[], None] = lambda: None,
+) -> None:
     """Print a result by its fields: an error always, an edit or a write as a diff.
 
     A ``pending`` stub prints nothing: the real result prints when it lands. A
@@ -498,27 +526,34 @@ def show_result(printer: Printer, result: ToolResult, *, display: ToolDisplay) -
       printer: Where it goes.
       result: The result.
       display: How its tool shows output.
+      before: Runs just ahead of the result's first row, and not at all when it
+        prints none, so a hidden result names no call again.
 
     """
     text = _without_reminders(result.text())
     if result.is_error is True:
-        printer.error(text)
+        before()
+        printer.failed(text)
         return
     if result.stub == "pending":
         return
     match result:
         case FileEditResult(path=path, edits=edits) if edits:
+            before()
             printer.diff(splice_diff(result), path=path or "")
         case FileWriteResult(path=path, content=content) if content not in (
             None,
             "",
         ) and display.output.lines != (0, 0):
+            before()
             printer.diff(
                 write_diff(result),
                 path=path or "",
                 lines=display.output.lines,
             )
         case _:
+            if display.output.shows(text):
+                before()
             printer.output(text, display=display)
 
 
@@ -628,6 +663,11 @@ def _without_reminders(text: str) -> str:
 
 # How a detached call's ``[detached; #N]`` line shows, whatever its tool shows.
 _NOTED: Final = ToolDisplay(output=DisplaySpec(lines=None))
+
+
+def _key(call_id: str, agent: str) -> str:
+    """Return the key a call's label prints under; a child's names the child."""
+    return f"{agent}: {call_id}" if agent else call_id
 
 
 def _display(call: ToolCall | None, *, tools: Mapping[str, Tool]) -> ToolDisplay:
