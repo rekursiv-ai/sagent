@@ -39,6 +39,7 @@ _RG_BASE = [
     "--no-heading",
     "--with-filename",
     "--hidden",
+    "--no-mmap",
     "--field-match-separator=\x01",
     "--field-context-separator=\x02",
 ]
@@ -684,12 +685,18 @@ def test_a_rg_failure_names_its_exit_and_stderr(
 
 
 @_BOTH
-def test_a_nul_is_no_line_break_and_matches_only_a_dot(tmp_path: Path) -> None:
-    """A NUL at offset 0 still marks a file binary; ``.`` alone crosses it."""
+def test_a_nul_breaks_a_line_and_only_a_multiline_dot_crosses_it(
+    tmp_path: Path,
+) -> None:
+    """A NUL at offset 0 still marks a file binary; one search holds it whole."""
     f = tmp_path / "bin.dat"
     f.write_bytes(b"\0x\0y\nhit\n")
-    assert grep(f, Query(pattern="x.y", output_mode="count")) == [f"{f}:1"]
-    assert grep(f, Query(pattern="^y|xy|x$", output_mode="count")) == []
+    assert grep(f, Query(pattern="x.y", output_mode="count")) == []
+    assert grep(f, Query(pattern="^y|xy|x$", output_mode="count")) == [f"{f}:2"]
+    crossed = Query(pattern="x.y", multiline=True, output_mode="count")
+    assert grep(f, crossed) == [f"{f}:1"]
+    anchored = Query(pattern="^y|xy|x$", multiline=True, output_mode="count")
+    assert grep(f, anchored) == []
     assert grep(f, Query(pattern="hit", output_mode="content")) == [
         f'{f}: binary file matches (found "\\0" byte around offset 0)',
     ]
@@ -759,12 +766,13 @@ def test_a_bom_file_keeps_its_invalid_bytes_as_replacements(tmp_path: Path) -> N
 
 
 @_BOTH
-def test_a_named_binary_file_matches_text_that_looks_like_a_marker(
+def test_a_named_binary_file_matches_across_a_nul_only_when_multiline(
     tmp_path: Path,
 ) -> None:
     f = tmp_path / "bin.dat"
     f.write_bytes(b"XX\0XX\n")
-    assert grep(f, Query(pattern="XX.XX")) == [str(f)]
+    assert grep(f, Query(pattern="XX.XX")) == []
+    assert grep(f, Query(pattern="XX.XX", multiline=True)) == [str(f)]
 
 
 @_BOTH

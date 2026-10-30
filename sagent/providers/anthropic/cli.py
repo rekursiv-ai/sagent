@@ -389,6 +389,14 @@ class AnthropicCLIModel(AsyncResource):
             "stream-json",
             "--include-partial-messages",
             "--verbose",
+            # Measured on claude 2.1.312: told nothing, ``--print`` leaves each
+            # thinking block's text empty. The flag is not in ``--help``; it is
+            # what the Agent SDK passes for a display.
+            *(
+                ["--thinking-display", "summarized"]
+                if self.settings.thinking_output == "text"
+                else []
+            ),
             "--model",
             self.capability.wire_model_id or self.capability.model_id,
             "--system-prompt-file",

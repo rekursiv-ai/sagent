@@ -35,8 +35,11 @@ if TYPE_CHECKING:
 
 _REQUEST = Request(records=(UserMessage(content="hi"),))
 
+# The command line lands whole, by rename: ``_Http`` answers once the file has
+# any text, and a server stopped mid-``printf`` left a cut-off one on macOS.
 _LIVES = (
-    'echo "loading model"\nprintf "%s\\n" "$@" > "$FAKE_LLAMA_ARGS"\nexec sleep 30\n'
+    'echo "loading model"\nprintf "%s\\n" "$@" > "$FAKE_LLAMA_ARGS.tmp"\n'
+    'mv "$FAKE_LLAMA_ARGS.tmp" "$FAKE_LLAMA_ARGS"\nexec sleep 30\n'
 )
 _DIES = 'echo "error: failed to open model"\necho "done"\nexit 1\n'
 _STUBBORN = "trap '' TERM\nprintf trapped > \"$FAKE_LLAMA_ARGS\"\nwhile :; do sleep 0.05; done\n"
@@ -454,9 +457,15 @@ async def test_a_running_server_that_answers_an_error_is_not_up() -> None:
     assert len(fake.requests) == 2
 
 
-def test_a_port_is_read_only_from_an_ipv4_socket(tmp_path: Path) -> None:
+def test_a_port_is_read_only_from_an_ipv4_socket(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Relative: macOS caps a socket's path at 104 bytes, and a test's temporary
+    # directory there runs past 120.
+    monkeypatch.chdir(tmp_path)
     with socket.socket(socket.AF_UNIX) as unix:
-        unix.bind(str(tmp_path / "s"))
+        unix.bind("s")
         with pytest.raises(TypeError, match="IPv4"):
             server._port(unix)
     with socket.socket() as ipv4:

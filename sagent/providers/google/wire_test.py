@@ -1019,9 +1019,10 @@ def test_an_unknown_error_names_its_status_and_kind() -> None:
 # ---- helpers -------------------------------------------------------------------
 
 
-# What Gemini 3.1 is sent at its defaults: its level, as it cannot stop thinking.
+# What Gemini 3.1 is sent at its defaults: its level, as it cannot stop thinking,
+# and its thought summaries, so the session keeps them.
 _LEVEL: Mapping[str, object] = {
-    "thinkingConfig": {"includeThoughts": False, "thinkingLevel": "high"},
+    "thinkingConfig": {"includeThoughts": True, "thinkingLevel": "high"},
 }
 
 

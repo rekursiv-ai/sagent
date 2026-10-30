@@ -1,12 +1,13 @@
 """The screen as settings: whether it shows the model's reasoning.
 
 What the model sends back (``model.thinking.output``) is the model's; whether
-this screen draws it is the screen's.
+this screen draws it is the screen's. The model's default asks for readable
+thinking so the session keeps it; the screen's default hides it.
 
 Typical usage example:
 
   owners = [..., (("screen",), ScreenSettings(view=printer))]
-  /screen.thinking hide
+  /screen.thinking show
 """
 
 from __future__ import annotations
@@ -48,10 +49,10 @@ class ScreenSettings:
         ]
 
     def _shown(self) -> str:
-        return "show (default)" if self.view.show_thinking else "hide"
+        return "show" if self.view.show_thinking else "hide (default)"
 
     async def _show(self, args: str) -> str:
         if args not in ("default", "show", "hide"):
             raise SettingError(f"{args!r} is not one of: default, show, hide")
-        self.view.show_thinking = args != "hide"
+        self.view.show_thinking = args == "show"
         return self._shown()

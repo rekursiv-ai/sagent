@@ -318,9 +318,13 @@ providers:
       haiku-5.5:
       haiku-4.5:
   anthropic-cli:
-    sends: [thinking_effort]
+    sends: [thinking_effort, thinking_output]
     # ``claude`` holds the conversation; what it compacts or prunes is its own.
     manage_context_server_side: [true]
+    # ``--thinking-display summarized`` shows the summary; ``claude`` has no
+    # sealed-only display to match the API's redaction.
+    thinking:
+      output: [none, text]
     models:
       fable-5.1:
       fable-5.0:

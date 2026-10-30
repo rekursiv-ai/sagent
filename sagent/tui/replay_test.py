@@ -417,9 +417,10 @@ class _Slow:
 
 
 def _screen() -> tuple[ConsolePrinter, io.StringIO]:
+    """Return a screen that draws thinking, so a replay is checked against all of it."""
     out = io.StringIO()
     console = Console(file=out, width=80, color_system=None, highlight=False)
-    return ConsolePrinter(console), out
+    return ConsolePrinter(console, show_thinking=True), out
 
 
 def _turn(*records: AssistantMessage | Thinking | ToolCall) -> Response:

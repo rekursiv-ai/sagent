@@ -239,6 +239,10 @@ def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
         # paging the lines cannot tell which file a bare line came from.
         "--with-filename",
         "--hidden",
+        # Ripgrep reads a NUL in a named file as a line break, except in a memory
+        # map -- made when at most ten paths, all files, are named, and never on
+        # macOS -- so one query over one file would answer two ways.
+        "--no-mmap",
         # No ``--sort path``: it makes ripgrep search one file at a time (8x
         # slower on this repo). Its parallel output is grouped per file and
         # sorted here instead, and control-byte field separators make each
@@ -589,10 +593,16 @@ def _search_file(
         return _file_lines(pattern, text, name=name, query=query)
     if walked:
         return []
-    # A binary file named outright is searched with each NUL swapped for a byte
-    # that ``.`` matches and no literal does, as ripgrep swaps it; its lines are
-    # never printed -- one note stands for all of them.
-    found = _file_lines(pattern, text.replace("\0", "\ue000"), name=name, query=query)
+    # A binary file named outright is searched as ripgrep reads one, each NUL a
+    # line break -- save in a multiline search, which holds the whole file:
+    # there each NUL stays, swapped here for a character ``.`` matches and no
+    # literal does. Its lines are never printed -- one note stands for all.
+    found = _file_lines(
+        pattern,
+        text.replace("\0", "\ue000" if query.multiline else "\n"),
+        name=name,
+        query=query,
+    )
     if found and query.output_mode == "content":
         offset = raw.index(b"\0")
         note = f'{name}: binary file matches (found "\\0" byte around offset {offset})'
