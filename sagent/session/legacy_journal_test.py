@@ -705,9 +705,6 @@ def test_a_v3_log_converts_through_the_tape(tmp_path: Path) -> None:
     assert result.is_error is True
 
 
-# ---- upgrade, find_old -------------------------------------------------------
-
-
 def _session(directory: Path, *records: PlainTree) -> Path:
     """Write ``records`` as the old session ``directory``."""
     directory.mkdir(parents=True)

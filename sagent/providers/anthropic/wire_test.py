@@ -146,9 +146,6 @@ class _Echo:
         return UncategorizedToolResult(call_id="", content=str(arguments.get("text")))
 
 
-# ---- encode: the request body ------------------------------------------------
-
-
 def test_encode_names_the_vendor_id_and_streams() -> None:
     body, betas = _encode([UserMessage(content="hi")])
     assert body["model"] == "claude-opus-5-5"
@@ -537,9 +534,6 @@ def test_bookkeeping_records_send_nothing() -> None:
     )
 
 
-# ---- encode: optional features -----------------------------------------------
-
-
 def test_adaptive_thinking_shows_the_summary_asked_for() -> None:
     _, settings = _model()
     settings = replace(settings, thinking_budget="auto", thinking_output="none")
@@ -694,9 +688,6 @@ def test_a_context_windows_betas_ride_every_request() -> None:
     assert betas == ["window-1"]
 
 
-# ---- system blocks and content -----------------------------------------------
-
-
 def test_system_blocks_drop_empty_parts_and_mark_the_last_three() -> None:
     _, settings = _model()
     blocks = wire.system_blocks(["a", "", "b", "c", "d", "e"], settings=settings)
@@ -815,9 +806,6 @@ def test_attachments_ride_user_messages_and_tool_results() -> None:
     assert [b["type"] for b in _blocks(_blocks(messages[2])[0])] == ["image"]
 
 
-# ---- the cached prefix -------------------------------------------------------
-
-
 def _unmarked(tree: PlainTree) -> PlainTree:
     """Return ``tree`` without its cache marks, which move by design."""
     if isinstance(tree, Mapping):
@@ -901,9 +889,6 @@ async def test_each_request_repeats_the_last_and_a_child_repeats_its_parent(
     assert "be terse" in str(parent_system)
 
 
-# ---- events: server-sent events ----------------------------------------------
-
-
 async def _lines(*lines: str) -> AsyncIterator[str]:
     for line in lines:
         yield line
@@ -931,9 +916,6 @@ async def test_events_gather_data_lines_until_a_blank_line(
         {"type": "ping"},
         {"type": "message_stop"},
     ]
-
-
-# ---- StreamReader: the reply -------------------------------------------------
 
 
 def _start(**usage: object) -> dict[str, object]:
@@ -1133,9 +1115,6 @@ def test_a_reply_is_billed_at_the_speed_it_was_served(
     today = datetime.now(UTC).date()
     assert response.spend == capability.prices[served, tokens.prompt, today] * tokens
     assert response.spend.request == (8.0 if speed == "fast" else 4.0)
-
-
-# ---- to_exception ------------------------------------------------------------
 
 
 def _error(kind: str, message: str) -> dict[str, object]:
@@ -1439,9 +1418,6 @@ def test_any_other_error_names_its_status_kind_and_text() -> None:
     assert str(error) == "Anthropic replied 418 : <html>teapot</html>"
 
 
-# ---- rate_limits -------------------------------------------------------------
-
-
 def test_rate_limits_read_both_windows() -> None:
     windows = wire.rate_limits(
         {
@@ -1503,9 +1479,6 @@ def test_utilization_is_clamped_to_a_fraction(raw: str, utilization: float) -> N
 )
 def test_an_api_key_reply_reports_no_window(headers: dict[str, str]) -> None:
     assert wire.rate_limits(headers) == ()
-
-
-# ---- edges of a reply --------------------------------------------------------
 
 
 def test_fields_a_reply_leaves_out_read_as_empty() -> None:

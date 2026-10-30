@@ -128,9 +128,6 @@ def _text(*lines: Sequence[Mapping[str, object]]) -> list[str]:
     return texts
 
 
-# ---- the process environment -------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_claude_starts_without_other_accounts_and_without_telemetry(
     monkeypatch: pytest.MonkeyPatch,
@@ -181,9 +178,6 @@ async def test_a_named_login_reaches_claude_as_a_token(tmp_path: Path) -> None:
     credentials.write_text(json_dumps({"claudeAiOauth": oauth}))
     env = await AnthropicCLI(credentials=credentials).environment()
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == oauth["accessToken"]
-
-
-# ---- a turn ------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -365,9 +359,6 @@ async def test_a_tool_results_images_are_shrunk_before_answering(
     assert Image.open(io.BytesIO(shrunk.data)).size == (2_576, 1)
 
 
-# ---- what starts a fresh claude ----------------------------------------------
-
-
 @pytest.mark.parametrize(
     "change",
     ["system", "tools", "schema", "environment", "history", "display"],
@@ -533,9 +524,6 @@ async def test_a_fresh_claude_hears_the_conversation_as_a_transcript(
     )
 
 
-# ---- failures ----------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_claude_exiting_mid_turn_is_a_disconnect(
     claude: _Stub,
@@ -698,9 +686,6 @@ async def test_a_failed_turn_leaves_the_next_to_a_fresh_claude(
         await _stream(model, request)
     await _stream(model, request)
     assert len(claude.processes()) == 2
-
-
-# ---- the rest ----------------------------------------------------------------
 
 
 @pytest.mark.asyncio

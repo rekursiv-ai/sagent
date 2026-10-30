@@ -108,9 +108,6 @@ if TYPE_CHECKING:
     from sagent.tools.types import ToolContext
 
 
-# ---- fixtures --------------------------------------------------------------
-
-
 def _flags(*argv: str) -> main.Flags:
     parser = argparse.ArgumentParser()
     main._add_arguments(parser)
@@ -266,9 +263,6 @@ def _journal(
     )
     os.utime(path, (mtime, mtime))
     return path
-
-
-# ---- flags -----------------------------------------------------------------
 
 
 def test_the_flags_default_to_a_fresh_interactive_session(
@@ -435,9 +429,6 @@ def test_a_count_or_amount_says_why_it_was_refused(
 def test_a_count_or_amount_that_fits_is_taken() -> None:
     assert main._positive_int("1") == 1
     assert main._positive_float("0.01") == 0.01
-
-
-# ---- main ------------------------------------------------------------------
 
 
 def test_an_unknown_command_is_a_usage_error(
@@ -1110,9 +1101,6 @@ def test_an_interactive_run_opens_the_prompt_and_names_the_model(
     del script
 
 
-# ---- settings --------------------------------------------------------------
-
-
 _WIDE_PRICES = PriceCatalog(window=1_000_000)
 _WIDE = ModelCapability(
     model_id="wide-1.0",
@@ -1246,9 +1234,6 @@ async def test_a_refused_setting_flag_says_why(
         await _set(*argv)
 
 
-# ---- tools -----------------------------------------------------------------
-
-
 def _tools(*argv: str, cwd: Path = Path("/w")) -> dict[str, object]:
     catalog = _Script().catalog()
     team = Team(catalog=catalog)
@@ -1349,9 +1334,6 @@ def test_memories_live_in_the_project_directory(tmp_path: Path) -> None:
     memory = _tools("--tools", "Memory", cwd=tmp_path)["Memory"]
     assert isinstance(memory, Memory)
     assert memory.directory == project_dir(tmp_path) / "memory"
-
-
-# ---- journal paths ---------------------------------------------------------
 
 
 def test_an_ephemeral_session_has_no_journal() -> None:
@@ -1553,9 +1535,6 @@ def test_resume_all_picks_from_every_project_reading_only_the_listing(
     assert "title 2" not in err
 
 
-# ---- the picker ------------------------------------------------------------
-
-
 def _infos(tmp_path: Path, *titles: str) -> list[projects.SessionInfo]:
 
     for i, title in enumerate(titles):
@@ -1632,9 +1611,6 @@ def test_ago_rounds_down_to_its_largest_unit(seconds: float, text: str) -> None:
     assert main._ago(seconds) == text
 
 
-# ---- logging ---------------------------------------------------------------
-
-
 def test_piped_logging_goes_to_stderr_only_when_asked(logs: logging.Logger) -> None:
     ours = logging.getLogger("sagent")
     before = ours.level
@@ -1680,9 +1656,6 @@ def test_interactive_logging_without_a_journal_uses_the_shared_file(
     assert logging.getLogger("sagent").level == logging.WARNING
 
 
-# ---- signals ---------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_first_signal_cancels_the_run_and_the_second_exits(
     monkeypatch: pytest.MonkeyPatch,
@@ -1701,9 +1674,6 @@ async def test_the_first_signal_cancels_the_run_and_the_second_exits(
         await asyncio.wait_for(task, timeout=5)
     assert exits == [1]
     assert signal.getsignal(signal.SIGINT) is signal.default_int_handler
-
-
-# ---- headless --------------------------------------------------------------
 
 
 async def _headless(
@@ -1967,9 +1937,6 @@ def test_a_detached_call_streams_its_stub_marked_then_its_result() -> None:
     )
 
 
-# ---- the interactive screen ------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_run_redraws_the_session_then_answers_what_is_typed(
     tmp_path: Path,
@@ -2074,7 +2041,7 @@ async def test_run_reports_a_failing_command_and_goes_on(
                 ),
                 timeout=5,
             )
-    assert "✗ RuntimeError: kaboom" in screen.getvalue()
+    assert "✗  RuntimeError: kaboom" in screen.getvalue()
 
 
 @pytest.mark.asyncio

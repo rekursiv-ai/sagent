@@ -112,9 +112,6 @@ def _body(request: httpx2.Request) -> dict[str, object]:
     return json_loads(request.content, dict[str, object])
 
 
-# ---- credentials and the request ---------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_credentials_are_the_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert await Anthropic().credentials() == {"x-api-key": "sk-test"}
@@ -187,9 +184,6 @@ async def test_each_reply_updates_the_accounts_windows() -> None:
         # A reply that reports no window leaves the last report standing.
         await _stream(anthropic["opus"])
         assert anthropic.usage == (window,)
-
-
-# ---- failures ----------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -349,9 +343,6 @@ async def test_a_providers_own_betas_lead_and_none_repeats() -> None:
     )
 
 
-# ---- count -------------------------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("tier", "betas"),
     [
@@ -405,9 +396,6 @@ async def test_a_reply_that_is_not_a_json_object_is_refused() -> None:
             )
 
 
-# ---- the prompt cache --------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_the_cache_lapses_only_after_an_answer_left_idle(
     monkeypatch: pytest.MonkeyPatch,
@@ -426,9 +414,6 @@ async def test_the_cache_lapses_only_after_an_answer_left_idle(
         await _stream(opus)
     kept = [_kept_thinking(_body(sent)) for sent in server.requests]
     assert kept == ["all", "all", {"type": "thinking_turns", "value": 1}]
-
-
-# ---- models ------------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -484,9 +469,6 @@ async def test_a_provider_closes_only_resources_it_made() -> None:
         client = shared.http
         await Anthropic(resources=shared).aclose()
         assert not client.is_closed
-
-
-# ---- the catalog's facts -----------------------------------------------------
 
 
 @pytest.mark.parametrize(

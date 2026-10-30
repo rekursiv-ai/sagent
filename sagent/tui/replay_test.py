@@ -325,9 +325,6 @@ async def test_a_taped_delivery_redraws_only_its_result_and_counts_once() -> Non
     ]
 
 
-# ---- live scrollback equals the replay of its journal ----------------------
-
-
 class _Streaming(ScriptedModel):
     """Streams each reply's reasoning and text a word at a time, as providers do."""
 
@@ -516,10 +513,10 @@ async def test_live_scrollback_equals_the_replay_of_its_journal() -> None:
         "∴ Thinking",
         "  Then fix line three.",
         "Reading a.py.",
-        "  Echo a\n     a\n  Fix a.py\n",
+        "  Echo a\n  ⎿  a\n  Fix a.py\n",
         " x = 2",
-        "  Slow\n     [detached; #1]",
-        "  Slow\n     [undetached; #1]\n     finally done",
+        "  Slow\n  ⎿  [detached; #1]",
+        "  Slow\n  ⎿  [undetached; #1]\n     finally done",
         "The slow one finished.",
     ):
         assert shown in live

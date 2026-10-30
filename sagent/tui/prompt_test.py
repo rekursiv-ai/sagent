@@ -121,9 +121,6 @@ class _Prompt:
         return self.runtime.inbox.drain_nowait()
 
 
-# ---- panes -----------------------------------------------------------------
-
-
 def test_staging_into_an_empty_pane_holds_the_message() -> None:
     panes = Panes()
     panes.stage("now", (_PNG,), deferred=False)
@@ -180,9 +177,6 @@ def test_sending_a_pane_pushes_it_and_empties_it() -> None:
         types.UserDeferredMessage(text="d", attachments=(_PNG,)),
     ]
     assert (panes.queue, panes.deferred) == (None, None)
-
-
-# ---- commit_panes ----------------------------------------------------------
 
 
 def test_the_queue_rides_the_next_tool_round() -> None:
@@ -277,9 +271,6 @@ def test_the_undo_keeps_a_hook_installed_after_it() -> None:
     assert runtime.before_tool_spawn is later
 
 
-# ---- prompt_text -----------------------------------------------------------
-
-
 def _prompt_text(runtime: Runtime, panes: Panes) -> FormattedText:
     return prompt_text(Deferred(runtime, panes), Input())
 
@@ -330,9 +321,6 @@ def test_an_agent_s_pending_message_alone_shows_nothing() -> None:
     assert _prompt_text(runtime, Panes()) == FormattedText(
         [("", "\n"), ("class:input_pane", "> ")],
     )
-
-
-# ---- Enter and Tab ---------------------------------------------------------
 
 
 def test_enter_while_idle_sends_resets_and_remembers_the_line() -> None:
@@ -477,9 +465,6 @@ def test_alt_enter_inserts_a_newline() -> None:
     prompt.press(Keys.Escape, Keys.ControlM)
     assert prompt.buffer.text == "a\n"
     assert prompt.pushed() == []
-
-
-# ---- Up and Down -----------------------------------------------------------
 
 
 @pytest_asyncio.fixture
@@ -765,9 +750,6 @@ async def test_the_deferred_stop_comes_back_on_the_way_down(busy: _Prompt) -> No
     assert busy.panes.deferred == Staged(text="D")
 
 
-# ---- other keys ------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_shift_up_and_down_search_history_by_prefix() -> None:
     """Each press searches by the text first typed, as readline's search does."""
@@ -882,9 +864,6 @@ def test_the_keys_that_send_stop_once_the_prompt_is_accepted() -> None:
     }
     assert all(live.values())
     assert {keys for keys, active in done.items() if not active} == guarded
-
-
-# ---- PromptSource ----------------------------------------------------------
 
 
 async def _line(

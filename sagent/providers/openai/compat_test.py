@@ -128,9 +128,6 @@ def _body(request: httpx2.Request) -> dict[str, object]:
     return json_loads(request.content, dict[str, object])
 
 
-# ---- the provider ------------------------------------------------------------
-
-
 def test_the_provider_serves_its_sections_models_by_any_name() -> None:
     vendor = _Vendor()
     assert vendor.name == "moonshot"
@@ -202,9 +199,6 @@ async def test_closing_closes_only_resources_the_provider_made() -> None:
         async with _Vendor(resources=shared):
             http = shared.http
         assert not http.is_closed
-
-
-# ---- streaming ---------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -424,9 +418,6 @@ async def test_a_401_with_nothing_to_renew_is_an_auth_error() -> None:
         with pytest.raises(AuthError, match="Bad key"):
             await _stream(_Vendor(resources=shared)["default"])
     assert len(server.requests) == 1
-
-
-# ---- counting and replies ----------------------------------------------------
 
 
 @pytest.mark.asyncio

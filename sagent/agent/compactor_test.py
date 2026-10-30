@@ -1856,9 +1856,6 @@ class _Latin1:
         return path.read_bytes().decode(encoding or "latin-1")
 
 
-# ---- the session-audit style ---------------------------------------------------
-
-
 @pytest.mark.parametrize(
     ("sizes", "budget", "k"),
     [

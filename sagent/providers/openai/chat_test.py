@@ -72,9 +72,6 @@ def _png() -> bytes:
     return out.getvalue()
 
 
-# ---- the request -------------------------------------------------------------
-
-
 def test_encode_streams_the_conversation_with_its_usage() -> None:
     request = Request(
         system=("Be terse.", "", "Mind the tests."),
@@ -259,9 +256,6 @@ def test_encode_offers_the_tools_and_names_a_tier_only_when_chosen() -> None:
         reasoning_field="",
     )
     assert body["service_tier"] == "priority"
-
-
-# ---- the reply ---------------------------------------------------------------
 
 
 def _reader(

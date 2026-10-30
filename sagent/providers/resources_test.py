@@ -58,9 +58,6 @@ def _alive(pid: int) -> bool:
     return True
 
 
-# ---- SubprocessPool ----------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_acquire_hands_out_the_spare_started_ahead(tmp_path: Path) -> None:
     log = tmp_path / "pids"
@@ -252,9 +249,6 @@ async def test_closing_with_a_spare_that_failed_to_start(tmp_path: Path) -> None
     script.unlink()
     await pool.aclose()
     assert first.returncode is not None
-
-
-# ---- SharedResources ---------------------------------------------------------
 
 
 @pytest.mark.asyncio

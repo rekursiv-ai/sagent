@@ -2,7 +2,7 @@
 
 Typical usage example:
 
-  render_diff(console, splice_diff(result), path=result.path or "")
+  render_diff(console, splice_diff(result), lead=Text("  "), hang="  ")
   console.print(highlight_source("ls -la", "bash"))
 """
 
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import difflib
+import itertools
 import re
 import textwrap
 
@@ -37,6 +38,8 @@ from sagent.tui.types import Sticky
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from pygments.lexer import Lexer
     from rich.console import Console
 
@@ -70,6 +73,8 @@ def render_diff(
     console: Console,
     diff: str,
     *,
+    lead: Text,
+    hang: str,
     path: str = "",
     style: DiffStyle | None = None,
     lines: tuple[int, int] | None = None,
@@ -80,6 +85,8 @@ def render_diff(
     Args:
       console: Where to print.
       diff: The diff; ``---``/``+++`` file headers are skipped.
+      lead: What starts the first row, as wide as ``hang``.
+      hang: What starts every other row.
       path: The file, whose name picks the highlighting.
       style: The colors; dark-terminal ones when omitted.
       lines: Body lines kept from the head and the tail, the rest counted in
@@ -90,22 +97,26 @@ def render_diff(
     s = style if style is not None else DiffStyle()
     lexer = _lexer_for(path)
     hunk = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
-    body = [
-        ln for ln in diff.splitlines() if not re.match(r"^(?:---|\+\+\+)(?:\s|$)", ln)
-    ]
-    added = sum(1 for ln in body if ln.startswith("+"))
-    removed = sum(1 for ln in body if ln.startswith("-"))
-    console.print(
-        Text(f"  ⎿  Added {added} lines, removed {removed} lines", style="dim"),
+    body = _dedent(
+        [
+            ln
+            for ln in diff.splitlines()
+            if not re.match(r"^(?:---|\+\+\+)(?:\s|$)", ln)
+        ],
+        hunk,
     )
-    body = _dedent(body, hunk)
     changes = [ln for ln in body if not hunk.match(ln)]
     pairs = _word_pairs(changes, threshold=s.word_threshold)
     digits = len(str(_last_number(body, hunk)))
     longest = max((cell_len(ln) for ln in changes), default=0)
     sticky = sticky if sticky is not None else Sticky()
-    # The margin ``  N ``: the call's indent, the number, a space.
-    width = sticky.cells(longest - 1, total_padding=digits + 3, width=console.width)
+    # The margin: the hang, the number, a space.
+    width = sticky.cells(
+        longest - 1,
+        total_padding=len(hang) + digits + 1,
+        width=console.width,
+    )
+    margins = itertools.chain([lead], itertools.repeat(Text(hang)))
     hidden = (
         range(lines[0], len(changes) - lines[1])
         if lines is not None and len(changes) > sum(lines)
@@ -120,11 +131,19 @@ def render_diff(
         number = old if sigil == "-" else new
         if index in hidden:
             if index == hidden.start:
-                indent = " " * (digits + 3)
-                console.print(Text(f"{indent}⋯ {len(hidden)} lines ⋯", style="dim"))
+                console.print(
+                    Text.assemble(
+                        next(margins),
+                        Text(
+                            f"{' ' * (digits + 1)}⋯ {len(hidden)} lines ⋯",
+                            style="dim",
+                        ),
+                    ),
+                )
         elif index in pairs:
             _print_words(
                 console,
+                margins,
                 f"{number:>{digits}} ",
                 sigil,
                 pairs[index],
@@ -136,6 +155,7 @@ def render_diff(
             background = {"+": s.added, "-": s.removed}.get(sigil, "")
             _print_line(
                 console,
+                margins,
                 f"{number:>{digits}} ",
                 content=_highlight(line[1:], lexer),
                 background=background,
@@ -306,6 +326,7 @@ def _last_number(body: list[str], hunk: re.Pattern[str]) -> int:
 
 def _print_line(
     console: Console,
+    margins: Iterator[Text],
     margin: str,
     *,
     content: Text,
@@ -320,6 +341,7 @@ def _print_line(
         content.stylize(background)
     _print_rows(
         console,
+        margins,
         margin,
         content,
         margin_style=style,
@@ -330,6 +352,7 @@ def _print_line(
 
 def _print_words(
     console: Console,
+    margins: Iterator[Text],
     margin: str,
     sigil: str,
     parts: list[tuple[str, str]],
@@ -349,6 +372,7 @@ def _print_words(
         at += len(text)
     _print_rows(
         console,
+        margins,
         margin,
         content,
         margin_style=f"{s.gutter} {line_bg}",
@@ -359,6 +383,7 @@ def _print_words(
 
 def _print_rows(
     console: Console,
+    margins: Iterator[Text],
     margin: str,
     content: Text,
     *,
@@ -367,22 +392,17 @@ def _print_rows(
     width: int,
 ) -> None:
     """Print ``content`` wrapped inside ``width``, later rows indented past ``margin``."""
-    # Under the ``⎿``, at the indent of the call above; layout, so no style.
-    indent = "  "
-    rows = content.wrap(
-        console,
-        max(1, width - len(indent) - len(margin)),
-        overflow="fold",
-    )
-    for i, row in enumerate(rows or [Text("")]):
-        lead = margin if i == 0 else " " * len(margin)
-        pad = max(0, width - len(indent) - len(margin) - row.cell_len)
+    # Every margin is as wide as the hang, so the first one sizes them all.
+    first = next(margins)
+    usable = width - first.cell_len - len(margin)
+    rows = content.wrap(console, max(1, usable), overflow="fold") or [Text("")]
+    for i, row in enumerate(rows):
         console.print(
             Text.assemble(
-                indent,
-                Text(lead, style=margin_style),
+                first if i == 0 else next(margins),
+                Text(margin if i == 0 else " " * len(margin), style=margin_style),
                 row,
-                Text(" " * pad, style=fill_style),
+                Text(" " * max(0, usable - row.cell_len), style=fill_style),
             ),
             no_wrap=True,
         )

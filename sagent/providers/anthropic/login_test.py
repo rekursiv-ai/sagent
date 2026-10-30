@@ -85,9 +85,6 @@ def _body(request: httpx2.Request) -> dict[str, object]:
     return json_loads(request.content, dict[str, object])
 
 
-# ---- token -------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_a_stored_token_far_from_expiry_needs_no_server(tmp_path: Path) -> None:
     path = tmp_path / ".credentials.json"
@@ -274,9 +271,6 @@ async def test_renew_refreshes_a_rotated_token_that_has_expired_too(
     assert _body(server.requests[0])["refresh_token"] == rotated
 
 
-# ---- the credentials file ----------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_saving_keeps_the_other_logins_claude_keeps(tmp_path: Path) -> None:
     """``claude`` keeps its MCP servers' logins in the same file."""
@@ -339,9 +333,6 @@ async def test_another_process_holding_the_lock_is_waited_for(tmp_path: Path) ->
             assert await renewing == "at-2"
     finally:
         os.close(fd)
-
-
-# ---- signing in --------------------------------------------------------------
 
 
 @pytest.mark.asyncio

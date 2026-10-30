@@ -115,9 +115,6 @@ def _job(
 _CONTEXT = ToolContext(cwd=Path("/"))
 
 
-# --- Control keys ---------------------------------------------------------------
-
-
 def test_an_ordinary_tool_is_backgroundable() -> None:
     assert backgroundable(Echo())
 
@@ -228,9 +225,6 @@ def test_without_controls_drops_only_the_control_keys() -> None:
         "text": "a",
     }
     assert without_controls({}) == {}
-
-
-# --- BackgroundTask --------------------------------------------------------------
 
 
 def test_background_task_describes_itself() -> None:

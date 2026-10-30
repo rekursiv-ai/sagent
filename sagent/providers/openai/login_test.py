@@ -108,9 +108,6 @@ def auth(tmp_path: Path) -> Path:
     return tmp_path / "auth.json"
 
 
-# ---- where the login lives ---------------------------------------------------
-
-
 def test_the_login_is_the_one_codex_keeps_unless_named(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -124,9 +121,6 @@ def test_the_login_is_the_one_codex_keeps_unless_named(
     assert CodexLogin(resources=resources).path == tmp_path / "home" / "auth.json"
     named = tmp_path / "auth-work.json"
     assert CodexLogin(named, resources=resources).path == named
-
-
-# ---- the token ---------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -356,9 +350,6 @@ def test_a_stored_login_is_private_even_over_a_leftover_staging_file(
     assert auth.read_text() == "{}"
 
 
-# ---- lending -----------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_lend_hands_out_the_token_held_and_renews_one_refused(auth: Path) -> None:
     held = _token("held", account="acct")
@@ -380,9 +371,6 @@ async def test_lend_hands_out_the_token_held_and_renews_one_refused(auth: Path) 
         )
         assert renewed.expires_at > time.time() + 3_000.0
     assert len(server.requests) == 1
-
-
-# ---- signing in --------------------------------------------------------------
 
 
 @dataclass(slots=True, kw_only=True)
@@ -747,9 +735,6 @@ async def test_sign_in_device_polls_no_faster_than_once_a_second(
     assert waits == [1.0]
 
 
-# ---- the account -------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_sign_out_revokes_the_refresh_token(auth: Path) -> None:
     _store(
@@ -805,8 +790,6 @@ async def test_the_account_is_what_the_tokens_say_the_id_token_first(
     async with SharedResources() as shared:
         assert await CodexLogin(auth, resources=shared).account() == account
 
-
-# ---- the steps, for a server that runs them across its own requests ----------
 
 _ISSUER = "https://issuer.test"
 

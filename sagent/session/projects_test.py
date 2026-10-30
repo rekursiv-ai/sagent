@@ -50,9 +50,6 @@ def _journal(
     return path
 
 
-# ---- cwd_slug --------------------------------------------------------------
-
-
 def test_a_slug_turns_separators_into_underscores() -> None:
     """Not under ``/home``: the slug resolves symlinks, and some hosts link ``/home``."""
     assert cwd_slug(Path("/Me/Proj9")) == "_Me_Proj9"
@@ -90,9 +87,6 @@ def test_a_long_slug_is_cut_and_ends_in_a_stable_hash() -> None:
 def test_a_slug_at_the_limit_is_kept_whole() -> None:
     assert cwd_slug(Path("/abcd"), max_len=5) == "_abcd"
     assert cwd_slug(Path("/abcde"), max_len=5).startswith("_abcd-")
-
-
-# ---- directories -----------------------------------------------------------
 
 
 def test_a_project_lives_under_the_per_user_root() -> None:
@@ -135,9 +129,6 @@ def test_a_child_is_a_session_inside_its_parents() -> None:
     )
 
 
-# ---- new_session_path ------------------------------------------------------
-
-
 def test_a_new_session_is_a_private_directory_holding_an_empty_journal(
     tmp_path: Path,
 ) -> None:
@@ -173,9 +164,6 @@ def test_a_colliding_id_is_replaced_by_a_fresh_one(
     assert caplog.messages == [
         f"session id {taken.hex[:12]} already exists; minting another.",
     ]
-
-
-# ---- list_sessions ---------------------------------------------------------
 
 
 def test_a_missing_directory_lists_nothing(tmp_path: Path) -> None:
@@ -391,9 +379,6 @@ def test_a_limited_listing_reads_no_journal_past_the_limit(
     peeked.clear()
     list_sessions(tmp_path, limit=2)
     assert peeked == ["000000000003", "000000000002"]
-
-
-# ---- find_sessions ---------------------------------------------------------
 
 
 def test_find_matches_a_prefix_in_every_project_and_scope(tmp_path: Path) -> None:

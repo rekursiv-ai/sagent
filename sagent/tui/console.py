@@ -1,6 +1,6 @@
 r"""The scrollback, printed with Rich.
 
-Rows share one left edge: a call's header, its ``⎿`` input rows, and its
+Rows share one left edge: a call's header, its marked input rows, and its
 output, indented with no glyph, so a long body is not a column of boxes.
 
 Typical usage example:
@@ -107,12 +107,13 @@ class ConsolePrinter:
         session keeps every summary the model returns.
       max_label_lines: The most rows one call's header and input may take.
       style: The colors; dark-terminal ones when omitted.
+      mark: What the first row under a call's header shows in ``hang``'s middle.
 
     """
 
     indent = "  "
-    input_mark = "  ⎿  "
-    output_indent = "     "
+    hang = "     "
+    """What starts every row under a call's header but the first."""
 
     def __init__(
         self,
@@ -121,22 +122,28 @@ class ConsolePrinter:
         show_thinking: bool = False,
         max_label_lines: int = 12,
         style: ConsoleStyle | None = None,
+        mark: str = "⎿",
     ) -> None:
         self.console = console
         self.show_thinking = show_thinking
         self.max_label_lines = max_label_lines
         self.style = style if style is not None else ConsoleStyle()
+        self.mark = mark
         self.sticky = Sticky()
         self.gap_owed = False
+        self.mark_owed = False
+        """Whether a call's header printed last, so the next row takes ``mark``."""
 
     def line(self, text: str) -> None:
         """Write ``text`` as it is, with no markup read in it."""
         self._gap()
+        self.mark_owed = False
         self.console.print(_shown(text), markup=False, highlight=False)
 
     def note(self, text: str) -> None:
         """Write ``text`` dim."""
         self._gap()
+        self.mark_owed = False
         for row in _shown(text).splitlines() or [""]:
             self.console.print(Text(row, style=self.style.quiet))
 
@@ -170,6 +177,7 @@ class ConsolePrinter:
         """Write a block of the reply, after a blank line."""
         self.gap_owed = True
         self._gap()
+        self.mark_owed = False
         self.console.print(TightMarkdown(_shown(text), sticky=self.sticky))
 
     def thinking(self, text: str, *, opens: bool, closes: bool) -> None:
@@ -184,13 +192,14 @@ class ConsolePrinter:
         """
         del closes
         self._gap()
+        self.mark_owed = False
         if opens:
             self.console.print(Text("∴ Thinking", style=self.style.heading))
         for row in _shown(text).splitlines():
             self.console.print(Text(f"  {row}", style=self.style.quiet))
 
     def call(self, label: str, *, display: ToolDisplay) -> None:
-        """Write the header, wrapped, then each input row after ``⎿``.
+        """Write the header, wrapped, then its input rows, the first after ``mark``.
 
         A summary carries its argument whole, so the cap is here, where the
         width is known: ``max_label_lines`` rows, the last saying how many more.
@@ -209,18 +218,13 @@ class ConsolePrinter:
         hang = " " * (len(name) + 1) if sep and len(name) + 1 <= width // 2 else ""
         for row in self._wrap(header, width, hang):
             self.console.print(Text(f"{self.indent}{row}", style=self.style.quiet))
-        if not rest:
-            return
-        rows = display.command.render(
-            rest,
-            width=self.console.width - len(self.input_mark),
-        )
-        for i, row in enumerate(rows):
+        self.mark_owed = True
+        rows = display.command.render(rest, width=self.console.width - len(self.hang))
+        for row in rows if rest else []:
             # An unknown or empty language highlights as plain text.
             body = highlight_source(row, display.command_language)
             body.stylize(self.style.quiet)
-            mark = self.input_mark if i == 0 else self.output_indent
-            self.console.print(Text(mark, style=self.style.quiet) + body)
+            self.console.print(Text(self._lead(), style=self.style.quiet) + body)
 
     def output(self, text: str, *, display: ToolDisplay) -> None:
         """Write the rows of ``text`` that ``display.output`` keeps, indented.
@@ -233,11 +237,9 @@ class ConsolePrinter:
         self._gap()
         for row in display.output.render(
             _shown(text),
-            width=self.console.width - len(self.output_indent),
+            width=self.console.width - len(self.hang),
         ):
-            self.console.print(
-                Text(f"{self.output_indent}{row}", style=self.style.quiet),
-            )
+            self.console.print(Text(f"{self._lead()}{row}", style=self.style.quiet))
 
     def diff(
         self,
@@ -258,13 +260,15 @@ class ConsolePrinter:
         render_diff(
             self.console,
             _shown(diff),
+            lead=Text(self._lead(), style=self.style.quiet),
+            hang=self.hang,
             path=_shown(path),
             lines=lines,
             sticky=self.sticky,
         )
 
     def error(self, text: str) -> None:
-        """Write ``✗`` and ``text`` in red at the output indent; never nothing.
+        """Write ``text`` in red, its first row after ``✗``; never nothing.
 
         Args:
           text: What failed; a blank one still shows a placeholder.
@@ -274,13 +278,9 @@ class ConsolePrinter:
         rows = _shown(text).rstrip("\n").splitlines()
         if not any(r.strip() for r in rows):
             rows = ["<no error message>"]
-        self.console.print(
-            Text(f"{self.output_indent}✗ {rows[0]}", style=self.style.failure),
-        )
-        for row in rows[1:]:
-            self.console.print(
-                Text(f"{self.output_indent}  {row}", style=self.style.failure),
-            )
+        for i, row in enumerate(rows):
+            lead = self._lead("✗" if i == 0 else "")
+            self.console.print(Text(f"{lead}{row}", style=self.style.failure))
 
     def halt(self, text: str) -> None:
         """Write ``text`` bold red, wrapped between two rules as wide as a fill.
@@ -290,6 +290,7 @@ class ConsolePrinter:
 
         """
         self._gap()
+        self.mark_owed = False
         shown = _shown(text)
         width = self.sticky.cells(
             max(cell_len(row) for row in shown.split("\n")),
@@ -304,6 +305,7 @@ class ConsolePrinter:
     def _bar(self, lead: str, *, text: str, style: Style) -> None:
         """Write ``lead`` then ``text`` as filled bars, between blank lines."""
         self.gap_owed = False
+        self.mark_owed = False
         self.console.print()
         rows = text.rstrip("\n").split("\n")
         # A bar is 80 whatever it holds, outside the turn's edge: what was said
@@ -323,6 +325,12 @@ class ConsolePrinter:
                 row.append(" " * max(0, width - row.cell_len))
                 self.console.print(row, style=style)
         self.gap_owed = True
+
+    def _lead(self, glyph: str = "") -> str:
+        """Return what starts the next row under a header, and spend the owed mark."""
+        shown = glyph or (self.mark if self.mark_owed else "")
+        self.mark_owed = False
+        return f"  {shown}  " if shown else self.hang
 
     def _gap(self) -> None:
         """Print the blank line owed after a user bar or before a reply block."""

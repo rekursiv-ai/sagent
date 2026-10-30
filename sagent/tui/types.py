@@ -76,7 +76,6 @@ __all__ = [
 ]
 
 
-# ── What prints ──────────────────────────────────────────────────────
 type Record = (
     UserMessage
     | AgentToAgentMessage
@@ -130,7 +129,6 @@ type Shown = Record | Live
 """Exactly the events scrollback prints; StatusChanged feeds TitlePane."""
 
 
-# ── Stream state: the one thing the runtime cannot know ──────────────
 type Stream = Literal["reply", "thinking"]
 
 
@@ -162,7 +160,6 @@ class Printed:
     last: int = -1
 
 
-# ── Width ────────────────────────────────────────────────────────────
 def fill(
     content: int,
     *,
@@ -240,7 +237,6 @@ class Sticky:
         return cells
 
 
-# ── Panes ────────────────────────────────────────────────────────────
 type Fragments = tuple[tuple[str, str], ...]  # (style, text): comparable.
 
 
@@ -402,7 +398,6 @@ class Frame:
     status: str
 
 
-# ── Back in ──────────────────────────────────────────────────────────
 class Commands(Protocol):
     """A line becomes agent actions; what it tells the user is a CommandOutput."""
 

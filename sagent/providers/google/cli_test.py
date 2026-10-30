@@ -111,9 +111,6 @@ async def shared(stub: _Stub) -> AsyncIterator[_Resources]:
         yield resources
 
 
-# ---- the process ---------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 async def test_agy_runs_as_our_agent_in_a_home_of_its_own(
     shared: _Resources,
@@ -194,9 +191,6 @@ async def test_the_effort_is_the_model_id_s_suffix(
     await _stream(model, Request(records=_HELLO))
     assert stub.only("argv").splitlines()[-1] == f"gemini-3.8-flash-{effort}"
     await model.provider.aclose()
-
-
-# ---- turns ---------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
@@ -458,9 +452,6 @@ async def test_an_image_is_named_not_sent(shared: _Resources, stub: _Stub) -> No
     await model.provider.aclose()
 
 
-# ---- failures ------------------------------------------------------------------
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "kind"),
@@ -551,9 +542,6 @@ async def test_agy_quiet_too_long_is_a_disconnect(
     await model.provider.aclose()
 
 
-# ---- the provider --------------------------------------------------------------
-
-
 def test_the_provider_serves_what_agy_offers() -> None:
     """``agy models`` listed 3.8 Flash alone on 2026-10-27, at three efforts."""
     provider = GoogleCLI()
@@ -601,9 +589,6 @@ async def test_a_provider_given_no_resources_closes_its_own() -> None:
     client = provider.resources.http
     await provider.aclose()
     assert client.is_closed
-
-
-# ---- helpers -------------------------------------------------------------------
 
 
 _HELLO: tuple[UserMessage, ...] = (UserMessage(content="hello"),)

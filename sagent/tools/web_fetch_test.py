@@ -94,9 +94,6 @@ def _shell(command: str) -> Mapping[str, PlainTree] | str | None:
     return WebFetch(session=FetchSession()).from_shell(invocation)
 
 
-# --- Description ------------------------------------------------------------
-
-
 def test_webfetch_describes_itself() -> None:
     tool = WebFetch(session=FetchSession())
     assert tool.name == "WebFetch"
@@ -107,9 +104,6 @@ def test_webfetch_describes_itself() -> None:
     )
     assert tool.summary({}) == "WebFetch "
     assert tool.serialize_key(_CONTEXT, {"url": "https://a.example"}) is None
-
-
-# --- Shell takeover -----------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -154,9 +148,6 @@ def test_a_plain_download_becomes_a_fetch(command: str) -> None:
 )
 def test_anything_else_stays_a_shell_command(command: str) -> None:
     assert _shell(command) is None
-
-
-# --- Fetching ---------------------------------------------------------------
 
 
 @pytest.mark.asyncio

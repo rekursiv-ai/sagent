@@ -90,6 +90,12 @@ def test_a_sticky_row_only_widens_within_a_turn() -> None:
     assert sticky.row == 109
 
 
+def test_a_short_indented_block_ends_at_80_not_past_it() -> None:
+    sticky = Sticky()
+    assert sticky.cells(10, total_padding=2, width=200, indent=4) == 76
+    assert sticky.row == 80
+
+
 def test_a_sticky_row_is_the_edge_an_indented_block_ends_at() -> None:
     sticky = Sticky()
     assert sticky.cells(90, total_padding=2, width=200, indent=4) == 92

@@ -68,9 +68,6 @@ def _encode(
     return responses.encode(request, capability=capability, settings=settings)
 
 
-# ---- the request -------------------------------------------------------------
-
-
 def test_encode_sends_the_whole_conversation_statelessly() -> None:
     capability, settings = _model()
     settings = replace(settings, thinking_effort="none")
@@ -276,9 +273,6 @@ def test_encode_sends_the_tier_and_a_temperature_only_where_they_apply() -> None
     # A model that can reason rejects a temperature.
     assert "temperature" not in body
     assert body["service_tier"] == "priority"
-
-
-# ---- the reply ---------------------------------------------------------------
 
 
 def _reader(

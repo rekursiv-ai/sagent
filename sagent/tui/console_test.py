@@ -318,21 +318,101 @@ def test_output_the_display_hides_prints_nothing() -> None:
     assert screen.rows() == []
 
 
-def test_a_diff_renders_with_its_counts() -> None:
+def test_a_diff_is_its_numbered_lines_alone() -> None:
     screen = _Screen()
     screen.printer.diff("@@ -1 +1 @@\n-a\n+b", path="x.py")
-    assert screen.rows() == [
-        "  ⎿  Added 1 lines, removed 1 lines",
-        "  1 a",
-        "  1 b",
+    assert screen.rows() == ["     1 a", "     1 b"]
+
+
+def _under_a_header(kind: str) -> list[str]:
+    """Return the rows a call's header, then one row of ``kind``, print under it."""
+    screen = _Screen()
+    printer = screen.printer
+    shown = ToolDisplay(output=DisplaySpec())
+    match kind:
+        case "input":
+            printer.call("Bash ls\nls\npwd", display=shown)
+        case "output":
+            printer.call("Bash ls", display=shown)
+            printer.output("one\ntwo", display=shown)
+        case "diff":
+            printer.call("Edit a.py", display=shown)
+            printer.diff("@@ -1 +1 @@\n-a\n+b", path="a.py")
+        case _:
+            printer.call("Read a.py", display=shown)
+            printer.error("gone\nwhy")
+    return screen.rows()[1:]
+
+
+@pytest.mark.parametrize(
+    ("kind", "rows"),
+    [
+        ("input", ["  ⎿  ls", "     pwd"]),
+        ("output", ["  ⎿  one", "     two"]),
+        ("diff", ["  ⎿  1 a", "     1 b"]),
+        ("error", ["  ✗  gone", "     why"]),
+    ],
+)
+def test_the_first_row_under_a_header_takes_the_mark(
+    kind: str,
+    rows: list[str],
+) -> None:
+    assert _under_a_header(kind) == rows
+
+
+def test_a_row_after_the_first_hangs_unmarked() -> None:
+    screen = _Screen()
+    shown = ToolDisplay(output=DisplaySpec())
+    screen.printer.call("Bash ls\nls", display=shown)
+    screen.printer.output("[undetached; #9]", display=shown)
+    screen.printer.diff("@@ -1 +1 @@\n-a\n+b", path="a.py")
+    assert screen.rows()[1:] == [
+        "  ⎿  ls",
+        "     [undetached; #9]",
+        "     1 a",
+        "     1 b",
     ]
+
+
+@pytest.mark.parametrize(
+    "kind",
+    ["line", "note", "user", "agent", "markdown", "thinking", "halt"],
+)
+def test_any_other_row_takes_the_header_s_mark_away(kind: str) -> None:
+    screen = _Screen()
+    printer = screen.printer
+    printer.call("Read a.py", display=ToolDisplay())
+    match kind:
+        case "agent":
+            printer.agent("w", None, "x")
+        case "thinking":
+            printer.thinking("x", opens=False, closes=False)
+        case _:
+            getattr(printer, kind)("x")
+    printer.output("late", display=ToolDisplay(output=DisplaySpec()))
+    assert screen.rows()[-1] == "     late"
+
+
+def test_a_hidden_output_leaves_the_mark_for_the_next_row() -> None:
+    screen = _Screen()
+    screen.printer.call("Read a.py", display=ToolDisplay())
+    screen.printer.output("secret", display=ToolDisplay())
+    screen.printer.error("gone")
+    assert screen.rows() == ["  Read a.py", "  ✗  gone"]
+
+
+def test_the_mark_is_the_printer_s_to_choose() -> None:
+    out = io.StringIO()
+    printer = ConsolePrinter(Console(file=out, width=40, color_system=None), mark="└")
+    printer.call("Bash ls\nls", display=ToolDisplay())
+    assert out.getvalue().splitlines()[1] == "  └  ls"
 
 
 def test_an_error_is_red_with_a_mark_on_its_first_row() -> None:
     screen = _Screen(color=True)
     screen.printer.error("failed\ndetail\n")
     raw = screen.raw()
-    assert [_visible(r) for r in raw] == ["     ✗ failed", "       detail"]
+    assert [_visible(r) for r in raw] == ["  ✗  failed", "     detail"]
     assert all(_codes(r)[0] == "2;31" for r in raw)
 
 
@@ -340,7 +420,7 @@ def test_an_error_is_red_with_a_mark_on_its_first_row() -> None:
 def test_a_blank_error_still_says_something(text: str) -> None:
     screen = _Screen()
     screen.printer.error(text)
-    assert screen.rows() == ["     ✗ <no error message>"]
+    assert screen.rows() == ["  ✗  <no error message>"]
 
 
 @pytest.mark.parametrize(("width", "rule"), [(30, 30), (10, 10), (200, 80)])
@@ -563,10 +643,10 @@ def test_a_user_bar_keeps_a_trailing_x_and_drops_trailing_newlines() -> None:
 def test_an_error_keeps_its_text_but_the_final_newlines() -> None:
     screen = _Screen(color=True)
     screen.printer.error("\nfailed X  \n")
-    assert [_visible(r) for r in screen.raw()] == ["     ✗ ", "       failed X  "]
+    assert [_visible(r) for r in screen.raw()] == ["  ✗  ", "     failed X  "]
     plain = _Screen()
     plain.printer.error("failed X\n")
-    assert plain.rows() == ["     ✗ failed X"]
+    assert plain.rows() == ["  ✗  failed X"]
 
 
 def test_a_diff_is_highlighted_by_its_path() -> None:
