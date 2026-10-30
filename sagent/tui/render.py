@@ -174,6 +174,8 @@ class Scrollback:
                     | types.ModelResponseCancelled()
                     | types.ModelResponseError()
                     | types.ModelCallSuspended()
+                    | types.LoginSwitched()
+                    | types.LoginsSpent()
                     | types.CompactStarted()
                     | types.CompactComplete()
                     | types.CompactFailed()
@@ -253,6 +255,9 @@ class Scrollback:
                         "agent waiting -- /account or /model to switch now,"
                         " or type to retry now",
                     )
+            case types.LoginSwitched() | types.LoginsSpent():
+                self._flush()
+                p.note(login_text(given))
             case types.CompactStarted():
                 self._flush()
                 p.note("[compacting history…]")
@@ -388,6 +393,8 @@ class Scrollback:
             p.error(f"{label}: {error_text(event.exception)}")
         elif isinstance(event, types.ModelCallSuspended):
             p.error(f"{label}: {suspended_text(event)}")
+        elif isinstance(event, (types.LoginSwitched, types.LoginsSpent)):
+            p.note(f"{label}: {login_text(event)}")
         elif isinstance(event, AgentToAgentMessage):
             p.agent(event.sender or "agent", recipient=label, text=event.content or "")
 
@@ -586,20 +593,27 @@ def suspended_text(event: types.ModelCallSuspended) -> str:
     return f"{_why(event.exception)}. Resumes {_when(event.until)}."
 
 
-# The provider's own words go to the log: they repeat the window, or say only
-# "Rate limited".
-def _why(error: RetryableError) -> str:
-    """Return what a retryable failure is, as ``Weekly limit reached``."""
-    if isinstance(error, RateLimitedError):
-        limit = error.limit
-        return (
-            f"{limit[:1].upper()}{limit[1:]} limit reached" if limit else "Rate limited"
-        )
-    if isinstance(error, OverloadedError):
-        return "Service overloaded"
-    if isinstance(error, DisconnectedError):
-        return "Disconnected"
-    return "Service unavailable"
+def login_text(event: types.LoginSwitched | types.LoginsSpent) -> str:
+    """Return what a login switch says: why it left a login, and which signs in now.
+
+    Args:
+      event: The switch, or the news that every login is spent.
+
+    Returns:
+      text: Such as ``[default spent (5-hour, resets ...); now on personal]``.
+
+    """
+    if isinstance(event, types.LoginsSpent):
+        resets = ", ".join(f"{a} {_when(until)}" for a, until in event.resets)
+        return f"[every {event.provider} login spent: {resets}]"
+    if not event.window:
+        return f"[{event.now} reset; back on {event.now}]"
+    if not event.until:
+        return f"[{event.was} {event.window}; now on {event.now}]"
+    return (
+        f"[{event.was} spent ({event.window}, resets {_when(event.until)});"
+        f" now on {event.now}]"
+    )
 
 
 # The date, as ``date`` prints it, stays true however late the line is read; the
@@ -701,3 +715,19 @@ def _below(value: PlainTree, home: Path | None) -> PlainTree:
         return value
     path = PurePosixPath(value)
     return str(path.relative_to(home)) if path.is_relative_to(home) else value
+
+
+# The provider's own words go to the log: they repeat the window, or say only
+# "Rate limited".
+def _why(error: RetryableError) -> str:
+    """Return what a retryable failure is, as ``Weekly limit reached``."""
+    if isinstance(error, RateLimitedError):
+        limit = error.limit
+        return (
+            f"{limit[:1].upper()}{limit[1:]} limit reached" if limit else "Rate limited"
+        )
+    if isinstance(error, OverloadedError):
+        return "Service overloaded"
+    if isinstance(error, DisconnectedError):
+        return "Disconnected"
+    return "Service unavailable"

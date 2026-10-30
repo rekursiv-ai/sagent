@@ -192,7 +192,7 @@ def test_its_accounts_are_the_logins_saved_beside_claude_s(
     _keep_logins_in(tmp_path, monkeypatch)
     for name in (".credentials.json", ".credentials-work.json"):
         (tmp_path / name).write_text("{}")
-    assert AnthropicCLI.accounts() == ("work",)
+    assert AnthropicCLI().logins.accounts() == ("work",)
 
 
 def _keep_logins_in(folder: Path, monkeypatch: pytest.MonkeyPatch) -> None:

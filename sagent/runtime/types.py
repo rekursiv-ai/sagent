@@ -47,6 +47,8 @@ __all__ = [
     "Job",
     "Kill",
     "LazyEvent",
+    "LoginSwitched",
+    "LoginsSpent",
     "Markers",
     "ModelCallStarted",
     "ModelCallSuspended",
@@ -445,6 +447,33 @@ class Charged:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class LoginSwitched:
+    """The model moved to another login of its provider: off a spent one, or back."""
+
+    provider: str
+    was: str
+    """The login left: ``default``, or a named account."""
+
+    now: str
+    """The login the next call signs in as."""
+
+    window: str = ""
+    """The window ``was`` spent, as ``5-hour``; ``""`` for a move back after a reset."""
+
+    until: float = 0.0
+    """When that window resets, in seconds since the epoch; ``0`` for a move back."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LoginsSpent:
+    """Every login of the provider has spent the window the model needs."""
+
+    provider: str
+    resets: tuple[tuple[str, float], ...]
+    """Each login and when it resets, soonest first."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Scheduled:
     """Work to run at the runtime's next safe point, between turns."""
 
@@ -513,6 +542,8 @@ type RuntimeEvent = (
     | ModelResponseCancelled
     | ModelResponseError
     | ModelCallSuspended
+    | LoginSwitched
+    | LoginsSpent
     | Retry
     | ModelIdle
     | AgentIdle

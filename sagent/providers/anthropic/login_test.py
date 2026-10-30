@@ -587,6 +587,20 @@ async def test_the_macos_keychain_holds_the_login_claude_keeps(
 
 
 @pytest.mark.asyncio
+async def test_the_default_file_named_on_macos_is_the_keychain_entry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller deriving every account's file from the default names it too."""
+    keychain = _Keychain.installed(tmp_path, monkeypatch)
+    oauth = {"accessToken": "at-k", "expiresAt": 10**15}
+    keychain.entry.write_text(json_dumps({"claudeAiOauth": oauth}))
+    async with _Served(_Server()) as shared:
+        login_ = ClaudeLogin(ClaudeLogin.default_path(), resources=shared)
+        assert await login_.token() == "at-k"
+
+
+@pytest.mark.asyncio
 async def test_a_keychain_write_keeps_the_login_out_of_every_command_line(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

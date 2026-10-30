@@ -1,11 +1,15 @@
-"""Tests for the team: labels, who spawned whom, depth caps, and persistent children."""
+"""Tests for the team: labels, who spawned whom, depth caps, persistent children,
+and the login each member's model signs in as.
+"""
 
 from __future__ import annotations
 
+from collections import deque
 from contextlib import AsyncExitStack
-from dataclasses import replace
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, override
 
+import asyncio
 import logging
 import time
 
@@ -13,9 +17,22 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import ChildSpec, Team
-from sagent.model.exceptions import OverloadedError, RateLimitedError
-from sagent.model.scripted import ScriptedProvider, call, reply
+from sagent.lib.userdirs import config_dir
+from sagent.model.exceptions import (
+    AuthError,
+    OverloadedError,
+    RateLimitedError,
+    UnknownModelError,
+)
+from sagent.model.scripted import (
+    Reply,
+    ScriptedModel,
+    ScriptedProvider,
+    call,
+    reply,
+)
 from sagent.providers.catalog import ModelCatalog
+from sagent.providers.login import Logins, Spent
 from sagent.runtime import types
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.types import (
@@ -33,7 +50,8 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
-    from sagent.model.types import Response
+    from sagent.model.types import Request, Response
+    from sagent.providers.types import ProviderFactory, ProviderSharedResources
 
 
 def _team() -> Team:
@@ -925,6 +943,339 @@ async def test_choices_stand_in_the_journal_and_come_back(tmp_path: Path) -> Non
                     team.choose("Agent", "model.thinking.effort", chosen)
                 else:
                     assert team.choices == {"Agent": {"model.thinking.effort": "high"}}
+
+
+@dataclass(slots=True, kw_only=True)
+class _Accounts:
+    """Each account's script, shared by every provider built for it, and who served."""
+
+    replies: dict[str, deque[Reply]] = field(default_factory=dict[str, deque[Reply]])
+    served: list[str] = field(default_factory=list[str])
+    modelless: set[str] = field(default_factory=set[str])
+    """Accounts whose provider serves no model."""
+
+    def script(self, account: str, *replies: Reply) -> None:
+        self.replies.setdefault(account, deque()).extend(replies)
+
+    def factories(self, account: str | None) -> dict[str, ProviderFactory]:
+        def build(*, name: str, resources: ProviderSharedResources) -> _Signing:
+            return _Signing(name=name, resources=resources, account=account, of=self)
+
+        return {"sub": build, "plain": ScriptedProvider}
+
+
+class _Signing(ScriptedProvider):
+    """A provider signed in as ``account``, answering from that account's script."""
+
+    def __init__(
+        self,
+        *,
+        name: str,
+        resources: ProviderSharedResources,
+        account: str | None,
+        of: _Accounts,
+    ) -> None:
+        super().__init__(name=name, resources=resources)
+        self.account = account or "default"
+        self._of = of
+        self.replies = of.replies.setdefault(self.account, deque())
+
+    @property
+    def logins(self) -> Logins:
+        return Logins(config_dir() / "rekursiv-ai" / "secrets" / "sub.json")
+
+    async def login(self, *, headless: bool = False) -> None:
+        del headless
+
+    @override
+    def __getitem__(self, model: str) -> ScriptedModel:
+        if self.account in self._of.modelless:
+            raise UnknownModelError(f"No model {model!r}.")
+        return super().__getitem__(model)
+
+    @override
+    def next_reply(self, request: Request) -> Response:
+        self._of.served.append(self.account)
+        return super().next_reply(request)
+
+
+def _saved(*accounts: str) -> Logins:
+    """Save a login file for ``default`` and each of ``accounts``; return their logins."""
+    logins = Logins(config_dir() / "rekursiv-ai" / "secrets" / "sub.json")
+    logins.default.parent.mkdir(parents=True, exist_ok=True)
+    for account in ("default", *accounts):
+        logins.path(account).write_text("{}")
+    return logins
+
+
+def _spent(window: str = "5-hour", *, wait_sec: float = 3_600.0) -> RateLimitedError:
+    return RateLimitedError("spent", retry_after_sec=wait_sec, limit=window)
+
+
+async def _session(
+    accounts: _Accounts,
+    tmp_path: Path,
+    *,
+    account: str | None = None,
+    persistent_retry: bool = False,
+) -> tuple[Team, Agent, list[types.RuntimeEvent]]:
+    catalog = ModelCatalog(factories=accounts.factories, account=account)
+    team = Team(catalog=catalog)
+    agent = Agent(
+        model=catalog["sub"]["scripted"],
+        cwd=tmp_path,
+        account=account,
+        persistent_retry=persistent_retry,
+    )
+    seen: list[types.RuntimeEvent] = []
+    agent.runtime.observers.append(seen.append)
+    team.join(agent)
+    await agent.aopen()
+    return team, agent, seen
+
+
+def _switches(seen: list[types.RuntimeEvent]) -> list[tuple[str, str]]:
+    return [(e.was, e.now) for e in seen if isinstance(e, types.LoginSwitched)]
+
+
+@pytest.mark.asyncio
+async def test_a_spent_window_moves_the_call_to_the_next_login_at_once(
+    tmp_path: Path,
+) -> None:
+    logins = _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", _spent("5-hour"))
+    accounts.script("personal", reply("from personal"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("hi") == "from personal"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "personal"]
+    assert _switches(seen) == [("default", "personal")]
+    mark = logins.spent("default", "scripted", now=time.time())
+    assert mark is not None
+    assert mark.window == "5-hour"
+    # The journal keeps the account the user chose, not the one spilled to.
+    assert agent.account is None
+
+
+@pytest.mark.asyncio
+async def test_a_turn_after_the_reset_goes_back_to_the_first_login(
+    tmp_path: Path,
+) -> None:
+    logins = _saved("personal")
+    await logins.spend(
+        None,
+        Spent(window="5-hour", model="scripted", until=time.time() + 0.3),
+    )
+    accounts = _Accounts()
+    accounts.script("personal", reply("one"))
+    accounts.script("default", reply("two"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("first") == "one"
+        await asyncio.sleep(0.4)
+        assert await agent.send("second") == "two"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["personal", "default"]
+    assert _switches(seen) == [("default", "personal"), ("personal", "default")]
+
+
+@pytest.mark.asyncio
+async def test_a_short_throttle_is_waited_as_ever(tmp_path: Path) -> None:
+    logins = _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", _spent("", wait_sec=10.0))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        with pytest.raises(RateLimitedError):
+            await agent.send("hi")
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default"]
+    assert _switches(seen) == []
+    assert logins.first_live("scripted", now=time.time()) == "default"
+
+
+@pytest.mark.asyncio
+async def test_no_login_is_asked_twice_and_all_spent_waits_as_ever(
+    tmp_path: Path,
+) -> None:
+    _saved("personal", "work")
+    accounts = _Accounts()
+    accounts.script("default", _spent("5-hour"))
+    accounts.script("personal", _spent("weekly"))
+    accounts.script("work", _spent("5-hour", wait_sec=600.0))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        with pytest.raises(RateLimitedError):
+            await agent.send("hi")
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "personal", "work"]
+    (spent,) = [e for e in seen if isinstance(e, types.LoginsSpent)]
+    assert [account for account, _ in spent.resets] == ["work", "default", "personal"]
+
+
+@pytest.mark.asyncio
+async def test_a_window_of_another_family_moves_nothing(tmp_path: Path) -> None:
+    """The login stays the first for this model, so a move would be to itself."""
+    _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", _spent("weekly Opus"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        with pytest.raises(RateLimitedError):
+            await agent.send("hi")
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default"]
+    assert _switches(seen) == []
+
+
+@pytest.mark.asyncio
+async def test_a_login_whose_provider_lacks_the_model_is_passed_over(
+    tmp_path: Path,
+) -> None:
+    _saved("aaa", "personal")
+    accounts = _Accounts(modelless={"aaa"})
+    accounts.script("default", _spent("5-hour"))
+    accounts.script("personal", reply("from personal"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("hi") == "from personal"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "personal"]
+    assert _switches(seen) == [("default", "personal")]
+
+
+@pytest.mark.asyncio
+async def test_a_login_the_user_switches_to_is_where_the_order_starts(
+    tmp_path: Path,
+) -> None:
+    _saved("personal", "work")
+    accounts = _Accounts()
+    accounts.script("default", _spent("5-hour"))
+    accounts.script("personal", reply("one"))
+    accounts.script("work", reply("two"))
+    team, agent, seen = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("first") == "one"
+        agent.model = team.catalog.signed_in("sub", account="work")["scripted"]
+        agent.account = "work"
+        assert await agent.send("second") == "two"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "personal", "work"]
+    assert _switches(seen) == [("default", "personal")]
+
+
+@pytest.mark.asyncio
+async def test_a_login_moved_onto_and_found_signed_out_is_passed_over(
+    tmp_path: Path,
+) -> None:
+    _saved("personal", "work")
+    accounts = _Accounts()
+    accounts.script("default", _spent("5-hour"))
+    accounts.script("personal", AuthError("expired"))
+    accounts.script("work", reply("from work"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("hi") == "from work"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "personal", "work"]
+    assert _switches(seen) == [("default", "personal"), ("personal", "work")]
+
+
+@pytest.mark.asyncio
+async def test_the_chosen_login_signed_out_is_the_user_s_to_fix(
+    tmp_path: Path,
+) -> None:
+    _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", AuthError("expired"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        with pytest.raises(AuthError):
+            await agent.send("hi")
+    finally:
+        await agent.aclose()
+    assert _switches(seen) == []
+
+
+@pytest.mark.asyncio
+async def test_a_window_of_one_family_leaves_the_login_for_the_others(
+    tmp_path: Path,
+) -> None:
+    logins = _saved("personal")
+    await logins.spend(
+        None,
+        Spent(window="weekly Opus", model="opus-5.5", until=time.time() + 60),
+    )
+    accounts = _Accounts()
+    accounts.script("default", reply("served"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("hi") == "served"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default"]
+
+
+@pytest.mark.asyncio
+async def test_the_chosen_login_comes_first_then_the_precedence(
+    tmp_path: Path,
+) -> None:
+    logins = _saved("personal", "work")
+    await logins.prefer(("work", "default", "personal"))
+    accounts = _Accounts()
+    accounts.script("personal", _spent("weekly"))
+    accounts.script("work", reply("from work"))
+    _, agent, seen = await _session(accounts, tmp_path, account="personal")
+    try:
+        assert await agent.send("hi") == "from work"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["personal", "work"]
+    assert _switches(seen) == [("personal", "work")]
+    assert agent.account == "personal"
+
+
+@pytest.mark.asyncio
+async def test_the_precedence_picks_the_first_login_of_a_fresh_session(
+    tmp_path: Path,
+) -> None:
+    logins = _saved("personal")
+    await logins.prefer(("personal", "default"))
+    accounts = _Accounts()
+    accounts.script("personal", reply("from personal"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("hi") == "from personal"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["personal"]
+
+
+@pytest.mark.asyncio
+async def test_a_provider_without_logins_is_left_alone(tmp_path: Path) -> None:
+    catalog = ModelCatalog(factories={"plain": ScriptedProvider})
+    team = Team(catalog=catalog)
+    provider = catalog["plain"]
+    assert isinstance(provider, ScriptedProvider)
+    provider.replies.extend([_spent("5-hour")])
+    agent = Agent(model=provider["scripted"], cwd=tmp_path)
+    team.join(agent)
+    await agent.aopen()
+    try:
+        with pytest.raises(RateLimitedError):
+            await agent.send("hi")
+    finally:
+        await agent.aclose()
 
 
 if __name__ == "__main__":

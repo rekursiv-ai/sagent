@@ -15,10 +15,12 @@ import pytest
 
 from sagent.runtime import types
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tui.console import ConsolePrinter, ConsoleStyle, Title
+from sagent.tui.console import ConsolePrinter, ConsoleStyle, Screen, Title
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sagent.tui.types import Printer
 
 
@@ -435,6 +437,31 @@ def test_any_row_printed_after_a_call_ends_it_being_last(kind: str) -> None:
         case _:
             getattr(printer, kind)("x")
     assert printer.last_call is None
+
+
+def test_a_write_to_the_screen_past_the_printer_ends_the_last_call() -> None:
+    screen = _Screen()
+    printer = screen.printer
+    printer.call("Read a.py", display=ToolDisplay(), key="1")
+    assert printer.screen.write("") == 0
+    before = printer.last_call
+    printer.screen.write("a warning\n")
+    assert (before, printer.last_call) == ("1", None)
+    assert screen.rows()[-1] == "a warning"
+
+
+def test_a_screen_counts_and_passes_on_what_is_written(tmp_path: Path) -> None:
+    with (tmp_path / "out").open("w") as file:
+        screen = Screen(file)
+        assert screen.written == 0
+        assert screen.write("ab") == 2
+        screen.flush()
+        assert (screen.written, screen.isatty(), screen.fileno()) == (
+            2,
+            False,
+            file.fileno(),
+        )
+    assert (tmp_path / "out").read_text() == "ab"
 
 
 def test_thinking_that_prints_nothing_leaves_the_last_call() -> None:

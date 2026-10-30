@@ -12,11 +12,13 @@ import re
 import pytest
 
 from sagent.agent.agent import Agent
+from sagent.lib.userdirs import config_dir
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
 from sagent.model.exceptions import UnknownModelError
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
+from sagent.providers.login import Logins
 from sagent.providers.table import ModelTable, ModelTags
 from sagent.tui.settings.harvest import harvest
 from sagent.tui.settings.model import AgentModel
@@ -224,6 +226,9 @@ async def test_provider_keeps_the_model_or_is_refused() -> None:
 
 @pytest.mark.asyncio
 async def test_account_offers_the_saved_logins_and_the_one_in_use() -> None:
+    saved = config_dir() / "rekursiv-ai" / "secrets" / "saving-home.json"
+    saved.parent.mkdir(parents=True)
+    saved.write_text("{}")
     catalog = ModelCatalog(factories=_signing_in)
     owner = AgentModel(
         agent=Agent(model=catalog["openai-sub"]["wide"]),
@@ -323,13 +328,14 @@ async def test_a_model_without_reasoning_inherits_none() -> None:
 
 
 class _Saving(ScriptedProvider):
-    """A provider that keeps the named logins ``home``."""
+    """A provider keeping its logins with the user's secrets, as ``saving.json``."""
 
     async def login(self, *, headless: bool = False) -> None:
         del headless
 
-    def accounts(self) -> tuple[str, ...]:
-        return ("home",)
+    @property
+    def logins(self) -> Logins:
+        return Logins(config_dir() / "rekursiv-ai" / "secrets" / "saving.json")
 
 
 def _signing_in(account: str | None) -> dict[str, ProviderFactory]:

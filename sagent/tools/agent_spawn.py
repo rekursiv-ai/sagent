@@ -751,6 +751,8 @@ class _Forward:
                 types.ModelResponseComplete,
                 types.ModelResponseError,
                 types.ModelCallSuspended,
+                types.LoginSwitched,
+                types.LoginsSpent,
                 types.CompactComplete,
                 types.DetachedResult,
                 AgentToAgentMessage,

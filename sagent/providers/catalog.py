@@ -31,7 +31,7 @@ from sagent.providers.dashscope.api import DashScope
 from sagent.providers.google.api import Google
 from sagent.providers.google.cli import GoogleCLI
 from sagent.providers.llamacpp.server import LlamaCpp
-from sagent.providers.login import check_account
+from sagent.providers.login import Logins, check_account
 from sagent.providers.minimax.api import MiniMax
 from sagent.providers.moonshot.api import Moonshot
 from sagent.providers.openai.api import OpenAI
@@ -576,8 +576,9 @@ def _registry(account: str | None) -> Mapping[str, ProviderFactory]:
 class _SigningIn(Listed, Protocol):
     """A provider class that signs in, as a named account or its default login."""
 
-    def accounts(self) -> tuple[str, ...]:
-        """Return each named account with a login saved."""
+    @property
+    def logins(self) -> Logins:
+        """Return every account kept beside its default login."""
         ...
 
     @override

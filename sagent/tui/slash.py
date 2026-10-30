@@ -225,6 +225,18 @@ class Commands:
                 usage="[headless=auto|true|false]",
                 apply=self._login,
             ),
+            Setting(
+                name=("login", "precedence"),
+                help_short="the order a provider's logins take the model, as quotas run out",
+                help_long="ACCOUNTs, comma separated; default is the default login."
+                " The first with quota left signs in, at each turn's start and"
+                " when a call spends a window; an account chosen with"
+                " /model.provider.account comes first. off orders default, then"
+                " each account as added. PROVIDER is the model's when left out.",
+                usage="[PROVIDER] ACCOUNT,...|off",
+                value=self._precedence_value,
+                apply=self._precedence,
+            ),
             *self._watching(),
         ]
 
@@ -563,6 +575,31 @@ class Commands:
         self.agent.runtime.retry()
         account = self.catalog.account
         return f"{provider.name} signed in{'' if account is None else f' as {account}'}"
+
+    def _precedence_value(self) -> str:
+        provider = self.agent.model.provider
+        if not isinstance(provider, HasLogin):
+            return ""
+        return ",".join(provider.logins.order())
+
+    async def _precedence(self, args: str) -> str:
+        words = args.split()
+        if len(words) not in (1, 2):
+            raise SettingError("give [PROVIDER] ACCOUNT,... or [PROVIDER] off")
+        provider = (
+            self.catalog[self.catalog.name(words[0])]
+            if len(words) == 2
+            else self.agent.model.provider
+        )
+        if not isinstance(provider, HasLogin):
+            raise SettingError(f"{provider.name} keeps no logins to order")
+        order = (
+            None
+            if words[-1] == "off"
+            else tuple(a for a in (w.strip() for w in words[-1].split(",")) if a)
+        )
+        await provider.logins.prefer(order)
+        return f"{provider.name}: {','.join(provider.logins.order())}"
 
     async def _jobs(self, args: str) -> str:
         del args

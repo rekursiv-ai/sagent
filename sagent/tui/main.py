@@ -90,7 +90,7 @@ from sagent.tools.skill import Skill
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
 from sagent.tools.write import Write
-from sagent.tui.console import ConsolePrinter
+from sagent.tui.console import ConsolePrinter, Screen
 from sagent.tui.prompt import (
     OPEN_TREE,
     Input,
@@ -99,7 +99,7 @@ from sagent.tui.prompt import (
     prompt_text,
     repaint_on_change,
 )
-from sagent.tui.render import error_text, suspended_text
+from sagent.tui.render import error_text, login_text, suspended_text
 from sagent.tui.settings.flags import flags
 from sagent.tui.settings.harvest import harvest
 from sagent.tui.settings.match import match
@@ -251,12 +251,18 @@ async def run(
     # would leave the sent text in the prompt.
     path.parent.mkdir(parents=True, exist_ok=True)
     # Not ``patch_stdout``: it builds its proxy with no way to set the batch time.
+    # Whatever else writes to the terminal, such as a library's warning, goes through
+    # the printer's screen, so a result below it names its call again.
     with (
         StdoutProxy(sleep_between_writes=print_batch_sec, raw=True) as proxy,
-        contextlib.redirect_stdout(proxy),
-        contextlib.redirect_stderr(proxy),
+        contextlib.redirect_stdout(screen := Screen(proxy)),
+        contextlib.redirect_stderr(screen),
     ):
-        printer = ConsolePrinter(Console(stderr=True), show_thinking=show_thinking)
+        printer = ConsolePrinter(
+            Console(stderr=True),
+            show_thinking=show_thinking,
+            screen=screen,
+        )
 
         def shown() -> int:
             return printer.output_width
@@ -1067,6 +1073,8 @@ def _records(
         ]
     if isinstance(event, types.ModelCallSuspended):
         return [{"descriptor": "text/x-notice", "content": suspended_text(event)}]
+    if isinstance(event, (types.LoginSwitched, types.LoginsSpent)):
+        return [{"descriptor": "text/x-notice", "content": login_text(event)}]
     return []
 
 

@@ -13,9 +13,10 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, override
 
 import contextlib
+import io
 import re
 import sys
 
@@ -47,6 +48,8 @@ else:
 __all__ = [
     "ConsolePrinter",
     "ConsoleStyle",
+    "Screen",
+    "TextStream",
     "Title",
 ]
 
@@ -110,6 +113,9 @@ class ConsolePrinter:
       max_label_lines: The most rows one call's header and input may take.
       style: The colors; dark-terminal ones when omitted.
       mark: What a call's first input row shows in ``output_indent``'s middle.
+      screen: What the rest of the program writes to the terminal through, so a
+        write past this printer ends ``last_call``; one over the console's own
+        file when omitted.
 
     """
 
@@ -126,16 +132,24 @@ class ConsolePrinter:
         max_label_lines: int = 12,
         style: ConsoleStyle | None = None,
         mark: str = "⎿",
+        screen: Screen | None = None,
     ) -> None:
         self.console = console
+        self.screen = screen if screen is not None else Screen(console.file)
         self.show_thinking = show_thinking
         self.max_label_lines = max_label_lines
         self.style = style if style is not None else ConsoleStyle()
         self.mark = mark
         self.sticky = Sticky()
         self.gap_owed = False
-        self.last_call: str | None = None
-        """The key of the call whose header printed last, until any row follows it."""
+        self._writes = 0
+        self._call: tuple[str | None, int] = (None, -1)
+
+    @property
+    def last_call(self) -> str | None:
+        """The key of the call whose header printed last, until anything is written."""
+        key, written = self._call
+        return key if written == self._written() else None
 
     @property
     def output_width(self) -> int:
@@ -144,12 +158,12 @@ class ConsolePrinter:
 
     def line(self, text: str) -> None:
         """Write ``text`` as it is, with no markup read in it."""
-        self._begin()
+        self._gap()
         self.console.print(_shown(text), markup=False, highlight=False)
 
     def note(self, text: str) -> None:
         """Write ``text`` dim."""
-        self._begin()
+        self._gap()
         for row in _shown(text).splitlines() or [""]:
             self.console.print(Text(row, style=self.style.quiet))
 
@@ -182,7 +196,7 @@ class ConsolePrinter:
     def markdown(self, text: str) -> None:
         """Write a block of the reply, after a blank line."""
         self.gap_owed = True
-        self._begin()
+        self._gap()
         self.console.print(TightMarkdown(_shown(text), sticky=self.sticky))
 
     def thinking(self, text: str, *, opens: bool, closes: bool) -> None:
@@ -199,7 +213,7 @@ class ConsolePrinter:
         rows = _shown(text).splitlines()
         if not opens and not rows:
             return
-        self._begin()
+        self._gap()
         if opens:
             self.console.print(Text("∴ Thinking", style=self.style.heading))
         for row in rows:
@@ -223,7 +237,7 @@ class ConsolePrinter:
           key: Which call this is, kept as ``last_call`` until a row follows.
 
         """
-        self._begin()
+        self._gap()
         header, _, rest = _shown(label).partition("\n")
         width = self._width(self.indent)
         name, sep, _ = header.partition(" ")
@@ -239,7 +253,7 @@ class ConsolePrinter:
             body.stylize(self.style.quiet)
             lead = f"{self.indent}{self.mark} " if i == 0 else self.output_indent
             self.console.print(Text(lead, style=self.style.quiet) + body)
-        self.last_call = key
+        self._call = (key, self._written())
 
     def output(self, text: str, *, display: ToolDisplay) -> None:
         """Write the rows ``display.output`` keeps of ``text``, at the output indent.
@@ -252,7 +266,7 @@ class ConsolePrinter:
         rows = display.output.render(_shown(text), width=self.output_width)
         if not rows:
             return
-        self._begin()
+        self._gap()
         for row in rows:
             self.console.print(
                 Text(f"{self.output_indent}{row}", style=self.style.quiet),
@@ -273,7 +287,7 @@ class ConsolePrinter:
           lines: Rows kept from the head and tail; ``None`` keeps all.
 
         """
-        self._begin()
+        self._gap()
         render_diff(
             self.console,
             _shown(diff),
@@ -298,7 +312,7 @@ class ConsolePrinter:
           text: Why the agent stopped, and what the user can do.
 
         """
-        self._begin()
+        self._gap()
         shown = _shown(text)
         width = self.sticky.cells(
             max(cell_len(row) for row in shown.split("\n")),
@@ -313,7 +327,7 @@ class ConsolePrinter:
     def _bar(self, lead: str, *, text: str, style: Style) -> None:
         """Write ``lead`` then ``text`` as filled bars, between blank lines."""
         self.gap_owed = True
-        self._begin()
+        self._gap()
         rows = text.rstrip("\n").split("\n")
         # A bar is 80 whatever it holds, outside the turn's edge: what was said
         # is prose, so it wraps rather than widening.
@@ -337,7 +351,7 @@ class ConsolePrinter:
     # Every row keeps all its text, wrapped under the text, never under ``✗``.
     def _failure(self, text: str, *, indent: str) -> None:
         """Write ``text`` in red after ``indent``, its first row after ``✗``; never nothing."""
-        self._begin()
+        self._gap()
         rows = DisplaySpec(lines=None).render(
             _shown(text),
             width=self._width(f"{indent}✗ "),
@@ -348,14 +362,18 @@ class ConsolePrinter:
                 Text(f"{indent}{glyph} {row}", style=self.style.failure),
             )
 
-    # Every write that prints a row starts here, so ``last_call`` can never name a
-    # call with a row printed below it, whoever called this printer.
-    def _begin(self) -> None:
-        """End ``last_call``, and print the blank line a bar or a reply block owes."""
-        self.last_call = None
+    # Every write of this printer, and only a write, starts here; ``_written`` counts
+    # them with the screen's, so ``last_call`` ends whoever writes below the call.
+    def _gap(self) -> None:
+        """Print the blank line owed after a user bar or before a reply block."""
+        self._writes += 1
         if self.gap_owed:
             self.console.print()
             self.gap_owed = False
+
+    def _written(self) -> int:
+        """Return how many writes reached the terminal: this printer's and the screen's."""
+        return self._writes + self.screen.written
 
     def _width(self, indent: str) -> int:
         """Return the cells a row has after ``indent``."""
@@ -377,6 +395,61 @@ class ConsolePrinter:
             return rows
         kept = self.max_label_lines - 1
         return [*rows[:kept], f"... ({len(rows) - kept} more lines)"]
+
+
+class TextStream(Protocol):
+    """What ``Screen`` writes to: a file, or prompt_toolkit's ``StdoutProxy``."""
+
+    def write(self, s: str, /) -> int:
+        """Write ``s``; return how much was written."""
+        ...
+
+    def flush(self) -> None:
+        """Flush what is buffered."""
+        ...
+
+    def isatty(self) -> bool:
+        """Return whether it is a terminal."""
+        ...
+
+    def fileno(self) -> int:
+        """Return its file descriptor."""
+        ...
+
+
+class Screen(io.TextIOBase):
+    """A stream to the terminal that counts what was written through it.
+
+    Args:
+      stream: Where the writes go.
+
+    """
+
+    def __init__(self, stream: TextStream) -> None:
+        self.stream = stream
+        self.written = 0
+        """Characters written so far."""
+
+    @override
+    def write(self, s: str, /) -> int:
+        """Write ``s`` to the stream, and count it."""
+        self.written += len(s)
+        return self.stream.write(s)
+
+    @override
+    def flush(self) -> None:
+        """Flush the stream."""
+        self.stream.flush()
+
+    @override
+    def isatty(self) -> bool:
+        """Return whether the stream is a terminal."""
+        return self.stream.isatty()
+
+    @override
+    def fileno(self) -> int:
+        """Return the stream's file descriptor."""
+        return self.stream.fileno()
 
 
 class Title:
