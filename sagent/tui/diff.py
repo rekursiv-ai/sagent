@@ -2,7 +2,7 @@
 
 Typical usage example:
 
-  render_diff(console, splice_diff(result), lead=Text("  "), hang="  ")
+  render_diff(console, splice_diff(result), row_indent="  ")
   console.print(highlight_source("ls -la", "bash"))
 """
 
@@ -12,7 +12,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import difflib
-import itertools
 import re
 import textwrap
 
@@ -38,8 +37,6 @@ from sagent.tui.types import Sticky
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from pygments.lexer import Lexer
     from rich.console import Console
 
@@ -73,8 +70,7 @@ def render_diff(
     console: Console,
     diff: str,
     *,
-    lead: Text,
-    hang: str,
+    row_indent: str,
     path: str = "",
     style: DiffStyle | None = None,
     lines: tuple[int, int] | None = None,
@@ -85,8 +81,7 @@ def render_diff(
     Args:
       console: Where to print.
       diff: The diff; ``---``/``+++`` file headers are skipped.
-      lead: What starts the first row, as wide as ``hang``.
-      hang: What starts every other row.
+      row_indent: What starts every row.
       path: The file, whose name picks the highlighting.
       style: The colors; dark-terminal ones when omitted.
       lines: Body lines kept from the head and the tail, the rest counted in
@@ -110,13 +105,12 @@ def render_diff(
     digits = len(str(_last_number(body, hunk)))
     longest = max((cell_len(ln) for ln in changes), default=0)
     sticky = sticky if sticky is not None else Sticky()
-    # The margin: the hang, the number, a space.
+    # The margin: the row indent, the number, a space.
     width = sticky.cells(
         longest - 1,
-        total_padding=len(hang) + digits + 1,
+        total_padding=cell_len(row_indent) + digits + 1,
         width=console.width,
     )
-    margins = itertools.chain([lead], itertools.repeat(Text(hang)))
     hidden = (
         range(lines[0], len(changes) - lines[1])
         if lines is not None and len(changes) > sum(lines)
@@ -133,7 +127,7 @@ def render_diff(
             if index == hidden.start:
                 console.print(
                     Text.assemble(
-                        next(margins),
+                        row_indent,
                         Text(
                             f"{' ' * (digits + 1)}⋯ {len(hidden)} lines ⋯",
                             style="dim",
@@ -143,7 +137,7 @@ def render_diff(
         elif index in pairs:
             _print_words(
                 console,
-                margins,
+                row_indent,
                 f"{number:>{digits}} ",
                 sigil,
                 pairs[index],
@@ -155,7 +149,7 @@ def render_diff(
             background = {"+": s.added, "-": s.removed}.get(sigil, "")
             _print_line(
                 console,
-                margins,
+                row_indent,
                 f"{number:>{digits}} ",
                 content=_highlight(line[1:], lexer),
                 background=background,
@@ -326,7 +320,7 @@ def _last_number(body: list[str], hunk: re.Pattern[str]) -> int:
 
 def _print_line(
     console: Console,
-    margins: Iterator[Text],
+    row_indent: str,
     margin: str,
     *,
     content: Text,
@@ -341,7 +335,7 @@ def _print_line(
         content.stylize(background)
     _print_rows(
         console,
-        margins,
+        row_indent,
         margin,
         content,
         margin_style=style,
@@ -352,7 +346,7 @@ def _print_line(
 
 def _print_words(
     console: Console,
-    margins: Iterator[Text],
+    row_indent: str,
     margin: str,
     sigil: str,
     parts: list[tuple[str, str]],
@@ -372,7 +366,7 @@ def _print_words(
         at += len(text)
     _print_rows(
         console,
-        margins,
+        row_indent,
         margin,
         content,
         margin_style=f"{s.gutter} {line_bg}",
@@ -383,7 +377,7 @@ def _print_words(
 
 def _print_rows(
     console: Console,
-    margins: Iterator[Text],
+    row_indent: str,
     margin: str,
     content: Text,
     *,
@@ -392,14 +386,12 @@ def _print_rows(
     width: int,
 ) -> None:
     """Print ``content`` wrapped inside ``width``, later rows indented past ``margin``."""
-    # Every margin is as wide as the hang, so the first one sizes them all.
-    first = next(margins)
-    usable = width - first.cell_len - len(margin)
+    usable = width - cell_len(row_indent) - len(margin)
     rows = content.wrap(console, max(1, usable), overflow="fold") or [Text("")]
     for i, row in enumerate(rows):
         console.print(
             Text.assemble(
-                first if i == 0 else next(margins),
+                row_indent,
                 Text(margin if i == 0 else " " * len(margin), style=margin_style),
                 row,
                 Text(" " * max(0, usable - row.cell_len), style=fill_style),

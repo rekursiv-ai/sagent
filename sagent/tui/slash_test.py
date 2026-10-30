@@ -61,6 +61,11 @@ class _Printer:
 
     show_thinking: bool = True
     said: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
+    called: str | None = None
+
+    @property
+    def last_call(self) -> str | None:
+        return self.called if self.said and self.said[-1][0] == "call" else None
 
     def line(self, text: str) -> None:
         self.said.append(("line", text))
@@ -82,9 +87,16 @@ class _Printer:
         del opens, closes
         self.said.append(("thinking", text))
 
-    def call(self, label: str, *, display: ToolDisplay) -> None:
+    def call(
+        self,
+        label: str,
+        *,
+        display: ToolDisplay,
+        key: str | None = None,
+    ) -> None:
         del display
         self.said.append(("call", label))
+        self.called = key
 
     def output(self, text: str, *, display: ToolDisplay) -> None:
         del display
@@ -102,6 +114,9 @@ class _Printer:
 
     def error(self, text: str) -> None:
         self.said.append(("error", text))
+
+    def failed(self, text: str) -> None:
+        self.said.append(("failed", text))
 
     def halt(self, text: str) -> None:
         self.said.append(("halt", text))

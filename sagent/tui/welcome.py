@@ -2,16 +2,21 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
+from random import Random
 from typing import TYPE_CHECKING
 
+from sagent.tui.holiday import holiday_icon, icon_rows
 from sagent.tui.types import fill
 
 
 if TYPE_CHECKING:
     from rich.console import Console
     from rich.text import Text
+
+    from sagent.tui.holiday import Icon
 else:
     from wrapt import lazy_import
 
@@ -38,6 +43,10 @@ def print_welcome(
         model=model,
         provider=provider,
         folder=folder,
+        holiday=holiday_icon(
+            datetime.now(UTC).astimezone().date(),
+            rng=Random(),  # noqa: S311 -- Picks a picture, not a secret.
+        ),
     )
 
 
@@ -49,6 +58,7 @@ def render_welcome(
     model: str = "",
     provider: str = "",
     folder: Path,
+    holiday: Icon | None = None,
     blue: str = "#4a90c4",
     green: str = "#93c47d",
     red: str = "#e06666",
@@ -66,6 +76,8 @@ def render_welcome(
       model: The model line; empty before one is configured.
       provider: The provider serving it.
       folder: The project directory.
+      holiday: An icon to show in place of the logo; terminals without 256
+        colors keep the logo, since the icon's shape depends on its colors.
       blue: The wordmark's color, and the first bar's.
       green: The second bar's color.
       red: The third bar's color.
@@ -78,7 +90,13 @@ def render_welcome(
         return
     unicode_ok = _supports_blocks(console.encoding)
     frame_width = fill(0, total_padding=0, width=console.width)
-    banner = _banner_rows(blue=blue, green=green, red=red)
+    many_colors = console.color_system in {"256", "truecolor"} and not console.no_color
+    banner = _banner_rows(
+        icon=icon_rows(holiday)
+        if holiday and many_colors
+        else _logo_rows(blue=blue, green=green, red=red),
+        blue=blue,
+    )
     large = (
         not console.is_dumb_terminal
         and unicode_ok
@@ -143,17 +161,8 @@ def render_welcome(
     console.print()
 
 
-def _banner_rows(*, blue: str, green: str, red: str) -> list[Text]:
+def _banner_rows(*, icon: list[Text], blue: str) -> list[Text]:
     """Return the icon beside the wordmark, one row per banner line, all one width."""
-    # Terminal adaptation of the supplied document-loop icon, with its three bars.
-    icon = (
-        "   ╔══════╗",
-        "   ▼      ║",
-        " ██████   ║",
-        " █████    ║",
-        " ███████  ║",
-        "   ╚══════╝",
-    )
     wordmark = (
         "███████╗ █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
         "██╔════╝██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝",
@@ -162,25 +171,43 @@ def _banner_rows(*, blue: str, green: str, red: str) -> list[Text]:
         "███████║██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║",
         "╚══════╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝",
     )
-    icon_width = max(len(row) for row in icon)
+    icon_width = max(row.cell_len for row in icon)
     width = icon_width + 3 + max(len(row) for row in wordmark)
     rows: list[Text] = []
-    for row_index, (icon_row, letters) in enumerate(zip(icon, wordmark, strict=True)):
-        lettering = Text()
-        for char in icon_row.ljust(icon_width):
-            # Box glyphs share the wordmark's regular face. Some terminal bold
-            # faces lack them; the double-line shape supplies their weight.
-            style = "not bold"
-            if char == "█" and 2 <= row_index <= 4:
-                style = f"bold {(blue, green, red)[row_index - 2]}"
-            lettering.append(char, style=style)
-        lettering.append("   ")
+    for icon_row, letters in zip(icon, wordmark, strict=True):
+        lettering = icon_row.copy()
+        lettering.append(" " * (icon_width - icon_row.cell_len + 3))
         for char in letters:
             style = f"dim {blue}" if char in "╔╗╚╝═║" else blue
             lettering.append(char, style=style)
         # Keep the lockup rectangular, including its final alignment row.
         lettering.append(" " * (width - lettering.cell_len))
         rows.append(lettering)
+    return rows
+
+
+def _logo_rows(*, blue: str, green: str, red: str) -> list[Text]:
+    """Return the document-loop logo, with its three colored bars."""
+    # Terminal adaptation of the supplied document-loop icon, with its three bars.
+    logo = (
+        "   ╔══════╗",
+        "   ▼      ║",
+        " ██████   ║",
+        " █████    ║",
+        " ███████  ║",
+        "   ╚══════╝",
+    )
+    rows: list[Text] = []
+    for row_index, logo_row in enumerate(logo):
+        row = Text()
+        for char in logo_row:
+            # Box glyphs share the wordmark's regular face. Some terminal bold
+            # faces lack them; the double-line shape supplies their weight.
+            style = "not bold"
+            if char == "█" and 2 <= row_index <= 4:
+                style = f"bold {(blue, green, red)[row_index - 2]}"
+            row.append(char, style=style)
+        rows.append(row)
     return rows
 
 

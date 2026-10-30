@@ -68,6 +68,11 @@ class _Printer:
     cuts: list[tuple[int, int] | None] = field(
         default_factory=list[tuple[int, int] | None],
     )
+    called: str | None = None
+
+    @property
+    def last_call(self) -> str | None:
+        return self.called if self.said and self.said[-1][0] == "call" else None
 
     def line(self, text: str) -> None:
         self.said.append(("line", text))
@@ -88,9 +93,16 @@ class _Printer:
     def thinking(self, text: str, *, opens: bool, closes: bool) -> None:
         self.said.append(("thinking", f"{'[' * opens}{text}{']' * closes}"))
 
-    def call(self, label: str, *, display: ToolDisplay) -> None:
+    def call(
+        self,
+        label: str,
+        *,
+        display: ToolDisplay,
+        key: str | None = None,
+    ) -> None:
         self.said.append(("call", label))
         self.displays.append(display)
+        self.called = key
 
     def output(self, text: str, *, display: ToolDisplay) -> None:
         self.said.append(("output", text))
@@ -108,6 +120,9 @@ class _Printer:
 
     def error(self, text: str) -> None:
         self.said.append(("error", text))
+
+    def failed(self, text: str) -> None:
+        self.said.append(("failed", text))
 
     def halt(self, text: str) -> None:
         self.said.append(("halt", text))
@@ -482,11 +497,104 @@ def test_a_grandchild_is_shown_under_its_own_label() -> None:
 
 def test_a_child_s_results_show_only_when_they_fail() -> None:
     render, printer = _renderer()
+    turn = _turn(call("Echo", "1", text="a"), call("Echo", "2", text="b"))
+    render(types.ChildEvent(label="c", inner=turn))
     render(types.ChildEvent(label="c", inner=_result("1", "fine")))
-    render(types.ChildEvent(label="c", inner=_result("1", "fine", is_error=False)))
     failed = _result("2", "bad<system-reminder>r</system-reminder>\n", is_error=True)
     render(types.ChildEvent(label="c", inner=failed))
-    assert printer.said == [("error", "c: bad")]
+    assert printer.said == [
+        ("call", "c: Echo a"),
+        ("call", "c: Echo b"),
+        ("failed", "c: bad"),
+    ]
+
+
+def _console() -> tuple[Scrollback, ConsolePrinter, io.StringIO]:
+    """Return a scrollback over a real printer, and what the printer writes to."""
+    out = io.StringIO()
+    printer = ConsolePrinter(
+        Console(file=out, width=60, color_system=None, highlight=False),
+    )
+    return Scrollback(printer, tools=_tools()), printer, out
+
+
+def _rows(out: io.StringIO) -> list[str]:
+    return [row.rstrip() for row in out.getvalue().splitlines() if row.strip()]
+
+
+def test_a_child_s_failure_names_its_own_call_again() -> None:
+    render, _, out = _console()
+    turn = _turn(call("Echo", "1", text="a"), call("Echo", "2", text="b"))
+    render(types.ChildEvent(label="c", inner=turn))
+    render(types.ChildEvent(label="c", inner=_result("1", "broke", is_error=True)))
+    assert _rows(out) == ["  c: Echo a", "  c: Echo b", "  c: Echo a", "    ✗ c: broke"]
+
+
+def test_a_child_s_failure_right_under_its_call_does_not_name_it_again() -> None:
+    render, _, out = _console()
+    render(types.ChildEvent(label="c", inner=_turn(call("Echo", "1", text="a"))))
+    render(types.ChildEvent(label="c", inner=_result("1", "broke", is_error=True)))
+    assert _rows(out) == ["  c: Echo a", "    ✗ c: broke"]
+
+
+def test_a_result_whose_call_is_unknown_sits_under_no_call() -> None:
+    render, printer = _renderer()
+    render(_turn(call("Echo", "1", text="a")))
+    render(_result("1", "said a"))
+    render(_result("9", "orphan"))
+    render(_result("9", "bad", is_error=True))
+    render(types.ChildEvent(label="c", inner=_result("8", "worse", is_error=True)))
+    assert printer.said == [
+        ("call", "Echo a"),
+        ("output", "said a"),
+        ("error", "bad"),
+        ("error", "c: worse"),
+    ]
+    assert render.shown == 2
+
+
+def test_a_result_that_shows_nothing_names_no_call_again() -> None:
+    render, _, out = _console()
+    render(_turn(call("Hidden", "1"), call("Hidden", "2"), call("Echo", "3", text="c")))
+    render(types.CohortStarted())
+    for call_id in ("1", "2"):
+        render(_result(call_id, "x"))
+    render(_result("3", "said c"))
+    assert _rows(out) == ["  Hidden", "  Hidden", "  Echo c", "    said c"]
+
+
+def test_show_result_runs_before_only_ahead_of_a_row() -> None:
+    printer = _Printer()
+    before: list[str] = []
+    show_result(
+        printer,
+        _result("1", "hidden"),
+        display=ToolDisplay(),
+        before=lambda: before.append("hidden"),
+    )
+    show_result(
+        printer,
+        _result("2", "bad", is_error=True),
+        display=ToolDisplay(),
+        before=lambda: before.append("failed"),
+    )
+    assert before == ["failed"]
+
+
+@pytest.mark.parametrize("writer", ["agent", "line", "note", "error"])
+def test_a_result_below_a_row_printed_past_scrollback_names_its_call_again(
+    writer: str,
+) -> None:
+    render, printer, out = _console()
+    render(_turn(call("Echo", "1", text="a")))
+    render(types.CohortStarted())
+    match writer:
+        case "agent":
+            printer.agent("Agent_0", "user", "a question")
+        case _:
+            getattr(printer, writer)("x")
+    render(_result("1", "said a"))
+    assert _rows(out)[-2:] == ["  Echo a", "    said a"]
 
 
 def test_a_child_s_failures_messages_and_suspensions_are_labelled(
@@ -560,15 +668,13 @@ def test_a_turn_shows_its_calls_and_each_result_by_its_tool_s_display() -> None:
     render, printer = _renderer()
     render(_turn(call("Echo", "1", text="a"), call("Other", "2"), text="unstreamed"))
     render(_result("2", "said b"))
-    render(_result("2", "again"))
     assert printer.said == [
         ("markdown", "unstreamed"),
         ("call", "Echo a"),
         ("call", "Other"),
         ("output", "said b"),
-        ("output", "again"),
     ]
-    assert printer.displays == [_SHOWN, ToolDisplay(), ToolDisplay(), ToolDisplay()]
+    assert printer.displays == [_SHOWN, ToolDisplay(), ToolDisplay()]
 
 
 def test_a_call_prints_when_it_starts_before_any_result() -> None:
@@ -994,10 +1100,10 @@ def test_show_call_labels_a_call_by_its_tool_or_its_name() -> None:
     assert printer.displays == [_SHOWN, ToolDisplay()]
 
 
-def test_show_result_shows_an_error_whatever_the_display() -> None:
+def test_show_result_shows_a_failure_whatever_the_display() -> None:
     printer = _Printer()
     show_result(printer, _result("1", "bad", is_error=True), display=ToolDisplay())
-    assert printer.said == [("error", "bad")]
+    assert printer.said == [("failed", "bad")]
 
 
 def test_show_result_shows_an_edit_as_a_diff() -> None:

@@ -6,7 +6,6 @@ import io
 import re
 
 from rich.console import Console
-from rich.text import Text
 
 import pytest
 
@@ -30,7 +29,7 @@ _GUTTER = "38;2;160;160;160"
 def _plain(diff: str, *, path: str = "", width: int = 40) -> list[str]:
     out = io.StringIO()
     console = Console(file=out, width=width, color_system=None, highlight=False)
-    render_diff(console, diff, lead=Text("  "), hang="  ", path=path)
+    render_diff(console, diff, row_indent="  ", path=path)
     return [row.rstrip() for row in out.getvalue().splitlines()]
 
 
@@ -48,7 +47,7 @@ def _ansi(
         color_system="truecolor",
         force_terminal=True,
     )
-    render_diff(console, diff, lead=Text("  "), hang="  ", path=path, style=style)
+    render_diff(console, diff, row_indent="  ", path=path, style=style)
     return out.getvalue().splitlines()
 
 
@@ -70,32 +69,16 @@ def _visible(row: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", row)
 
 
-def test_the_first_row_takes_the_lead_and_every_other_the_hang() -> None:
+def test_every_row_starts_with_the_row_indent() -> None:
     out = io.StringIO()
     console = Console(file=out, width=20, color_system=None, highlight=False)
     diff = "@@ -0,0 +1,3 @@\n+a\n+" + "b" * 20 + "\n+c\n"
-    render_diff(console, diff, lead=Text("  ⎿  "), hang="     ", lines=(2, 0))
+    render_diff(console, diff, row_indent="     ", lines=(2, 0))
     assert [row.rstrip() for row in out.getvalue().splitlines()] == [
-        "  ⎿  1 a",
+        "     1 a",
         "     2 " + "b" * 13,
         "       " + "b" * 7,
         "       ⋯ 1 lines ⋯",
-    ]
-
-
-def test_a_cut_at_the_head_puts_the_lead_on_its_count() -> None:
-    out = io.StringIO()
-    console = Console(file=out, width=20, color_system=None, highlight=False)
-    render_diff(
-        console,
-        "@@ -0,0 +1,2 @@\n+a\n+b\n",
-        lead=Text("  ⎿  "),
-        hang="     ",
-        lines=(0, 1),
-    )
-    assert [row.rstrip() for row in out.getvalue().splitlines()] == [
-        "  ⎿    ⋯ 1 lines ⋯",
-        "     2 b",
     ]
 
 
@@ -400,7 +383,7 @@ def test_a_cut_diff_keeps_its_head_and_tail_and_counts_every_line() -> None:
     diff = "@@ -0,0 +1,5 @@\n+a\n+b\n+c\n+d\n+e"
     out = io.StringIO()
     console = Console(file=out, width=40, color_system=None, highlight=False)
-    render_diff(console, diff, lead=Text("  "), hang="  ", lines=(1, 2))
+    render_diff(console, diff, row_indent="  ", lines=(1, 2))
     assert [row.rstrip() for row in out.getvalue().splitlines()] == [
         "  1 a",
         "    ⋯ 2 lines ⋯",

@@ -257,6 +257,11 @@ class ThinkingView(Protocol):
 class Printer(ThinkingView, Protocol):
     """Where scrollback is written, one method per kind of line."""
 
+    @property
+    def last_call(self) -> str | None:
+        """The key of the call whose header printed last, until any row follows it."""
+        ...
+
     def line(self, text: str) -> None:
         """Write ``text`` as it is."""
         ...
@@ -288,8 +293,14 @@ class Printer(ThinkingView, Protocol):
         """
         ...
 
-    def call(self, label: str, *, display: ToolDisplay) -> None:
-        """Write a tool call: its header, then its input rows."""
+    def call(
+        self,
+        label: str,
+        *,
+        display: ToolDisplay,
+        key: str | None = None,
+    ) -> None:
+        """Write a tool call: its header, then its input rows; ``key`` names it."""
         ...
 
     def output(self, text: str, *, display: ToolDisplay) -> None:
@@ -314,7 +325,11 @@ class Printer(ThinkingView, Protocol):
         ...
 
     def error(self, text: str) -> None:
-        """Write what failed."""
+        """Write what failed outside any call: the model, a command."""
+        ...
+
+    def failed(self, text: str) -> None:
+        """Write how a tool call failed, under the call."""
         ...
 
     def halt(self, text: str) -> None:

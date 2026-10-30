@@ -1,7 +1,8 @@
 r"""The scrollback, printed with Rich.
 
-Rows share one left edge: a call's header, its marked input rows, and its
-output, indented with no glyph, so a long body is not a column of boxes.
+A call's header sits at the indent. Under it, at the output indent, come its
+input rows, the first after the mark, then its results with no mark: the mark
+says input, so a long body is not a column of boxes.
 
 Typical usage example:
 
@@ -19,6 +20,7 @@ import re
 import sys
 
 from sagent.runtime import types
+from sagent.tools.display import DisplaySpec
 from sagent.tui.diff import highlight_source, render_diff
 from sagent.tui.markdown import TightMarkdown
 from sagent.tui.types import Sticky, fill
@@ -107,14 +109,14 @@ class ConsolePrinter:
         session keeps every summary the model returns.
       max_label_lines: The most rows one call's header and input may take.
       style: The colors; dark-terminal ones when omitted.
-      mark: What the first row under a call's header shows in ``hang``'s middle.
+      mark: What a call's first input row shows in ``output_indent``'s middle.
 
     """
 
     indent = "  "
-    hang = indent + "  "
-    """What starts every row under a call's header but the first: the header's
-    indent, a cell for the mark, and a space."""
+    output_indent = indent + "  "
+    """What starts every row under a call's header but its first input row: the
+    header's indent, a cell for the mark, and a space."""
 
     def __init__(
         self,
@@ -132,24 +134,22 @@ class ConsolePrinter:
         self.mark = mark
         self.sticky = Sticky()
         self.gap_owed = False
-        self.mark_owed = False
-        """Whether a call's header printed last, so the next row takes ``mark``."""
+        self.last_call: str | None = None
+        """The key of the call whose header printed last, until any row follows it."""
 
     @property
     def output_width(self) -> int:
-        """Return the cells a row under a call's header has after ``hang``."""
-        return self.console.width - len(self.hang)
+        """Return the cells a row under a call's header has after its indent."""
+        return self._width(self.output_indent)
 
     def line(self, text: str) -> None:
         """Write ``text`` as it is, with no markup read in it."""
-        self._gap()
-        self.mark_owed = False
+        self._begin()
         self.console.print(_shown(text), markup=False, highlight=False)
 
     def note(self, text: str) -> None:
         """Write ``text`` dim."""
-        self._gap()
-        self.mark_owed = False
+        self._begin()
         for row in _shown(text).splitlines() or [""]:
             self.console.print(Text(row, style=self.style.quiet))
 
@@ -182,8 +182,7 @@ class ConsolePrinter:
     def markdown(self, text: str) -> None:
         """Write a block of the reply, after a blank line."""
         self.gap_owed = True
-        self._gap()
-        self.mark_owed = False
+        self._begin()
         self.console.print(TightMarkdown(_shown(text), sticky=self.sticky))
 
     def thinking(self, text: str, *, opens: bool, closes: bool) -> None:
@@ -197,14 +196,22 @@ class ConsolePrinter:
 
         """
         del closes
-        self._gap()
-        self.mark_owed = False
+        rows = _shown(text).splitlines()
+        if not opens and not rows:
+            return
+        self._begin()
         if opens:
             self.console.print(Text("∴ Thinking", style=self.style.heading))
-        for row in _shown(text).splitlines():
+        for row in rows:
             self.console.print(Text(f"{self.indent}{row}", style=self.style.quiet))
 
-    def call(self, label: str, *, display: ToolDisplay) -> None:
+    def call(
+        self,
+        label: str,
+        *,
+        display: ToolDisplay,
+        key: str | None = None,
+    ) -> None:
         """Write the header, wrapped, then its input rows, the first after ``mark``.
 
         A summary carries its argument whole, so the cap is here, where the
@@ -213,39 +220,43 @@ class ConsolePrinter:
         Args:
           label: The header, then zero or more input lines.
           display: How the input rows show, and in what language.
+          key: Which call this is, kept as ``last_call`` until a row follows.
 
         """
-        self._gap()
+        self._begin()
         header, _, rest = _shown(label).partition("\n")
-        width = self.console.width - len(self.indent)
+        width = self._width(self.indent)
         name, sep, _ = header.partition(" ")
         # Continuations hang under the argument, so the tool name stands alone;
         # a name taking over half the width leaves too little room, so wrap flush.
         hang = " " * (len(name) + 1) if sep and len(name) + 1 <= width // 2 else ""
         for row in self._wrap(header, width, hang):
             self.console.print(Text(f"{self.indent}{row}", style=self.style.quiet))
-        self.mark_owed = True
         rows = display.command.render(rest, width=self.output_width)
-        for row in rows if rest else []:
+        for i, row in enumerate(rows):
             # An unknown or empty language highlights as plain text.
             body = highlight_source(row, display.command_language)
             body.stylize(self.style.quiet)
-            self.console.print(Text(self._lead(), style=self.style.quiet) + body)
+            lead = f"{self.indent}{self.mark} " if i == 0 else self.output_indent
+            self.console.print(Text(lead, style=self.style.quiet) + body)
+        self.last_call = key
 
     def output(self, text: str, *, display: ToolDisplay) -> None:
-        """Write the rows of ``text`` that ``display.output`` keeps, indented.
+        """Write the rows ``display.output`` keeps of ``text``, at the output indent.
 
         Args:
           text: What the tool returned.
           display: How much of it shows, and how wide.
 
         """
-        self._gap()
-        for row in display.output.render(
-            _shown(text),
-            width=self.output_width,
-        ):
-            self.console.print(Text(f"{self._lead()}{row}", style=self.style.quiet))
+        rows = display.output.render(_shown(text), width=self.output_width)
+        if not rows:
+            return
+        self._begin()
+        for row in rows:
+            self.console.print(
+                Text(f"{self.output_indent}{row}", style=self.style.quiet),
+            )
 
     def diff(
         self,
@@ -262,31 +273,23 @@ class ConsolePrinter:
           lines: Rows kept from the head and tail; ``None`` keeps all.
 
         """
-        self._gap()
+        self._begin()
         render_diff(
             self.console,
             _shown(diff),
-            lead=Text(self._lead(), style=self.style.quiet),
-            hang=self.hang,
+            row_indent=self.output_indent,
             path=_shown(path),
             lines=lines,
             sticky=self.sticky,
         )
 
     def error(self, text: str) -> None:
-        """Write ``text`` in red, its first row after ``✗``; never nothing.
+        """Write what failed outside any call, red after ``✗`` at the indent."""
+        self._failure(text, indent=self.indent)
 
-        Args:
-          text: What failed; a blank one still shows a placeholder.
-
-        """
-        self._gap()
-        rows = _shown(text).rstrip("\n").splitlines()
-        if not any(r.strip() for r in rows):
-            rows = ["<no error message>"]
-        for i, row in enumerate(rows):
-            lead = self._lead("✗" if i == 0 else "")
-            self.console.print(Text(f"{lead}{row}", style=self.style.failure))
+    def failed(self, text: str) -> None:
+        """Write how a call failed, red after ``✗`` at the output indent."""
+        self._failure(text, indent=self.output_indent)
 
     def halt(self, text: str) -> None:
         """Write ``text`` bold red, wrapped between two rules as wide as a fill.
@@ -295,8 +298,7 @@ class ConsolePrinter:
           text: Why the agent stopped, and what the user can do.
 
         """
-        self._gap()
-        self.mark_owed = False
+        self._begin()
         shown = _shown(text)
         width = self.sticky.cells(
             max(cell_len(row) for row in shown.split("\n")),
@@ -310,9 +312,8 @@ class ConsolePrinter:
 
     def _bar(self, lead: str, *, text: str, style: Style) -> None:
         """Write ``lead`` then ``text`` as filled bars, between blank lines."""
-        self.gap_owed = False
-        self.mark_owed = False
-        self.console.print()
+        self.gap_owed = True
+        self._begin()
         rows = text.rstrip("\n").split("\n")
         # A bar is 80 whatever it holds, outside the turn's edge: what was said
         # is prose, so it wraps rather than widening.
@@ -333,17 +334,32 @@ class ConsolePrinter:
                 self.console.print(row, style=style)
         self.gap_owed = True
 
-    def _lead(self, glyph: str = "") -> str:
-        """Return what starts the next row under a header, and spend the owed mark."""
-        shown = glyph or (self.mark if self.mark_owed else "")
-        self.mark_owed = False
-        return f"{self.indent}{shown} " if shown else self.hang
+    # Every row keeps all its text, wrapped under the text, never under ``✗``.
+    def _failure(self, text: str, *, indent: str) -> None:
+        """Write ``text`` in red after ``indent``, its first row after ``✗``; never nothing."""
+        self._begin()
+        rows = DisplaySpec(lines=None).render(
+            _shown(text),
+            width=self._width(f"{indent}✗ "),
+        )
+        for i, row in enumerate(rows or ["<no error message>"]):
+            glyph = "✗" if i == 0 else " "
+            self.console.print(
+                Text(f"{indent}{glyph} {row}", style=self.style.failure),
+            )
 
-    def _gap(self) -> None:
-        """Print the blank line owed after a user bar or before a reply block."""
+    # Every write that prints a row starts here, so ``last_call`` can never name a
+    # call with a row printed below it, whoever called this printer.
+    def _begin(self) -> None:
+        """End ``last_call``, and print the blank line a bar or a reply block owes."""
+        self.last_call = None
         if self.gap_owed:
             self.console.print()
             self.gap_owed = False
+
+    def _width(self, indent: str) -> int:
+        """Return the cells a row has after ``indent``."""
+        return self.console.width - cell_len(indent)
 
     def _wrap(self, text: str, width: int, hang: str) -> list[str]:
         """Return ``text`` cut to ``width`` cells, at most ``max_label_lines`` rows."""
@@ -353,8 +369,9 @@ class ConsolePrinter:
             head, *_ = chop_cells(raw, usable) or [""]
             rows.append(head)
             if tail := raw[len(head) :]:
+                # ``call`` hangs at most half the width, so a cell or more remains.
                 rows.extend(
-                    hang + part for part in chop_cells(tail, max(1, usable - len(hang)))
+                    hang + part for part in chop_cells(tail, usable - len(hang))
                 )
         if len(rows) <= self.max_label_lines:
             return rows

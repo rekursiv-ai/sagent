@@ -64,6 +64,11 @@ class _Printer:
     cuts: list[tuple[int, int] | None] = field(
         default_factory=list[tuple[int, int] | None],
     )
+    called: str | None = None
+
+    @property
+    def last_call(self) -> str | None:
+        return self.called if self.said and self.said[-1][0] == "call" else None
 
     def line(self, text: str) -> None:
         self.said.append(("line", text))
@@ -84,9 +89,16 @@ class _Printer:
     def thinking(self, text: str, *, opens: bool, closes: bool) -> None:
         self.said.append(("thinking", f"{'[' * opens}{text}{']' * closes}"))
 
-    def call(self, label: str, *, display: ToolDisplay) -> None:
+    def call(
+        self,
+        label: str,
+        *,
+        display: ToolDisplay,
+        key: str | None = None,
+    ) -> None:
         self.said.append(("call", label))
         self.displays.append(display)
+        self.called = key
 
     def output(self, text: str, *, display: ToolDisplay) -> None:
         self.said.append(("output", text))
@@ -104,6 +116,9 @@ class _Printer:
 
     def error(self, text: str) -> None:
         self.said.append(("error", text))
+
+    def failed(self, text: str) -> None:
+        self.said.append(("failed", text))
 
     def halt(self, text: str) -> None:
         self.said.append(("halt", text))
@@ -251,18 +266,14 @@ async def test_a_call_redraws_by_its_tool_and_its_result_by_that_tool_s_display(
         ("call", "Gone"),
         ("call", "Echo a"),
         ("output", "said a"),
-        ("call", "Gone"),
         ("output", "from gone"),
-        ("output", "orphan"),
-        ("line", "── resumed · 4 messages · scripted/scripted ──"),
+        ("line", "── resumed · 3 messages · scripted/scripted ──"),
     ]
     assert said_and_shown.displays == [
         _SHOWN,
         ToolDisplay(),
         _SHOWN,
         _SHOWN,
-        ToolDisplay(),
-        ToolDisplay(),
         ToolDisplay(),
     ]
 
@@ -513,10 +524,10 @@ async def test_live_scrollback_equals_the_replay_of_its_journal() -> None:
         "∴ Thinking",
         "  Then fix line three.",
         "Reading a.py.",
-        "  Echo a\n  ⎿ a\n  Fix a.py\n",
+        "  Echo a\n    a\n  Fix a.py\n",
         " x = 2",
-        "  Slow\n  ⎿ [detached; #1]",
-        "  Slow\n  ⎿ [undetached; #1]\n    finally done",
+        "  Slow\n    [detached; #1]",
+        "  Slow\n    [undetached; #1]\n    finally done",
         "The slow one finished.",
     ):
         assert shown in live

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from datetime import date
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 import io
 import re
@@ -13,7 +15,12 @@ from rich.console import Console
 import pytest
 
 from sagent.tui import welcome
+from sagent.tui.holiday import Icon
 from sagent.tui.welcome import render_welcome
+
+
+if TYPE_CHECKING:
+    from random import Random
 
 
 @pytest.fixture(autouse=True)
@@ -334,7 +341,10 @@ def test_icon_and_wordmark_use_compact_layout_when_the_pair_would_wrap(
 
 
 def test_identity_keeps_a_rectangular_cell_grid() -> None:
-    rows = welcome._banner_rows(blue="blue", green="green", red="red")
+    rows = welcome._banner_rows(
+        icon=welcome._logo_rows(blue="blue", green="green", red="red"),
+        blue="blue",
+    )
     assert len(rows) == 6
     assert {row.cell_len for row in rows} == {66}
     # The icon's 11 columns, a 3-column gap, then the wordmark.
@@ -342,6 +352,60 @@ def test_identity_keeps_a_rectangular_cell_grid() -> None:
     assert rows[0].plain[14:].rstrip() == (
         "███████╗ █████╗  ██████╗ ███████╗███╗   ██╗████████╗"
     )
+
+
+_PUMPKIN = Icon(
+    name="test pumpkin",
+    palette={"O": "#e8761c"},
+    pixels=("OOOOOOOOOOO",) * 12,
+)
+
+
+def _holiday_console(*, color_system: Literal["truecolor", "standard"]) -> Console:
+    return Console(
+        file=io.StringIO(),
+        force_terminal=True,
+        color_system=color_system,
+        record=True,
+        width=80,
+        height=24,
+    )
+
+
+def test_holiday_icon_replaces_the_logo_beside_the_wordmark() -> None:
+    console = _holiday_console(color_system="truecolor")
+    render_welcome(console, folder=Path("/research"), holiday=_PUMPKIN)
+    plain = console.export_text(styles=False, clear=False)
+    first = next(line for line in plain.splitlines() if "███████╗" in line)
+    assert first.startswith("│  " + "█" * 11 + "   ███████╗")
+    assert "▼" not in plain
+    assert "#e8761c" in console.export_html(inline_styles=True)
+
+
+def test_few_color_terminal_keeps_the_logo_on_a_holiday() -> None:
+    console = _holiday_console(color_system="standard")
+    render_welcome(console, folder=Path("/research"), holiday=_PUMPKIN)
+    assert "▼" in console.export_text(styles=False)
+
+
+def test_print_welcome_shows_todays_holiday(monkeypatch: pytest.MonkeyPatch) -> None:
+    console = _holiday_console(color_system="truecolor")
+    asked: list[date] = []
+
+    def to_stderr(*, stderr: bool) -> Console:
+        assert stderr
+        return console
+
+    def pumpkin(today: date, *, rng: Random) -> Icon:
+        del rng
+        asked.append(today)
+        return _PUMPKIN
+
+    monkeypatch.setattr(welcome, "Console", to_stderr)
+    monkeypatch.setattr(welcome, "holiday_icon", pumpkin)
+    welcome.print_welcome(folder=Path("/research"))
+    assert "▼" not in console.export_text(styles=False)
+    assert asked == [date.today()]  # noqa: DTZ011 -- The local date is the subject.
 
 
 def test_frame_has_equal_top_and_bottom_breathing_room() -> None:
