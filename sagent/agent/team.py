@@ -826,9 +826,16 @@ class _Precedence:
         logins = self._logins()
         if not turn_start or logins is None:
             return
-        want = self._first_live(logins, now=time.time())
-        if want is not None and want != self._serving:
+        now = time.time()
+        want = self._first_live(logins, now=now)
+        if want is None or want == self._serving:
+            return
+        model = self._agent.model.capability.model_id
+        spent = logins.spent(self._serving, model, now=now)
+        if spent is None:
             await self._move(logins)
+        else:
+            await self._move(logins, window=spent.window, until=spent.until)
 
     async def after_failure(self, exc: BaseException) -> None:
         """Move off a login that spent a window, or that a move found signed out.
