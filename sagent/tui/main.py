@@ -53,7 +53,7 @@ from sagent.lib.userdirs import data_dir, state_dir
 from sagent.model.exceptions import AuthError
 from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.providers.table import ModelTags
-from sagent.providers.types import Login
+from sagent.providers.types import HasLogin
 from sagent.runtime import types
 from sagent.session.jsonl import JournalInUseError, JsonlJournal
 from sagent.session.legacy_journal import (
@@ -640,7 +640,7 @@ def _provider_name(catalog: ModelCatalog, flags: Flags) -> str:
 
 async def _login(provider: Provider, *, headless: bool) -> int:
     """Sign in to ``provider``; return the exit code."""
-    if not isinstance(provider, Login):
+    if not isinstance(provider, HasLogin):
         sys.stderr.write(f"Error: {provider.name} has no interactive sign-in.\n")
         return 1
     # A pasted code from another sign-in, or no answer at the prompt at all.

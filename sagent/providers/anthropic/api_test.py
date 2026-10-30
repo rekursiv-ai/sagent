@@ -26,7 +26,7 @@ from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import AnthropicCLI
 from sagent.providers.catalog import listings
 from sagent.providers.resources import SharedResources
-from sagent.providers.types import Login, UsageWindow
+from sagent.providers.types import HasLogin, UsageWindow
 from sagent.session.types import AssistantMessage, Attachment, UserMessage
 
 
@@ -456,7 +456,7 @@ def test_iterating_lists_the_sections_models() -> None:
 def test_a_provider_is_named_for_its_section_unless_named() -> None:
     assert Anthropic().name == "anthropic"
     assert Anthropic(name="work").name == "work"
-    assert not isinstance(Anthropic(), Login)  # An API key needs no sign-in.
+    assert not isinstance(Anthropic(), HasLogin)  # An API key needs no sign-in.
 
 
 @pytest.mark.asyncio
@@ -738,10 +738,11 @@ def test_a_model_thinks_as_claude_code_has_it(model: str, budget: str) -> None:
 # The Messages API ones send what Claude Code sends; ``claude`` itself is it.
 def _claude_code_providers() -> list[type[Anthropic | AnthropicCLI]]:
     """Return each provider whose models start as Claude Code starts them."""
+    listed = {each.section for each in listings()}
     providers: list[type[Anthropic | AnthropicCLI]] = [
-        listing.factory
-        for listing in listings()
-        if isinstance(listing.factory, type) and issubclass(listing.factory, Anthropic)
+        kind
+        for kind in (Anthropic, *Anthropic.__subclasses__())
+        if kind.section in listed
     ]
     assert Anthropic in providers
     return [*providers, AnthropicCLI]

@@ -23,8 +23,6 @@ from sagent.tui.settings.model import AgentModel
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from sagent.providers.types import ProviderFactory
     from sagent.tui.settings.types import Setting
 
@@ -225,12 +223,7 @@ async def test_provider_keeps_the_model_or_is_refused() -> None:
 
 
 @pytest.mark.asyncio
-async def test_account_offers_the_saved_logins_and_the_one_in_use(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    (tmp_path / "auth-home.json").write_text("{}")
+async def test_account_offers_the_saved_logins_and_the_one_in_use() -> None:
     catalog = ModelCatalog(factories=_signing_in)
     owner = AgentModel(
         agent=Agent(model=catalog["openai-sub"]["wide"]),
@@ -329,12 +322,22 @@ async def test_a_model_without_reasoning_inherits_none() -> None:
     assert (await _inherit(owner, "model.thinking.effort", "max")).startswith("none")
 
 
+class _Saving(ScriptedProvider):
+    """A provider that keeps the named logins ``home``."""
+
+    async def login(self, *, headless: bool = False) -> None:
+        del headless
+
+    def accounts(self) -> tuple[str, ...]:
+        return ("home",)
+
+
 def _signing_in(account: str | None) -> dict[str, ProviderFactory]:
     """Return ``openai-sub``, which keeps named logins, and ``vendor``, which does not."""
     del account
     table = ModelTable(rows=(_WIDE,), roles={"default": "wide"})
     return {
-        "openai-sub": partial(ScriptedProvider, models=table),
+        "openai-sub": partial(_Saving, models=table),
         "vendor": partial(ScriptedProvider, models=table),
     }
 

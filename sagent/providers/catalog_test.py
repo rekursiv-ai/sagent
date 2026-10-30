@@ -6,7 +6,7 @@ from dataclasses import replace
 from functools import partial
 from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, ClassVar, override
 
 import re
 
@@ -26,13 +26,10 @@ from sagent.model.scripted import ScriptedModel, ScriptedProvider
 from sagent.model.types import Request
 from sagent.providers.anthropic.api import Anthropic, AnthropicModel
 from sagent.providers.anthropic.cli import AnthropicCLI, AnthropicCLIModel
-from sagent.providers.anthropic.login import ClaudeLogin
 from sagent.providers.catalog import (
     CachedModel,
     ModelCatalog,
     ModelMemory,
-    account_credentials,
-    accounts,
     default_provider,
     listings,
     recall,
@@ -44,6 +41,7 @@ from sagent.providers.openai.compat import OpenAIModel
 from sagent.providers.selfhosted import server
 from sagent.providers.selfhosted.server import SelfHostedModel
 from sagent.providers.table import ModelTable, ModelTags
+from sagent.providers.types import HasLogin
 from sagent.session.types import UserMessage
 from sagent.types import AsyncResource
 
@@ -53,7 +51,7 @@ if TYPE_CHECKING:
 
     import httpx2
 
-    from sagent.providers.listing import Listing
+    from sagent.providers.catalog import Listed
     from sagent.providers.types import Model, ProviderSharedResources, UsageWindow
 
 
@@ -182,60 +180,30 @@ def test_a_section_name_builds_its_provider_class(name: str, kind: type) -> None
     assert isinstance(ModelCatalog()[name], kind)
 
 
-@pytest.mark.parametrize("section", [listing.section for listing in listings()])
+@pytest.mark.parametrize("section", [listed.section for listed in listings()])
 def test_every_listed_provider_names_the_models_it_serves(section: str) -> None:
     assert list(ModelCatalog()[section])
 
 
-def test_the_default_provider_is_the_one_preferred_else_the_first() -> None:
-    offered = listings()
-    preferred = [listing.section for listing in offered if listing.preferred]
-    assert len(preferred) <= 1
-    assert (preferred or [offered[0].section])[0] == default_provider()
+def test_the_default_provider_is_the_first_listed() -> None:
+    assert default_provider() == listings()[0].section
     assert default_provider() in ModelCatalog().factories
 
 
-_ACCOUNT_FILES = (
-    ("anthropic-cli", "<claude>/.credentials-work.json"),
-    ("openai-sub", "~/.codex/auth-work.json"),
+@pytest.mark.parametrize(
+    "listed",
+    [listed for listed in listings() if isinstance(listed, HasLogin)],
+    ids=[listed.section for listed in listings() if isinstance(listed, HasLogin)],
 )
-
-
-def _file(path: str) -> Path:
-    """Return a ``_ACCOUNT_FILES`` path, ``<claude>`` where Claude's logins live."""
-    claude = str(ClaudeLogin.default_path().parent)
-    return Path(path.replace("<claude>", claude)).expanduser()
-
-
-@pytest.mark.parametrize(("name", "path"), _ACCOUNT_FILES)
-def test_an_account_names_its_own_login_file(
-    name: str,
-    path: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("CODEX_HOME", raising=False)
-    assert account_credentials(name, "work") == _file(path)
-
-
-def test_a_codex_account_lives_where_codex_keeps_its_login(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    assert account_credentials("openai-sub", "work") == tmp_path / "auth-work.json"
-
-
-@pytest.mark.parametrize(("name", "path"), _ACCOUNT_FILES)
-def test_a_named_account_signs_every_login_provider_in_as_it(
-    name: str,
-    path: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("CODEX_HOME", raising=False)
-    factory = ModelCatalog(account="work").factories[name]
+def test_a_named_account_signs_every_login_provider_in_as_it(listed: Listed) -> None:
+    factory = ModelCatalog(account="work").factories[listed.section]
 
     assert isinstance(factory, partial)
-    assert factory.keywords == {"credentials": _file(path)}
+    assert (factory.func, factory.keywords) == (listed, {"account": "work"})
+
+
+def test_a_named_account_leaves_a_provider_without_a_login_as_it_is() -> None:
+    assert ModelCatalog(account="work").factories["anthropic"] is Anthropic
 
 
 @pytest.mark.parametrize("account", [None, "default", ""])
@@ -257,10 +225,7 @@ def test_an_account_of_letters_digits_and_separators_is_a_name(account: str) -> 
     assert ModelCatalog(account=account).account == account
 
 
-def test_using_an_account_signs_in_as_it_from_then_on(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("CODEX_HOME", raising=False)
+def test_using_an_account_signs_in_as_it_from_then_on() -> None:
     catalog = ModelCatalog()
     catalog.allow(["anthropic-cli", "openai"])
     before = catalog["anthropic-cli"]
@@ -271,9 +236,7 @@ def test_using_an_account_signs_in_as_it_from_then_on(
     assert list(catalog.factories) == ["anthropic-cli", "openai"]
     factory = catalog.factories["anthropic-cli"]
     assert isinstance(factory, partial)
-    assert factory.keywords == {
-        "credentials": ClaudeLogin.default_path().with_name(".credentials-work.json"),
-    }
+    assert factory.keywords == {"account": "work"}
     assert catalog["anthropic-cli"] is not before
 
 
@@ -362,24 +325,6 @@ def test_a_catalog_of_fixed_factories_has_no_accounts() -> None:
     )
 
 
-def test_an_api_provider_keeps_no_named_accounts() -> None:
-    with pytest.raises(ValueError, match="has no named accounts"):
-        account_credentials("anthropic", "work")
-    assert accounts("anthropic") == ()
-
-
-def test_the_accounts_are_the_login_files_beside_the_default_one(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path))
-    assert accounts("openai-sub") == ()
-    for name in ("auth.json", "auth-work.json", "auth-home.json", "auth-.json"):
-        (tmp_path / name).write_text("{}")
-    (tmp_path / "auth-x.txt").write_text("{}")
-    assert accounts("openai-sub") == ("home", "work")
-
-
 def test_a_provider_is_built_once_on_first_lookup() -> None:
     built: list[_Recorded] = []
     catalog = ModelCatalog(factories={"work": _Factory(built=built)})
@@ -403,11 +348,12 @@ def test_given_factories_replace_the_registry() -> None:
 
 
 def test_an_unknown_provider_names_the_known_ones() -> None:
+    catalog = ModelCatalog()
     with pytest.raises(
         UnknownProviderError,
-        match=r"^unknown provider 'nope'; known: anthropic, ",
+        match=rf"^unknown provider 'nope'; known: {', '.join(catalog.factories)}$",
     ):
-        ModelCatalog()["nope"]
+        catalog["nope"]
 
 
 @pytest.mark.parametrize(
@@ -417,7 +363,6 @@ def test_an_unknown_provider_names_the_known_ones() -> None:
         ("OpenAISub", "openai-sub"),
         ("openai_sub", "openai-sub"),
         ("OPENAI SUB", "openai-sub"),
-        ("OpenAISubscription", "openai-sub"),
         ("oaisub", "openai-sub"),
         ("osub", "openai-sub"),
         ("antcli", "anthropic-cli"),
@@ -435,16 +380,20 @@ def test_a_provider_answers_to_every_spelling_of_its_name(
     assert catalog[spelling] is catalog[name]
 
 
-@pytest.mark.parametrize("listing", listings(), ids=lambda listing: listing.section)
-def test_each_provider_declares_its_own_aliases(listing: Listing) -> None:
+@pytest.mark.parametrize(
+    "listed",
+    listings(),
+    ids=[listed.section for listed in listings()],
+)
+def test_each_provider_declares_its_own_aliases(listed: Listed) -> None:
     # Inherited, a subclass's aliases would be its parent's: ``oapi`` naming
     # ``openai-sub``.
-    assert "aliases" in vars(listing.factory)
+    assert "aliases" in vars(listed)
 
 
 @pytest.mark.parametrize(
     ("alias", "section"),
-    [(alias, listing.section) for listing in listings() for alias in listing.aliases],
+    [(alias, listed.section) for listed in listings() for alias in listed.aliases],
 )
 def test_a_provider_answers_to_each_alias_it_declares(
     alias: str,
@@ -476,18 +425,15 @@ _VENDORS = {
 def _kinds(vendor: str) -> list[str]:
     """Return how each of ``vendor``'s providers is reached: ``api``, ``cli``, ..."""
     return [
-        "api" if listing.section == vendor else kind
-        for listing in listings()
-        for head, _, kind in [listing.section.partition("-")]
+        "api" if listed.section == vendor else kind
+        for listed in listings()
+        for head, _, kind in [listed.section.partition("-")]
         if head == vendor
     ]
 
 
 def test_each_vendor_offers_its_api_and_another_way_in() -> None:
-    assert {vendor: _kinds(vendor)[0] for vendor in _VENDORS} == dict.fromkeys(
-        _VENDORS,
-        "api",
-    )
+    assert all("api" in _kinds(vendor) for vendor in _VENDORS)
     assert all(len(_kinds(vendor)) > 1 for vendor in _VENDORS)
 
 
@@ -527,7 +473,7 @@ def test_a_spelling_no_single_provider_answers_to_is_refused(
 
 def test_allowing_narrows_the_catalog_to_the_providers_named() -> None:
     catalog = ModelCatalog()
-    assert catalog.allow(["OpenAISubscription", "antcli", "openai-sub"]) == [
+    assert catalog.allow(["osub", "antcli", "openai-sub"]) == [
         "openai-sub",
         "anthropic-cli",
     ]
@@ -540,7 +486,7 @@ def test_allowing_names_every_spelling_that_answers_to_nothing() -> None:
     catalog = ModelCatalog()
     with pytest.raises(
         UnknownProviderError,
-        match=r"^unknown providers ghost, zed; known: anthropic, ",
+        match=rf"^unknown providers ghost, zed; known: {', '.join(catalog.factories)}$",
     ):
         catalog.allow(["zed", "openai", "ghost"])
     assert list(catalog.factories) == list(ModelCatalog().factories)
@@ -945,6 +891,8 @@ async def test_a_provider_failing_to_close_leaves_none_of_the_rest_open() -> Non
 
 class _Recorded(AsyncResource):
     """A provider serving no model, which notes what it saw when it closed."""
+
+    aliases: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, *, name: str, resources: ProviderSharedResources) -> None:
         self._name = name

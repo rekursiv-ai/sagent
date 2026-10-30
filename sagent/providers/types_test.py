@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import io
 
 from PIL import Image
@@ -33,7 +31,7 @@ from sagent.providers.resources import SharedResources, SubprocessPool
 from sagent.providers.selfhosted.server import SelfHosted, SelfHostedModel
 from sagent.providers.tool_server import McpMount, McpToolServer
 from sagent.providers.types import (
-    Login,
+    HasLogin,
     Model,
     ModelCatalog,
     ProcessPool,
@@ -44,10 +42,6 @@ from sagent.providers.types import (
     UsageWindow,
 )
 from sagent.session.types import Attachment
-
-
-if TYPE_CHECKING:
-    from sagent.providers.listing import Listing
 
 
 def _members(protocol: type) -> set[str]:
@@ -79,13 +73,13 @@ async def test_every_catalog_provider_is_a_provider_and_serves_models() -> None:
     async with SharedResources() as shared:
         offered = listings()
         providers: list[Provider] = [
-            listing.factory(name="", resources=shared) for listing in offered
+            listed(name="", resources=shared) for listed in offered
         ]
         models: list[Model] = [p["default"] for p in providers]
         served = {
-            listing.section: type(model)
-            for listing, model in zip(offered, models, strict=True)
-            if listing.section in expected
+            listed.section: type(model)
+            for listed, model in zip(offered, models, strict=True)
+            if listed.section in expected
         }
 
         assert served == expected
@@ -142,14 +136,9 @@ def test_a_scripted_provider_is_a_provider_too() -> None:
     assert provider.usage == ()
 
 
-@pytest.mark.parametrize(
-    "listing",
-    listings(),
-    ids=[listing.section for listing in listings()],
-)
-def test_a_login_is_any_provider_that_signs_in(listing: Listing) -> None:
-    built = listing.factory(name="", resources=SharedResources())
-    assert isinstance(built, Login) is (listing.default_login is not None)
+def test_a_provider_without_a_login_is_no_login() -> None:
+    assert not isinstance(OpenAI(), HasLogin)
+    assert isinstance(OpenAISub(), HasLogin)
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,7 @@ Typical usage example:
       sol = openai["sol"]
       openai.usage                               # The plan's windows, as reported.
 
-  work = OpenAISub(credentials=Path("~/.codex/auth-work.json"))
+  work = OpenAISub(account="work")              # ~/.codex/auth-work.json
   child = OpenAISub(lease=parent_login.lend)   # Borrows; never renews.
 """
 
@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, ClassVar, NotRequired, Protocol, TypedDict, ov
 from treekle import json_dumps, json_loads
 
 from sagent.model.types import Request
+from sagent.providers.login import account_path, saved_accounts
 from sagent.providers.openai import token_count, wire
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.lease import BorrowedLogin
@@ -30,7 +31,6 @@ from sagent.providers.openai.login import ORIGINATOR, CodexLogin
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from pathlib import Path
 
     from sagent.providers.openai.compat import OpenAIModel
     from sagent.providers.openai.lease import TokenLease
@@ -49,7 +49,8 @@ class OpenAISub(OpenAI):
       name: The name the catalog knows this provider by; the section by default.
       resources: What this shares with other providers; ``None`` makes and
         closes its own.
-      credentials: A login file; ``None`` uses the login ``codex`` keeps.
+      account: A named account, its login kept beside ``codex``'s; ``None``
+        uses the login ``codex`` keeps.
       lease: Lends tokens from a login another process holds; ``None`` holds
         the login here, and renews it.
 
@@ -75,12 +76,17 @@ class OpenAISub(OpenAI):
         *,
         name: str = "",
         resources: ProviderSharedResources | None = None,
-        credentials: Path | None = None,
+        account: str | None = None,
         lease: TokenLease | None = None,
     ) -> None:
         super().__init__(name=name, resources=resources)
         self._login: _Login = (
-            CodexLogin(credentials, resources=self.resources)
+            CodexLogin(
+                None
+                if account is None
+                else account_path(CodexLogin.default_path(), account),
+                resources=self.resources,
+            )
             if lease is None
             else BorrowedLogin(lease)
         )
@@ -90,6 +96,11 @@ class OpenAISub(OpenAI):
     async def login(self, *, headless: bool = False) -> None:
         """Sign in through the browser, or with the redirect pasted from it."""
         await self._login.sign_in(headless=headless)
+
+    @classmethod
+    def accounts(cls) -> tuple[str, ...]:
+        """Return each named account with a login saved beside ``codex``'s."""
+        return saved_accounts(CodexLogin.default_path())
 
     @override
     async def credentials(self) -> dict[str, str]:

@@ -31,7 +31,7 @@ from treekle import from_plain, json_dumps, json_loads
 
 from sagent.lib.posix.child import Child
 from sagent.model.exceptions import AuthError
-from sagent.providers.lock import file_lock
+from sagent.providers.login import file_lock
 
 
 if TYPE_CHECKING:

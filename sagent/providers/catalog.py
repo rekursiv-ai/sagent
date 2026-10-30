@@ -7,7 +7,7 @@ Typical usage example:
       catalog.use_account("work")                   # Sign-ins as work from now.
 
   work = ModelCatalog(
-      factories={"anthropic-work": partial(AnthropicCLI, credentials=work_login)},
+      factories={"anthropic-work": partial(AnthropicCLI, account="work")},
   )
 """
 
@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Self, override
+from typing import TYPE_CHECKING, Protocol, Self, override, runtime_checkable
 
 import re
 
@@ -27,16 +27,14 @@ from sagent.model.capability import (
 from sagent.model.exceptions import UnknownModelError, UnknownProviderError
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import AnthropicCLI
-from sagent.providers.anthropic.login import ClaudeLogin
 from sagent.providers.dashscope.api import DashScope
 from sagent.providers.google.api import Google
 from sagent.providers.google.cli import GoogleCLI
-from sagent.providers.listing import Listing
 from sagent.providers.llamacpp.server import LlamaCpp
+from sagent.providers.login import check_account
 from sagent.providers.minimax.api import MiniMax
 from sagent.providers.moonshot.api import Moonshot
 from sagent.providers.openai.api import OpenAI
-from sagent.providers.openai.login import CodexLogin
 from sagent.providers.openai.sub import OpenAISub
 from sagent.providers.resources import SharedResources, close_all
 from sagent.providers.selfhosted.server import SelfHosted
@@ -45,13 +43,13 @@ from sagent.providers.table import ModelTags
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
-    from pathlib import Path
 
     from sagent.providers.types import (
         Model,
         ModelCatalog as CatalogProtocol,
         Provider,
         ProviderFactory,
+        ProviderSharedResources,
     )
 
 
@@ -60,8 +58,6 @@ __all__ = [
     "ModelCatalog",
     "ModelMemory",
     "PerAccount",
-    "account_credentials",
-    "accounts",
     "cache_key",
     "default_provider",
     "listings",
@@ -70,91 +66,55 @@ __all__ = [
 ]
 
 
-def listings() -> tuple[Listing, ...]:
-    """Return every provider the catalog offers.
+class Listed(Protocol):
+    """A provider class the catalog offers, under its section's name."""
+
+    @property
+    def section(self) -> str:
+        """Return the name it is offered under."""
+        ...
+
+    @property
+    def aliases(self) -> tuple[str, ...]:
+        """Return the other names it answers to."""
+        ...
+
+    def __call__(
+        self,
+        *,
+        name: str,
+        resources: ProviderSharedResources,
+    ) -> Provider:
+        """Return a provider the catalog knows as ``name``."""
+        ...
+
+
+def listings() -> tuple[Listed, ...]:
+    """Return every provider class the catalog offers.
 
     Returns:
-      listings: In the order a model name is asked of them.
+      listings: In the order a model name is asked of them; the first is the
+        one a session starts on.
 
     """
     return (
-        Listing.of(Anthropic),
-        Listing.signing_in(AnthropicCLI, default=ClaudeLogin.default_path),
-        Listing.of(OpenAI),
-        Listing.signing_in(
-            OpenAISub,
-            default=CodexLogin.default_path,
-            former_names=("OpenAISubscription",),
-        ),
-        Listing.of(Google),
-        Listing.of(GoogleCLI),
-        Listing.of(DashScope),
-        Listing.of(MiniMax),
-        Listing.of(Moonshot),
-        Listing.of(LlamaCpp),
-        Listing.of(SelfHosted),
+        Anthropic,
+        AnthropicCLI,
+        OpenAI,
+        OpenAISub,
+        Google,
+        GoogleCLI,
+        DashScope,
+        MiniMax,
+        Moonshot,
+        LlamaCpp,
+        SelfHosted,
     )
 
 
 def default_provider() -> str:
-    """Return the provider a session starts on unless told otherwise.
-
-    Returns:
-      name: The one listed as preferred, else the first.
-
-    """
-    offered = listings()
-    return next((o.section for o in offered if o.preferred), offered[0].section)
-
-
-def account_credentials(provider: str, account: str) -> Path:
-    """Return the login file ``provider`` keeps for the account ``account``.
-
-    It is the default file with ``-<account>`` added to its stem, beside it.
-
-    Args:
-      provider: A signing-in provider's own name, as ``openai-sub``.
-      account: The account's name: letters, digits, ``_``, ``-``.
-
-    Returns:
-      path: The account's credentials file.
-
-    Raises:
-      ValueError: ``provider`` keeps no named accounts, or ``account`` is no name.
-
-    """
-    logins = _logins()
-    default = logins.get(provider)
-    if default is None:
-        raise ValueError(
-            f"provider {provider!r} has no named accounts;"
-            f" ones that do: {', '.join(logins)}",
-        )
-    _check_name(account)
-    path = default()
-    return path.with_name(f"{path.stem}-{account}{path.suffix}")
-
-
-def accounts(provider: str) -> tuple[str, ...]:
-    """Return the named accounts ``provider`` has a login saved for, sorted.
-
-    Args:
-      provider: A provider's own name, as ``openai-sub``.
-
-    Returns:
-      names: Each account whose file ``account_credentials`` names exists;
-        none for a provider that keeps no named accounts.
-
-    """
-    default = _logins().get(provider)
-    if default is None:
-        return ()
-    path = default()
-    names = (
-        found.name.removeprefix(f"{path.stem}-").removesuffix(path.suffix)
-        for found in path.parent.glob(f"{path.stem}-*{path.suffix}")
-    )
-    return tuple(sorted(n for n in names if _ACCOUNT.fullmatch(n)))
+    """Return the provider a session starts on unless told otherwise: the first listed."""
+    return listings()[0].section
 
 
 class ModelCatalog(SharedResources):
@@ -162,11 +122,9 @@ class ModelCatalog(SharedResources):
 
     A provider answers to its name in any case and with or without separators
     (``OpenAISub``, ``openai_sub``), to each alias its class declares
-    (``anthropic-api``, ``acli``), to a former name (``OpenAISubscription``),
-    and to an abbreviation: its letters in order, from the first (``antcli``,
-    ``anthsub``). A declared alias wins over any abbreviation; a name or an
-    alias abbreviated wins over a former name abbreviated, so ``opai`` is
-    ``openai``, not ``OpenAISubscription``.
+    (``anthropic-api``, ``acli``), and to an abbreviation: its letters in
+    order, from the first (``antcli``, ``opsub``). A name or a declared alias
+    wins over any abbreviation.
 
     Args:
       factories: How to build each provider, by the name it is looked up by,
@@ -326,23 +284,13 @@ class ModelCatalog(SharedResources):
         if provider in self.factories:
             return provider
         wanted = _key(provider)
-        offered = {listing.section: listing for listing in listings()}
         # A fixed catalog's own names (``anthropic-work``) are listed nowhere.
-        listed = {name: offered.get(name) for name in self.factories}
-        current = {
-            name: {_key(name), *(_key(a) for a in (lst.aliases if lst else ()))}
-            for name, lst in listed.items()
+        aliases = {listed.section: listed.aliases for listed in listings()}
+        spellings = {
+            name: {_key(name), *(_key(alias) for alias in aliases.get(name, ()))}
+            for name in self.factories
         }
-        former = {
-            name: {_key(old) for old in (lst.former_names if lst else ())}
-            for name, lst in listed.items()
-        }
-        for spellings, exact in (
-            (current, True),
-            (former, True),
-            (current, False),
-            (former, False),
-        ):
+        for exact in (True, False):
             matches = [
                 name
                 for name, keys in spellings.items()
@@ -614,23 +562,34 @@ async def _built(catalog: CatalogProtocol, line: str) -> Model:
 
 def _registry(account: str | None) -> Mapping[str, ProviderFactory]:
     """Return every provider by its section's name, each signing in as ``account``."""
-    known: dict[str, ProviderFactory] = {}
-    for listing in listings():
-        known[listing.section] = (
-            listing.factory
-            if account is None or listing.signed_in is None
-            else listing.signed_in(account_credentials(listing.section, account))
-        )
-    return known
-
-
-def _logins() -> dict[str, Callable[[], Path]]:
-    """Return where each provider that signs in keeps its default login, by name."""
     return {
-        listing.section: listing.default_login
-        for listing in listings()
-        if listing.default_login is not None
+        listed.section: (
+            partial(listed, account=account)
+            if account is not None and isinstance(listed, _SigningIn)
+            else listed
+        )
+        for listed in listings()
     }
+
+
+@runtime_checkable
+class _SigningIn(Listed, Protocol):
+    """A provider class that signs in, as a named account or its default login."""
+
+    def accounts(self) -> tuple[str, ...]:
+        """Return each named account with a login saved."""
+        ...
+
+    @override
+    def __call__(
+        self,
+        *,
+        name: str,
+        resources: ProviderSharedResources,
+        account: str | None = None,
+    ) -> Provider:
+        """Return a provider the catalog knows as ``name``, signed in as ``account``."""
+        ...
 
 
 def _fixed(
@@ -650,19 +609,8 @@ def _named(account: str | None) -> str | None:
     """Return ``account``, checked, or ``None`` for each spelling of the default."""
     if account in (None, "", "default"):
         return None
-    _check_name(account)
+    check_account(account)
     return account
-
-
-_ACCOUNT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
-
-
-def _check_name(account: str) -> None:
-    """Refuse ``account`` unless it is a name: letters, digits, ``_``, ``-``."""
-    if not _ACCOUNT.fullmatch(account):
-        raise ValueError(
-            f"account {account!r} is not a name: use letters, digits, '_', '-'",
-        )
 
 
 def _key(name: str) -> str:

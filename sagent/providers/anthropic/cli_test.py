@@ -32,7 +32,7 @@ from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.anthropic import login, wire
 from sagent.providers.anthropic.cli import AnthropicCLI, AnthropicCLIModel
 from sagent.providers.resources import SharedResources
-from sagent.providers.types import Login
+from sagent.providers.types import HasLogin
 from sagent.session.types import (
     AgentToAgentMessage,
     AnyToolResult,
@@ -172,12 +172,36 @@ async def test_claude_starts_without_other_accounts_and_without_telemetry(
 
 
 @pytest.mark.asyncio
-async def test_a_named_login_reaches_claude_as_a_token(tmp_path: Path) -> None:
+async def test_a_named_login_reaches_claude_as_a_token(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _keep_logins_in(tmp_path, monkeypatch)
     oauth = {"accessToken": "at-work", "expiresAt": 10**15}
-    credentials = tmp_path / ".credentials-work.json"
-    credentials.write_text(json_dumps({"claudeAiOauth": oauth}))
-    env = await AnthropicCLI(credentials=credentials).environment()
+    (tmp_path / ".credentials-work.json").write_text(
+        json_dumps({"claudeAiOauth": oauth}),
+    )
+    env = await AnthropicCLI(account="work").environment()
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == oauth["accessToken"]
+
+
+def test_its_accounts_are_the_logins_saved_beside_claude_s(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _keep_logins_in(tmp_path, monkeypatch)
+    for name in (".credentials.json", ".credentials-work.json"):
+        (tmp_path / name).write_text("{}")
+    assert AnthropicCLI.accounts() == ("work",)
+
+
+def _keep_logins_in(folder: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make ``claude``'s default login, and so every account's, live in ``folder``."""
+    monkeypatch.setattr(
+        login.ClaudeLogin,
+        "default_path",
+        staticmethod(lambda: folder / ".credentials.json"),
+    )
 
 
 @pytest.mark.asyncio
@@ -780,8 +804,9 @@ async def test_login_signs_claude_in_to_the_named_account(
     client = httpx2.AsyncClient(
         transport=httpx2.MockTransport(lambda request: replies[str(request.url)]),
     )
+    _keep_logins_in(tmp_path, monkeypatch)
     async with _Resources(http=client) as resources:
-        cli = AnthropicCLI(resources=resources, credentials=tmp_path / "work.json")
+        cli = AnthropicCLI(resources=resources, account="work")
         await cli.login()
         env = await cli.environment()
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == grant["access_token"]
@@ -801,7 +826,8 @@ async def test_login_passes_headless_to_the_sign_in(
         seen.append(headless)
 
     monkeypatch.setattr(login.ClaudeLogin, "sign_in", sign_in)
-    await AnthropicCLI(credentials=tmp_path / "c.json").login(headless=headless)
+    _keep_logins_in(tmp_path, monkeypatch)
+    await AnthropicCLI(account="c").login(headless=headless)
     assert seen == [headless]
 
 
@@ -846,7 +872,7 @@ def test_the_cli_offers_the_effort_it_passes_and_the_rest_as_claude_has_them() -
     assert row.service_tier == {"auto"}
     assert AnthropicCLI().usage == ()
     assert AnthropicCLI().name == "anthropic-cli"
-    assert isinstance(AnthropicCLI(), Login)
+    assert isinstance(AnthropicCLI(), HasLogin)
     assert list(AnthropicCLI()) == list(AnthropicCLI.models())
 
 

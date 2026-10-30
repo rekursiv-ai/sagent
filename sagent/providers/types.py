@@ -10,7 +10,7 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, ClassVar, Protocol, runtime_checkable
 
 from sagent.types import Resource
 
@@ -28,7 +28,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "Login",
+    "HasLogin",
     "Model",
     "ModelCatalog",
     "ProcessPool",
@@ -181,6 +181,9 @@ class Provider(Resource, Protocol):
         """Return the name the catalog knows this provider by."""
         ...
 
+    aliases: ClassVar[tuple[str, ...]]
+    """The other names it answers to, as ``acli``; its class's, read before it is built."""
+
     @property
     def resources(self) -> ProviderSharedResources:
         """Return what this provider shares with others."""
@@ -237,9 +240,13 @@ class Model(Resource, Protocol):
 
 
 @runtime_checkable
-class Login(Protocol):
+class HasLogin(Protocol):
     """A provider that signs in to an account."""
 
     async def login(self, *, headless: bool = False) -> None:
         """Sign in, interactively; ``headless`` skips the browser and takes a pasted code."""
+        ...
+
+    def accounts(self) -> tuple[str, ...]:
+        """Return each named account with a login saved, sorted."""
         ...

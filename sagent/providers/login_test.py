@@ -1,18 +1,19 @@
-"""Tests for the lock a login holds around reading, renewing and writing its file."""
+"""Tests for a login's file: its lock, and the files each named account keeps."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import asyncio
 
 import pytest
 
-from sagent.providers.lock import file_lock
-
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from sagent.providers.login import (
+    account_path,
+    check_account,
+    file_lock,
+    saved_accounts,
+)
 
 
 @pytest.mark.asyncio
@@ -76,6 +77,35 @@ async def test_a_waiter_cancelled_leaves_the_lock_to_the_next(tmp_path: Path) ->
 
     async with asyncio.timeout(5), file_lock(lock):
         pass
+
+
+def test_an_account_s_file_sits_beside_the_default_one() -> None:
+    default = Path("/logins/auth.json")
+    assert account_path(default, "work") == Path("/logins/auth-work.json")
+
+
+@pytest.mark.parametrize("account", ["../x", "a/b", "-x", "a b", "work.x", "a..b", ""])
+def test_an_account_that_is_no_name_is_refused(account: str) -> None:
+    with pytest.raises(ValueError, match="is not a name"):
+        check_account(account)
+    with pytest.raises(ValueError, match="is not a name"):
+        account_path(Path("/logins/auth.json"), account)
+
+
+@pytest.mark.parametrize("account", ["Work", "w2", "a_b-C"])
+def test_an_account_of_letters_digits_and_separators_is_a_name(account: str) -> None:
+    check_account(account)
+
+
+def test_the_saved_accounts_are_the_files_beside_the_default_one(
+    tmp_path: Path,
+) -> None:
+    default = tmp_path / "auth.json"
+    assert saved_accounts(default) == ()
+    for name in ("auth.json", "auth-work.json", "auth-home.json", "auth-.json"):
+        (tmp_path / name).write_text("{}")
+    (tmp_path / "auth-x.txt").write_text("{}")
+    assert saved_accounts(default) == ("home", "work")
 
 
 if __name__ == "__main__":

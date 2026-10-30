@@ -458,7 +458,7 @@ class HasModels:
     """The catalog section whose models and settings this provider serves."""
 
     aliases: ClassVar[tuple[str, ...]]
-    """The other names it answers to; each class names its own, never inherits."""
+    """The other names it answers to; each listed class names its own."""
 
     @classmethod
     def models(cls) -> ModelTable:

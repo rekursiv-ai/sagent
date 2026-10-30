@@ -240,6 +240,9 @@ class _Signing(_Picky):
         if self.error is not None:
             raise self.error
 
+    def accounts(self) -> tuple[str, ...]:
+        return ()
+
 
 def _wide(*, name: str, resources: ProviderSharedResources) -> Provider:
     return ScriptedProvider(

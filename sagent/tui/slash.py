@@ -45,7 +45,7 @@ import sys
 import time
 
 from sagent.model.exceptions import AuthError
-from sagent.providers.types import Login
+from sagent.providers.types import HasLogin
 from sagent.runtime import types
 from sagent.session.types import UserMessage
 from sagent.tools.agent_spawn import AgentSpawn
@@ -550,7 +550,7 @@ class Commands:
         if flag not in ("auto", "true", "false"):
             raise SettingError(f"headless={flag!r}: give auto, true, or false")
         provider = self.agent.model.provider
-        if not isinstance(provider, Login):
+        if not isinstance(provider, HasLogin):
             raise SettingError(f"{provider.name} has no interactive sign-in")
         headless = headless_wanted(os.environ) if flag == "auto" else flag == "true"
         # A pasted code from another sign-in, or no answer at the prompt at all.

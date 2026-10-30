@@ -43,9 +43,9 @@ from sagent.model.capability import (
     typed_text,
 )
 from sagent.model.cost import ServiceTier
-from sagent.providers.catalog import accounts, successor
+from sagent.providers.catalog import successor
 from sagent.providers.table import ModelTags
-from sagent.providers.types import ModelCatalog
+from sagent.providers.types import HasLogin, ModelCatalog
 from sagent.tui.settings.types import Setting, SettingError
 
 
@@ -238,7 +238,8 @@ class AgentModel:
 
     def _accounts(self) -> tuple[str, ...]:
         """Return ``default``, then each login this provider keeps and the one in use."""
-        saved = set(accounts(self.agent.model.provider.name))
+        provider = self.agent.model.provider
+        saved = set(provider.accounts() if isinstance(provider, HasLogin) else ())
         if self.catalog.account is not None:
             saved.add(self.catalog.account)
         return ("default", *sorted(saved))
