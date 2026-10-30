@@ -60,19 +60,19 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "FILLS",
     "CommandOutput",
     "Commands",
     "DeferredPane",
-    "Fill",
     "Frame",
     "InputPane",
     "Printed",
     "Printer",
     "ScrollbackPane",
     "StatusPane",
+    "Sticky",
     "ThinkingView",
     "TitlePane",
+    "fill",
 ]
 
 
@@ -163,46 +163,45 @@ class Printed:
 
 
 # ── Width ────────────────────────────────────────────────────────────
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Fill:
-    """Paint min(W, max(min(content, wrap) + gutter, floor)) cells."""
+def fill(
+    content: int,
+    *,
+    total_padding: int,
+    width: int,
+    turn: int = 0,
+    indent: int = 0,
+) -> int:
+    """Return the cells a block paints to its right edge, or centers within.
 
-    floor: int = 80
-    wrap: int = 100
-    gutter: int = 0
+    The one rule for every edge: bars, code, diffs, rules, titles, the welcome.
+    Every edge is a column: an indented block ends where a flush one does.
+    Content wraps at 100; a fill wider than the window would reflow into extra
+    rows when the window shrinks, so it stops at its need, never at ``W`` alone.
 
-    def need(self, content: int) -> int:
-        """Return the row ``content`` cells need, before the window bounds it.
+    Args:
+      content: The block's widest line, in cells.
+      total_padding: Cells the block paints besides its content, both sides.
+      width: The window's width, ``W``.
+      turn: This turn's rightmost edge so far; edges may only step outward.
+      indent: Cells left of the block, which it does not paint.
 
-        Args:
-          content: The widest line, in cells.
+    Returns:
+      cells: ``min(W, max(need, turn)) - indent``, where
+        ``need = min(100 + total_padding, max(80, indent + content + total_padding))``.
 
-        Returns:
-          need: ``max(min(content, wrap) + gutter, floor)``.
-
-        """
-        return max(min(content, self.wrap) + self.gutter, self.floor)
-
-    def cells(self, content: int, *, width: int) -> int:
-        """Return the cells to paint for ``content`` cells in a ``width``-cell window.
-
-        A fill wider than the window reflows into extra rows when it shrinks, so
-        it stops at the content, or ``floor``, never at ``width`` alone.
-
-        Args:
-          content: The widest line, in cells.
-          width: The window's width, ``W``.
-
-        Returns:
-          cells: ``min(W, need(content))``.
-
-        """
-        return min(width, self.need(content))
+    """
+    # Code caps at 100 (Google Java style) among the common limits: 79 (PEP 8),
+    # 88 (black, ruff, this repo), 120 (JetBrains). 100 keeps 88-wide code whole,
+    # and no fill passes 100 + total_padding, so a window that wide never
+    # reflows; 120 would need 20 more. The 80 floor is the classic terminal
+    # width, so short blocks share one edge.
+    need = min(100 + total_padding, max(80, indent + content + total_padding))
+    return min(width, max(need, turn)) - indent
 
 
 @dataclass(kw_only=True, slots=True)
 class Sticky:
-    """The widest row this turn's fills needed: later fills are never narrower.
+    """The turn's rightmost edge: later fills never end left of it.
 
     Scrollback cannot redraw a block, so edges may only step outward; a user
     message starts a new turn and resets it.
@@ -210,29 +209,35 @@ class Sticky:
 
     row: int = 0
 
-    def cells(self, fill: Fill, content: int, *, width: int) -> int:
-        """Return ``fill``'s cells for ``content``, at least this turn's widest.
+    def cells(
+        self,
+        content: int,
+        *,
+        total_padding: int,
+        width: int,
+        indent: int = 0,
+    ) -> int:
+        """Return the ``fill`` for ``content``, and keep where it ends as the edge.
 
         Args:
-          fill: The block kind's fill.
-          content: The widest line, in cells.
+          content: The block's widest line, in cells.
+          total_padding: Cells the block paints besides its content, both sides.
           width: The window's width, ``W``.
+          indent: Cells left of the block, which it does not paint.
 
         Returns:
-          cells: ``min(W, row)``, ``row`` the running max of each fill's need.
+          cells: What the block paints.
 
         """
-        self.row = max(self.row, fill.need(content))
-        return min(width, self.row)
-
-
-FILLS: Mapping[Literal["user", "diff", "code"], Fill] = MappingProxyType(
-    {
-        "user": Fill(wrap=78, gutter=2),  # = min(W, 80)
-        "diff": Fill(gutter=9),
-        "code": Fill(gutter=2),
-    },
-)
+        cells = fill(
+            content,
+            total_padding=total_padding,
+            width=width,
+            turn=self.row,
+            indent=indent,
+        )
+        self.row = indent + cells
+        return cells
 
 
 # ── Panes ────────────────────────────────────────────────────────────
@@ -265,7 +270,7 @@ class Printer(ThinkingView, Protocol):
         ...
 
     def user(self, text: str) -> None:
-        """Write what the user said, as a full-width bar."""
+        """Write what the user said, as a bar."""
         ...
 
     def agent(self, sender: str, recipient: str | None, text: str) -> None:
@@ -322,7 +327,7 @@ class Printer(ThinkingView, Protocol):
 
 
 class ScrollbackPane(Protocol):
-    """Append-only; owns W, FILLS, and the Printed of the stream in flight.
+    """Append-only; owns W, the turn's Sticky, and the Printed of the stream in flight.
 
     Built with the agent, to resolve a result's call by id and its tool's display.
     """

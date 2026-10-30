@@ -2644,7 +2644,7 @@ async def test_run_labels_calls_by_their_tool_and_quits_by_command(
     shown = screen.getvalue()
     assert Read().summary(call("Read", file_path="a.txt").arguments) in shown
     assert "[/kill] cancelled all tool calls" in shown
-    assert "sagent --resume abc   # this session" in capsys.readouterr().err
+    assert "sagent --resume abc     # this session" in capsys.readouterr().err
 
 
 @pytest.mark.asyncio
@@ -2672,12 +2672,40 @@ async def test_run_says_every_way_to_resume(
             )
     assert capsys.readouterr().err.split("\n")[:6] == [
         "Resume this session with:",
-        "sagent --resume abc   # this session",
-        "sagent --continue         # the latest in this directory",
-        "sagent --resume           # pick one in this directory",
-        "sagent --continue-all     # the latest anywhere",
-        "sagent --resume-all       # pick one anywhere",
+        "sagent --resume abc     # this session",
+        "sagent --continue       # the latest in this directory",
+        "sagent --resume         # pick one in this directory",
+        "sagent --continue-all   # the latest anywhere",
+        "sagent --resume-all     # pick one anywhere",
     ]
+
+
+@pytest.mark.asyncio
+async def test_a_long_session_id_pushes_every_resume_comment_out(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    async with (
+        JsonlJournal(tmp_path / "5c67e618b5cb" / "journal.jsonl") as journal,
+        Agent(model=ScriptedProvider()["scripted"], journal=journal) as agent,
+    ):
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("\x04")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+                timeout=5,
+            )
+    rows = capsys.readouterr().err.split("\n")[1:6]
+    assert rows[0] == "sagent --resume 5c67e618b5cb   # this session"
+    assert {row.index("#") for row in rows} == {31}
 
 
 @pytest.mark.asyncio

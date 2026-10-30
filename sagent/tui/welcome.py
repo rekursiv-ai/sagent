@@ -6,6 +6,8 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from sagent.tui.types import fill
+
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -54,7 +56,6 @@ def render_welcome(
     blue: str = "#4a90c4",
     green: str = "#93c47d",
     red: str = "#e06666",
-    max_width: int = 80,
     padding: int = 2,
 ) -> None:
     """Render a width-aware welcome without performing any model request.
@@ -73,7 +74,6 @@ def render_welcome(
       blue: The wordmark's color, and the first bar's.
       green: The second bar's color.
       red: The third bar's color.
-      max_width: The widest the frame grows.
       padding: Columns between the frame's sides and its content.
 
     """
@@ -82,7 +82,7 @@ def render_welcome(
             console.print(Text(f"[{provider}] {model}"))
         return
     unicode_ok = _supports_blocks(console.encoding)
-    frame_width = min(console.width, max_width)
+    frame_width = fill(0, total_padding=0, width=console.width)
     banner = _banner_rows(blue=blue, green=green, red=red)
     large = (
         not resumed
@@ -145,7 +145,7 @@ def render_welcome(
         left, horizontal, right = ("╰", "─", "╯") if unicode_ok else ("+", "-", "+")
         console.print(Text(left + horizontal * (frame_width - 2) + right, style="dim"))
     console.print()
-    greeting = Text("Good news, everyone! The discovering begins!")
+    greeting = Text("Good news, everyone! The discovering begins.")
     for line in greeting.wrap(console, frame_width):
         console.print(line)
     console.print()

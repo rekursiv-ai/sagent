@@ -69,6 +69,10 @@ def _visible(row: str) -> str:
     return re.sub(r"\x1b\[[0-9;]*m", "", row)
 
 
+def test_a_new_printer_owes_no_gap() -> None:
+    assert ConsolePrinter(Console(file=io.StringIO())).gap_owed is False
+
+
 def test_it_is_a_printer_that_hides_thinking_by_default() -> None:
     printer: Printer = ConsolePrinter(Console(file=io.StringIO()))
     assert printer.show_thinking is False
@@ -113,6 +117,13 @@ def test_a_user_bar_stops_at_80_in_a_wide_window() -> None:
     assert [len(_visible(r)) for r in screen.raw()] == [0, 80]
 
 
+def test_a_long_user_bar_still_stops_at_80() -> None:
+    screen = _Screen(width=200, color=True)
+    screen.printer.user("u" * 150)
+    assert [len(_visible(r)) for r in screen.raw()] == [0, 80, 80]
+    assert _visible(screen.raw()[1]) == "> " + "u" * 78
+
+
 def _fills(screen: _Screen) -> list[int]:
     """Return each filled row's width, in order, runs of one width merged."""
     widths = [len(_visible(r)) for r in screen.raw() if len(_visible(r)) >= 80]
@@ -136,6 +147,25 @@ def test_a_user_message_narrows_the_next_turn_s_fills_again() -> None:
     screen.printer.diff("@@ -1 +1 @@\n-a\n+b\n", path="t.py")
     screen.printer.markdown("```\nz = 2\n```")
     assert _fills(screen) == [92, 80]
+
+
+def test_a_bar_neither_sets_nor_follows_its_turn_s_width() -> None:
+    screen = _Screen(width=200, color=True)
+    screen.printer.user("u" * 95)
+    screen.printer.markdown("```\nz = 2\n```")
+    screen.printer.markdown(f"```\n{'w' * 95}\n```")
+    screen.printer.agent("w", None, "done")
+    assert _fills(screen) == [80, 97, 80]
+
+
+def test_a_halt_s_rules_fill_like_every_other_edge() -> None:
+    screen = _Screen(width=200)
+    screen.printer.halt("stopped")
+    screen.printer.markdown(f"```\n{'w' * 95}\n```")
+    screen.printer.halt("h" * 150)
+    rules = [len(r) for r in screen.rows() if r.startswith("─")]
+    assert rules == [80, 80, 100, 100]
+    assert "h" * 100 in screen.rows()
 
 
 def test_an_empty_user_message_still_shows_its_bar() -> None:
@@ -313,12 +343,12 @@ def test_a_blank_error_still_says_something(text: str) -> None:
     assert screen.rows() == ["     ✗ <no error message>"]
 
 
-@pytest.mark.parametrize(("width", "rule"), [(30, 30), (10, 20)])
+@pytest.mark.parametrize(("width", "rule"), [(30, 30), (10, 10), (200, 80)])
 def test_a_halt_is_bold_red_between_rules(width: int, rule: int) -> None:
     screen = _Screen(width=width, color=True)
     screen.printer.halt("stopped")
     raw = screen.raw()
-    assert [_visible(r) for r in raw if r][:1] == ["─" * min(rule, width)]
+    assert [_visible(r) for r in raw if r][:1] == ["─" * rule]
     assert "stopped" in [_visible(r) for r in raw]
     assert any(_codes(r) and _codes(r)[0] == "1;31" for r in raw)
     assert _codes(raw[0])[0] == "31"

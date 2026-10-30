@@ -4,8 +4,8 @@
    a blank line comes only between rendered blocks.
 2. CommonMark lets only a list starting at 1 interrupt a paragraph, so a
    continued numbering under a bold heading ran into the paragraph as prose.
-3. Rich fills a code block to the window, which reflows when it shrinks;
-   here code wraps at 100 and the fill stops at the longest line, or 80.
+3. Rich fills a code block, a rule, and a title's centering to the window,
+   which reflows when it shrinks; here each spans ``fill``, as every edge does.
 
 ``TightMarkdown.__rich_console__`` is a copy of Rich's, changed for (1); a
 test renders both over a corpus to catch the copy drifting from Rich.
@@ -24,18 +24,23 @@ from markdown_it import MarkdownIt
 from markdown_it.rules_block.list import list_block, skipOrderedListMarker
 from rich.cells import cell_len
 from rich.markdown import (
+    BlockQuote,
     CodeBlock,
+    Heading,
+    HorizontalRule,
     Link,
     Markdown,
     MarkdownContext,
     MarkdownElement,
     UnknownElement,
 )
+from rich.rule import Rule
 from rich.segment import Segment
 from rich.style import Style as RichStyle
 from rich.syntax import Syntax
+from rich.text import Text
 
-from sagent.tui.types import FILLS, Sticky
+from sagent.tui.types import Sticky
 
 
 if TYPE_CHECKING:
@@ -52,7 +57,7 @@ __all__ = [
 
 
 class FitCodeBlock(CodeBlock):
-    """A code block wrapping its code at 100, filled to 80 or, once wide, its cap."""
+    """A code block wrapping its code at 100, filled as wide as ``fill``."""
 
     @override
     def __init__(
@@ -68,8 +73,7 @@ class FitCodeBlock(CodeBlock):
     @classmethod
     def create(cls, markdown: Markdown, token: Token) -> FitCodeBlock:
         lexer_name = (token.info or "").partition(" ")[0]
-        sticky = markdown.sticky if isinstance(markdown, TightMarkdown) else Sticky()
-        return cls(lexer_name or "text", markdown.code_theme, sticky)
+        return cls(lexer_name or "text", markdown.code_theme, _sticky(markdown))
 
     @override
     def __rich_console__(
@@ -79,7 +83,13 @@ class FitCodeBlock(CodeBlock):
     ) -> RenderResult:
         code = str(self.text).rstrip()
         longest = max((cell_len(line) for line in code.splitlines()), default=0)
-        width = self.sticky.cells(FILLS["code"], longest, width=options.max_width)
+        # Syntax's padding=1 puts a cell each side of the code.
+        width = self.sticky.cells(
+            longest,
+            total_padding=2,
+            width=console.width,
+            indent=_indent(console, options),
+        )
         syntax = Syntax(
             code,
             self.lexer_name,
@@ -90,6 +100,97 @@ class FitCodeBlock(CodeBlock):
         yield from console.render(syntax, options.update_width(width))
 
 
+class FitHeading(Heading):
+    """A heading; a centered one centers within ``fill``, not the window."""
+
+    @override
+    def __init__(self, tag: str, sticky: Sticky | None = None) -> None:
+        super().__init__(tag)
+        self.sticky = sticky if sticky is not None else Sticky()
+
+    @override
+    @classmethod
+    def create(cls, markdown: Markdown, token: Token) -> FitHeading:
+        return cls(token.tag, _sticky(markdown))
+
+    @override
+    def __rich_console__(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
+        if self.LEVEL_ALIGN.get(self.tag) != "center":
+            yield from super().__rich_console__(console, options)
+            return
+        width = self.sticky.cells(
+            self.text.cell_len,
+            total_padding=0,
+            width=console.width,
+            indent=_indent(console, options),
+        )
+        text = self.text.copy()
+        text.justify = "center"
+        yield from console.render(text, options.update_width(width))
+
+
+class FitHorizontalRule(HorizontalRule):
+    """A horizontal rule as wide as ``fill``."""
+
+    @override
+    def __init__(self, sticky: Sticky | None = None) -> None:
+        super().__init__()
+        self.sticky = sticky if sticky is not None else Sticky()
+
+    @override
+    @classmethod
+    def create(cls, markdown: Markdown, token: Token) -> FitHorizontalRule:
+        return cls(_sticky(markdown))
+
+    @override
+    def __rich_console__(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
+        width = self.sticky.cells(
+            0,
+            total_padding=0,
+            width=console.width,
+            indent=_indent(console, options),
+        )
+        rule = Rule(
+            style=console.get_style("markdown.hr", default="none"),
+            characters="-",
+        )
+        yield from console.render(rule, options.update_width(width))
+        yield Text()
+
+
+class LeftQuote(BlockQuote):
+    """A quote narrowed only by its ``▌ ``, so what it holds can find its indent.
+
+    Rich's narrows by 4 for a 2-cell bar; the 2 lost on the right would put
+    a quoted code block's edge 2 cells left of every other.
+    """
+
+    @override
+    def __rich_console__(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+    ) -> RenderResult:
+        bar = Segment("▌ ", self.style)
+        lines = console.render_lines(
+            self.elements,
+            options.update(width=options.max_width - bar.cell_length),
+            style=self.style,
+        )
+        for line in lines:
+            yield bar
+            yield from line
+            yield Segment.line()
+
+
 class TightMarkdown(Markdown):
     """Markdown without a leading blank line or swallowed ordered lists."""
 
@@ -97,6 +198,9 @@ class TightMarkdown(Markdown):
         **Markdown.elements,
         "fence": FitCodeBlock,
         "code_block": FitCodeBlock,
+        "heading_open": FitHeading,
+        "hr": FitHorizontalRule,
+        "blockquote_open": LeftQuote,
     }
 
     @override
@@ -275,6 +379,18 @@ def stable_boundary(text: str) -> int:
         return 0
     lines = text.split("\n")
     return sum(len(lines[i]) + 1 for i in range(starts[-1]))
+
+
+def _sticky(markdown: Markdown) -> Sticky:
+    """Return the turn's width ``markdown`` shares, or a fresh one for Rich's own."""
+    return markdown.sticky if isinstance(markdown, TightMarkdown) else Sticky()
+
+
+# Exact only because every container narrows on its left alone: Rich's lists do,
+# and LeftQuote does.
+def _indent(console: Console, options: ConsoleOptions) -> int:
+    """Return the cells left of a block that its lists and quotes took."""
+    return console.width - options.max_width
 
 
 # Across 133,899 logged replies this applied 244 times; the wrapped number it guards

@@ -11,6 +11,7 @@ from rich.markdown import Markdown
 import pytest
 
 from sagent.tui.markdown import TightMarkdown, stable_boundary
+from sagent.tui.types import Sticky
 
 
 def _render(markdown: Markdown, *, width: int = 80) -> str:
@@ -34,6 +35,11 @@ def _rich(text: str, *, hyperlinks: bool = True) -> str:
     return _render(Markdown(text, hyperlinks=hyperlinks))
 
 
+def _bare(rendered: str) -> str:
+    """Return ``rendered`` without each row's end padding, which a quote widens."""
+    return "\n".join(row.rstrip() for row in rendered.split("\n"))
+
+
 def _ansi(markdown: Markdown) -> str:
     out = io.StringIO()
     Console(file=out, width=80, color_system="truecolor", force_terminal=True).print(
@@ -49,6 +55,7 @@ _AGREES_WITH_RICH = [
     "plain paragraph\n",
     "first para\n\nsecond para\n",
     "# Title\n\nBody text\n",
+    "## Section\n\nBody text\n",
     "```python\nprint('hi')\n2. not a list\n```\n",
     "para\n\n    indented = 1\n    2. still code\n",
     "| a | b |\n|---|---|\n| 1 | 2 |\n",
@@ -62,7 +69,6 @@ _AGREES_WITH_RICH = [
     "1. a\n   1. b\n      1. c\n",
     "line one  \nline two\n",
     "line one\nline two\n",
-    "- item\n\n> quote\n",
     "para\n*\nmore\n",
     "para\n2.\nmore\n",
     "para\n1.\nmore\n",
@@ -89,12 +95,13 @@ def test_it_matches_rich_but_for_a_leading_blank_line(
 def test_a_list_or_quote_that_opens_the_text_gets_no_blank_line(text: str) -> None:
     assert _rich(text).startswith("\n")
     assert not _tight(text).startswith("\n")
-    assert _tight(text) == _rich(text)[1:]
+    assert _bare(_tight(text)) == _bare(_rich(text)[1:])
 
 
-def test_blocks_after_the_first_keep_their_blank_line() -> None:
-    assert _tight("- a\n\n> b\n") == _rich("- a\n\n> b\n").lstrip("\n")
-    assert "\n\n" in _tight("- a\n\n> b\n")
+@pytest.mark.parametrize("text", ["- a\n\n> b\n", "- item\n\n> quote\n"])
+def test_blocks_after_the_first_keep_their_blank_line(text: str) -> None:
+    assert _bare(_tight(text)) == _bare(_rich(text).lstrip("\n"))
+    assert "\n\n" in _tight(text)
 
 
 def test_a_leading_html_block_keeps_the_blank_line_after_it() -> None:
@@ -165,6 +172,66 @@ def test_a_code_block_wraps_its_code_at_100_and_fills_at_least_80(
 ) -> None:
     rows = _render(TightMarkdown(f"```\n{code}\n```"), width=window).splitlines()
     assert {len(row) for row in rows} == {fill}
+
+
+def test_a_horizontal_rule_fills_like_a_code_block() -> None:
+    rows = _render(TightMarkdown("a\n\n---\n\nb\n"), width=200).splitlines()
+    assert [row.rstrip() for row in rows if "-" in row] == ["-" * 80]
+
+
+def test_a_title_centers_within_the_fill_not_the_window() -> None:
+    (row,) = _render(TightMarkdown("# Title\n"), width=200).splitlines()
+    assert row.rstrip() == " " * 37 + "Title"
+
+
+def test_a_rule_and_a_title_widen_with_the_turn() -> None:
+    sticky = Sticky(row=100)
+    rows = _render(TightMarkdown("# Ti\n\n---\n", sticky=sticky), width=200)
+    assert [row.rstrip() for row in rows.splitlines() if row.strip()] == [
+        " " * 49 + "Ti",
+        "-" * 100,
+    ]
+
+
+def _edges(text: str, *, width: int = 200) -> set[int]:
+    """Return the columns where the rows painted with a background end."""
+    console = Console(file=io.StringIO(), width=width, color_system="truecolor")
+    ends: set[int] = set()
+    for line in console.render_lines(TightMarkdown(text), console.options):
+        column = end = 0
+        for segment in line:
+            column += segment.cell_length
+            if segment.style is not None and segment.style.bgcolor is not None:
+                end = column
+        ends |= {end} - {0}
+    return ends
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "```\nx = 1\n```\n",
+        "1. **The rule:**\n   ```\n   x = 1\n   ```\n",
+        "- item\n\n  > ```\n  > x = 1\n  > ```\n",
+        "> > ```\n> > x = 1\n> > ```\n",
+    ],
+)
+def test_a_nested_code_block_ends_where_a_top_level_one_does(text: str) -> None:
+    assert _edges(text) == {80}
+
+
+def test_a_nested_rule_and_title_end_where_top_level_ones_do() -> None:
+    rows = _render(TightMarkdown("- # Ti\n\n  ---\n"), width=200).splitlines()
+    assert [row.rstrip() for row in rows if row.strip()] == [
+        " • " + " " * 37 + "Ti",
+        "   " + "-" * 77,
+    ]
+
+
+def test_a_quote_gives_up_columns_only_on_its_left() -> None:
+    (row,) = _render(TightMarkdown("> " + "q " * 50), width=40).splitlines()[:1]
+    assert len(row) == 40
+    assert row.rstrip() == "▌ " + "q " * 18 + "q"
 
 
 def test_a_fence_is_never_reflowed_into_a_list() -> None:

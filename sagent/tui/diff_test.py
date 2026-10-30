@@ -103,6 +103,29 @@ def test_a_diff_without_a_hunk_header_numbers_from_zero() -> None:
     assert _plain("+added\n same\n")[1:] == ["  0 added", "  1 same"]
 
 
+def test_the_indent_every_line_shares_is_dropped() -> None:
+    diff = "@@ -1,2 +1,2 @@\n-        a = 1\n+        a = 2\n         b\n"
+    assert _plain(diff)[1:] == ["  1 a = 1", "  1 a = 2", "  2 b"]
+
+
+def test_a_dropped_indent_keeps_each_line_s_relative_indent() -> None:
+    diff = "@@ -1 +1,2 @@\n-    if x:\n+    if y:\n+        z\n"
+    assert _plain(diff)[1:] == ["  1 if x:", "  1 if y:", "  2     z"]
+
+
+def test_a_blank_line_does_not_keep_the_indent() -> None:
+    assert _plain("@@ -0,0 +1,3 @@\n+    a\n+\n+    b\n")[1:] == [
+        "  1 a",
+        "  2",
+        "  3 b",
+    ]
+
+
+def test_only_an_identical_prefix_is_dropped_never_tabs_for_spaces() -> None:
+    rows = _plain("@@ -1 +1 @@\n-\ta\n+    a\n", width=60)
+    assert rows[1:] == ["  1 " + " " * 8 + "a", "  1     a"]
+
+
 def test_file_headers_are_neither_shown_nor_counted() -> None:
     rows = _plain("--- a/foo\n+++ b/foo\n@@ -1 +1 @@\n-old\n+new\n")
     assert rows == [
