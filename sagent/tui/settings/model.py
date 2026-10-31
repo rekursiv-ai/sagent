@@ -46,7 +46,8 @@ from sagent.model.cost import ServiceTier
 from sagent.providers.catalog import successor
 from sagent.providers.table import ModelTags
 from sagent.providers.types import HasLogin, ModelCatalog
-from sagent.settings.types import Setting, SettingError
+from sagent.settings.exceptions import SettingError
+from sagent.settings.types import Setting
 
 
 if TYPE_CHECKING:

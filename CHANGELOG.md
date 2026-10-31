@@ -7,8 +7,8 @@ All notable sagent changes are documented here. This project follows
 
 ### Added
 
-- The welcome logo becomes a holiday icon around 26 holidays, from the last
-  workday before each through its last day; overlapping holidays are picked
+- The welcome logo becomes a holiday icon on 26 holidays, for that day, or
+  Friday to Sunday when it falls on a weekend; overlapping holidays are picked
   at random. Dates follow US observance: computed for seasons, Lunar New
   Year, Mid-Autumn, Holi, Diwali, Vaisakhi, Easter, Thanksgiving and the
   Hebrew holidays; announced for the Eids and Vesak. Terminals without 256

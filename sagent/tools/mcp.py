@@ -319,17 +319,17 @@ async def remove_server(
             document, listed = _file_config(path)
             if name not in listed:
                 continue
-            removed = _checked(name, listed.pop(name), source=str(path))
+            removed = listed.pop(name)
             _write_config(path, document, listed)
-        key = _key(name, _written(removed))
+        key = _signed_in_key(name, removed)
         # The other scope may name the same server, and keep using its sign-in.
         still = (
-            _key(name, _written(_checked(name, entry, source=str(p))))
+            _signed_in_key(name, entry)
             for p in (_config_file(cwd, scope=s) for s in ("local", "user"))
             for n, entry in _file_config(p)[1].items()
             if n == name
         )
-        if key not in still:
+        if key is not None and key not in still:
             McpTokenStorage(key).path.unlink(missing_ok=True)
         return where
     raise ValueError(f"No MCP server {name!r} in {' or '.join(scopes)}.")
@@ -1064,6 +1064,15 @@ def _written(entry: _Entry) -> str:
     if "command" in entry:
         return " ".join([entry["command"], *entry.get("args", [])])
     return entry.get("url", entry.get("serverUrl", ""))
+
+
+# A sign-in is made only for a server that reads, so one that does not has none.
+def _signed_in_key(name: str, raw: Mapping[str, PlainTree]) -> str | None:
+    """Return the key a sign-in of the server ``raw`` would have; ``None`` if malformed."""
+    try:
+        return _key(name, _written(_checked(name, raw, source="")))
+    except ValueError:
+        return None
 
 
 def _key(name: str, where: str) -> str:

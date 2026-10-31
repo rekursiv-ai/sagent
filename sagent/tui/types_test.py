@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 import inspect
 import io
 
 from rich.console import Console
+from rich.text import Text
 
 import pytest
 
 from sagent.tui.console import ConsolePrinter
-from sagent.tui.types import Printer, Sticky, fill
+from sagent.tui.types import Printer, Sticky, fill, hang
 
 
 def _members() -> set[str]:
@@ -102,6 +105,71 @@ def test_a_sticky_row_is_the_edge_an_indented_block_ends_at() -> None:
     assert sticky.cells(90, total_padding=2, width=200, indent=4) == 92
     assert sticky.row == 96
     assert sticky.cells(10, total_padding=2, width=200) == 96
+
+
+def _hung(
+    line: str,
+    *,
+    width: int,
+    limit: int = 0,
+    overflow: Literal["fold", "ellipsis"] = "fold",
+    prose: bool = False,
+    background: str | None = None,
+    max_rows: int = 0,
+) -> list[str]:
+    """Return the rows ``hang`` prints ``line`` as, led by ``> `` then two spaces."""
+    console = Console(file=io.StringIO(), width=200, color_system=None)
+    hang(
+        console,
+        Text(line),
+        first=Text("> "),
+        rest=Text("  "),
+        width=width,
+        limit=limit,
+        overflow=overflow,
+        prose=prose,
+        background=background,
+        max_rows=max_rows,
+    )
+    file = console.file
+    assert isinstance(file, io.StringIO)
+    return file.getvalue().splitlines()
+
+
+def test_a_hung_line_folds_at_the_edge_under_its_lead() -> None:
+    assert _hung("abcdefghij", width=6) == ["> abcd", "  efgh", "  ij"]
+    assert _hung("abcdefghij", width=20, limit=3) == ["> abc", "  def", "  ghi", "  j"]
+
+
+def test_a_hung_line_cut_short_ends_in_an_ellipsis() -> None:
+    assert _hung("abcdefghij", width=6, overflow="ellipsis") == ["> abc…"]
+
+
+def test_hung_prose_breaks_between_words_unless_a_word_is_wider_than_a_row() -> None:
+    assert _hung("aa bbbb", width=7, prose=True) == ["> aa", "  bbbb"]
+    assert _hung("aa bbbbbbb", width=7, prose=True) == ["> aa bb", "  bbbbb"]
+    assert _hung("", width=7, prose=True) == ["> "]
+
+
+def test_a_hung_line_past_its_rows_says_how_many_more() -> None:
+    rows = _hung("abcdefghijkl", width=6, max_rows=2)
+    assert rows[0] == "> abcd"
+    assert rows[1].startswith("  ...")
+    assert _hung("abcdefghijkl", width=20, limit=2, max_rows=1) == ["> .…"]
+
+
+def test_a_hung_tab_takes_its_cells_and_never_leads_a_row() -> None:
+    assert _hung("a\tb", width=20) == ["> a       b"]
+    assert _hung("abc\tdef", width=6) == ["> abc ", "  def"]
+    assert _hung("abc\tdef", width=7) == ["> abc  ", "  de", "  f"]
+
+
+def test_a_lead_as_wide_as_the_row_folds_as_text() -> None:
+    assert _hung("abcd", width=2) == ["> ", "ab", "cd"]
+
+
+def test_a_hung_background_paints_to_the_row_s_width() -> None:
+    assert _hung("ab", width=8, background="on red") == ["> ab    "]
 
 
 if __name__ == "__main__":

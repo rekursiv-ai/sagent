@@ -9,8 +9,8 @@ import shlex
 
 import pytest
 
+from sagent.settings.exceptions import HelpRequestedError, SettingError
 from sagent.settings.flags import ActionParser, flags
-from sagent.settings.types import SettingError
 
 
 _STATIC = frozenset({"--resume", "--tools", "--name", "--headless", "-h", "--help"})
@@ -102,6 +102,14 @@ def test_an_actions_help_is_returned_not_printed_or_exited(
     help_text = parser.format_help()
     assert help_text.startswith("usage: sagent mcp add [-h] [-e ENV]")
     assert "Add an MCP server." in help_text
+    assert capsys.readouterr() == ("", "")
+
+
+def test_printing_an_actions_help_raises_rather_than_prints(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(HelpRequestedError):
+        _parser().print_help()
     assert capsys.readouterr() == ("", "")
 
 

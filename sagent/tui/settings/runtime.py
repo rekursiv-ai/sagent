@@ -14,7 +14,8 @@ from dataclasses import dataclass
 import math
 
 from sagent.runtime.runtime import Runtime
-from sagent.settings.types import Setting, SettingError
+from sagent.settings.exceptions import SettingError
+from sagent.settings.types import Setting
 
 
 __all__ = [

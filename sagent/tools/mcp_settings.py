@@ -26,8 +26,9 @@ import os
 from treekle import PlainTree, json_loads
 
 from sagent.providers.login import headless_wanted
+from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import ActionParser
-from sagent.settings.types import Setting, SettingError
+from sagent.settings.types import Setting
 from sagent.tools.mcp import (
     McpServer,
     McpSession,
@@ -121,6 +122,7 @@ class McpSettings:
                     usage=parser.format_usage().partition(verb)[2].strip(),
                     apply=partial(_run, parser, run),
                     cli=True,
+                    flags=parser.options,
                 ),
             )
         return settings

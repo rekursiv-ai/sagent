@@ -77,9 +77,9 @@ from sagent.session.types import (
     UserMessage,
     record_classes,
 )
-from sagent.settings.flags import flags
+from sagent.settings.exceptions import SettingError
+from sagent.settings.flags import ActionParser, flags
 from sagent.settings.harvest import harvest
-from sagent.settings.types import SettingError
 from sagent.tools import mcp_settings
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
@@ -97,7 +97,7 @@ from sagent.tools.read import Read
 from sagent.tools.session import Session
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
-from sagent.tui import main
+from sagent.tui import main, slash
 from sagent.tui.console import ConsolePrinter, Screen
 from sagent.tui.prompt import Input, Panes, prompt_text
 from sagent.tui.slash import Commands
@@ -444,7 +444,7 @@ def test_a_count_or_amount_that_fits_is_taken() -> None:
 
 
 @pytest.mark.parametrize("word", ["logout", "hello"])
-def test_an_unknown_command_names_the_known_ones(
+def test_an_unknown_command_points_at_help(
     script: _Script,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -458,6 +458,19 @@ def test_an_unknown_command_names_the_known_ones(
     del script
 
 
+def test_an_unknown_command_is_named_before_any_model_is_built(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A typo says it is one, not that the provider set up for a session fails."""
+    monkeypatch.setenv("SAGENT_PROVIDER", "nowhere")
+    _argv(monkeypatch, "hello")
+    assert main.main() == 2
+    assert capsys.readouterr().err == (
+        "Error: unknown command: sagent hello; see sagent --help\n"
+    )
+
+
 def test_a_word_a_command_does_not_take_is_refused(
     script: _Script,
     monkeypatch: pytest.MonkeyPatch,
@@ -466,7 +479,7 @@ def test_a_word_a_command_does_not_take_is_refused(
     _argv(monkeypatch, "login", "--provider", "signing", "extra")
     assert main.main() == 1
     assert capsys.readouterr().err == (
-        "Error: [/login] unrecognized arguments: extra; see sagent login --help\n"
+        "Error: unrecognized arguments: extra; see sagent login --help\n"
     )
     provider = script.providers["signing"]
     assert isinstance(provider, _Signing)
@@ -484,6 +497,58 @@ def test_a_commands_setting_flags_match_as_the_sessions_do(
     provider = script.providers["signing"]
     assert isinstance(provider, _Signing)
     assert provider.signed_in == 1
+
+
+def test_an_action_s_own_flag_is_never_taken_as_a_setting(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--out`` names ``model.thinking.output`` by its letters, but login takes it."""
+    made = slash._login_parser
+
+    def with_out() -> ActionParser:
+        parser = made()
+        parser.add_argument("--out")
+        return parser
+
+    monkeypatch.setattr(slash, "_login_parser", with_out)
+    _argv(monkeypatch, "login", "--provider", "signing", "--out", "x")
+    assert main.main() == 0
+    provider = script.providers["signing"]
+    assert isinstance(provider, _Signing)
+    assert provider.signed_in == 1
+
+
+def test_a_command_builds_one_set_of_commands_for_its_flags_and_itself(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[Commands] = []
+
+    class _Counted(Commands):
+        def __init__(
+            self,
+            agent: Agent,
+            *,
+            catalog: ModelCatalog,
+            say: Callable[[CommandOutput], None],
+            screen: main._Screen,
+            panes: Panes,
+        ) -> None:
+            super().__init__(
+                agent,
+                catalog=catalog,
+                say=say,
+                screen=screen,
+                panes=panes,
+            )
+            built.append(self)
+
+    monkeypatch.setattr(main, "Commands", _Counted)
+    _argv(monkeypatch, "login", "--provider", "signing", "--effort", "none")
+    assert main.main() == 0
+    assert len(built) == 1
+    del script
 
 
 def test_an_unknown_tool_is_refused_before_a_session_file_is_made(
@@ -556,7 +621,7 @@ def test_mcp_keeps_its_own_flags(
         json_dumps(config),
     )
     assert main.main() == 0
-    assert capsys.readouterr().out == "[/mcp.list] off  http  every_request  disabled\n"
+    assert capsys.readouterr().out == "off  http  every_request  disabled\n"
 
 
 def test_what_a_setting_flag_says_is_dropped() -> None:
@@ -954,9 +1019,9 @@ def test_an_account_that_is_no_name_is_an_error(
     [
         (
             AuthError("the code was for another sign-in"),
-            "Error: [/login] AuthError: the code was for another sign-in\n",
+            "Error: AuthError: the code was for another sign-in\n",
         ),
-        (EOFError(), "Error: [/login] EOFError\n"),
+        (EOFError(), "Error: EOFError\n"),
     ],
     ids=["refused", "no-input"],
 )
@@ -986,9 +1051,7 @@ def test_login_to_a_provider_without_one_is_an_error(
 ) -> None:
     _argv(monkeypatch, "login", "--provider", "scripted")
     assert main.main() == 1
-    assert capsys.readouterr().err == (
-        "Error: [/login] scripted has no interactive sign-in\n"
-    )
+    assert capsys.readouterr().err == "Error: scripted has no interactive sign-in\n"
     del script
 
 
@@ -1111,7 +1174,7 @@ def test_mcp_verbs_run_from_the_shell_without_a_model(
         _argv(monkeypatch, *argv)
         assert main.main() == 0, argv
         said = capsys.readouterr()
-        assert said.out.startswith(f"[/mcp.{argv[1]}] {out}"), (argv, said)
+        assert said.out.startswith(out), (argv, said)
         assert said.err == "", (argv, said)
 
 
@@ -1136,7 +1199,7 @@ def test_mcp_login_shows_the_sign_in_page_then_what_it_did(
     assert main.main() == 0
     said = capsys.readouterr()
     assert (said.out, said.err) == (
-        "Open https://auth/web\n[/mcp.login] Signed in to MCP server 'web'.\n",
+        "Open https://auth/web\nSigned in to MCP server 'web'.\n",
         "",
     )
 
@@ -1150,7 +1213,7 @@ def test_mcp_commands_log_to_the_log_file_not_the_terminal(
     _argv(monkeypatch, "mcp", "list", "--mcp-config", json_dumps(config))
     assert main.main() == 0
     said = capsys.readouterr()
-    assert said.out.startswith("[/mcp.list] dead  http  every_request  failed: ")
+    assert said.out.startswith("dead  http  every_request  failed: ")
     assert said.err == ""
     for handler in logs.handlers:
         handler.flush()
@@ -1167,15 +1230,10 @@ def test_a_group_lists_its_commands(
     _argv(monkeypatch, *argv)
     assert main.main() == 0
     out = capsys.readouterr().out.splitlines()
-    assert out[0] == "[/help] mcp commands"
-    assert [line.split()[0] for line in out[1:] if line.startswith("  /")] == [
-        "/mcp.list",
-        "/mcp.get",
-        "/mcp.add",
-        "/mcp.add-json",
-        "/mcp.remove",
-        "/mcp.login",
-        "/mcp.logout",
+    assert out[0] == "mcp commands"
+    assert [line.split()[:3] for line in out[1:] if line.startswith("  sagent ")] == [
+        ["sagent", "mcp", verb]
+        for verb in ("list", "get", "add", "add-json", "remove", "login", "logout")
     ]
 
 
@@ -1190,28 +1248,25 @@ def test_a_group_lists_its_commands(
         (
             ("mcp", "login"),
             (
-                "Error: [/mcp.login] the following arguments are required: name;"
+                "Error: the following arguments are required: name;"
                 " see sagent mcp login --help\n"
             ),
             1,
         ),
         (
             ("mcp", "login", "nope"),
-            "Error: [/mcp.login] No MCP server 'nope'; configured: git\n",
+            "Error: No MCP server 'nope'; configured: git\n",
             1,
         ),
         (
             ("mcp", "login", "git"),
-            (
-                "Error: [/mcp.login] ValueError: MCP server 'git' runs locally;"
-                " it needs no sign-in.\n"
-            ),
+            "Error: ValueError: MCP server 'git' runs locally; it needs no sign-in.\n",
             1,
         ),
         (
             ("mcp", "list", "--effort", "high"),
             (
-                "Error: [/mcp.list] unrecognized arguments: --effort high;"
+                "Error: unrecognized arguments: --effort high;"
                 " see sagent mcp list --help\n"
             ),
             1,
@@ -1269,9 +1324,10 @@ def test_every_shell_command_runs_as_its_prompt_command_does(
             asyncio.run(commands(f"/{dotted} {args}"))
             (prompt,) = said
             said.clear()
+            assert prompt.command == f"/{dotted}"
             if code == 0:
                 assert prompt.tone == "note"
-                assert prompt.text == f"[/{dotted}] {action.help_long.rstrip()}"
+                assert prompt.text == action.help_long.rstrip()
                 assert (shell.out, shell.err) == (f"{prompt.text}\n", "")
             else:
                 assert prompt.tone == "error"
@@ -1638,7 +1694,14 @@ async def _set(*argv: str) -> tuple[main._Screen, Agent]:
     agent = Agent(model=catalog["wide"]["wide"], tools=[Read()])
     screen = main._Screen()
     _, given = flags(argv, static=frozenset())
-    await main._configure(agent, catalog=catalog, screen=screen, given=given)
+    commands = Commands(
+        agent,
+        catalog=catalog,
+        say=main._dropped,
+        screen=screen,
+        panes=Panes(),
+    )
+    await main._configure(harvest(commands.owners()), catalog=catalog, given=given)
     return screen, agent
 
 

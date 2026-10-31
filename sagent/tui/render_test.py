@@ -355,7 +355,7 @@ def test_an_unstreamed_turn_prints_its_reasoning_and_reply_from_its_records() ->
 def test_command_output_is_a_note_or_an_error() -> None:
     render, printer = _renderer()
     render.show(types.ModelResponsePartial(text="held"))
-    render.show(CommandOutput(text="[/model] a", tone="note"))
+    render.show(CommandOutput(text="a", tone="note", command="/model"))
     render.show(CommandOutput(text="no such", tone="error"))
     assert printer.said == [
         ("markdown", "held"),

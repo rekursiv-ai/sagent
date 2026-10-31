@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sagent.settings.types import Setting, SettingError
+from sagent.settings.exceptions import SettingError
+from sagent.settings.types import Setting
 from sagent.tui.types import ThinkingView
 
 

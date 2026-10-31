@@ -121,6 +121,9 @@ class CommandOutput:
 
     text: str
     tone: Literal["line", "note", "error"]
+    command: str = ""
+    """The command that says it, as typed at the prompt (``/mcp.list``); the
+    scrollback leads with it, the shell, where it was typed, does not."""
 
 
 type Live = (

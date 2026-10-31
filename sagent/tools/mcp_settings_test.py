@@ -12,8 +12,8 @@ import pytest
 
 from sagent.lib.userdirs import data_dir
 from sagent.session.projects import project_dir
+from sagent.settings.exceptions import SettingError
 from sagent.settings.harvest import harvest
-from sagent.settings.types import Setting, SettingError
 from sagent.tools import mcp_settings
 from sagent.tools.mcp import McpServer, servers
 from sagent.tools.mcp_auth import McpTokenStorage
@@ -22,6 +22,8 @@ from sagent.tools.mcp_settings import McpSettings
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from sagent.settings.types import Setting
 
 
 _VERBS = ["list", "get", "add", "add-json", "remove", "login", "logout"]

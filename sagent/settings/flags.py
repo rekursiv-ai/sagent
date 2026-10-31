@@ -26,11 +26,13 @@ from typing import TYPE_CHECKING, NoReturn, override
 import argparse
 import shlex
 
-from sagent.settings.types import SettingError
+from sagent.settings.exceptions import HelpRequestedError, SettingError
 
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
+
+    from _typeshed import SupportsWrite
 
 
 __all__ = [
@@ -59,6 +61,11 @@ class ActionParser(argparse.ArgumentParser):
             allow_abbrev=False,
         )
 
+    @property
+    def options(self) -> frozenset[str]:
+        """Return every option string this parser takes, such as ``--headless``."""
+        return frozenset(o for action in self._actions for o in action.option_strings)
+
     def read(self, args: str) -> argparse.Namespace | None:
         """Return ``args``, split as a shell would, parsed; ``None`` when help is asked.
 
@@ -76,10 +83,17 @@ class ActionParser(argparse.ArgumentParser):
             words = shlex.split(args)
         except ValueError as e:
             self.error(str(e))
-        before = words[: words.index("--")] if "--" in words else words
-        if "-h" in before or "--help" in before:
+        try:
+            return self.parse_args(words)
+        except HelpRequestedError:
             return None
-        return self.parse_args(words)
+
+    # Help is asked for as argparse reads it, before it checks what is required, so
+    # ``--help`` with nothing else still gets it; after ``--`` it is an argument.
+    @override
+    def print_help(self, file: SupportsWrite[str] | None = None) -> NoReturn:
+        del file
+        raise HelpRequestedError
 
     @override
     def error(self, message: str) -> NoReturn:
@@ -87,7 +101,7 @@ class ActionParser(argparse.ArgumentParser):
 
     @override
     def exit(self, status: int = 0, message: str | None = None) -> NoReturn:
-        # ``argparse`` exits only after ``error``, or for help ``read`` answers first.
+        # ``argparse`` exits only after ``error``, or for help ``print_help`` raises.
         raise SettingError(message or f"see {self.prog} --help")
 
 

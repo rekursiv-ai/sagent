@@ -351,36 +351,55 @@ class _Shared(httpx2.Auth):
 
     """
 
+    # The SDK reads a 401's body for what to do next, and declares so on its own auth.
+    requires_response_body = True
+
     def __init__(self, *, auth: OAuthClientProvider, storage: McpTokenStorage) -> None:
         self.auth = auth
         self.storage = storage
         self._renewal = asyncio.Lock()
 
+    # The SDK renews only a token it knows has expired; a 401 it answers with a whole
+    # new sign-in, which a session cannot make. A token with no expiry, or one the
+    # server revoked early, would end the session holding a refresh token that works.
     @override
     async def async_auth_flow(
         self,
         request: httpx2.Request,
     ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
-        renews = not self.auth.context.is_token_valid()
-        async with self._renewing() if renews else nullcontext():
-            flow = self.auth.async_auth_flow(request)
-            try:
-                sent = await anext(flow)
-                while True:
-                    sent = await flow.asend((yield sent))  # codespell:ignore asend
-            except StopAsyncIteration:
-                return
-            finally:
-                await flow.aclose()
+        context = self.auth.context
+        refused: OAuthToken | None = None
+        for last in (False, True):
+            renews = refused is not None or not context.is_token_valid()
+            # Each try's flow closes as its block ends, before the next try's lock:
+            # the flow holds the SDK's own lock, which a renewal under ours waits on.
+            async with self._renewing(refused) if renews else nullcontext():
+                flow = self.auth.async_auth_flow(request)
+                try:
+                    sent = await anext(flow)
+                    while True:
+                        response = yield sent
+                        if not last and sent is request and response.status_code == 401:
+                            refused = context.current_tokens
+                            break
+                        sent = await flow.asend(response)  # codespell:ignore asend
+                except StopAsyncIteration:
+                    return
+                finally:
+                    await flow.aclose()
 
     @asynccontextmanager
-    async def _renewing(self) -> AsyncGenerator[None]:
-        """Hold the server's file, and take the tokens another session may have kept."""
+    async def _renewing(self, refused: OAuthToken | None) -> AsyncGenerator[None]:
+        """Hold the server's file; take its tokens, and expire ``refused`` if they are it."""
+        context = self.auth.context
         async with self._renewal, self.storage.locked():
             kept = await self.storage.read()
             if kept.tokens is not None:
-                self.auth.context.current_tokens = kept.tokens
-                self.auth.context.token_expiry_time = kept.expires_at
+                context.current_tokens = kept.tokens
+                context.token_expiry_time = kept.expires_at
+            # Unchanged since the refusal, so no other session renewed it: this does.
+            if refused is not None and context.current_tokens == refused:
+                context.token_expiry_time = time.time() - 1
             yield
 
 

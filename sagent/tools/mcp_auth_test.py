@@ -15,6 +15,7 @@ import socket
 import time
 
 from mcp import StdioServerParameters
+from mcp.client.auth import OAuthClientProvider
 from mcp.client.session_group import StreamableHttpParameters
 from mcp.server.auth.provider import (
     AccessToken,
@@ -37,7 +38,7 @@ import uvicorn
 from sagent.lib.userdirs import config_dir
 from sagent.model.exceptions import AuthError
 from sagent.tools import mcp_auth
-from sagent.tools.mcp import McpServer, McpSession, login
+from sagent.tools.mcp import McpServer, McpSession, login, logout
 from sagent.tools.mcp_auth import McpTokenStorage
 from sagent.tools.types import ToolContext
 
@@ -88,6 +89,14 @@ async def test_two_changes_at_once_keep_both() -> None:
     assert await storage.get_client_info() == client
 
 
+def test_a_session_s_auth_reads_responses_as_the_sdk_s_does() -> None:
+    """The SDK reads a response's body as it needs; its wrapper must not stop it."""
+    assert (
+        mcp_auth._Shared.requires_response_body
+        is OAuthClientProvider.requires_response_body
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_change_waits_for_another_task_holding_the_file() -> None:
     """Only the task holding the lock may write without taking it; any other waits."""
@@ -130,6 +139,39 @@ async def test_sessions_open_at_once_renew_once_and_share_the_renewal(
                 )
                 assert result.text() == "hello Ada"
     assert authority.renewed == 1
+
+
+@pytest.mark.asyncio
+async def test_a_token_refused_before_it_seems_to_expire_is_renewed_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server may give no expiry, or revoke a token early: a 401 then renews it.
+
+    Two sessions meet the refusal at once; one renews, and the other takes the
+    token it kept.
+    """
+    authority = _Authority(says_expiry=False)
+    async with _protected(authority) as url:
+        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
+        await _sign_in(server, monkeypatch=monkeypatch)
+        authority.tokens.clear()
+        async with McpSession([server]) as first, McpSession([server]) as second:
+            for session in (first, second):
+                assert [t.name for t in session.tools()] == ["mcp__web__greet"]
+    assert authority.renewed == 1
+
+
+@pytest.mark.asyncio
+async def test_logging_out_keeps_another_project_s_server_of_the_same_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two projects' ``web`` are two servers; signing out of one leaves the other."""
+    async with _protected() as url:
+        theirs = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
+        await _sign_in(theirs, monkeypatch=monkeypatch)
+    mine = McpServer(name="web", parameters=StreamableHttpParameters(url="https://b"))
+    assert logout(mine) is False
+    assert McpTokenStorage(theirs.key).path.exists()
 
 
 @pytest.mark.asyncio
@@ -430,6 +472,9 @@ class _Authority:
     one renewal both outlive it however slowly the second one calls.
     """
 
+    says_expiry: bool = True
+    """Whether it tells the client when a token expires, as ``expires_in``."""
+
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         return self.clients.get(client_id)
 
@@ -536,7 +581,7 @@ class _Authority:
         return OAuthToken(
             access_token=access,
             token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
-            expires_in=lifetime_sec,
+            expires_in=lifetime_sec if self.says_expiry else None,
             refresh_token=refresh,
         )
 

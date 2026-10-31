@@ -334,6 +334,14 @@ async def test_removing_keeps_a_sign_in_another_scope_still_uses(
 
 
 @pytest.mark.asyncio
+async def test_an_entry_that_does_not_read_is_still_removed(tmp_path: Path) -> None:
+    """Removing is how a broken entry is cleaned up; it must not be refused for it."""
+    _write(project_dir(tmp_path) / "mcp.json", {"bad": {}, "git": {"command": "uvx"}})
+    assert await remove_server("bad", cwd=tmp_path) == "local"
+    assert [s.name for s in servers(tmp_path)] == ["git"]
+
+
+@pytest.mark.asyncio
 async def test_removing_finds_the_scope_unless_told_and_forgets_the_sign_in(
     tmp_path: Path,
 ) -> None:
