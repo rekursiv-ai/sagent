@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
@@ -79,6 +79,7 @@ from sagent.session.types import (
 from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import ActionParser, flags
 from sagent.settings.harvest import harvest
+from sagent.settings.types import Setting
 from sagent.tools import mcp_settings
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
@@ -147,18 +148,22 @@ class _Picky(ScriptedProvider):
 
 
 class _Signing(_Picky):
-    """Signs in, and serves only its own default: none of the starting provider's."""
+    """Signs in, and serves only its own model: none of the starting provider's."""
 
     def __init__(self, *, name: str, resources: ProviderResources) -> None:
-        super().__init__(name=name, resources=resources)
+        super().__init__(
+            name=name,
+            resources=resources,
+            capability=replace(_DEEP, model_id="signed"),
+        )
         self.signed_in = 0
         self.headless: list[bool] = []
 
     @override
     def __getitem__(self, model: str) -> ScriptedModel:
-        if model != "default":
+        if model not in ("default", "signed"):
             raise UnknownModelError(f"Unknown model {model!r}.")
-        return super().__getitem__(model)
+        return ScriptedProvider.__getitem__(self, model)
 
     async def login(self, *, headless: bool = False) -> None:
         self.signed_in += 1
@@ -1002,6 +1007,26 @@ def test_login_headless_as_an_account_reaches_the_provider(
     assert script.catalogs[0].account == "work"
 
 
+@pytest.mark.parametrize(
+    "allow",
+    [("--allow-providers", "signing"), ("--allow-providers=signing",)],
+)
+def test_login_takes_the_providers_allowed_as_a_session_does(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    allow: tuple[str, ...],
+) -> None:
+    """``sagent login --account work --allow-providers acli`` signs in to acli."""
+    monkeypatch.delenv("SAGENT_ALLOW_PROVIDERS", raising=False)
+    monkeypatch.delenv("SAGENT_PROVIDER", raising=False)
+    _argv(monkeypatch, "login", "--account", "work", *allow, "--headless")
+    assert main.main() == 0
+    provider = script.providers["signing"]
+    assert isinstance(provider, _Signing)
+    assert provider.signed_in == 1
+    assert script.catalogs[0].account == "work"
+
+
 def test_an_account_that_is_no_name_is_an_error(
     script: _Script,
     monkeypatch: pytest.MonkeyPatch,
@@ -1288,6 +1313,74 @@ def test_a_bad_mcp_command_is_an_error_not_a_traceback(
     _argv(monkeypatch, *argv, *(flags if len(argv) > 1 and argv[1] != "frob" else ()))
     assert main.main() == code
     assert capsys.readouterr().err == said
+
+
+async def _echoed(args: str) -> str:
+    return f"ran {args}".rstrip()
+
+
+# A group two levels deep (``sagent a b``) holding an action and a setting
+# with a value, which no shell action runs.
+_NESTED = (
+    Setting(name=("a", "b", "go"), help_short="go", apply=_echoed, cli=True),
+    Setting(
+        name=("a", "b", "level"),
+        help_short="level",
+        value=lambda: "low",
+        apply=_echoed,
+        cli=True,
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    ("argv", "code", "out", "err"),
+    [
+        (("a", "b", "go", "x"), 0, "ran x\n", ""),
+        (("a", "b"), 0, "a.b commands\n  sagent a b go", ""),
+        (
+            ("a", "b", "frob"),
+            2,
+            "",
+            "Error: unknown command: sagent a b frob; see sagent a b --help\n",
+        ),
+        (
+            ("a", "b", "level"),
+            2,
+            "",
+            "Error: unknown command: sagent a b level; see sagent a b --help\n",
+        ),
+        (
+            ("a", "b", "--frob"),
+            2,
+            "",
+            "Error: unknown command: sagent a b; see sagent a b --help\n",
+        ),
+        (("a", "b", "--help"), 0, "a.b commands\n", ""),
+    ],
+)
+def test_a_shell_command_runs_an_action_or_lists_its_group_at_any_depth(
+    capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...],
+    code: int,
+    out: str,
+    err: str,
+) -> None:
+    assert asyncio.run(main._dispatch(_NESTED, argv)) == code
+    said = capsys.readouterr()
+    assert (said.out.startswith(out), said.err) == (True, err)
+
+
+def test_a_group_listed_from_the_shell_is_a_note(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Said as ``/help`` says it at the prompt, where the tone shows."""
+    said: list[CommandOutput] = []
+    monkeypatch.setattr(main, "_print_to_shell", said.append)
+    assert asyncio.run(main._dispatch(_NESTED, ("a", "b"))) == 0
+    assert [(output.tone, output.text.splitlines()[0]) for output in said] == [
+        ("note", "a.b commands"),
+    ]
 
 
 def test_every_shell_command_runs_as_its_prompt_command_does(

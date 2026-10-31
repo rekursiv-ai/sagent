@@ -269,11 +269,17 @@ class _CaseSensitiveParser(configparser.ConfigParser):
 def _build(project: Path) -> Wheel:
     """Build ``project``'s wheel into a fresh directory."""
     out_dir = Path(tempfile.mkdtemp(prefix="wheel-"))
-    subprocess.run(  # noqa: S603 -- Fixed uv argv over a project directory.
+    done = subprocess.run(  # noqa: S603 -- Fixed uv argv over a project directory.
         ["uv", "build", "--wheel", "--out-dir", str(out_dir), str(project)],  # noqa: S607 -- uv from PATH, as every gate runs it.
-        check=True,
+        check=False,
         capture_output=True,
+        text=True,
     )
+    # A CI log keeps only the exception, so it carries what the build said.
+    if done.returncode:
+        raise RuntimeError(
+            f"uv build of {project} failed (exit {done.returncode}):\n{done.stderr}",
+        )
     (path,) = out_dir.glob("*.whl")
     return Wheel(path=path, project=project)
 

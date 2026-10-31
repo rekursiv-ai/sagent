@@ -4230,7 +4230,7 @@ async def test_a_cancelled_stream_reports_how_much_it_said(
 async def test_a_bash_command_no_tool_owns_runs_as_bash(tmp_path: Path) -> None:
     tools: list[Tool] = [Bash(peers=(Read(),)), Read()]
     async with Harness(
-        reply(calls=[call("Bash", "b1", command="echo hi")]),
+        reply(calls=[call("Bash", "b1", command="echo hi", description="Say hi")]),
         reply("ran"),
         tools=tools,
         cwd=tmp_path,

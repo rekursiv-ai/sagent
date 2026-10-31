@@ -282,6 +282,25 @@ def test_built_wheel_builds_once_and_runs_outside_the_checkout(
     assert argv == wheel.argv("import demo")[1:]
 
 
+def test_a_failed_build_says_what_the_build_said(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A CI log holds only the error, so the build's own words must be in it."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "uv").write_text(
+        "#!/bin/sh\necho 'npm error ERESOLVE' >&2\nexit 2\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    root = _project(tmp_path / "broken", _BUILDABLE)
+
+    with pytest.raises(RuntimeError, match=r"(?s)exit 2.*npm error ERESOLVE"):
+        built_wheel(root)
+
+
 def test_the_wheel_names_its_top_level_modules_and_scripts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

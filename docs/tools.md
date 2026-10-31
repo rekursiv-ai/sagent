@@ -102,7 +102,7 @@ Each built-in lives in its own module under `sagent.tools`, such as `sagent.tool
 | `Glob` | Find files by filename pattern. | `pattern`; optional `path`, `sort`, `long`, `max_results`, `offset`. |
 | `Grep` | Search file contents with ripgrep. | `pattern`; optional `path`, filters (`glob`, `type`, `exclude`), and output controls (`output_mode`, context, paging). |
 | `List` | List directory entries. | `path`; optional `show_hidden`, `long`, `sort`, `max_results`, `keep_last`. |
-| `Bash` | Run shell commands. | `command`; optional `timeout` (ms), `description`. |
+| `Bash` | Run shell commands. | `command`, `description`; optional `timeout` (ms). |
 | `WebSearch` | Query web search backends. | `query`; optional `backend`, `categories`, `transport`, `allowed_domains`, `blocked_domains`. |
 | `WebFetch` | Fetch and extract readable URL content. | `url`; optional `method`, `transport`, `extractor`, `json`, `form`. |
 | `PaperSearch` | Search scholarly papers. | `query`; optional `source`, `limit`, `year_from`, `year_to`, `open_access_only`, `abstract_chars`. |
@@ -226,8 +226,8 @@ A child of a parent with a journal file stands in that journal, with its own jou
 If `BackgroundTask` is available to an agent, Sagent injects `background` and `delay` fields into other tool schemas.
 
 ```json
-{"command": "long-running command", "background": true}
-{"command": "remind me", "delay": 60}
+{"command": "make", "description": "Build it", "background": true}
+{"command": "echo done", "description": "Remind me", "delay": 60}
 ```
 
 A backgrounded tool immediately returns a placeholder result. When the tool completes, its real result is delivered to the agent inbox. Use:
