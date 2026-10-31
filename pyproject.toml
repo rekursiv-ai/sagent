@@ -209,6 +209,7 @@ markers = [
 ]
 addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=20 --dist=worksteal -p no:py_pglite"
 timeout = 60
+asyncio_default_fixture_loop_scope = "function"
 # "error" = treat all warnings as errors (same as -Werror).
 # Using filterwarnings instead of addopts so we can add exceptions.
 filterwarnings = [
