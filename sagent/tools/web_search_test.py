@@ -70,7 +70,7 @@ def searches(monkeypatch: pytest.MonkeyPatch) -> Searches:
     return fake
 
 
-_CONTEXT = ToolContext(cwd=Path("/"))
+_CONTEXT = ToolContext(cwd=Path("/"), fetch_session=FetchSession())
 
 
 def _error(text: str) -> UncategorizedToolResult:
@@ -78,7 +78,7 @@ def _error(text: str) -> UncategorizedToolResult:
 
 
 def test_websearch_describes_itself() -> None:
-    tool = WebSearch(session=FetchSession())
+    tool = WebSearch()
     assert tool.name == "WebSearch"
     assert tool.description.strip()
     assert tool.schema["required"] == ["query"]
@@ -89,7 +89,7 @@ def test_websearch_describes_itself() -> None:
 
 @pytest.mark.asyncio
 async def test_a_search_returns_each_hit(searches: Searches) -> None:
-    tool = WebSearch(session=FetchSession())
+    tool = WebSearch()
     result = await tool.call(_CONTEXT, {"query": "python"})
     assert isinstance(result, WebSearchResults)
     assert result.query == "python"
@@ -106,7 +106,7 @@ async def test_a_search_returns_each_hit(searches: Searches) -> None:
             "backend": None,
             "categories": "general",
             "transport": "auto",
-            "session": tool.session,
+            "session": _CONTEXT.fetch_session,
         },
     ]
 
@@ -121,7 +121,7 @@ async def test_a_hits_snippet_carries_its_category_fields(searches: Searches) ->
             doi="10.1/x",
         ),
     )
-    result = await WebSearch(session=FetchSession()).call(
+    result = await WebSearch().call(
         _CONTEXT,
         {"query": "q", "categories": "science"},
     )
@@ -135,7 +135,7 @@ async def test_a_hits_snippet_carries_its_category_fields(searches: Searches) ->
 
 @pytest.mark.asyncio
 async def test_a_call_may_choose_backend_and_transport(searches: Searches) -> None:
-    tool = WebSearch(session=FetchSession(), policy=PolicyParams(transport="curl"))
+    tool = WebSearch(policy=PolicyParams(transport="curl"))
     _ = await tool.call(_CONTEXT, {"query": "q"})
     _ = await tool.call(
         _CONTEXT,
@@ -149,7 +149,7 @@ async def test_a_call_may_choose_backend_and_transport(searches: Searches) -> No
 
 @pytest.mark.asyncio
 async def test_domains_scope_the_query(searches: Searches) -> None:
-    _ = await WebSearch(session=FetchSession()).call(
+    _ = await WebSearch().call(
         _CONTEXT,
         {
             "query": "release notes",
@@ -172,7 +172,7 @@ async def test_a_domain_that_is_not_a_hostname_is_refused(
     domain: str,
 ) -> None:
     for key in ("allowed_domains", "blocked_domains"):
-        result = await WebSearch(session=FetchSession()).call(
+        result = await WebSearch().call(
             _CONTEXT,
             {"query": "q", key: [domain]},
         )
@@ -183,7 +183,7 @@ async def test_a_domain_that_is_not_a_hostname_is_refused(
 @pytest.mark.asyncio
 async def test_no_hits_says_so(searches: Searches) -> None:
     searches.hits = ()
-    result = await WebSearch(session=FetchSession()).call(_CONTEXT, {"query": "q"})
+    result = await WebSearch().call(_CONTEXT, {"query": "q"})
     assert isinstance(result, UncategorizedToolResult)
     assert result == UncategorizedToolResult(call_id="", content="(no results)")
 
@@ -195,7 +195,7 @@ async def test_hits_are_kept_while_they_fit(searches: Searches) -> None:
         for i in range(10)
     )
     context = ToolContext(cwd=Path("/"), max_result_chars=200)
-    result = await WebSearch(session=FetchSession()).call(context, {"query": "q"})
+    result = await WebSearch().call(context, {"query": "q"})
     assert isinstance(result, WebSearchResults)
     assert [hit.title for hit in result.content] == ["T0", "T1"]
 
@@ -219,7 +219,7 @@ async def test_a_failed_search_says_why(
     message: str,
 ) -> None:
     searches.error = error
-    result = await WebSearch(session=FetchSession()).call(_CONTEXT, {"query": "q"})
+    result = await WebSearch().call(_CONTEXT, {"query": "q"})
     assert result == _error(message)
 
 
@@ -237,7 +237,7 @@ async def test_malformed_arguments_are_argument_errors(
     arguments: dict[str, PlainTree],
 ) -> None:
     with pytest.raises(ValueError, match="must be"):
-        _ = await WebSearch(session=FetchSession()).call(_CONTEXT, arguments)
+        _ = await WebSearch().call(_CONTEXT, arguments)
     assert searches.seen == []
 
 

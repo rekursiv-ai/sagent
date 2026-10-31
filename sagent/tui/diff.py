@@ -72,6 +72,7 @@ def render_diff(
     diff: str,
     *,
     row_indent: str,
+    first: Text | None = None,
     path: str = "",
     style: DiffStyle | None = None,
     lines: tuple[int, int] | None = None,
@@ -82,7 +83,9 @@ def render_diff(
     Args:
       console: Where to print.
       diff: The diff; ``---``/``+++`` file headers are skipped.
-      row_indent: What starts every row.
+      row_indent: What starts every row but the first.
+      first: What starts the first row, as wide as ``row_indent``; that when
+        omitted.
       path: The file, whose name picks the highlighting.
       style: The colors; dark-terminal ones when omitted.
       lines: Body lines kept from the head and the tail, the rest counted in
@@ -91,7 +94,7 @@ def render_diff(
 
     """
     s = style if style is not None else DiffStyle()
-    lexer = _lexer_for(path)
+    lexer = _path_lexer(path)
     hunk = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
     body = _dedent(
         [
@@ -124,20 +127,21 @@ def render_diff(
             continue
         sigil = line[:1] if line[:1] in "+-" else " "
         number = old if sigil == "-" else new
+        indent = first if first is not None and index == 0 else Text(row_indent)
         if index in hidden:
             if index == hidden.start:
-                lead = Text(row_indent + " " * (digits + 1))
+                gap = " " * (digits + 1)
                 hang(
                     console,
                     Text(Elided(hidden=len(hidden)).marker, style="dim"),
-                    first=lead,
-                    rest=lead,
+                    first=indent + gap,
+                    rest=Text(row_indent + gap),
                     width=width,
                 )
         elif index in pairs:
             _print_words(
                 console,
-                row_indent,
+                indent,
                 f"{number:>{digits}} ",
                 sigil,
                 pairs[index],
@@ -149,7 +153,7 @@ def render_diff(
             background = {"+": s.added, "-": s.removed}.get(sigil, "")
             _print_line(
                 console,
-                row_indent,
+                indent,
                 f"{number:>{digits}} ",
                 content=_highlight(line[1:], lexer),
                 background=background,
@@ -218,7 +222,7 @@ def highlight_source(code: str, language: str) -> Text:
     return _highlight(code, lexer)
 
 
-def _lexer_for(path: str) -> Lexer:
+def _path_lexer(path: str) -> Lexer:
     """Return the lexer ``path``'s name picks, or plain text."""
     try:
         return get_lexer_for_filename(path, stripnl=False, ensurenl=False)
@@ -320,7 +324,7 @@ def _last_number(body: list[str], hunk: re.Pattern[str]) -> int:
 
 def _print_line(
     console: Console,
-    row_indent: str,
+    row_indent: Text,
     margin: str,
     *,
     content: Text,
@@ -346,7 +350,7 @@ def _print_line(
 
 def _print_words(
     console: Console,
-    row_indent: str,
+    row_indent: Text,
     margin: str,
     sigil: str,
     parts: list[tuple[str, str]],
@@ -377,7 +381,7 @@ def _print_words(
 
 def _print_rows(
     console: Console,
-    row_indent: str,
+    row_indent: Text,
     margin: str,
     content: Text,
     *,
@@ -385,12 +389,15 @@ def _print_rows(
     fill_style: str,
     width: int,
 ) -> None:
-    """Print ``content`` inside ``width``, later rows indented past ``margin``."""
+    """Print ``content`` inside ``width``, later rows blank under ``row_indent`` and ``margin``."""
     hang(
         console,
         content,
         first=Text.assemble(row_indent, Text(margin, style=margin_style)),
-        rest=Text.assemble(row_indent, Text(" " * len(margin), style=margin_style)),
+        rest=Text.assemble(
+            " " * row_indent.cell_len,
+            Text(" " * len(margin), style=margin_style),
+        ),
         width=width,
         background=fill_style,
     )

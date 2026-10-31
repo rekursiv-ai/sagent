@@ -28,7 +28,7 @@ from sagent.tools.types import ToolContext
 if TYPE_CHECKING:
     from treekle import PlainTree
 
-    from sagent.providers.types import ProviderFactory, ProviderSharedResources
+    from sagent.providers.types import ProviderFactory, ProviderResources
     from sagent.runtime.types import RuntimeEvent
 
 
@@ -53,7 +53,10 @@ def _setup(tmp_path: Path) -> tuple[Team, Agent, AgentSelf]:
         },
     )
     team = Team(catalog=catalog)
-    agent = Agent(model=catalog["scripted"]["scripted"], cwd=tmp_path)
+    agent = Agent(
+        model=catalog["scripted"]["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
     _ = team.join(agent)
     return team, agent, AgentSelf(team=team)
 
@@ -231,7 +234,10 @@ async def test_a_switch_finds_who_serves_the_model_and_keeps_the_window(
         },
     )
     team = Team(catalog=catalog)
-    agent = Agent(model=catalog["first"]["a+200k"], cwd=tmp_path)
+    agent = Agent(
+        model=catalog["first"]["a+200k"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
     _ = team.join(agent)
 
     text = await _patch(AgentSelf(team=team), tmp_path, {"model": "b"})
@@ -247,7 +253,10 @@ async def test_a_switch_signs_in_as_the_catalogs_account(tmp_path: Path) -> None
         return {"first": partial(ScriptedProvider, models=_windowed("a-1.0"))}
 
     team = Team(catalog=ModelCatalog(factories=per_account))
-    agent = Agent(model=team.catalog["first"]["a"], cwd=tmp_path)
+    agent = Agent(
+        model=team.catalog["first"]["a"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
     _ = team.join(agent)
     team.catalog.use_account("work")
 
@@ -330,7 +339,7 @@ class _Recording(ScriptedProvider):
         built: list[ScriptedModel],
         closed: list[ScriptedModel],
         name: str = "",
-        resources: ProviderSharedResources | None = None,
+        resources: ProviderResources | None = None,
     ) -> None:
         super().__init__(
             name=name,

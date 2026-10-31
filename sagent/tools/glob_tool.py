@@ -27,7 +27,7 @@ from sagent.tools.command_analyzer import (
 )
 from sagent.tools.display import ToolDisplay
 from sagent.tools.list import Sort, ls_row, sort_paths
-from sagent.tools.types import Arg, parse, schema_of
+from sagent.tools.types import Arg, json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -76,7 +76,7 @@ class Glob:
     description = (files(__package__) / "assets" / "glob.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay())
 

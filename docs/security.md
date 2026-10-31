@@ -44,18 +44,16 @@ Use one of these when persistence is not appropriate:
 
 ```bash
 sagent --ephemeral
-sagent --session /tmp/disposable-sagent-session
+sagent --session /tmp/disposable-sagent-session/session.jsonl
 ```
 
-`--ephemeral` also disables the auto-memory system prompt section, so existing project memories are not sent to providers and the model is not instructed to write new memories. Library users can leave `session_dir` unset for in-memory runs; pass `prompt_context=SagentContext(include_memory=False)` to `Agent` when persistent memory should be disabled too.
+`--ephemeral` also drops the `Memory` tool, so existing project memories are not sent to providers and the model cannot write new ones. Library users omit `journal` for in-memory runs, and leave out the `Memory` tool when memories should stay off too.
 
-Large tool outputs may be persisted separately to keep model requests within budget. Session runs store those under `session_dir/tool-results`; no-session runs use `/tmp/sagent_results`. Persisted files are written with owner-only permissions.
-
-Sagent also writes always-on error traces for provider wire-layer failures to `~/.sagent/debug.log` by default. Records include compact prompt and tool-result previews truncated to 200 characters. Set `SAGENT_DEBUG_LOG` to redirect the log; set `SAGENT_DEBUG=1` to add verbose request traces.
+With a journal file, `Bash` writes a cut command's whole output beside it. Journals are written with owner-only permissions.
 
 ## Credentials
 
-Public providers read API keys from environment variables through `--auth env` or `Provider.from_env()`. Keep keys in your shell, secret manager, or CI secret store.
+Public providers read API keys from environment variables. Keep keys in your shell, secret manager, or CI secret store.
 
 Common environment variables:
 
@@ -68,12 +66,9 @@ DASHSCOPE_API_KEY=...
 MINIMAX_API_KEY=...
 SEMANTIC_SCHOLAR_API_KEY=...
 OPENALEX_EMAIL=...
-SAGENT_DEBUG=...
-SAGENT_DEBUG_LOG=...
 ```
 
-Do not pass literal API keys through `--auth`; it names a `from_<auth>` factory.
-Use `--auth env` so secrets stay out of shell history and process listings.
+Keep keys in the environment so secrets stay out of shell history and process listings.
 
 ## Shell and filesystem safety
 
@@ -121,9 +116,7 @@ A command that starts its own session or process group, kills the guard, or writ
 line that tells it to stand down to the guard's pipe, can outlive a stop, as a command
 that starts its own session can without a wrapper. The guard runs with the shell's own
 permissions, so it cannot stop a command that means to escape it; only something that
-acts on every process of the other user can. A fully detached job (the Python-only
-`run_as_fully_detached` argument) runs through the wrapper too but has no guard:
-nothing waits on it, so nothing stops it.
+acts on every process of the other user can.
 
 ## Network safety
 

@@ -51,9 +51,15 @@ def test_every_method_a_printer_declares_is_recorded() -> None:
     assert declared - set(vars(RecordingPrinter)) == set()
 
 
-def test_reasoning_is_shown_unless_asked_not_to() -> None:
-    assert RecordingPrinter().show_thinking is True
-    assert RecordingPrinter(show_thinking=False).show_thinking is False
+def test_what_it_drew_is_kept_at_its_width() -> None:
+    printer = RecordingPrinter(width=12)
+    printer.note("a" * 20)
+    assert printer.text == "a" * 12 + "\n" + "a" * 8 + "\n"
+
+
+def test_reasoning_is_hidden_unless_asked_for_as_the_console_printer_s_is() -> None:
+    assert RecordingPrinter().show_thinking is False
+    assert RecordingPrinter(show_thinking=True).show_thinking is True
 
 
 if __name__ == "__main__":

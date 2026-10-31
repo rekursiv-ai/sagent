@@ -27,7 +27,7 @@ from treekle import PlainTree
 
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import Tool, parse, schema_of
+from sagent.tools.types import Tool, json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -78,7 +78,7 @@ class BackgroundTask:
     description = (files(__package__) / "assets" / "backgroundtask.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay())
 

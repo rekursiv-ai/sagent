@@ -10,10 +10,12 @@ from typing import Annotated, Literal
 import os
 
 from treekle import PlainTree
+from wesearch.fetch import FetchSession
+from wesearch.fetch.session import default_session
 
 import pytest
 
-from sagent.tools.types import Arg, FileTracker, ToolContext, parse, schema_of
+from sagent.tools.types import Arg, FileTracker, ToolContext, json_schema, parse
 
 
 type _Color = Literal["red", "green"]
@@ -36,7 +38,7 @@ class _Arguments:
 
 
 def test_schema_names_each_field_and_requires_those_without_defaults() -> None:
-    schema = schema_of(_Arguments)
+    schema = json_schema(_Arguments)
     assert schema["type"] == "object"
     assert schema["required"] == ["text"]
     assert schema["additionalProperties"] is False
@@ -52,7 +54,7 @@ def test_schema_names_each_field_and_requires_those_without_defaults() -> None:
 
 
 def test_schema_spells_each_type_as_json_schema() -> None:
-    properties = schema_of(_Arguments)["properties"]
+    properties = json_schema(_Arguments)["properties"]
     assert isinstance(properties, Mapping)
     got = {
         k: {**v, "description": ""}
@@ -86,7 +88,7 @@ def test_schema_spells_each_type_as_json_schema() -> None:
 
 
 def test_schema_uses_the_models_name_for_a_renamed_argument() -> None:
-    properties = schema_of(_Arguments)["properties"]
+    properties = json_schema(_Arguments)["properties"]
     assert isinstance(properties, Mapping)
     assert "-B" in properties
     assert "before" not in properties
@@ -99,7 +101,7 @@ class _Counts:
 
 
 def test_bounds_on_a_sequence_bound_each_item() -> None:
-    properties = schema_of(_Counts)["properties"]
+    properties = json_schema(_Counts)["properties"]
     assert isinstance(properties, Mapping)
     assert properties["counts"] == {
         "type": "array",
@@ -129,7 +131,7 @@ def test_schema_refuses_a_field_without_a_description() -> None:
         x: int
 
     with pytest.raises(TypeError, match=r"Bare\.x needs Annotated"):
-        schema_of(Bare)
+        json_schema(Bare)
 
 
 def test_a_field_built_without_annotated_may_carry_its_description() -> None:
@@ -137,7 +139,7 @@ def test_a_field_built_without_annotated_may_carry_its_description() -> None:
     class Built:
         x: int = field(metadata={"description": "An x."})
 
-    assert schema_of(Built)["properties"] == {
+    assert json_schema(Built)["properties"] == {
         "x": {"type": "integer", "description": "An x."},
     }
     assert parse({"x": 2}, Built) == Built(x=2)
@@ -149,7 +151,7 @@ def test_schema_refuses_a_type_json_cannot_spell() -> None:
         x: Annotated[bytes, "Raw."]
 
     with pytest.raises(TypeError, match="No JSON schema"):
-        schema_of(Odd)
+        json_schema(Odd)
 
 
 def test_schema_refuses_a_literal_member_json_cannot_hold() -> None:
@@ -158,7 +160,7 @@ def test_schema_refuses_a_literal_member_json_cannot_hold() -> None:
         x: Annotated[Literal["a", b"b"], "Raw."]
 
     with pytest.raises(TypeError, match="not a JSON value"):
-        schema_of(Odd)
+        json_schema(Odd)
 
 
 def test_parse_fills_defaults_for_what_was_omitted() -> None:
@@ -170,7 +172,7 @@ def test_a_field_with_a_default_factory_is_optional() -> None:
     class Made:
         tags: Annotated[tuple[str, ...], "Tags."] = field(default_factory=tuple)
 
-    assert schema_of(Made)["required"] == []
+    assert json_schema(Made)["required"] == []
     assert parse({}, Made) == Made()
 
 
@@ -458,6 +460,18 @@ def _bump_mtime(path: Path) -> None:
 def test_the_origin_is_where_the_agent_started_else_where_it_works() -> None:
     assert ToolContext(cwd=Path("/w")).origin == Path("/w")
     assert ToolContext(cwd=Path("/w/sub"), root=Path("/w")).origin == Path("/w")
+
+
+def test_a_context_given_nothing_works_here_and_fetches_through_the_shared_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    context = ToolContext()
+    assert context.cwd == tmp_path
+    assert context.fetch_session is default_session()
+    given = FetchSession()
+    assert ToolContext(fetch_session=given).fetch_session is given
 
 
 if __name__ == "__main__":

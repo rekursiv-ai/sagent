@@ -49,7 +49,7 @@ if TYPE_CHECKING:
         ModelCatalog as CatalogProtocol,
         Provider,
         ProviderFactory,
-        ProviderSharedResources,
+        ProviderResources,
     )
 
 
@@ -83,7 +83,7 @@ class Listed(Protocol):
         self,
         *,
         name: str,
-        resources: ProviderSharedResources,
+        resources: ProviderResources,
     ) -> Provider:
         """Return a provider the catalog knows as ``name``."""
         ...
@@ -586,7 +586,7 @@ class _SigningIn(Listed, Protocol):
         self,
         *,
         name: str,
-        resources: ProviderSharedResources,
+        resources: ProviderResources,
         account: str | None = None,
     ) -> Provider:
         """Return a provider the catalog knows as ``name``, signed in as ``account``."""

@@ -31,7 +31,7 @@ from sagent.tools.command_analyzer import (
     resolve,
 )
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import Arg, parse, schema_of
+from sagent.tools.types import Arg, json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -172,7 +172,7 @@ class Grep:
     description = (files(__package__) / "assets" / "grep.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay())
 

@@ -53,6 +53,7 @@ from sagent.session.types import (
     UserMessage,
 )
 from sagent.tools.display import ToolDisplay
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
@@ -62,7 +63,6 @@ if TYPE_CHECKING:
     from sagent.model.capability import ModelCapability, ThinkingBudget
     from sagent.model.cost import ServiceTier
     from sagent.session.types import SessionRecord
-    from sagent.tools.types import ToolContext
 
 
 def _model(
@@ -858,7 +858,7 @@ async def test_each_request_repeats_the_last_and_a_child_repeats_its_parent(
     parent = Agent(
         model=parent_model["scripted"],
         tools=tools,
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         system_prompt="S",
         agents_md=config,
     )
@@ -866,7 +866,7 @@ async def test_each_request_repeats_the_last_and_a_child_repeats_its_parent(
         model=child_model["scripted"],
         tools=tools,
         allowed=["Echo"],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         system_prompt="S",
         agents_md=config,
     )

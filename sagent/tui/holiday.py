@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
 from functools import cache, partial
 from importlib.resources import files
-from typing import TYPE_CHECKING, TypedDict
+from typing import TYPE_CHECKING, Literal, NotRequired, TypedDict
 
 import math
 
@@ -46,18 +46,20 @@ class Icon:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Holiday:
-    """A recurring holiday: its dates in a year and its icons."""
+    """A recurring holiday: its dates, the workday its weekends reach, its icons."""
 
     name: str
-    starts: Callable[[int], tuple[date, ...]]
+    dates: Callable[[int], tuple[date, ...]]
     icons: tuple[Icon, ...]
+    workday: Literal["friday", "monday"] = "friday"
 
 
 def holiday_icon(today: date, *, rng: Random) -> Icon | None:
     """Pick an icon of a random holiday showing ``today``, if any.
 
-    A holiday shows on its day; on a Saturday or Sunday, it shows Friday to
-    Sunday of that weekend.
+    A holiday shows on its day. On a Saturday or Sunday, it also shows on the
+    rest of that weekend and its ``workday``, Friday or Monday, so it is seen
+    at work.
 
     Args:
       today: The local date.
@@ -112,7 +114,8 @@ def holidays() -> tuple[Holiday, ...]:
     return tuple(
         Holiday(
             name=entry["name"],
-            starts=_rule(entry["starts"]),
+            dates=_rule(entry["dates"]),
+            workday=entry.get("workday", "friday"),
             icons=tuple(
                 Icon(
                     name=icon["name"],
@@ -378,20 +381,21 @@ def thanksgiving(year: int) -> tuple[date, ...]:
 
 
 def _in_window(holiday: Holiday, today: date) -> bool:
-    """Whether ``today`` is a holiday, or in the Friday-to-Sunday weekend holding one."""
+    """Whether ``today`` is a holiday, or in the weekend and workday holding one."""
+    first = 4 if holiday.workday == "friday" else 5  # Friday, else Saturday.
     for year in (today.year - 1, today.year, today.year + 1):
-        for day in holiday.starts(year):
-            friday = day - timedelta(days=day.weekday() - 4)
+        for day in holiday.dates(year):
+            opens = day - timedelta(days=day.weekday() - first)
             weekend = day.weekday() >= 5  # Saturday or Sunday.
-            if today == day or (weekend and 0 <= (today - friday).days <= 2):
+            if today == day or (weekend and 0 <= (today - opens).days <= 2):
                 return True
     return False
 
 
-def _rule(starts: str) -> Callable[[int], tuple[date, ...]]:
+def _rule(dates: str) -> Callable[[int], tuple[date, ...]]:
     """Read ``MM-DD`` as a fixed date, else name one of the computed rules."""
-    if starts[:1].isdigit():
-        month, day = starts.split("-")
+    if dates[:1].isdigit():
+        month, day = dates.split("-")
         return partial(_annual, month=int(month), day=int(day))
     computed = (
         lunar_new_year,
@@ -410,7 +414,7 @@ def _rule(starts: str) -> Callable[[int], tuple[date, ...]]:
         hanukkah,
         winter,
     )
-    return {rule.__name__: rule for rule in computed}[starts]
+    return {rule.__name__: rule for rule in computed}[dates]
 
 
 class _IconEntry(TypedDict):
@@ -421,8 +425,9 @@ class _IconEntry(TypedDict):
 
 class _HolidayEntry(TypedDict):
     name: str
-    starts: str
+    dates: str
     why: str  # Required, so every holiday states which inclusion rule it meets.
+    workday: NotRequired[Literal["friday", "monday"]]
     icons: list[_IconEntry]
 
 

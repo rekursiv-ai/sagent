@@ -388,7 +388,7 @@ def test_a_row_offering_no_effort_says_nothing_of_one(budget: ThinkingBudget) ->
         thinking_budget=budget,
         thinking_output="text",
     )
-    assert _thinking_of(capability, settings) == {"includeThoughts": True}
+    assert _encoded_thinking(capability, settings) == {"includeThoughts": True}
 
 
 @pytest.mark.parametrize("budget", ["auto", "fixed"])
@@ -425,7 +425,7 @@ def test_an_effort_the_wire_cannot_say_is_refused(
         thinking_output="none",
     )
     with pytest.raises(ValueError, match=effort):
-        _thinking_of(capability, settings)
+        _encoded_thinking(capability, settings)
 
 
 def test_the_estimate_is_text_over_characters_per_token_plus_image_tiles() -> None:
@@ -1102,10 +1102,10 @@ def _thinking(
         thinking_effort=effort,
         thinking_output=output,
     )
-    return _thinking_of(capability, settings)
+    return _encoded_thinking(capability, settings)
 
 
-def _thinking_of(capability: ModelCapability, settings: ModelSettings) -> object:
+def _encoded_thinking(capability: ModelCapability, settings: ModelSettings) -> object:
     body = wire.encode(
         Request(records=(UserMessage(content="q"),)),
         capability=capability,

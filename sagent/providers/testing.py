@@ -19,9 +19,9 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "bound_port",
     "first_live",
     "free_port",
-    "port_of",
     "send",
     "visit",
     "window",
@@ -51,7 +51,7 @@ class Bound(Protocol):
     def getsockname(self) -> tuple[str, int]: ...
 
 
-def port_of(bound: Bound) -> int:
+def bound_port(bound: Bound) -> int:
     """Return the port ``bound`` listens on."""
     return bound.getsockname()[1]
 
@@ -60,7 +60,7 @@ def free_port() -> int:
     """Return a loopback port nothing listens on, as of the call."""
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
-        return port_of(probe)
+        return bound_port(probe)
 
 
 async def visit(port: int, target: str) -> int:

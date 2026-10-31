@@ -27,7 +27,7 @@ from sagent.tools.command_analyzer import (
     resolve,
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tools.types import parse, schema_of
+from sagent.tools.types import json_schema, parse
 from sagent.tools.write import write_file
 
 
@@ -61,7 +61,7 @@ class Edit:
     description = (files(__package__) / "assets" / "edit.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay(output=DisplaySpec()))
 

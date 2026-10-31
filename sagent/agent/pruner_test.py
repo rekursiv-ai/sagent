@@ -48,6 +48,7 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
@@ -103,7 +104,7 @@ def _agent(
         model=provider["priced"],
         compactor=compactor,
         pruner=Pruner if stub is None else partial(Pruner, stub=stub),
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         system_prompt="",
     )
     pruner = agent.session.pruner

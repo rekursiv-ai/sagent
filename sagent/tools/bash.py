@@ -29,7 +29,7 @@ from sagent.lib.posix.child import Child, finish
 from sagent.session.types import ShellCommandResult
 from sagent.tools.command_analyzer import ReadOnly, Rewrite, ShellTool, rewrite
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tools.types import Arg, parse, schema_of
+from sagent.tools.types import Arg, json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -68,7 +68,7 @@ class Bash:
     description = (files(__package__) / "assets" / "bash.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(
         default=ToolDisplay(

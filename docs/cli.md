@@ -9,7 +9,7 @@ export GOOGLE_API_KEY=...
 sagent --provider Google --model gemini-pro-3.1
 ```
 
-The public package defaults to API-key auth with `--auth env`. Provider API keys are read from the provider's environment variable.
+Provider API keys are read from the provider's environment variable.
 
 Every interactive session shows the Sagent welcome before provider or model
 configuration, including a first launch without credentials and a resumed
@@ -47,7 +47,7 @@ printf 'Summarize this repository in five bullets.' | \
   sagent --provider Google --model gemini-pro-3.1 --output-format json
 ```
 
-`sagent` starts the REPL only when both `--input-format` and `--output-format` are `text`. Any machine-readable format runs one headless request and exits.
+`sagent` starts the REPL when stdin is a terminal. Piped stdin runs one headless request, printed as `--output-format` says, and exits.
 
 ## Provider and model flags
 
@@ -64,18 +64,16 @@ sagent --provider SelfHosted --model /opt/models/qwen3.6-27b+bfloat16+cuda
 
 | Flag | Meaning |
 | --- | --- |
-| `--provider NAME` | Provider class from `sagent.providers`, such as `Anthropic` or `Google`. |
-| `--auth METHOD` | Calls `Provider.from_<METHOD>()`; an explicit API-key provider defaults to `env`, while subscription providers default to `credentials`. |
+| `--provider NAME` | Provider name in the model catalog, in any case, such as `anthropic` or `Google`, or an alias such as `gapi`. |
 | `--account NAME` | Optional named credential slot for providers that support one. |
 | `--model ID` | Catalog model ID. Bare IDs select the largest context window. Models with smaller profiles accept `+200k` or `+272k`; an explicit `+1m` remains valid when the bare profile is already at least one million tokens. SelfHosted IDs may include `+cuda`, `+bfloat16`, or `+compile`. |
 | `--system-prompt TEXT` | System prompt replacing Sagent's default prompt. |
 | `--append-system-prompt TEXT` | Instructions added after the system prompt. |
-| `--effort LEVEL` | Reasoning effort: `none`, `min`, `low`, `medium`, `high`, `xhigh`, or `max`. Each model accepts a subset (GPT-5.6 takes all seven; GPT-6 Astra has no `none`), and an unsupported value raises. |
-| `--max-response-tokens N` | Limit response tokens for each model call. |
-| `--log-level LEVEL` | Enable stderr diagnostics. Same values as Python logging levels. |
+| `--effort LEVEL` | Reasoning effort: `none`, `min`, `low`, `medium`, `high`, `xhigh`, or `max`. Each model accepts a subset (`gpt-5.6` takes all but `min`; `astra-6.0` also has no `none`), and an unsupported value raises. |
+| `--log-level LEVEL` | Log level; interactive logs go to the session's `.log` file. |
+| `--allow-providers LIST` | Comma-separated providers this agent and its children may use. |
 
-If no `from_<auth>` factory exists, Sagent reports an error. Use `--auth env`
-for API keys so secrets do not land in shell history.
+`--provider`, `--account`, `--model`, and `--effort` are settings: every setting `/help` lists is a flag too, as `--NAME VALUE`. If no provider answers to the name, Sagent reports an error. Keep API keys in the environment so secrets do not land in shell history.
 
 For self-hosted HuggingFace models, `SelfHosted` defaults to
 `Qwen/Qwen3.6-27B` and treats `--model` as a repo ID or local snapshot path with
@@ -92,7 +90,7 @@ traces:
 
 ```bash
 sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+cuda \
-  --effort none --max-response-tokens 32 --max-tool-call-rounds 1
+  --effort none --max-tool-call-rounds 1
 ```
 
 Add `--log-level DEBUG` or set `SAGENT_LOG_LEVEL=DEBUG` when debugging local
@@ -100,8 +98,8 @@ model load, device placement, prompt rendering, generation, or tool-call
 parsing.
 
 Supported SelfHosted options are `cpu`, `cuda`, `mps`, `shard`, `float16`,
-`bfloat16`, `float32`, and `compile`. Options can appear in any order, but each
-category can appear only once.
+`bfloat16`, `float32`, `compile`, and a context size such as `200k`. Options can
+appear in any order, but each category can appear only once.
 
 ## Tool flags
 
@@ -110,14 +108,13 @@ sagent --tools Read Glob Grep WebSearch
 sagent --tools Read Bash BackgroundTask
 ```
 
-`--tools` accepts exact class names exported from `sagent.tools`. The default terminal tool set is:
+`--tools` accepts tool names, MCP tools included. The default is every tool:
 
 ```text
-AgentSpawn AgentSend AgentSelf Bash Read Write Edit Grep Glob List WebSearch WebFetch PaperSearch PaperDetails PaperAuthor PaperFetch Memory PlayAudio Skill
+Bash Read Write Edit Grep Glob List WebSearch WebFetch PaperSearch PaperDetails PaperAuthor PaperFetch Memory PlayAudio AgentSpawn AgentSend AgentSelf Session Skill BackgroundTask
 ```
 
-`Memory` is left out where the model is shown no memory index: under
-`--ephemeral`, or a recipe without the `memory` section.
+`Memory` is left out under `--ephemeral`; naming it there is an error.
 
 Use `--tools none` for a model-only run with no tools.
 
@@ -128,7 +125,7 @@ Use `--tools none` for a model-only run with no tools.
 ## Sessions
 
 ```bash
-sagent --session /tmp/sagent-session
+sagent --session /tmp/sagent-session/session.jsonl
 sagent --continue
 sagent --resume
 sagent --continue-all
@@ -138,20 +135,18 @@ sagent --ephemeral
 
 | Flag | Behavior |
 | --- | --- |
-| `--session PATH` | Use an explicit session directory. Overrides resume/continue. |
-| `--continue` | Resume the newest session for the current working directory, or start fresh if none exists. |
-| `--resume` | Open an interactive picker for sessions from the current working directory. |
+| `--session PATH` | Journal file to write and resume. |
+| `--continue` | Resume the newest session for the current working directory. |
+| `--resume [ID]` | Resume by id prefix, or open a picker for sessions from the current working directory. |
 | `--continue-all` | Resume the newest session across all projects. |
 | `--resume-all` | Open an interactive picker across all projects. |
-| `--resume-persistent` | Restart live persistent subagents recorded in the session (default). |
-| `--no-resume-persistent` | Skip persistent-subagent restart when resuming a session. |
-| `--ephemeral` | Keep conversation state in memory and disable auto-memory. |
+| `--resume-persistent` / `--no-resume-persistent` | Restart the persistent agents a resumed session left running. Default: on. |
+| `--resume-limit N` | Sessions the picker lists. Default: 20. |
+| `--ephemeral` | Keep no journal and no memories. |
 
-When resuming, Sagent re-reads the parent session's persistent-subagent
-lifecycle records and restarts every child whose latest durable state is
-``running``. Cancelled, completed, or stopped children stay archived.
-Pass ``--no-resume-persistent`` to suppress restart -- the archived
-lifecycle metadata is left intact for later inspection.
+A spawned child stands in its parent's journal until it is stopped. When
+resuming, Sagent starts each standing child again from its own journal;
+`--no-resume-persistent` leaves them stopped, still standing.
 
 Default sessions live under a project-scoped directory derived from the current working directory. See [Sessions](sessions.md).
 
@@ -160,10 +155,12 @@ Default sessions live under a project-scoped directory derived from the current 
 | Flag | Behavior |
 | --- | --- |
 | `--compact` / `--no-compact` | Enable or disable automatic conversation compaction. Default: enabled. |
+| `--compactor {summary,session-audit}` | Condense what the model sees, or audit the whole session from its journal. Default: `summary`. |
+| `--prune` / `--no-prune` | Drop old tool output once that costs less than keeping it cached. Default: enabled. |
 | `--max-budget-usd USD` | Stop once cumulative model cost reaches this run budget. |
-| `--max-tool-call-rounds N` | Limit model/tool-call rounds for one prompt. Default: unlimited. |
+| `--max-tool-call-rounds N` | Limit tool-call rounds for one prompt. Default: unlimited. |
 
-Compaction keeps long sessions within the model context window and writes pre-compaction transcripts when session persistence is enabled. See [Compaction](compaction.md).
+Compaction keeps long sessions within the model context window; the journal keeps every earlier window. See [Compaction](compaction.md).
 
 ## Machine-readable I/O
 
@@ -179,7 +176,7 @@ printf '{"prompt":"Say hi"}\n' | \
 | `json` | Not accepted for input. | Print `{"content": "..."}`. |
 | `stream-json` | Read NDJSON objects and join each `prompt` field. | Print event records, then final `{"descriptor":"result","content":"..."}`. |
 
-`stream-json` output uses message descriptors such as `text/plain`, `text/x-tool-label`, `multipart/x-tool-result`, and `application/x-done`. See [Streaming](streaming.md).
+`stream-json` output uses descriptors such as `text/plain`, `text/x-tool-label`, and `application/x-tool-result`. See [Streaming](streaming.md).
 
 ## REPL flags and keys
 
@@ -189,10 +186,8 @@ sagent --name reviewer --history ~/.sagent-history-reviewer
 
 | Flag | Behavior |
 | --- | --- |
-| `--name NAME` | Agent name used for the REPL and live-agent registry. |
-| `--history PATH` | Prompt-toolkit input history file. |
-| `--advisor MODEL` | Add an `advisor` tool backed by another model. |
-| `--advisor-max-uses N` | Cap advisor calls for the session. |
+| `--name NAME` | The agent's label in its team. Default: `Agent`. |
+| `--history PATH` | Input history file. Default: the per-user one. |
 
 REPL keys:
 
@@ -204,51 +199,42 @@ REPL keys:
 
 ### Steering subagents
 
-`/send`, `/halt`, and `/kill` accept a shared target syntax for live
-persistent subagents:
+`/send` and `/halt` take an `AGENTS` target:
 
 | Syntax | Matches |
 | --- | --- |
 | `label` | Exact agent label. |
+| `parent`, `children`, `ancestors`, `descendants`, `all` | Agents by relation. |
 | `fix-*` | Glob-style match against agent labels. |
 | `{a,b,c}` | Explicit comma-separated list. |
 | `/regex/` | Regex search over labels. |
 
 ```text
 /send fix-tools continue from the last failing test
-/send fix-* /model claude-sonnet-4-7
+/send fix-* /model sonnet
 /send {fix-tools,fix-compact} continue
 /halt /fix-.*/
 /kill fix-tools
 ```
 
-`/send <target> <text>` delivers a plain message to each matched
-subagent's inbox; if the body starts with `/`, the supported
-subagent-control verbs are `/model`, `/thinking`, `/halt`, and `/quit`.
-`/halt <target>` halts the matched subagents (bare `/halt` halts the
-local agent). `/kill <qid|all>` keeps its tool-task meaning, and
-`/kill <target>` cancels matched persistent subagents through the same
-graceful path as `BackgroundTask cancel persistent:<label>` -- a
-terminal `cancelled` lifecycle record is written before the child shuts
-down. Zero matches surface a visible error.
+`/send AGENTS TEXT` messages each matched agent; a body starting with `/`
+runs that command on them. `/LABEL.NAME ARGS` is short for
+`/send LABEL /NAME ARGS`, as in `/children.effort high`. `/halt AGENTS`
+halts the matched agents (bare `/halt` halts the local agent).
+`/kill ID|LABEL|all` cancels tool calls, or stops a persistent child.
+`/send parent` from a root with no parent starts its watcher.
 
 ### Service suspensions
 
-When a model provider returns a recoverable backoff response (HTTP 429,
-529, or `retry-after`), Sagent publishes a `ModelServiceSuspended`
-runtime event rather than streaming a retry banner into the assistant
-text. The REPL renders a single dim line:
+When a model call fails in a way that may pass, such as a rate limit,
+Sagent publishes a `ModelCallSuspended` runtime event rather than
+streaming a retry banner into the assistant text. The turn waits, then
+calls again; the user's message, a new model, or a sign-in calls again
+at once. The REPL shows one line, such as:
 
 ```
-[model service suspended: rate-limited; resumes at 11:40:00 (in 32m 18s)]
+Weekly limit reached. Resumes Sat Oct 31 06:00:00 (1d 22h 3m 5s).
 ```
 
-Short waits (under a minute) show ``resumes in Ns`` instead. The event
-is durable: the resume path reads the latest `retry_at` from the
-session log and sleeps the remaining time before the next provider
-call. Activity accounting pauses while suspended so per-agent
-elapsed-seconds reflects real work, not retry sleep.
-
-The `stream-json` output channel forwards the suspension as a
-`application/x-model-service-suspended` record carrying provider,
-model, retry timestamps, and a sanitized error snapshot.
+The `stream-json` output channel forwards the same text as a
+`text/x-notice` record.

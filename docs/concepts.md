@@ -4,52 +4,48 @@ Sagent is a typed Python runtime for LLM agents. The CLI is a surface over the s
 
 ## Agent
 
-An `Agent` owns the loop: receive messages, call a model, dispatch tool calls, persist state, compact history, and continue until idle.
+An `Agent` owns the loop: take input, call a model, run tool calls, write the session, compact history, and continue until idle. `async with Agent(...)` starts it; `send()` and `stream()` give it a turn.
 
-Agents can also act as tools. Parent agents can spawn child agents for review, delegation, or map-reduce work.
+Parent agents spawn child agents for review, delegation, or map-reduce work. The agents of one session form a `Team`.
 
-## Message
+## Session records
 
-`Message` is the shared communication type across the runtime. Text, JSON, bytes, tool calls, tool results, provider responses, and multipart assistant turns all flow through messages.
-
-`TextMessage` is central by design. It is the common interface between tools, providers, sessions, compaction, and user surfaces.
+A session is a sequence of typed, frozen records: `UserMessage`, `AssistantMessage`, `Thinking`, `ToolCall`, typed tool results such as `ShellCommandResult` and `FileEditResult`, `SystemMessage`, and more. The session keeps what each tool did, not a description of it.
 
 ## Tool
 
-A `Tool` receives a JSON directive inside a `Message` and returns a `Message`. Tools cover local files, shell commands, search, scholarly papers, audio, skills, background jobs, and agent coordination.
+A `Tool` takes the model's JSON arguments and the calling agent's `ToolContext`, and returns the session record of what it did. Tools cover local files, shell commands, search, scholarly papers, audio, skills, background jobs, and agent coordination.
 
 Tools are normal Python objects. You can use Sagent's built-ins, wrap a function with `@tool`, or implement the full protocol.
 
 ## Model
 
-A `Model` is the backend request/response interface. It accepts typed requests and returns typed responses with content, stop reason, token counts, cache counts, response IDs, and cost data.
-
-Models support buffered calls and may support text streaming callbacks.
+A `Model` is one model served by one provider. `stream(request)` yields text chunks, then a `Response` with the reply's records, token counts, spend, and stop reason. `capability` says what settings it offers; `settings` holds those chosen.
 
 ## Provider
 
-A `Provider` owns authentication and builds models. Public providers use API keys through `Provider.from_env()`, `Provider.from_key(...)`, or CLI `--auth env`.
+A `Provider` owns authentication and serves models by name. API-key providers read their key from the environment. A `ModelCatalog` offers every provider by name, sharing one HTTP client and process pool.
 
 Providers also define default models, utility models, pricing, and context-window metadata.
 
 ## Session
 
-A session persists conversation and agent state. The CLI stores sessions per working directory by default; library users can pass `session_dir` explicitly.
+A session persists conversation and agent state in a journal. The CLI stores sessions per working directory by default; library users pass a `JsonlJournal`.
 
-Sessions are plaintext local state. They may include prompts, model responses, tool results, file snippets, local paths, compaction transcripts, and cost metadata.
+Sessions are plaintext local state. They may include prompts, model responses, tool results, file snippets, local paths, and cost metadata.
 
 ## Compaction
 
-Compaction summarizes old conversation when a session approaches the model's context limit. Microcompaction and result storage separately shrink old or large tool outputs.
+Compaction summarizes old conversation when a session approaches the model's context limit. Pruning separately drops old tool results, and each tool result is bounded in size.
 
 Compaction lets one agent session stay coherent across many model requests without requiring every old token to remain in context.
 
-## Inbox
+## Runtime
 
-The inbox is the agent's coordination boundary. REPL input, background task completions, and peer-agent sends all become inbox items. The agent drains them at the top of the loop.
+`agent.runtime` runs the turns. User input, background task completions, and peer-agent sends all become events pushed to it; it publishes every event of a turn to its observers.
 
 ## AgentSelf, AgentSpawn, AgentSend
 
-- `AgentSelf` lets an agent inspect or mutate its own state, including compaction, diagnostics, model changes, history clear, and token limits.
+- `AgentSelf` lets an agent inspect or mutate its own state: model, settings, compaction, diagnostics, and status.
 - `AgentSpawn` creates child agents for isolated subtasks, reviews, persistent workers, or map-reduce work.
-- `AgentSend` sends messages to named live agents, enabling peer-to-peer coordination through inboxes.
+- `AgentSend` sends messages to named live agents, enabling peer-to-peer coordination.

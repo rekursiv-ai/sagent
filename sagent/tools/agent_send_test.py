@@ -42,7 +42,10 @@ def _team(tmp_path: Path, *labels: str) -> Team:
 
 
 def _agent(tmp_path: Path) -> Agent:
-    return Agent(model=ScriptedProvider()["scripted"], cwd=tmp_path)
+    return Agent(
+        model=ScriptedProvider()["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
 
 
 def _context(tmp_path: Path, label: str = "Agent") -> ToolContext:
@@ -140,7 +143,7 @@ async def test_a_root_that_may_spawn_starts_its_watcher_to_reach_its_parent(
     root = Agent(
         model=ScriptedProvider()["scripted"],
         tools=[send, AgentSpawn(team=team)],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
     )
     _ = team.join(root)
     async with team:
@@ -174,7 +177,7 @@ async def test_a_root_kept_from_spawning_starts_no_watcher(tmp_path: Path) -> No
         model=ScriptedProvider()["scripted"],
         tools=[send, AgentSpawn(team=team)],
         allowed=["AgentSend"],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
     )
     _ = team.join(root)
 

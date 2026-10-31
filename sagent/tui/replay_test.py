@@ -7,10 +7,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, override
 
 import asyncio
-import io
 import re
 
-from rich.console import Console
 from treekle import PlainTree
 
 import pytest
@@ -41,7 +39,6 @@ from sagent.session.types import (
     UserMessage,
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tui.console import ConsolePrinter
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.render import Scrollback
 from sagent.tui.replay import replay
@@ -355,13 +352,6 @@ class _Slow:
         return UncategorizedToolResult(call_id="", content="finally done")
 
 
-def _screen() -> tuple[ConsolePrinter, io.StringIO]:
-    """Return a screen that draws thinking, so a replay is checked against all of it."""
-    out = io.StringIO()
-    console = Console(file=out, width=80, color_system=None, highlight=False)
-    return ConsolePrinter(console, show_thinking=True), out
-
-
 def _turn(*records: AssistantMessage | Thinking | ToolCall) -> Response:
     return Response(
         records=records,
@@ -402,25 +392,26 @@ async def _live_and_replayed(
 ) -> tuple[str, str]:
     """Return a live session's scrollback, and its journal's replay without footer."""
     journal = RecordingJournal()
-    printer, live = _screen()
+    # Reasoning shows, so a replay is checked against all of what was drawn.
+    live = RecordingPrinter(show_thinking=True)
     idles = _Idles()
     async with Agent(
         model=_StreamingProvider(replies=replies)["scripted"],
         tools=tools,
         journal=journal,
     ) as agent:
-        agent.runtime.observers.extend((Scrollback(printer, tools=agent.tools), idles))
+        agent.runtime.observers.extend((Scrollback(live, tools=agent.tools), idles))
         await drive(agent, idles)
-    printer, replayed = _screen()
+    replayed = RecordingPrinter(show_thinking=True)
     async with Agent(
         model=ScriptedProvider()["scripted"],
         tools=tools,
         journal=journal,
     ) as agent:
-        replay(agent, Scrollback(printer, tools=agent.tools))
-    footer = replayed.getvalue().rstrip("\n").rpartition("\n")
+        replay(agent, Scrollback(replayed, tools=agent.tools))
+    footer = replayed.text.rstrip("\n").rpartition("\n")
     assert footer[2].startswith("── resumed · ")
-    return live.getvalue(), footer[0] + "\n"
+    return live.text, footer[0] + "\n"
 
 
 async def _detaching(agent: Agent, idles: _Idles) -> None:

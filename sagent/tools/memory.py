@@ -34,7 +34,7 @@ from sagent.lib.yaml import (
 )
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import parse, schema_of
+from sagent.tools.types import json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -86,7 +86,7 @@ class Memory:
     description = (files(__package__) / "assets" / "memory.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
     kinds: ClassVar[tuple[Kind, ...]] = (
         "user",
         "feedback",

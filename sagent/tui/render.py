@@ -76,8 +76,8 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Scrollback",
+    "call_header",
     "error_text",
-    "header_of",
     "show_result",
     "suspended_text",
 ]
@@ -122,7 +122,7 @@ class Scrollback:
         # The calls not yet answered, as labelled, by key: a result printed below
         # anything else names its call again.
         self._calls: dict[str, Header] = {}
-        # Each detached call's number, by call id, in the order they detached.
+        # Each detached call's number, by key, in the order they detached.
         self._jobs: dict[str, int] = {}
         # A turn's calls, labelled once the stubs that follow the turn are in, so
         # a backgrounded call's ``[detached; #N]`` prints under its own label.
@@ -149,7 +149,7 @@ class Scrollback:
         return (
             isinstance(record, ToolResult)
             and record.stub == "pending"
-            and any(h.key == record.call_id for h in self._held)
+            and any(h.key == _key(record.call_id, "") for h in self._held)
         )
 
     def __call__(self, event: types.RuntimeEvent) -> None:
@@ -327,13 +327,13 @@ class Scrollback:
                 if call_id.endswith(self.markers.arrival):
                     return
                 self._flush()
-                header = header_of(record, tools=self.tools, home=self.home)
+                header = call_header(record, tools=self.tools, home=self.home)
                 self._held.append(header)
-                self._calls[call_id] = header
+                self._calls[header.key] = header
             case ToolResult():
                 self._flush()
                 call_id = record.call_id.removesuffix(self.markers.arrival)
-                header = self._calls.get(call_id)
+                header = self._calls.get(_key(call_id, ""))
                 if header is None:
                     self._orphaned(record)
                     return
@@ -341,7 +341,7 @@ class Scrollback:
                 # lands, is shown under the label again with the same number. A
                 # held call's number prints when its label does.
                 if record.stub == "pending":
-                    job = self._jobs.setdefault(call_id, len(self._jobs) + 1)
+                    job = self._jobs.setdefault(header.key, len(self._jobs) + 1)
                     self.shown += 1
                     if not self._held:
                         p.output(
@@ -350,8 +350,8 @@ class Scrollback:
                             header=header,
                         )
                     return
-                self._calls.pop(call_id, None)
-                job = self._jobs.get(call_id)
+                del self._calls[header.key]
+                job = self._jobs.get(header.key)
                 if job is not None and record.stub is None:
                     p.output(f"[undetached; #{job}]", display=_NOTED, header=header)
                 show_result(p, record, header=header)
@@ -374,7 +374,7 @@ class Scrollback:
                 ):
                     p.note(record.content or "", lead=f"{label}: ", prose=True)
                 elif isinstance(record, ToolCall):
-                    header = header_of(
+                    header = call_header(
                         record,
                         tools=self.tools,
                         home=self.home,
@@ -384,10 +384,12 @@ class Scrollback:
                     p.call(header)
         elif isinstance(event, ToolResult) and event.stub != "pending":
             call_id = event.call_id.removesuffix(self.markers.arrival)
-            header = self._calls.pop(_key(call_id, label), None)
+            header = self._calls.get(_key(call_id, label))
             if header is None:
                 self._orphaned(event, agent=label)
-            elif event.is_error is True:
+                return
+            del self._calls[header.key]
+            if event.is_error is True:
                 p.failed(f"{label}: {_without_reminders(event.text())}", header=header)
         elif isinstance(event, types.ModelResponseError):
             p.error(f"{label}: {error_text(event.exception)}")
@@ -489,7 +491,7 @@ class Scrollback:
         self._printed = Printed()
 
 
-def header_of(
+def call_header(
     call: ToolCall,
     *,
     tools: Mapping[str, Tool],

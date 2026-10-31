@@ -6,7 +6,7 @@ identifier, so asking again returns the same path without a download.
 
 Typical usage example:
 
-  result = await PaperFetch(session=session).call(context, {"ids": ["2106.15928"]})
+  result = await PaperFetch().call(context, {"ids": ["2106.15928"]})
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Annotated
 
 import asyncio
 
-from wesearch.fetch import FetchSession
 from wesearch.paper.errors import PaperError
 from wesearch.paper.fetch import batch_oa_urls, download, looks_like_pdf
 from wesearch.paper.ids import id_slug, normalize_id, s2_wire_id
@@ -27,7 +26,7 @@ from sagent.lib.userdirs import cache_dir
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import paper_ids, summary_ids
-from sagent.tools.types import parse, schema_of
+from sagent.tools.types import json_schema, parse
 from sagent.tools.write import write_file
 
 
@@ -35,6 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from treekle import PlainTree
+    from wesearch.fetch import FetchSession
     from wesearch.paper.types import IdType
 
     from sagent.tools.types import ToolContext
@@ -69,7 +69,7 @@ class PaperFetch:
     description = (files(__package__) / "assets" / "paperfetch.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay())
 
@@ -77,9 +77,6 @@ class PaperFetch:
         default_factory=lambda: cache_dir() / "rekursiv-ai" / "wesearch" / "papers",
     )
     """Where PDFs are kept, one per identifier."""
-
-    session: FetchSession = field(repr=False)
-    """Connections, browser, and egress every download reuses; whoever made it closes it."""
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
         """Return ``PaperFetch <ids>``."""
@@ -112,7 +109,7 @@ class PaperFetch:
           ValueError: ``ids`` is empty, or names something that is no paper id.
 
         """
-        del context
+        session = context.fetch_session
         ids = paper_ids(parse(arguments, PaperFetch.Arguments).ids)
         if not ids:
             raise ValueError("'ids' is empty.")
@@ -126,14 +123,20 @@ class PaperFetch:
             await asyncio.to_thread(
                 batch_oa_urls,
                 [s2_wire_id(*p) for p in parsed],
-                session=self.session,
+                session=session,
             )
             if len(parsed) > 1
             else None
         )
         lines = await asyncio.gather(
             *(
-                self._fetch(kind, canonical, url=url, looked_up=urls is not None)
+                self._fetch(
+                    kind,
+                    canonical,
+                    url=url,
+                    looked_up=urls is not None,
+                    session=session,
+                )
                 for (kind, canonical), url in zip(
                     parsed,
                     urls if urls is not None else [None] * len(parsed),
@@ -154,6 +157,7 @@ class PaperFetch:
         *,
         url: str | None,
         looked_up: bool,
+        session: FetchSession,
     ) -> tuple[str, bool]:
         """Return where one paper's PDF is, and whether getting it failed."""
         path = self.directory / f"{id_slug(kind, canonical)}.pdf"
@@ -170,7 +174,7 @@ class PaperFetch:
                 canonical,
                 oa_url=url,
                 oa_looked_up=looked_up,
-                session=self.session,
+                session=session,
             )
         except PaperError as e:
             return str(e), True

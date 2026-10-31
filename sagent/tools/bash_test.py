@@ -24,6 +24,8 @@ from sagent.lib.posix.pids import gone_within, running
 from sagent.tools import bash
 from sagent.tools.bash import Bash, _drain, _guard, _HeldPipe, _stop
 from sagent.tools.command_analyzer import Rewrite
+from sagent.tools.grep import Grep
+from sagent.tools.list import List
 from sagent.tools.read import Read
 from sagent.tools.types import ToolContext
 
@@ -136,7 +138,14 @@ async def test_arguments_that_do_not_fit_are_refused(
 
 @pytest.mark.parametrize(
     "command",
-    ["cat foo.py", "grep -n pat foo.py", "ls -la", "git status --short"],
+    [
+        "cat foo.py",
+        "grep -n pat foo.py",
+        "ls -la",
+        "git status --short",
+        "grep -rl pat d 2>/dev/null",
+        "ls d 2>&1",
+    ],
 )
 def test_a_command_that_only_reads_runs_beside_others(
     tmp_path: Path,
@@ -150,6 +159,7 @@ def test_a_command_that_only_reads_runs_beside_others(
     [
         "rm victim",
         "echo hi > victim",
+        "ls d 2> err",
         "sed -i 's/a/b/' foo.py",
         "git checkout .",
         "cd /srv && head -20 f",
@@ -172,6 +182,25 @@ def test_a_command_another_tool_does_becomes_its_call() -> None:
     assert tool.rewrite({"command": "make"}) is None
     assert tool.rewrite({"command": 7}) is None
     assert Bash().rewrite({"command": "cat a.py"}) is None
+
+
+def test_a_line_of_reads_that_drops_its_errors_becomes_each_peers_call() -> None:
+    """``2>/dev/null`` writes no file, so the line splits rather than being refused."""
+    tool = Bash(peers=(Grep(), List()))
+    command = "grep -rl 'x y' d 2>/dev/null | head; ls d 2>/dev/null | head"
+    assert tool.rewrite({"command": command}) == (
+        Rewrite(
+            tool=Grep(),
+            arguments={
+                "output_mode": "files_with_matches",
+                "pattern": "x y",
+                "path": "d",
+                "keep_first": 10,
+            },
+        ),
+        Rewrite(tool=List(), arguments={"path": "d", "max_results": 10}),
+    )
+    assert tool.rewrite({"command": "ls d 2> err"}) is None
 
 
 def test_the_environment_never_appears_in_the_repr() -> None:

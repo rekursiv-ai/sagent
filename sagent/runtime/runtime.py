@@ -1101,7 +1101,7 @@ class Runtime:
                 ids = (entry.call_id,)
                 self._placeholder_refs[entry.call_id] = record.ref
             for cid in ids:
-                n = _mimic_index_of(cid, prefix=self.markers.mimic)
+                n = _mimic_index(cid, prefix=self.markers.mimic)
                 if n is not None:
                     self._mimic_counter = max(self._mimic_counter, n + 1)
 
@@ -2767,7 +2767,7 @@ def _entry_text(entry: ModelContextEvent) -> str:
 
 
 # ``isdecimal``, not ``isdigit``: ``"²".isdigit()`` is true, and ``int`` refuses it.
-def _mimic_index_of(cid: str, *, prefix: str) -> int | None:
+def _mimic_index(cid: str, *, prefix: str) -> int | None:
     """Return the ``N`` of a ``<prefix>N`` id, or ``None``."""
     if not cid.startswith(prefix):
         return None

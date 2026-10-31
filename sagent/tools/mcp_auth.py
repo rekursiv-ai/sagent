@@ -2,21 +2,21 @@
 
 A remote server may answer ``401`` and name an OAuth authority, as the MCP
 spec says. ``sagent mcp login <server>`` (``/mcp.login`` at the prompt) then
-registers sagent as a client,
-opens the authority's page in the browser, takes the redirect back on a
-loopback port, and keeps the client, its tokens, and when they expire in
-``config_dir() / "rekursiv-ai" / "secrets" / "mcp" / "<key>.json"``, the
-server's ``McpServer.key``, private to the user. The sign-in runs against nothing saved and saves only on
-success, so signing in again, or giving up part way, never leaves tokens
-without their client. Every later connection sends the tokens and renews them
-before they expire; one that finds none sends none, and a server that
-refuses it says to sign in, rather than opening a browser mid-session.
+registers sagent as a client, opens the authority's page in the browser, takes
+the redirect back on a loopback port, and keeps the client, its tokens, when
+they expire, and the server's configuration file in ``config_dir() /
+"rekursiv-ai" / "secrets" / "mcp" / "<key>.json"``, ``key`` being the server's
+``McpServer.key``, private to the user. The sign-in runs against nothing saved
+and saves only on success, so signing in again, or giving up part way, never
+leaves tokens without their client. Every later connection sends the tokens and
+renews them before they expire; one that finds none sends none, and a server
+that refuses it says to sign in, rather than opening a browser mid-session.
 ``sagent mcp logout <server>`` forgets them.
 
 Typical usage example:
 
-  http = create_mcp_http_client(auth=await session_auth("linear", url, key=key))
-  async with login_auth(url, key=key, show=print) as auth:
+  auth = await session_auth("linear", url, key=key, source=source)
+  async with login_auth(url, key=key, source=source, show=print) as auth:
       ...  # Connect with ``auth``; the server's ``401`` runs the sign-in.
 """
 
@@ -78,6 +78,7 @@ __all__ = [
     "McpTokenStorage",
     "login_auth",
     "session_auth",
+    "sign_ins",
 ]
 
 
@@ -114,15 +115,19 @@ class McpTokenStorage:
     """One server's tokens, their expiry, and its client, in a file private to the user.
 
     The three change together: a sign-in saves them in one write, and a renewal
-    replaces the tokens and their expiry under the same client.
+    replaces the tokens and their expiry under the same client. Every write also
+    records the configuration file the server is in, so a sign-in that file no
+    longer names can be found and forgotten.
 
     Args:
       key: The server's ``McpServer.key``, which names its file.
+      source: The server's ``McpServer.source``.
 
     """
 
-    def __init__(self, key: str) -> None:
+    def __init__(self, key: str, *, source: str = "") -> None:
         self.path = config_dir() / "rekursiv-ai" / "secrets" / "mcp" / f"{key}.json"
+        self.source = source
 
     async def get_tokens(self) -> OAuthToken | None:
         """Return the tokens kept; ``None`` before a sign-in."""
@@ -183,21 +188,44 @@ class McpTokenStorage:
             finally:
                 _HELD.reset(token)
 
+    # Every write, a renewal's too: one that recreates a file a logout forgot must
+    # still say whose it is, or no later logout finds it.
     async def _write(self, kept: _MemoryStorage) -> None:
-        await asyncio.to_thread(
-            write_private,
-            self.path,
-            json_dumps(dict(_plain(kept))),
-        )
+        plain = _plain(kept)
+        if self.source:
+            plain["source"] = self.source
+        await asyncio.to_thread(write_private, self.path, json_dumps(dict(plain)))
 
 
-async def session_auth(name: str, url: str, *, key: str) -> httpx2.Auth:
+def sign_ins(source: str) -> dict[str, Path]:
+    """Return each sign-in that records ``source`` as its server's file.
+
+    Args:
+      source: A server's ``McpServer.source``.
+
+    Returns:
+      sign_ins: Each sign-in's file, by its server's ``McpServer.key``.
+
+    """
+    found: dict[str, Path] = {}
+    for path in sorted(
+        (config_dir() / "rekursiv-ai" / "secrets" / "mcp").glob("*.json"),
+    ):
+        # Another process may forget one between the listing and the read.
+        with suppress(FileNotFoundError):
+            if _load(path).get("source") == source:
+                found[path.stem] = path
+    return found
+
+
+async def session_auth(name: str, url: str, *, key: str, source: str) -> httpx2.Auth:
     """Return the auth a session's requests to server ``name`` at ``url`` carry.
 
     Args:
       name: The server's configured name, which messages name it by.
       url: Its endpoint.
       key: Its ``McpServer.key``, which names its tokens' file.
+      source: Its ``McpServer.source``, which the file records.
 
     Returns:
       auth: Sends the tokens kept and renews them before they expire. Before a
@@ -206,7 +234,7 @@ async def session_auth(name: str, url: str, *, key: str) -> httpx2.Auth:
         a browser.
 
     """
-    storage = McpTokenStorage(key)
+    storage = McpTokenStorage(key, source=source)
     kept = await storage.read()
     needed = _SignInNeeded(name=name)
     if kept.tokens is None or kept.client is None:
@@ -229,6 +257,7 @@ async def login_auth(
     url: str,
     *,
     key: str,
+    source: str,
     show: Callable[[str], object],
     headless: bool = False,
     wait_sec: float = 300.0,
@@ -240,6 +269,7 @@ async def login_auth(
     Args:
       url: Its endpoint.
       key: Its ``McpServer.key``, which names its tokens' file.
+      source: Its ``McpServer.source``, which the file records.
       show: Shows the user the sign-in page and what to do.
       headless: Open no browser; the user opens the page anywhere and pastes
         the address it lands on.
@@ -270,7 +300,7 @@ async def login_auth(
             redirect_handler=sign_in.redirect,
             callback_handler=sign_in.callback,
         )
-    await McpTokenStorage(key).save(pending)
+    await McpTokenStorage(key, source=source).save(pending)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -350,9 +380,6 @@ class _Shared(httpx2.Auth):
       storage: The server's file, which every session shares.
 
     """
-
-    # The SDK reads a 401's body for what to do next, and declares so on its own auth.
-    requires_response_body = True
 
     def __init__(self, *, auth: OAuthClientProvider, storage: McpTokenStorage) -> None:
         self.auth = auth
@@ -456,6 +483,7 @@ class _Kept(TypedDict):
     tokens: NotRequired[dict[str, object]]
     client: NotRequired[dict[str, object]]
     expires_at: NotRequired[float]
+    source: NotRequired[str]
 
 
 def _expiry(tokens: OAuthToken) -> float | None:

@@ -32,14 +32,14 @@ from sagent.providers.openai.login import (
     CodexLogin,
     CodexTokens,
     DeviceCode,
-    account_of,
+    codex_account,
     poll_device_code,
     refresh_grant,
     request_device_code,
     revoke_refresh_token,
 )
 from sagent.providers.resources import SharedResources
-from sagent.providers.testing import free_port, port_of, visit
+from sagent.providers.testing import bound_port, free_port, visit
 
 
 if TYPE_CHECKING:
@@ -616,7 +616,7 @@ async def test_a_browser_sign_in_gives_way_when_its_port_is_taken() -> None:
     with socket.socket() as taken:
         taken.bind(("127.0.0.1", 0))
         taken.listen(1)
-        port = port_of(taken)
+        port = bound_port(taken)
         assert (
             await login._browser_code(
                 "https://x",
@@ -913,7 +913,7 @@ def test_the_account_of_tokens_reads_the_id_token_first() -> None:
         expires_at=0.0,
     )
 
-    assert account_of(tokens) == CodexAccount(plan="pro", email="i@x.test")
+    assert codex_account(tokens) == CodexAccount(plan="pro", email="i@x.test")
 
 
 def _nowhere(url: str) -> bool:

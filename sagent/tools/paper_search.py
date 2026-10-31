@@ -5,7 +5,7 @@ owns every backend, rank fusion, and per-source rate limits.
 
 Typical usage example:
 
-  result = await PaperSearch(session=session).call(context, {"query": "diffusion models"})
+  result = await PaperSearch().call(context, {"query": "diffusion models"})
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Annotated
 
 import asyncio
 
-from wesearch.fetch import FetchSession
 from wesearch.paper.errors import PaperError
 from wesearch.paper.render import format_record, truncation_notice
 from wesearch.paper.search import Source, search
@@ -27,7 +26,7 @@ import cachetools
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import error
-from sagent.tools.types import Arg, parse, schema_of
+from sagent.tools.types import Arg, json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -96,12 +95,9 @@ class PaperSearch:
     description = (files(__package__) / "assets" / "papersearch.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay())
-
-    session: FetchSession = field(repr=False)
-    """Connections, browser, and egress every search reuses; whoever made it closes it."""
 
     # Results are stable on an agent's timescale; the cache spares the shared
     # rate gates a repeated query.
@@ -147,7 +143,6 @@ class PaperSearch:
           ValueError: The query is empty, or the years are inverted.
 
         """
-        del context
         a = parse(arguments, PaperSearch.Arguments)
         query = a.query.strip()
         if not query:
@@ -181,7 +176,7 @@ class PaperSearch:
                 year_from=a.year_from,
                 year_to=a.year_to,
                 open_access_only=a.open_access_only,
-                session=self.session,
+                session=context.fetch_session,
             )
         except BotDetectionError as e:
             return error(

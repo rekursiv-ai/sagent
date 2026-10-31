@@ -206,7 +206,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             )
             if c is not None
         ]
-        label = label or self.label_for(parent)
+        label = label or self.child_label(parent)
         dun = _Dun(team=self, label=label)
         self._members[label] = _Member(
             agent=agent,
@@ -285,7 +285,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             above = self._members[above].parent
         return found
 
-    def label_for(self, parent: str | None) -> str:
+    def child_label(self, parent: str | None) -> str:
         """Return the first free label for a child of ``parent``.
 
         Args:

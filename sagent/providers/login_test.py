@@ -29,7 +29,7 @@ from sagent.providers.login import (
     read_pasted_code,
     redirected,
 )
-from sagent.providers.testing import first_live, port_of, send, visit, window
+from sagent.providers.testing import bound_port, first_live, send, visit, window
 
 
 @pytest.mark.asyncio
@@ -49,7 +49,7 @@ async def test_the_redirect_is_answered_only_on_its_path_with_its_state(
         "127.0.0.1",
         0,
     )
-    port = port_of(server.sockets[0])
+    port = bound_port(server.sockets[0])
     async with server:
         assert await visit(port, f"{path}?code=c1&state=wrong") == 400
         assert await visit(port, "/elsewhere?code=c1&state=s1") == 400

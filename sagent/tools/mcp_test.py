@@ -22,6 +22,7 @@ from mcp import Client, StdioServerParameters
 from mcp.client._memory import InMemoryTransport
 from mcp.client.session_group import StreamableHttpParameters
 from mcp.server.lowlevel import Server
+from mcp.shared.auth import OAuthToken
 
 import mcp.types as mcp_types
 import pytest
@@ -39,6 +40,7 @@ from sagent.tools.mcp import (
     McpSession,
     McpTool,
     add_server,
+    login,
     logout,
     remove_server,
     servers,
@@ -317,28 +319,188 @@ def test_a_server_is_known_by_its_name_and_where_it_is(
     assert key("docs", {"url": "https://${SAGENT_TEST_HOST}/mcp"}) == written
 
 
+def test_a_server_is_its_config_file_s_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same name and URL in two files are two servers, each signed in apart."""
+    entry: dict[str, object] = {"docs": {"url": "https://h/mcp"}}
+    _write(project_dir(tmp_path / "p") / "mcp.json", entry)
+    _write(project_dir(tmp_path / "q") / "mcp.json", entry)
+    _write(tmp_path / "flag.json", entry)
+    (p,) = servers(tmp_path / "p")
+    (q,) = servers(tmp_path / "q")
+    monkeypatch.chdir(tmp_path)
+    (flagged,) = servers(tmp_path, flags=["flag.json"], strict=True)
+    (inline,) = servers(
+        tmp_path,
+        flags=[json.dumps({"mcpServers": entry})],
+        strict=True,
+    )
+    assert (p.source, flagged.source, inline.source) == (
+        str(project_dir(tmp_path / "p") / "mcp.json"),
+        str(tmp_path / "flag.json"),
+        "--mcp-config",
+    )
+    assert len({p.key, q.key, flagged.key, inline.key}) == 4
+
+
+async def _signed_in(server: McpServer) -> Path:
+    """Keep a sign-in for ``server``, as ``login`` would; return its file."""
+    storage = McpTokenStorage(server.key, source=server.source)
+    await storage.set_tokens(
+        OAuthToken(
+            access_token="a",  # noqa: S106 -- A test's token, no secret.
+            token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
+        ),
+    )
+    return storage.path
+
+
 @pytest.mark.asyncio
-async def test_removing_keeps_a_sign_in_another_scope_still_uses(
+async def test_removing_a_server_keeps_another_project_s_of_the_same_name(
+    tmp_path: Path,
+) -> None:
+    for project in ("p", "q"):
+        await add_server("docs", {"url": "https://h/mcp"}, cwd=tmp_path / project)
+    (theirs,) = servers(tmp_path / "q")
+    kept = await _signed_in(theirs)
+    (mine,) = servers(tmp_path / "p")
+    gone = await _signed_in(mine)
+    assert await remove_server("docs", cwd=tmp_path / "p") == "local"
+    assert (gone.exists(), kept.exists()) == (False, True)
+
+
+@pytest.mark.asyncio
+async def test_removing_from_one_scope_keeps_the_other_scope_s_sign_in(
     tmp_path: Path,
 ) -> None:
     await add_server("docs", {"url": "https://h/mcp"}, cwd=tmp_path, scope="user")
     await add_server("docs", {"url": "https://h/mcp"}, cwd=tmp_path)
-    (server,) = servers(tmp_path)
-    signed_in = McpTokenStorage(server.key).path
-    signed_in.parent.mkdir(parents=True)
-    signed_in.write_text("{}")
+    (local,) = servers(tmp_path)
+    (user,) = servers(
+        tmp_path,
+        flags=[str(data_dir() / "rekursiv-ai" / "sagent" / "mcp.json")],
+        strict=True,
+    )
+    local_file, user_file = await _signed_in(local), await _signed_in(user)
     assert await remove_server("docs", cwd=tmp_path) == "local"
-    assert signed_in.exists()
+    assert (local_file.exists(), user_file.exists()) == (False, True)
     assert await remove_server("docs", cwd=tmp_path) == "user"
-    assert not signed_in.exists()
+    assert not user_file.exists()
+
+
+@pytest.mark.asyncio
+async def test_logging_out_forgets_what_its_file_no_longer_names(
+    tmp_path: Path,
+) -> None:
+    """A URL edited by hand leaves its old sign-in, which no entry can use again."""
+    await add_server("docs", {"url": "https://a/mcp"}, cwd=tmp_path / "p")
+    await add_server("docs", {"url": "https://a/mcp"}, cwd=tmp_path / "q")
+    await add_server("docs", {"url": "https://a/mcp"}, cwd=tmp_path, scope="user")
+    (old,) = servers(tmp_path / "p")
+    (theirs,) = servers(tmp_path / "q")
+    (users,) = servers(
+        tmp_path,
+        flags=[str(data_dir() / "rekursiv-ai" / "sagent" / "mcp.json")],
+        strict=True,
+    )
+    stale, kept = await _signed_in(old), [await _signed_in(s) for s in (theirs, users)]
+    _write(project_dir(tmp_path / "p") / "mcp.json", {"docs": {"url": "https://b/mcp"}})
+    (edited,) = servers(tmp_path / "p")
+    assert await logout(edited) is False
+    assert not stale.exists()
+    assert all(path.exists() for path in kept)
+
+
+@pytest.mark.asyncio
+async def test_logging_out_deletes_nothing_when_its_file_does_not_read(
+    tmp_path: Path,
+) -> None:
+    await add_server("docs", {"url": "https://a/mcp"}, cwd=tmp_path)
+    await add_server("wiki", {"url": "https://w/mcp"}, cwd=tmp_path)
+    docs, wiki = servers(tmp_path)
+    mine, other = await _signed_in(docs), await _signed_in(wiki)
+    (project_dir(tmp_path) / "mcp.json").write_text("{not json")
+    assert await logout(docs) is True
+    assert (mine.exists(), other.exists()) == (False, True)
+
+
+@pytest.mark.asyncio
+async def test_a_server_given_inline_leaves_others_inline_signed_in(
+    tmp_path: Path,
+) -> None:
+    entries = {"docs": {"url": "https://a/mcp"}, "wiki": {"url": "https://w/mcp"}}
+    docs, wiki = servers(
+        tmp_path,
+        flags=[json.dumps({"mcpServers": entries})],
+        strict=True,
+    )
+    mine, other = await _signed_in(docs), await _signed_in(wiki)
+    assert await logout(docs) is True
+    assert (mine.exists(), other.exists()) == (False, True)
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_a_renewal_writes_again_still_says_whose_it_is(
+    tmp_path: Path,
+) -> None:
+    """A session still open on an old entry may renew after the file forgot it."""
+    await add_server("docs", {"url": "https://a/mcp"}, cwd=tmp_path)
+    (old,) = servers(tmp_path)
+    renewed = await _signed_in(old)
+    _write(project_dir(tmp_path) / "mcp.json", {"docs": {"url": "https://b/mcp"}})
+    (edited,) = servers(tmp_path)
+    assert await logout(edited) is False
+    assert not renewed.exists()
+    assert await _signed_in(old) == renewed
+    assert await logout(edited) is False
+    assert not renewed.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_removal_waits_out_another_writer_of_its_file(tmp_path: Path) -> None:
+    """A server added and signed in while a removal cleans up keeps its sign-in."""
+    await add_server("docs", {"url": "https://a/mcp"}, cwd=tmp_path)
+    path = project_dir(tmp_path) / "mcp.json"
+    async with mcp._locked(path):
+        removing = asyncio.create_task(remove_server("docs", cwd=tmp_path))
+        await asyncio.sleep(0.05)
+        assert not removing.done()
+    assert await removing == "local"
+
+
+@pytest.mark.asyncio
+async def test_a_logout_sweeps_only_once_its_file_is_its_own(tmp_path: Path) -> None:
+    """An ``add`` and its sign-in between the sweep's read and delete would be lost."""
+    await add_server("docs", {"url": "https://a/mcp"}, cwd=tmp_path)
+    (docs,) = servers(tmp_path)
+    async with mcp._locked(project_dir(tmp_path) / "mcp.json"):
+        sweeping = asyncio.create_task(logout(docs))
+        await asyncio.sleep(0.05)
+        assert not sweeping.done()
+    assert await sweeping is False
+
+
+@pytest.mark.asyncio
+async def test_removing_skips_a_scope_whose_file_does_not_read(tmp_path: Path) -> None:
+    await add_server("web", {"url": "https://h/mcp"}, cwd=tmp_path, scope="user")
+    path = project_dir(tmp_path) / "mcp.json"
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json")
+    assert await remove_server("web", cwd=tmp_path) == "user"
+    assert path.read_text() == "{not json"
+    with pytest.raises(ValueError, match=r"mcp\.json is no mcpServers JSON"):
+        await remove_server("gone", cwd=tmp_path)
 
 
 @pytest.mark.asyncio
 async def test_an_entry_that_does_not_read_is_still_removed(tmp_path: Path) -> None:
     """Removing is how a broken entry is cleaned up; it must not be refused for it."""
-    _write(project_dir(tmp_path) / "mcp.json", {"bad": {}, "git": {"command": "uvx"}})
+    path = project_dir(tmp_path) / "mcp.json"
+    _write(path, {"bad": {}, "worse": {}, "git": {"command": "uvx"}})
     assert await remove_server("bad", cwd=tmp_path) == "local"
-    assert [s.name for s in servers(tmp_path)] == ["git"]
+    assert list(json.loads(path.read_text())["mcpServers"]) == ["worse", "git"]
 
 
 @pytest.mark.asyncio
@@ -348,9 +510,7 @@ async def test_removing_finds_the_scope_unless_told_and_forgets_the_sign_in(
     await add_server("web", {"url": "https://h/mcp"}, cwd=tmp_path, scope="user")
     await add_server("git", {"command": "uvx"}, cwd=tmp_path)
     (web,) = (s for s in servers(tmp_path) if s.name == "web")
-    signed_in = McpTokenStorage(web.key).path
-    signed_in.parent.mkdir(parents=True)
-    signed_in.write_text("{}")
+    signed_in = await _signed_in(web)
     assert await remove_server("web", cwd=tmp_path) == "user"
     assert not signed_in.exists()
     assert [s.name for s in servers(tmp_path)] == ["git"]
@@ -364,11 +524,12 @@ async def test_removing_finds_the_scope_unless_told_and_forgets_the_sign_in(
 async def test_logging_out_forgets_only_the_sign_in(tmp_path: Path) -> None:
     await add_server("web", {"url": "https://h/mcp"}, cwd=tmp_path)
     (web,) = servers(tmp_path)
-    signed_in = config_dir() / "rekursiv-ai" / "secrets" / "mcp" / f"{web.key}.json"
-    signed_in.parent.mkdir(parents=True)
-    signed_in.write_text("{}")
-    assert logout(web) is True
-    assert logout(web) is False
+    signed_in = await _signed_in(web)
+    assert signed_in == (
+        config_dir() / "rekursiv-ai" / "secrets" / "mcp" / f"{web.key}.json"
+    )
+    assert await logout(web) is True
+    assert await logout(web) is False
     assert [s.name for s in servers(tmp_path)] == ["web"]
 
 
@@ -732,6 +893,55 @@ async def test_a_remote_server_is_reached_over_streamable_http() -> None:
             (greet,) = session.tools()
     assert greet.name == "mcp__web__Greet"
     assert greet.description.startswith("Say hello.")
+
+
+def test_a_server_says_how_it_is_reached_and_which_tool_names_are_its() -> None:
+    local = McpServer(name="git", parameters=StdioServerParameters(command="x"))
+    remote = McpServer(name="web", parameters=StreamableHttpParameters(url="u"))
+    assert (local.transport, remote.transport) == ("stdio", "http")
+    assert [remote.names(n) for n in ("mcp__web", "mcp__web__get", "mcp__webx")] == [
+        True,
+        True,
+        False,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_only_a_remote_server_signs_in() -> None:
+    local = McpServer(name="git", parameters=StdioServerParameters(command="x"))
+    with pytest.raises(ValueError, match="MCP server 'git' runs locally"):
+        await login(local, show=list[str]().append)
+
+
+@pytest.mark.asyncio
+async def test_signing_in_to_a_server_that_asks_for_none_keeps_no_tokens() -> None:
+    shown: list[str] = []
+    async with McpToolServer() as served:
+        mount = await served.mount()
+        remote = McpServer(
+            name="web",
+            parameters=StreamableHttpParameters(url=mount.url),
+        )
+        await login(remote, show=shown.append, headless=True)
+    assert shown == []
+    assert await McpTokenStorage(remote.key).get_tokens() is None
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_that_stops_raises_why_not_the_group_around_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @asynccontextmanager
+    async def _stops(url: str, **_: object) -> AsyncGenerator[None]:
+        del url
+        # The SDK's task groups wrap what stops a sign-in, as here.
+        raise ExceptionGroup("sign-in", [EOFError("nothing pasted")])
+        yield
+
+    monkeypatch.setattr(mcp, "login_auth", _stops)
+    remote = McpServer(name="web", parameters=StreamableHttpParameters(url="u"))
+    with pytest.raises(EOFError, match="nothing pasted"):
+        await login(remote, show=list[str]().append)
 
 
 @pytest.mark.asyncio

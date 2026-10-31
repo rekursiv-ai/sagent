@@ -19,7 +19,6 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from datetime import datetime
 from importlib.resources import files
-from pathlib import Path
 from typing import TYPE_CHECKING, override
 
 import asyncio
@@ -59,13 +58,13 @@ from sagent.types import AsyncResource
 if TYPE_CHECKING:
     from collections.abc import (
         AsyncIterator,
-        Callable,
         Collection,
         Iterable,
         Iterator,
         Mapping,
         Sequence,
     )
+    from pathlib import Path
 
     from sagent.agent.types import (
         Agent as AgentProtocol,
@@ -156,9 +155,12 @@ class Agent(AsyncResource):
         journal that opens, such as ``JsonlJournal``, is opened by the caller.
       compactor: Builds what starts the session over from a summary.
       pruner: Builds what drops old tool results.
-      cwd: Where the tools start; the current directory when omitted.
-      root: Where the session started, which AGENTS.md and the skills are read
-        from and each new window returns to; ``cwd`` when omitted.
+      tool_context: What the tools start with: where they work, where the session
+        started (``cwd`` when unset), how much a result may hold, the width
+        output shows in, and the fetch session; ``ToolContext()`` when omitted.
+        The agent works on a copy, so a ``cd`` never moves the one given, but
+        the copy's fields are the given's own objects: two agents given one
+        context share its file tracker.
       max_rounds: Tool-call rounds a turn may run; ``None`` for no cap.
       max_spend_usd: What the agent may spend; ``None`` for no cap.
       persistent_retry: Whether a long rate limit is waited out, not raised.
@@ -166,15 +168,11 @@ class Agent(AsyncResource):
         omitted.
       allowed: The tools the model may call, by name; ``None`` for all. The
         rest are still offered, so every agent's tools cache alike.
-      max_result_chars: How much text one tool result may hold; the tool
-        context's default when omitted.
       environment: Whether the model is told where it runs: its directory, the
         git state, platform and shell. Off for an agent serving people the
         host's details are not for.
       account: The named login ``model``'s provider signs in as; ``None`` for
         its default. Whoever switches the model keeps it current.
-      columns: The width a command's output is shown in, as ``COLUMNS``; a
-        frontend whose window resizes passes a callable, read per command.
 
     Raises:
       ValueError: ``allowed`` names a tool not in ``tools``.
@@ -190,31 +188,29 @@ class Agent(AsyncResource):
         journal: Journal | None = None,
         compactor: Factory[Shrinker] = NoShrinker,
         pruner: Factory[Shrinker] = NoShrinker,
-        cwd: Path | None = None,
-        root: Path | None = None,
+        tool_context: ToolContext | None = None,
         max_rounds: int | None = None,
         max_spend_usd: float | None = None,
         persistent_retry: bool = False,
         agents_md: AgentsMdConfig | None = None,
         allowed: Collection[str] | None = None,
-        max_result_chars: int | None = None,
         environment: bool = True,
         account: str | None = None,
-        columns: int | Callable[[], int] = 80,
     ) -> None:
         self.agents_md: AgentsMdConfig = (
             agents_md if agents_md is not None else AgentsMdConfig()
         )
-        start = cwd if cwd is not None else Path.cwd()
+        given = tool_context if tool_context is not None else ToolContext()
         kept = journal.path if journal is not None else None
         self.runtime: Runtime = Runtime(
             model=model,
             tools=tools,
-            tool_context=ToolContext(
-                cwd=start,
-                root=root if root is not None else start,
+            # Where it started is fixed now: a ``cd`` must not move where its
+            # AGENTS.md and skills are read from.
+            tool_context=replace(
+                given,
+                root=given.origin,
                 spill_dir=kept.parent if kept is not None else None,
-                columns=columns,
             ),
         )
         # Named by its journal, which a resume reopens, so vendors see one
@@ -224,8 +220,6 @@ class Agent(AsyncResource):
             if kept is None
             else uuid.uuid5(uuid.NAMESPACE_URL, kept.resolve().as_uri()),
         )
-        if max_result_chars is not None:
-            self.runtime.tool_context.max_result_chars = max_result_chars
         self.tools: Mapping[str, Tool] = self.runtime.tools
         self.environment = environment
         self.account = account

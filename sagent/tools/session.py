@@ -51,7 +51,7 @@ from sagent.session.types import (
     UserMessage,
 )
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import parse, schema_of
+from sagent.tools.types import json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -115,7 +115,7 @@ class Session:
     description = (files(__package__) / "assets" / "session.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     team: Team = field(repr=False)
     """Where the caller is found."""

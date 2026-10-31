@@ -6,7 +6,7 @@ the tool imports it, so nothing reaches the network.
 
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from wesearch.fetch import FetchSession
@@ -33,12 +33,6 @@ _ONE = PaperRecord(title="Attention", year=2017, abstract="All you need, really.
 _TWO = PaperRecord(title="Diffusion", year=2020)
 
 
-def test_a_search_needs_the_session_it_shares() -> None:
-    """A session a tool made for itself is one nobody closes."""
-    (session,) = [f for f in fields(PaperSearch) if f.name == "session"]
-    assert (session.default, session.default_factory) == (MISSING, MISSING)
-
-
 def test_summary_quotes_the_query_and_names_a_single_source() -> None:
     tool = _tool()
     assert tool.summary({"query": " diffusion "}) == "PaperSearch 'diffusion'"
@@ -60,10 +54,11 @@ async def test_the_search_gets_every_filter_and_the_shared_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    session = FetchSession()
     calls = _searches(monkeypatch, SearchResult(records=[_ONE], total=1, complete=True))
     tool = _tool()
     await tool.call(
-        ToolContext(cwd=tmp_path),
+        ToolContext(cwd=tmp_path, fetch_session=session),
         {
             "query": " attention ",
             "source": "s2",
@@ -81,7 +76,7 @@ async def test_the_search_gets_every_filter_and_the_shared_session(
             year_from=2015,
             year_to=2020,
             open_access_only=True,
-            session=tool.session,
+            session=session,
         ),
     ]
 
@@ -288,7 +283,7 @@ class _Call:
 
 
 def _tool() -> PaperSearch:
-    return PaperSearch(session=FetchSession())
+    return PaperSearch()
 
 
 def _searches(

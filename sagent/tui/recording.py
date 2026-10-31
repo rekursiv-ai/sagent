@@ -14,12 +14,12 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Literal, override
 
 import io
 
 from sagent.tools.display import ToolDisplay
-from sagent.tui.console import ConsolePrinter
+from sagent.tui.console import ConsolePrinter, Screen
 
 
 if TYPE_CHECKING:
@@ -42,8 +42,21 @@ __all__ = [
 class Said:
     """One thing a printer was asked to write."""
 
-    kind: str
-    """The ``Printer`` method, such as ``call`` or ``output``."""
+    kind: Literal[
+        "line",
+        "note",
+        "user",
+        "agent",
+        "markdown",
+        "thinking",
+        "call",
+        "output",
+        "diff",
+        "error",
+        "failed",
+        "halt",
+    ]
+    """The ``Printer`` method that was asked."""
 
     text: str
     """What it wrote: a call's label, a bar's ``sender→recipient: text``, a diff's
@@ -62,15 +75,27 @@ class RecordingPrinter(ConsolePrinter):
 
     Args:
       show_thinking: Whether reasoning shows.
+      width: The console's width, in cells.
 
     """
 
-    def __init__(self, *, show_thinking: bool = True) -> None:
+    def __init__(self, *, show_thinking: bool = False, width: int = 80) -> None:
+        self._out = io.StringIO()
         super().__init__(
-            Console(file=io.StringIO(), width=80, color_system=None),
+            Console(
+                file=Screen(self._out),
+                width=width,
+                color_system=None,
+                highlight=False,
+            ),
             show_thinking=show_thinking,
         )
         self.entries: list[Said] = []
+
+    @property
+    def text(self) -> str:
+        """Return what it drew, as plain text."""
+        return self._out.getvalue()
 
     @property
     def said(self) -> list[tuple[str, str]]:

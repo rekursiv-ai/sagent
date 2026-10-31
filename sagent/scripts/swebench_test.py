@@ -122,7 +122,7 @@ def _solve(
     )
 
 
-def _tasks_of(**sizes: int) -> list[Task]:
+def _sized_tasks(**sizes: int) -> list[Task]:
     return [
         Task(
             instance_id=f"{repo}-{n}",
@@ -298,7 +298,7 @@ def test_a_task_already_predicted_is_skipped_and_a_mirror_fetched_once(
 def test_an_agent_solves_jobs_tasks_at_once(tmp_path: Path) -> None:
     git = _Git(meet=threading.Barrier(3))
 
-    assert _solve(tmp_path, git, *_tasks_of(a=2, b=1), jobs=3) == 3
+    assert _solve(tmp_path, git, *_sized_tasks(a=2, b=1), jobs=3) == 3
 
     lines = (tmp_path / "out" / "sagent" / "predictions.jsonl").read_text().splitlines()
     assert sorted(
@@ -314,7 +314,7 @@ def test_tasks_solved_one_at_a_time_never_meet(tmp_path: Path) -> None:
     """The barrier above proves concurrency: serially it breaks."""
     git = _Git(meet=threading.Barrier(2), meet_sec=0.01)
     with pytest.raises(threading.BrokenBarrierError):
-        _ = _solve(tmp_path, git, *_tasks_of(a=2), jobs=1)
+        _ = _solve(tmp_path, git, *_sized_tasks(a=2), jobs=1)
 
 
 @pytest.mark.parametrize("line", ["[]", "{}", '{"instance_id": 1}'])
@@ -624,7 +624,7 @@ def test_a_cost_not_known_for_every_task_is_not_summed(
 
 
 def test_a_sample_keeps_each_repositorys_share() -> None:
-    tasks = _tasks_of(big=60, mid=30, small=9, tiny=1)
+    tasks = _sized_tasks(big=60, mid=30, small=9, tiny=1)
 
     drawn = swebench.stratified(tasks, 10, seed=0)
 
@@ -637,7 +637,7 @@ def test_a_sample_keeps_each_repositorys_share() -> None:
 
 
 def test_a_sample_is_the_same_for_a_seed_and_differs_across_seeds() -> None:
-    tasks = _tasks_of(a=50, b=50)
+    tasks = _sized_tasks(a=50, b=50)
 
     first = swebench.stratified(tasks, 10, seed=1)
 
@@ -647,7 +647,7 @@ def test_a_sample_is_the_same_for_a_seed_and_differs_across_seeds() -> None:
 
 
 def test_a_sample_as_large_as_the_tasks_is_all_of_them() -> None:
-    tasks = _tasks_of(a=2, b=1)
+    tasks = _sized_tasks(a=2, b=1)
     assert swebench.stratified(tasks, 5, seed=0) == tasks
 
 

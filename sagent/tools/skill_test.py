@@ -17,7 +17,7 @@ from sagent.lib.userdirs import data_dir
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools import skill
 from sagent.tools.skill import Skill, SkillInfo
-from sagent.tools.types import ToolContext, schema_of
+from sagent.tools.types import ToolContext, json_schema
 
 
 _CWD: Final = Path(__file__).resolve().parent
@@ -598,7 +598,7 @@ def test_the_model_sees_the_name_schema_and_asset() -> None:
     tool = Skill()
     # The compactor elides results of a tool by this exact name.
     assert tool.name == "Skill"
-    assert tool.schema == schema_of(Skill.Arguments)
+    assert tool.schema == json_schema(Skill.Arguments)
     assert tool.schema["required"] == ["skill"]
     assert tool.description.startswith("Load a user-authored skill")
 

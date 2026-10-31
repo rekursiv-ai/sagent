@@ -6,7 +6,7 @@ it, so nothing reaches the network.
 
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -28,11 +28,6 @@ if TYPE_CHECKING:
 
 
 _PDF = b"%PDF-1.7\n" + b"x" * 200
-
-
-def test_a_download_needs_the_session_it_shares() -> None:
-    (session,) = [f for f in fields(PaperFetch) if f.name == "session"]
-    assert (session.default, session.default_factory) == (MISSING, MISSING)
 
 
 def test_pdfs_are_kept_in_the_users_cache_by_default() -> None:
@@ -83,10 +78,14 @@ async def test_one_paper_is_downloaded_and_kept(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    session = FetchSession()
     calls = _downloads(monkeypatch, {"2106.15928": (_PDF, "arXiv")})
     batches = _batches(monkeypatch)
     tool = _tool(tmp_path)
-    result = await tool.call(ToolContext(cwd=tmp_path), {"ids": "arXiv:2106.15928"})
+    result = await tool.call(
+        ToolContext(cwd=tmp_path, fetch_session=session),
+        {"ids": "arXiv:2106.15928"},
+    )
     path = tmp_path / "arxiv_2106.15928.pdf"
     assert result.text() == f"Downloaded via arXiv: {path}"
     assert result.is_error is False
@@ -96,7 +95,7 @@ async def test_one_paper_is_downloaded_and_kept(
     assert calls == [
         _Call(
             args=("arxiv", "2106.15928"),
-            kwargs={"oa_url": None, "oa_looked_up": False, "session": tool.session},
+            kwargs={"oa_url": None, "oa_looked_up": False, "session": session},
         ),
     ]
 
@@ -137,6 +136,7 @@ async def test_many_papers_share_one_lookup_and_report_in_input_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    session = FetchSession()
     batches = _batches(monkeypatch, ["https://oa/a.pdf", None])
     calls = _downloads(
         monkeypatch,
@@ -147,7 +147,7 @@ async def test_many_papers_share_one_lookup_and_report_in_input_order(
     )
     tool = _tool(tmp_path)
     result = await tool.call(
-        ToolContext(cwd=tmp_path),
+        ToolContext(cwd=tmp_path, fetch_session=session),
         {"ids": ["10.1000/a", "10.1000/b"]},
     )
     assert result.text() == (
@@ -158,7 +158,7 @@ async def test_many_papers_share_one_lookup_and_report_in_input_order(
     assert batches == [
         _Call(
             args=(["DOI:10.1000/a", "DOI:10.1000/b"],),
-            kwargs={"session": tool.session},
+            kwargs={"session": session},
         ),
     ]
     assert [c.kwargs["oa_url"] for c in calls] == ["https://oa/a.pdf", None]
@@ -238,15 +238,7 @@ class _Call:
 
 
 def _tool(directory: Path | None = None) -> PaperFetch:
-    session = FetchSession()
-    return (
-        PaperFetch(session=session)
-        if directory is None
-        else PaperFetch(
-            session=session,
-            directory=directory,
-        )
-    )
+    return PaperFetch() if directory is None else PaperFetch(directory=directory)
 
 
 # The downloads run at once, so the order they arrive in is no order at all.

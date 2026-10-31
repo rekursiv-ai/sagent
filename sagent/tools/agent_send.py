@@ -25,7 +25,7 @@ from sagent.agent.team import Team
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tools.types import Arg, parse, schema_of
+from sagent.tools.types import Arg, json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -64,7 +64,7 @@ class AgentSend:
     description = (files(__package__) / "assets" / "agentsend.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     team: Team = field(repr=False)
     """Who can be reached."""

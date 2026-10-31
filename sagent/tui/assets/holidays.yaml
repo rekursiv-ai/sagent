@@ -1,7 +1,8 @@
-# Holidays in calendar order. `starts` is a fixed MM-DD or the name of a
+# Holidays in calendar order. `dates` is a fixed MM-DD or the name of a
 # date rule in holiday.py. A holiday shows on its main day (Hanukkah's first
-# eve, Kwanzaa's first day); on a weekend, Friday to Sunday. Each icon is 11x12
-# pixels.
+# eve, Kwanzaa's first day). On a weekend it shows the whole weekend and its
+# `workday`, so it is seen at work: `friday` unless set to `monday`. Each icon
+# is 11x12 pixels.
 # Letters name colors: R red, O orange, Y yellow or gold, G green,
 # C teal, B blue, V violet, P pink, M magenta, N brown, T tan,
 # W white, S silver or gray, K black. Lowercase is a second shade of the
@@ -16,7 +17,7 @@
 # Additions that meet this rule are welcome.
 
 - name: "New Year's"
-  starts: 01-01
+  dates: 01-01
   why: "US federal holiday."
   icons:
     - name: "fireworks"
@@ -51,7 +52,7 @@
         ...........
 
 - name: "Lunar New Year"
-  starts: lunar_new_year
+  dates: lunar_new_year
   why: "Over 100M observers: China, Korea, Vietnam, and diasporas."
   icons:
     - name: "lantern"
@@ -86,7 +87,7 @@
         ...........
 
 - name: "Valentine's Day"
-  starts: 02-14
+  dates: 02-14
   why: "Over 100M observers, in the US and beyond."
   icons:
     - name: "heart"
@@ -121,7 +122,7 @@
         .....G.....
 
 - name: "Mario Day"
-  starts: 03-10
+  dates: 03-10
   why: "In-joke: MAR10 spells Mario; the Halloween ghost is a Boo."
   icons:
     - name: "mushroom"
@@ -156,7 +157,7 @@
         OOOOOOOOOOO
 
 - name: "Pi Day"
-  starts: 03-14
+  dates: 03-14
   why: "In-joke: 3/14 spells 3.14."
   icons:
     - name: "pi"
@@ -191,7 +192,7 @@
         ...........
 
 - name: "St. Patrick's Day"
-  starts: 03-17
+  dates: 03-17
   why: "Over 100M observers, in Ireland, the US, and beyond."
   icons:
     - name: "shamrock"
@@ -226,7 +227,7 @@
         ...........
 
 - name: "Holi"
-  starts: holi
+  dates: holi
   why: "Over 100M observers: Hindus, the festival of colors."
   icons:
     - name: "powder burst"
@@ -261,7 +262,7 @@
         ....PPPP...
 
 - name: "Nowruz"
-  starts: spring
+  dates: spring
   why: "Over 100M observers: about 300M across Iran, Afghanistan, and Central Asia, of several faiths."
   icons:
     - name: "hyacinth"
@@ -296,7 +297,7 @@
         ...........
 
 - name: "First day of spring"
-  starts: spring
+  dates: spring
   why: "Season: the March equinox."
   icons:
     - name: "tulip"
@@ -331,8 +332,9 @@
         ...........
 
 - name: "Easter"
-  starts: easter
+  dates: easter
   why: "Over 100M observers: Christians."
+  workday: monday  # Friday is Good Friday, a solemn day.
   icons:
     - name: "egg"
       palette: {B: "#8fd3ff", P: "#f7a8c4", W: "#ffffff", Y: "#ffe680"}
@@ -366,7 +368,7 @@
         .SS.....SS.
 
 - name: "Vaisakhi"
-  starts: vaisakhi
+  dates: vaisakhi
   why: "Exception: the main Sikh festival; Sikhs number about 26M."
   icons:
     - name: "wheat sheaf"
@@ -401,7 +403,7 @@
         ...........
 
 - name: "Eid al-Fitr"
-  starts: eid_al_fitr
+  dates: eid_al_fitr
   why: "Over 100M observers: Muslims; it ends Ramadan."
   icons:
     - name: "crescent + star"
@@ -436,7 +438,7 @@
         ...........
 
 - name: "Vesak"
-  starts: vesak
+  dates: vesak
   why: "Over 100M observers: Buddhists."
   icons:
     - name: "lotus"
@@ -471,7 +473,7 @@
         .O.......O.
 
 - name: "Juneteenth"
-  starts: 06-19
+  dates: 06-19
   why: "US federal holiday."
   icons:
     - name: "Juneteenth flag"
@@ -506,7 +508,7 @@
         ...........
 
 - name: "First day of summer"
-  starts: summer
+  dates: summer
   why: "Season: the June solstice."
   icons:
     - name: "sun"
@@ -541,7 +543,7 @@
         ...........
 
 - name: "Independence Day"
-  starts: 07-04
+  dates: 07-04
   why: "US federal holiday."
   icons:
     - name: "flag"
@@ -576,7 +578,7 @@
         ...........
 
 - name: "Eid al-Adha"
-  starts: eid_al_adha
+  dates: eid_al_adha
   why: "Over 100M observers: Muslims."
   icons:
     - name: "mosque"
@@ -611,7 +613,7 @@
         ...........
 
 - name: "First day of fall"
-  starts: fall
+  dates: fall
   why: "Season: the September equinox."
   icons:
     - name: "maple leaf"
@@ -646,7 +648,7 @@
         ...........
 
 - name: "Mid-Autumn Festival"
-  starts: mid_autumn
+  dates: mid_autumn
   why: "Over 100M observers: China, Korea, and Vietnam."
   icons:
     - name: "mooncake"
@@ -681,7 +683,7 @@
         ...........
 
 - name: "Halloween"
-  starts: 10-31
+  dates: 10-31
   why: "Over 100M observers, mostly in the US."
   icons:
     - name: "jack-o-lantern"
@@ -716,7 +718,7 @@
         ..SSSSSSS..
 
 - name: "Diwali"
-  starts: diwali
+  dates: diwali
   why: "Over 100M observers: Hindus, Sikhs, and Jains."
   icons:
     - name: "diya"
@@ -751,7 +753,7 @@
         ...........
 
 - name: "Thanksgiving"
-  starts: thanksgiving
+  dates: thanksgiving
   why: "US federal holiday."
   icons:
     - name: "turkey"
@@ -786,7 +788,7 @@
         ...........
 
 - name: "Hanukkah"
-  starts: hanukkah
+  dates: hanukkah
   why: "Exception: Jews number about 15M, but Hanukkah is widely marked in the US."
   icons:
     - name: "menorah"
@@ -821,7 +823,7 @@
         ...........
 
 - name: "First day of winter"
-  starts: winter
+  dates: winter
   why: "Season: the December solstice."
   icons:
     - name: "snowflake"
@@ -856,7 +858,7 @@
         ..SSSSSSS..
 
 - name: "Christmas"
-  starts: 12-25
+  dates: 12-25
   why: "Over 100M observers, and a US federal holiday."
   icons:
     - name: "tree"
@@ -891,7 +893,7 @@
         ...........
 
 - name: "Kwanzaa"
-  starts: 12-26
+  dates: 12-26
   why: "Exception: an African American cultural celebration."
   icons:
     - name: "kinara"

@@ -33,13 +33,14 @@ from sagent.session.types import (
 from sagent.tools.bash import Bash
 from sagent.tools.display import ToolDisplay
 from sagent.tools.read import Read
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from sagent.model.types import Request, Response
-    from sagent.tools.types import Tool, ToolContext
+    from sagent.tools.types import Tool
 
 
 @dataclass(slots=True, kw_only=True)
@@ -174,7 +175,7 @@ async def test_each_request_in_a_window_extends_the_one_before(tmp_path: Path) -
         model=provider["scripted"],
         tools=[Bash(peers=(Read(),)), Read(), note],
         system_prompt="S",
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         agents_md=AgentsMdConfig(system_dir=tmp_path / "s", user_dir=tmp_path / "u"),
         compactor=SummaryCompactor,
     )

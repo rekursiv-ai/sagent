@@ -57,22 +57,21 @@ Create `/tmp/sagent-demo/analyze.py`:
 ```python
 import asyncio
 
-from sagent import tools
-from sagent.agent import Agent
-from sagent.lib.codec import immutable
-from sagent.providers import Google
+from sagent.agent.agent import Agent
+from sagent.providers.catalog import ModelCatalog
+from sagent.tools.glob_tool import Glob
+from sagent.tools.grep import Grep
+from sagent.tools.read import Read
 
 
 async def main() -> None:
-    agent = Agent(
-        model=Google.from_env().model("gemini-pro-3.1"),
-        system="You summarize local project files concisely.",
-        tools=[tools.Read(), tools.Glob(), tools.Grep()],
-    )
-    result = await agent.run(
-        immutable({"prompt": "Read /tmp/sagent-demo/notes.md and summarize it."})
-    )
-    print(result.content)
+    async with ModelCatalog() as catalog:
+        async with Agent(
+            model=catalog["google"]["gemini-pro-3.1"],
+            system_prompt="You summarize local project files concisely.",
+            tools=[Read(), Glob(), Grep()],
+        ) as agent:
+            print(await agent.send("Read /tmp/sagent-demo/notes.md and summarize it."))
 
 
 asyncio.run(main())
@@ -88,25 +87,30 @@ The agent can read the file through the `Read` tool instead of receiving file co
 
 ## 5. Persist a session
 
-Use an explicit session directory when follow-up calls should share state:
+Pass a journal when later runs should resume the conversation:
 
 ```python
-agent = Agent(
-    model=Google.from_env().model("gemini-pro-3.1"),
-    system="You summarize local project files concisely.",
-    tools=[tools.Read(), tools.Glob(), tools.Grep()],
-    session_dir="/tmp/sagent-demo/session",
-)
+from pathlib import Path
+
+from sagent.session.jsonl import JsonlJournal
+
+path = Path("/tmp/sagent-demo/session/session.jsonl")
+async with ModelCatalog() as catalog, JsonlJournal(path) as journal:
+    async with Agent(
+        model=catalog["google"]["gemini-pro-3.1"],
+        tools=[Read(), Glob(), Grep()],
+        journal=journal,
+    ) as agent:
+        print(await agent.send("What did you summarize last time?"))
 ```
 
-CLI equivalent:
+CLI equivalent, resuming the same journal file:
 
 ```bash
-sagent --provider Google --model gemini-pro-3.1 --session /tmp/sagent-demo/session
-sagent --provider Google --model gemini-pro-3.1 --continue
+sagent --provider Google --model gemini-pro-3.1 --session /tmp/sagent-demo/session/session.jsonl
 ```
 
-Use `--ephemeral` for prompts that should not write conversation state or auto-memory to disk.
+Use `--ephemeral` for prompts that should write no journal and no memories.
 
 ## 6. Add machine-readable output
 
@@ -123,29 +127,41 @@ printf 'Summarize /tmp/sagent-demo/notes.md' | \
 
 ## 7. Add a reviewer child
 
-`AgentSpawn` lets one agent delegate isolated work to a child agent. Give children only the tools and depth they need.
+`AgentSpawn` lets one agent delegate isolated work to a child agent. Children join the parent's `Team`. Give them only the tools and depth they need.
 
 ```python
-agent = Agent(
-    model=Google.from_env().model("gemini-pro-3.1"),
-    system="Draft a short answer, then spawn a reviewer before finalizing.",
-    tools=[tools.AgentSpawn()],
-)
+from sagent.agent.team import Team
+from sagent.tools.agent_spawn import AgentSpawn
+
+async with ModelCatalog() as catalog, Team(catalog=catalog) as team:
+    async with Agent(
+        model=catalog["google"]["gemini-pro-3.1"],
+        system_prompt="Draft a short answer, then spawn a reviewer before finalizing.",
+        tools=[AgentSpawn(team=team)],
+    ) as agent:
+        team.join(agent)
+        print(await agent.send("Explain what a context window is."))
 ```
 
 The parent can call `AgentSpawn` with `tools=[]` and `max_depth=0` for a pure text review.
 
 ## 8. Use a custom tool
 
-For deterministic functions, use `@tool`:
+For deterministic functions, use `@tool`. The docstring is what the model reads; its `Args:` lines describe each parameter.
 
 ```python
-from sagent.tools import tool
+from sagent.tools.function import tool
 
 
 @tool
-def word_count(text: str) -> int:
-    return len(text.split())
+def word_count(text: str) -> str:
+    """Count the words in some text.
+
+    Args:
+      text: The text to count.
+
+    """
+    return str(len(text.split()))
 ```
 
 Then pass `word_count` into `Agent(..., tools=[word_count])`.
@@ -154,7 +170,7 @@ Then pass `word_count` into `Agent(..., tools=[word_count])`.
 
 - Missing API key: set the provider key or choose another provider with `--provider`.
 - Unknown model: pass a model ID supported by the selected provider.
-- Session surprises: use `--session PATH` for an explicit location or `--ephemeral` for stateless runs with auto-memory disabled.
+- Session surprises: use `--session PATH` to name a journal file, or `--ephemeral` to keep no journal and no memories.
 - Tool access: tools operate in the user's environment. Only pass tools the agent needs.
 - Long context: keep compaction enabled or lower the task scope with narrower tools/prompts.
 

@@ -2,8 +2,8 @@
 
 Typical usage example:
 
-  result = await PaperDetails(session=session).call(context, {"ids": ["2106.15928"]})
-  result = await PaperDetails(session=session).call(
+  result = await PaperDetails().call(context, {"ids": ["2106.15928"]})
+  result = await PaperDetails().call(
       context, {"ids": "2106.15928", "operation": "citations"},
   )
 """
@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Annotated, Literal
 
 import asyncio
 
-from wesearch.fetch import FetchSession
 from wesearch.paper.details import (
     citations,
     metadata,
@@ -37,13 +36,14 @@ from sagent.tools.paper_common import (
     paper_ids,
     summary_ids,
 )
-from sagent.tools.types import Arg, parse, schema_of
+from sagent.tools.types import Arg, json_schema, parse
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from treekle import PlainTree
+    from wesearch.fetch import FetchSession
 
     from sagent.tools.types import ToolContext
 
@@ -117,12 +117,9 @@ class PaperDetails:
     description = (files(__package__) / "assets" / "paperdetails.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay())
-
-    session: FetchSession = field(repr=False)
-    """Connections, browser, and egress every lookup reuses; whoever made it closes it."""
 
     # Paper metadata is effectively immutable on an agent's timescale.
     cache: cachetools.LRUCache[tuple[object, ...], str] = field(
@@ -168,7 +165,6 @@ class PaperDetails:
           ValueError: The arguments contradict each other.
 
         """
-        del context
         a = parse(arguments, PaperDetails.Arguments)
         ids = paper_ids(a.ids)
         if not ids:
@@ -183,7 +179,11 @@ class PaperDetails:
             )
         try:
             if a.operation is None:
-                return await self._metadata(ids, a.abstract_chars)
+                return await self._metadata(
+                    ids,
+                    a.abstract_chars,
+                    session=context.fetch_session,
+                )
             kind, canonical = normalize_id(ids[0])
             key = (
                 a.operation,
@@ -205,7 +205,7 @@ class PaperDetails:
                     canonical,
                     limit=a.limit,
                     source=source,
-                    session=self.session,
+                    session=context.fetch_session,
                 )
                 if a.operation == "references"
                 else asyncio.to_thread(
@@ -216,7 +216,7 @@ class PaperDetails:
                     source=source,
                     influential_only=a.influential_only,
                     year_from=a.year_from,
-                    session=self.session,
+                    session=context.fetch_session,
                 )
             )
         except PaperError as e:
@@ -229,6 +229,8 @@ class PaperDetails:
         self,
         raw_ids: list[str],
         abstract_chars: int | None,
+        *,
+        session: FetchSession,
     ) -> UncategorizedToolResult:
         """Look up every id in one batched request, in input order."""
         wire = [s2_wire_id(*normalize_id(raw)) for raw in raw_ids]
@@ -241,14 +243,14 @@ class PaperDetails:
                 await asyncio.to_thread(
                     metadata,
                     *normalize_id(raw_ids[0]),
-                    session=self.session,
+                    session=session,
                 ),
             ]
         else:
             records = await asyncio.to_thread(
                 metadata_batch,
                 wire,
-                session=self.session,
+                session=session,
             )
         text = "\n\n".join(
             format_block(r, abstract_chars=abstract_chars)

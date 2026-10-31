@@ -305,7 +305,7 @@ class McpToolServer(AsyncResource):
             ready.set()
             await self._stop.wait()
 
-    def _mount_of(self, ctx: ServerRequestContext[object]) -> McpMount | None:
+    def _request_mount(self, ctx: ServerRequestContext[object]) -> McpMount | None:
         request = ctx.request
         # Streamable HTTP hands every handler the HTTP request it came in.
         assert isinstance(request, Request)
@@ -317,7 +317,7 @@ class McpToolServer(AsyncResource):
         params: mcp_types.PaginatedRequestParams | None,
     ) -> mcp_types.ListToolsResult:
         del params
-        mount = self._mount_of(ctx)
+        mount = self._request_mount(ctx)
         return (
             mount.listed() if mount is not None else mcp_types.ListToolsResult(tools=[])
         )
@@ -327,7 +327,7 @@ class McpToolServer(AsyncResource):
         ctx: ServerRequestContext[object],
         params: mcp_types.CallToolRequestParams,
     ) -> mcp_types.CallToolResult:
-        mount = self._mount_of(ctx)
+        mount = self._request_mount(ctx)
         if mount is None:
             text = "No tools are offered at this URL."
             return mcp_types.CallToolResult(

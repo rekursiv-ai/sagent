@@ -32,7 +32,6 @@ from prompt_toolkit.keys import Keys
 from prompt_toolkit.output import DummyOutput
 from prompt_toolkit.output.plain_text import PlainTextOutput
 from prompt_toolkit.patch_stdout import StdoutProxy
-from rich.console import Console
 from treekle import PlainTree, json_dumps, json_loads
 from wesearch.fetch import FetchSession
 
@@ -95,11 +94,13 @@ from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.paper_search import PaperSearch
 from sagent.tools.read import Read
 from sagent.tools.session import Session
+from sagent.tools.types import ToolContext
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
 from sagent.tui import main, slash
-from sagent.tui.console import ConsolePrinter, Screen
+from sagent.tui.console import ConsolePrinter
 from sagent.tui.prompt import Input, Panes, prompt_text
+from sagent.tui.recording import RecordingPrinter
 from sagent.tui.slash import Commands
 from sagent.tui.types import CommandOutput, Header
 from sagent.tui.views import Views
@@ -108,13 +109,15 @@ from sagent.tui.views import Views
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator, Sequence
 
+    from rich.console import Console
+
     from sagent.model.types import Request, Response
     from sagent.providers.types import (
         Provider,
         ProviderFactory,
-        ProviderSharedResources,
+        ProviderResources,
     )
-    from sagent.tools.types import Tool, ToolContext
+    from sagent.tools.types import Tool
 
 
 def _flags(*argv: str) -> main.Flags:
@@ -146,7 +149,7 @@ class _Picky(ScriptedProvider):
 class _Signing(_Picky):
     """Signs in, and serves only its own default: none of the starting provider's."""
 
-    def __init__(self, *, name: str, resources: ProviderSharedResources) -> None:
+    def __init__(self, *, name: str, resources: ProviderResources) -> None:
         super().__init__(name=name, resources=resources)
         self.signed_in = 0
         self.headless: list[bool] = []
@@ -181,7 +184,7 @@ class _Script:
     def catalog(self, *, account: str | None = None) -> ModelCatalog:
         self.accounts.append(account)
 
-        def scripted(*, name: str, resources: ProviderSharedResources) -> Provider:
+        def scripted(*, name: str, resources: ProviderResources) -> Provider:
             return self._keep(
                 _Picky(
                     name=name,
@@ -191,10 +194,10 @@ class _Script:
                 ),
             )
 
-        def deep(*, name: str, resources: ProviderSharedResources) -> Provider:
+        def deep(*, name: str, resources: ProviderResources) -> Provider:
             return self._keep(_Picky(name=name, resources=resources, capability=_DEEP))
 
-        def signing(*, name: str, resources: ProviderSharedResources) -> Provider:
+        def signing(*, name: str, resources: ProviderResources) -> Provider:
             return self._keep(_Signing(name=name, resources=resources))
 
         def per_account(account: str | None) -> dict[str, ProviderFactory]:
@@ -1295,7 +1298,10 @@ def test_every_shell_command_runs_as_its_prompt_command_does(
 ) -> None:
     """``sagent NAME ARGS`` and ``/NAME ARGS`` reach one action and say one thing."""
     monkeypatch.chdir(tmp_path)
-    agent = Agent(model=script.catalog()["scripted"]["scripted"], cwd=tmp_path)
+    agent = Agent(
+        model=script.catalog()["scripted"]["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
     said: list[CommandOutput] = []
     commands = Commands(
         agent,
@@ -1807,7 +1813,6 @@ def _tools(*argv: str, cwd: Path = Path("/w")) -> dict[str, object]:
         _flags(*argv),
         cwd=cwd,
         team=team,
-        session=FetchSession(),
     )
     return {tool.name: tool for tool in tools}
 
@@ -1861,24 +1866,13 @@ def test_an_unknown_tool_lists_the_known_ones() -> None:
     assert str(error.value).endswith(", Skill, BackgroundTask")
 
 
-def test_the_web_tools_share_one_session_and_bash_knows_its_peers() -> None:
+def test_the_team_s_tools_share_the_team_and_bash_knows_its_peers() -> None:
     catalog = _Script().catalog()
-    session = FetchSession()
     team = Team(catalog=catalog)
-    tools = {
-        t.name: t
-        for t in main._tools(
-            _flags(),
-            cwd=Path("/w"),
-            team=team,
-            session=session,
-        )
-    }
+    tools = {t.name: t for t in main._tools(_flags(), cwd=Path("/w"), team=team)}
     web = [WebFetch, WebSearch, PaperSearch, PaperDetails, PaperAuthor, PaperFetch]
     for kind in web:
-        tool = tools[kind.__name__]
-        assert isinstance(tool, kind)
-        assert tool.session is session
+        assert isinstance(tools[kind.__name__], kind)
     for kind in (AgentSpawn, AgentSend, AgentSelf, Session):
         tool = tools[kind.__name__]
         assert isinstance(tool, kind)
@@ -1908,7 +1902,6 @@ def test_mcp_tools_join_the_built_in_ones_and_tools_can_name_them() -> None:
                 _flags(*argv),
                 cwd=Path("/w"),
                 team=team,
-                session=FetchSession(),
                 mcp=extra,
             )
         ]
@@ -2639,14 +2632,8 @@ async def test_a_write_to_stderr_during_a_session_names_the_call_again(
     labels: list[str] = []
 
     class _Kept(ConsolePrinter):
-        def __init__(
-            self,
-            console: Console,
-            *,
-            show_thinking: bool = False,
-            screen: Screen | None = None,
-        ) -> None:
-            super().__init__(console, show_thinking=show_thinking, screen=screen)
+        def __init__(self, console: Console, *, show_thinking: bool = False) -> None:
+            super().__init__(console, show_thinking=show_thinking)
             made.append(self)
 
         @override
@@ -2667,10 +2654,11 @@ async def test_a_write_to_stderr_during_a_session_names_the_call_again(
 
     monkeypatch.setattr(main, "ConsolePrinter", _Kept)
     monkeypatch.setattr(main, "Commands", _Warns)
+    screen = io.StringIO()
     async with Agent(model=ScriptedProvider()["scripted"]) as agent:
         with (
             create_pipe_input() as pipe,
-            create_app_session(input=pipe, output=PlainTextOutput(io.StringIO())),
+            create_app_session(input=pipe, output=PlainTextOutput(screen)),
         ):
             pipe.send_text("/warn\r/exit\r")
             await asyncio.wait_for(
@@ -2683,6 +2671,11 @@ async def test_a_write_to_stderr_during_a_session_names_the_call_again(
                 timeout=5,
             )
     assert labels == ["Read a.py", "Read a.py"]
+    shown = screen.getvalue()
+    first = shown.index("Read a.py")
+    warned = shown.index("a library warning", first)
+    again = shown.index("Read a.py", warned)
+    assert shown.index("✗ gone", again) > again
 
 
 @pytest.mark.asyncio
@@ -2759,7 +2752,7 @@ def test_the_system_prompt_is_replaced_or_extended(
         model=ScriptedProvider()["scripted"],
         tools=(),
         journal=None,
-        cwd=Path("/w"),
+        tool_context=ToolContext(cwd=Path("/w")),
         interactive=False,
     )
     assert agent.system_prompt == system
@@ -2771,7 +2764,7 @@ def test_an_appended_prompt_extends_the_default_one() -> None:
         model=ScriptedProvider()["scripted"],
         tools=(),
         journal=None,
-        cwd=Path("/w"),
+        tool_context=ToolContext(cwd=Path("/w")),
         interactive=False,
     )
     assert agent.system_prompt == f"{default_system_prompt()}\n\nUse tabs."
@@ -2787,7 +2780,7 @@ def test_compact_picks_the_compactor(argv: tuple[str, ...], compactor: type) -> 
         model=ScriptedProvider()["scripted"],
         tools=(),
         journal=None,
-        cwd=Path("/w"),
+        tool_context=ToolContext(cwd=Path("/w")),
         interactive=False,
     )
     assert type(agent.session.compactor) is compactor
@@ -2803,7 +2796,7 @@ def test_compactor_picks_how_it_compacts(argv: tuple[str, ...], style: str) -> N
         model=ScriptedProvider()["scripted"],
         tools=(),
         journal=None,
-        cwd=Path("/w"),
+        tool_context=ToolContext(cwd=Path("/w")),
         interactive=False,
     )
     compactor = agent.session.compactor
@@ -2817,7 +2810,7 @@ def test_the_caps_reach_the_agent() -> None:
         model=ScriptedProvider()["scripted"],
         tools=(),
         journal=None,
-        cwd=Path("/w"),
+        tool_context=ToolContext(cwd=Path("/w")),
         interactive=False,
     )
     assert (agent.max_rounds, agent.max_spend_usd) == (3, 1.5)
@@ -2921,10 +2914,9 @@ def test_the_run_s_tools_and_team_share_its_session_and_catalog(
 
     async def headless(agent: Agent, flags: main.Flags) -> int:
         del flags
-        fetch, spawn = agent.tools["WebFetch"], agent.tools["AgentSpawn"]
-        assert isinstance(fetch, WebFetch)
+        spawn = agent.tools["AgentSpawn"]
         assert isinstance(spawn, AgentSpawn)
-        seen.append(fetch.session is made[0])
+        seen.append(agent.runtime.tool_context.fetch_session is made[0])
         seen.append(spawn.team.catalog is script.catalogs[0])
         seen.append(agent.runtime.tool_context.cwd == Path.cwd())
         return 0
@@ -3041,7 +3033,7 @@ async def test_the_prompt_session_wears_the_screen_s_settings_for_the_agent_show
     child = Agent(model=ScriptedProvider()["scripted"])
     _ = team.join(root)
     _ = team.join(child, label="kid", parent="Agent")
-    printer = ConsolePrinter(Console(file=io.StringIO()))
+    printer = RecordingPrinter()
     views = Views(root, team=team, printer=printer, catalog=_Script().catalog())
     entry = Input()
     session = main._prompt_session(views, entry=entry, history=tmp_path / "h")
@@ -3176,8 +3168,7 @@ async def test_what_the_shown_agent_did_under_the_tree_prints_once_it_closes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = ScriptedProvider(replies=[reply("said under the tree")])
-    screen = io.StringIO()
-    printer = ConsolePrinter(Console(file=screen, width=80))
+    printer = RecordingPrinter()
     async with Agent(model=provider["scripted"]) as agent:
         views = Views(agent, team=None, printer=printer, catalog=_Script().catalog())
         idle = asyncio.Event()
@@ -3189,12 +3180,12 @@ async def test_what_the_shown_agent_did_under_the_tree_prints_once_it_closes(
             del args, kwargs
             agent.runtime.push(UserMessage(content="go"))
             await asyncio.wait_for(idle.wait(), timeout=5)
-            assert "said under the tree" not in screen.getvalue()
+            assert "said under the tree" not in printer.text
 
         monkeypatch.setattr(main, "pick", busy)
         await main._tree(views)
         await views.aclose()
-    assert "said under the tree" in screen.getvalue()
+    assert "said under the tree" in printer.text
 
 
 @pytest.mark.asyncio
@@ -3259,7 +3250,7 @@ async def test_run_labels_calls_by_their_tool_and_quits_by_command(
             model=provider["scripted"],
             tools=[Read()],
             journal=journal,
-            cwd=tmp_path,
+            tool_context=ToolContext(cwd=tmp_path),
         ) as agent,
     ):
         answered = asyncio.Event()
@@ -3593,16 +3584,18 @@ def test_a_picker_reads_one_journal_past_its_limit_and_no_more(
     assert capsys.readouterr().err.count(" records · title ") == 3
 
 
-def test_the_agent_works_where_it_was_told() -> None:
+def test_the_agent_works_where_it_was_told_through_the_session_s_fetches() -> None:
+    fetches = FetchSession()
     agent = main._agent(
         _flags(),
         model=ScriptedProvider()["scripted"],
         tools=(),
         journal=None,
-        cwd=Path("/w"),
+        tool_context=ToolContext(cwd=Path("/w"), fetch_session=fetches),
         interactive=False,
     )
-    assert agent.runtime.tool_context.cwd == Path("/w")
+    context = agent.runtime.tool_context
+    assert (context.cwd, context.fetch_session) == (Path("/w"), fetches)
 
 
 @pytest.mark.parametrize("interactive", [True, False])
@@ -3614,7 +3607,7 @@ def test_a_terminal_waits_out_a_rate_limit_and_a_pipe_does_not(
         model=ScriptedProvider()["scripted"],
         tools=(),
         journal=None,
-        cwd=Path("/w"),
+        tool_context=ToolContext(cwd=Path("/w")),
         interactive=interactive,
     )
     assert agent.runtime.persistent_retry is interactive

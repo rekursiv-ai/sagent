@@ -36,7 +36,7 @@ import inspect
 
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import ToolContext, parse, schema_of
+from sagent.tools.types import ToolContext, json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -90,7 +90,7 @@ class FunctionTool:
         self._takes_context = "context" in inspect.signature(fn).parameters
         self.name = name
         self.description = description
-        self.schema = schema_of(self._arguments) if schema is None else schema
+        self.schema = json_schema(self._arguments) if schema is None else schema
         self.display = display
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:

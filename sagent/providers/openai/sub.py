@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 
     from sagent.providers.openai.compat import OpenAIModel
     from sagent.providers.openai.lease import TokenLease
-    from sagent.providers.types import ProviderSharedResources
+    from sagent.providers.types import ProviderResources
 
 
 __all__ = [
@@ -75,7 +75,7 @@ class OpenAISub(OpenAI):
         self,
         *,
         name: str = "",
-        resources: ProviderSharedResources | None = None,
+        resources: ProviderResources | None = None,
         account: str | None = None,
         lease: TokenLease | None = None,
     ) -> None:

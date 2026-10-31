@@ -173,7 +173,7 @@ class McpSettings:
 
     async def _logout(self, parsed: argparse.Namespace) -> str:
         flags = cast(_Named, parsed)
-        if logout(_named(self._servers(flags), flags.name)):
+        if await logout(_named(self._servers(flags), flags.name)):
             return f"Signed out of MCP server {flags.name!r}."
         return f"MCP server {flags.name!r} had no sign-in."
 

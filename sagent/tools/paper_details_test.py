@@ -6,7 +6,7 @@ it, so nothing reaches the network.
 
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast, get_args, get_type_hints
 
 import re
@@ -36,11 +36,6 @@ _ONE = PaperRecord(title="Attention", year=2017, abstract="All you need, really.
 _TWO = PaperRecord(title="Diffusion", year=2020)
 
 
-def test_a_lookup_needs_the_session_it_shares() -> None:
-    (session,) = [f for f in fields(PaperDetails) if f.name == "session"]
-    assert (session.default, session.default_factory) == (MISSING, MISSING)
-
-
 def test_summary_names_the_operation_and_the_ids() -> None:
     tool = _tool()
     assert tool.summary({"ids": "2106.15928"}) == "PaperDetails 2106.15928"
@@ -63,13 +58,17 @@ async def test_one_id_is_looked_up_alone_with_the_shared_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    session = FetchSession()
     calls = _fake(monkeypatch, "metadata", _ONE)
     tool = _tool()
-    result = await tool.call(ToolContext(cwd=tmp_path), {"ids": "arXiv:2106.15928"})
+    result = await tool.call(
+        ToolContext(cwd=tmp_path, fetch_session=session),
+        {"ids": "arXiv:2106.15928"},
+    )
     assert result.text() == format_block(_ONE)
     assert result.call_id == ""
     assert calls == [
-        _Call(args=("arxiv", "2106.15928"), kwargs={"session": tool.session}),
+        _Call(args=("arxiv", "2106.15928"), kwargs={"session": session}),
     ]
 
 
@@ -78,10 +77,11 @@ async def test_many_ids_are_looked_up_in_one_batch_in_input_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    session = FetchSession()
     calls = _fake(monkeypatch, "metadata_batch", [_ONE, None, _TWO])
     tool = _tool()
     result = await tool.call(
-        ToolContext(cwd=tmp_path),
+        ToolContext(cwd=tmp_path, fetch_session=session),
         {"ids": ["2106.15928", "10.1000/gone", "doi:10.1000/b"], "abstract_chars": 4},
     )
     assert result.text() == (
@@ -91,7 +91,7 @@ async def test_many_ids_are_looked_up_in_one_batch_in_input_order(
     assert calls == [
         _Call(
             args=(["ARXIV:2106.15928", "DOI:10.1000/gone", "DOI:10.1000/b"],),
-            kwargs={"session": tool.session},
+            kwargs={"session": session},
         ),
     ]
 
@@ -163,13 +163,17 @@ async def test_the_graph_is_walked_from_one_paper_with_every_filter(
     name: str,
     kwargs: dict[str, object],
 ) -> None:
+    session = FetchSession()
     calls = _fake(monkeypatch, name, Listing(records=[_ONE, _TWO], complete=True))
     tool = _tool()
-    result = await tool.call(ToolContext(cwd=tmp_path), arguments)
+    result = await tool.call(
+        ToolContext(cwd=tmp_path, fetch_session=session),
+        arguments,
+    )
     assert result.text() == f"{format_record(_ONE)}\n{format_record(_TWO)}"
     assert result.call_id == ""
     assert calls == [
-        _Call(args=("doi", "10.1000/x"), kwargs={**kwargs, "session": tool.session}),
+        _Call(args=("doi", "10.1000/x"), kwargs={**kwargs, "session": session}),
     ]
 
 
@@ -331,7 +335,7 @@ class _Call:
 
 
 def _tool() -> PaperDetails:
-    return PaperDetails(session=FetchSession())
+    return PaperDetails()
 
 
 def _fake(

@@ -36,7 +36,7 @@ from sagent.providers.types import (
     ModelCatalog,
     ProcessPool,
     Provider,
-    ProviderSharedResources,
+    ProviderResources,
     ToolMount,
     ToolServer,
     UsageWindow,
@@ -144,7 +144,7 @@ def test_a_provider_without_a_login_is_no_login() -> None:
 @pytest.mark.asyncio
 async def test_the_shared_resources_meet_their_protocols() -> None:
     async with Catalog() as catalog:
-        shared: ProviderSharedResources = catalog
+        shared: ProviderResources = catalog
         typed: ModelCatalog = catalog
         pool: ProcessPool = shared.process_pool("claude")
         server: ToolServer = shared.tool_server
@@ -155,7 +155,7 @@ async def test_the_shared_resources_meet_their_protocols() -> None:
         assert isinstance(server, McpToolServer)
         assert mount.url == "http://127.0.0.1:1/token"
         for protocol, value in (
-            (ProviderSharedResources, shared),
+            (ProviderResources, shared),
             (ModelCatalog, typed),
             (ProcessPool, pool),
             (ToolServer, server),

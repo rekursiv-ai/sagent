@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, override
@@ -55,7 +55,7 @@ from sagent.tools.types import ToolContext
 
 if TYPE_CHECKING:
     from sagent.agent.types import Factory, Journal, Shrinker
-    from sagent.providers.types import ProviderSharedResources
+    from sagent.providers.types import ProviderResources
 
 
 @pytest.fixture(autouse=True)
@@ -220,7 +220,7 @@ def _setup(
         system_prompt="the parent's prompt",
         journal=journal,
         compactor=compactor,
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         agents_md=AgentsMdConfig(system_dir=tmp_path / "s", user_dir=tmp_path / "u"),
     )
     _ = team.join(parent)
@@ -295,7 +295,10 @@ def test_the_reminder_lists_the_children_who_owes_whom_and_a_leaf(
     setup = _setup(tmp_path)
     for label in ("leaf", "asked", "asker"):
         _ = setup.team.join(
-            Agent(model=ScriptedProvider()["scripted"], cwd=tmp_path),
+            Agent(
+                model=ScriptedProvider()["scripted"],
+                tool_context=ToolContext(cwd=tmp_path),
+            ),
             label=label,
             parent="Agent",
             max_depth=0,
@@ -545,7 +548,10 @@ async def test_a_caller_that_may_not_spawn_is_refused(
 ) -> None:
     setup = _setup(tmp_path)
     _ = setup.team.join(
-        Agent(model=ScriptedProvider()["scripted"], cwd=tmp_path),
+        Agent(
+            model=ScriptedProvider()["scripted"],
+            tool_context=ToolContext(cwd=tmp_path),
+        ),
         label="leaf",
         parent="Agent",
         max_depth=0,
@@ -652,24 +658,48 @@ async def test_a_child_and_a_watcher_inherit_every_setting_alike(
     )
     parent = setup.parent
     width = lambda: 61  # noqa: E731 -- the same callable must reach each heir.
-    parent.runtime.tool_context.columns = width
-    parent.runtime.tool_context.max_result_chars = 4321
+    mine = parent.runtime.tool_context
+    mine.columns = width
+    mine.max_result_chars = 4321
+    mine.cwd = tmp_path / "moved"
+    read = tmp_path / "read.txt"
+    _ = read.write_text("x")
+    mine.files.saw(read)
     parent.runtime.persistent_retry = True
     parent.environment = False
     async with setup.team:
         _ = await _spawn(setup, tmp_path, {"prompt": "wait"})
         assert await setup.spawn.watch("Agent") == "watcher"
-        for heir in (setup.team["Agent_0"], setup.team["watcher"]):
+        for label in ("Agent_0", "watcher"):
+            heir = setup.team[label]
             context = heir.runtime.tool_context
-            assert context.columns is width
-            assert context.max_result_chars == 4321
-            assert context.cwd == parent.runtime.tool_context.cwd
-            assert heir.root == parent.root
+            assert {f.name: getattr(context, f.name) for f in _INHERITED} == {
+                f.name: getattr(mine, f.name) for f in _INHERITED
+            }
+            assert (context.cwd, heir.root) == (tmp_path / "moved", tmp_path)
+            assert context.files is not mine.files
+            assert not context.files.recent()
+            assert context.label == label
             assert heir.runtime.persistent_retry is True
             assert heir.environment is False
             assert heir.agents_md is parent.agents_md
             assert isinstance(heir.session.compactor, SummaryCompactor)
-            assert context.files is not parent.runtime.tool_context.files
+
+
+# What a child's tool context takes from its parent's; the rest are its own.
+_INHERITED = [
+    f
+    for f in fields(ToolContext)
+    if f.name in {"cwd", "root", "max_result_chars", "columns", "fetch_session"}
+]
+_OWN = {"files", "label", "spill_dir"}
+
+
+def test_every_tool_context_field_is_inherited_or_a_child_s_own() -> None:
+    """A new field fails here until it is said which a child gets."""
+    assert sorted(f.name for f in fields(ToolContext)) == sorted(
+        {f.name for f in _INHERITED} | _OWN,
+    )
 
 
 @pytest.mark.asyncio
@@ -1102,7 +1132,10 @@ async def test_a_child_whose_label_is_taken_resumes_under_a_new_one(
         setup = _setup(tmp_path, journal=journal)
         _session(setup.parent).resume()
         _ = setup.team.join(
-            Agent(model=ScriptedProvider()["scripted"], cwd=tmp_path),
+            Agent(
+                model=ScriptedProvider()["scripted"],
+                tool_context=ToolContext(cwd=tmp_path),
+            ),
             label="helper",
             parent="Agent",
         )
@@ -1320,7 +1353,7 @@ async def test_a_started_watcher_is_told_the_watched_agent_s_own_watch_skill(
     root = Agent(
         model=ScriptedProvider()["scripted"],
         tools=[spawn, Skill(builtin_dir=skills)],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
     )
     _ = team.join(root)
     async with team:
@@ -1339,7 +1372,11 @@ async def test_watch_starts_the_callers_watcher_its_prompt_the_first_request(
 ) -> None:
     team = Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider}))
     spawn = AgentSpawn(team=team)
-    root = Agent(model=ScriptedProvider()["scripted"], tools=[spawn], cwd=tmp_path)
+    root = Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=[spawn],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
     _ = team.join(root)
     context = root.runtime.tool_context
     async with team:
@@ -1367,7 +1404,10 @@ async def test_a_watcher_of_a_journaled_root_keeps_its_journal_beside_it(
     async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
         setup = _setup(tmp_path, journal=journal)
         async with setup.parent, setup.team:
-            other = Agent(model=ScriptedProvider()["scripted"], cwd=tmp_path)
+            other = Agent(
+                model=ScriptedProvider()["scripted"],
+                tool_context=ToolContext(cwd=tmp_path),
+            )
             _ = setup.team.join(other, label="other")
             setup.parent.runtime.persistent_retry = True
 
@@ -1475,7 +1515,7 @@ class _Counting(ScriptedProvider):
         *,
         models: list[_CountingModel],
         name: str = "",
-        resources: ProviderSharedResources | None = None,
+        resources: ProviderResources | None = None,
         replies: Sequence[Reply] = (),
     ) -> None:
         super().__init__(
