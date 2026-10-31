@@ -72,7 +72,6 @@ def render_diff(
     diff: str,
     *,
     row_indent: str,
-    first: Text | None = None,
     path: str = "",
     style: DiffStyle | None = None,
     lines: tuple[int, int] | None = None,
@@ -83,9 +82,7 @@ def render_diff(
     Args:
       console: Where to print.
       diff: The diff; ``---``/``+++`` file headers are skipped.
-      row_indent: What starts every row but the first.
-      first: What starts the first row, as wide as ``row_indent``; that when
-        omitted.
+      row_indent: What starts every row.
       path: The file, whose name picks the highlighting.
       style: The colors; dark-terminal ones when omitted.
       lines: Body lines kept from the head and the tail, the rest counted in
@@ -127,7 +124,7 @@ def render_diff(
             continue
         sigil = line[:1] if line[:1] in "+-" else " "
         number = old if sigil == "-" else new
-        indent = first if first is not None and index == 0 else Text(row_indent)
+        indent = Text(row_indent)
         if index in hidden:
             if index == hidden.start:
                 gap = " " * (digits + 1)

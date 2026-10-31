@@ -100,7 +100,7 @@ class Elided:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolDisplay:
-    """How one tool's calls show: the marked input row, then the output."""
+    """How one tool's calls show: the input rows, then the output."""
 
     command: DisplaySpec = DisplaySpec(lines=None)
     """The input row, such as a Bash command or an Edit receipt."""
