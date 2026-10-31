@@ -25,6 +25,7 @@ def test_summary_quotes_the_pattern_and_names_any_other_path() -> None:
     assert Grep().summary({"pattern": "x", "path": "."}) == "Grep 'x'"
     assert Grep().summary({"pattern": "x", "path": ""}) == "Grep 'x'"
     assert Grep().summary({"pattern": "x", "path": "src"}) == "Grep 'x' in src"
+    assert Grep().summary({"pattern": "x", "path": ["a", "b"]}) == "Grep 'x' in a, b"
     assert Grep().summary({}) == "Grep ''"
 
 
@@ -36,7 +37,10 @@ def test_ripgreps_own_flags_are_the_argument_names() -> None:
     properties = Grep.schema["properties"]
     assert isinstance(properties, dict)
     assert {"-B", "-A", "-C", "-i", "-n", "type"} <= set(properties)
+    assert {"-v", "-w", "-x", "-F", "-o", "-m", "-a"} <= set(properties)
+    assert {"no_ignore", "follow", "max_depth"} <= set(properties)
     assert "before" not in properties
+    assert "invert" not in properties
 
 
 @pytest.mark.asyncio
@@ -60,12 +64,22 @@ async def test_each_argument_reaches_the_query(
             "-n": False,
             "multiline": True,
             "pcre": True,
+            "-v": True,
+            "-w": True,
+            "-x": True,
+            "-F": True,
+            "-o": True,
+            "-m": 3,
+            "-a": True,
+            "no_ignore": True,
+            "follow": True,
+            "max_depth": 2,
         },
     )
     assert result.text() == "hit"
     assert seen == [
         (
-            tmp_path / "src",
+            [tmp_path / "src"],
             Query(
                 pattern="p",
                 glob="*.py",
@@ -78,9 +92,50 @@ async def test_each_argument_reaches_the_query(
                 line_numbers=False,
                 multiline=True,
                 pcre=True,
+                text=True,
+                invert=True,
+                word=True,
+                whole_line=True,
+                fixed=True,
+                only_matching=True,
+                max_count=3,
+                search_ignored=True,
+                follow=True,
+                max_depth=2,
             ),
         ),
     ]
+
+
+@pytest.mark.asyncio
+async def test_several_paths_are_searched_in_the_order_given(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen = _capture(monkeypatch, rows=[])
+    await Grep().call(
+        ToolContext(cwd=tmp_path),
+        {"pattern": "p", "path": ["b", "/abs/a", ""]},
+    )
+    assert [paths for paths, _ in seen] == [
+        [tmp_path / "b", type(tmp_path)("/abs/a"), tmp_path],
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_real_inverted_search_lists_the_other_lines(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("alpha\nbeta\n")
+    (tmp_path / "b.py").write_text("alpha\n")
+    result = await Grep().call(
+        ToolContext(cwd=tmp_path),
+        {
+            "pattern": "alpha",
+            "path": ["a.py", "b.py"],
+            "output_mode": "content",
+            "-v": True,
+        },
+    )
+    assert result.text() == f"{tmp_path / 'a.py'}:2:beta"
 
 
 @pytest.mark.asyncio
@@ -108,7 +163,7 @@ async def test_context_on_each_side_is_the_widest_asked_for(
         {"pattern": "p", "path": "", **arguments},
     )
     ((root, query),) = seen
-    assert root == tmp_path
+    assert root == [tmp_path]
     assert (query.context_before, query.context_after) == (before, after)
     assert query.output_mode == "files_with_matches"
     assert query.line_numbers
@@ -153,7 +208,7 @@ async def test_a_search_that_cannot_run_is_an_error(
     assert result.call_id == ""
     assert result.text() == f"no such file or directory: {tmp_path / 'missing'}"
 
-    def refuse(paths: Path, query: Query) -> list[Row]:
+    def refuse(paths: Sequence[Path], query: Query) -> list[Row]:
         del paths, query
         raise GrepError("bad pattern")
 
@@ -319,7 +374,147 @@ _REFUSAL = "Search with Grep: pattern, path, glob, -i, -C, output_mode."
         ("rg foo f.txt", {"pattern": "foo", "path": "f.txt", "output_mode": "content"}),
         ("rg foo", {"pattern": "foo", "output_mode": "content"}),
         ("grep -r foo", {"pattern": "foo", "output_mode": "content"}),
-        ("grep -R foo", {"pattern": "foo", "output_mode": "content"}),
+        ("grep -R foo", {"pattern": "foo", "output_mode": "content", "follow": True}),
+        (
+            "grep -v foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-v": True},
+        ),
+        (
+            "grep --invert-match foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-v": True},
+        ),
+        (
+            "grep -vc foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "count", "-v": True},
+        ),
+        (
+            "grep -lv foo f",
+            {
+                "pattern": "foo",
+                "path": "f",
+                "output_mode": "files_with_matches",
+                "-v": True,
+            },
+        ),
+        (
+            "grep -wxoa foo f",
+            {
+                "pattern": "foo",
+                "path": "f",
+                "output_mode": "content",
+                "-w": True,
+                "-x": True,
+                "-o": True,
+                "-a": True,
+            },
+        ),
+        (
+            "grep --word-regexp --line-regexp --only-matching --text foo f",
+            {
+                "pattern": "foo",
+                "path": "f",
+                "output_mode": "content",
+                "-w": True,
+                "-x": True,
+                "-o": True,
+                "-a": True,
+            },
+        ),
+        (
+            "grep -F 'a+(b' f",
+            {"pattern": "a+(b", "path": "f", "output_mode": "content", "-F": True},
+        ),
+        (
+            "grep --fixed-strings 'a|b' f",
+            {"pattern": "a|b", "path": "f", "output_mode": "content", "-F": True},
+        ),
+        (
+            "grep -m 3 foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-m": 3},
+        ),
+        (
+            "grep --max-count=3 foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-m": 3},
+        ),
+        (
+            "grep --max-count 3 foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-m": 3},
+        ),
+        (
+            "grep -L foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "files_without_match"},
+        ),
+        (
+            "rg --files-without-match foo",
+            {"pattern": "foo", "output_mode": "files_without_match"},
+        ),
+        (
+            "grep --count --ignore-case foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "count", "-i": True},
+        ),
+        (
+            "grep --files-with-matches foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "files_with_matches"},
+        ),
+        (
+            "grep foo a.txt b.txt",
+            {"pattern": "foo", "path": ["a.txt", "b.txt"], "output_mode": "content"},
+        ),
+        (
+            "cd /src && grep -c foo a b",
+            {"pattern": "foo", "path": ["/src/a", "/src/b"], "output_mode": "count"},
+        ),
+        ("rg -L foo", {"pattern": "foo", "output_mode": "content", "follow": True}),
+        (
+            "rg --follow foo",
+            {"pattern": "foo", "output_mode": "content", "follow": True},
+        ),
+        (
+            "rg --no-ignore foo",
+            {"pattern": "foo", "output_mode": "content", "no_ignore": True},
+        ),
+        ("rg -u foo", {"pattern": "foo", "output_mode": "content", "no_ignore": True}),
+        ("rg -uu foo", {"pattern": "foo", "output_mode": "content", "no_ignore": True}),
+        (
+            "rg --max-depth 2 foo",
+            {"pattern": "foo", "output_mode": "content", "max_depth": 2},
+        ),
+        ("rg -d 2 foo", {"pattern": "foo", "output_mode": "content", "max_depth": 2}),
+        (
+            "rg -g '*.py' -g '!*_test.py' foo",
+            {
+                "pattern": "foo",
+                "output_mode": "content",
+                "glob": "*.py",
+                "exclude": "*_test.py",
+            },
+        ),
+        (
+            "rg --glob=*.py foo",
+            {"pattern": "foo", "output_mode": "content", "glob": "*.py"},
+        ),
+        (
+            "rg -N foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-n": False},
+        ),
+        ("rg -is foo f", {"pattern": "foo", "path": "f", "output_mode": "content"}),
+        (
+            "rg -co foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "count", "-o": True},
+        ),
+        (
+            "rg -vwxFa foo f",
+            {
+                "pattern": "foo",
+                "path": "f",
+                "output_mode": "content",
+                "-v": True,
+                "-w": True,
+                "-x": True,
+                "-F": True,
+                "-a": True,
+            },
+        ),
         ("grep f -e foo", {"pattern": "foo", "path": "f", "output_mode": "content"}),
         (
             "find . -print -name '*.py' | xargs grep foo",
@@ -427,7 +622,17 @@ def test_a_plain_file_search_becomes_the_grep_for_it(
 @pytest.mark.parametrize(
     "command",
     [
-        "grep foo a.txt b.txt",
+        "grep foo a.txt *.py",
+        "rg -uuu foo",
+        "rg -r x foo f",
+        "rg -E utf8 foo f",
+        "rg -h foo f",
+        "rg -R foo f",
+        "rg -g a -g b foo",
+        "rg -g '!a' -g '!b' foo",
+        "grep -g x foo f",
+        "grep -m x foo f",
+        "rg --max-depth x foo",
         "grep --weird=val foo f",
         "grep -Z foo f",
         "grep -A2 foo f",
@@ -459,9 +664,15 @@ def test_a_search_no_grep_matches_is_refused_with_advice(command: str) -> None:
         "ps aux | grep python",
         "echo hi | grep x",
         # Only the shell does these.
-        "grep -v foo f",
-        "grep --invert-match foo f",
         "grep -q foo f",
+        # Grep cannot say these as grep means them.
+        "grep -ov foo f",
+        "grep -co foo f",
+        "grep -F -e a -e b f",
+        "grep -m 0 foo f",
+        "rg --max-depth 0 foo",
+        "rg -d 0 foo",
+        "grep --max-count foo",
         "grep foo f | grep -v bar",
         "grep foo f | wc -c",
         "grep foo f | sort",
@@ -516,12 +727,12 @@ def _capture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     rows: Sequence[Row],
-) -> list[tuple[Path, Query]]:
+) -> list[tuple[list[Path], Query]]:
     """Answer every search with ``rows``; return where each searched, and how."""
-    seen: list[tuple[Path, Query]] = []
+    seen: list[tuple[list[Path], Query]] = []
 
-    def fake_rows(paths: Path, query: Query) -> list[Row]:
-        seen.append((paths, query))
+    def fake_rows(paths: Sequence[Path], query: Query) -> list[Row]:
+        seen.append((list(paths), query))
         return list(rows)
 
     monkeypatch.setattr(grep, "grep_rows", fake_rows)

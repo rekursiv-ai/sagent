@@ -24,15 +24,15 @@ classifiers = [
 dependencies = [
     # Prefer https://awesome-python.com deps over alternatives.
     # nlp
-    "tiktoken>=0.12.0",
+    "tiktoken>=0.14.0",
     # web client
-    "httpx2>=2.12",
+    "httpx2>=2.16.0",
     # mcp
-    "mcp>=2.0.0",
-    "starlette>=0.40",
-    "uvicorn>=0.30.0",
+    "mcp>=2.3.0",
+    "starlette>=1.10.0",
+    "uvicorn>=0.54.0",
     # config
-    "pyyaml>=6.0",
+    "pyyaml>=6.0.3",
     # text / docs
     "pypdfium2>=5.14.0",
     # markdown
@@ -41,8 +41,8 @@ dependencies = [
     "pygments>=2.21.0",
     "rich>=15.0.0",
     # containers
-    "cachetools>=7.2.1",
-    "wrapt>=2.5.0",
+    "cachetools>=7.2.7",
+    "wrapt>=2.5.2",
     # json
     # 0.4.1 leaves dataclass fields at their defaults out of trees.
     "treekle>=0.4.1",
@@ -56,6 +56,22 @@ dependencies = [
     "rignore>=0.8.1",
 ]
 
+[project.optional-dependencies]
+selfhosted = [
+    "accelerate>=1.15.0",
+    "auto-round>=0.16.1",
+    "compressed-tensors>=0.20.1",
+    "kernels>=0.18.0",
+    "nvidia-cudnn-cu13>=9.19.0.56 ; sys_platform == 'linux'",
+    "nvidia_cudnn_frontend>=1.32.1 ; sys_platform == 'linux'",
+    "protobuf>=6.33.6",
+    "safetensors>=0.8.0",
+    "sentencepiece>=0.2.2",
+    "torch>=2.11.0",
+    "torchvision>=0.26.0",
+    "transformers>=5.22.1",
+]
+
 [project.scripts]
 sagent = "sagent.tui.main:main"
 
@@ -63,30 +79,30 @@ sagent = "sagent.tui.main:main"
 # NEVER ADD MORE DEPENDENCIES!
 
 debug = [
-    "ipython",
-    "tqdm",
+    "ipython>=9.18.0",
+    "tqdm>=4.70.1",
 ]
 lint = [
-    "codespell>=2.2.4",
-    "ruff",
+    "codespell>=2.4.3",
+    "ruff>=0.17.3",
 ]
 test = [
     "pytest-timeout>=2.4.0",
     "pytest-xdist>=3.8.0",
-    "pytest>=7.0",
-    "hypothesis>=6.155.1",
-    "pytest-cov",
-    "pytest-asyncio>=1.3.0",
+    "pytest>=9.2.0",
+    "hypothesis>=6.170.14",
+    "pytest-cov>=7.1.0",
+    "pytest-asyncio>=1.4.1",
     "sagent[selfhosted]",
 ]
 typecheck = [
-    "basedpyright>=1.40.1",
+    "basedpyright>=1.40.2",
     "pyrefly>=1.4.0",
-    "ty>=0.0.84",
+    "ty>=0.0.95",
     "rekursiv-ai-typings>=0.1.11",
 ]
 "pre-commit" = [
-    "pre-commit>=4.6",
+    "pre-commit>=4.7.0",
     {include-group = "lint"},
     {include-group = "test"},
     {include-group = "typecheck"},
@@ -105,22 +121,6 @@ Documentation = "https://github.com/rekursiv-ai/sagent/tree/main/docs"
 Source = "https://github.com/rekursiv-ai/sagent"
 Issues = "https://github.com/rekursiv-ai/sagent/issues"
 Changelog = "https://github.com/rekursiv-ai/sagent/releases"
-
-[project.optional-dependencies]
-selfhosted = [
-    "accelerate>=1.13.0",
-    "auto-round>=0.12.3",
-    "compressed-tensors>=0.19.0",
-    "kernels>=0.13.0",
-    "nvidia-cudnn-cu13>=9.19.0.56 ; sys_platform == 'linux'",
-    "nvidia_cudnn_frontend>=1.30.0 ; sys_platform == 'linux'",
-    "protobuf>=6.33.6",
-    "safetensors>=0.8.0",
-    "sentencepiece>=0.2.2",
-    "torch>=2.11.0",
-    "torchvision>=0.26.0",
-    "transformers>=5.8.0",
-]
 
 [build-system]
 requires = ["hatchling"]
