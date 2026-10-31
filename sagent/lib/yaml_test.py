@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import pytest
 import yaml
 
 from sagent.lib.yaml import parse, split_frontmatter
+
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 def test_a_document_parses_to_plain_data() -> None:
@@ -84,8 +90,9 @@ def test_keys_may_be_any_scalar_when_asked() -> None:
         ("---\n---\nbody\n", None, "body\n"),
         ("---  \nname: a\n---\n", {"name": "a"}, ""),
         ("---\nf: |\n  ---\n---\nbody\n", {"f": "---\n"}, "body\n"),
+        ("---\nname: a\n---\none\ntwo\n", {"name": "a"}, "one\ntwo\n"),
     ],
-    ids=["lf", "crlf", "bom", "empty", "trailing-space", "indented-fence"],
+    ids=["lf", "crlf", "bom", "empty", "trailing-space", "indented-fence", "lines"],
 )
 def test_frontmatter_is_split_from_the_body(
     text: str,
@@ -108,6 +115,11 @@ def test_a_frontmatter_error_names_the_file_and_its_line() -> None:
         split_frontmatter("---\na: 1\na: 2\n---\nbody\n", source="SKILL.md")
 
 
+def test_a_frontmatter_error_without_a_source_names_only_the_line() -> None:
+    with pytest.raises(ValueError, match=r"^line 3: the key 'a' is given twice\.$"):
+        split_frontmatter("---\na: 1\na: 2\n---\nbody\n")
+
+
 @pytest.mark.parametrize(("text", "passes"), [("a: [1, 2]\n", 0), ("a: '*'\n", 1)])
 def test_only_a_document_holding_a_star_is_read_twice(
     monkeypatch: pytest.MonkeyPatch,
@@ -121,7 +133,7 @@ def test_only_a_document_holding_a_star_is_read_twice(
     def counted(
         stream: str,
         Loader: type[yaml.SafeLoader | yaml.CSafeLoader],  # noqa: N803 -- PyYAML's name.
-    ) -> object:
+    ) -> Iterator[yaml.Event]:
         calls.append(stream)
         return events(stream, Loader=Loader)
 
