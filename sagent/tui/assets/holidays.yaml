@@ -1,7 +1,6 @@
 # Holidays in calendar order. `starts` is a fixed MM-DD or the name of a
-# date rule in holiday.py. `days` spans a festival only when each of its days
-# is the holiday itself (Hanukkah's eight nights, from the eve; Kwanzaa's
-# seven days); otherwise a holiday shows on its main day. Each icon is 11x12
+# date rule in holiday.py. A holiday shows on its main day (Hanukkah's first
+# eve, Kwanzaa's first day); on a weekend, Friday to Sunday. Each icon is 11x12
 # pixels.
 # Letters name colors: R red, O orange, Y yellow or gold, G green,
 # C teal, B blue, V violet, P pink, M magenta, N brown, T tan,
@@ -789,7 +788,6 @@
 - name: "Hanukkah"
   starts: hanukkah
   why: "Exception: Jews number about 15M, but Hanukkah is widely marked in the US."
-  days: 9
   icons:
     - name: "menorah"
       palette: {B: "#4a90e2", Y: "#ffd23f", y: "#e6b422"}
@@ -895,7 +893,6 @@
 - name: "Kwanzaa"
   starts: 12-26
   why: "Exception: an African American cultural celebration."
-  days: 7
   icons:
     - name: "kinara"
       palette: {G: "#43a047", K: "#5a5a5a", N: "#8b5a2b", R: "#e53935", Y: "#ffd23f", g: "#1b5e20", r: "#9e1b1b"}

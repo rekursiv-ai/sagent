@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
 from functools import cache, partial
 from importlib.resources import files
-from typing import TYPE_CHECKING, NotRequired, TypedDict
+from typing import TYPE_CHECKING, TypedDict
 
 import math
 
@@ -46,19 +46,18 @@ class Icon:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Holiday:
-    """A recurring holiday: its start dates in a year, its length, its icons."""
+    """A recurring holiday: its dates in a year and its icons."""
 
     name: str
     starts: Callable[[int], tuple[date, ...]]
     icons: tuple[Icon, ...]
-    days: int = 1
 
 
 def holiday_icon(today: date, *, rng: Random) -> Icon | None:
     """Pick an icon of a random holiday showing ``today``, if any.
 
-    A holiday shows from its first day, or from the Friday before when that
-    day is a weekend, through its last day.
+    A holiday shows on its day; on a Saturday or Sunday, it shows Friday to
+    Sunday of that weekend.
 
     Args:
       today: The local date.
@@ -114,7 +113,6 @@ def holidays() -> tuple[Holiday, ...]:
         Holiday(
             name=entry["name"],
             starts=_rule(entry["starts"]),
-            days=entry.get("days", 1),
             icons=tuple(
                 Icon(
                     name=icon["name"],
@@ -380,13 +378,12 @@ def thanksgiving(year: int) -> tuple[date, ...]:
 
 
 def _in_window(holiday: Holiday, today: date) -> bool:
-    """Whether ``today`` falls in a holiday, or from the Friday before one on a weekend."""
+    """Whether ``today`` is a holiday, or in the Friday-to-Sunday weekend holding one."""
     for year in (today.year - 1, today.year, today.year + 1):
-        for start in holiday.starts(year):
-            opens = start
-            while opens.weekday() >= 5:  # Saturday or Sunday.
-                opens -= timedelta(days=1)
-            if opens <= today < start + timedelta(days=holiday.days):
+        for day in holiday.starts(year):
+            friday = day - timedelta(days=day.weekday() - 4)
+            weekend = day.weekday() >= 5  # Saturday or Sunday.
+            if today == day or (weekend and 0 <= (today - friday).days <= 2):
                 return True
     return False
 
@@ -426,7 +423,6 @@ class _HolidayEntry(TypedDict):
     name: str
     starts: str
     why: str  # Required, so every holiday states which inclusion rule it meets.
-    days: NotRequired[int]
     icons: list[_IconEntry]
 
 

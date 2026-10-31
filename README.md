@@ -43,7 +43,7 @@ A coding-agent CLI and strongly-typed Python library -- self-mutating, hot-swapp
 ## Quick Start
 
 ```bash
-uvx sagent
+uvx sagent@latest
 ```
 
 See [Install](#install) for additional details.
@@ -127,6 +127,7 @@ print(result.content)
 
 ```bash
 uv tool install sagent && sagent
+# Later: uv tool upgrade sagent
 ```
 
 If you're missing `uvx`/`uv`,
