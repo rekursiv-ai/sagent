@@ -3269,6 +3269,11 @@ async def test_a_bash_read_is_recorded_and_run_as_read(tmp_path: Path) -> None:
     assert complete.response == turn
 
 
+def _bash(call_id: str, command: str) -> ToolCall:
+    """Return the Bash call the model makes to run ``command``."""
+    return call("Bash", call_id, command=command, description="Run it")
+
+
 @pytest.mark.asyncio
 async def test_a_cd_to_where_bash_starts_is_dropped(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("alpha\n")
@@ -3277,8 +3282,8 @@ async def test_a_cd_to_where_bash_starts_is_dropped(tmp_path: Path) -> None:
     async with Harness(
         reply(
             calls=[
-                call("Bash", "b1", command=f"cd {here} && echo one"),
-                call("Bash", "b2", command=f"cd {here} && cat a.txt"),
+                _bash("b1", f"cd {here} && echo one"),
+                _bash("b2", f"cd {here} && cat a.txt"),
             ],
         ),
         reply("done"),
@@ -3290,9 +3295,10 @@ async def test_a_cd_to_where_bash_starts_is_dropped(tmp_path: Path) -> None:
     turn = h.history()[1]
     assert isinstance(turn, Response)
     assert [(c.name, dict(c.arguments)) for c in calls(turn.records)] == [
-        ("Bash", {"command": "echo one"}),
+        ("Bash", {"command": "echo one", "description": "Run it"}),
         ("Read", {"file_path": "a.txt"}),
     ]
+    assert [r.text().strip() for r in h.results("b1")] == ["one"]
 
 
 # The reply's calls run side by side and share the shell's directory, so a call that
@@ -3318,7 +3324,7 @@ async def test_a_cd_is_kept_where_the_shell_may_have_moved_when_it_runs(
 
     def placed(arguments: dict[str, PlainTree]) -> dict[str, PlainTree]:
         command = str(arguments["command"]).replace("{here}", here)
-        return {**arguments, "command": command}
+        return {**arguments, "command": command, "description": "Run it"}
 
     async with Harness(
         reply(
@@ -3340,6 +3346,7 @@ async def test_a_cd_is_kept_where_the_shell_may_have_moved_when_it_runs(
         placed(first),
         placed(second),
     ]
+    assert not any(r.is_error for c in ("b1", "b2") for r in h.results(c))
 
 
 @pytest.mark.asyncio
@@ -3352,8 +3359,8 @@ async def test_a_bash_line_of_reads_is_recorded_and_run_as_each_read(
     async with Harness(
         reply(
             calls=[
-                call("Bash", "b1", command="cat a.txt; cat b.txt"),
-                call("Bash", "b1_1", command="echo taken"),
+                _bash("b1", "cat a.txt; cat b.txt"),
+                _bash("b1_1", "echo taken"),
             ],
         ),
         reply("read them"),
@@ -3367,11 +3374,12 @@ async def test_a_bash_line_of_reads_is_recorded_and_run_as_each_read(
     assert [(c.call_id, c.name, dict(c.arguments)) for c in calls(turn.records)] == [
         ("b1", "Read", {"file_path": "a.txt"}),
         ("b1_2", "Read", {"file_path": "b.txt"}),
-        ("b1_1", "Bash", {"command": "echo taken"}),
+        ("b1_1", "Bash", {"command": "echo taken", "description": "Run it"}),
     ]
-    assert [r.text().strip() for c in ("b1", "b1_2") for r in h.results(c)] == [
+    assert [r.text().strip() for c in ("b1", "b1_2", "b1_1") for r in h.results(c)] == [
         "1\talpha",
         "1\tbeta",
+        "taken",
     ]
 
 
