@@ -64,6 +64,7 @@ from sagent.session.types import (
     record_classes,
 )
 from sagent.tools.display import ToolDisplay
+from sagent.tools.skill import Skill
 
 
 if TYPE_CHECKING:
@@ -1303,6 +1304,53 @@ def test_allowing_a_tool_the_agent_lacks_is_refused() -> None:
     assert agent.allowed == frozenset({"_Tool"})
     agent.allowed = None
     assert agent.allowed is None
+
+
+def test_each_file_skipped_is_told_to_the_user_once(tmp_path: Path) -> None:
+    _ = (tmp_path / "AGENTS.md").write_text("---\na: 1\na: 2\n---\nroot\n")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    _ = (sub / "AGENTS.md").write_text("---\nb: 1\nb: 2\n---\nsub\n")
+    skill = tmp_path / ".sagent" / "skills" / "twice" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    _ = skill.write_text("---\nname: twice\nname: other\n---\nbody\n")
+    agent = Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=[Skill(user_dir=tmp_path / "u", builtin_dir=tmp_path / "b")],
+        cwd=tmp_path,
+        agents_md=_config(tmp_path),
+    )
+    told: list[str] = []
+    agent.runtime.observers.append(
+        lambda e: told.append(e.text) if isinstance(e, types.Skipped) else None,
+    )
+    session = _session(agent)
+    session.append(*session.updates())
+    session.append(*session.updates())
+    at_start = list(told)
+    agent.runtime.tool_context.cwd = sub
+    session.append(*session.updates())
+
+    assert sorted(at_start) == sorted(
+        [
+            (
+                f"Skipping {(tmp_path / 'AGENTS.md').resolve()}: its frontmatter will"
+                f" not parse: {(tmp_path / 'AGENTS.md').resolve()}, line 3: the key"
+                " 'a' is given twice."
+            ),
+            (
+                f"Skipping skill {skill}: its frontmatter will not parse: {skill},"
+                " line 3: the key 'name' is given twice."
+            ),
+        ],
+    )
+    assert told[2:] == [
+        (
+            f"Skipping {(sub / 'AGENTS.md').resolve()}: its frontmatter will not"
+            f" parse: {(sub / 'AGENTS.md').resolve()}, line 3: the key 'b' is given"
+            " twice."
+        ),
+    ]
 
 
 def test_a_rule_is_given_once_when_a_file_it_governs_is_seen(tmp_path: Path) -> None:

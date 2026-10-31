@@ -297,7 +297,8 @@ async def test_the_credentials_file_is_never_readable_by_others(tmp_path: Path) 
     async with _Served(server) as shared:
         await ClaudeLogin(path, resources=shared).token()
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert not staged.exists()
+    # Staged under a fresh name, the save never writes into the leftover.
+    assert staged.read_text() == ""
 
 
 @pytest.mark.asyncio
@@ -499,7 +500,7 @@ async def test_a_pasted_code_must_carry_this_sign_ins_state(
     pasted.answers.append("the-code#other")
     with pytest.raises(
         AuthError,
-        match=r"^the pasted code belongs to another sign-in$",
+        match=r"^The pasted address belongs to another sign-in\.$",
     ):
         await login._pasted_code("challenge", "abc", show=shown.append)
 
@@ -880,7 +881,7 @@ async def _sign_in(
 ) -> None:
     shown = [] if show is None else show
     with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(login, "webbrowser", browser)
+        patch.setattr(login, "open_browser", browser.open)
         await claude_login.sign_in(headless=headless, show=shown.append)
     await asyncio.gather(*browser.tasks)
 

@@ -1,21 +1,28 @@
 """Holidays, their dates, and the icons that replace the welcome logo then.
 
-Hebrew dates are exact arithmetic. Seasons and lunisolar dates follow Meeus,
-"Astronomical Algorithms" (1998), ch. 27 and 49, accurate to minutes;
-``holiday_test`` checks them against published dates. Eid and Vesak follow
-moon sightings and national committees, so they come from announced dates,
-with an arithmetic estimate outside them.
+Each holiday falls on the date its US observers keep. Seasons, Nowruz, and
+Holi follow the sky on the user's own calendar. Vesak and the Eids are
+announced, by the UN and the Fiqh Council of North America. Lunar New Year and
+the Mid-Autumn Festival follow China's calendar; Diwali and Vaisakhi, India's.
+Hebrew dates are exact arithmetic. Astronomy follows Meeus, "Astronomical Algorithms"
+(1998), ch. 27 and 49, accurate to seconds; ``holiday_test`` checks each rule
+against published dates.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, timedelta
-from functools import partial
-from typing import TYPE_CHECKING
+from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
+from functools import cache, partial
+from importlib.resources import files
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 import math
+
+from treekle import from_plain
+
+from sagent.lib.yaml import parse
 
 
 if TYPE_CHECKING:
@@ -43,12 +50,24 @@ class Holiday:
 
     name: str
     starts: Callable[[int], tuple[date, ...]]
-    icons: tuple[Icon, Icon]
+    icons: tuple[Icon, ...]
     days: int = 1
 
 
 def holiday_icon(today: date, *, rng: Random) -> Icon | None:
-    """Pick an icon of a random holiday from the weekday before it to its end."""
+    """Pick an icon of a random holiday showing ``today``, if any.
+
+    A holiday shows from its first day, or from the Friday before when that
+    day is a weekend, through its last day.
+
+    Args:
+      today: The local date.
+      rng: Chooses among overlapping holidays, then between their icons.
+
+    Returns:
+      icon: The chosen icon, or None outside every holiday.
+
+    """
     current = [h for h in holidays() if _in_window(h, today)]
     return rng.choice(rng.choice(current).icons) if current else None
 
@@ -81,1361 +100,62 @@ def icon_rows(icon: Icon) -> list[Text]:
     return rows
 
 
+@cache
 def holidays() -> tuple[Holiday, ...]:
-    """List every holiday, in calendar order.
+    """List every holiday, in calendar order, from ``assets/holidays.yaml``.
 
     Returns:
       holidays: Each holiday with its dates and its two icons.
 
     """
-    return (
+    asset = files(__package__) / "assets" / "holidays.yaml"
+    text = asset.read_text(encoding="utf-8")
+    return tuple(
         Holiday(
-            name="New Year's",
-            starts=partial(_annual, month=1, day=1),
-            icons=(
+            name=entry["name"],
+            starts=_rule(entry["starts"]),
+            days=entry.get("days", 1),
+            icons=tuple(
                 Icon(
-                    name="fireworks",
-                    palette={
-                        "Y": "#ffd23f",
-                        "R": "#ff4d4d",
-                        "B": "#4da6ff",
-                        "W": "#ffffff",
-                        "g": "#888888",
-                    },
-                    pixels=(
-                        "...R.B.R...",
-                        ".B.......B.",
-                        "R...Y.Y...R",
-                        "...Y...Y...",
-                        "B.Y..W..Y.B",
-                        "....WWW....",
-                        "B.Y..W..Y.B",
-                        "...Y...Y...",
-                        "R...Y.Y...R",
-                        ".B.......B.",
-                        "...R.B.R...",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="champagne toast",
-                    palette={
-                        "G": "#f4c542",
-                        "W": "#e8f4ff",
-                        "B": "#fffbe6",
-                        "S": "#cfd8dc",
-                        "Y": "#ffd23f",
-                    },
-                    pixels=(
-                        ".....Y.....",
-                        "...Y.Y.Y...",
-                        ".W..W.W..W.",
-                        ".WGGW.WGGW.",
-                        ".WGBW.WBGW.",
-                        ".WBGW.WGBW.",
-                        ".WGGW.WGGW.",
-                        "..WW...WW..",
-                        "...S...S...",
-                        "...S...S...",
-                        "..SSS.SSS..",
-                        "...........",
-                    ),
-                ),
+                    name=icon["name"],
+                    palette=icon["palette"],
+                    pixels=tuple(icon["pixels"].split()),
+                )
+                for icon in entry["icons"]
             ),
-        ),
-        Holiday(
-            name="Lunar New Year",
-            starts=lunar_new_year,
-            icons=(
-                Icon(
-                    name="lantern",
-                    palette={
-                        "R": "#e0262f",
-                        "D": "#a01c2c",
-                        "Y": "#ffd23f",
-                        "O": "#ffb300",
-                    },
-                    pixels=(
-                        ".....Y.....",
-                        "...YYYYY...",
-                        "..RRRRRRR..",
-                        ".RRDRRRDRR.",
-                        "RRRDRRRDRRR",
-                        "RRRDRYRDRRR",
-                        "RRRDRRRDRRR",
-                        ".RRDRRRDRR.",
-                        "..RRRRRRR..",
-                        "...YYYYY...",
-                        "....OOO....",
-                        "....O.O....",
-                    ),
-                ),
-                Icon(
-                    name="firecrackers",
-                    palette={
-                        "R": "#e0262f",
-                        "Y": "#ffd23f",
-                        "f": "#8b5a2b",
-                        "O": "#ff8c1a",
-                    },
-                    pixels=(
-                        ".O...O...O.",
-                        ".f...f...f.",
-                        "RRR.RRR.RRR",
-                        "YYY.YYY.YYY",
-                        "RRR.RRR.RRR",
-                        "RRR.RRR.RRR",
-                        "RRR.RRR.RRR",
-                        "YYY.YYY.YYY",
-                        "RRR.RRR.RRR",
-                        "...........",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Valentine's Day",
-            starts=partial(_annual, month=2, day=14),
-            icons=(
-                Icon(
-                    name="heart",
-                    palette={"R": "#e53950", "P": "#ff8fa3"},
-                    pixels=(
-                        "...........",
-                        ".RRR...RRR.",
-                        "RPPRR.RRRRR",
-                        "RPRRRRRRRRR",
-                        "RRRRRRRRRRR",
-                        "RRRRRRRRRRR",
-                        ".RRRRRRRRR.",
-                        "..RRRRRRR..",
-                        "...RRRRR...",
-                        "....RRR....",
-                        ".....R.....",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="rose",
-                    palette={
-                        "R": "#d32f2f",
-                        "r": "#ff6b6b",
-                        "D": "#8e1b1b",
-                        "G": "#3fa34d",
-                    },
-                    pixels=(
-                        "...RRRRR...",
-                        "..RrrrRDR..",
-                        ".RrRRRrDRR.",
-                        ".RrRDRrDRR.",
-                        ".RRrRRrRRR.",
-                        "..RRrrrRR..",
-                        "...RRRRR...",
-                        ".....G.....",
-                        ".GG..G.....",
-                        "..GGGG..GG.",
-                        ".....GGGG..",
-                        ".....G.....",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Pi Day",
-            starts=partial(_annual, month=3, day=14),
-            icons=(
-                Icon(
-                    name="pi",
-                    palette={"B": "#4a90c4"},
-                    pixels=(
-                        "...........",
-                        "BBBBBBBBBBB",
-                        "BBBBBBBBBBB",
-                        "..BB...BB..",
-                        "..BB...BB..",
-                        "..BB...BB..",
-                        "..BB...BB..",
-                        ".BB....BB..",
-                        ".BB....BBB.",
-                        "BB......BB.",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="pie slice",
-                    palette={
-                        "C": "#d9a35b",
-                        "D": "#a8702e",
-                        "R": "#c62839",
-                        "P": "#f06070",
-                    },
-                    pixels=(
-                        "...........",
-                        "..........C",
-                        "........CCC",
-                        "......CCCCC",
-                        "....CCCCCCC",
-                        "..CCCCCCCCC",
-                        "CRRPRRPRRRC",
-                        "CRRRRRRRRRC",
-                        "CPRRRPRRRPC",
-                        "DDDDDDDDDDD",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="St. Patrick's Day",
-            starts=partial(_annual, month=3, day=17),
-            icons=(
-                Icon(
-                    name="shamrock",
-                    palette={"G": "#3fa34d", "L": "#7fd67f", "D": "#2a7a36"},
-                    pixels=(
-                        "....GGG....",
-                        "...GLGGG...",
-                        "...GGGGG...",
-                        ".GG.GGG.GG.",
-                        "GLGG.G.GLGG",
-                        "GGGGGGGGGGG",
-                        ".GGGG.GGGG.",
-                        "..GG.D.GG..",
-                        ".....D.....",
-                        "......D....",
-                        "......D....",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="pot of gold",
-                    palette={
-                        "K": "#4a4a4a",
-                        "k": "#7a7a7a",
-                        "Y": "#ffd23f",
-                        "O": "#e0a800",
-                    },
-                    pixels=(
-                        "...........",
-                        "...Y.Y.Y...",
-                        "..YOYYOYY..",
-                        ".YYYOYYOYY.",
-                        "kkkkkkkkkkk",
-                        ".KKKKKKKKK.",
-                        "KKKKKKKKKKK",
-                        "KKKKKKKKKKK",
-                        "KKKKKKKKKKK",
-                        ".KKKKKKKKK.",
-                        "..K.....K..",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Holi",
-            starts=holi,
-            icons=(
-                Icon(
-                    name="powder burst",
-                    palette={
-                        "M": "#e91e8c",
-                        "Y": "#ffd600",
-                        "G": "#2ecc40",
-                        "C": "#00c8e8",
-                        "O": "#ff7a00",
-                    },
-                    pixels=(
-                        "..M....G...",
-                        ".MMM.M.GG.G",
-                        "MMMMMMGGGG.",
-                        ".MMMMMGGGGG",
-                        "..MMMYGGGG.",
-                        ".OOOYYYCCC.",
-                        "OOOOOYCCCCC",
-                        ".OOOOOCCCC.",
-                        "OOOOO.CCCC.",
-                        ".O.OO..CC.C",
-                        "..O.....C..",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="handprint",
-                    palette={
-                        "P": "#ff4fa3",
-                        "O": "#ff8c1a",
-                        "Y": "#ffd600",
-                        "C": "#00c8e8",
-                    },
-                    pixels=(
-                        "..P.P.P....",
-                        "..P.P.P.P..",
-                        "..P.P.P.P..",
-                        "..PPPPPPP..",
-                        "P.PPPPPPP..",
-                        "PPPPPPPPP..",
-                        ".PPPPPPPP..",
-                        "..PPPPPPP..",
-                        "...PPPPP...",
-                        "...PPPPP...",
-                        "O.......Y..",
-                        "...C..O...C",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Nowruz",
-            starts=nowruz,
-            icons=(
-                Icon(
-                    name="hyacinth",
-                    palette={
-                        "P": "#8e5fd6",
-                        "p": "#c3a6f0",
-                        "G": "#4caf50",
-                        "T": "#c1663f",
-                    },
-                    pixels=(
-                        "....P.P....",
-                        "...PpPpP...",
-                        "...PPpPP...",
-                        "...PpPpP...",
-                        "...PPpPP...",
-                        "...PpPpP...",
-                        "....PPP....",
-                        ".G..G.G..G.",
-                        "..GG.G.GG..",
-                        "...TTTTT...",
-                        "...TTTTT...",
-                        "....TTT....",
-                    ),
-                ),
-                Icon(
-                    name="sabzeh",
-                    palette={
-                        "G": "#4cbb5a",
-                        "L": "#8be38b",
-                        "R": "#d32f2f",
-                        "T": "#c1663f",
-                    },
-                    pixels=(
-                        ".L.G.L.G.L.",
-                        ".G.L.G.L.G.",
-                        "LG.GLG.GL.G",
-                        ".GLGLGLGLG.",
-                        ".LGLGLGLGL.",
-                        ".GGGGGGGGG.",
-                        "RRRRRRRRRRR",
-                        ".TTTTTTTTT.",
-                        ".TTTTTTTTT.",
-                        "..TTTTTTT..",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="First day of spring",
-            starts=spring,
-            icons=(
-                Icon(
-                    name="tulip",
-                    palette={"P": "#f06292", "p": "#f8bbd0", "G": "#4caf50"},
-                    pixels=(
-                        "...P.P.P...",
-                        "...PpPpP...",
-                        "...PPpPP...",
-                        "...PPPPP...",
-                        "....PPP....",
-                        ".....G.....",
-                        ".GG..G..GG.",
-                        "..GG.G.GG..",
-                        "...GGGGG...",
-                        ".....G.....",
-                        ".....G.....",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="cherry blossom",
-                    palette={"P": "#f8a5c2", "W": "#fff0f5", "B": "#8d6e63"},
-                    pixels=(
-                        "...........",
-                        ".P.......P.",
-                        "PWP.....PWP",
-                        ".P.....B.P.",
-                        "......B....",
-                        "..P..B.....",
-                        ".PWPB......",
-                        "..PB..P....",
-                        "..B..PWP...",
-                        ".B....P....",
-                        "B..........",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Easter",
-            starts=easter,
-            icons=(
-                Icon(
-                    name="egg",
-                    palette={
-                        "P": "#f7a8c4",
-                        "B": "#8fd3ff",
-                        "Y": "#ffe680",
-                        "W": "#ffffff",
-                    },
-                    pixels=(
-                        "....PPP....",
-                        "...PPPPP...",
-                        "..BBBBBBB..",
-                        "..YBYBYBY..",
-                        ".YYYYYYYYY.",
-                        ".PPPPPPPPP.",
-                        ".PWPWPWPWP.",
-                        ".BBBBBBBBB.",
-                        "..BBBBBBB..",
-                        "..YYYYYYY..",
-                        "...PPPPP...",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="bunny",
-                    palette={
-                        "W": "#f5f5f5",
-                        "P": "#f7a8c4",
-                        "K": "#333333",
-                        "S": "#c8c8c8",
-                    },
-                    pixels=(
-                        "..WW...WW..",
-                        "..WP...PW..",
-                        "..WP...PW..",
-                        "..WP...PW..",
-                        "..WWWWWWW..",
-                        ".WWWWWWWWW.",
-                        ".WKWWWWWKW.",
-                        ".WWWWPWWWW.",
-                        "..WWWWWWW..",
-                        ".WWWWWWWWW.",
-                        "WWWWWWWWWWW",
-                        ".SS.....SS.",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Passover",
-            starts=passover,
-            days=8,
-            icons=(
-                Icon(
-                    name="matzah",
-                    palette={"T": "#e8c890", "D": "#a8763e"},
-                    pixels=(
-                        "...........",
-                        "TTTTTTTTTTT",
-                        "TDTTDTTDTTT",
-                        "TTTTTTTTTDT",
-                        "TTDTTDTTTTT",
-                        "TTTTTTTTTTT",
-                        "TDTTTDTTDTT",
-                        "TTTTDTTTTTT",
-                        "TTDTTTTDTDT",
-                        "TTTTTTTTTTT",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="wine cup",
-                    palette={
-                        "P": "#7b1fa2",
-                        "p": "#b05ad8",
-                        "S": "#c0c7cf",
-                        "s": "#8e98a3",
-                    },
-                    pixels=(
-                        "...........",
-                        ".SSSSSSSSS.",
-                        ".SPPPPPPPS.",
-                        ".SPpPPPPPS.",
-                        "..SPPPPPS..",
-                        "...SSSSS...",
-                        ".....S.....",
-                        ".....s.....",
-                        "....SSS....",
-                        "..SSSSSSS..",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Vaisakhi",
-            starts=vaisakhi,
-            icons=(
-                Icon(
-                    name="wheat sheaf",
-                    palette={"Y": "#e8c05a", "G": "#b8902a", "O": "#ff9933"},
-                    pixels=(
-                        ".Y.Y.Y.Y.Y.",
-                        "YGYGYGYGYGY",
-                        ".Y.YYYYY.Y.",
-                        "..YYGYGYY..",
-                        "...YYYYY...",
-                        "....GYG....",
-                        "...OOOOO...",
-                        "....GYG....",
-                        "...YGYGY...",
-                        "..Y.GYG.Y..",
-                        ".Y..G.G..Y.",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="dhol drum",
-                    palette={
-                        "O": "#ff9933",
-                        "Y": "#ffd23f",
-                        "W": "#f2f2f2",
-                        "T": "#8b5a2b",
-                    },
-                    pixels=(
-                        "T.........T",
-                        ".T.......T.",
-                        "..YYYYYYY..",
-                        ".YOWOOOWOY.",
-                        "YOOOWOWOOOY",
-                        "YOOOOWOOOOY",
-                        "YOOOWOWOOOY",
-                        ".YOWOOOWOY.",
-                        "..YYYYYYY..",
-                        "...........",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Eid al-Fitr",
-            starts=eid_al_fitr,
-            icons=(
-                Icon(
-                    name="crescent + star",
-                    palette={"Y": "#ffd23f"},
-                    pixels=(
-                        "....YYYY...",
-                        "..YYYY.....",
-                        ".YYY.......",
-                        "YYY.....Y..",
-                        "YYY....YYY.",
-                        "YYY.....Y..",
-                        "YYY........",
-                        ".YYY.......",
-                        "..YYYY.....",
-                        "....YYYY...",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="fanous",
-                    palette={
-                        "Y": "#e6b422",
-                        "T": "#26a69a",
-                        "t": "#80cbc4",
-                        "W": "#fff3b0",
-                    },
-                    pixels=(
-                        ".....Y.....",
-                        "....YYY....",
-                        "...YYYYY...",
-                        "..YTTTTTY..",
-                        "..YTtWtTY..",
-                        "..YTWWWTY..",
-                        "..YTtWtTY..",
-                        "..YTTTTTY..",
-                        "...YYYYY...",
-                        "....YYY....",
-                        ".....Y.....",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Vesak",
-            starts=vesak,
-            icons=(
-                Icon(
-                    name="lotus",
-                    palette={
-                        "P": "#f48fb1",
-                        "p": "#fce4ec",
-                        "G": "#4caf50",
-                        "Y": "#ffd23f",
-                    },
-                    pixels=(
-                        "...........",
-                        ".....P.....",
-                        "....PpP....",
-                        ".P..PpP..P.",
-                        ".PP.PpP.PP.",
-                        ".PpPPpPPpP.",
-                        "..PpPYPpP..",
-                        "...PPPPP...",
-                        ".GGGGGGGGG.",
-                        "GGG.....GGG",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="star lantern",
-                    palette={
-                        "Y": "#ffd23f",
-                        "R": "#e53935",
-                        "W": "#fff6c8",
-                        "O": "#ff8c1a",
-                    },
-                    pixels=(
-                        ".....Y.....",
-                        ".....R.....",
-                        "....RRR....",
-                        "....RWR....",
-                        "RRRRWWWRRRR",
-                        ".RRWWWWWRR.",
-                        "..RRWWWRR..",
-                        "..RRRRRRR..",
-                        ".RRR...RRR.",
-                        ".RR.....RR.",
-                        ".O.......O.",
-                        ".O.......O.",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Juneteenth",
-            starts=partial(_annual, month=6, day=19),
-            icons=(
-                Icon(
-                    name="Juneteenth flag",
-                    palette={
-                        "B": "#2b4c9b",
-                        "R": "#d7263d",
-                        "W": "#ffffff",
-                        "w": "#b8cdf5",
-                    },
-                    pixels=(
-                        "...........",
-                        "BBwBwBwBBBB",
-                        "BBBBWBBBBBB",
-                        "BwBWWWBwBBB",
-                        "BBBWBWBBBBB",
-                        "BBwBwBwBBBB",
-                        "BBBRRRRRBBB",
-                        "BRRRRRRRRRB",
-                        "RRRRRRRRRRR",
-                        "RRRRRRRRRRR",
-                        "RRRRRRRRRRR",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="red velvet cake",
-                    palette={"R": "#b22234", "W": "#fff5f5"},
-                    pixels=(
-                        "...........",
-                        "..........W",
-                        "........WWW",
-                        "......WWWWW",
-                        "....WWWWWWW",
-                        "..WWWWWWWWW",
-                        "RRRRRRRRRRR",
-                        "RRRRRRRRRRR",
-                        "WWWWWWWWWWW",
-                        "RRRRRRRRRRR",
-                        "RRRRRRRRRRR",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="First day of summer",
-            starts=summer,
-            icons=(
-                Icon(
-                    name="sun",
-                    palette={"Y": "#ffd23f", "O": "#ff8c1a"},
-                    pixels=(
-                        ".....O.....",
-                        ".O...O...O.",
-                        "..O.....O..",
-                        "....YYY....",
-                        "...YYYYY...",
-                        "OO.YYYYY.OO",
-                        "...YYYYY...",
-                        "....YYY....",
-                        "..O.....O..",
-                        ".O...O...O.",
-                        ".....O.....",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="ice pop",
-                    palette={
-                        "R": "#ff5252",
-                        "O": "#ff8c1a",
-                        "Y": "#ffd23f",
-                        "T": "#d9a35b",
-                    },
-                    pixels=(
-                        "....RRR....",
-                        "...RRRRR...",
-                        "...RRRRR...",
-                        "...OOOOO...",
-                        "...OOOOO...",
-                        "...YYYYY...",
-                        "...YYYYY...",
-                        "....YYY....",
-                        ".....T.....",
-                        ".....T.....",
-                        ".....T.....",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Independence Day",
-            starts=partial(_annual, month=7, day=4),
-            icons=(
-                Icon(
-                    name="flag",
-                    palette={"R": "#d7263d", "W": "#f2f2f2", "B": "#2b4c9b"},
-                    pixels=(
-                        "...........",
-                        "BWBWBRRRRRR",
-                        "BBWBBWWWWWW",
-                        "BWBWBRRRRRR",
-                        "BBWBBWWWWWW",
-                        "BWBWBRRRRRR",
-                        "WWWWWWWWWWW",
-                        "RRRRRRRRRRR",
-                        "WWWWWWWWWWW",
-                        "RRRRRRRRRRR",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="rocket",
-                    palette={
-                        "R": "#d7263d",
-                        "W": "#f2f2f2",
-                        "B": "#2b4c9b",
-                        "Y": "#ffd23f",
-                        "O": "#ff8c1a",
-                    },
-                    pixels=(
-                        ".....R.....",
-                        "....RRR....",
-                        "....WWW....",
-                        "....BWB....",
-                        "....WWW....",
-                        "....RRR....",
-                        "....RRR....",
-                        "...RRRRR...",
-                        "....YOY....",
-                        "...Y.O.Y...",
-                        "..Y..Y..Y..",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Eid al-Adha",
-            starts=eid_al_adha,
-            icons=(
-                Icon(
-                    name="mosque",
-                    palette={"T": "#26a69a", "Y": "#ffd23f", "W": "#f0e6d2"},
-                    pixels=(
-                        ".....Y.....",
-                        ".Y...Y...Y.",
-                        ".T...Y...T.",
-                        ".W..TTT..W.",
-                        ".W.TTTTT.W.",
-                        ".W.TTTTT.W.",
-                        ".WWWWWWWWW.",
-                        ".WWWWWWWWW.",
-                        ".WW.WWW.WW.",
-                        ".WW.W.W.WW.",
-                        ".WWWWWWWWW.",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="crescent over dunes",
-                    palette={"Y": "#ffd23f", "S": "#e0b872", "s": "#b8873e"},
-                    pixels=(
-                        "......YYY..",
-                        ".Y...YY....",
-                        ".....Y.....",
-                        ".....YY....",
-                        "......YYY..",
-                        "...........",
-                        "...SSS.....",
-                        ".SSSSSSS.ss",
-                        "SSSSSSSssss",
-                        "SSSSSsssssS",
-                        "sssssssSSSS",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="First day of fall",
-            starts=fall,
-            icons=(
-                Icon(
-                    name="maple leaf",
-                    palette={"R": "#d84315", "O": "#ff8c1a", "B": "#6d4c41"},
-                    pixels=(
-                        ".....R.....",
-                        "....RRR....",
-                        ".R.RRORR.R.",
-                        ".RRRRORRRR.",
-                        "RRRRRORRRRR",
-                        ".RRROOORRR.",
-                        "..RRRORRR..",
-                        ".RRRRORRRR.",
-                        "....ROR....",
-                        ".....B.....",
-                        ".....B.....",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="acorn",
-                    palette={
-                        "C": "#8b5a2b",
-                        "c": "#5d4037",
-                        "T": "#d9a35b",
-                        "t": "#b07a3a",
-                    },
-                    pixels=(
-                        ".....c.....",
-                        ".....c.....",
-                        "...CCCCC...",
-                        "..CcCcCcC..",
-                        ".CCCCCCCCC.",
-                        "..TTTTTTT..",
-                        "..TTTTTTt..",
-                        "..TTTTTTt..",
-                        "...TTTTt...",
-                        "....TTt....",
-                        ".....t.....",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Mid-Autumn Festival",
-            starts=mid_autumn,
-            icons=(
-                Icon(
-                    name="mooncake",
-                    palette={"G": "#d9a441", "D": "#9c6a2a"},
-                    pixels=(
-                        "...GGGGG...",
-                        ".GGGDGDGGG.",
-                        ".GDGGGGGDG.",
-                        "GGGDDDDDGGG",
-                        "GDGDGGGDGDG",
-                        "GGGDGDGDGGG",
-                        "GDGDGGGDGDG",
-                        "GGGDDDDDGGG",
-                        ".GDGGGGGDG.",
-                        ".GGGDGDGGG.",
-                        "...GGGGG...",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="moon rabbit",
-                    palette={"Y": "#fff2a8", "S": "#cbb866", "P": "#ff8fa3"},
-                    pixels=(
-                        "...YYYYY...",
-                        ".YYYYYYYYY.",
-                        "YYYYSYSYYYY",
-                        "YYYYSYSYYYY",
-                        "YYYYSSSYYYY",
-                        "YYYSSPSSYYY",
-                        "YYYSSSSSYYY",
-                        "YYSSSSSSSYY",
-                        ".YYSSSSSYY.",
-                        "..YYYYYYY..",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Rosh Hashanah",
-            starts=rosh_hashanah,
-            icons=(
-                Icon(
-                    name="apple + honey",
-                    palette={
-                        "R": "#d32f2f",
-                        "r": "#ff6b6b",
-                        "G": "#4cbb5a",
-                        "T": "#8b5a2b",
-                        "Y": "#f5b301",
-                    },
-                    pixels=(
-                        ".....T.G...",
-                        ".....TGG...",
-                        "..RRRTRRR..",
-                        ".RrRRRRRRR.",
-                        "YYYYYYYYYYY",
-                        "RYRRYRRRYRR",
-                        "RYRRRRRRYRR",
-                        "RRRRRRRRRRR",
-                        ".RRRRRRRRR.",
-                        "..RRRRRRR..",
-                        "...RR.RR...",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="shofar",
-                    palette={"I": "#f0e2c0", "B": "#a0703e"},
-                    pixels=(
-                        ".........I.",
-                        "........II.",
-                        "........I..",
-                        ".......II..",
-                        "......III..",
-                        ".....IIII..",
-                        "....IIIII..",
-                        "..IIIIIII..",
-                        "IIIIIIII...",
-                        "BIIIIII....",
-                        "BBII.......",
-                        "B..........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Halloween",
-            starts=partial(_annual, month=10, day=31),
-            icons=(
-                Icon(
-                    name="jack-o-lantern",
-                    palette={"O": "#e8761c", "G": "#4caf50", "Y": "#ffd23f"},
-                    pixels=(
-                        ".....GG....",
-                        "....GG.....",
-                        "..OOOOOOO..",
-                        ".OOOOOOOOO.",
-                        "OOOYOOOYOOO",
-                        "OOYYOOOYYOO",
-                        "OOOOOYOOOOO",
-                        "OOOOOOOOOOO",
-                        "OYYOYYYOYYO",
-                        "OOYYYYYYYOO",
-                        ".OOOYOYOOO.",
-                        "..OOOOOOO..",
-                    ),
-                ),
-                Icon(
-                    name="boo ghost",
-                    palette={
-                        "W": "#f5f5f5",
-                        "S": "#c8d0dc",
-                        "K": "#222222",
-                        "R": "#e0405a",
-                    },
-                    pixels=(
-                        "...WWWWW...",
-                        ".WWWWWWWWW.",
-                        "WWWWKWWKWWW",
-                        "WWWWKWWKWWW",
-                        "WWWWWWWWWWW",
-                        "WWKKKKKKKWW",
-                        "WWKRRRRRKWW",
-                        "WWWKRRRKWWW",
-                        "WWWWRRRWWWS",
-                        "SWWWWWWWWS.",
-                        ".SSWWWWWSS.",
-                        "...SSSSS...",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Diwali",
-            starts=diwali,
-            icons=(
-                Icon(
-                    name="diya",
-                    palette={
-                        "T": "#c1663f",
-                        "D": "#8a3f22",
-                        "Y": "#ffd23f",
-                        "O": "#ff8c1a",
-                        "W": "#fff6c8",
-                    },
-                    pixels=(
-                        ".....Y.....",
-                        "....YOY....",
-                        "....OWO....",
-                        "....YWY....",
-                        ".....Y.....",
-                        "...........",
-                        "TTT.....TTT",
-                        "TTTTTTTTTTT",
-                        ".TTDTDTDTT.",
-                        "..TTTTTTT..",
-                        "....TTT....",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="rangoli",
-                    palette={
-                        "M": "#e91e8c",
-                        "O": "#ff8c1a",
-                        "T": "#00a6a6",
-                        "Y": "#ffd600",
-                    },
-                    pixels=(
-                        ".....M.....",
-                        "....MYM....",
-                        "...TMOMT...",
-                        "..T.OYO.T..",
-                        ".MMOYTYOMM.",
-                        "MYOYTMTYOYM",
-                        ".MMOYTYOMM.",
-                        "..T.OYO.T..",
-                        "...TMOMT...",
-                        "....MYM....",
-                        ".....M.....",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Thanksgiving",
-            starts=thanksgiving,
-            icons=(
-                Icon(
-                    name="turkey",
-                    palette={
-                        "R": "#d7263d",
-                        "O": "#ff8c1a",
-                        "Y": "#ffd23f",
-                        "b": "#8b5a2b",
-                        "h": "#c08850",
-                        "K": "#222222",
-                        "y": "#ffb300",
-                        "r": "#e0262f",
-                    },
-                    pixels=(
-                        "..RROOORR..",
-                        ".ROOYYYOOR.",
-                        "ROOYbbbYOOR",
-                        "ROYbhhhbYOR",
-                        "ROYbKhKbYOR",
-                        ".RYbhyhbYR.",
-                        "..bbhrhbb..",
-                        ".bbbbbbbbb.",
-                        ".bbbbbbbbb.",
-                        "..bbbbbbb..",
-                        "...y...y...",
-                        "..yy...yy..",
-                    ),
-                ),
-                Icon(
-                    name="pumpkin pie",
-                    palette={
-                        "C": "#d9a35b",
-                        "D": "#a8702e",
-                        "O": "#f08a24",
-                        "o": "#c8641a",
-                        "W": "#fff8ee",
-                    },
-                    pixels=(
-                        "...........",
-                        "...........",
-                        "...........",
-                        "......WW..C",
-                        ".....WWWWCC",
-                        "....OOOOOCC",
-                        "..OOOOOOOCC",
-                        "OOOOOOOOOCC",
-                        "oooooooooCC",
-                        "oooooooooCC",
-                        "DDDDDDDDDDD",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Hanukkah",
-            starts=hanukkah,
-            days=8,
-            icons=(
-                Icon(
-                    name="menorah",
-                    palette={"G": "#e6b422", "Y": "#ffd23f", "B": "#4a90e2"},
-                    pixels=(
-                        ".....Y.....",
-                        ".YYYYBYYYY.",
-                        ".BBBBBBBBB.",
-                        ".BBBBBBBBB.",
-                        ".GGGGGGGGG.",
-                        "..GG.G.GG..",
-                        "...GGGGG...",
-                        ".....G.....",
-                        ".....G.....",
-                        "...GGGGG...",
-                        "...........",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="dreidel",
-                    palette={
-                        "B": "#2b6cb0",
-                        "b": "#5a9bd8",
-                        "S": "#c0c7cf",
-                        "W": "#ffffff",
-                    },
-                    pixels=(
-                        ".....S.....",
-                        ".....S.....",
-                        "..BBBBBBB..",
-                        "..BbbbbbB..",
-                        "..BbWWWbB..",
-                        "..BbbbWbB..",
-                        "..BbWbWbB..",
-                        "..BbWbWbB..",
-                        "...BbbbB...",
-                        "....BbB....",
-                        ".....B.....",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="First day of winter",
-            starts=winter,
-            icons=(
-                Icon(
-                    name="snowflake",
-                    palette={"W": "#ffffff", "I": "#8fd3ff"},
-                    pixels=(
-                        ".....W.....",
-                        "...I.W.I...",
-                        "....IWI....",
-                        ".I...W...I.",
-                        "..I..W..I..",
-                        "WWWWWIWWWWW",
-                        "..I..W..I..",
-                        ".I...W...I.",
-                        "....IWI....",
-                        "...I.W.I...",
-                        ".....W.....",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="snowman",
-                    palette={
-                        "W": "#f5f5f5",
-                        "K": "#4a4a4a",
-                        "O": "#ff8c1a",
-                        "R": "#d32f2f",
-                    },
-                    pixels=(
-                        "...KKKKK...",
-                        "...KKKKK...",
-                        "..KKKKKKK..",
-                        "...WWWWW...",
-                        "...WKWKW...",
-                        "...WWOOW...",
-                        "..RRRRRRR..",
-                        "..WWWRWWW..",
-                        ".WWWWKWWWW.",
-                        ".WWWWWWWWW.",
-                        ".WWWWKWWWW.",
-                        "..WWWWWWW..",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Christmas",
-            starts=partial(_annual, month=12, day=25),
-            icons=(
-                Icon(
-                    name="tree",
-                    palette={
-                        "G": "#2e8b3e",
-                        "Y": "#ffd23f",
-                        "R": "#e53935",
-                        "B": "#42a5f5",
-                        "T": "#8b5a2b",
-                    },
-                    pixels=(
-                        ".....Y.....",
-                        "....YYY....",
-                        ".....G.....",
-                        "....GRG....",
-                        "...GGGGG...",
-                        "..GBGGGRG..",
-                        "...GGGGG...",
-                        "..GGYGGGG..",
-                        ".GRGGGBGGG.",
-                        "GGGGGGGGGRG",
-                        "....TTT....",
-                        "....TTT....",
-                    ),
-                ),
-                Icon(
-                    name="gift",
-                    palette={"R": "#d32f2f", "D": "#a82020", "Y": "#ffd23f"},
-                    pixels=(
-                        "...YY.YY...",
-                        "..Y..Y..Y..",
-                        "...YYYYY...",
-                        "RRRRRYRRRRR",
-                        "RRRRRYRRRRR",
-                        "YYYYYYYYYYY",
-                        ".RRRRYRRRR.",
-                        ".RRRRYRRRR.",
-                        ".RRRRYRRRR.",
-                        ".RRRRYRRRR.",
-                        ".DDDDYDDDD.",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
-        Holiday(
-            name="Kwanzaa",
-            starts=partial(_annual, month=12, day=26),
-            days=7,
-            icons=(
-                Icon(
-                    name="kinara",
-                    palette={
-                        "Y": "#ffd23f",
-                        "R": "#e53935",
-                        "r": "#9e1b1b",
-                        "K": "#5a5a5a",
-                        "G": "#43a047",
-                        "g": "#1b5e20",
-                        "T": "#8b5a2b",
-                    },
-                    pixels=(
-                        ".....Y.....",
-                        "....YKY....",
-                        "...YRKGY...",
-                        "..YrRKGgY..",
-                        "..RrRKGgG..",
-                        "..RrRKGgG..",
-                        ".TTTTTTTTT.",
-                        ".TTTTTTTTT.",
-                        "..T.....T..",
-                        "..T.....T..",
-                        ".TTT...TTT.",
-                        "...........",
-                    ),
-                ),
-                Icon(
-                    name="corn",
-                    palette={"Y": "#ffd23f", "y": "#e0a800", "G": "#6aa84f"},
-                    pixels=(
-                        "....YyY....",
-                        "...YyYyY...",
-                        "...yYyYy...",
-                        "...YyYyY...",
-                        "...yYyYy...",
-                        ".G.YyYyY.G.",
-                        ".GGyYyYyGG.",
-                        "..GGYyYGG..",
-                        "...GGGGG...",
-                        "....GGG....",
-                        ".....G.....",
-                        "...........",
-                    ),
-                ),
-            ),
-        ),
+        )
+        for entry in from_plain(parse(text, source=str(asset)), list[_HolidayEntry])
     )
 
 
 def spring(year: int) -> tuple[date, ...]:
-    """Return the March equinox's UTC date."""
-    return (_utc_date(_season(year, 0), utc_hours=0),)
+    """Return the March equinox's local date; Nowruz begins then too."""
+    return (_civil_date(_season(year, 0), zone=None),)
 
 
 def summer(year: int) -> tuple[date, ...]:
-    """Return the June solstice's UTC date."""
-    return (_utc_date(_season(year, 1), utc_hours=0),)
+    """Return the June solstice's local date."""
+    return (_civil_date(_season(year, 1), zone=None),)
 
 
 def fall(year: int) -> tuple[date, ...]:
-    """Return the September equinox's UTC date."""
-    return (_utc_date(_season(year, 2), utc_hours=0),)
+    """Return the September equinox's local date."""
+    return (_civil_date(_season(year, 2), zone=None),)
 
 
 def winter(year: int) -> tuple[date, ...]:
-    """Return the December solstice's UTC date."""
-    return (_utc_date(_season(year, 3), utc_hours=0),)
-
-
-def nowruz(year: int) -> tuple[date, ...]:
-    """Return the March equinox's day in Tehran, or the next if after noon there."""
-    return (_utc_date(_season(year, 0), utc_hours=3.5 + 12),)
+    """Return the December solstice's local date."""
+    return (_civil_date(_season(year, 3), zone=None),)
 
 
 def lunar_new_year(year: int) -> tuple[date, ...]:
     """Return the first new moon on or after January 21, in China time."""
-    return (_new_or_full_moon(date(year, 1, 21), full=False, utc_hours=8),)
+    china = timezone(timedelta(hours=8))
+    return (_new_or_full_moon(date(year, 1, 21), full=False, zone=china),)
 
 
 def mid_autumn(year: int) -> tuple[date, ...]:
-    """Return day 15 of the month begun by the last new moon before the equinox.
+    """Return day 15 of the lunar month holding the September equinox, China time.
 
     Args:
       year: The Gregorian year.
@@ -1444,27 +164,46 @@ def mid_autumn(year: int) -> tuple[date, ...]:
       days: The Mid-Autumn Festival's date.
 
     """
-    # China time. Searching from 29 days before skips a new moon on the
-    # equinox's own day, which starts the next month: in 2033 that keeps the
-    # festival on September 8, not October 8. In 1990-2099 no 30-day gap puts
-    # the first new moon of the search on the equinox itself.
-    equinox = _utc_date(_season(year, 2), utc_hours=8)
-    new_moon = _new_or_full_moon(equinox - timedelta(days=29), full=False, utc_hours=8)
+    # The "2033 problem": China's calendar places a leap month that makes the
+    # eighth month the one before the equinox's, against the rule below.
+    if year == 2033:
+        return (date(2033, 9, 8),)
+    china = timezone(timedelta(hours=8))
+    equinox = _civil_date(_season(year, 2), zone=china)
+    new_moon = _new_or_full_moon(equinox - timedelta(days=30), full=False, zone=china)
+    following = _new_or_full_moon(new_moon + timedelta(days=1), full=False, zone=china)
+    if following <= equinox:
+        new_moon = following
     return (new_moon + timedelta(days=14),)
 
 
 def holi(year: int) -> tuple[date, ...]:
     """Return the morning after the bonfire night of the Phalguna full moon."""
-    # The full moon ends its lunar day. Ending after 17:00 India time, that day
+    # The full moon ends its lunar day. Ending after 17:00 local time, that day
     # holds the evening bonfire, so Holi is the next day: +7 h rolls over then.
-    return (_new_or_full_moon(date(year, 2, 28), full=True, utc_hours=5.5 + 7),)
+    return (_new_or_full_moon(date(year, 2, 28), full=True, zone=None, shift_hours=7),)
 
 
 def diwali(year: int) -> tuple[date, ...]:
-    """Return the evening of prayers in the Kartika new moon's lunar day."""
+    """Return the evening of prayers in the Kartika new moon's lunar day.
+
+    Args:
+      year: The Gregorian year.
+
+    Returns:
+      days: Diwali's date, India time, which US temples keep too.
+
+    """
     # The new moon ends its lunar day. Ending after 18:00 India time, that day
     # holds the evening prayers; otherwise the evening before does: -18 h.
-    return (_new_or_full_moon(date(year, 10, 17), full=False, utc_hours=5.5 - 18),)
+    return (
+        _new_or_full_moon(
+            date(year, 10, 17),
+            full=False,
+            zone=timezone(timedelta(hours=5, minutes=30)),
+            shift_hours=-18,
+        ),
+    )
 
 
 def vaisakhi(year: int) -> tuple[date, ...]:
@@ -1472,29 +211,66 @@ def vaisakhi(year: int) -> tuple[date, ...]:
     ayanamsa_deg = 24.22 + 0.013_97 * (year - 2026)
     sun_deg_per_day = 0.985
     jde = _season(year, 0) + ayanamsa_deg / sun_deg_per_day
-    return (_utc_date(jde, utc_hours=5.5),)
-
-
-def rosh_hashanah(year: int) -> tuple[date, ...]:
-    """Return 1 Tishrei of the Hebrew year that begins in ``year``."""
-    return (date.fromordinal(_hebrew_new_year(year + 3761)),)
-
-
-def passover(year: int) -> tuple[date, ...]:
-    """Return 15 Nisan, always 163 days before the next Rosh Hashanah."""
-    return (date.fromordinal(_hebrew_new_year(year + 3761) - 163),)
+    return (_civil_date(jde, zone=timezone(timedelta(hours=5, minutes=30))),)
 
 
 def hanukkah(year: int) -> tuple[date, ...]:
-    """Return 25 Kislev, after a Cheshvan of 29 days, or 30 in a complete year."""
+    """Return the evening the first candle is lit, the eve of 25 Kislev."""
     hebrew_year = year + 3761
     new_year = _hebrew_new_year(hebrew_year)
     complete = (_hebrew_new_year(hebrew_year + 1) - new_year) % 10 == 5
-    return (date.fromordinal(new_year + 30 + (30 if complete else 29) + 24),)
+    return (date.fromordinal(new_year + 30 + (30 if complete else 29) + 23),)
+
+
+def vesak(year: int) -> tuple[date, ...]:
+    """Return the UN's Day of Vesak, else the first full moon of May in UTC.
+
+    Args:
+      year: The Gregorian year.
+
+    Returns:
+      days: Vesak's date, one for the whole country.
+
+    """
+    # timeanddate.com/holidays/un/vesak-day. Buddhist councils pick the full
+    # moon, so no zone's rule matches every year: 2015 was June 1. Past the
+    # list, UTC agrees with the most UN years, 20 of 26.
+    return _listed(
+        year,
+        dates=(
+            "2005-05-23",
+            "2006-05-13",
+            "2007-05-02",
+            "2008-05-20",
+            "2009-05-08",
+            "2010-05-27",
+            "2011-05-17",
+            "2012-05-06",
+            "2013-05-25",
+            "2014-05-13",
+            "2015-06-01",
+            "2016-05-20",
+            "2017-05-10",
+            "2018-05-29",
+            "2019-05-19",
+            "2020-05-07",
+            "2021-05-26",
+            "2022-05-16",
+            "2023-05-05",
+            "2024-05-23",
+            "2025-05-12",
+            "2026-05-01",
+            "2027-05-20",
+            "2028-05-08",
+            "2029-05-27",
+            "2030-05-27",
+        ),
+        otherwise=_vesak_estimate,
+    )
 
 
 def eid_al_fitr(year: int) -> tuple[date, ...]:
-    """Return 1 Shawwal: Singapore's announced dates, else the arithmetic calendar.
+    """Return 1 Shawwal by the Fiqh Council of North America, else arithmetic.
 
     Args:
       year: The Gregorian year.
@@ -1503,27 +279,38 @@ def eid_al_fitr(year: int) -> tuple[date, ...]:
       days: Eid al-Fitr's dates; some years hold two.
 
     """
+    # fiqhcouncil.org/calendar, which runs through 2045.
     return _listed(
         year,
         dates=(
-            "2026-03-21",
-            "2027-03-10",
-            "2028-02-27",
-            "2029-02-15",
+            "2026-03-20",
+            "2027-03-09",
+            "2028-02-26",
+            "2029-02-14",
             "2030-02-04",
-            "2031-01-25",
+            "2031-01-24",
             "2032-01-14",
-            "2033-01-03",
+            "2033-01-02",
             "2033-12-23",
             "2034-12-12",
             "2035-12-01",
+            "2036-11-19",
+            "2037-11-08",
+            "2038-10-29",
+            "2039-10-19",
+            "2040-10-07",
+            "2041-09-26",
+            "2042-09-15",
+            "2043-09-04",
+            "2044-08-24",
+            "2045-08-14",
         ),
         otherwise=partial(_islamic, month=10, day=1),
     )
 
 
 def eid_al_adha(year: int) -> tuple[date, ...]:
-    """Return 10 Dhu al-Hijjah: Singapore's announced dates, else arithmetic.
+    """Return the day after Arafah by the Fiqh Council of North America, else arithmetic.
 
     Args:
       year: The Gregorian year.
@@ -1532,49 +319,34 @@ def eid_al_adha(year: int) -> tuple[date, ...]:
       days: Eid al-Adha's dates; some years hold two.
 
     """
+    # fiqhcouncil.org/calendar: 1 Dhul-Hijjah plus nine days. The council
+    # defers to Saudi Arabia's Day of Arafah, which its calendar anticipates.
     return _listed(
         year,
         dates=(
             "2026-05-27",
-            "2027-05-17",
+            "2027-05-16",
             "2028-05-05",
-            "2029-04-25",
-            "2030-04-14",
-            "2031-04-03",
+            "2029-04-24",
+            "2030-04-13",
+            "2031-04-02",
             "2032-03-22",
-            "2033-03-12",
+            "2033-03-11",
             "2034-03-01",
-            "2035-02-19",
+            "2035-02-18",
+            "2036-02-07",
+            "2037-01-26",
+            "2038-01-16",
+            "2039-01-05",
+            "2039-12-26",
+            "2040-12-14",
+            "2041-12-04",
+            "2042-11-23",
+            "2043-11-12",
+            "2044-10-31",
+            "2045-10-21",
         ),
         otherwise=partial(_islamic, month=12, day=10),
-    )
-
-
-def vesak(year: int) -> tuple[date, ...]:
-    """Return Singapore's Vesak Day, else the first full moon from May 8.
-
-    Args:
-      year: The Gregorian year.
-
-    Returns:
-      days: Vesak's date.
-
-    """
-    return _listed(
-        year,
-        dates=(
-            "2026-05-31",
-            "2027-05-20",
-            "2028-05-09",
-            "2029-05-27",
-            "2030-05-16",
-            "2031-06-04",
-            "2032-05-23",
-            "2033-05-13",
-            "2034-06-01",
-            "2035-05-22",
-        ),
-        otherwise=_vesak_estimate,
     )
 
 
@@ -1608,10 +380,10 @@ def thanksgiving(year: int) -> tuple[date, ...]:
 
 
 def _in_window(holiday: Holiday, today: date) -> bool:
-    """Whether ``today`` falls from the weekday before a start to its last day."""
+    """Whether ``today`` falls in a holiday, or from the Friday before one on a weekend."""
     for year in (today.year - 1, today.year, today.year + 1):
         for start in holiday.starts(year):
-            opens = start - timedelta(days=1)
+            opens = start
             while opens.weekday() >= 5:  # Saturday or Sunday.
                 opens -= timedelta(days=1)
             if opens <= today < start + timedelta(days=holiday.days):
@@ -1619,8 +391,51 @@ def _in_window(holiday: Holiday, today: date) -> bool:
     return False
 
 
+def _rule(starts: str) -> Callable[[int], tuple[date, ...]]:
+    """Read ``MM-DD`` as a fixed date, else name one of the computed rules."""
+    if starts[:1].isdigit():
+        month, day = starts.split("-")
+        return partial(_annual, month=int(month), day=int(day))
+    computed = (
+        lunar_new_year,
+        holi,
+        spring,
+        easter,
+        vaisakhi,
+        eid_al_fitr,
+        vesak,
+        summer,
+        eid_al_adha,
+        fall,
+        mid_autumn,
+        diwali,
+        thanksgiving,
+        hanukkah,
+        winter,
+    )
+    return {rule.__name__: rule for rule in computed}[starts]
+
+
+class _IconEntry(TypedDict):
+    name: str
+    palette: dict[str, str]
+    pixels: str
+
+
+class _HolidayEntry(TypedDict):
+    name: str
+    starts: str
+    why: str  # Required, so every holiday states which inclusion rule it meets.
+    days: NotRequired[int]
+    icons: list[_IconEntry]
+
+
 def _annual(year: int, *, month: int, day: int) -> tuple[date, ...]:
     return (date(year, month, day),)
+
+
+def _vesak_estimate(year: int) -> tuple[date, ...]:
+    return (_new_or_full_moon(date(year, 5, 1), full=True, zone=UTC),)
 
 
 def _listed(
@@ -1635,13 +450,37 @@ def _listed(
     return otherwise(year)
 
 
-def _vesak_estimate(year: int) -> tuple[date, ...]:
-    return (_new_or_full_moon(date(year, 5, 8), full=True, utc_hours=8),)
+# ``zone=None`` is the user's own time zone, as in ``datetime.astimezone``.
+def _civil_date(jde: float, *, zone: tzinfo | None, shift_hours: float = 0) -> date:
+    """Return the date in ``zone`` of Julian day ``jde``, ``shift_hours`` later."""
+    j2000 = datetime(2000, 1, 1, 12, tzinfo=UTC)
+    moment = j2000 + timedelta(
+        days=jde - 2_451_545.0,
+        hours=shift_hours,
+        seconds=-_delta_t_sec(jde),
+    )
+    return moment.astimezone(zone).date()
 
 
-def _utc_date(jde: float, *, utc_hours: float) -> date:
-    """Return the civil date of Julian day ``jde`` at ``utc_hours`` from UTC."""
-    return date.fromordinal(math.floor(jde + 0.5 + utc_hours / 24) - 1_721_425)
+def _delta_t_sec(jde: float) -> float:
+    """Return how far terrestrial time runs ahead of UTC (Espenak and Meeus, 2006)."""
+    # Over a minute today and some three by 2090: enough to move a moon
+    # phase near midnight onto the other day.
+    year = 2000 + (jde - 2_451_545.0) / 365.25
+    t = year - 2000
+    if year < 2005:
+        return 63.86 + t * (
+            0.3345
+            + t
+            * (
+                -0.060_374
+                + t * (0.001_727_5 + t * (0.000_651_814 + t * 0.000_023_735_99))
+            )
+        )
+    if year < 2050:
+        return 62.92 + t * (0.322_17 + t * 0.005_589)
+    u = (year - 1820) / 100
+    return -20 + 32 * u * u - 0.5628 * (2150 - year)
 
 
 def _season(year: int, index: int) -> float:
@@ -1656,37 +495,113 @@ def _season(year: int, index: int) -> float:
     return a0 + y * (a1 + y * (a2 + y * (a3 + y * a4)))
 
 
-def _new_or_full_moon(start: date, *, full: bool, utc_hours: float) -> date:
-    """Return the first new (or full) moon's local date on or after ``start``."""
+def _new_or_full_moon(
+    start: date,
+    *,
+    full: bool,
+    zone: tzinfo | None,
+    shift_hours: float = 0,
+) -> date:
+    """Return the first new (or full) moon's date in ``zone`` on or after ``start``."""
     lunation = 29.530_588_861
-    jd = start.toordinal() + 1_721_424.5 - utc_hours / 24
+    jd = start.toordinal() + 1_721_424.5
     k = math.floor((jd - 2_451_550.097_66) / lunation) - 1 + (0.5 if full else 0)
-    while (day := _utc_date(_moon_phase(k), utc_hours=utc_hours)) < start:
+    while (
+        day := _civil_date(_moon_phase(k), zone=zone, shift_hours=shift_hours)
+    ) < start:
         k += 1
     return day
 
 
+# Meeus ch. 49 with every periodic term, good to seconds; seven terms alone stray by
+# minutes, enough to move a phase across midnight.
 def _moon_phase(k: float) -> float:
     """Return the Julian day of new moon ``k`` (integer) or full moon (half)."""
     t = k / 1236.85
-    jde = 2_451_550.097_66 + 29.530_588_861 * k + 0.000_154_37 * t * t
-    e = 1 - 0.002_516 * t
-    sun = math.radians(2.5534 + 29.105_356_70 * k)
-    moon = math.radians(201.5643 + 385.816_935_28 * k)
-    node = math.radians(160.7108 + 390.670_502_84 * k)
-    c = (
+    jde = (
+        2_451_550.097_66
+        + 29.530_588_861 * k
+        + t * t * (0.000_154_37 + t * (-0.000_000_150 + t * 0.000_000_000_73))
+    )
+    e = 1 - t * (0.002_516 + t * 0.000_007_4)
+    sun = math.radians(2.5534 + 29.105_356_70 * k - t * t * (0.000_001_4 + t * 1.1e-7))
+    moon = math.radians(
+        201.5643
+        + 385.816_935_28 * k
+        + t * t * (0.010_758_2 + t * (0.000_012_38 - t * 5.8e-8)),
+    )
+    lat = math.radians(
+        160.7108
+        + 390.670_502_84 * k
+        - t * t * (0.001_611_8 + t * (0.000_002_27 - t * 1.1e-8)),
+    )
+    node = math.radians(124.7746 - 1.563_755_88 * k + t * t * 0.002_067_2)
+    periodic = sum(
+        coefficient
+        * (1, e, e * e)[e_power]
+        * math.sin(a * moon + b * sun + c * lat + d * node)
+        for coefficient, e_power, a, b, c, d in _lunar_terms(full=bool(k % 1))
+    )
+    planetary = sum(
+        coefficient * math.sin(math.radians(start + rate * k + squared * t * t))
+        for coefficient, start, rate, squared in _planetary_terms()
+    )
+    return jde + periodic + planetary
+
+
+def _lunar_terms(*, full: bool) -> tuple[tuple[float, int, int, int, int, int], ...]:
+    """Return Meeus table 49.A: coefficient, power of E, and multiples of M', M, F, Ω."""
+    first = (
         (-0.406_14, 0.173_02, 0.016_14, 0.010_43, 0.007_34, -0.005_15, 0.002_09)
-        if k % 1
+        if full
         else (-0.407_20, 0.172_41, 0.016_08, 0.010_39, 0.007_39, -0.005_14, 0.002_08)
     )
-    return jde + (
-        c[0] * math.sin(moon)
-        + c[1] * e * math.sin(sun)
-        + c[2] * math.sin(2 * moon)
-        + c[3] * math.sin(2 * node)
-        + c[4] * e * math.sin(moon - sun)
-        + c[5] * e * math.sin(moon + sun)
-        + c[6] * e * e * math.sin(2 * sun)
+    return (
+        (first[0], 0, 1, 0, 0, 0),
+        (first[1], 1, 0, 1, 0, 0),
+        (first[2], 0, 2, 0, 0, 0),
+        (first[3], 0, 0, 0, 2, 0),
+        (first[4], 1, 1, -1, 0, 0),
+        (first[5], 1, 1, 1, 0, 0),
+        (first[6], 2, 0, 2, 0, 0),
+        (-0.001_11, 0, 1, 0, -2, 0),
+        (-0.000_57, 0, 1, 0, 2, 0),
+        (0.000_56, 1, 2, 1, 0, 0),
+        (-0.000_42, 0, 3, 0, 0, 0),
+        (0.000_42, 1, 0, 1, 2, 0),
+        (0.000_38, 1, 0, 1, -2, 0),
+        (-0.000_24, 1, 2, -1, 0, 0),
+        (-0.000_17, 0, 0, 0, 0, 1),
+        (-0.000_07, 0, 1, 2, 0, 0),
+        (0.000_04, 0, 2, 0, -2, 0),
+        (0.000_04, 0, 0, 3, 0, 0),
+        (0.000_03, 0, 1, 1, -2, 0),
+        (0.000_03, 0, 2, 0, 2, 0),
+        (-0.000_03, 0, 1, 1, 2, 0),
+        (0.000_03, 0, 1, -1, 2, 0),
+        (-0.000_02, 0, 1, -1, -2, 0),
+        (-0.000_02, 0, 3, 1, 0, 0),
+        (0.000_02, 0, 4, 0, 0, 0),
+    )
+
+
+def _planetary_terms() -> tuple[tuple[float, float, float, float], ...]:
+    """Return Meeus's additional corrections A1-A14: coefficient, angle, rate, T²."""
+    return (
+        (0.000_325, 299.77, 0.107_408, -0.009_173),
+        (0.000_165, 251.88, 0.016_321, 0),
+        (0.000_164, 251.83, 26.651_886, 0),
+        (0.000_126, 349.42, 36.412_478, 0),
+        (0.000_110, 84.66, 18.206_239, 0),
+        (0.000_062, 141.74, 53.303_771, 0),
+        (0.000_060, 207.14, 2.453_732, 0),
+        (0.000_056, 154.84, 7.306_860, 0),
+        (0.000_047, 34.52, 27.261_239, 0),
+        (0.000_042, 207.19, 0.121_824, 0),
+        (0.000_040, 291.34, 1.844_379, 0),
+        (0.000_037, 161.72, 24.198_154, 0),
+        (0.000_035, 239.56, 25.513_099, 0),
+        (0.000_023, 331.55, 3.592_518, 0),
     )
 
 

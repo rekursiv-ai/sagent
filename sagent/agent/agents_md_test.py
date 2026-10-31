@@ -246,15 +246,57 @@ def test_frontmatter_and_a_byte_order_mark_are_stripped(
     assert "title" not in section
 
 
-def test_malformed_frontmatter_is_dropped_and_the_body_kept(
+@pytest.mark.parametrize(
+    ("meta", "line"),
+    [("paths: [unclosed", "line 2"), ("paths: ['src/**']\npaths: ['**']", "line 3")],
+    ids=["malformed", "repeated-key"],
+)
+def test_a_file_whose_frontmatter_will_not_parse_is_skipped_with_a_warning(
+    tmp_path: Path,
+    cfg: AgentsMdConfig,
+    caplog: pytest.LogCaptureFixture,
+    meta: str,
+    line: str,
+) -> None:
+    """Its ``paths:`` cannot be read, so loading it would apply it everywhere."""
+    rule = _write(tmp_path / ".sagent" / "rules" / "r.md", f"---\n{meta}\n---\nbody\n")
+    _write(tmp_path / "AGENTS.md", "kept\n")
+
+    with caplog.at_level(logging.WARNING):
+        section = directives(tmp_path, config=cfg)
+        found = rules_for(tmp_path, [tmp_path / "a.py"], exclude=set(), config=cfg)
+
+    assert "body" not in section
+    assert "kept" in section
+    assert found == ("", set())
+    assert str(rule.resolve()) in caplog.text
+    assert line in caplog.text
+
+
+def test_a_window_keeps_each_file_it_skipped_where_it_was_reached(
     tmp_path: Path,
     cfg: AgentsMdConfig,
 ) -> None:
-    _write(tmp_path / "AGENTS.md", "---\npaths: [unclosed\n---\nbody\n")
+    root = _write(tmp_path / "AGENTS.md", "---\na: 1\na: 2\n---\nroot\n")
+    nested = _write(tmp_path / "sub" / "AGENTS.md", "---\nb: 1\nb: 2\n---\nsub\n")
+    window = Directives(root=tmp_path, config=cfg)
 
-    section = directives(tmp_path, config=cfg)
+    window.start()
+    at_start = list(window.skipped)
+    window.found([tmp_path / "sub"], [], given=set())
 
-    assert section.endswith(":\nbody")
+    assert at_start == [
+        (
+            f"Skipping {root.resolve()}: its frontmatter will not parse:"
+            f" {root.resolve()}, line 3: the key 'a' is given twice."
+        ),
+    ]
+    assert window.skipped[1:] == [
+        (
+            f"Skipping {nested.resolve()}: its frontmatter will not parse:"
+            f" {nested.resolve()}, line 3: the key 'b' is given twice."
+        ),
+    ]
 
 
 @pytest.mark.parametrize("meta", ["- a\n- b", "just words", "42"])

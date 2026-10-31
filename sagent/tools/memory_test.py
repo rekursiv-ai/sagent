@@ -209,16 +209,62 @@ async def test_a_name_that_files_like_another_is_refused_not_overwritten(
 
 
 @pytest.mark.asyncio
+async def test_a_memory_whose_frontmatter_will_not_parse_still_names_its_owner(
+    tmp_path: Path,
+) -> None:
+    """Written by hand or by an older tool, ``name: A: b`` is no YAML but a name."""
+    held = b"---\nname: Role: lead\ndescription: d\ntype: user\n---\n\nx\n"
+    (tmp_path / "user_role_lead.md").write_bytes(held)
+    memory = Memory(directory=tmp_path)
+    other = await _save(memory, "role lead", kind="user")
+    assert other.is_error is True
+    assert other.text() == (
+        "'role lead' files as the memory 'Role: lead'; save it under that name,"
+        " or another."
+    )
+    assert (tmp_path / "user_role_lead.md").read_bytes() == held
+    own = await _save(memory, "Role: lead", kind="user")
+    assert own.is_error is None, own.text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_a_name_line_with_an_unclosed_quote_names_its_owner_as_written(
+    tmp_path: Path,
+) -> None:
+    held = b'---\nname: "role lead\ndescription: a: b\n---\n\nx\n'
+    (tmp_path / "user_role_lead.md").write_bytes(held)
+    memory = Memory(directory=tmp_path)
+    other = await _save(memory, "role lead", kind="user")
+    assert other.text() == (
+        "'role lead' files as the memory '\"role lead'; save it under that name,"
+        " or another."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_quoted_name_in_frontmatter_that_will_not_parse_is_unquoted(
+    tmp_path: Path,
+) -> None:
+    """Today's writer quotes ``"Role: lead"``; a broken line elsewhere keeps it its own."""
+    held = b'---\nname: "Role: lead"\ndescription: a: b\n---\n\nx\n'
+    (tmp_path / "user_role_lead.md").write_bytes(held)
+    memory = Memory(directory=tmp_path)
+    own = await _save(memory, "Role: lead", kind="user")
+    assert own.is_error is None, own.text()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "held",
     [
         b"written by hand\n",
-        b"---\nname: Deploy: staging\n---\n\nx\n",
+        b"---\nname: role: lead\nname: x\n",
         b"---\n- a list\n---\n\nx\n",
         b"---\nname: [1]\n---\n\nx\n",
         b"\xff\xfe",
     ],
-    ids=["no-frontmatter", "bad-yaml", "not-a-mapping", "no-string-name", "not-utf8"],
+    ids=["no-frontmatter", "unclosed", "not-a-mapping", "no-string-name", "not-utf8"],
 )
 async def test_a_file_that_names_no_memory_is_replaced_by_its_name(
     tmp_path: Path,

@@ -52,7 +52,7 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
-from sagent.tools.types import Briefing, Reminding, ToolContext
+from sagent.tools.types import Briefing, Reminding, Skipping, ToolContext
 from sagent.types import AsyncResource
 
 
@@ -653,6 +653,7 @@ class RuntimeSession:
         self._memory: ModelMemory | None = None
         self._prompt: str | None = None
         self._directives = Directives(root=agent.root, config=agent.agents_md)
+        self._told: set[str] = set()
 
     # A window's prompt is read once, at its start, and never again until the next:
     # any byte it changed mid-window would rewrite the whole cached conversation. What
@@ -936,7 +937,26 @@ class RuntimeSession:
                     ),
                 )
         out.extend(self._reminders(context))
+        self._tell_skipped()
         return out
+
+    # The prompt is up by now, and logs go to the session's file; the user is told
+    # here, once a session, of each file the model was not given.
+    def _tell_skipped(self) -> None:
+        """Publish each AGENTS.md file and skill left unread, once."""
+        tool_context = self._agent.runtime.tool_context
+        for text in (
+            *self._directives.skipped,
+            *(
+                line
+                for tool in self._agent.tools.values()
+                if isinstance(tool, Skipping)
+                for line in tool.skipped(tool_context)
+            ),
+        ):
+            if text not in self._told:
+                self._told.add(text)
+                self._agent.runtime.publish(types.Skipped(text=text))
 
     # One that empties is withdrawn, so the model stops relying on what it said.
     def _reminders(

@@ -20,13 +20,13 @@ from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
 from sagent.providers.login import Logins
 from sagent.providers.table import ModelTable, ModelTags
-from sagent.tui.settings.harvest import harvest
+from sagent.settings.harvest import harvest
 from sagent.tui.settings.model import AgentModel
 
 
 if TYPE_CHECKING:
     from sagent.providers.types import ProviderFactory
-    from sagent.tui.settings.types import Setting
+    from sagent.settings.types import Setting
 
 
 def _windowed(model_id: str, window: int) -> ModelCapability:

@@ -3,6 +3,35 @@
 All notable sagent changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.2.1 - 2026-10-30
+
+### Added
+
+- The welcome logo becomes a holiday icon around 26 holidays, from the last
+  workday before each through its last day; overlapping holidays are picked
+  at random. Dates follow US observance: computed for seasons, Lunar New
+  Year, Mid-Autumn, Holi, Diwali, Vaisakhi, Easter, Thanksgiving and the
+  Hebrew holidays; announced for the Eids and Vesak. Terminals without 256
+  colors, or with `NO_COLOR`, keep the logo.
+- `sagent.lib.yaml.parse`, a YAML loader that refuses a key given twice, a
+  key that is no string, and an alias unless allowed, naming the line.
+
+### Changed
+
+- The model catalogs and the Bash read-only policy load through the strict
+  YAML loader. The Bash policy, once read by the pure-Python parser, loads
+  about nine times faster; the catalogs, already on the C parser, load about
+  as fast as before.
+- An AGENTS.md rule or a skill whose frontmatter will not parse is skipped,
+  and the session shows which file and line, rather than loading it with its
+  `paths:`, name, or description dropped.
+- Memory reads the owner of a memory file whose frontmatter will not parse
+  from its `name:` line, so another name cannot overwrite it.
+- Terminal output, tool rows, diffs and tool failures render aligned to the
+  active window.
+- Provider accounts and catalogs are discovered together, and a spent login
+  falls back to the next one with quota, saying which window was spent.
+
 ## 0.2.0 - 2026-10-29
 
 ### Changed

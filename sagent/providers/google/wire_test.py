@@ -966,10 +966,51 @@ def test_retry_info_with_an_odd_delay_defers_to_the_header() -> None:
     assert error.retry_after_sec == 2.0
 
 
+@pytest.mark.parametrize(
+    ("message", "wait_sec"),
+    [
+        # As agy 1.2.2 relayed the server's own words (antigravity-cli#1018).
+        (
+            (
+                "Individual quota reached. Please upgrade your subscription to"
+                " increase your limits. Resets in 2h39m52s."
+            ),
+            2 * 3_600 + 39 * 60 + 52,
+        ),
+        ("Your quota will reset after 155h19m17s.", 155 * 3_600 + 19 * 60 + 17),
+        ("Resets in 500ms.", 0.5),
+    ],
+)
+def test_a_spent_quota_without_advice_waits_for_the_reset_it_names(
+    message: str,
+    wait_sec: float,
+) -> None:
+    """Unread, the wait was nothing, and the spent quota looked like a throttle."""
+    body = [{"error": {"status": "RESOURCE_EXHAUSTED", "message": message}}]
+    error = wire.to_exception(429, body=body)
+    assert isinstance(error, RateLimitedError)
+    assert error.retry_after_sec == pytest.approx(wait_sec)
+    # A quota that resets is the login's, spent for every model it serves.
+    assert error.limit == "quota"
+
+
 def test_no_advice_is_no_wait() -> None:
     error = wire.to_exception(429, body={"error": {"message": "m"}})
     assert isinstance(error, RateLimitedError)
     assert error.retry_after_sec == 0.0
+
+
+def test_a_throttle_that_merely_mentions_quota_is_no_spent_quota() -> None:
+    """The API's per-minute throttle says ``check quota``, and resets on its own."""
+    body = {
+        "error": {
+            "status": "RESOURCE_EXHAUSTED",
+            "message": "Resource has been exhausted (e.g. check quota).",
+        },
+    }
+    error = wire.to_exception(429, body=body)
+    assert isinstance(error, RateLimitedError)
+    assert error.limit == ""
 
 
 def test_code_assist_wraps_its_error_in_a_list() -> None:

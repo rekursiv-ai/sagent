@@ -9,7 +9,7 @@ import dataclasses
 import pytest
 
 from sagent.runtime.exceptions import UserFacingError
-from sagent.tui.settings.types import HasSettings, Setting, SettingError
+from sagent.settings.types import HasSettings, Setting, SettingError
 
 
 if TYPE_CHECKING:

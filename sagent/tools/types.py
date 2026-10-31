@@ -77,6 +77,7 @@ __all__ = [
     "Briefing",
     "FileTracker",
     "Reminding",
+    "Skipping",
     "Tool",
     "ToolContext",
     "parse",
@@ -160,6 +161,15 @@ class Reminding(Protocol):
 
     def reminder(self, context: ToolContext) -> str:
         """Return what the model should know now; ``""`` for nothing."""
+        ...
+
+
+@runtime_checkable
+class Skipping(Protocol):
+    """A tool that reads the user's files and can leave one unread, such as a skill."""
+
+    def skipped(self, context: ToolContext) -> tuple[str, ...]:
+        """Return which files were left unread, and why; one line each."""
         ...
 
 

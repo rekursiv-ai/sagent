@@ -37,7 +37,6 @@ def test_the_console_printer_has_every_member_a_printer_declares() -> None:
     members = _members()
     assert members == {
         "show_thinking",
-        "last_call",
         "line",
         "note",
         "user",
@@ -54,8 +53,7 @@ def test_the_console_printer_has_every_member_a_printer_declares() -> None:
     printer = ConsolePrinter(Console(file=io.StringIO()))
     assert {name for name in members if not hasattr(printer, name)} == set()
     found = dict[str, object]((name, getattr(printer, name)) for name in members)
-    fields = {"show_thinking", "last_call"}
-    assert all(callable(found[name]) for name in members - fields)
+    assert all(callable(found[name]) for name in members - {"show_thinking"})
 
 
 @pytest.mark.parametrize(

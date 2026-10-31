@@ -8,7 +8,7 @@ import pytest
 
 from sagent.model.scripted import ScriptedProvider
 from sagent.runtime.runtime import Runtime
-from sagent.tui.settings.harvest import harvest
+from sagent.settings.harvest import harvest
 from sagent.tui.settings.runtime import RuntimeSettings
 
 

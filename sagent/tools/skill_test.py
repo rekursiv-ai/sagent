@@ -63,9 +63,13 @@ def loads(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     seen: list[Path] = []
     real = skill._load
 
-    def counting(directory: Path, source: Source) -> SkillInfo | None:
+    def counting(
+        directory: Path,
+        source: Source,
+        skipped: list[str],
+    ) -> SkillInfo | None:
         seen.append(directory)
-        return real(directory, source)
+        return real(directory, source, skipped)
 
     monkeypatch.setattr(skill, "_load", counting)
     return seen
@@ -212,10 +216,46 @@ def test_a_non_text_name_or_description_is_skipped_with_a_warning(
 
 
 @pytest.mark.parametrize(
-    "frontmatter",
-    ["---\nname: [unclosed\n---\n", "---\n- a list\n---\n", "\ufeff---\nx: 1\n---\n"],
+    "meta",
+    ["name: [unclosed\n", "name: plain\ndescription: a\nname: other\n"],
+    ids=["malformed", "repeated-key"],
 )
-def test_unusable_frontmatter_is_dropped_and_the_body_kept(
+def test_a_skill_whose_frontmatter_will_not_parse_is_skipped_with_a_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    meta: str,
+) -> None:
+    """Its name and description cannot be read; guessing them hides the typo."""
+    directory = tmp_path / ".sagent" / "skills" / "plain"
+    directory.mkdir(parents=True)
+    path = directory / "SKILL.md"
+    path.write_text(f"---\n{meta}---\nThe body.\n", encoding="utf-8")
+    _write(tmp_path, "good", name="good")
+    with caplog.at_level(logging.WARNING):
+        skills = Skill(user_dir=tmp_path / "u").discover(tmp_path)
+    assert _names(skills) == ["good"]
+    assert str(path) in caplog.text
+    assert "line " in caplog.text
+
+
+def test_a_skipped_skill_is_told_from_where_the_agent_started(tmp_path: Path) -> None:
+    path = tmp_path / ".sagent" / "skills" / "twice" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("---\nname: twice\nname: other\n---\nbody\n", encoding="utf-8")
+    skill = Skill(user_dir=tmp_path / "u", builtin_dir=tmp_path / "b")
+    assert skill.skipped(ToolContext(cwd=tmp_path)) == (
+        (
+            f"Skipping skill {path}: its frontmatter will not parse: {path}, line 3:"
+            " the key 'name' is given twice."
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    ["---\n- a list\n---\n", "\ufeff---\nx: 1\n---\n"],
+)
+def test_frontmatter_that_names_nothing_is_dropped_and_the_body_kept(
     tmp_path: Path,
     frontmatter: str,
 ) -> None:

@@ -32,7 +32,6 @@ from typing import TYPE_CHECKING, ClassVar, override
 import asyncio
 import hashlib
 import os
-import re
 import shutil
 import tempfile
 
@@ -42,6 +41,7 @@ from sagent.model.cost import TokenCount
 from sagent.model.exceptions import AuthError, DisconnectedError, RateLimitedError
 from sagent.model.types import Response, TextChunk
 from sagent.providers import google
+from sagent.providers.google import wire
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import HasModels
 from sagent.session.types import (
@@ -805,27 +805,12 @@ def _failure(result: Mapping[str, object]) -> Exception:
     if "authenticat" in lowered or "sign in" in lowered:
         return AuthError(f"{error}; run agy once to sign in")
     if "resource_exhausted" in lowered or "quota" in lowered or "429" in lowered:
-        return RateLimitedError(error, retry_after_sec=_reset_sec(lowered))
+        return RateLimitedError(
+            error,
+            retry_after_sec=wire.reset_sec(lowered),
+            limit=wire.quota_window(lowered),
+        )
     return RuntimeError(f"agy: {error}")
-
-
-# The server's words, which agy passes on: "Resets in 2h39m52s." from agy 1.2
-# (antigravity-cli#1018), "Your quota will reset after 155h19m17s." before it.
-def _reset_sec(error: str) -> float:
-    """Return the wait a spent quota's message names; ``0`` when it names none."""
-    # Go's spelling of a duration: ``155h19m17s``, ``1m0.5s``, or ``500ms``.
-    found = re.search(
-        r"reset(?:s in| after) (?:(\d+)h)?(?:(\d+)m(?!s))?(?:(\d+(?:\.\d+)?)(m?)s)?",
-        error,
-    )
-    if found is None:
-        return 0.0
-    hours, minutes, seconds, milli = found.groups()
-    return (
-        float(hours or 0) * 3_600
-        + float(minutes or 0) * 60
-        + float(seconds or 0) / (1_000 if milli else 1)
-    )
 
 
 def _object(value: object) -> dict[str, object]:

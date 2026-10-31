@@ -33,7 +33,8 @@ from pygments.util import ClassNotFound
 from rich.cells import cell_len
 from rich.text import Text
 
-from sagent.tui.types import Sticky
+from sagent.tools.display import Elided
+from sagent.tui.types import Sticky, hang
 
 
 if TYPE_CHECKING:
@@ -125,14 +126,13 @@ def render_diff(
         number = old if sigil == "-" else new
         if index in hidden:
             if index == hidden.start:
-                console.print(
-                    Text.assemble(
-                        row_indent,
-                        Text(
-                            f"{' ' * (digits + 1)}⋯ {len(hidden)} lines ⋯",
-                            style="dim",
-                        ),
-                    ),
+                lead = Text(row_indent + " " * (digits + 1))
+                hang(
+                    console,
+                    Text(Elided(hidden=len(hidden)).marker, style="dim"),
+                    first=lead,
+                    rest=lead,
+                    width=width,
                 )
         elif index in pairs:
             _print_words(
@@ -385,19 +385,15 @@ def _print_rows(
     fill_style: str,
     width: int,
 ) -> None:
-    """Print ``content`` wrapped inside ``width``, later rows indented past ``margin``."""
-    usable = width - cell_len(row_indent) - len(margin)
-    rows = content.wrap(console, max(1, usable), overflow="fold") or [Text("")]
-    for i, row in enumerate(rows):
-        console.print(
-            Text.assemble(
-                row_indent,
-                Text(margin if i == 0 else " " * len(margin), style=margin_style),
-                row,
-                Text(" " * max(0, usable - row.cell_len), style=fill_style),
-            ),
-            no_wrap=True,
-        )
+    """Print ``content`` inside ``width``, later rows indented past ``margin``."""
+    hang(
+        console,
+        content,
+        first=Text.assemble(row_indent, Text(margin, style=margin_style)),
+        rest=Text.assemble(row_indent, Text(" " * len(margin), style=margin_style)),
+        width=width,
+        background=fill_style,
+    )
 
 
 class _Monokai(Style):

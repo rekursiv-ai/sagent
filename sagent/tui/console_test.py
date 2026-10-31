@@ -14,11 +14,14 @@ from rich.style import Style
 import pytest
 
 from sagent.runtime import types
+from sagent.tools.bash import Bash
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tui.console import ConsolePrinter, ConsoleStyle, Screen, Title
+from sagent.tui.types import Header
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from sagent.tui.types import Printer
@@ -107,7 +110,7 @@ def test_a_user_bar_fills_the_width_with_a_prompt_on_its_first_row() -> None:
         "",
         "> hello     ",
         "  world wide",
-        "   web      ",
+        "  web       ",
     ]
     assert all("48;2;55;55;55" in _codes(r)[0] for r in raw[1:])
     assert all(_codes(r)[0].startswith("37;") for r in raw[1:])
@@ -238,7 +241,9 @@ def test_streamed_thinking_rows_join_into_the_whole_block() -> None:
 
 def test_a_call_header_is_indented_and_its_input_follows_the_mark() -> None:
     screen = _Screen(color=True)
-    screen.printer.call("Bash list files\nls -la\ncd /", display=ToolDisplay())
+    screen.printer.call(
+        Header(key="1", label="Bash list files\nls -la\ncd /", display=ToolDisplay()),
+    )
     raw = screen.raw()
     assert [_visible(r) for r in raw] == [
         "  Bash list files",
@@ -251,20 +256,24 @@ def test_a_call_header_is_indented_and_its_input_follows_the_mark() -> None:
 
 def test_a_call_with_no_input_is_its_header_alone() -> None:
     screen = _Screen()
-    screen.printer.call("Read a.py", display=ToolDisplay())
-    screen.printer.call("", display=ToolDisplay())
+    screen.printer.call(Header(key="1", label="Read a.py", display=ToolDisplay()))
+    screen.printer.call(Header(key="1", label="", display=ToolDisplay()))
     assert screen.rows() == ["  Read a.py", ""]
 
 
 def test_a_long_header_wraps_at_the_indent() -> None:
     screen = _Screen(width=12)
-    screen.printer.call("abcdefghijklmnop", display=ToolDisplay())
+    screen.printer.call(
+        Header(key="1", label="abcdefghijklmnop", display=ToolDisplay()),
+    )
     assert screen.rows() == ["  abcdefghij", "  klmnop"]
 
 
 def test_a_wrapped_header_hangs_under_its_argument() -> None:
     screen = _Screen(width=20)
-    screen.printer.call("Grep " + "y" * 30, display=ToolDisplay())
+    screen.printer.call(
+        Header(key="1", label="Grep " + "y" * 30, display=ToolDisplay()),
+    )
     assert screen.rows() == [
         "  Grep " + "y" * 13,
         "       " + "y" * 13,
@@ -274,13 +283,13 @@ def test_a_wrapped_header_hangs_under_its_argument() -> None:
 
 def test_the_header_is_capped_and_says_how_many_rows_it_hid() -> None:
     screen = _Screen(width=24, max_label_lines=3)
-    screen.printer.call("a" * 110, display=ToolDisplay())
+    screen.printer.call(Header(key="1", label="a" * 110, display=ToolDisplay()))
     assert screen.rows() == ["  " + "a" * 22, "  " + "a" * 22, "  ... (3 more lines)"]
 
 
 def test_a_header_at_the_cap_is_kept_whole() -> None:
     screen = _Screen(width=12, max_label_lines=2)
-    screen.printer.call("a" * 20, display=ToolDisplay())
+    screen.printer.call(Header(key="1", label="a" * 20, display=ToolDisplay()))
     assert screen.rows() == ["  aaaaaaaaaa", "  aaaaaaaaaa"]
 
 
@@ -290,28 +299,32 @@ def test_the_input_rows_follow_the_display_and_its_language() -> None:
         command_language="bash",
     )
     plain = _Screen()
-    plain.printer.call("Bash\na\nb\nc", display=display)
+    plain.printer.call(Header(key="1", label="Bash\na\nb\nc", display=display))
     assert plain.rows() == ["  Bash", "  ⎿ a", "    ⋯ 1 lines ⋯", "    c"]
     colored = _Screen(color=True)
-    colored.printer.call("Bash\necho hi", display=display)
+    colored.printer.call(Header(key="1", label="Bash\necho hi", display=display))
     unhighlighted = _Screen(color=True)
-    unhighlighted.printer.call("Bash\necho hi", display=ToolDisplay())
+    unhighlighted.printer.call(
+        Header(key="1", label="Bash\necho hi", display=ToolDisplay()),
+    )
     assert colored.raw() != unhighlighted.raw()
     assert [_visible(r) for r in colored.raw()] == ["  Bash", "  ⎿ echo hi"]
 
 
 def test_input_rows_wrap_at_the_mark() -> None:
     screen = _Screen(width=10)
-    screen.printer.call("H\nabcdefghij", display=ToolDisplay())
+    screen.printer.call(Header(key="1", label="H\nabcdefghij", display=ToolDisplay()))
     assert screen.rows() == ["  H", "  ⎿ abcdef", "    ghij"]
 
 
 def test_output_rows_are_dim_at_the_output_indent() -> None:
     screen = _Screen(width=10, color=True)
-    screen.printer.output("one\ntwo three", display=ToolDisplay(output=DisplaySpec()))
+    shown = ToolDisplay(output=DisplaySpec())
+    screen.printer.output("one\ntwo three\nX\n\n", display=shown)
     raw = screen.raw()
-    assert [_visible(r) for r in raw] == ["    one", "    two th", "    ree"]
-    assert all(_codes(r)[0] == "2" for r in raw)
+    assert [_visible(r) for r in raw] == ["    one", "    two th", "    ree", "    X"]
+    assert all(r.startswith("\x1b[2m    ") for r in raw)
+    assert all(codes == "2" for r in raw for codes, _ in _runs(r))
 
 
 @pytest.mark.parametrize("width", [10, 80, 196])
@@ -347,18 +360,18 @@ def _under_a_header(kind: str) -> list[str]:
     shown = ToolDisplay(output=DisplaySpec())
     match kind:
         case "input":
-            printer.call("Bash ls\nls\npwd", display=shown)
+            printer.call(Header(key="1", label="Bash ls\nls\npwd", display=shown))
         case "output":
-            printer.call("Bash ls", display=shown)
+            printer.call(Header(key="1", label="Bash ls", display=shown))
             printer.output("one\ntwo", display=shown)
         case "diff":
-            printer.call("Edit a.py", display=shown)
+            printer.call(Header(key="1", label="Edit a.py", display=shown))
             printer.diff("@@ -1 +1 @@\n-a\n+b", path="a.py")
         case "failed":
-            printer.call("Read a.py", display=shown)
+            printer.call(Header(key="1", label="Read a.py", display=shown))
             printer.failed("gone\nwhy")
         case _:
-            printer.call("Read a.py", display=shown)
+            printer.call(Header(key="1", label="Read a.py", display=shown))
             printer.error("gone\nwhy")
     return screen.rows()[1:]
 
@@ -383,7 +396,7 @@ def test_only_input_takes_the_mark_and_results_sit_at_the_output_indent(
 def test_a_row_after_the_first_sits_unmarked_at_the_output_indent() -> None:
     screen = _Screen()
     shown = ToolDisplay(output=DisplaySpec())
-    screen.printer.call("Bash ls\nls", display=shown)
+    screen.printer.call(Header(key="1", label="Bash ls\nls", display=shown))
     screen.printer.output("[undetached; #9]", display=shown)
     screen.printer.diff("@@ -1 +1 @@\n-a\n+b", path="a.py")
     assert screen.rows()[1:] == [
@@ -394,16 +407,26 @@ def test_a_row_after_the_first_sits_unmarked_at_the_output_indent() -> None:
     ]
 
 
-def test_the_last_call_is_the_one_whose_header_printed_last() -> None:
+_OUTPUT = ToolDisplay(output=DisplaySpec())
+_READ = Header(key="1", label="Read a.py", display=_OUTPUT)
+
+
+def test_a_row_right_under_its_call_names_it_once() -> None:
     screen = _Screen()
     printer = screen.printer
-    assert printer.last_call is None
-    printer.call("Read a.py", display=ToolDisplay(), key="1")
-    assert printer.last_call == "1"
-    printer.output("hidden", display=ToolDisplay())
-    assert printer.last_call == "1"
-    printer.call("Read b.py", display=ToolDisplay())
-    assert printer.last_call is None
+    printer.call(_READ)
+    printer.output("[undetached; #1]", display=_OUTPUT, header=_READ)
+    printer.output("said", display=_OUTPUT, header=_READ)
+    printer.diff("@@ -1 +1 @@\n-a\n+b", path="a.py", header=_READ)
+    printer.failed("broke", header=_READ)
+    assert screen.rows() == [
+        "  Read a.py",
+        "    [undetached; #1]",
+        "    said",
+        "    1 a",
+        "    1 b",
+        "    ✗ broke",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -415,66 +438,120 @@ def test_the_last_call_is_the_one_whose_header_printed_last() -> None:
         "agent",
         "markdown",
         "thinking",
-        "output",
-        "diff",
+        "other-call",
+        "other-output",
         "error",
-        "failed",
         "halt",
+        "screen",
     ],
 )
-def test_any_row_printed_after_a_call_ends_it_being_last(kind: str) -> None:
-    printer = _Screen().printer
-    printer.call("Read a.py", display=ToolDisplay(), key="1")
+@pytest.mark.parametrize("row", ["output", "diff", "failed"])
+def test_a_row_below_anything_else_names_its_call_again(kind: str, row: str) -> None:
+    screen = _Screen()
+    printer = screen.printer
+    printer.call(_READ)
+    other = Header(key="2", label="Read b.py", display=_OUTPUT)
     match kind:
         case "agent":
             printer.agent("w", None, "x")
         case "thinking":
             printer.thinking("x", opens=False, closes=False)
-        case "output":
-            printer.output("x", display=ToolDisplay(output=DisplaySpec()))
-        case "diff":
-            printer.diff("@@ -1 +1 @@\n-a\n+b", path="a.py")
+        case "other-call":
+            printer.call(other)
+        case "other-output":
+            printer.output("x", display=_OUTPUT, header=other)
+        case "screen":
+            printer.screen.write("a warning\n")
         case _:
             getattr(printer, kind)("x")
-    assert printer.last_call is None
+    match row:
+        case "output":
+            printer.output("said", display=_OUTPUT, header=_READ)
+        case "diff":
+            printer.diff("@@ -1 +1 @@\n-a\n+b", path="a.py", header=_READ)
+        case _:
+            printer.failed("broke", header=_READ)
+    rows = screen.rows()
+    assert rows.count("  Read a.py") == 2
+    assert rows[rows.index("  Read a.py", 1) + 1].startswith("    ")
 
 
-def test_a_write_to_the_screen_past_the_printer_ends_the_last_call() -> None:
+@pytest.mark.parametrize(
+    "kind",
+    ["hidden-output", "blank-thinking", "title", "partial-line", "nothing"],
+)
+def test_what_prints_no_row_leaves_its_call_last(kind: str) -> None:
     screen = _Screen()
     printer = screen.printer
-    printer.call("Read a.py", display=ToolDisplay(), key="1")
-    assert printer.screen.write("") == 0
-    before = printer.last_call
-    printer.screen.write("a warning\n")
-    assert (before, printer.last_call) == ("1", None)
-    assert screen.rows()[-1] == "a warning"
+    printer.call(_READ)
+    match kind:
+        case "hidden-output":
+            printer.output("x", display=ToolDisplay(), header=_READ)
+        case "blank-thinking":
+            printer.thinking("", opens=False, closes=True)
+        case "title":
+            printer.screen.write("\x1b]0;working\x07")
+        case "partial-line":
+            printer.screen.write("")
+        case _:
+            pass
+    printer.output("said", display=_OUTPUT, header=_READ)
+    rows = [r for r in screen.rows() if r.strip()]
+    assert (rows[0], rows[-1].endswith("    said"), len(rows)) == (
+        "  Read a.py",
+        True,
+        2,
+    )
 
 
-def test_a_screen_counts_and_passes_on_what_is_written(tmp_path: Path) -> None:
+def test_a_result_that_prints_no_row_names_no_call_again() -> None:
+    screen = _Screen()
+    printer = screen.printer
+    printer.call(_READ)
+    printer.note("x")
+    printer.output("hidden", display=ToolDisplay(), header=_READ)
+    printer.output("  \n", display=_OUTPUT, header=_READ)
+    assert screen.rows() == ["  Read a.py", "x"]
+
+
+def test_a_row_that_prints_only_after_cleaning_still_names_its_call() -> None:
+    screen = _Screen()
+    printer = screen.printer
+    printer.call(_READ)
+    printer.note("x")
+    printer.output("\x0b", display=_OUTPUT, header=_READ)
+    assert screen.rows()[-2:] == ["  Read a.py", "    ^K"]
+
+
+def test_rows_written_through_the_given_screen_name_the_call_again() -> None:
+    out = io.StringIO()
+    screen = Screen(out)
+    printer = ConsolePrinter(Console(file=out, width=40), screen=screen)
+    printer.call(_READ)
+    screen.write("a warning\n")
+    printer.output("said", display=_OUTPUT, header=_READ)
+    assert out.getvalue().count("Read a.py") == 2
+
+
+def test_a_screen_counts_the_rows_it_passes_on(tmp_path: Path) -> None:
     with (tmp_path / "out").open("w") as file:
         screen = Screen(file)
-        assert screen.written == 0
-        assert screen.write("ab") == 2
+        assert screen.rows == 0
+        assert screen.write("a\x1b]0;t\x07") == 7
+        screen.write("b\nc\n")
         screen.flush()
-        assert (screen.written, screen.isatty(), screen.fileno()) == (
+        assert (screen.rows, screen.isatty(), screen.fileno()) == (
             2,
             False,
             file.fileno(),
         )
-    assert (tmp_path / "out").read_text() == "ab"
-
-
-def test_thinking_that_prints_nothing_leaves_the_last_call() -> None:
-    printer = _Screen().printer
-    printer.call("Read a.py", display=ToolDisplay(), key="1")
-    printer.thinking("", opens=False, closes=True)
-    assert printer.last_call == "1"
+    assert (tmp_path / "out").read_text() == "a\x1b]0;t\x07b\nc\n"
 
 
 def test_the_mark_is_the_printer_s_to_choose() -> None:
     out = io.StringIO()
     printer = ConsolePrinter(Console(file=out, width=40, color_system=None), mark="└")
-    printer.call("Bash ls\nls", display=ToolDisplay())
+    printer.call(Header(key="1", label="Bash ls\nls", display=ToolDisplay()))
     assert out.getvalue().splitlines()[1] == "  └ ls"
 
 
@@ -482,21 +559,25 @@ _FAILURES = [("error", "  "), ("failed", "    ")]
 """Each way to write what failed, and the indent its ``✗`` follows."""
 
 
-@pytest.mark.parametrize(("kind", "lead"), _FAILURES)
-def test_a_failure_is_red_with_an_x_on_its_first_row(kind: str, lead: str) -> None:
+@pytest.mark.parametrize(("kind", "indent"), _FAILURES)
+def test_a_failure_is_red_with_an_x_on_its_first_row(kind: str, indent: str) -> None:
     screen = _Screen(color=True)
     getattr(screen.printer, kind)("failed\ndetail\n")
     raw = screen.raw()
-    assert [_visible(r) for r in raw] == [f"{lead}✗ failed", f"{lead}  detail"]
+    assert [_visible(r) for r in raw] == [f"{indent}✗ failed", f"{indent}  detail"]
     assert all(_codes(r)[0] == "2;31" for r in raw)
 
 
-@pytest.mark.parametrize(("kind", "lead"), _FAILURES)
+@pytest.mark.parametrize(("kind", "indent"), _FAILURES)
 @pytest.mark.parametrize("text", ["", "\n", "  \n \n"])
-def test_a_blank_failure_still_says_something(kind: str, lead: str, text: str) -> None:
+def test_a_blank_failure_still_says_something(
+    kind: str,
+    indent: str,
+    text: str,
+) -> None:
     screen = _Screen()
     getattr(screen.printer, kind)(text)
-    assert screen.rows() == [f"{lead}✗ <no error message>"]
+    assert screen.rows() == [f"{indent}✗ <no error message>"]
 
 
 @pytest.mark.parametrize(
@@ -589,7 +670,9 @@ def _print_hostile(printer: ConsolePrinter, kind: str) -> None:
         case "agent":
             printer.agent(_HOSTILE, _HOSTILE, _HOSTILE)
         case "call":
-            printer.call(f"{_HOSTILE}\n{_HOSTILE}", display=shown)
+            printer.call(
+                Header(key="1", label=f"{_HOSTILE}\n{_HOSTILE}", display=shown),
+            )
         case "output":
             printer.output(_HOSTILE, display=shown)
         case "thinking":
@@ -649,7 +732,7 @@ def _runs(row: str) -> list[tuple[str, str]]:
 
 def test_an_input_row_and_its_mark_are_dim() -> None:
     screen = _Screen(color=True)
-    screen.printer.call("H\nls -la", display=ToolDisplay())
+    screen.printer.call(Header(key="1", label="H\nls -la", display=ToolDisplay()))
     mark, body = _runs(screen.raw()[1])
     assert mark == ("2", "  ⎿ ")
     assert body == ("2", "ls -la")
@@ -657,7 +740,13 @@ def test_an_input_row_and_its_mark_are_dim() -> None:
 
 def test_a_highlighted_input_row_is_dim_too() -> None:
     screen = _Screen(color=True)
-    screen.printer.call("H\necho hi", display=ToolDisplay(command_language="bash"))
+    screen.printer.call(
+        Header(
+            key="1",
+            label="H\necho hi",
+            display=ToolDisplay(command_language="bash"),
+        ),
+    )
     runs = _runs(screen.raw()[1])[1:]
     assert len(runs) > 1
     assert all("2" in codes.split(";") for codes, _ in runs)
@@ -666,7 +755,7 @@ def test_a_highlighted_input_row_is_dim_too() -> None:
 def test_a_header_is_capped_at_twelve_rows_by_default() -> None:
     screen = _Screen(width=30)
     screen.printer = ConsolePrinter(screen.printer.console)
-    screen.printer.call("a" * 1000, display=ToolDisplay())
+    screen.printer.call(Header(key="1", label="a" * 1000, display=ToolDisplay()))
     rows = screen.rows()
     assert len(rows) == 12
     assert rows[-1] == "  ... (25 more lines)"
@@ -674,7 +763,7 @@ def test_a_header_is_capped_at_twelve_rows_by_default() -> None:
 
 def test_a_header_on_a_tiny_console_still_wraps_by_one_cell() -> None:
     screen = _Screen(width=3)
-    screen.printer.call("abc", display=ToolDisplay())
+    screen.printer.call(Header(key="1", label="abc", display=ToolDisplay()))
     assert screen.rows() == ["  a", "  b", "  c"]
 
 
@@ -703,7 +792,7 @@ def test_every_row_after_a_user_bar_follows_one_blank_line(follow: str) -> None:
     printer.user("u")
     match follow:
         case "call":
-            printer.call("Bash ls", display=ToolDisplay())
+            printer.call(Header(key="1", label="Bash ls", display=ToolDisplay()))
         case "thinking":
             printer.thinking("t", opens=False, closes=False)
         case "agent":
@@ -729,14 +818,20 @@ def test_a_user_bar_keeps_a_trailing_x_and_drops_trailing_newlines() -> None:
     assert screen.rows() == ["", "> hello X"]
 
 
-@pytest.mark.parametrize(("kind", "lead"), _FAILURES)
-def test_a_failure_keeps_its_text_but_the_final_newlines(kind: str, lead: str) -> None:
+@pytest.mark.parametrize(("kind", "indent"), _FAILURES)
+def test_a_failure_keeps_its_text_but_the_final_newlines(
+    kind: str,
+    indent: str,
+) -> None:
     screen = _Screen(color=True)
     getattr(screen.printer, kind)("\nfailed X  \n")
-    assert [_visible(r) for r in screen.raw()] == [f"{lead}✗ ", f"{lead}  failed X  "]
+    assert [_visible(r) for r in screen.raw()] == [
+        f"{indent}✗ ",
+        f"{indent}  failed X  ",
+    ]
     plain = _Screen()
     getattr(plain.printer, kind)("failed X\n")
-    assert plain.rows() == [f"{lead}✗ failed X"]
+    assert plain.rows() == [f"{indent}✗ failed X"]
 
 
 def test_a_diff_is_highlighted_by_its_path() -> None:
@@ -753,6 +848,194 @@ def test_the_style_picks_the_colors() -> None:
     printer = ConsolePrinter(console, style=ConsoleStyle(quiet=Style(italic=True)))
     printer.note("n")
     assert _codes(out.getvalue())[0] == "3"
+
+
+_ALL = ToolDisplay(command=DisplaySpec(lines=None), output=DisplaySpec(lines=None))
+
+_INPUTS = {
+    "long": "w" * 90,
+    "tabs": "a\tb\t" * 15,
+    "cjk": "错误" * 30,
+    "emoji": "🙂👍🏽" * 20,
+    "spaced": "word " * 25,
+    "multiline": "line one\n" + "z" * 70 + "\nline three",
+    "trailing-newline": "only\n",
+    "empty": "",
+}
+
+
+def _diff_of(text: str) -> str:
+    return "@@ -1 +1 @@\n" + "\n".join(f"+{ln}" for ln in text.split("\n"))
+
+
+# Each kind: how to print a text, then the patterns its first row and every later
+# row start with. A row matching neither has fallen out of its column.
+_KINDS: dict[str, tuple[Callable[[ConsolePrinter, str], None], str, str]] = {
+    "note": (lambda p, s: p.note(s, lead="Agent_0: "), "Agent_0: ", " " * 9),
+    "user": (lambda p, s: p.user(s), "> ", "  "),
+    "agent": (lambda p, s: p.agent("w", "Agent", s), "w→Agent: ", "  "),
+    "thinking": (lambda p, s: p.thinking(s, opens=False, closes=True), "  ", "  "),
+    "header": (
+        lambda p, s: p.call(Header(key="1", label="Bash " + s, display=_ALL)),
+        "  ",
+        "  ",
+    ),
+    "input": (
+        lambda p, s: p.call(Header(key="1", label="Bash\n" + s, display=_ALL)),
+        "  (Bash|⎿ )",
+        "    ",
+    ),
+    "output": (lambda p, s: p.output(s, display=_ALL), "    ", "    "),
+    "error": (lambda p, s: p.error(s), "  ✗ ", "    "),
+    "failed": (lambda p, s: p.failed(s), "    ✗ ", "      "),
+    "diff": (lambda p, s: p.diff(_diff_of(s), path="a.txt"), r"\s*\d+ ", "    "),
+}
+
+
+@pytest.mark.parametrize("given", list(_INPUTS))
+@pytest.mark.parametrize("kind", list(_KINDS))
+def test_every_row_stays_in_its_column_inside_the_pane(kind: str, given: str) -> None:
+    """A wrapped row continues under its own prefix, never back at column 0.
+
+    Each method wrapped its own rows: ``chop_cells`` counts a tab as no cells,
+    so a tabbed row overran the pane and the console wrapped it to column 0;
+    reasoning was not wrapped at all.
+    """
+    emit, first, rest = _KINDS[kind]
+    screen = _Screen()
+    emit(screen.printer, _INPUTS[given])
+    rows = [r for r in screen.raw() if r.strip()]
+    for row in rows:
+        assert len(_visible(row)) <= 40, f"{row!r} overruns the pane"
+        assert "\t" not in row, f"{row!r} sends a tab"
+        assert re.match(first, row) or row.startswith(rest), f"{row!r} left its column"
+    if _INPUTS[given].strip():
+        assert _visible(screen.raw()[-1]).strip(), "a trailing blank row"
+
+
+_SENTENCE = "alpha beta gamma delta epsilon zeta eta theta iota"
+
+# What a person or a model wrote, and the lead its first row starts with.
+_PROSE: dict[str, tuple[Callable[[ConsolePrinter, str], None], str]] = {
+    "child-reply": (lambda p, s: p.note(s, lead="Agent_0: ", prose=True), "Agent_0: "),
+    "user": (lambda p, s: p.user(s), "> "),
+    "agent": (lambda p, s: p.agent("w", None, s), "w→me: "),
+    "thinking": (lambda p, s: p.thinking(s, opens=False, closes=True), ""),
+    "header": (
+        lambda p, s: p.call(Header(key="1", label="Bash " + s, display=_ALL)),
+        "Bash ",
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", list(_PROSE))
+def test_prose_wraps_between_words(kind: str) -> None:
+    """A sentence breaks at a space; cutting mid-word made prose hard to read."""
+    emit, lead = _PROSE[kind]
+    screen = _Screen(width=33)
+    emit(screen.printer, _SENTENCE)
+    rows = [r for r in screen.rows() if r.strip()]
+    assert len(rows) > 1
+    assert rows[0].lstrip().startswith(lead)
+    words = " ".join(rows).replace(lead, "", 1).split()
+    assert words == _SENTENCE.split(), rows
+
+
+# What a tool or the harness wrote, the text's first and later leads: a space in it
+# may be content, such as a column's alignment.
+_VERBATIM: dict[str, tuple[Callable[[ConsolePrinter, str], None], int, int]] = {
+    "failed": (lambda p, s: p.failed(s), 6, 6),
+    "error": (lambda p, s: p.error(s), 4, 4),
+    "note": (lambda p, s: p.note(s), 0, 0),
+}
+
+
+@pytest.mark.parametrize("kind", list(_VERBATIM))
+def test_a_tool_s_or_the_harness_s_text_keeps_its_spacing(kind: str) -> None:
+    """Breaking between words dropped the spaces at each break, losing columns."""
+    emit, first, rest = _VERBATIM[kind]
+    text = "col_a      col_b      col_c      col_d      col_e      col_f"
+    screen = _Screen(width=40)
+    emit(screen.printer, text)
+    rows = screen.raw()
+    assert rows[0][first:] == text[: 40 - first], rows
+    assert rows[1][rest:].rstrip() == text[40 - first :][: 40 - rest].rstrip(), rows
+
+
+def test_a_command_s_tab_is_as_wide_as_an_output_s() -> None:
+    """``Bash.summary`` made a tab four spaces; the printer makes it a tab stop."""
+    screen = _Screen()
+    screen.printer.call(
+        Header(key="1", label=Bash().summary({"command": "a\tb"}), display=_ALL),
+    )
+    screen.printer.output("a\tb", display=_ALL)
+    command, output = screen.rows()[1:]
+    assert command.removeprefix("  ⎿ ") == output.removeprefix("    ") == "a       b"
+
+
+def test_a_row_wrapped_inside_a_tab_starts_at_the_next_text() -> None:
+    """The rest of a tab's stop is no content to lead the next row with."""
+    screen = _Screen(width=40)
+    screen.printer.output("x" * 34 + "\tyz", display=_ALL)
+    assert screen.rows() == ["    " + "x" * 34, "    yz"]
+
+
+def test_a_capped_header_s_count_fits_a_narrow_pane() -> None:
+    """The count row was printed whole, past the pane's edge."""
+    screen = _Screen(width=12, max_label_lines=3)
+    screen.printer.call(Header(key="1", label="a" * 200, display=ToolDisplay()))
+    rows = screen.rows()
+    assert len(rows) == 3
+    assert all(len(r) <= 12 for r in rows), rows
+
+
+def test_a_pane_narrower_than_the_indent_still_caps_the_header() -> None:
+    """With no cell after the lead, the console's own wrap skipped the cap."""
+    screen = _Screen(width=2, max_label_lines=3)
+    screen.printer.call(Header(key="1", label="a" * 200, display=ToolDisplay()))
+    rows = screen.rows()
+    assert len(rows) == 3, rows
+    assert all(len(r) <= 2 for r in rows), rows
+
+
+@pytest.mark.parametrize("kind", ["output", "input"])
+def test_code_still_wraps_at_the_edge(kind: str) -> None:
+    """Output and commands are not prose: a space there is content, not a break."""
+    screen = _Screen(width=20)
+    text = "abc defghijklmnopqrstuvwxyz"
+    if kind == "output":
+        screen.printer.output(text, display=_ALL)
+    else:
+        screen.printer.call(Header(key="1", label="Bash\n" + text, display=_ALL))
+    assert any(row.endswith(" abc defghijklmno") for row in screen.rows())
+
+
+def test_ellipsis_cuts_a_wide_row_and_marks_the_cut_but_never_the_count() -> None:
+    screen = _Screen(width=10)
+    spec = DisplaySpec(lines=(1, 1), overflow="ellipsis")
+    screen.printer.output("abcdefghij\n2\n3\n4", display=ToolDisplay(output=spec))
+    assert screen.rows() == ["    abcde…", "    ⋯ 2 li", "    nes ⋯", "    4"]
+
+
+def test_a_spec_width_narrows_the_row_and_tabs_take_their_cells() -> None:
+    screen = _Screen(width=40)
+    spec = DisplaySpec(lines=None, width=4)
+    screen.printer.output("abcdef\na\tb\n\nc", display=ToolDisplay(output=spec))
+    assert screen.rows() == ["    abcd", "    ef", "    a", "    b", "", "    c"]
+
+
+def test_a_wrapped_command_keeps_its_strings_colored_past_the_cut() -> None:
+    """Each row was highlighted alone, so a row inside a string lost its quote."""
+    screen = _Screen(color=True)
+    body = "\n".join(f"line{i}" for i in range(9)) + "\n" + "y" * 60 + '"'
+    display = ToolDisplay(command=DisplaySpec(lines=(1, 1)), command_language="bash")
+    screen.printer.call(Header(key="1", label=f'Bash\necho "{body}', display=display))
+    tail = [r for r in screen.raw() if "y" in _visible(r)]
+    assert len(tail) == 2
+    head = [r for r in screen.raw() if "echo" in _visible(r)]
+    (string,) = {codes for codes, text in _runs(head[0]) if "line0" in text}
+    for row in tail:
+        assert all(codes == string for codes, text in _runs(row) if "y" in text), row
 
 
 if __name__ == "__main__":

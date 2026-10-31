@@ -39,11 +39,12 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.settings.harvest import harvest
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tui.prompt import Panes, Staged
+from sagent.tui.recording import RecordingPrinter
 from sagent.tui.render import Scrollback
-from sagent.tui.settings.harvest import harvest
-from sagent.tui.slash import Commands, headless_wanted
+from sagent.tui.slash import Commands
 
 
 if TYPE_CHECKING:
@@ -55,73 +56,6 @@ if TYPE_CHECKING:
         ProviderSharedResources,
     )
     from sagent.tools.types import ToolContext
-
-
-@dataclass(slots=True, kw_only=True)
-class _Printer:
-    """Records each call as ``(kind, text)``."""
-
-    show_thinking: bool = True
-    said: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
-    called: str | None = None
-
-    @property
-    def last_call(self) -> str | None:
-        return self.called if self.said and self.said[-1][0] == "call" else None
-
-    def line(self, text: str) -> None:
-        self.said.append(("line", text))
-
-    def note(self, text: str) -> None:
-        self.said.append(("note", text))
-
-    def user(self, text: str) -> None:
-        self.said.append(("user", text))
-
-    def agent(self, sender: str, recipient: str | None, text: str) -> None:
-        to = "me" if recipient is None else recipient
-        self.said.append(("agent", f"{sender}→{to}: {text}"))
-
-    def markdown(self, text: str) -> None:
-        self.said.append(("markdown", text))
-
-    def thinking(self, text: str, *, opens: bool, closes: bool) -> None:
-        del opens, closes
-        self.said.append(("thinking", text))
-
-    def call(
-        self,
-        label: str,
-        *,
-        display: ToolDisplay,
-        key: str | None = None,
-    ) -> None:
-        del display
-        self.said.append(("call", label))
-        self.called = key
-
-    def output(self, text: str, *, display: ToolDisplay) -> None:
-        del display
-        self.said.append(("output", text))
-
-    def diff(
-        self,
-        diff: str,
-        *,
-        path: str,
-        lines: tuple[int, int] | None = None,
-    ) -> None:
-        del lines
-        self.said.append(("diff", f"{path}\n{diff}"))
-
-    def error(self, text: str) -> None:
-        self.said.append(("error", text))
-
-    def failed(self, text: str) -> None:
-        self.said.append(("failed", text))
-
-    def halt(self, text: str) -> None:
-        self.said.append(("halt", text))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -291,7 +225,7 @@ class _Desk:
     catalog: ModelCatalog = field(
         default_factory=lambda: ModelCatalog(factories=_per_account),
     )
-    printer: _Printer = field(default_factory=_Printer)
+    printer: RecordingPrinter = field(default_factory=RecordingPrinter)
     panes: Panes = field(default_factory=Panes)
     provider: str = "scripted"
     team: Team | None = None
@@ -364,7 +298,7 @@ def _names(desk: _Desk) -> list[str]:
     return [".".join(s.name) for s in harvest(desk.commands.owners())]
 
 
-def test_actions_come_first_then_the_model_the_tools_and_the_screen() -> None:
+def test_actions_come_first_then_the_model_the_tools_the_screen_and_mcp() -> None:
     names = _names(_Desk())
     assert names[:14] == [
         "quit",
@@ -386,7 +320,16 @@ def test_actions_come_first_then_the_model_the_tools_and_the_screen() -> None:
     assert names.index("tool.Echo.display.command.lines") < names.index(
         "tool.Plain.display.command.lines",
     )
-    assert names[-1] == "screen.thinking"
+    assert names[-8:] == [
+        "screen.thinking",
+        "mcp.list",
+        "mcp.get",
+        "mcp.add",
+        "mcp.add-json",
+        "mcp.remove",
+        "mcp.login",
+        "mcp.logout",
+    ]
 
 
 @pytest.mark.asyncio
@@ -422,6 +365,17 @@ async def test_help_on_one_setting_says_all_it_knows() -> None:
         "error",
         "[/help] no setting 'nothing-at-all'",
     )
+
+
+@pytest.mark.asyncio
+async def test_help_on_a_group_lists_its_settings() -> None:
+    desk = _Desk()
+    await desk.commands("/help mcp")
+    ((kind, text),) = desk.printer.said
+    rows = text.split("\n")
+    assert (kind, rows[0]) == ("note", "[/help] mcp commands")
+    listed = [row.split()[0] for row in rows if row.startswith("  /")]
+    assert listed == [f"/{name}" for name in _names(desk) if name.startswith("mcp.")]
 
 
 @pytest.mark.asyncio
@@ -483,7 +437,7 @@ async def test_clear_runs_as_a_task_and_empties_the_context() -> None:
     journal = RecordingJournal()
     journal.append(UserMessage(content="old"))
     provider = ScriptedProvider()
-    printer = _Printer()
+    printer = RecordingPrinter()
     async with Agent(model=provider["scripted"], journal=journal) as agent:
         commands = Commands(
             agent,
@@ -1410,6 +1364,73 @@ async def test_login_precedence_refuses_a_provider_that_keeps_no_logins() -> Non
 
 
 @pytest.mark.asyncio
+async def test_login_precedence_takes_a_provider_by_any_name_it_answers_to() -> None:
+    desk = _Desk(provider="signing")
+    provider = desk.agent.model.provider
+    assert isinstance(provider, _Signing)
+    for account in ("default", "work"):
+        provider.logins.path(account).parent.mkdir(parents=True, exist_ok=True)
+        provider.logins.path(account).write_text("{}")
+    await desk.commands("/login.precedence sgn work")
+    await desk.commands("/login.precedence nope work")
+    assert provider.logins.precedence() == ("work",)
+    assert desk.printer.said[0] == ("note", "[/login.precedence] signing: work")
+    kind, text = desk.printer.said[1]
+    assert kind == "error"
+    assert "unknown provider 'nope'" in text
+
+
+@pytest.mark.asyncio
+async def test_login_precedence_reads_a_list_as_a_person_types_it() -> None:
+    """A space after a comma is no provider, nor is an account a provider abbreviates."""
+    desk = _Desk(provider="signing")
+    provider = desk.agent.model.provider
+    assert isinstance(provider, _Signing)
+    for account in ("default", "work", "gs"):
+        provider.logins.path(account).parent.mkdir(parents=True, exist_ok=True)
+        provider.logins.path(account).write_text("{}")
+    await desk.commands("/login.precedence work, default")
+    assert provider.logins.precedence() == ("work", "default")
+    await desk.commands("/login.precedence default ,work")
+    assert provider.logins.precedence() == ("default", "work")
+    await desk.commands("/login.precedence gs,work")
+    assert provider.logins.precedence() == ("gs", "work")
+    await desk.commands("/login.precedence zed,work")
+    assert desk.printer.said[-1] == (
+        "note",
+        "[/login.precedence] signing: work (no login saved: zed)",
+    )
+
+
+@pytest.mark.asyncio
+async def test_login_precedence_says_saved_of_a_login_signed_out() -> None:
+    """Its file is there; signed out, it is passed over for now, not missing."""
+    desk = _Desk(provider="signing")
+    provider = desk.agent.model.provider
+    assert isinstance(provider, _Signing)
+    for account in ("default", "work"):
+        provider.logins.path(account).parent.mkdir(parents=True, exist_ok=True)
+        provider.logins.path(account).write_text("{}")
+    await provider.logins.sign_out("work")
+    await desk.commands("/login.precedence work,default")
+    assert desk.printer.said == [("note", "[/login.precedence] signing: default")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("line", ["work default", "off,work", "work,off"])
+async def test_login_precedence_refuses_a_list_it_cannot_read(line: str) -> None:
+    """Spaces with no comma, or ``off`` among accounts, would be read as something else."""
+    desk = _Desk(provider="signing")
+    provider = desk.agent.model.provider
+    assert isinstance(provider, _Signing)
+    await desk.commands(f"/login.precedence {line}")
+    assert provider.logins.precedence() is None
+    ((kind, text),) = desk.printer.said
+    assert kind == "error"
+    assert text.endswith("give [PROVIDER] ACCOUNT,... or [PROVIDER] off")
+
+
+@pytest.mark.asyncio
 async def test_login_retries_the_turn_a_failure_stopped() -> None:
     """A sign-in changes no model, so nothing else would send the turn again."""
     desk = _Desk(provider="signing")
@@ -1455,36 +1476,14 @@ async def test_login_on_a_provider_without_one_says_so() -> None:
     assert desk.agent.model is before
 
 
-@pytest.mark.parametrize(
-    ("environ", "platform", "wanted"),
-    [
-        ({"DISPLAY": ":0"}, "linux", False),
-        ({"WAYLAND_DISPLAY": "wayland-0"}, "linux", False),
-        ({}, "linux", True),
-        ({"DISPLAY": ":0", "SSH_CONNECTION": "1 2 3 4"}, "linux", True),
-        ({}, "darwin", False),
-        ({"SSH_TTY": "/dev/pts/1"}, "darwin", True),
-        ({"SSH_CLIENT": "1 2 3"}, "darwin", True),
-    ],
-    ids=["x11", "wayland", "no-display", "ssh", "mac", "mac-ssh-tty", "mac-ssh"],
-)
-def test_headless_is_wanted_over_ssh_or_where_no_screen_shows_a_browser(
-    environ: dict[str, str],
-    platform: str,
-    wanted: bool,
-) -> None:
-    assert headless_wanted(environ, platform=platform) is wanted
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("line", "remote", "headless"),
     [
         ("/login", True, True),
         ("/login", False, False),
-        ("/login headless=auto", True, True),
-        ("/login headless=false", True, False),
-        ("/login headless=true", False, True),
+        ("/login --no-headless", True, False),
+        ("/login --headless", False, True),
     ],
 )
 async def test_login_signs_in_headless_where_it_must_unless_told(
@@ -1509,7 +1508,7 @@ async def test_login_signs_in_headless_where_it_must_unless_told(
 @pytest.mark.asyncio
 async def test_login_headless_signs_in_without_the_browser() -> None:
     desk = _Desk(provider="signing")
-    await desk.commands("/login headless=true")
+    await desk.commands("/login --headless")
     provider = desk.agent.model.provider
     assert isinstance(provider, _Signing)
     assert provider.headless == [True]
@@ -1589,22 +1588,31 @@ async def test_an_account_the_model_cannot_move_onto_leaves_both_as_they_were() 
 
 
 @pytest.mark.asyncio
-async def test_login_refuses_a_headless_that_is_no_boolean() -> None:
+async def test_login_refuses_an_option_it_does_not_take() -> None:
     desk = _Desk(provider="signing")
-    await desk.commands("/login headless=maybe")
+    await desk.commands("/login --headles")
+    provider = desk.agent.model.provider
+    assert isinstance(provider, _Signing)
+    assert provider.signed_in == 0
     assert desk.printer.said == [
-        ("error", "[/login] headless='maybe': give auto, true, or false"),
+        (
+            "error",
+            "[/login] unrecognized arguments: --headles; see sagent login --help",
+        ),
     ]
 
 
 @pytest.mark.asyncio
-async def test_login_refuses_an_option_it_does_not_take() -> None:
+async def test_login_help_is_its_parsers() -> None:
     desk = _Desk(provider="signing")
-    await desk.commands("/login headles=true")
+    await desk.commands("/login --help")
+    ((tone, said),) = desk.printer.said
+    assert tone == "note"
+    assert said.startswith("[/login] usage: sagent login [-h]")
+    assert "[--headless | --no-headless]" in said
     provider = desk.agent.model.provider
     assert isinstance(provider, _Signing)
     assert provider.signed_in == 0
-    assert desk.printer.said == [("error", "[/login] unknown option: headles")]
 
 
 @pytest.mark.asyncio

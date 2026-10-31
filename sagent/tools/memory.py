@@ -28,6 +28,10 @@ from treekle import ReadError, from_plain, json_dumps
 
 import yaml
 
+from sagent.lib.yaml import (
+    parse as yaml_parse,
+    split_frontmatter,
+)
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import parse, schema_of
@@ -257,15 +261,36 @@ def _stored_name(path: Path) -> str | None:
         raw = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return None
-    match = re.match(r"---\n(.*?)\n---\n", raw, re.DOTALL)
-    if match is None:
-        return None
     try:
-        meta = from_plain(yaml.safe_load(match.group(1)), dict[str, object])
-    except (yaml.YAMLError, ReadError):
+        split = split_frontmatter(raw, source=str(path))
+    except yaml.YAMLError:
+        # Older writers left ``name: Deploy: staging`` unquoted: no YAML, but
+        # still the owner's name, and skipping it would let another overwrite it.
+        return next(
+            (
+                _unquoted(line.removeprefix("name: ").strip())
+                for line in raw.splitlines()[1:]
+                if line.startswith("name: ")
+            ),
+            None,
+        )
+    try:
+        meta = from_plain(split[0] if split else None, dict[str, object], default={})
+    except ReadError:  # A list or a scalar names nothing.
         return None
     name = meta.get("name")
     return name if isinstance(name, str) else None
+
+
+def _unquoted(value: str) -> str:
+    """Return ``value`` read as YAML when it is a quoted string, else as written."""
+    if value[:1] not in {'"', "'"}:
+        return value
+    try:
+        read = yaml_parse(value)
+    except yaml.YAMLError:
+        return value
+    return read if isinstance(read, str) else value
 
 
 # A colon or a leading ``#`` changes what a plain YAML value says, and the
@@ -273,7 +298,7 @@ def _stored_name(path: Path) -> str | None:
 def _scalar(value: str) -> str:
     """Return ``value`` as a YAML scalar that reads back as itself."""
     try:
-        plain = yaml.safe_load(f"k: {value}") == {"k": value}
+        plain = yaml_parse(f"k: {value}") == {"k": value}
     except yaml.YAMLError:
         plain = False
     return value if plain else json_dumps(value, ensure_ascii=False)

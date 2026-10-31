@@ -43,14 +43,15 @@ def print_welcome(
         model=model,
         provider=provider,
         folder=folder,
-        holiday=holiday_icon(
+        icon=holiday_icon(
             datetime.now(UTC).astimezone().date(),
             rng=Random(),  # noqa: S311 -- Picks a picture, not a secret.
         ),
     )
 
 
-# Text cells only: no image protocol, extra font, or background color required.
+# Text cells only: no image protocol or extra font required. Only a holiday
+# icon sets a background color, packing two pixels into one cell.
 # The blue is slightly darker than the logo reference to work on light terminals.
 def render_welcome(
     console: Console,
@@ -58,7 +59,7 @@ def render_welcome(
     model: str = "",
     provider: str = "",
     folder: Path,
-    holiday: Icon | None = None,
+    icon: Icon | None = None,
     blue: str = "#4a90c4",
     green: str = "#93c47d",
     red: str = "#e06666",
@@ -76,8 +77,9 @@ def render_welcome(
       model: The model line; empty before one is configured.
       provider: The provider serving it.
       folder: The project directory.
-      holiday: An icon to show in place of the logo; terminals without 256
-        colors keep the logo, since the icon's shape depends on its colors.
+      icon: A holiday icon to show in place of the logo. Terminals without 256
+        colors, or with NO_COLOR set, keep the logo: the icon's shape is
+        drawn in its colors.
       blue: The wordmark's color, and the first bar's.
       green: The second bar's color.
       red: The third bar's color.
@@ -92,8 +94,8 @@ def render_welcome(
     frame_width = fill(0, total_padding=0, width=console.width)
     many_colors = console.color_system in {"256", "truecolor"} and not console.no_color
     banner = _banner_rows(
-        icon=icon_rows(holiday)
-        if holiday and many_colors
+        icon=icon_rows(icon)
+        if icon and many_colors
         else _logo_rows(blue=blue, green=green, red=red),
         blue=blue,
     )

@@ -86,8 +86,9 @@ def test_summary_heads_with_the_description_then_the_command() -> None:
 
 
 def test_summary_shows_the_command_as_the_pane_prints_it() -> None:
+    # A tab stays a tab: the printer gives it the width every row's tab takes.
     assert Bash().summary({"command": "\nif x;\r\n\tthen y\n"}) == (
-        "Bash\nif x;\n    then y"
+        "Bash\nif x;\n\tthen y"
     )
     # Only blank lines are dropped: indentation and the last word are the command's.
     assert Bash().summary({"command": "  echo X\n"}) == "Bash\n  echo X"

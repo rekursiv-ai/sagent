@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, override
 
@@ -49,8 +49,9 @@ from sagent.tools.grep import Grep
 from sagent.tools.read import Read
 from sagent.tools.write import Write
 from sagent.tui.console import ConsolePrinter
-from sagent.tui.render import Scrollback, error_text, show_call, show_result
-from sagent.tui.types import CommandOutput
+from sagent.tui.recording import RecordingPrinter
+from sagent.tui.render import Scrollback, error_text, header_of, show_result
+from sagent.tui.types import CommandOutput, Header
 
 
 if TYPE_CHECKING:
@@ -58,77 +59,9 @@ if TYPE_CHECKING:
     from sagent.tui.types import Shown
 
 
-@dataclass(slots=True, kw_only=True)
-class _Printer:
-    """Records each call as ``(kind, text)``, and each display it was given."""
-
-    show_thinking: bool = True
-    said: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
-    displays: list[ToolDisplay] = field(default_factory=list[ToolDisplay])
-    cuts: list[tuple[int, int] | None] = field(
-        default_factory=list[tuple[int, int] | None],
-    )
-    called: str | None = None
-
-    @property
-    def last_call(self) -> str | None:
-        return self.called if self.said and self.said[-1][0] == "call" else None
-
-    def line(self, text: str) -> None:
-        self.said.append(("line", text))
-
-    def note(self, text: str) -> None:
-        self.said.append(("note", text))
-
-    def user(self, text: str) -> None:
-        self.said.append(("user", text))
-
-    def agent(self, sender: str, recipient: str | None, text: str) -> None:
-        to = "me" if recipient is None else recipient
-        self.said.append(("agent", f"{sender}→{to}: {text}"))
-
-    def markdown(self, text: str) -> None:
-        self.said.append(("markdown", text))
-
-    def thinking(self, text: str, *, opens: bool, closes: bool) -> None:
-        self.said.append(("thinking", f"{'[' * opens}{text}{']' * closes}"))
-
-    def call(
-        self,
-        label: str,
-        *,
-        display: ToolDisplay,
-        key: str | None = None,
-    ) -> None:
-        self.said.append(("call", label))
-        self.displays.append(display)
-        self.called = key
-
-    def output(self, text: str, *, display: ToolDisplay) -> None:
-        self.said.append(("output", text))
-        self.displays.append(display)
-
-    def diff(
-        self,
-        diff: str,
-        *,
-        path: str,
-        lines: tuple[int, int] | None = None,
-    ) -> None:
-        self.said.append(("diff", f"{path}\n{diff}"))
-        self.cuts.append(lines)
-
-    def error(self, text: str) -> None:
-        self.said.append(("error", text))
-
-    def failed(self, text: str) -> None:
-        self.said.append(("failed", text))
-
-    def halt(self, text: str) -> None:
-        self.said.append(("halt", text))
-
-
 _SHOWN = ToolDisplay(output=DisplaySpec(lines=None))
+_ECHO = Header(key="1", label="Echo", display=_SHOWN)
+"""A call whose label prints before ``show_result`` does, so none prints again."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -166,8 +99,8 @@ def _renderer(
     *,
     show_thinking: bool = True,
     flush_chars: int = 64 * 1024,
-) -> tuple[Scrollback, _Printer]:
-    printer = _Printer(show_thinking=show_thinking)
+) -> tuple[Scrollback, RecordingPrinter]:
+    printer = RecordingPrinter(show_thinking=show_thinking)
     return Scrollback(printer, tools=_tools(), flush_chars=flush_chars), printer
 
 
@@ -431,6 +364,18 @@ def test_command_output_is_a_note_or_an_error() -> None:
     ]
 
 
+def test_a_skipped_file_is_an_error_the_user_sees() -> None:
+    render, printer = _renderer()
+    render.show(types.Skipped(text="Skipping a.md: line 3."))
+    assert printer.said == [("error", "Skipping a.md: line 3.")]
+
+
+def test_a_skipped_file_is_drawn_when_it_arrives() -> None:
+    render, printer = _renderer()
+    render(types.Skipped(text="Skipping a.md: line 3."))
+    assert printer.said == [("error", "Skipping a.md: line 3.")]
+
+
 class _Stranger:
     """No event or record the renderer knows, as a type added and not drawn is."""
 
@@ -499,7 +444,7 @@ def test_a_child_s_results_show_only_when_they_fail() -> None:
     render, printer = _renderer()
     turn = _turn(call("Echo", "1", text="a"), call("Echo", "2", text="b"))
     render(types.ChildEvent(label="c", inner=turn))
-    render(types.ChildEvent(label="c", inner=_result("1", "fine")))
+    render(types.ChildEvent(label="c", inner=_result("1", "fine", is_error=False)))
     failed = _result("2", "bad<system-reminder>r</system-reminder>\n", is_error=True)
     render(types.ChildEvent(label="c", inner=failed))
     assert printer.said == [
@@ -542,7 +487,9 @@ def test_a_result_whose_call_is_unknown_sits_under_no_call() -> None:
     render(_turn(call("Echo", "1", text="a")))
     render(_result("1", "said a"))
     render(_result("9", "orphan"))
+    assert render.shown == 1
     render(_result("9", "bad", is_error=True))
+    assert render.shown == 2
     render(types.ChildEvent(label="c", inner=_result("8", "worse", is_error=True)))
     assert printer.said == [
         ("call", "Echo a"),
@@ -563,22 +510,32 @@ def test_a_result_that_shows_nothing_names_no_call_again() -> None:
     assert _rows(out) == ["  Hidden", "  Hidden", "  Echo c", "    said c"]
 
 
-def test_show_result_runs_before_only_ahead_of_a_row() -> None:
-    printer = _Printer()
-    before: list[str] = []
-    show_result(
-        printer,
-        _result("1", "hidden"),
-        display=ToolDisplay(),
-        before=lambda: before.append("hidden"),
-    )
-    show_result(
-        printer,
-        _result("2", "bad", is_error=True),
-        display=ToolDisplay(),
-        before=lambda: before.append("failed"),
-    )
-    assert before == ["failed"]
+def test_a_hidden_result_between_a_call_and_its_failure_names_no_call_again() -> None:
+    render, printer = _renderer()
+    render(_turn(call("Other", "1"), call("Echo", "2", text="b")))
+    render(types.CohortStarted())
+    render(_result("1", "hidden"))
+    render(_result("2", "bad", is_error=True))
+    assert printer.said == [
+        ("call", "Other"),
+        ("call", "Echo b"),
+        ("output", "hidden"),
+        ("failed", "bad"),
+    ]
+
+
+def test_show_result_puts_every_row_under_its_call() -> None:
+    printer = RecordingPrinter()
+    printer.note("x")
+    hidden = Header(key="1", label="Echo", display=ToolDisplay())
+    show_result(printer, _result("1", "hidden"), header=hidden)
+    show_result(printer, _result("1", "bad", is_error=True), header=_ECHO)
+    assert printer.said == [
+        ("note", "x"),
+        ("output", "hidden"),
+        ("call", "Echo"),
+        ("failed", "bad"),
+    ]
 
 
 @pytest.mark.parametrize("writer", ["agent", "line", "note", "error"])
@@ -829,7 +786,7 @@ def test_a_stub_for_an_earlier_call_labels_the_held_ones_first() -> None:
 
 
 def test_scrollback_names_paths_below_where_sagent_started() -> None:
-    printer = _Printer()
+    printer = RecordingPrinter()
     render = Scrollback(printer, tools={"Read": Read()}, home=Path("/r"))
     render(_turn(call("Read", "1", file_path="/r/a.py")))
     render(_result("1", "[detached]", stub="pending"))
@@ -853,13 +810,16 @@ def test_a_user_message_that_merely_mentions_a_delivery_still_shows() -> None:
 
 
 def test_a_write_shows_as_a_diff_cut_like_its_tool_s_output() -> None:
-    printer = _Printer()
+    printer = RecordingPrinter()
+    printer.call(_ECHO)
     write = FileWriteResult(call_id="1", path="a.py", content="x\ny\n")
-    show_result(printer, write, display=ToolDisplay(output=DisplaySpec(lines=(1, 1))))
-    show_result(printer, write, display=_SHOWN)
-    show_result(printer, write, display=ToolDisplay())
-    show_result(printer, FileWriteResult(call_id="2", path="b.py"), display=_SHOWN)
+    cut = ToolDisplay(output=DisplaySpec(lines=(1, 1)))
+    show_result(printer, write, header=replace(_ECHO, display=cut))
+    show_result(printer, write, header=_ECHO)
+    show_result(printer, write, header=replace(_ECHO, display=ToolDisplay()))
+    show_result(printer, FileWriteResult(call_id="2", path="b.py"), header=_ECHO)
     assert printer.said == [
+        ("call", "Echo"),
         ("diff", "a.py\n@@ -0,0 +1,2 @@\n+x\n+y"),
         ("diff", "a.py\n@@ -0,0 +1,2 @@\n+x\n+y"),
         ("output", "Wrote a.py."),
@@ -935,13 +895,26 @@ def test_a_model_error_shows_and_says_what_the_user_can_do(
     ]
 
 
+def test_a_child_s_long_reply_hangs_under_its_label() -> None:
+    """A child's words wrapped back to column 0, under its label, not its text."""
+    out = io.StringIO()
+    printer = ConsolePrinter(Console(file=out, width=30, color_system=None))
+    render = Scrollback(printer, tools=_tools())
+    render(types.ChildEvent(label="Agent_0", inner=_turn(text="word " * 12)))
+    rows = [r.rstrip() for r in out.getvalue().split("\n") if r.strip()]
+    assert len(rows) > 1
+    assert rows[0].startswith("Agent_0: word")
+    assert all(r.startswith(" " * 9) and r[9] != " " for r in rows[1:]), rows
+
+
 def test_a_printer_failure_is_logged_and_never_raised(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    class _Broken(_Printer):
+    class _Broken(RecordingPrinter):
         @override
-        def note(self, text: str) -> None:
-            raise RuntimeError(text)
+        def note(self, text: str, *, lead: str = "", prose: bool = False) -> None:
+            del prose
+            raise RuntimeError(lead + text)
 
     render = Scrollback(_Broken(), tools=_tools())
     with caplog.at_level(logging.ERROR, logger="sagent.tui.render"):
@@ -1018,8 +991,22 @@ def test_a_suspension_shows_why_when_it_resumes_and_what_to_do(
             "[default spent (5-hour, resets Wed Oct 28 13:00:00 (1h 0m 0s)); now on personal]",
         ),
         (
-            types.LoginSwitched(provider="acli", was="work", now="default"),
-            "[default reset; back on default]",
+            types.LoginSwitched(
+                provider="acli",
+                was="work",
+                now="default",
+                first="default",
+            ),
+            "[on default, first in order]",
+        ),
+        (
+            types.LoginSwitched(
+                provider="acli",
+                was="work",
+                now="personal",
+                first="default",
+            ),
+            "[on personal, first with quota]",
         ),
         (
             types.LoginSwitched(
@@ -1031,7 +1018,7 @@ def test_a_suspension_shows_why_when_it_resumes_and_what_to_do(
             "[work signed out; now on default]",
         ),
     ],
-    ids=["spent", "reset", "signed-out"],
+    ids=["spent", "first", "first-live", "signed-out"],
 )
 def test_a_login_switch_says_why_and_what_signs_in_now(
     monkeypatch: pytest.MonkeyPatch,
@@ -1059,7 +1046,7 @@ def test_every_login_spent_says_when_each_resets(
         (
             "note",
             (
-                "[every acli login spent: work Wed Oct 28 12:01:00 (1m 0s),"
+                "[no acli login has quota: work Wed Oct 28 12:01:00 (1m 0s),"
                 " default Wed Oct 28 13:00:00 (1h 0m 0s)]"
             ),
         ),
@@ -1068,9 +1055,17 @@ def test_every_login_spent_says_when_each_resets(
 
 def test_a_child_s_login_switch_is_noted_under_its_label() -> None:
     render, printer = _renderer()
-    switched = types.LoginSwitched(provider="acli", was="work", now="default")
+    switched = types.LoginSwitched(
+        provider="acli",
+        was="work",
+        now="default",
+        first="default",
+    )
     render(types.ChildEvent(label="Agent_0", inner=switched))
-    assert printer.said == [("note", "Agent_0: [default reset; back on default]")]
+    spent = types.LoginsSpent(provider="acli", resets=(("work", _NOON),))
+    render(types.ChildEvent(label="Agent_0", inner=spent))
+    assert printer.said[0] == ("note", "Agent_0: [on default, first in order]")
+    assert printer.said[1][1].startswith("Agent_0: [no acli login has quota: work ")
 
 
 def test_a_suspension_failing_again_says_why_without_the_banner(
@@ -1151,52 +1146,54 @@ def test_a_call_names_a_path_below_where_sagent_started_relative_to_it(
     arguments: dict[str, PlainTree],
     label: str,
 ) -> None:
-    printer = _Printer()
-    show_call(
-        printer,
+    header = header_of(
         ToolCall(call_id="1", name=tool.name, arguments=arguments),
         tools={tool.name: tool},
         home=Path("/home/u/repo"),
     )
-    assert printer.said == [("call", label)]
+    assert header.label == label
 
 
-def test_show_call_labels_a_call_by_its_tool_or_its_name() -> None:
-    printer = _Printer()
-    show_call(printer, call("Echo", text="hi"), tools=_tools())
-    show_call(printer, call("Gone"), tools=_tools())
-    assert printer.said == [("call", "Echo hi"), ("call", "Gone")]
-    assert printer.displays == [_SHOWN, ToolDisplay()]
+def test_a_header_is_its_tool_s_label_and_display_or_the_call_s_name() -> None:
+    echo = header_of(call("Echo", "1", text="hi"), tools=_tools())
+    gone = header_of(call("Gone", "2"), tools=_tools(), agent="c")
+    assert echo == Header(key="1", label="Echo hi", display=_SHOWN)
+    assert gone == Header(key="c: 2", label="c: Gone", display=ToolDisplay())
 
 
 def test_show_result_shows_a_failure_whatever_the_display() -> None:
-    printer = _Printer()
-    show_result(printer, _result("1", "bad", is_error=True), display=ToolDisplay())
-    assert printer.said == [("failed", "bad")]
+    printer = RecordingPrinter()
+    printer.call(_ECHO)
+    hidden = replace(_ECHO, display=ToolDisplay())
+    show_result(printer, _result("1", "bad", is_error=True), header=hidden)
+    assert printer.said == [("call", "Echo"), ("failed", "bad")]
 
 
 def test_show_result_shows_an_edit_as_a_diff() -> None:
-    printer = _Printer()
+    printer = RecordingPrinter()
     edit = FileEditResult(
         call_id="1",
         path="a.py",
         edits=(Splice(before="x", after="y", start=2),),
     )
-    show_result(printer, edit, display=_SHOWN)
-    show_result(printer, FileEditResult(call_id="2", path="b.py"), display=_SHOWN)
+    printer.call(_ECHO)
+    show_result(printer, edit, header=_ECHO)
+    show_result(printer, FileEditResult(call_id="2", path="b.py"), header=_ECHO)
     assert printer.said == [
+        ("call", "Echo"),
         ("diff", "a.py\n@@ -2,1 +2,1 @@\n-x\n+y"),
         ("output", "Edited b.py."),
     ]
-    show_result(printer, FileEditResult(call_id="3", edits=edit.edits), display=_SHOWN)
+    show_result(printer, FileEditResult(call_id="3", edits=edit.edits), header=_ECHO)
     assert printer.said[-1] == ("diff", "\n@@ -2,1 +2,1 @@\n-x\n+y")
 
 
 def test_show_result_skips_a_pending_stub_but_not_a_cancelled_one() -> None:
-    printer = _Printer()
-    show_result(printer, _result("1", "[detached]", stub="pending"), display=_SHOWN)
-    show_result(printer, _result("2", "[cancelled]", stub="cancelled"), display=_SHOWN)
-    assert printer.said == [("output", "[cancelled]")]
+    printer = RecordingPrinter()
+    printer.call(_ECHO)
+    show_result(printer, _result("1", "[detached]", stub="pending"), header=_ECHO)
+    show_result(printer, _result("1", "[cancelled]", stub="cancelled"), header=_ECHO)
+    assert printer.said == [("call", "Echo"), ("output", "[cancelled]")]
 
 
 @pytest.mark.parametrize(
@@ -1216,9 +1213,10 @@ def test_show_result_skips_a_pending_stub_but_not_a_cancelled_one() -> None:
     ],
 )
 def test_show_result_drops_reminders_meant_for_the_model(text: str, shown: str) -> None:
-    printer = _Printer()
-    show_result(printer, ShellCommandResult(call_id="1", stdout=text), display=_SHOWN)
-    assert printer.said == [("output", shown)]
+    printer = RecordingPrinter()
+    printer.call(_ECHO)
+    show_result(printer, ShellCommandResult(call_id="1", stdout=text), header=_ECHO)
+    assert printer.said == [("call", "Echo"), ("output", shown)]
 
 
 def test_error_text_keeps_a_polished_message_and_names_any_other() -> None:

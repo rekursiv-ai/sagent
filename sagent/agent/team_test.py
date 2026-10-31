@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, override
 
 import asyncio
 import logging
+import threading
 import time
 
 import pytest
@@ -31,8 +32,10 @@ from sagent.model.scripted import (
     call,
     reply,
 )
+from sagent.providers import login as login_module
 from sagent.providers.catalog import ModelCatalog
 from sagent.providers.login import Logins, Spent
+from sagent.providers.testing import first_live, window
 from sagent.runtime import types
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.types import (
@@ -46,12 +49,18 @@ from sagent.tools.agent_send import AgentSend
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
     from treekle import PlainTree
 
     from sagent.model.types import Request, Response
-    from sagent.providers.types import ProviderFactory, ProviderSharedResources
+    from sagent.providers.types import (
+        Model,
+        ProviderFactory,
+        ProviderSharedResources,
+    )
+    from sagent.runtime.tape import ContextSplice, TapeRecord, TapeRef
 
 
 def _team() -> Team:
@@ -1053,7 +1062,7 @@ async def test_a_spent_window_moves_the_call_to_the_next_login_at_once(
         await agent.aclose()
     assert accounts.served == ["default", "personal"]
     assert _switches(seen) == [("default", "personal")]
-    mark = logins.spent("default", "scripted", now=time.time())
+    mark = window(logins, "default", "scripted", now=time.time())
     assert mark is not None
     assert mark.window == "5-hour"
     # The journal keeps the account the user chose, not the one spilled to.
@@ -1080,10 +1089,10 @@ async def test_a_turn_after_the_reset_goes_back_to_the_first_login(
     finally:
         await agent.aclose()
     assert accounts.served == ["personal", "default"]
-    assert _switches(seen) == [("default", "personal"), ("personal", "default")]
-    # Off a spent login says it was spent; back onto one says it reset.
-    away, back = (e for e in seen if isinstance(e, types.LoginSwitched))
-    assert (away.window, back.window) == ("5-hour", "")
+    # The session starts off the spent login quietly; the move back is news.
+    assert _switches(seen) == [("personal", "default")]
+    (back,) = (e for e in seen if isinstance(e, types.LoginSwitched))
+    assert (back.window, back.first) == ("", "default")
 
 
 @pytest.mark.asyncio
@@ -1099,7 +1108,31 @@ async def test_a_short_throttle_is_waited_as_ever(tmp_path: Path) -> None:
         await agent.aclose()
     assert accounts.served == ["default"]
     assert _switches(seen) == []
-    assert logins.first_live("scripted", now=time.time()) == "default"
+    assert first_live(logins, "scripted", now=time.time()) == "default"
+
+
+@pytest.mark.asyncio
+async def test_every_login_spent_waits_for_the_earliest_reset_and_takes_it(
+    tmp_path: Path,
+) -> None:
+    logins = _saved("personal")
+    soon = time.time() + 0.5
+    await logins.spend(
+        "personal",
+        Spent(window="5-hour", model="scripted", until=soon),
+    )
+    accounts = _Accounts()
+    accounts.script("default", _spent("weekly", wait_sec=86_400.0))
+    accounts.script("personal", reply("from personal"))
+    _, agent, seen = await _session(accounts, tmp_path, persistent_retry=True)
+    try:
+        assert await asyncio.wait_for(agent.send("hi"), timeout=10) == "from personal"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "personal"]
+    (suspended,) = [e for e in seen if isinstance(e, types.ModelCallSuspended)]
+    assert suspended.until == pytest.approx(soon, abs=0.1)
+    assert _switches(seen) == [("default", "personal")]
 
 
 @pytest.mark.asyncio
@@ -1123,19 +1156,246 @@ async def test_no_login_is_asked_twice_and_all_spent_waits_as_ever(
 
 
 @pytest.mark.asyncio
-async def test_a_window_of_another_family_moves_nothing(tmp_path: Path) -> None:
-    """The login stays the first for this model, so a move would be to itself."""
+async def test_a_ledger_that_cannot_be_written_leaves_the_call_to_go_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Advisory state that fails must not stop the agent: before, it hung."""
     _saved("personal")
+
+    async def unwritable(self: Logins, account: str | None, spent: Spent) -> None:
+        del self, account, spent
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(Logins, "spend", unwritable)
     accounts = _Accounts()
-    accounts.script("default", _spent("weekly Opus"))
-    _, agent, seen = await _session(accounts, tmp_path)
+    accounts.script("default", _spent("5-hour"), reply("answered"))
+    _, agent, _ = await _session(accounts, tmp_path)
     try:
         with pytest.raises(RateLimitedError):
-            await agent.send("hi")
+            await asyncio.wait_for(agent.send("hi"), timeout=5)
+        # The next turn is the default's again: nothing was learned of it.
+        assert await asyncio.wait_for(agent.send("again"), timeout=5) == "answered"
     finally:
         await agent.aclose()
-    assert accounts.served == ["default"]
+    assert accounts.served == ["default", "default"]
+
+
+@pytest.mark.asyncio
+async def test_no_login_left_with_none_spent_says_nothing_of_resets(
+    tmp_path: Path,
+) -> None:
+    """Every other login is unserving or signed out; a note of no resets says nothing."""
+    _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", _spent("5-hour", wait_sec=0.2))
+    accounts.script("personal", reply("one"), AuthError("expired"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("first") == "one"
+        await asyncio.sleep(0.3)
+        accounts.modelless.add("default")
+        with pytest.raises(AuthError):
+            await agent.send("second")
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "personal", "personal"]
+    assert [e for e in seen if isinstance(e, types.LoginsSpent)] == []
+
+
+@pytest.mark.asyncio
+async def test_the_ledger_is_read_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Read before every call, it would stall every other task while the disk answers."""
+    _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", _spent("5-hour"))
+    accounts.script("personal", reply("from personal"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    looping = threading.current_thread()
+    on_loop: list[bool] = []
+    raw = login_module._raw
+
+    def watched(ledger: Path) -> dict[str, dict[str, object]]:
+        on_loop.append(threading.current_thread() is looping)
+        return raw(ledger)
+
+    monkeypatch.setattr(login_module, "_raw", watched)
+    try:
+        assert await agent.send("hi") == "from personal"
+    finally:
+        await agent.aclose()
+    assert on_loop
+    assert not any(on_loop)
+
+
+@pytest.mark.asyncio
+async def test_a_call_reads_the_ledger_once_per_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each account's window read alone cost a read each, on the path of every call."""
+    logins = _saved("aaa", "personal", "work")
+    await logins.spend(
+        None,
+        Spent(window="5-hour", model="scripted", until=time.time() + 60),
+    )
+    accounts = _Accounts()
+    accounts.script("aaa", reply("from aaa"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    reads: list[Path] = []
+    raw = login_module._raw
+
+    def counted(ledger: Path) -> dict[str, dict[str, object]]:
+        reads.append(ledger)
+        return raw(ledger)
+
+    monkeypatch.setattr(login_module, "_raw", counted)
+    try:
+        assert await agent.send("hi") == "from aaa"
+    finally:
+        await agent.aclose()
+    # One check before the call, one to pick the login it moves to.
+    assert len(reads) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_login_signed_out_a_day_ago_is_tried_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logins = _saved("other")
+    now = time.time()
+    monkeypatch.setattr(time, "time", lambda: now - 2 * 86_400)
+    await logins.sign_out("other")
+    monkeypatch.setattr(time, "time", lambda: now)
+    await logins.spend(
+        None,
+        Spent(window="5-hour", model="scripted", until=now + 60),
+    )
+    accounts = _Accounts()
+    accounts.script("other", reply("from other"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("hi") == "from other"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["other"]
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_that_cannot_be_read_before_a_call_leaves_it_to_go_on(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing check before the call is logged; the call is still made."""
+    _saved("personal")
+
+    def unreadable(
+        self: Logins,
+        model: str,
+        *,
+        now: float,
+        first: str | None = None,
+    ) -> None:
+        del self, model, now, first
+        raise OSError("read error")
+
+    monkeypatch.setattr(Logins, "ranked", unreadable)
+    accounts = _Accounts()
+    accounts.script("default", reply("answered"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    try:
+        assert await asyncio.wait_for(agent.send("hi"), timeout=5) == "answered"
+    finally:
+        await agent.aclose()
+
+
+class _Recording:
+    """A compactor that notes which login it was given, then fails."""
+
+    def __init__(self) -> None:
+        self.logins: list[str] = []
+        self.asked = asyncio.Event()
+
+    async def compact(
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[types.ModelContextEvent],
+        model: Model,
+        mint_ref: Callable[[], TapeRef],
+        custom_instructions: str | None = None,
+    ) -> ContextSplice:
+        del tape, context, mint_ref, custom_instructions
+        provider = model.provider
+        assert isinstance(provider, _Signing)
+        self.logins.append(provider.account)
+        self.asked.set()
+        raise RuntimeError("recorded")
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_on_a_spent_login_moves_to_one_with_quota_first(
+    tmp_path: Path,
+) -> None:
+    logins = _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", reply("one"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    recording = _Recording()
+    agent.runtime.compactor = recording
+    try:
+        assert await agent.send("first") == "one"
+        await logins.spend(
+            None,
+            Spent(window="5-hour", model="scripted", until=time.time() + 60),
+        )
+        agent.runtime.push(types.Compact())
+        async with asyncio.timeout(5):
+            await recording.asked.wait()
+    finally:
+        await agent.aclose()
+    assert recording.logins == ["personal"]
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_first_leaves_the_session_s_start_quiet(
+    tmp_path: Path,
+) -> None:
+    """A compaction that moves nothing does not spend the start's quiet move."""
+    logins = _saved("personal")
+    await logins.prefer(("personal", "default"))
+    accounts = _Accounts()
+    accounts.script("personal", reply("one"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    recording = _Recording()
+    agent.runtime.compactor = recording
+    try:
+        agent.runtime.push(types.Compact())
+        async with asyncio.timeout(5):
+            await recording.asked.wait()
+        assert await agent.send("hi") == "one"
+    finally:
+        await agent.aclose()
     assert _switches(seen) == []
+
+
+@pytest.mark.asyncio
+async def test_a_window_naming_no_family_of_its_model_moves_on(tmp_path: Path) -> None:
+    """``weekly Oauth_apps`` names no model; read as one, the login was never left."""
+    _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", _spent("weekly Oauth_apps"))
+    accounts.script("personal", reply("from personal"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("hi") == "from personal"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "personal"]
+    assert _switches(seen) == [("default", "personal")]
 
 
 @pytest.mark.asyncio
@@ -1174,6 +1434,28 @@ async def test_a_login_the_user_switches_to_is_where_the_order_starts(
         await agent.aclose()
     assert accounts.served == ["default", "personal", "work"]
     assert _switches(seen) == [("default", "personal")]
+
+
+@pytest.mark.asyncio
+async def test_a_login_passed_over_is_tried_again_once_the_user_switches(
+    tmp_path: Path,
+) -> None:
+    """What one login could not serve says nothing of the order the user picks next."""
+    _saved("aaa", "personal")
+    accounts = _Accounts(modelless={"aaa"})
+    accounts.script("default", _spent("5-hour"))
+    accounts.script("personal", reply("one"), _spent("weekly"))
+    accounts.script("aaa", reply("from aaa"))
+    team, agent, _ = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("first") == "one"
+        accounts.modelless.clear()
+        agent.model = team.catalog.signed_in("sub", account="personal")["scripted"]
+        agent.account = "personal"
+        assert await agent.send("second") == "from aaa"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "personal", "personal", "aaa"]
 
 
 @pytest.mark.asyncio
@@ -1249,6 +1531,47 @@ async def test_the_chosen_login_comes_first_then_the_precedence(
 
 
 @pytest.mark.asyncio
+async def test_a_new_session_starts_on_the_first_login_with_quota_without_a_note(
+    tmp_path: Path,
+) -> None:
+    """What an earlier session learned, it does not announce again."""
+    logins = _saved("other", "personal")
+    await logins.spend(
+        None,
+        Spent(window="weekly", model="scripted", until=time.time() + 60),
+    )
+    await logins.sign_out("other")
+    accounts = _Accounts()
+    accounts.script("personal", reply("from personal"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("hi") == "from personal"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["personal"]
+    assert _switches(seen) == []
+
+
+@pytest.mark.asyncio
+async def test_a_login_found_signed_out_stays_passed_over_until_signed_in_again(
+    tmp_path: Path,
+) -> None:
+    logins = _saved("other", "personal")
+    accounts = _Accounts()
+    accounts.script("default", _spent("5-hour"))
+    accounts.script("other", AuthError("expired"))
+    accounts.script("personal", reply("from personal"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("hi") == "from personal"
+    finally:
+        await agent.aclose()
+    assert "other" not in logins.order()
+    await logins.added("other")
+    assert "other" in logins.order()
+
+
+@pytest.mark.asyncio
 async def test_the_precedence_picks_the_first_login_of_a_fresh_session(
     tmp_path: Path,
 ) -> None:
@@ -1256,12 +1579,14 @@ async def test_the_precedence_picks_the_first_login_of_a_fresh_session(
     await logins.prefer(("personal", "default"))
     accounts = _Accounts()
     accounts.script("personal", reply("from personal"))
-    _, agent, _ = await _session(accounts, tmp_path)
+    _, agent, seen = await _session(accounts, tmp_path)
     try:
         assert await agent.send("hi") == "from personal"
     finally:
         await agent.aclose()
     assert accounts.served == ["personal"]
+    # A session's start is no switch: nothing is announced.
+    assert _switches(seen) == []
 
 
 @pytest.mark.asyncio

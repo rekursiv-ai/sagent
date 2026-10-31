@@ -13,6 +13,7 @@ several match picks from:
     tool.NAME.*      each tool's display: ToolDisplaySettings
     runtime.*        when a call detaches, how a rate limit waits: RuntimeSettings
     screen.*         whether reasoning shows: ScreenSettings
+    mcp.*            the MCP servers, added, removed, signed in: McpSettings
 
 A compaction or a clear runs as a task, so the prompt stays live: ``/halt``
 still reaches a long one.
@@ -34,46 +35,52 @@ Typical usage example:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from functools import partial
+from typing import TYPE_CHECKING, Literal, cast
 
+import argparse
 import asyncio
 import fnmatch
 import logging
 import os
 import re
-import sys
 import time
 
-from sagent.model.exceptions import AuthError
+from sagent.providers.login import SIGN_IN_ERRORS, headless_wanted
 from sagent.providers.types import HasLogin
 from sagent.runtime import types
 from sagent.session.types import UserMessage
+from sagent.settings.flags import ActionParser
+from sagent.settings.harvest import harvest
+from sagent.settings.match import match
+from sagent.settings.types import Setting, SettingError
 from sagent.tools.agent_spawn import AgentSpawn
+from sagent.tools.mcp_settings import McpSettings
 from sagent.tui.prompt import Panes
 from sagent.tui.render import error_text
-from sagent.tui.settings.harvest import harvest
-from sagent.tui.settings.match import match
 from sagent.tui.settings.model import AgentModel
 from sagent.tui.settings.runtime import RuntimeSettings
 from sagent.tui.settings.screen import ScreenSettings
 from sagent.tui.settings.tool import ToolDisplaySettings
-from sagent.tui.settings.types import Setting, SettingError
 from sagent.tui.types import CommandOutput
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping, Sequence
+    from pathlib import Path
 
     from sagent.agent.team import Team
     from sagent.agent.types import Agent
     from sagent.providers.types import ModelCatalog
-    from sagent.tui.settings.types import HasSettings
+    from sagent.settings.types import HasSettings
     from sagent.tui.types import ThinkingView
 
 
 __all__ = [
     "Commands",
-    "headless_wanted",
+    "apply_setting",
+    "help_text",
+    "owners_without_agent",
 ]
 
 
@@ -132,7 +139,8 @@ class Commands:
         """Return what exports settings, each after where it is mounted, in order.
 
         Returns:
-          owners: These actions, the model, each tool, the runtime, then the screen.
+          owners: These actions, the model, each tool, the runtime, the screen,
+            then the MCP servers.
 
         """
         tools = self.agent.runtime.tools
@@ -145,6 +153,10 @@ class Commands:
             ),
             (("runtime",), RuntimeSettings(runtime=self.agent.runtime)),
             (("screen",), ScreenSettings(view=self.screen)),
+            *owners_without_agent(
+                cwd=self.agent.runtime.tool_context.origin,
+                say=self.say,
+            ),
         ]
 
     def settings(self) -> list[Setting]:
@@ -222,8 +234,10 @@ class Commands:
             Setting(
                 name=("login",),
                 help_short="sign in to the model's provider",
-                usage="[headless=auto|true|false]",
+                help_long=_login_parser().format_help(),
+                usage="[--headless|--no-headless]",
                 apply=self._login,
+                cli=True,
             ),
             Setting(
                 name=("login", "precedence"),
@@ -317,16 +331,12 @@ class Commands:
             return
         rolls = setting.value is not None and setting.name not in _OWN
         given = self._given(key) if rolls and args == "default" else None
-        try:
-            said = await setting.apply(args if given is None else given)
-        except ValueError as e:
-            self._say("error", f"[{shown}] {error_text(e)}")
+        chosen = args if given is None else given
+        if not await apply_setting(setting, chosen, say=self.say):
             return
         if rolls and self.team is not None and self._label in self.team:
             self.team.choose(self._label, key, None if args == "default" else args)
-            await self._roll(self.team, key, args if given is None else given)
-        if said:
-            self._say("note", f"[{shown}] {said}")
+            await self._roll(self.team, key, chosen)
 
     @property
     def _label(self) -> str:
@@ -399,21 +409,7 @@ class Commands:
         return ""
 
     async def _help(self, args: str) -> str:
-        settings = harvest(self.owners())
-        if not args:
-            return "\n".join(["sagent commands", *map(_listed, settings)])
-        setting = match(settings, args)
-        if setting is None:
-            raise SettingError(f"no setting {args!r}")
-        value = setting.value
-        return "\n".join(
-            [
-                f"/{'.'.join(setting.name)} {setting.usage}".rstrip(),
-                setting.help_short,
-                *([setting.help_long] if setting.help_long else []),
-                *([] if value is None else [f"now: {_valued(value, setting.options)}"]),
-            ],
-        )
+        return help_text(harvest(self.owners()), args)
 
     async def _clear(self, args: str) -> str:
         del args
@@ -551,24 +547,19 @@ class Commands:
         return f"stopping {label}"
 
     async def _login(self, args: str) -> str:
-        options: dict[str, str] = {}
-        for word in args.split():
-            key, _, value = word.partition("=")
-            options[key] = value
-        unknown = set(options) - {"headless"}
-        if unknown:
-            raise SettingError(f"unknown option: {', '.join(sorted(unknown))}")
-        flag = options.get("headless", "auto").lower()
-        if flag not in ("auto", "true", "false"):
-            raise SettingError(f"headless={flag!r}: give auto, true, or false")
+        parser = _login_parser()
+        parsed = parser.read(args)
+        if parsed is None:
+            return parser.format_help()
         provider = self.agent.model.provider
         if not isinstance(provider, HasLogin):
             raise SettingError(f"{provider.name} has no interactive sign-in")
-        headless = headless_wanted(os.environ) if flag == "auto" else flag == "true"
+        given = cast("bool | None", parsed.headless)
+        headless = headless_wanted(os.environ, given=given)
         # A pasted code from another sign-in, or no answer at the prompt at all.
         try:
             await provider.login(headless=headless)
-        except (AuthError, EOFError, OSError, RuntimeError, ValueError) as e:
+        except SIGN_IN_ERRORS as e:
             raise SettingError(error_text(e)) from e
         self.panes.send_deferred(self.agent.runtime)
         # The model is the same, so nothing else sends the turn a failure stopped.
@@ -582,24 +573,37 @@ class Commands:
             return ""
         return ",".join(provider.logins.order())
 
+    # By shape alone, never by asking the catalog: an account a provider's name
+    # abbreviates (``gs``) is still an account.
     async def _precedence(self, args: str) -> str:
-        words = args.split()
-        if len(words) not in (1, 2):
-            raise SettingError("give [PROVIDER] ACCOUNT,... or [PROVIDER] off")
-        provider = (
-            self.catalog[self.catalog.name(words[0])]
-            if len(words) == 2
-            else self.agent.model.provider
-        )
+        usage = SettingError("give [PROVIDER] ACCOUNT,... or [PROVIDER] off")
+        first, _, rest = args.strip().partition(" ")
+        named = bool(rest.strip()) and "," not in first and rest.lstrip()[:1] != ","
+        listed = (rest if named else args).strip()
+        accounts = tuple(a for a in (w.strip() for w in listed.split(",")) if a)
+        if (
+            not accounts
+            or any(" " in a for a in accounts)
+            or ("off" in accounts and accounts != ("off",))
+        ):
+            raise usage
+        # ``work default``, its comma forgotten, names no provider: say how to write it.
+        try:
+            provider = (
+                self.catalog[self.catalog.name(first)]
+                if named
+                else self.agent.model.provider
+            )
+        except ValueError as e:
+            raise SettingError(f"{e}; {usage}") from e
         if not isinstance(provider, HasLogin):
             raise SettingError(f"{provider.name} keeps no logins to order")
-        order = (
-            None
-            if words[-1] == "off"
-            else tuple(a for a in (w.strip() for w in words[-1].split(",")) if a)
-        )
-        await provider.logins.prefer(order)
-        return f"{provider.name}: {','.join(provider.logins.order())}"
+        await provider.logins.prefer(None if accounts == ("off",) else accounts)
+        order = provider.logins.order()
+        saved = ("default", *provider.logins.accounts())
+        unsaved = [a for a in accounts if a not in saved and a != "off"]
+        missing = f" (no login saved: {','.join(unsaved)})" if unsaved else ""
+        return f"{provider.name}: {','.join(order)}{missing}"
 
     async def _jobs(self, args: str) -> str:
         del args
@@ -625,32 +629,103 @@ class Commands:
         return ""
 
 
-def headless_wanted(
-    environ: Mapping[str, str],
+def owners_without_agent(
     *,
-    platform: str = sys.platform,
-) -> bool:
-    """Return whether a sign-in should print its URL rather than open a browser.
-
-    Over ssh, a browser opens on the far machine's screen, not the user's; on
-    Linux with no display, there is none to open. macOS always has a screen.
+    cwd: Path,
+    say: Callable[[CommandOutput], None],
+) -> list[tuple[tuple[str, ...], HasSettings]]:
+    """Return the owners that need no agent, so run from the shell with no model.
 
     Args:
-      environ: The environment, such as ``os.environ``.
-      platform: ``sys.platform``.
+      cwd: The working directory, which names the project.
+      say: Where they say what they do along the way, such as a sign-in's page.
 
     Returns:
-      headless: Whether no browser the user can see would open.
+      owners: Each owner, after where it is mounted.
 
     """
-    if any(
-        environ.get(name, "") != ""
-        for name in ("SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY")
-    ):
-        return True
-    return platform.startswith("linux") and all(
-        environ.get(name, "") == "" for name in ("DISPLAY", "WAYLAND_DISPLAY")
+    return [(("mcp",), McpSettings(cwd=cwd, show=partial(_say_note, say)))]
+
+
+async def apply_setting(
+    setting: Setting,
+    args: str,
+    *,
+    say: Callable[[CommandOutput], None],
+) -> bool:
+    """Apply ``args`` to ``setting``; say what it did, or why it could not.
+
+    Args:
+      setting: What was named.
+      args: What followed its name.
+      say: Where it is said, as ``[/NAME] ...``.
+
+    Returns:
+      done: Whether it applied.
+
+    """
+    shown = f"/{'.'.join(setting.name)}"
+    try:
+        said = await setting.apply(args)
+    except ValueError as e:
+        say(CommandOutput(text=f"[{shown}] {error_text(e)}", tone="error"))
+        return False
+    if said:
+        say(CommandOutput(text=f"[{shown}] {said.rstrip()}", tone="note"))
+    return True
+
+
+def help_text(settings: Sequence[Setting], args: str) -> str:
+    """Return what ``/help ARGS`` says: every setting, a group's, or all of one.
+
+    Args:
+      settings: Every setting, in order.
+      args: Nothing, a group's name such as ``mcp``, or a setting's name.
+
+    Returns:
+      text: The list, or the one setting's usage, help, and value.
+
+    Raises:
+      SettingError: ``args`` names nothing.
+
+    """
+    if not args:
+        return "\n".join(["sagent commands", *map(_listed, settings)])
+    parts = tuple(args.split("."))
+    under = [s for s in settings if s.name[: len(parts)] == parts and s.name != parts]
+    if under and not any(s.name == parts for s in settings):
+        return "\n".join([f"{args} commands", *map(_listed, under)])
+    setting = match(settings, args)
+    if setting is None:
+        raise SettingError(f"no setting {args!r}")
+    value = setting.value
+    return "\n".join(
+        [
+            f"/{'.'.join(setting.name)} {setting.usage}".rstrip(),
+            setting.help_short,
+            *([setting.help_long] if setting.help_long else []),
+            *([] if value is None else [f"now: {_valued(value, setting.options)}"]),
+        ],
     )
+
+
+def _say_note(say: Callable[[CommandOutput], None], text: str) -> None:
+    say(CommandOutput(text=text, tone="note"))
+
+
+def _login_parser() -> ActionParser:
+    """Return how ``login`` reads its arguments, at the prompt or the shell."""
+    parser = ActionParser(
+        ("login",),
+        description="Sign in to the model's provider, as --provider and --account say.",
+    )
+    parser.add_argument(
+        "--headless",
+        action=argparse.BooleanOptionalAction,
+        help="print the URL and take the code pasted back; default: over ssh, or"
+        " on Linux with no display",
+    )
+    return parser
 
 
 def _valued(

@@ -42,6 +42,7 @@ from sagent.session.types import (
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tui.console import ConsolePrinter
+from sagent.tui.recording import RecordingPrinter
 from sagent.tui.render import Scrollback
 from sagent.tui.replay import replay
 
@@ -52,76 +53,6 @@ if TYPE_CHECKING:
     from sagent.model.scripted import Reply
     from sagent.model.types import Request
     from sagent.tools.types import Tool, ToolContext
-
-
-@dataclass(slots=True, kw_only=True)
-class _Printer:
-    """Records each call as ``(kind, text)``, and each display it was given."""
-
-    show_thinking: bool = True
-    said: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
-    displays: list[ToolDisplay] = field(default_factory=list[ToolDisplay])
-    cuts: list[tuple[int, int] | None] = field(
-        default_factory=list[tuple[int, int] | None],
-    )
-    called: str | None = None
-
-    @property
-    def last_call(self) -> str | None:
-        return self.called if self.said and self.said[-1][0] == "call" else None
-
-    def line(self, text: str) -> None:
-        self.said.append(("line", text))
-
-    def note(self, text: str) -> None:
-        self.said.append(("note", text))
-
-    def user(self, text: str) -> None:
-        self.said.append(("user", text))
-
-    def agent(self, sender: str, recipient: str | None, text: str) -> None:
-        to = "me" if recipient is None else recipient
-        self.said.append(("agent", f"{sender}→{to}: {text}"))
-
-    def markdown(self, text: str) -> None:
-        self.said.append(("markdown", text))
-
-    def thinking(self, text: str, *, opens: bool, closes: bool) -> None:
-        self.said.append(("thinking", f"{'[' * opens}{text}{']' * closes}"))
-
-    def call(
-        self,
-        label: str,
-        *,
-        display: ToolDisplay,
-        key: str | None = None,
-    ) -> None:
-        self.said.append(("call", label))
-        self.displays.append(display)
-        self.called = key
-
-    def output(self, text: str, *, display: ToolDisplay) -> None:
-        self.said.append(("output", text))
-        self.displays.append(display)
-
-    def diff(
-        self,
-        diff: str,
-        *,
-        path: str,
-        lines: tuple[int, int] | None = None,
-    ) -> None:
-        self.said.append(("diff", f"{path}\n{diff}"))
-        self.cuts.append(lines)
-
-    def error(self, text: str) -> None:
-        self.said.append(("error", text))
-
-    def failed(self, text: str) -> None:
-        self.said.append(("failed", text))
-
-    def halt(self, text: str) -> None:
-        self.said.append(("halt", text))
 
 
 _SHOWN = ToolDisplay(output=DisplaySpec(lines=None))
@@ -162,7 +93,7 @@ async def _replayed(
     journal = RecordingJournal()
     journal.append(*records)
     provider = ScriptedProvider(capability=capability)
-    printer = _Printer(show_thinking=show_thinking)
+    printer = RecordingPrinter(show_thinking=show_thinking)
     async with Agent(
         model=provider["scripted"],
         tools=[_Echo()],
@@ -243,7 +174,7 @@ async def test_reasoning_redraws_only_when_shown_and_never_counts(show: bool) ->
 async def test_a_call_redraws_by_its_tool_and_its_result_by_that_tool_s_display() -> (
     None
 ):
-    said_and_shown = _Printer()
+    said_and_shown = RecordingPrinter()
     journal = RecordingJournal()
     journal.append(
         UserMessage(content="go"),

@@ -12,6 +12,7 @@ import bashlex
 import pytest
 
 from sagent.session.types import UncategorizedToolResult
+from sagent.tools import command_analyzer
 from sagent.tools.command_analyzer import (
     Invocation,
     ReadOnly,
@@ -32,6 +33,8 @@ from sagent.tools.display import ToolDisplay
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sagent.tools.types import ToolContext
 
 
@@ -732,6 +735,9 @@ def test_drop_cd_drops_only_a_leading_cd_to_where_the_shell_starts(
         (". env.sh", True),
         ("builtin cd /x", True),
         ("command cd /x", True),
+        ("command popd", True),
+        ("builtin", False),
+        ("exec bash", True),
         ("eval 'cd /x'", True),
         ("X=1 cd /x", True),
         ('"$go" /x', True),
@@ -762,6 +768,22 @@ def test_moves_says_whether_a_command_may_change_directory(
 )
 def test_sed_mutates_only_in_place(args: tuple[str, ...], mutates: bool) -> None:
     assert sed_mutates(args) is mutates
+
+
+def test_a_policy_asset_error_names_the_asset(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "assets").mkdir()
+    (tmp_path / "assets" / "bash.yaml").write_text("readers: []\nreaders: []\n")
+
+    def here(package: str) -> Path:
+        del package
+        return tmp_path
+
+    monkeypatch.setattr(command_analyzer, "files", here)
+    with pytest.raises(ValueError, match=r"bash\.yaml, line 2: the key 'readers'"):
+        ReadOnly.default()
 
 
 if __name__ == "__main__":
