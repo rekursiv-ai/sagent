@@ -423,7 +423,12 @@ class _Authority:
     """How many refresh tokens were exchanged."""
 
     lifetime_sec: int = 3600
-    """How long each access token it issues is good for; a refresh token, an hour."""
+    """How long the access token a sign-in issues is good for.
+
+    A renewed access token, and every refresh token, is good for an hour: a short
+    lifetime then makes the sign-in's token expire, while two sessions that share
+    one renewal both outlive it however slowly the second one calls.
+    """
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         return self.clients.get(client_id)
@@ -473,6 +478,7 @@ class _Authority:
             client,
             scopes=authorization_code.scopes,
             resource=authorization_code.resource,
+            lifetime_sec=self.lifetime_sec,
         )
 
     async def load_access_token(self, token: str) -> AccessToken | None:
@@ -498,6 +504,7 @@ class _Authority:
             client,
             scopes=scopes or refresh_token.scopes,
             resource=refresh_token.resource,
+            lifetime_sec=3600,
         )
 
     def _issue(
@@ -506,6 +513,7 @@ class _Authority:
         *,
         scopes: list[str],
         resource: str | None,
+        lifetime_sec: int,
     ) -> OAuthToken:
         """Issue an access token good for ``lifetime_sec``, and a refresh token."""
         assert client.client_id is not None
@@ -515,7 +523,7 @@ class _Authority:
             token=access,
             client_id=client.client_id,
             scopes=scopes,
-            expires_at=now + self.lifetime_sec,
+            expires_at=now + lifetime_sec,
             resource=resource,
         )
         self.refresh_tokens[refresh] = RefreshToken(
@@ -528,7 +536,7 @@ class _Authority:
         return OAuthToken(
             access_token=access,
             token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
-            expires_in=self.lifetime_sec,
+            expires_in=lifetime_sec,
             refresh_token=refresh,
         )
 
