@@ -27,6 +27,7 @@ from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.session.types import (
     AssistantMessage,
     ToolCall,
+    ToolResult,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -115,6 +116,11 @@ def _extends(requests: Sequence[Request]) -> None:
         assert list(after.records[: len(before.records)]) == list(before.records)
 
 
+def _bash(call_id: str, command: str) -> ToolCall:
+    """Return the Bash call the model makes to run ``command``."""
+    return call("Bash", call_id, command=command, description="Run it")
+
+
 @pytest.mark.asyncio
 async def test_each_request_in_a_window_extends_the_one_before(tmp_path: Path) -> None:
     (tmp_path / "AGENTS.md").write_text("root rule\n")
@@ -150,15 +156,15 @@ async def test_each_request_in_a_window_extends_the_one_before(tmp_path: Path) -
         [
             reply(calls=[call("Read", "r1", file_path="pkg/a.py")]),
             _then(
-                reply(calls=[call("Bash", "b1", command="cd pkg && echo in")]),
+                reply(calls=[_bash("b1", "cd pkg && echo in")]),
                 before=[gate, remind_again],
             ),
             _then(
-                reply(calls=[call("Bash", "b2", command=f"cd {root} && echo out")]),
+                reply(calls=[_bash("b2", f"cd {root} && echo out")]),
                 before=[withdraw, think_harder],
             ),
             _then(
-                reply(calls=[call("Bash", "b3", command=f"cd {root} && cat pkg/a.py")]),
+                reply(calls=[_bash("b3", f"cd {root} && cat pkg/a.py")]),
                 before=[ungate],
             ),
             reply("first answer"),
@@ -207,6 +213,8 @@ async def test_each_request_in_a_window_extends_the_one_before(tmp_path: Path) -
         "Read",
         "Note",
     ], "the cd to where the shell stood is dropped, and its cat read"
+    ran = [r for r in first[-1].records if isinstance(r, ToolResult)]
+    assert [r.text().strip() for r in ran if r.call_id in ("b1", "b2")] == ["in", "out"]
     added = [str(r) for r in first[-1].records]
     assert any("pkg rule" in r for r in added), "a rule read below the root is added"
     assert not any("pkg rule" in s for s in first[-1].system)
