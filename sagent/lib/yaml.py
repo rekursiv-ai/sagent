@@ -96,9 +96,9 @@ def split_frontmatter(text: str, *, source: str = "") -> tuple[object, str] | No
         return None
     closing = next(
         (i for i, line in enumerate(lines) if i and line.rstrip() == "---"),
-        0,
+        None,
     )
-    if not closing:
+    if closing is None:
         return None
     # The leading newline stands for the opening line, so errors count the
     # file's lines, not the block's.
@@ -119,7 +119,7 @@ def _validate(
     if node is None or id(node) in seen:
         return
     seen.add(id(node))
-    rules = {"loader": loader, "where": where, "string_keys": string_keys, "seen": seen}
+    children: list[yaml.Node] = []
     if isinstance(node, yaml.MappingNode):
         keys: set[object] = set()
         for key, value in node.value:
@@ -137,11 +137,17 @@ def _validate(
                         f"{where}line {line}: the key {key.value!r} is given twice.",
                     )
                 keys.add(read)
-            _validate(key, **rules)
-            _validate(value, **rules)
+            children += (key, value)
     elif isinstance(node, yaml.SequenceNode):
-        for value in node.value:
-            _validate(value, **rules)
+        children += node.value
+    for child in children:
+        _validate(
+            child,
+            loader=loader,
+            where=where,
+            string_keys=string_keys,
+            seen=seen,
+        )
 
 
 @runtime_checkable
