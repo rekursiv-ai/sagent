@@ -22,7 +22,7 @@ import pytest
 from sagent.lib.posix.child import Child
 from sagent.lib.posix.pids import gone_within, running
 from sagent.tools import bash
-from sagent.tools.bash import Bash, _drain, _guard, _HeldPipe, _stop
+from sagent.tools.bash import Bash, _drain, _guard, _HeldPipe, _spill, _stop
 from sagent.tools.command_analyzer import Rewrite
 from sagent.tools.grep import Grep
 from sagent.tools.list import List
@@ -431,6 +431,17 @@ async def test_output_past_bash_s_own_cap_is_cut_and_spilled_whole(
     assert spilled is not None
     whole = await asyncio.to_thread(Path(spilled[1]).read_text, encoding="utf-8")
     assert whole.splitlines() == [f"line-{i}-padding" for i in range(1, 10_001)]
+
+
+def test_a_spill_makes_its_directories_and_shares_them_with_the_next(
+    tmp_path: Path,
+) -> None:
+    """A session's spill directory starts missing and nested, then holds many."""
+    first, second = tmp_path / "a" / "b" / "1.txt", tmp_path / "a" / "b" / "2.txt"
+    _spill(first, ["x\n", "é\n"])
+    _spill(second, ["y\n"])
+    assert first.read_text(encoding="utf-8") == "x\né\n"
+    assert second.read_text(encoding="utf-8") == "y\n"
 
 
 @pytest.mark.asyncio
