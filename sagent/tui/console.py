@@ -302,8 +302,13 @@ class ConsolePrinter:
             return
         with self._under(header):
             self._gap()
-            indent = Text(self.output_indent, style=self.style.quiet)
-            self._rows(lines, first=indent, rest=indent, spec=display.output)
+            output_indent = Text(self.output_indent, style=self.style.quiet)
+            self._rows(
+                lines,
+                first=output_indent,
+                rest=output_indent,
+                spec=display.output,
+            )
 
     def diff(
         self,

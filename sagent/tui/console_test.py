@@ -395,33 +395,6 @@ def test_every_row_under_a_call_sits_at_the_output_indent(
     assert _under_a_header(kind) == rows
 
 
-def test_input_and_results_share_the_output_indent() -> None:
-    screen = _Pane()
-    shown = ToolDisplay(output=DisplaySpec())
-    screen.printer.call(Header(key="1", label="Bash ls\nls", display=shown))
-    screen.printer.output("[undetached; #9]", display=shown)
-    screen.printer.diff("@@ -1 +1 @@\n-a\n+b", path="a.py")
-    assert screen.rows()[1:] == [
-        "    ls",
-        "    [undetached; #9]",
-        "    1 a",
-        "    1 b",
-    ]
-
-
-def test_a_relabelled_diff_sits_at_the_output_indent() -> None:
-    screen = _Pane()
-    edit = Header(key="1", label="Edit a.py", display=ToolDisplay())
-    screen.printer.note("between")
-    screen.printer.diff("@@ -0,0 +1,2 @@\n+a\n+b", path="a.py", header=edit)
-    assert screen.rows() == [
-        "between",
-        "  Edit a.py",
-        "    1 a",
-        "    2 b",
-    ]
-
-
 def test_a_diff_cut_at_its_head_marks_the_count() -> None:
     screen = _Pane()
     edit = Header(key="1", label="Write a.py", display=ToolDisplay())

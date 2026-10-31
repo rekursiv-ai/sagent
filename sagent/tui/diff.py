@@ -117,6 +117,7 @@ def render_diff(
         if lines is not None and len(changes) > sum(lines)
         else range(0)
     )
+    indent = Text(row_indent)
     index = old = new = 0
     for line in body:
         if m := hunk.match(line):
@@ -124,15 +125,14 @@ def render_diff(
             continue
         sigil = line[:1] if line[:1] in "+-" else " "
         number = old if sigil == "-" else new
-        indent = Text(row_indent)
         if index in hidden:
             if index == hidden.start:
-                gap = " " * (digits + 1)
+                lead = indent + " " * (digits + 1)
                 hang(
                     console,
                     Text(Elided(hidden=len(hidden)).marker, style="dim"),
-                    first=indent + gap,
-                    rest=Text(row_indent + gap),
+                    first=lead,
+                    rest=lead,
                     width=width,
                 )
         elif index in pairs:
