@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
@@ -28,7 +29,7 @@ from sagent.lib.files.grep import (
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Generator, Iterator
     from pathlib import Path
 
 
@@ -1274,16 +1275,116 @@ def test_combinations_ripgrep_answers_inconsistently_are_refused(
         grep(tmp_path, query)
 
 
+@contextlib.contextmanager
+def _locked(path: Path) -> Generator[None]:
+    """Make ``path`` unreadable for the block; skip under root, which reads all."""
+    if os.geteuid() == 0:
+        pytest.skip("root reads every file")
+    mode = path.stat().st_mode
+    path.chmod(0)
+    try:
+        yield
+    finally:
+        path.chmod(mode)
+
+
 @_BOTH
 def test_an_unreadable_walked_file_is_skipped_in_every_backend(
     tmp_path: Path,
 ) -> None:
-    if os.geteuid() == 0:
-        pytest.skip("root reads every file")
     (tmp_path / "a.txt").write_text("hit\n")
     (tmp_path / "b.txt").write_text("hit\n")
-    (tmp_path / "a.txt").chmod(0)
-    assert grep(tmp_path, Query(pattern="hit")) == [str(tmp_path / "b.txt")]
+    with _locked(tmp_path / "a.txt"):
+        found = grep(tmp_path, Query(pattern="hit"))
+    assert found == [str(tmp_path / "b.txt")]
+
+
+@_BOTH
+@pytest.mark.parametrize("follow", [False, True])
+def test_an_unreadable_walked_directory_is_skipped_in_every_backend(
+    tmp_path: Path,
+    follow: bool,
+) -> None:
+    (tmp_path / "locked").mkdir()
+    (tmp_path / "locked" / "a.txt").write_text("hit\n")
+    (tmp_path / "z.txt").write_text("hit\n")
+    with _locked(tmp_path / "locked"):
+        found = grep(tmp_path, Query(pattern="hit", follow=follow))
+    assert found == [str(tmp_path / "z.txt")]
+
+
+@_BOTH
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_an_unreadable_named_path_is_an_error_not_no_matches(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    """A walk skips what it cannot read; a path the caller named is not skipped."""
+    named = tmp_path / "named"
+    if kind == "file":
+        named.write_text("hit\n")
+    else:
+        named.mkdir()
+        (named / "a.txt").write_text("hit\n")
+    with _locked(named), pytest.raises(GrepError) as raised:
+        grep(named, Query(pattern="hit"))
+    assert str(raised.value) == f"permission denied: {named}"
+
+
+@pytest.mark.parametrize(
+    ("field", "make"),
+    [
+        ("context_before", partial(Query, pattern="x", context_before=-1)),
+        ("context_after", partial(Query, pattern="x", context_after=-1)),
+        ("max_count", partial(Query, pattern="x", max_count=-1)),
+        ("max_depth", partial(Query, pattern="x", max_depth=-1)),
+    ],
+)
+def test_a_negative_count_is_refused_when_the_query_is_made(
+    field: str,
+    make: Callable[[], Query],
+) -> None:
+    with pytest.raises(ValueError, match=f"{field} must be at least 0, got -1"):
+        make()
+
+
+@_BOTH
+@pytest.mark.parametrize(
+    ("pattern", "lines"),
+    [
+        ("x*", [2, 3, 4, 5, 6]),
+        ("-", []),
+        ("foo-", [3, 4]),
+        ("b c", [1]),
+        ("", [2, 3, 4, 5, 6]),
+        (r"\.", [5]),
+        ("a?", [1, 2, 3, 4, 5, 6]),
+    ],
+)
+def test_word_agrees_with_ripgrep_where_a_match_can_be_empty_or_end_in_a_symbol(
+    tmp_path: Path,
+    pattern: str,
+    lines: list[int],
+) -> None:
+    f = tmp_path / "f"
+    f.write_text("a-b c\n-x\nfoo-\nfoo- bar\n.\n\nab ab\n")
+    query = Query(pattern=pattern, output_mode="content", word=True)
+    assert [int(row.split(":")[1]) for row in grep(f, query)] == lines
+
+
+@_BOTH
+def test_an_inverted_named_binary_file_splits_at_each_nul(tmp_path: Path) -> None:
+    f = tmp_path / "nb"
+    f.write_bytes(b"x\0foo\0bar\nbaz\n")
+    assert grep(f, Query(pattern="foo", output_mode="count", invert=True)) == [
+        f"{f}:3",
+    ]
+    text = Query(pattern="foo", output_mode="count", invert=True, text=True)
+    assert grep(f, text) == [f"{f}:1"]
+    content = Query(pattern="foo", output_mode="content", invert=True)
+    assert grep(f, content) == [
+        f'{f}: binary file matches (found "\\0" byte around offset 1)',
+    ]
 
 
 def test_a_name_outside_every_path_sorts_last() -> None:

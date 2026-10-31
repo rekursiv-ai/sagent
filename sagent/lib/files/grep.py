@@ -2,12 +2,14 @@
 
 Both backends take one :class:`Query` and return the same lines -- one entry per
 match, per context line, per ``--`` group separator, per counted file, or per
-matching file -- each as a :class:`Row` locating its first match. A directory is walked in path order with ``.git``/``.svn``/
-``.hg`` and ``.gitignore``d trees skipped, hidden entries searched, symlinks
-not followed, and binary (NUL-bearing) files skipped. A file named outright is
-searched whatever its name, type or ignore status, as ripgrep searches it. The
-Python backend walks with ``rignore``, which binds the Rust ``ignore`` library
-ripgrep itself is built on.
+listed file -- each as a :class:`Row` locating its first match. A directory is
+walked in path order with ``.git``/``.svn``/``.hg`` skipped, ``.gitignore``d
+trees skipped unless ``search_ignored``, symlinks followed only under
+``follow``, hidden entries searched, and binary (NUL-bearing) or unreadable
+files skipped. A file named outright is searched whatever its name, type or
+ignore status, as ripgrep searches it, and one that is missing or unreadable is
+an error. The Python backend walks with ``rignore``, which binds the Rust
+``ignore`` library ripgrep itself is built on.
 """
 
 from __future__ import annotations
@@ -134,6 +136,17 @@ class Query:
     follow: bool = False
     max_depth: int = 0
 
+    def __post_init__(self) -> None:
+        """Refuse a negative count, which each backend would reject differently."""
+        for name, value in (
+            ("context_before", self.context_before),
+            ("context_after", self.context_after),
+            ("max_count", self.max_count),
+            ("max_depth", self.max_depth),
+        ):
+            if value < 0:
+                raise ValueError(f"{name} must be at least 0, got {value}.")
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Row:
@@ -184,7 +197,7 @@ def grep_rows(
       rows: The rendered output, one entry per line; empty when nothing matched.
 
     Raises:
-      GrepError: A path is missing, ``file_type`` is unknown, the pattern is
+      GrepError: A path is missing or unreadable, ``file_type`` is unknown, the pattern is
         invalid, two options cannot combine, or the search could not finish.
 
     """
@@ -197,10 +210,14 @@ def grep_rows(
         )
     if clash := _clash(query):
         raise GrepError(clash)
-    # Here, not from ``rg``'s stderr: ``--no-messages`` silences it.
+    # Here, not from ``rg``'s stderr: ``--no-messages`` silences it, and a walk
+    # skips what it cannot read, but a path the caller named is never skipped.
     for path in targets:
         if not path.exists():
             raise GrepError(f"no such file or directory: {path}")
+        # A directory needs ``x`` as well to be walked.
+        if not os.access(path, os.R_OK | (os.X_OK if path.is_dir() else 0)):
+            raise GrepError(f"permission denied: {path}")
     if not targets:
         return []
     rg = shutil.which("rg")

@@ -143,7 +143,8 @@ class Grep:
         ] = False
         only_matching: Annotated[
             bool,
-            'One entry per match, holding just the match (rg -o); "content" mode.',
+            'One entry per match, holding just the match (rg -o); "count" counts'
+            " matches.",
             Arg(key="-o"),
         ] = False
         max_count: Annotated[
@@ -274,7 +275,7 @@ class Grep:
             exe == "grep" and not fed and not named and not _flagged(args, "rR")
         ):
             return None
-        if _differs(arguments, patterns=patterns, exe=exe):
+        if _differs(arguments, patterns=patterns):
             return None
         if (
             exe == "grep"
@@ -297,9 +298,8 @@ class Grep:
         elif targets[0]:
             arguments["path"] = targets[0]
         arguments.update(extra)
-        for sink in invocation.downstream():
-            if sink.exe == "wc":
-                arguments["output_mode"] = "count"
+        # ``wc -l`` counts printed lines, which Grep's rows are; no count stands
+        # in for them, as a binary file's matches print as one note.
         sink = bounding_sink(invocation)
         if sink is not None:
             count = line_count(sink.args)
@@ -551,27 +551,19 @@ def _place_globs(arguments: dict[str, PlainTree], globs: list[str]) -> bool:
     return True
 
 
-def _differs(
-    arguments: Mapping[str, PlainTree],
-    *,
-    patterns: list[str],
-    exe: str,
-) -> bool:
-    """Return whether Grep would answer ``arguments`` otherwise than ``exe`` does."""
+# Grep answers as ripgrep does, so a ``grep`` whose output differs only in
+# GNU detail -- ``-c`` zero rows, ``-o`` context, ``-m`` context markers -- is
+# still Grep's; these differ in what is searched for.
+def _differs(arguments: Mapping[str, PlainTree], *, patterns: list[str]) -> bool:
+    """Return whether Grep cannot say what ``arguments`` search for."""
     return (
         # ``0`` is no cap to Grep and no output to ``-m``/``--max-depth``.
         arguments.get("-m") == 0
         or arguments.get("max_depth") == 0
         # Text joined by ``|`` would be read as one literal.
         or (arguments.get("-F") is True and len(patterns) > 1)
-        # ``grep -o -v`` prints nothing; Grep refuses the pair.
+        # Grep refuses ``-o`` with ``-v``, which ripgrep answers inconsistently.
         or (arguments.get("-o") is True and arguments.get("-v") is True)
-        # ``grep -c -o`` counts lines; Grep counts matches, as ``rg`` does.
-        or (
-            exe == "grep"
-            and arguments.get("-o") is True
-            and arguments["output_mode"] == "count"
-        )
     )
 
 
