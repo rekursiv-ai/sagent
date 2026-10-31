@@ -42,7 +42,13 @@ _LIVES = (
     'mv "$FAKE_LLAMA_ARGS.tmp" "$FAKE_LLAMA_ARGS"\nexec sleep 30\n'
 )
 _DIES = 'echo "error: failed to open model"\necho "done"\nexit 1\n'
-_STUBBORN = "trap '' TERM\nprintf trapped > \"$FAKE_LLAMA_ARGS\"\nwhile :; do sleep 0.05; done\n"
+# Each ``sleep`` off the server's stdout: one holding the pipe outlives the
+# kill, the test's loop closes first, and the transport it strands, collected
+# in a later test, pins that test's frames -- a dropped provider is never freed.
+_STUBBORN = (
+    "trap '' TERM\nprintf trapped > \"$FAKE_LLAMA_ARGS\"\n"
+    "while :; do sleep 0.05 > /dev/null 2>&1; done\n"
+)
 
 
 @pytest.fixture(autouse=True)
