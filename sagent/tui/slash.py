@@ -35,6 +35,8 @@ Typical usage example:
 
 from __future__ import annotations
 
+from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING, Literal, cast
 
@@ -50,10 +52,11 @@ from sagent.providers.login import SIGN_IN_ERRORS, headless_wanted
 from sagent.providers.types import HasLogin
 from sagent.runtime import types
 from sagent.session.types import UserMessage
+from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import ActionParser
 from sagent.settings.harvest import harvest
 from sagent.settings.match import match
-from sagent.settings.types import Setting, SettingError
+from sagent.settings.types import Setting
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.mcp_settings import McpSettings
 from sagent.tui.prompt import Panes
@@ -66,7 +69,7 @@ from sagent.tui.types import CommandOutput
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from sagent.agent.team import Team
@@ -77,6 +80,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "Action",
     "Commands",
     "apply_setting",
     "help_text",
@@ -163,83 +167,108 @@ class Commands:
         """Return the actions, first, so a short name reaches them before a setting.
 
         Returns:
-          settings: Each action, ``quit`` to ``login``.
+          settings: Each of ``actions``, run on this agent, then ``watcher``.
 
         """
         return [
-            Setting(name=("quit",), help_short="end the session", apply=self._quit),
-            Setting(name=("exit",), help_short="end the session", apply=self._quit),
             Setting(
+                name=a.name,
+                help_short=a.help_short,
+                help_long=a.help_long,
+                usage=a.usage,
+                value=None if a.value is None else partial(a.value, self),
+                apply=partial(a.run, self),
+                cli=a.cli,
+                flags=a.flags,
+            )
+            for a in self.actions()
+        ] + self._watching()
+
+    # Listed with no agent, so the shell knows a command before it builds a model.
+    @classmethod
+    def actions(cls) -> list[Action]:
+        """Return each action ``quit`` to ``login``, as yet run on no agent.
+
+        Returns:
+          actions: Each action's name, help, and what runs it.
+
+        """
+        login = _login_parser()
+        return [
+            Action(name=("quit",), help_short="end the session", run=Commands._quit),
+            Action(name=("exit",), help_short="end the session", run=Commands._quit),
+            Action(
                 name=("help",),
                 help_short="this list, or all one setting says",
                 usage="[NAME]",
-                apply=self._help,
+                run=Commands._help,
             ),
-            Setting(
+            Action(
                 name=("clear",),
                 help_short="wipe context (the journal keeps it)",
-                apply=self._clear,
+                run=Commands._clear,
             ),
-            Setting(
+            Action(
                 name=("compact",),
                 help_short="compact history",
                 usage="[hints]",
-                apply=self._compact,
+                run=Commands._compact,
             ),
-            Setting(
+            Action(
                 name=("recompact",),
                 help_short="compact history",
                 usage="[hints]",
-                apply=self._compact,
+                run=Commands._compact,
             ),
-            Setting(
+            Action(
                 name=("halt",),
                 help_short="stop the model call (Ctrl+C), or the agents'",
                 usage="[AGENTS]",
-                apply=self._halt,
+                run=Commands._halt,
             ),
-            Setting(
+            Action(
                 name=("kill",),
                 help_short="cancel tool calls, or stop a persistent child",
                 usage="ID|LABEL|all",
-                apply=self._kill,
+                run=Commands._kill,
             ),
-            Setting(
+            Action(
                 name=("send",),
                 help_short="message agents, or run a /COMMAND on them",
                 help_long="AGENTS: a label, parent, children, ancestors, descendants,"
                 " all, a*glob, {a,b}, or /regex/. /send parent from a root with no"
                 " parent starts its watcher.",
                 usage="AGENTS TEXT",
-                apply=self._send,
+                run=Commands._send,
             ),
-            Setting(
+            Action(
                 name=("focus",),
                 help_short="show another agent; what you type goes to it",
                 help_long="Left on an empty line picks one from the tree.",
                 usage="LABEL",
-                apply=self._focus,
+                run=Commands._focus,
             ),
-            Setting(
+            Action(
                 name=("defer",),
                 help_short="send once the agent idles (Tab)",
                 usage="TEXT",
-                apply=self._defer,
+                run=Commands._defer,
             ),
-            Setting(
+            Action(
                 name=("tasks",),
                 help_short="list running tool calls",
-                apply=self._jobs,
+                run=Commands._jobs,
             ),
-            Setting(
+            Action(
                 name=("login",),
                 help_short="sign in to the model's provider",
-                help_long=_login_parser().format_help(),
+                help_long=login.format_help(),
                 usage="[--headless|--no-headless]",
-                apply=self._login,
+                run=Commands._login,
                 cli=True,
+                flags=login.options,
             ),
-            Setting(
+            Action(
                 name=("login", "precedence"),
                 help_short="the order a provider's logins take the model, as quotas run out",
                 help_long="ACCOUNTs, comma separated; default is the default login."
@@ -248,10 +277,9 @@ class Commands:
                 " /model.provider.account comes first. off orders default, then"
                 " each account as added. PROVIDER is the model's when left out.",
                 usage="[PROVIDER] ACCOUNT,...|off",
-                value=self._precedence_value,
-                apply=self._precedence,
+                value=Commands._precedence_value,
+                run=Commands._precedence,
             ),
-            *self._watching(),
         ]
 
     def _watching(self) -> list[Setting]:
@@ -327,7 +355,7 @@ class Commands:
         key = ".".join(setting.name)
         shown = f"/{key}"
         if not args and setting.value is not None:
-            self._say("note", f"[{shown}] {_valued(setting.value, setting.options)}")
+            self._say("note", _valued(setting.value, setting.options), command=shown)
             return
         rolls = setting.value is not None and setting.name not in _OWN
         given = self._given(key) if rolls and args == "default" else None
@@ -373,7 +401,7 @@ class Commands:
         try:
             _ = await take(args)
         except ValueError as e:
-            self._say("error", f"[{self._label} /{key}] {error_text(e)}")
+            self._say("error", error_text(e), command=f"{self._label} /{key}")
             return
         if self.team is not None:
             await self._roll(self.team, key, args)
@@ -388,8 +416,14 @@ class Commands:
             if key not in mine:
                 await self.take(key, args)
 
-    def _say(self, tone: Literal["line", "note", "error"], text: str) -> None:
-        self.say(CommandOutput(text=text, tone=tone))
+    def _say(
+        self,
+        tone: Literal["line", "note", "error"],
+        text: str,
+        *,
+        command: str = "",
+    ) -> None:
+        self.say(CommandOutput(text=text, tone=tone, command=command))
 
     def _spawn(self, name: str, work: Coroutine[object, object, None]) -> None:
         """Run ``work`` as a task; a failure prints under ``name``."""
@@ -399,7 +433,7 @@ class Commands:
         def done(t: asyncio.Task[None]) -> None:
             self._tasks.discard(t)
             if not t.cancelled() and (e := t.exception()) is not None:
-                self._say("error", f"[{name}] {error_text(e)}")
+                self._say("error", error_text(e), command=name)
 
         task.add_done_callback(done)
 
@@ -629,6 +663,20 @@ class Commands:
         return ""
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Action:
+    """One of ``Commands``' own actions, before it is bound to an agent's commands."""
+
+    name: tuple[str, ...]
+    help_short: str
+    help_long: str = ""
+    usage: str = ""
+    run: Callable[[Commands, str], Coroutine[object, object, str]]
+    value: Callable[[Commands], str] | None = None
+    cli: bool = False
+    flags: frozenset[str] = frozenset()
+
+
 def owners_without_agent(
     *,
     cwd: Path,
@@ -658,7 +706,7 @@ async def apply_setting(
     Args:
       setting: What was named.
       args: What followed its name.
-      say: Where it is said, as ``[/NAME] ...``.
+      say: Where it is said, each saying ``/NAME`` as its command.
 
     Returns:
       done: Whether it applied.
@@ -668,19 +716,26 @@ async def apply_setting(
     try:
         said = await setting.apply(args)
     except ValueError as e:
-        say(CommandOutput(text=f"[{shown}] {error_text(e)}", tone="error"))
+        say(CommandOutput(text=error_text(e), tone="error", command=shown))
         return False
     if said:
-        say(CommandOutput(text=f"[{shown}] {said.rstrip()}", tone="note"))
+        say(CommandOutput(text=said.rstrip(), tone="note", command=shown))
     return True
 
 
-def help_text(settings: Sequence[Setting], args: str) -> str:
+def help_text(
+    settings: Sequence[Setting],
+    args: str,
+    *,
+    spell: Callable[[tuple[str, ...]], str] = lambda name: f"/{'.'.join(name)}",
+) -> str:
     """Return what ``/help ARGS`` says: every setting, a group's, or all of one.
 
     Args:
       settings: Every setting, in order.
       args: Nothing, a group's name such as ``mcp``, or a setting's name.
+      spell: How a setting's name is typed where the help shows: ``/mcp.add``
+        at the prompt, ``sagent mcp add`` at the shell.
 
     Returns:
       text: The list, or the one setting's usage, help, and value.
@@ -690,18 +745,18 @@ def help_text(settings: Sequence[Setting], args: str) -> str:
 
     """
     if not args:
-        return "\n".join(["sagent commands", *map(_listed, settings)])
+        return "\n".join(["sagent commands", *(_listed(s, spell) for s in settings)])
     parts = tuple(args.split("."))
     under = [s for s in settings if s.name[: len(parts)] == parts and s.name != parts]
     if under and not any(s.name == parts for s in settings):
-        return "\n".join([f"{args} commands", *map(_listed, under)])
+        return "\n".join([f"{args} commands", *(_listed(s, spell) for s in under)])
     setting = match(settings, args)
     if setting is None:
         raise SettingError(f"no setting {args!r}")
     value = setting.value
     return "\n".join(
         [
-            f"/{'.'.join(setting.name)} {setting.usage}".rstrip(),
+            f"{spell(setting.name)} {setting.usage}".rstrip(),
             setting.help_short,
             *([setting.help_long] if setting.help_long else []),
             *([] if value is None else [f"now: {_valued(value, setting.options)}"]),
@@ -737,9 +792,9 @@ def _valued(
     return value() + (f"   ({offered})" if offered else "")
 
 
-def _listed(setting: Setting) -> str:
+def _listed(setting: Setting, spell: Callable[[tuple[str, ...]], str]) -> str:
     """Return ``setting``'s row in ``/help``: its name and usage, then what it is."""
-    head = f"/{'.'.join(setting.name)} {setting.usage}".rstrip()
+    head = f"{spell(setting.name)} {setting.usage}".rstrip()
     return (
         f"  {head:<32s}{setting.help_short}"
         if len(head) < 32

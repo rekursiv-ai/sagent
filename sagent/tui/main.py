@@ -76,10 +76,10 @@ from sagent.session.projects import (
     project_dir,
 )
 from sagent.session.types import ToolCall, ToolResult
+from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import flags
 from sagent.settings.harvest import harvest
 from sagent.settings.match import match
-from sagent.settings.types import SettingError
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
@@ -618,7 +618,18 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
                 system = _system(flags)
                 if system is not None:
                     agent.system_prompt = system
-                await _configure(agent, catalog=catalog, screen=screen, given=given)
+                commands = Commands(
+                    agent,
+                    catalog=catalog,
+                    say=_dropped,
+                    screen=screen,
+                    panes=Panes(),
+                )
+                await _configure(
+                    harvest(commands.owners()),
+                    catalog=catalog,
+                    given=given,
+                )
             except ValueError as e:
                 sys.stderr.write(f"Error: {error_text(e)}\n")
                 return 1
@@ -683,6 +694,10 @@ async def _action(argv: Sequence[str]) -> int:
 
 async def _agent_action(argv: Sequence[str]) -> int:
     """Run the agent's action ``argv`` names, after the setting flags it gives."""
+    words = _command_words(argv)
+    named = {a.name for a in Commands.actions() if a.cli}
+    if not any(tuple(words[:n]) in named for n in range(1, len(words) + 1)):
+        return _unknown(argv)
     screen = _Screen()
     async with ModelCatalog() as catalog:
         name = _provider_name(catalog, os.environ.get("SAGENT_ALLOW_PROVIDERS", ""))
@@ -696,14 +711,17 @@ async def _agent_action(argv: Sequence[str]) -> int:
         )
         settings = harvest(commands.owners())
 
-        async def apply_flags(tail: list[str]) -> list[str]:
-            rest, given = flags(tail, static=_action_options(tail, settings))
-            await _configure(agent, catalog=catalog, screen=screen, given=given)
+        async def apply_flags(action: Setting, tail: list[str]) -> list[str]:
+            rest, given = flags(tail, static=_action_options(action, tail, settings))
+            await _configure(settings, catalog=catalog, given=given)
             return rest
 
         found = await _dispatch(settings, argv, configure=apply_flags)
-    if found is not None:
-        return found
+    return _unknown(argv) if found is None else found
+
+
+def _unknown(argv: Sequence[str]) -> int:
+    """Say ``argv`` names no command; return the exit code."""
     words = " ".join(_command_words(argv))
     _print_to_shell(
         CommandOutput(
@@ -718,7 +736,7 @@ async def _dispatch(
     settings: Sequence[Setting],
     argv: Sequence[str],
     *,
-    configure: Callable[[list[str]], Awaitable[list[str]]] | None = None,
+    configure: Callable[[Setting, list[str]], Awaitable[list[str]]] | None = None,
 ) -> int | None:
     """Run the action ``argv`` names, or list its group; ``None`` if it names neither."""
     words = _command_words(argv)
@@ -728,7 +746,7 @@ async def _dispatch(
         action = next((a for a in actions if a.name == named), None)
         if action is not None:
             tail = list(argv[n:])
-            rest = tail if configure is None else await configure(tail)
+            rest = tail if configure is None else await configure(action, tail)
             return (
                 0
                 if await apply_setting(action, shlex.join(rest), say=_print_to_shell)
@@ -745,8 +763,12 @@ async def _dispatch(
                 ),
             )
             return 2
-        text = help_text(settings, ".".join(named))
-        _print_to_shell(CommandOutput(text=f"[/help] {text}", tone="note"))
+        text = help_text(
+            settings,
+            ".".join(named),
+            spell=lambda name: f"sagent {' '.join(name)}",
+        )
+        _print_to_shell(CommandOutput(text=text, tone="note"))
         return 0
     return None
 
@@ -756,16 +778,23 @@ def _command_words(argv: Sequence[str]) -> list[str]:
     return list(itertools.takewhile(lambda w: not w.startswith("-"), argv))
 
 
-def _action_options(tail: Sequence[str], settings: Sequence[Setting]) -> set[str]:
-    """Return the ``--NAME`` words of ``tail`` that name no setting: the action's."""
+# Its own first: a setting's letters may spell an action's option, as ``--out``
+# spells ``model.thinking.output``. One naming nothing is left for the action to refuse.
+def _action_options(
+    action: Setting,
+    tail: Sequence[str],
+    settings: Sequence[Setting],
+) -> frozenset[str]:
+    """Return the ``--NAME`` words of ``tail`` that are ``action``'s, not a setting's."""
     values = [s for s in settings if s.cli and s.value is not None]
     before = tail[: tail.index("--")] if "--" in tail else tail
-    return {
+    unnamed = {
         option
         for word in before
         if (option := word.partition("=")[0]).startswith("--")
         and match(values, option[2:]) is None
     }
+    return action.flags | unnamed
 
 
 def _print_to_shell(output: CommandOutput) -> None:
@@ -827,21 +856,13 @@ def _agent(
 # the model, so each other flag is checked against it; then the model again, so what
 # its name says wins over a flag for the same choice.
 async def _configure(
-    agent: AgentProtocol,
+    harvested: Sequence[Setting],
     *,
     catalog: Catalog,
-    screen: _Screen,
     given: Sequence[tuple[str, str]],
 ) -> None:
-    """Apply each setting ``given``, as the prompt would."""
-    commands = Commands(
-        agent,
-        catalog=catalog,
-        say=_dropped,
-        screen=screen,
-        panes=Panes(),
-    )
-    settings = [s for s in harvest(commands.owners()) if s.cli]
+    """Apply each setting ``given``, as the prompt would, from ``harvested``."""
+    settings = [s for s in harvested if s.cli]
     chosen: list[tuple[Setting, str]] = []
     for name, value in given:
         setting = match(settings, name)

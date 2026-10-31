@@ -270,9 +270,10 @@ class Scrollback:
             case types.Skipped(text=text):
                 self._flush()
                 p.error(text)
-            case CommandOutput(text=text, tone=tone):
+            case CommandOutput(text=text, tone=tone, command=command):
                 self._flush()
-                {"line": p.line, "note": p.note, "error": p.error}[tone](text)
+                said = f"[{command}] {text}" if command else text
+                {"line": p.line, "note": p.note, "error": p.error}[tone](said)
             case (
                 UserMessage()
                 | AgentToAgentMessage()

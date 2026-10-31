@@ -1,4 +1,4 @@
-"""Defaults and contracts of ``Setting``, ``SettingError`` and ``HasSettings``."""
+"""Defaults and contracts of ``Setting`` and ``HasSettings``."""
 
 from __future__ import annotations
 
@@ -8,8 +8,7 @@ import dataclasses
 
 import pytest
 
-from sagent.runtime.exceptions import UserFacingError
-from sagent.settings.types import HasSettings, Setting, SettingError
+from sagent.settings.types import HasSettings, Setting
 
 
 if TYPE_CHECKING:
@@ -36,13 +35,6 @@ def test_setting_is_frozen_and_keyword_only() -> None:
     assert all(field.kw_only for field in dataclasses.fields(setting))
     with pytest.raises(dataclasses.FrozenInstanceError):
         setting.__setattr__("cli", False)
-
-
-def test_setting_error_is_user_facing_value_error() -> None:
-    assert issubclass(SettingError, UserFacingError)
-    assert issubclass(SettingError, ValueError)
-    with pytest.raises(ValueError, match="bad level"):
-        raise SettingError("bad level")
 
 
 class _Owner:

@@ -30,18 +30,11 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
-from sagent.runtime.exceptions import UserFacingError
-
 
 __all__ = [
     "HasSettings",
     "Setting",
-    "SettingError",
 ]
-
-
-class SettingError(UserFacingError, ValueError):
-    """What a user gave a setting does not fit it; the message says what would."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -73,6 +66,10 @@ class Setting:
 
     cli: bool = False
     """Whether the command line takes it before the session opens."""
+
+    flags: frozenset[str] = frozenset()
+    """An action's own options, such as ``--headless``: on the command line they
+    are its, never a setting's, whatever setting their letters spell."""
 
     inherit: Callable[[str], Awaitable[str]] | None = None
     """Take what an ancestor chose: the closest value this one offers, rather than
