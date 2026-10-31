@@ -1,9 +1,7 @@
 r"""The scrollback, printed with Rich.
 
 A call's header sits at the indent. Under it, at the output indent, come its
-input rows, the first after the mark, then its results with no mark: the mark
-says input, so a long body is not a column of boxes. An edit's or a write's
-diff is its input shown, so right under the header it takes the mark too.
+input rows, then its results.
 
 A result names the call it belongs to, and the printer alone decides whether to
 label that call again: it does unless the last row on screen is that call's,
@@ -125,8 +123,6 @@ class ConsolePrinter:
       max_label_lines: The most rows one call's header may take; its input
         is bounded by its display's ``command.lines``.
       style: The colors; dark-terminal ones when omitted.
-      mark: What shows in ``output_indent``'s middle on a call's first row of
-        input: its first input row, or its diff's first row right under it.
 
     Raises:
       TypeError: ``console`` writes to no ``Screen``.
@@ -135,8 +131,7 @@ class ConsolePrinter:
 
     indent = "  "
     output_indent = indent + "  "
-    """What starts every row under a call's header but the first row of its input,
-    which ``marked`` starts: the header's indent, a cell for the mark, a space."""
+    """What starts every row under a call's header."""
 
     def __init__(
         self,
@@ -145,7 +140,6 @@ class ConsolePrinter:
         show_thinking: bool = False,
         max_label_lines: int = 12,
         style: ConsoleStyle | None = None,
-        mark: str = "⎿",
     ) -> None:
         if not isinstance(console.file, Screen):
             raise TypeError(f"The console writes to {console.file!r}, not a Screen.")
@@ -154,18 +148,12 @@ class ConsolePrinter:
         self.show_thinking = show_thinking
         self.max_label_lines = max_label_lines
         self.style = style if style is not None else ConsoleStyle()
-        self.mark = mark
         self.sticky = Sticky()
         self.gap_owed = False
         # pragma: no mutate start -- no screen has written -1 rows, so this names no
         # call before the first one prints.
-        self._tail = _Tail(key="", header=-1, rows=-1)
+        self._tail = _Tail(key="", rows=-1)
         # pragma: no mutate end
-
-    @property
-    def marked(self) -> Text:
-        """Return what starts a call's first row of input: the indent and the mark."""
-        return Text(f"{self.indent}{self.mark} ", style=self.style.quiet)
 
     @property
     def output_width(self) -> int:
@@ -249,7 +237,7 @@ class ConsolePrinter:
         self._rows(lines, first=indent, rest=indent, prose=True)
 
     def call(self, header: Header) -> None:
-        """Write the label, wrapped, then the input rows, the first after ``mark``.
+        """Write the label, wrapped, then the input rows at the output indent.
 
         A summary carries its argument whole, so the cap is here, where the
         width is known: ``max_label_lines`` rows, the last saying how many more.
@@ -277,20 +265,20 @@ class ConsolePrinter:
             # A label names the call in words, such as Bash's description.
             prose=True,
         )
-        label_end = self.screen.rows
         display = header.display
         rest = rest.rstrip("\n")
         if rest.strip():
             # An unknown or empty language highlights as plain text.
             body = highlight_source(rest, display.command_language)
             body.stylize(self.style.quiet)
+            output_indent = Text(self.output_indent, style=self.style.quiet)
             self._rows(
                 display.command.keep(list(body.split("\n", allow_blank=True))),
-                first=self.marked,
-                rest=Text(self.output_indent, style=self.style.quiet),
+                first=output_indent,
+                rest=output_indent,
                 spec=display.command,
             )
-        self._tail = _Tail(key=header.key, header=label_end, rows=self.screen.rows)
+        self._tail = _Tail(key=header.key, rows=self.screen.rows)
 
     def output(
         self,
@@ -327,9 +315,6 @@ class ConsolePrinter:
     ) -> None:
         """Write ``diff`` highlighted, its words marked, cut to ``lines``.
 
-        A diff shows the call's input, an edit's or a write's text, so right
-        under the header its first row takes the mark, as input rows do.
-
         Args:
           diff: A unified diff.
           path: The file it changes, for its lexer.
@@ -343,7 +328,6 @@ class ConsolePrinter:
                 self.console,
                 _shown(diff),
                 row_indent=self.output_indent,
-                first=self.marked if self._tail.header == self.screen.rows else None,
                 path=_shown(path),
                 lines=lines,
                 sticky=self.sticky,
@@ -717,9 +701,6 @@ class _Tail:
 
     key: str
     """The call's ``Header.key``."""
-
-    header: int
-    """``screen.rows`` right after its header: a diff then takes the mark."""
 
     rows: int
     """``screen.rows`` right after its last row."""

@@ -241,7 +241,7 @@ def test_streamed_thinking_rows_join_into_the_whole_block() -> None:
     assert whole.rows() == ["∴ Thinking", "  a", "", "  b", "  c"]
 
 
-def test_a_call_header_is_indented_and_its_input_follows_the_mark() -> None:
+def test_a_call_header_is_indented_and_its_input_sits_at_the_output_indent() -> None:
     screen = _Pane(color=True)
     screen.printer.call(
         Header(key="1", label="Bash list files\nls -la\ncd /", display=ToolDisplay()),
@@ -249,7 +249,7 @@ def test_a_call_header_is_indented_and_its_input_follows_the_mark() -> None:
     raw = screen.raw()
     assert [_visible(r) for r in raw] == [
         "  Bash list files",
-        "  ⎿ ls -la",
+        "    ls -la",
         "    cd /",
     ]
     assert _codes(raw[0])[0] == "2"
@@ -302,7 +302,7 @@ def test_the_input_rows_follow_the_display_and_its_language() -> None:
     )
     plain = _Pane()
     plain.printer.call(Header(key="1", label="Bash\na\nb\nc", display=display))
-    assert plain.rows() == ["  Bash", "  ⎿ a", "    ⋯ 1 lines ⋯", "    c"]
+    assert plain.rows() == ["  Bash", "    a", "    ⋯ 1 lines ⋯", "    c"]
     colored = _Pane(color=True)
     colored.printer.call(Header(key="1", label="Bash\necho hi", display=display))
     unhighlighted = _Pane(color=True)
@@ -310,13 +310,13 @@ def test_the_input_rows_follow_the_display_and_its_language() -> None:
         Header(key="1", label="Bash\necho hi", display=ToolDisplay()),
     )
     assert colored.raw() != unhighlighted.raw()
-    assert [_visible(r) for r in colored.raw()] == ["  Bash", "  ⎿ echo hi"]
+    assert [_visible(r) for r in colored.raw()] == ["  Bash", "    echo hi"]
 
 
-def test_input_rows_wrap_at_the_mark() -> None:
+def test_input_rows_wrap_at_the_output_indent() -> None:
     screen = _Pane(width=10)
     screen.printer.call(Header(key="1", label="H\nabcdefghij", display=ToolDisplay()))
-    assert screen.rows() == ["  H", "  ⎿ abcdef", "    ghij"]
+    assert screen.rows() == ["  H", "    abcdef", "    ghij"]
 
 
 def test_output_rows_are_dim_at_the_output_indent() -> None:
@@ -381,47 +381,45 @@ def _under_a_header(kind: str) -> list[str]:
 @pytest.mark.parametrize(
     ("kind", "rows"),
     [
-        ("input", ["  ⎿ ls", "    pwd"]),
+        ("input", ["    ls", "    pwd"]),
         ("output", ["    one", "    two"]),
-        ("diff", ["  ⎿ 1 a", "    1 b"]),
+        ("diff", ["    1 a", "    1 b"]),
         ("failed", ["    ✗ gone", "      why"]),
         ("error", ["  ✗ gone", "    why"]),
     ],
 )
-def test_only_input_and_diffs_take_the_mark_and_results_sit_at_the_output_indent(
+def test_every_row_under_a_call_sits_at_the_output_indent(
     kind: str,
     rows: list[str],
 ) -> None:
     assert _under_a_header(kind) == rows
 
 
-def test_a_row_after_the_first_sits_unmarked_at_the_output_indent() -> None:
+def test_input_and_results_share_the_output_indent() -> None:
     screen = _Pane()
     shown = ToolDisplay(output=DisplaySpec())
     screen.printer.call(Header(key="1", label="Bash ls\nls", display=shown))
     screen.printer.output("[undetached; #9]", display=shown)
     screen.printer.diff("@@ -1 +1 @@\n-a\n+b", path="a.py")
     assert screen.rows()[1:] == [
-        "  ⎿ ls",
+        "    ls",
         "    [undetached; #9]",
         "    1 a",
         "    1 b",
     ]
 
 
-def test_a_relabelled_diff_takes_the_mark_as_input_does() -> None:
-    color = _Pane(color=True)
+def test_a_relabelled_diff_sits_at_the_output_indent() -> None:
+    screen = _Pane()
     edit = Header(key="1", label="Edit a.py", display=ToolDisplay())
-    color.printer.note("between")
-    color.printer.diff("@@ -0,0 +1,2 @@\n+a\n+b", path="a.py", header=edit)
-    raw = color.raw()
-    assert [_visible(r).rstrip() for r in raw] == [
+    screen.printer.note("between")
+    screen.printer.diff("@@ -0,0 +1,2 @@\n+a\n+b", path="a.py", header=edit)
+    assert screen.rows() == [
         "between",
         "  Edit a.py",
-        "  ⎿ 1 a",
+        "    1 a",
         "    2 b",
     ]
-    assert _codes(raw[2])[0] == "2"
 
 
 def test_a_diff_cut_at_its_head_marks_the_count() -> None:
@@ -433,7 +431,7 @@ def test_a_diff_cut_at_its_head_marks_the_count() -> None:
         lines=(0, 1),
         header=edit,
     )
-    assert screen.rows() == ["  Write a.py", "  ⎿   ⋯ 2 lines ⋯", "    3 c"]
+    assert screen.rows() == ["  Write a.py", "      ⋯ 2 lines ⋯", "    3 c"]
 
 
 _OUTPUT = ToolDisplay(output=DisplaySpec())
@@ -502,8 +500,7 @@ def test_a_row_below_anything_else_names_its_call_again(kind: str, row: str) -> 
             printer.failed("broke", header=_READ)
     rows = screen.rows()
     assert rows.count("  Read a.py") == 2
-    lead = "  ⎿ " if row == "diff" else "    "
-    assert rows[rows.index("  Read a.py", 1) + 1].startswith(lead)
+    assert rows[rows.index("  Read a.py", 1) + 1].startswith("    ")
 
 
 @pytest.mark.parametrize(
@@ -652,16 +649,6 @@ def test_a_screen_counts_the_rows_it_passes_on(tmp_path: Path) -> None:
             file.fileno(),
         )
     assert (tmp_path / "out").read_text() == "a\x1b]0;t\x07b\nc\n"
-
-
-def test_the_mark_is_the_printer_s_to_choose() -> None:
-    out = io.StringIO()
-    printer = ConsolePrinter(
-        Console(file=Screen(out), width=40, color_system=None),
-        mark="└",
-    )
-    printer.call(Header(key="1", label="Bash ls\nls", display=ToolDisplay()))
-    assert out.getvalue().splitlines()[1] == "  └ ls"
 
 
 _FAILURES = [("error", "  "), ("failed", "    ")]
@@ -839,12 +826,12 @@ def _runs(row: str) -> list[tuple[str, str]]:
     ]
 
 
-def test_an_input_row_and_its_mark_are_dim() -> None:
+def test_an_input_row_and_its_indent_are_dim() -> None:
     screen = _Pane(color=True)
     screen.printer.call(Header(key="1", label="H\nls -la", display=ToolDisplay()))
-    mark, body = _runs(screen.raw()[1])
-    assert mark == ("2", "  ⎿ ")
-    assert body == ("2", "ls -la")
+    runs = _runs(screen.raw()[1])
+    assert "".join(text for _, text in runs) == "    ls -la"
+    assert all(codes == "2" for codes, _ in runs)
 
 
 def test_a_highlighted_input_row_is_dim_too() -> None:
@@ -996,7 +983,7 @@ _KINDS: dict[str, tuple[Callable[[ConsolePrinter, str], None], str, str]] = {
     ),
     "input": (
         lambda p, s: p.call(Header(key="1", label="Bash\n" + s, display=_ALL)),
-        "  (Bash|⎿ )",
+        "  Bash",
         "    ",
     ),
     "output": (lambda p, s: p.output(s, display=_ALL), "    ", "    "),
@@ -1084,7 +1071,7 @@ def test_a_command_s_tab_is_as_wide_as_an_output_s() -> None:
     )
     screen.printer.output("a\tb", display=_ALL)
     command, output = screen.rows()[1:]
-    assert command.removeprefix("  ⎿ ") == output.removeprefix("    ") == "a       b"
+    assert command.removeprefix("    ") == output.removeprefix("    ") == "a       b"
 
 
 def test_a_row_wrapped_inside_a_tab_starts_at_the_next_text() -> None:
