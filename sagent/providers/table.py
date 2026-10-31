@@ -611,6 +611,10 @@ def _model(
         )
     prices = _prices(row)
     tiers = prices.service_tiers if row.service_tier is None else row.service_tier
+    for unpriced in sorted(tiers - prices.service_tiers):
+        raise ValueError(
+            f"Model {row.model_id!r} offers service_tier {unpriced!r} with no price.",
+        )
     tier = _lowest("service_tier", tiers, literal_members(ServiceTier))
     size = (
         _size(row.context_size_default.lower())

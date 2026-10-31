@@ -8,13 +8,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, override
 
 import importlib
+import math
 
 import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import Team
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
-from sagent.model.cost import PriceCatalog
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
 from sagent.model.exceptions import UnknownProviderError
 from sagent.model.scripted import ScriptedModel, ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
@@ -206,6 +207,41 @@ async def test_a_switch_with_settings_applies_them_to_the_new_model(
     assert agent.model is not before
     assert agent.model.settings.thinking_effort == "high"
     assert before.settings.thinking_effort == "none"
+
+
+@pytest.mark.asyncio
+async def test_a_tier_whose_prices_band_otherwise_sizes_the_context_again(
+    tmp_path: Path,
+) -> None:
+    prices = PriceCatalog(
+        prices={
+            PriceCondition(token_size_range=(0, 200_001)): TokenPrice(request=1.0),
+            PriceCondition(token_size_range=(200_001, math.inf)): TokenPrice(),
+            PriceCondition(service_tier="priority"): TokenPrice(request=2.0),
+        },
+        window=1_000_000,
+    )
+    capability = ModelCapability(
+        model_id="banded",
+        limits=ModelLimits(max_request_tokens=1_000_000),
+        prices=prices,
+        service_tier=frozenset({"auto", "priority"}),
+        default=ModelSettings(context_size=prices["auto", "smallcontext"]),
+    )
+    catalog = ModelCatalog(
+        factories={"scripted": partial(ScriptedProvider, capability=capability)},
+    )
+    team = Team(catalog=catalog)
+    agent = Agent(
+        model=catalog["scripted"]["banded"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+    _ = team.join(agent)
+
+    _ = await _patch(AgentSelf(team=team), tmp_path, {"service_tier": "priority"})
+
+    assert agent.model.settings.service_tier == "priority"
+    assert agent.model.settings.context_size == prices["priority", "smallcontext"]
 
 
 def _windowed(model_id: str) -> ModelTable:

@@ -42,7 +42,6 @@ from sagent.model.capability import (
     literal_members,
     typed_text,
 )
-from sagent.model.cost import ServiceTier
 from sagent.providers.catalog import successor
 from sagent.providers.table import ModelTags
 from sagent.providers.types import HasLogin, ModelCatalog
@@ -313,18 +312,7 @@ class AgentModel:
     def _choose(self, picked: dict[ModelSettingName, object]) -> None:
         """Set the model's ``picked`` choices; a new tier sizes the context again."""
         model = self.agent.model
-        capability = model.capability
-        tier = picked.pop("service_tier", None)
-        settings = model.settings
-        for field, value in picked.items():
-            settings = settings.with_value(field, value)
-        if tier is not None:
-            settings = capability.fit(
-                settings,
-                was=capability,
-                service_tier=cast(ServiceTier, tier),
-            )
-        model.settings = settings
+        model.settings = model.capability.choose(model.settings, picked)
 
     # ``default`` is a fresh model's; an effort or a tier reads as its tag does
     # in a model line, ``highthink`` and ``fast`` too.

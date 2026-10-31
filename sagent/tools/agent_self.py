@@ -11,7 +11,7 @@ Typical usage example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from functools import partial
 from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated, Literal
@@ -33,7 +33,11 @@ if TYPE_CHECKING:
     from treekle import PlainTree
 
     from sagent.agent.agent import Agent
-    from sagent.model.capability import ModelCapability, ModelSettings
+    from sagent.model.capability import (
+        ModelCapability,
+        ModelSettingName,
+        ModelSettings,
+    )
     from sagent.providers.types import Model
     from sagent.tools.types import ToolContext
 
@@ -203,18 +207,16 @@ def _planned(
     a: AgentSelf.Arguments,
 ) -> ModelSettings:
     """Return ``settings`` with the reasoning and serving arguments; raise if not offered."""
-    planned = settings
-    if a.effort is not None:
-        planned = replace(planned, thinking_effort=a.effort)
-    if a.budget is not None:
-        planned = replace(planned, thinking_budget=a.budget)
-    if a.output is not None:
-        planned = replace(planned, thinking_output=a.output)
-    if a.service_tier is not None:
-        capability.check(replace(planned, service_tier=a.service_tier))
-        planned = capability.fit(planned, was=capability, service_tier=a.service_tier)
-    capability.check(planned)
-    return planned
+    asked: dict[ModelSettingName, object | None] = {
+        "thinking_effort": a.effort,
+        "thinking_budget": a.budget,
+        "thinking_output": a.output,
+        "service_tier": a.service_tier,
+    }
+    return capability.choose(
+        settings,
+        {name: value for name, value in asked.items() if value is not None},
+    )
 
 
 def _diagnostics(agent: Agent, *, label: str) -> list[str]:

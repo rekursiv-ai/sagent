@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   validate:
-    name: Lint, type-check, test, and build (${{ matrix.python-version }})
+    name: Lint, type-check, test, and build
     runs-on: ubuntu-latest
     # Bounded so a hung step fails in minutes, not at the 6h default.
     timeout-minutes: 45
@@ -57,14 +57,3 @@ jobs:
           uv sync --frozen --all-groups
           SKIP=superseded-at-pre-push uv run pre-commit run --all-files --hook-stage pre-commit
           uv run pre-commit run --all-files --hook-stage pre-push
-
-  validated:
-    name: Lint, type-check, test, and build
-    needs: validate
-    if: ${{ !cancelled() }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Require every version
-        run: |
-          test "${{ needs.validate.result }}" = success
