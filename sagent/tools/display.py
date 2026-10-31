@@ -1,4 +1,4 @@
-r"""How a tool call shows in the terminal: its input row and its output.
+r"""How a tool call shows in the terminal: its input rows and its output.
 
 A long result shows a few lines from each end, with ``⋯ N lines ⋯`` between:
 across 894 results over 20 lines, the line that mattered sat in the tail 16.9%
@@ -103,13 +103,13 @@ class ToolDisplay:
     """How one tool's calls show: the input rows, then the output."""
 
     command: DisplaySpec = DisplaySpec(lines=None)
-    """The input row, such as a Bash command or an Edit receipt."""
+    """The input rows, such as a Bash command or an Edit receipt."""
 
     output: DisplaySpec = DisplaySpec(lines=(0, 0))
     """The result; hidden unless the tool shows it."""
 
     command_language: str = ""
-    """The Pygments lexer for the input row, such as ``"bash"``; ``""`` for none."""
+    """The Pygments lexer for the input rows, such as ``"bash"``; ``""`` for none."""
 
 
 def override(display: ToolDisplay, setting: str) -> ToolDisplay:
