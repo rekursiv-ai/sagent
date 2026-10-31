@@ -474,14 +474,7 @@ def _session_arguments(parser: argparse.ArgumentParser) -> list[argparse.Action]
 def _run_arguments(parser: argparse.ArgumentParser) -> list[argparse.Action]:
     """Register what builds the agent: its tools, prompt, caps, and helpers."""
     return [
-        parser.add_argument(
-            "--allow-providers",
-            default=os.environ.get("SAGENT_ALLOW_PROVIDERS", ""),
-            metavar="LIST",
-            help="Comma-separated providers this agent and the agents it spawns"
-            " may use; $SAGENT_PROVIDER joins them. Default:"
-            " $SAGENT_ALLOW_PROVIDERS, else every provider.",
-        ),
+        _allow_providers_argument(parser),
         parser.add_argument(
             "--name",
             default="Agent",
@@ -545,6 +538,19 @@ def _run_arguments(parser: argparse.ArgumentParser) -> list[argparse.Action]:
         ),
         *add_config_arguments(parser),
     ]
+
+
+# A session and an action (``sagent login``) narrow the catalog alike.
+def _allow_providers_argument(parser: argparse.ArgumentParser) -> argparse.Action:
+    """Register ``--allow-providers`` on ``parser``."""
+    return parser.add_argument(
+        "--allow-providers",
+        default=os.environ.get("SAGENT_ALLOW_PROVIDERS", ""),
+        metavar="LIST",
+        help="Comma-separated providers this agent and the agents it spawns"
+        " may use; $SAGENT_PROVIDER joins them. Default:"
+        " $SAGENT_ALLOW_PROVIDERS, else every provider.",
+    )
 
 
 async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
@@ -697,8 +703,11 @@ async def _agent_action(argv: Sequence[str]) -> int:
     if not any(tuple(words[:n]) in named for n in range(1, len(words) + 1)):
         return _unknown(argv)
     screen = _Screen()
+    allow = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    _allow_providers_argument(allow)
+    allowed, argv = allow.parse_known_args(argv)
     async with ModelCatalog() as catalog:
-        name = _provider_name(catalog, os.environ.get("SAGENT_ALLOW_PROVIDERS", ""))
+        name = _provider_name(catalog, cast(str, allowed.allow_providers))
         agent = Agent(model=catalog.model("default", current=name))
         commands = Commands(
             agent,

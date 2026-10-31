@@ -774,7 +774,10 @@ def _login_parser() -> ActionParser:
     """Return how ``login`` reads its arguments, at the prompt or the shell."""
     parser = ActionParser(
         ("login",),
-        description="Sign in to the model's provider, as --provider and --account say.",
+        description=(
+            "Sign in to the model's provider, as --provider, --account and"
+            " --allow-providers say."
+        ),
     )
     parser.add_argument(
         "--headless",

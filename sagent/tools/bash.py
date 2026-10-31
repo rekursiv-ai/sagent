@@ -5,7 +5,10 @@ that times out, or whose call is cancelled, is stopped with its process group.
 
 Typical usage example:
 
-  result = await Bash().call(context, {"command": "pytest -q", "timeout": 60_000})
+  result = await Bash().call(
+      context,
+      {"command": "pytest -q", "description": "Run the tests", "timeout": 60_000},
+  )
 """
 
 from __future__ import annotations
@@ -54,15 +57,12 @@ class Bash:
         """What the model passes."""
 
         command: Annotated[str, "The command to execute."]
+        description: Annotated[str, "What this command does, in active voice."]
         timeout: Annotated[
             float,
             "Kill the command after this many milliseconds.",
             Arg(minimum=1, maximum=600_000),
         ] = 600_000
-        description: Annotated[
-            str,
-            "What this command does, in active voice.",
-        ] = ""
 
     name = "Bash"
     description = (files(__package__) / "assets" / "bash.md").read_text(

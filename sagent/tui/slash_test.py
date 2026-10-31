@@ -813,6 +813,10 @@ async def test_label_dot_setting_is_send_to_that_agent() -> None:
         "error",
         "unknown command: /nobody.halt; see /help",
     )
+    # Only the first dot names the agent: the rest is the setting's own.
+    await desk.commands("/a.model.thinking.effort")
+    tone, said = desk.printer.said[-1]
+    assert (tone, said.startswith("[/model.thinking.effort] ")) == ("note", True)
 
 
 @pytest.mark.asyncio

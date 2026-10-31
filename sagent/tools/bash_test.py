@@ -63,7 +63,10 @@ from sagent.tools.types import ToolContext
 directory, command, *prefix = sys.argv[1:]
 context = ToolContext(cwd=Path(directory))
 asyncio.run(
-    Bash(exec_prefix=tuple(prefix)).call(context, {"command": command, "timeout": 120_000}),
+    Bash(exec_prefix=tuple(prefix)).call(
+        context,
+        {"command": command, "description": "Sleep", "timeout": 120_000},
+    ),
 )
 """
 
@@ -96,9 +99,10 @@ def test_summary_shows_the_command_as_the_pane_prints_it() -> None:
     assert Bash().summary({"command": "  echo X\n"}) == "Bash\n  echo X"
 
 
-def test_schema_requires_a_command_and_bounds_the_timeout() -> None:
+def test_schema_requires_a_command_and_its_description_and_bounds_the_timeout() -> None:
+    """The description heads the call's row and names it in mined sessions."""
     schema = Bash.schema
-    assert schema["required"] == ["command"]
+    assert schema["required"] == ["command", "description"]
     assert schema["additionalProperties"] is False
     properties = schema["properties"]
     assert isinstance(properties, Mapping)
@@ -115,17 +119,18 @@ def test_a_command_with_no_timeout_is_killed_at_the_longest_allowed() -> None:
     assert isinstance(properties, Mapping)
     timeout = properties["timeout"]
     assert isinstance(timeout, Mapping)
-    assert Bash.Arguments(command="x").timeout == timeout["maximum"]
+    assert Bash.Arguments(command="x", description="x").timeout == timeout["maximum"]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "arguments",
     [
-        {"command": "true", "run_as_fully_detached": True},
-        {"command": "true", "timeout": 600_001},
-        {"command": "true", "timeout": 0},
-        {"timeout": 5},
+        {"command": "true", "description": "x", "run_as_fully_detached": True},
+        {"command": "true", "description": "x", "timeout": 600_001},
+        {"command": "true", "description": "x", "timeout": 0},
+        {"description": "x", "timeout": 5},
+        {"command": "true"},
     ],
 )
 async def test_arguments_that_do_not_fit_are_refused(
@@ -236,7 +241,7 @@ async def test_a_command_sees_the_columns_its_output_is_shown_in(
     seen: str,
 ) -> None:
     context = ToolContext(cwd=tmp_path, columns=columns)
-    result = await Bash(env=env).call(context, {"command": 'printf %s "$COLUMNS"'})
+    result = await Bash(env=env).call(context, _arguments('printf %s "$COLUMNS"'))
     assert result.stdout == f"{seen}\n"
 
 
@@ -247,7 +252,7 @@ async def test_columns_leave_the_rest_of_the_environment_inherited(
 ) -> None:
     monkeypatch.setenv("SAGENT_MARKER", "kept")
     context = ToolContext(cwd=tmp_path, columns=75)
-    result = await Bash().call(context, {"command": 'printf %s "$SAGENT_MARKER"'})
+    result = await Bash().call(context, _arguments('printf %s "$SAGENT_MARKER"'))
     assert result.stdout == "kept\n"
 
 
@@ -280,9 +285,9 @@ async def test_the_commands_own_exit_status_is_kept(
 async def test_a_cd_moves_the_directory_later_calls_start_in(tmp_path: Path) -> None:
     (tmp_path / "sub").mkdir()
     context = ToolContext(cwd=tmp_path)
-    await Bash().call(context, {"command": "cd sub"})
+    await Bash().call(context, _arguments("cd sub"))
     assert context.cwd == tmp_path / "sub"
-    result = await Bash().call(context, {"command": "pwd"})
+    result = await Bash().call(context, _arguments("pwd"))
     assert result.stdout == f"{tmp_path / 'sub'}\n"
 
 
@@ -291,7 +296,7 @@ async def test_the_cwd_report_never_reaches_the_output(tmp_path: Path) -> None:
     """``printf`` adds no newline, so the report must not fuse with it."""
     (tmp_path / "sub").mkdir()
     context = ToolContext(cwd=tmp_path)
-    result = await Bash().call(context, {"command": "cd sub; printf hello"})
+    result = await Bash().call(context, _arguments("cd sub; printf hello"))
     assert result.stdout == "hello\n"
     assert context.cwd == tmp_path / "sub"
 
@@ -318,7 +323,7 @@ async def test_the_cwd_is_tracked_whether_the_command_exits_or_owns_the_trap(
     """A trap the command sets still reports the directory, however it ends."""
     (tmp_path / "sub").mkdir()
     context = ToolContext(cwd=tmp_path)
-    result = await Bash().call(context, {"command": command})
+    result = await Bash().call(context, _arguments(command))
     assert "__SAGENT_CWD_" not in result.stdout
     assert context.cwd == tmp_path / "sub"
 
@@ -337,7 +342,7 @@ async def test_a_trap_in_a_subshell_reports_no_directory(tmp_path: Path) -> None
     context = ToolContext(cwd=tmp_path)
     result = await Bash().call(
         context,
-        {"command": "(trap 'echo x' EXIT; cd /); echo y"},
+        _arguments("(trap 'echo x' EXIT; cd /); echo y"),
     )
     assert result.stdout == "x\ny\n"
     assert context.cwd == tmp_path
@@ -359,7 +364,7 @@ async def test_a_vanished_directory_falls_back_to_its_nearest_ancestor(
     tmp_path: Path,
 ) -> None:
     context = ToolContext(cwd=tmp_path / "gone" / "deeper")
-    result = await Bash().call(context, {"command": "pwd"})
+    result = await Bash().call(context, _arguments("pwd"))
     assert result.stdout == f"{tmp_path}\n"
     assert context.cwd == tmp_path
 
@@ -369,7 +374,7 @@ async def test_a_reported_directory_that_is_gone_is_not_adopted(
     tmp_path: Path,
 ) -> None:
     context = ToolContext(cwd=tmp_path)
-    await Bash().call(context, {"command": 'mkdir sub && cd sub && rmdir "$PWD"'})
+    await Bash().call(context, _arguments('mkdir sub && cd sub && rmdir "$PWD"'))
     assert context.cwd == tmp_path
 
 
@@ -399,9 +404,9 @@ async def test_long_output_is_cut_on_a_line_and_says_how_much_was_omitted(
     context = ToolContext(cwd=tmp_path, max_result_chars=200)
     result = await Bash().call(
         context,
-        {
-            "command": "for i in $(seq 1 100); do echo line$i; done; echo boom >&2; exit 3",
-        },
+        _arguments(
+            "for i in $(seq 1 100); do echo line$i; done; echo boom >&2; exit 3",
+        ),
     )
     assert result.stdout.startswith("line1\nline2\n")
     kept = sum(row.startswith("line") for row in result.stdout.splitlines())
@@ -419,7 +424,7 @@ async def test_output_past_bash_s_own_cap_is_cut_and_spilled_whole(
     context = ToolContext(cwd=tmp_path, spill_dir=tmp_path / "session")
     result = await Bash().call(
         context,
-        {"command": "for i in $(seq 1 10000); do echo line-$i-padding; done"},
+        _arguments("for i in $(seq 1 10000); do echo line-$i-padding; done"),
     )
     assert len(result.stdout) <= Bash().max_result_chars
     spilled = re.search(r"; full output: (\S+)\)\n$", result.stdout)
@@ -432,7 +437,7 @@ async def test_output_past_bash_s_own_cap_is_cut_and_spilled_whole(
 async def test_output_cut_with_nowhere_to_spill_names_no_file(tmp_path: Path) -> None:
     result = await Bash(max_result_chars=200).call(
         ToolContext(cwd=tmp_path),
-        {"command": "seq 1 1000"},
+        _arguments("seq 1 1000"),
     )
     assert re.search(r"\.\.\. \(\d+ more lines omitted\)\n$", result.stdout)
     assert len(result.stdout) <= 200
@@ -445,7 +450,7 @@ async def test_stderr_keeps_a_quarter_so_stdout_cannot_be_crowded_out(
     context = ToolContext(cwd=tmp_path, max_result_chars=400)
     result = await Bash().call(
         context,
-        {"command": "for i in $(seq 1 200); do echo err$i >&2; done; echo out"},
+        _arguments("for i in $(seq 1 200); do echo err$i >&2; done; echo out"),
     )
     assert result.stdout == "out\n"
     assert result.stderr.startswith("err1\nerr2\n")
@@ -667,8 +672,8 @@ async def test_a_wrapped_shell_enters_the_directory_and_tracks_cd(
     (tmp_path / "sub").mkdir()
     tool = Bash(exec_prefix=wrapper, env={"KEPT": "yes"})
     context = ToolContext(cwd=tmp_path)
-    shown = await tool.call(context, {"command": 'echo "$PWD $KEPT"'})
-    await tool.call(context, {"command": "cd sub"})
+    shown = await tool.call(context, _arguments('echo "$PWD $KEPT"'))
+    await tool.call(context, _arguments("cd sub"))
     assert shown.stdout == f"{tmp_path} yes\n"
     assert context.cwd == tmp_path / "sub"
     assert _read_text(Path(f"{record}.cwd")) == "/"
@@ -680,7 +685,7 @@ async def test_a_wrapped_shell_falls_back_to_the_root_when_its_directory_is_gone
 ) -> None:
     wrapper, _ = _recording_prefix(tmp_path)
     context = ToolContext(cwd=tmp_path / "gone")
-    result = await Bash(exec_prefix=wrapper).call(context, {"command": "pwd"})
+    result = await Bash(exec_prefix=wrapper).call(context, _arguments("pwd"))
     assert result.stdout == "/\n"
     assert context.cwd == Path("/")
 
@@ -701,7 +706,7 @@ async def test_a_wrapped_call_never_looks_at_the_shells_directory(
 
     monkeypatch.setattr(Path, "is_dir", is_dir)
     context = ToolContext(cwd=tmp_path)
-    await Bash(exec_prefix=wrapper).call(context, {"command": "cd sub"})
+    await Bash(exec_prefix=wrapper).call(context, _arguments("cd sub"))
     assert context.cwd == tmp_path / "sub"
 
 
@@ -1068,6 +1073,11 @@ async def test_killing_the_calling_process_leaves_no_shell_behind(
         await caller.wait()
 
 
+def _arguments(command: str) -> dict[str, PlainTree]:
+    """Return what the model passes to run ``command``."""
+    return {"command": command, "description": "Run it"}
+
+
 async def _run(
     cwd: Path,
     command: str,
@@ -1078,7 +1088,7 @@ async def _run(
     """Run ``command`` with ``tool`` in a fresh context at ``cwd``."""
     return await (tool or Bash()).call(
         ToolContext(cwd=cwd),
-        {"command": command, "timeout": limit_ms},
+        {**_arguments(command), "timeout": limit_ms},
     )
 
 
