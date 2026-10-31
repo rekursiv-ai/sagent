@@ -1054,6 +1054,9 @@ def test_a_headless_login_at_the_prompt_takes_the_address_pasted(
     env = {
         **{k: v for k, v in os.environ.items() if not k.startswith("SAGENT_")},
         **{name: str(tmp_path / name) for name in homes},
+        # The driver imports the code under test, not the shared venv's editable
+        # install, which may point at another checkout.
+        "PYTHONPATH": os.pathsep.join(sys.path),
         "SAGENT_PROVIDER": "pasting",
         "TERM": "xterm",
         "PROMPT_TOOLKIT_NO_CPR": "1",
