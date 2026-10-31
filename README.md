@@ -65,12 +65,12 @@ See [Install](#install) for additional details.
 
 4. Unified cost tracking.
    - One USD total across every provider in a session.
-   - Pricing base don API costs when on sub.
+   - Pricing based on API costs when on sub.
    - Sub-agent costs roll up to the root. `--max-budget-usd N` caps the whole tree.
 
 5. Self-directing agent fleets.
    - Agents retune their own runtime -- provider, model, thinking, context -- mid-task.
-   - A coordinator can do it to its workers over `AgentSend`: *"switch to o1, crank thinking, recompact and drop the file reads."*
+   - A coordinator can do it to its workers over `AgentSend`: *"switch to luna, crank thinking, recompact and drop the file reads."*
 
 6. Recursive agent messaging.
    - Any spawned agent can spawn and `AgentSend` to any peer, so coordination is a tree, not a star.
@@ -78,7 +78,7 @@ See [Install](#install) for additional details.
 
 7. Richer built-in tools.
    - WebSearch/Fetch use headed or headless chrome.
-   - `PaperSearch`/`PaperFetch` walk citation graphs and fetch PDFs.
+   - `PaperDetails` walks citation graphs; `PaperFetch` fetches PDFs.
    - Multi-backend `WebSearch`, `WebFetch` with markdown extraction, atomic read/write tracking on file tools.
 
 8. Unix-aligned and pipeable.
@@ -89,7 +89,7 @@ See [Install](#install) for additional details.
    - Example: `ls files/` is auto-promoted to `List(files/)` tool call.
 
 10. Universal session format.
-    - Convert claude/codex sessions to from sagent format and vice versa.
+    - Typed session records keep whatever no field names in `extra`.
 
 11. All spawns' sessions (ancestors and/or descendants) can be focused.
 
@@ -103,24 +103,25 @@ See [Install](#install) for additional details.
     - The same `Agent` class powers the CLI, your application code, and recursive sub-agents.
 
 15. Typed Python objects.
-    - `Agent`, `Tool`, `Model`, `Provider`, and `Message` are protocols and dataclasses you import, compose, and unit-test.
+    - `Agent`, `Tool`, `Model`, `Provider`, and the session records are protocols and dataclasses you import, compose, and unit-test.
     - Passes strict: `basedpyright`, `pyrefly`, and `ty`.
 
 Example:
 
 ```python
-from sagent import tools
-from sagent.agent import Agent
-from sagent.lib.codec import immutable
-from sagent.providers import Google
+from sagent.agent.agent import Agent
+from sagent.providers.catalog import ModelCatalog
+from sagent.tools.glob_tool import Glob
+from sagent.tools.grep import Grep
+from sagent.tools.read import Read
 
-agent = Agent(
-    model=Google.from_env().model("gemini-pro-3.1"),
-    system="You are a scientist.",
-    tools=[tools.Read(), tools.Glob(), tools.Grep()],
-)
-result = await agent.run(immutable({"prompt": "analyze the CSV in ./data/"}))
-print(result.content)
+async with ModelCatalog() as catalog:
+    async with Agent(
+        model=catalog["google"]["gemini-pro-3.1"],
+        system_prompt="You are a scientist.",
+        tools=[Read(), Glob(), Grep()],
+    ) as agent:
+        print(await agent.send("analyze the CSV in ./data/"))
 ```
 
 ## Install
@@ -207,7 +208,7 @@ For a small smoke test:
 
 ```bash
 sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+cuda \
-  --effort none --max-response-tokens 32 --max-tool-call-rounds 1
+  --effort none --max-tool-call-rounds 1
 ```
 
 SelfHosted options use `+` suffixes after the model name. Device, dtype, and `compile` can appear in any order, but each category can appear once.
@@ -260,14 +261,14 @@ In code, open the servers and pass their tools:
 ```python
 from pathlib import Path
 
-from sagent import tools
-from sagent.agent import Agent
-from sagent.providers import Google
+from sagent.agent.agent import Agent
+from sagent.providers.catalog import ModelCatalog
 from sagent.tools.mcp import McpSession, servers
+from sagent.tools.read import Read
 
-model = Google.from_env().model("gemini-pro-3.1")
-async with McpSession(servers(Path.cwd())) as mcp:
-    async with Agent(model=model, tools=[tools.Read(), *mcp.tools()]) as agent:
+async with ModelCatalog() as catalog, McpSession(servers(Path.cwd())) as mcp:
+    model = catalog["google"]["gemini-pro-3.1"]
+    async with Agent(model=model, tools=[Read(), *mcp.tools()]) as agent:
         ...
 ```
 
@@ -282,7 +283,7 @@ services. Sessions are plaintext local state and may contain prompts, model
 responses, tool results, file snippets, and paths.
 
 Use narrow tool sets, pass `--ephemeral` for one-off sensitive
-prompts so sessions and auto-memory are disabled, and run Sagent inside your own
+prompts so no journal or memories are kept, and run Sagent inside your own
 OS/container sandbox when a task needs hard isolation. See
 [Security](https://github.com/rekursiv-ai/sagent/blob/main/docs/security.md).
 

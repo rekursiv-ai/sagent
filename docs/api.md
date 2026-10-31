@@ -1,184 +1,159 @@
 # Python API
 
-Sagent is a Python runtime for typed agent loops. The CLI is a thin surface over the same `Agent`, `Model`, `Provider`, `Tool`, and `Message` contracts.
+Sagent is a Python runtime for typed agent loops. The CLI is a thin surface over the same `Agent`, `Model`, `Provider`, and `Tool` contracts.
 
 ## Minimal agent
 
 ```python
 import asyncio
 
-from sagent import tools
-from sagent.agent import Agent
-from sagent.lib.codec import immutable
-from sagent.providers import Google
+from sagent.agent.agent import Agent
+from sagent.providers.catalog import ModelCatalog
+from sagent.tools.glob_tool import Glob
+from sagent.tools.grep import Grep
+from sagent.tools.read import Read
 
 
 async def main() -> None:
-    agent = Agent(
-        model=Google.from_env().model("gemini-pro-3.1"),
-        system="You summarize files concisely.",
-        tools=[tools.Read(), tools.Glob(), tools.Grep()],
-    )
-    result = await agent.run(immutable({"prompt": "Summarize README.md"}))
-    print(result.content)
+    async with ModelCatalog() as catalog:
+        async with Agent(
+            model=catalog["google"]["gemini-pro-3.1"],
+            system_prompt="You summarize files concisely.",
+            tools=[Read(), Glob(), Grep()],
+        ) as agent:
+            print(await agent.send("Summarize README.md"))
 
 
 asyncio.run(main())
 ```
 
-`Agent.run()` accepts a JSON directive with a `prompt` field and returns a `Message`.
+`async with Agent(...)` starts the runtime; `send()` returns the reply's text once the agent is idle.
 
 ## Agent constructor
 
 ```python
 agent = Agent(
     model=model,
-    model_spec=None,
-    system="",
-    tools=[],
-    compactor=None,
-    name="Agent",
-    description="An AI agent.",
-    max_tool_call_rounds=None,
-    max_attempts=5,
-    thinking="adaptive",
-    effort=None,
-    session_dir=None,
-    budget=None,
-    max_budget_usd=None,
+    tools=(),
+    system_prompt=None,
+    journal=None,
+    compactor=NoShrinker,
+    pruner=NoShrinker,
+    tool_context=None,
+    max_rounds=None,
+    max_spend_usd=None,
     persistent_retry=False,
-    track_changed_files=True,
+    agents_md=None,
+    allowed=None,
+    environment=True,
+    account=None,
 )
 ```
 
+Every argument is keyword-only.
+
 | Argument | Meaning |
 | --- | --- |
-| `model` | Required `Model` backend. |
-| `model_spec` | Recipe for rebuilding/switching the model, used by agent tools. |
-| `system` | String or dict of named system prompt sections. Dict values may be strings or zero-arg callables. |
-| `tools` | List of tool objects. Duplicate `tool_id` values are rejected. |
-| `compactor` | Conversation compactor, usually `SummaryCompactor`. |
-| `name` | Live-agent registry and UI name. |
-| `description` | Human-facing description when an agent is used as a tool. |
-| `max_tool_call_rounds` | Per-run cap on model requests that include tool calls. |
-| `max_attempts` | Retry cap for transient model failures. Must be at least 1. |
-| `thinking` | Provider-specific thinking mode. `None` disables explicit thinking config. |
-| `effort` | Provider-specific effort level. Rejected if the model does not support effort. |
-| `session_dir` | Directory for persisted session state and tool-result storage. |
-| `budget` | Explicit `ContextBudget`; validated against model limits. |
-| `max_budget_usd` | Cost cap for this agent's session. |
-| `persistent_retry` | Keep retrying persistent runs after recoverable failures. |
-| `track_changed_files` | Track file changes for safety reminders. |
+| `model` | Required `Model`; assign `agent.model` later to switch. |
+| `tools` | Tools the model may call; names must differ. |
+| `system_prompt` | What the model is told it is; `None` uses the default prompt. |
+| `journal` | Where the session is written; `None` keeps nothing. Open a `JsonlJournal` yourself and pass it. |
+| `compactor` | Factory for what summarizes the session, usually `SummaryCompactor`. |
+| `pruner` | Factory for what drops old tool results, usually `Pruner`. |
+| `tool_context` | Working directory, result size limit, terminal width, and fetch session; `ToolContext()` when omitted. |
+| `max_rounds` | Tool-call rounds one turn may run; `None` for no cap. |
+| `max_spend_usd` | USD the agent may spend; `None` for no cap. |
+| `persistent_retry` | Wait out a long rate limit instead of raising. |
+| `agents_md` | Where `AGENTS.md` files are looked for; defaults when omitted. |
+| `allowed` | Tool names the model may call; `None` for all. The rest are still offered, so the prompt cache holds. |
+| `environment` | Tell the model its directory, git state, platform, and shell. |
+| `account` | Named login for the model's provider; `None` for its default. |
 
 ## Running agents
 
-`run(directive, events=None)` runs one prompt to completion. `events` is an optional `asyncio.Queue[Message | None]` for streamed model text, thinking, tool labels, tool results, and completion metadata. `None` is a request-boundary sentinel.
-
 ```python
-events: asyncio.Queue[Message | None] = asyncio.Queue()
-result = await agent.run(immutable({"prompt": "Do the task"}), events=events)
+reply = await agent.send("Do the task")
+
+async for words in agent.stream("Now explain it"):
+    print(words, end="")
 ```
 
-`run_forever(events=None)` drains `agent.inbox`, joins queued strings into prompts, calls `run()`, survives cancellation, and exits when it receives Sagent's quit sentinel. The REPL uses this shape for long-lived agents.
+- `send(text, attachments=())` returns the last text the model wrote in the turn.
+- `stream(text, attachments=())` yields the reply's text as it is written.
+- Both raise `BudgetExhaustedError` past `max_spend_usd` and `RoundLimitError` past `max_rounds`.
+- `attachments` takes `Attachment(mime_descriptor=..., data=...)` images and documents.
 
-The inbox is the coordination point for REPL input, background tool completion, and peer-agent messages. Prefer putting text into the inbox over mutating history directly.
+Every runtime event -- thinking, tool calls, tool results, compactions -- goes to `agent.runtime`. See [Streaming](streaming.md).
 
 ## Observable state
 
-Important public properties:
-
-| Property | Meaning |
+| Attribute | Meaning |
 | --- | --- |
-| `messages` | Mutable conversation history. |
-| `tools` | Tool set available to this agent. |
-| `model` | Current model backend. |
-| `model_spec` | Provider/auth/model/account recipe when known. |
-| `budget` | Active `ContextBudget`. |
-| `max_request_tokens` | Request token limit; setter validates model max. |
-| `max_response_tokens` | Response token reserve; setter validates model max. |
-| `total_cost_usd` | Cumulative subtree model cost for this session (includes descendant agents; live during active runs). |
-| `total_tokens` | Cumulative subtree `TokenCount` for this session (live during active runs). |
-| `total_active_elapsed_seconds` | Cumulative wall-clock seconds spent in `run()` across the session (live-ticks while active). |
-| `cache_tokens` | `(cache_creation_tokens, cache_read_tokens)` from `total_tokens`. |
-| `cache_ttl` | Prompt-cache TTL for outgoing requests (`"5m"` default or `"1h"`); setter validates. |
-| `session_id` | Stable short session ID. |
-| `status` | Current status string. |
-| `active` | True while `run()` is executing. |
-| `last_elapsed` | Wall-clock seconds for the most recent run. |
-| `last_model_request_tokens` | Last request token count. |
-| `last_model_response_tokens` | Last response token count. |
-
-`swap_model(model, spec=...)` replaces the active model and its model recipe. `AgentSelf(model_id="...")` uses the same mechanism.
-
-## Messages
-
-Messages are frozen dataclasses with common metadata: `parent_id`, `id`, and `timestamp`.
-
-| Type | Content |
-| --- | --- |
-| `TextMessage` | `str` content with a text descriptor. |
-| `BytesMessage` | `bytes` content for binary data. |
-| `JsonMessage` | JSON content. |
-| `MultipartMessage` | Tuple of nested messages. |
-
-`Message` is the union of these four types. Serialization stores `descriptor`, `content`, `_id`, `_parent_id`, and `_timestamp`; bytes are base64 encoded and multipart messages serialize recursively.
-
-Common descriptors:
-
-- `text/plain`: ordinary text.
-- `text/x-error`: expected tool or runtime error.
-- `text/x-thinking`: model thinking stream.
-- `text/x-tool-label`: human-readable tool status.
-- `multipart/x-tool-result`: tool result message.
-- `application/x-done`: run completion metadata.
+| `model` | Current model; assign to switch at the next model call. |
+| `system_prompt` | Assign to change what the model is told it is. |
+| `tools` | Tools offered, by name. |
+| `allowed` | Tools the model may call; assign to change. |
+| `session` | The conversation: iterate it, `append()` records, `clear()`, and reach its `journal`, `compactor`, and `pruner`. |
+| `runtime` | What runs the turns: `observers`, `async for event in agent.runtime`, `halt()`, `jobs`. |
+| `spend_usd` | USD the model calls have cost, a resumed session's included. |
+| `max_rounds`, `max_spend_usd` | The caps; assign to change. |
+| `running` | Whether the runtime serves turns. |
+| `root` | Where the session started. |
 
 ## Models and providers
 
-A `Provider` constructs `Model` objects:
+A `ModelCatalog` holds every provider, sharing one HTTP client and process pool. Looking a model up does no I/O.
 
 ```python
-provider = Google.from_env()
-model = provider.model("gemini-pro-3.1")
-utility = provider.model("utility")
+async with ModelCatalog() as catalog:
+    model = catalog["google"]["gemini-pro-3.1"]
+    utility = catalog["google"]["utility"]
+```
+
+A provider can also be used alone:
+
+```python
+from sagent.providers.google.api import Google
+
+async with Google() as google:
+    model = google["gemini-pro-3.1"]
 ```
 
 A `Model` exposes:
 
-- `buffer(request) -> ModelResponse`
-- `stream(request, on_text=None) -> ModelResponse`
-- `is_context_overflow(error) -> bool`
+- `capability`: every setting it offers, its limits, and its prices.
+- `settings`: the settings chosen; assign to change them.
+- `count(request)`: tokens a `Request` would send.
+- `stream(request)`: yields `TextChunk`s, then the finished `Response`.
 
-`stream()` returns a complete `ModelResponse` while calling `on_text(chunk)` for streamed text chunks.
+```python
+from dataclasses import replace
 
-`ModelRequest` contains messages, tools, system prompt, token limits, thinking/effort settings, and request metadata. `ModelResponse` contains content messages, stop reason, token counts, cache counts, response IDs, and request/response/total cost.
+model.settings = replace(model.settings, thinking_effort="high")
+```
+
+`Request` holds system prompt blocks, session records, and tools. `Response` holds the reply's records, token counts, spend, and stop reason.
+
+## Session records
+
+A session is a sequence of frozen dataclasses from `sagent.session.types`: `UserMessage`, `AssistantMessage`, `Thinking`, `ToolCall`, tool results such as `ShellCommandResult` and `UncategorizedToolResult`, `SystemMessage`, and more. `JsonlJournal` writes one record per JSON line.
 
 ## Tools
 
-Tools receive a tool-call `Message`, parse its JSON directive, and return a `Message`.
-
-Batch tools implement:
+A tool has a `name`, `description`, JSON `schema`, and `display`, and implements:
 
 ```python
-async def run(self, msg: Message) -> Message: ...
+def summary(self, arguments: Mapping[str, PlainTree]) -> str: ...
+def serialize_key(
+    self, context: ToolContext, arguments: Mapping[str, PlainTree]
+) -> str | None: ...
+async def call(
+    self, context: ToolContext, arguments: Mapping[str, PlainTree]
+) -> AnyToolResult: ...
 ```
-
-Streaming tools implement:
-
-```python
-streaming = True
-
-
-def run(self, msg: Message) -> AsyncGenerator[Message, None]: ...
-```
-
-For streaming tools, all yielded messages before the last are forwarded as events. The final yield is the tool result.
 
 See [Tools](tools.md) for built-ins and custom-tool examples.
 
-## Cost and context budgets
+## Costs
 
-`Pricing` is per-million-token USD and tracks request, response, cache write, and cache read prices. `TokenCount` tracks input, output, cache creation, and cache read tokens.
-
-`ContextBudget.from_model(model)` derives conservative request/response/headroom defaults from the model limits. Explicit budgets are validated when the agent is constructed and when token-limit properties are changed.
-
-If `max_budget_usd` is set, Sagent records every model response and raises once cumulative session cost reaches the cap.
+Each `Response` carries its `TokenCount` and `TokenCost`. `agent.spend_usd` sums them across the session, children's spend included. With `max_spend_usd` set, the turn halts and raises `BudgetExhaustedError` once spend reaches the cap.

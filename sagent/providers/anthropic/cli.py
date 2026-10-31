@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     )
     from sagent.model.types import Request, Response, TextChunk
     from sagent.providers.types import (
-        ProviderSharedResources,
+        ProviderResources,
         ToolMount,
         UsageWindow,
     )
@@ -100,7 +100,7 @@ class AnthropicCLI(HasModels, AsyncResource):
         self,
         *,
         name: str = "",
-        resources: ProviderSharedResources | None = None,
+        resources: ProviderResources | None = None,
         account: str | None = None,
     ) -> None:
         self._name = name or self.section
@@ -116,7 +116,7 @@ class AnthropicCLI(HasModels, AsyncResource):
         return self._name
 
     @property
-    def resources(self) -> ProviderSharedResources:
+    def resources(self) -> ProviderResources:
         """Return what this provider shares with others."""
         return self._resources
 

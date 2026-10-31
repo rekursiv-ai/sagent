@@ -7,29 +7,41 @@ Sessions persist agent conversation and state across runs. They are plaintext lo
 The CLI stores sessions under a project-scoped directory derived from the current working directory:
 
 ```text
-~/.sagent/projects/<cwd-slug>/<session-id>/
+<data-dir>/rekursiv-ai/sagent/projects/<cwd-slug>/<session-id>/session.jsonl
 ```
 
-The slug is based on the resolved working directory. Long slugs are shortened with a hash.
+`<data-dir>` is the user's data directory, such as `~/.local/share` on Linux. The slug is based on the resolved working directory. Long slugs are shortened with a hash. Each spawned child keeps its own session under `<session-id>/<label>/`.
 
 ## Explicit sessions
 
-Use an explicit directory when scripts, tests, or applications should control persistence:
+Use an explicit journal file when scripts, tests, or applications should control persistence:
 
 ```bash
-sagent --session /tmp/my-sagent-session
+sagent --session /tmp/my-sagent-session/session.jsonl
 ```
 
 ```python
-agent = Agent(
-    model=model,
-    system="You are concise.",
-    tools=[],
-    session_dir="/tmp/my-sagent-session",
-)
+from pathlib import Path
+
+from sagent.agent.agent import Agent
+from sagent.session.jsonl import JsonlJournal
+
+path = Path("/tmp/my-sagent-session/session.jsonl")
+async with JsonlJournal(path) as journal:
+    async with Agent(model=model, journal=journal) as agent:
+        print(await agent.send("Pick up where we left off."))
 ```
 
-Passing `session_dir` loads existing state if present and stores large persisted tool results under that directory.
+Opening the agent resumes what the journal holds. A journal is locked to one process: a second open raises `JournalInUseError`.
+
+To restore the model, account, and system prompt the session last used, call `recall` before opening the agent:
+
+```python
+agent = Agent(model=model, journal=journal)
+await agent.recall(catalog)
+async with agent:
+    ...
+```
 
 ## Resume and continue
 
@@ -42,12 +54,10 @@ sagent --resume-all
 
 | Flag | Behavior |
 | --- | --- |
-| `--continue` | Resume the newest session for the current working directory, or start fresh. |
-| `--resume` | Open a picker for sessions from the current working directory. |
+| `--continue` | Resume the newest session for the current working directory. |
+| `--resume [ID]` | Resume by id prefix, or open a picker for sessions from the current working directory. |
 | `--continue-all` | Resume the newest session across all project directories. |
 | `--resume-all` | Open a picker across all project directories. |
-
-`--session PATH` always wins over resume and continue flags.
 
 ## Disable persistence
 
@@ -55,35 +65,20 @@ sagent --resume-all
 sagent --ephemeral
 ```
 
-Use this for prompts that should not write conversation state or auto-memory to disk. Library users can omit `session_dir` for in-memory runs and pass `prompt_context=SagentContext(include_memory=False)` to `Agent` when persistent memory should be disabled too.
-
-No-session runs may still persist oversized tool results temporarily under `/tmp/sagent_results` when needed to keep model requests within context budgets.
+Use this for prompts that should not write conversation state or memories to disk. Library users omit `journal` for an in-memory run, and leave out the `Memory` tool.
 
 ## What persists
 
-Sagent writes session metadata and conversation state, including:
+The journal is one JSON line per session record, in order:
 
-- messages;
-- event log;
-- provider, auth, model ID, and account recipe when known;
-- token limits and last token counts;
-- total cost;
-- tool-call round counts;
-- compaction count and summary pointers;
-- status string;
-- Bash current working directory;
-- tool-result replacement state.
+- user, assistant, and system messages;
+- thinking, tool calls, and typed tool results;
+- token usage and spend, a child's included;
+- compactions and clears, each starting a new window;
+- standing records: the model, its settings, the account, and the system prompt.
 
-Before compaction, Sagent writes numbered `pre_compact_<N>.jsonl` transcripts when a session directory exists.
-
-Large tool outputs are stored under:
-
-```text
-<session-dir>/tool-results/
-```
+A compaction or clear starts a new window; the journal keeps every earlier one. `journal.history()` yields every record, and iterating the journal yields the last window.
 
 ## Loading sessions
 
-On load, Sagent restores messages, status, cost and token counters, compaction state, tool-result replacement state, and Bash cwd. It also repairs dangling tool calls so the next provider request is well-formed.
-
-If saved provider metadata is available, Sagent can restore the provider/model recipe rather than only replaying text history.
+On open, the agent reads the journal's last window back into its session, and counts the spend recorded before. `journal.history()` reads a line cut off mid-write as an `IncompleteRecord`.

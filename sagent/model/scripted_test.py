@@ -26,6 +26,7 @@ from sagent.session.types import (
     UserMessage,
 )
 from sagent.tools.read import Read
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
@@ -38,7 +39,11 @@ async def test_agent_runs_a_tool_round_from_the_script(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         replies=[reply(calls=[call("Read", file_path="a.txt")]), reply("done")],
     )
-    async with Agent(model=provider["scripted"], tools=[Read()], cwd=tmp_path) as agent:
+    async with Agent(
+        model=provider["scripted"],
+        tools=[Read()],
+        tool_context=ToolContext(cwd=tmp_path),
+    ) as agent:
         assert await agent.send("read a.txt") == "done"
     assert len(provider.requests) == 2
     second = provider.requests[1].records

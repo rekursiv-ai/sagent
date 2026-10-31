@@ -2,39 +2,56 @@
 
 Sagent has two streaming layers:
 
-1. Model streaming: providers can stream text chunks while still returning a complete `ModelResponse`.
-2. Agent events: `Agent.run(..., events=queue)` emits text chunks, thinking, tool labels, tool results, and completion metadata as `Message` objects.
+1. Model streaming: `Model.stream(request)` yields `TextChunk`s as the reply is written, then the finished `Response`.
+2. Runtime events: `agent.runtime` publishes every event of a turn -- text, thinking, tool calls, tool results, compactions, idle.
 
-The CLI exposes agent events through `--output-format stream-json`.
+The CLI exposes runtime events through `--output-format stream-json`.
 
-## Python event queue
+## Reply text
+
+`Agent.stream()` yields the reply's text as it is written:
 
 ```python
-import asyncio
-
-from sagent.lib.codec import immutable
-
-
-events: asyncio.Queue = asyncio.Queue()
-result = await agent.run(immutable({"prompt": "Explain this repo"}), events=events)
+async for words in agent.stream("Explain this repo"):
+    print(words, end="")
 ```
 
-The queue receives `Message` objects during the run and a `None` sentinel at the request boundary.
+## Runtime events
 
-Common event descriptors:
+Iterate `agent.runtime` for every event published from then on, or add a callback to `agent.runtime.observers`:
 
-| Descriptor | Meaning |
+```python
+from sagent.runtime import types
+
+
+def observe(event: types.RuntimeEvent) -> None:
+    if isinstance(event, types.ModelResponseThinking):
+        print(event.text, end="")
+    elif isinstance(event, types.ModelResponseComplete):
+        print(event.response.spend.total)
+
+
+agent.runtime.observers.append(observe)
+reply = await agent.send("Explain this repo")
+agent.runtime.observers.remove(observe)
+```
+
+Common events in `sagent.runtime.types`:
+
+| Event | Meaning |
 | --- | --- |
-| `text/plain` | Model text chunk or ordinary text event. |
-| `text/x-thinking` | Provider thinking content when available. |
-| `text/x-tool-label` | Human-readable label for a pending tool invocation. |
-| `multipart/x-tool-result` | Foreground tool result. |
-| `text/x-error` | Expected tool/runtime error. |
-| `text/x-interrupted` | Run was cancelled. |
-| `text/x-signal-status-changed` | Agent status changed. |
-| `application/x-done` | Final token/cost metadata for the run. |
+| `ModelCallStarted` | A model call began. |
+| `ModelResponsePartial` | Reply text chunk. |
+| `ModelResponseThinking` | Thinking text chunk, when the provider returns it. |
+| `ModelResponseComplete` | The finished `Response`: records, tool calls, tokens, spend. |
+| `ModelResponseError` | A model call failed past retrying. |
+| `ModelCallSuspended` | A transient failure; the turn waits, then calls again. |
+| `CompactStarted`, `CompactComplete` | Compaction began, and finished. |
+| `ChildEvent`, `ChildDoneEvent` | A spawned child's event, and its finish. |
+| `Halt` | Someone halted the turn. |
+| `AgentIdle` | The agent has no more work and waits for input. |
 
-The returned `result` is still the final assistant message.
+Tool results arrive as the session records they are, such as `ShellCommandResult`.
 
 ## CLI output formats
 
@@ -56,9 +73,20 @@ printf 'Say hi' | sagent --provider Google --model gemini-pro-3.1 --output-forma
 
 ```json
 {"descriptor":"text/plain","content":"Hello"}
-{"descriptor":"application/x-done","content":"{...}"}
 {"descriptor":"result","content":"Hello"}
 ```
+
+| Descriptor | Meaning |
+| --- | --- |
+| `text/plain` | Reply text chunk. |
+| `text/x-thinking` | Thinking text chunk. |
+| `text/x-tool-label` | Label of a tool call, with its `call_id`. |
+| `application/x-tool-result` | Tool result, with `call_id` and `is_error`. |
+| `application/x-error` | Model call failed. |
+| `text/x-notice` | Retry wait or login switch. |
+| `result` | Final reply. |
+
+A failed run prints `{"error": "..."}` and exits 1.
 
 ## CLI input formats
 
@@ -72,27 +100,6 @@ cat <<'EOF' | sagent --provider Google --model gemini-pro-3.1 --input-format str
 {"prompt":"Then compare it with file B."}
 EOF
 ```
-
-## Continuous agents
-
-`Agent.run_forever(events=queue)` is for long-lived surfaces such as REPLs and chat adapters. It drains `agent.inbox`, joins queued strings into a prompt, calls `run()`, and waits for more inbox items. It exits only on Sagent's quit sentinel.
-
-`AgentSend`, background task completion, and host UIs all communicate through the same inbox path.
-
-## Streaming tools
-
-Batch tools return one final result. Streaming tools yield intermediate `Message` objects and then a final result:
-
-```python
-class ProgressTool:
-    streaming = True
-
-    async def run(self, msg):
-        yield TextMessage("starting", "text/plain")
-        yield TextMessage("done", "text/plain")
-```
-
-The dispatch layer forwards intermediate yields to the event queue. The last yielded message becomes the actual tool result that is appended to conversation history.
 
 ## Caveats
 

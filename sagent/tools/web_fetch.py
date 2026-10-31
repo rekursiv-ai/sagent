@@ -5,7 +5,7 @@ extractor; a POST may have effects, so it is never replayed.
 
 Typical usage example:
 
-  result = await WebFetch(session=FetchSession()).call(context, {"url": "https://peps.python.org/pep-0008/"})
+  result = await WebFetch().call(context, {"url": "https://peps.python.org/pep-0008/"})
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ import ipaddress
 import time
 
 from treekle import PlainTree, mutable
-from wesearch.fetch import Extractor, FetchSession, PolicyParams, Transport
+from wesearch.fetch import Extractor, PolicyParams, Transport
 from wesearch.mcp.types import FetchBodyParamsSchema, FetchMethod
 from wesearch.types.errors import BotDetectionError, FetchError
 from wesearch.types.params import NO_BODY
@@ -32,7 +32,7 @@ import cachetools
 from sagent.session.types import UncategorizedToolResult, WebFetchResult
 from sagent.tools.command_analyzer import Invocation, replaceable
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import parse, schema_of
+from sagent.tools.types import json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -75,12 +75,9 @@ class WebFetch:
     description = (files(__package__) / "assets" / "webfetch.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay())
-
-    session: FetchSession = field(repr=False)
-    """Connections, browser, and egress every fetch reuses; whoever made it closes it."""
 
     policy: PolicyParams = field(default_factory=PolicyParams)
     """How to fetch when a call does not say."""
@@ -198,7 +195,7 @@ class WebFetch:
                     json_body=NO_BODY if a.json is None else mutable(a.json),
                     form_body=None if a.form is None else dict(a.form),
                     policy=policy,
-                    session=self.session,
+                    session=context.fetch_session,
                 )
             except BotDetectionError as e:
                 # Which block it was decides the remedy: Cloudflare, a

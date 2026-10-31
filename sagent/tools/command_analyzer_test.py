@@ -258,38 +258,53 @@ def test_a_pipeline_stage_that_runs_nothing_feeds_nothing() -> None:
 
 
 @pytest.mark.parametrize(
-    ("command", "captures"),
+    ("command", "diverts"),
     [
         ("ls > out", True),
         ("ls >> out", True),
         ("ls >| out", True),
         ("ls 1> out", True),
-        ("ls 2> err", False),
+        ("ls > /dev/null", True),
+        ("ls >&2", True),
+        ("ls 1>&-", True),
+        ("ls &> /dev/null", True),
+        ("ls &> out", True),
+        ("ls &>> out", True),
+        ("ls >& out", True),
+        ("ls <> f", True),
+        ("ls 2> err", True),
+        ("ls 2> /dev/null", False),
         ("ls 2>&1", False),
         ("ls < in", False),
         ("(ls) > out", True),
+        ("(ls) 2> err", True),
+        ("(ls) 2> /dev/null", False),
     ],
 )
-def test_only_a_redirect_of_stdout_captures_it(command: str, captures: bool) -> None:
-    assert _one(command, "ls").captures_stdout is captures
+def test_a_redirect_diverts_output_when_it_writes_a_file_or_hides_stdout(
+    command: str,
+    diverts: bool,
+) -> None:
+    """A tool call writes no file and shows its output: ``2> err`` is no call."""
+    assert _one(command, "ls").diverts_output is diverts
 
 
 def test_only_the_last_stage_reaches_an_enclosing_redirect() -> None:
     found = _found("(cat f | grep p) > out")
     cat, grep = (next(i for i in found if i.exe == exe) for exe in ("cat", "grep"))
-    assert not cat.captures_stdout
-    assert grep.captures_stdout
+    assert not cat.diverts_output
+    assert grep.diverts_output
 
 
-def test_every_command_of_a_redirected_group_is_captured() -> None:
+def test_every_command_of_a_redirected_group_is_diverted() -> None:
     found = _found("(cat f; ls) > out")
-    assert [(i.exe, i.captures_stdout) for i in found] == [("cat", True), ("ls", True)]
+    assert [(i.exe, i.diverts_output) for i in found] == [("cat", True), ("ls", True)]
 
 
 def test_a_redirect_downstream_is_seen_from_the_source() -> None:
     grep = _one("grep p f | head -20 > out", "grep")
-    assert not grep.captures_stdout
-    assert any(stage.captures_stdout for stage in grep.downstream())
+    assert not grep.diverts_output
+    assert any(stage.diverts_output for stage in grep.downstream())
 
 
 @pytest.mark.parametrize(
@@ -357,6 +372,11 @@ def test_a_command_inside_a_compound_stage_feeds_what_the_stage_feeds() -> None:
         "command -v ls",
         "cat a; ls && wc -l b",
         "uniq in",
+        "cat f 2>/dev/null",
+        "cat f >/dev/null",
+        "cat f &>/dev/null",
+        "cat f 2>&1",
+        "cat f >&2",
     ],
 )
 def test_a_command_that_only_reads_may_run_beside_others(command: str) -> None:
@@ -369,7 +389,12 @@ def test_a_command_that_only_reads_may_run_beside_others(command: str) -> None:
         "rm victim",
         "frobnicate",
         "echo hi > victim",
-        "cat f 2>/dev/null",
+        "cat f 2> err",
+        "cat f &> out",
+        "cat f >& out",
+        "cat f 1>&-",
+        "cat <> f",
+        "cat < in",
         "sed -i 's/a/b/' foo.py",
         "sed -ni '1p' f",
         "git checkout .",
@@ -503,6 +528,17 @@ def test_a_line_that_only_reads_becomes_each_call_once() -> None:
     )
 
 
+def test_a_line_of_reads_that_drops_its_errors_becomes_each_call() -> None:
+    """``2>/dev/null`` writes no file: the line still only reads, and splits."""
+    cat, head = _Peer(), _Peer(name="Head", exe="head")
+    command = "cat a 2>/dev/null | tail; head b 2>/dev/null"
+    reads = ReadOnly.default().reads(command)
+    assert rewrite(command, peers=(cat, head), reads=reads) == (
+        Rewrite(tool=cat, arguments={"file": "a"}),
+        Rewrite(tool=head, arguments={"file": "b"}),
+    )
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -554,6 +590,10 @@ def test_operands_skip_flags_and_their_values(
         ("ls", False),
         ("LC_ALL=C cat f", False),
         ("cat f > out", False),
+        ("cat f 2> err", False),
+        ("cat f &> out", False),
+        ("cat f 2>/dev/null", True),
+        ("cat f 2>&1", True),
         ("cat f | head -3", True),
         ("cat f | cat | less | more | tail", True),
         ("cat f | sort", False),

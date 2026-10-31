@@ -20,7 +20,7 @@ def cfg(tmp_path: Path) -> AgentsMdConfig:
     return AgentsMdConfig(system_dir=tmp_path / "system", user_dir=tmp_path / "user")
 
 
-def rules_for(
+def found_rules(
     root: Path,
     paths: list[Path],
     *,
@@ -210,7 +210,7 @@ def test_only_the_tiers_named_are_read(
     )
 
     section = directives(cwd, config=cfg)
-    rules, matched = rules_for(cwd, [cwd / "a.py"], exclude=set(), config=cfg)
+    rules, matched = found_rules(cwd, [cwd / "a.py"], exclude=set(), config=cfg)
 
     words = set(section.split())
     assert {"system-rule", "user-rule"} & words == kept
@@ -264,7 +264,7 @@ def test_a_file_whose_frontmatter_will_not_parse_is_skipped_with_a_warning(
 
     with caplog.at_level(logging.WARNING):
         section = directives(tmp_path, config=cfg)
-        found = rules_for(tmp_path, [tmp_path / "a.py"], exclude=set(), config=cfg)
+        found = found_rules(tmp_path, [tmp_path / "a.py"], exclude=set(), config=cfg)
 
     assert "body" not in section
     assert "kept" in section
@@ -308,7 +308,7 @@ def test_frontmatter_that_is_no_mapping_is_dropped_and_the_body_kept(
     _write(tmp_path / "AGENTS.md", f"---\n{meta}\n---\nbody\n")
 
     assert directives(tmp_path, config=cfg).endswith(":\nbody")
-    assert rules_for(tmp_path, [tmp_path / "a.py"], exclude=set(), config=cfg) == (
+    assert found_rules(tmp_path, [tmp_path / "a.py"], exclude=set(), config=cfg) == (
         "",
         set(),
     )
@@ -346,7 +346,7 @@ def test_rules_for_returns_the_rules_a_path_matches(
     _write(rules / "text.md", "---\npaths: ['**/*.txt']\n---\ntext-rule\n")
     _write(tmp_path / "AGENTS.md", "always-loaded\n")
 
-    text, matched = rules_for(
+    text, matched = found_rules(
         tmp_path,
         [tmp_path / "main.py"],
         exclude=set(),
@@ -369,7 +369,7 @@ def test_rules_for_skips_a_rule_already_given(
         "---\npaths: ['**/*.py']\n---\npy\n",
     )
 
-    text, matched = rules_for(
+    text, matched = found_rules(
         tmp_path,
         [tmp_path / "a.py"],
         exclude={str(rule.resolve())},
@@ -401,7 +401,7 @@ def test_rule_globs_match_paths_relative_to_the_working_directory(
         f"---\npaths: {paths}\n---\nthe-rule\n",
     )
 
-    text, _ = rules_for(tmp_path, [tmp_path / target], exclude=set(), config=cfg)
+    text, _ = found_rules(tmp_path, [tmp_path / target], exclude=set(), config=cfg)
 
     assert ("the-rule" in text) is matches
 
@@ -417,7 +417,7 @@ def test_a_path_outside_the_working_directory_matches_as_absolute(
         f"---\npaths: ['{outside.resolve().as_posix()}']\n---\nabs-rule\n",
     )
 
-    text, _ = rules_for(cwd, [outside], exclude=set(), config=cfg)
+    text, _ = found_rules(cwd, [outside], exclude=set(), config=cfg)
 
     assert "abs-rule" in text
 
@@ -589,7 +589,7 @@ def test_an_include_of_a_rule_governs_only_the_rules_paths(
         f"---\npaths: ['*.py']\n---\n@{extra}\n",
     )
 
-    text, _ = rules_for(tmp_path, [tmp_path / "a.py"], exclude=set(), config=cfg)
+    text, _ = found_rules(tmp_path, [tmp_path / "a.py"], exclude=set(), config=cfg)
 
     assert "SECRET" not in directives(tmp_path, config=cfg)
     assert "SECRET" in text

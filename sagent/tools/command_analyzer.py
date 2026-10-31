@@ -88,8 +88,9 @@ class Invocation:
     env_prefix: Mapping[str, str] = field(default_factory=dict[str, str])
     """Leading ``KEY=value`` words, as in ``LC_ALL=C grep``."""
 
-    captures_stdout: bool = False
-    """Whether a redirect sends its output to a file."""
+    diverts_output: bool = False
+    """Whether a redirect writes a file or keeps stdout off the screen, as no
+    tool call does; ``2>/dev/null`` and ``2>&1`` do neither."""
 
     expands: bool = False
     """Whether bash fills in a word first, as ``$x`` or ``$(...)``; ``~`` is no expansion."""
@@ -213,8 +214,9 @@ def invocations(command: str) -> tuple[Invocation, ...] | None:
 class ReadOnly:
     """Which commands only read, so a call running only them may run beside others.
 
-    An unknown command, a redirect, a loop, or an unparsed line counts as
-    writing: a wrong ``False`` only serializes, a wrong ``True`` races writers.
+    An unknown command, a loop, an unparsed line, or any redirect but one that
+    drops output (``2>/dev/null``) or merges it (``2>&1``) counts as writing:
+    a wrong ``False`` only serializes, a wrong ``True`` races writers.
     """
 
     utilities: frozenset[str]
@@ -293,7 +295,7 @@ class ReadOnly:
 
     def _safe_command(self, node: Node) -> bool:
         """Return whether one simple command only reads."""
-        if any(part.kind == "redirect" for part in node.parts):
+        if not all(_drops_or_merges(p) for p in node.parts if p.kind == "redirect"):
             return False
         for part in node.parts:
             if part.kind in {"word", "assignment"} and not all(
@@ -429,8 +431,8 @@ def replaceable(
     """Return whether one tool call could do what ``invocation`` does.
 
     The command must be one of ``exes``, without an environment prefix or a
-    redirect, and its output may pass only through stages that cut it short:
-    ``head``, ``tail``, ``cat``, ``less``, ``more``.
+    redirect that diverts its output, and that output may pass only through
+    stages that cut it short: ``head``, ``tail``, ``cat``, ``less``, ``more``.
 
     Args:
       invocation: One simple command, with its pipeline.
@@ -445,11 +447,7 @@ def replaceable(
       replaceable: ``True`` when one call covers it.
 
     """
-    if (
-        invocation.exe not in exes
-        or invocation.env_prefix
-        or invocation.captures_stdout
-    ):
+    if invocation.exe not in exes or invocation.env_prefix or invocation.diverts_output:
         return False
     if any(_sink_blocks(sink, counted=counted) for sink in invocation.downstream()):
         return False
@@ -627,7 +625,7 @@ def _parse(command: str) -> tuple[Node, ...] | None:
     return tuple(trees) or None
 
 
-# `bashlex` hangs ``(grep p f) > out``'s redirect on the compound; ``captured``
+# `bashlex` hangs ``(grep p f) > out``'s redirect on the compound; ``diverted``
 # carries it down to the commands inside.
 def _walk(
     node: Node,
@@ -635,11 +633,12 @@ def _walk(
     cwd: str | None,
     out: list[Invocation],
     pipelines: Iterator[int],
-    captured: bool = False,
+    diverted: bool = False,
     sink: Invocation | None = None,
 ) -> None:
     """Append every simple command under ``node`` to ``out``."""
-    captured = captured or _redirects_stdout(node)
+    redirects = node.redirects if hasattr(node, "redirects") else ()
+    diverted = diverted or any(_diverts(r) for r in redirects)
     if node.kind == "command":
         command = _command(node, cwd=cwd, pipeline=next(pipelines))
         if command.exe:
@@ -647,14 +646,14 @@ def _walk(
                 replace(
                     command,
                     piped_into=sink,
-                    captures_stdout=command.captures_stdout or captured,
+                    diverts_output=command.diverts_output or diverted,
                 ),
             )
         _walk_substitutions(node, cwd=cwd, out=out, pipelines=pipelines)
     elif node.kind == "pipeline":
-        _walk_pipeline(node, cwd=cwd, out=out, pipelines=pipelines, captured=captured)
+        _walk_pipeline(node, cwd=cwd, out=out, pipelines=pipelines, diverted=diverted)
     elif node.kind == "list":
-        _walk_list(node, cwd=cwd, out=out, pipelines=pipelines, captured=captured)
+        _walk_list(node, cwd=cwd, out=out, pipelines=pipelines, diverted=diverted)
     else:
         # Loop bodies too: ``for f in *; do cat $f; done`` is still Read's job.
         for child in _children(node):
@@ -663,7 +662,7 @@ def _walk(
                 cwd=cwd,
                 out=out,
                 pipelines=pipelines,
-                captured=captured,
+                diverted=diverted,
                 sink=sink,
             )
 
@@ -676,7 +675,7 @@ def _walk_list(
     cwd: str | None,
     out: list[Invocation],
     pipelines: Iterator[int],
-    captured: bool,
+    diverted: bool,
 ) -> None:
     """Walk ``A && B ; C``, carrying each ``cd`` into what follows it."""
     here = before = cwd
@@ -687,12 +686,12 @@ def _walk_list(
             continue
         if part.kind == "command":
             command = _command(part, cwd=here, pipeline=-1)
-            if command.exe == "cd" and not command.captures_stdout:
+            if command.exe == "cd" and not command.diverts_output:
                 before = here
                 here = _cd(here, command.args)
                 continue
         before = here
-        _walk(part, cwd=here, out=out, pipelines=pipelines, captured=captured)
+        _walk(part, cwd=here, out=out, pipelines=pipelines, diverted=diverted)
 
 
 def _walk_pipeline(
@@ -701,7 +700,7 @@ def _walk_pipeline(
     cwd: str | None,
     out: list[Invocation],
     pipelines: Iterator[int],
-    captured: bool,
+    diverted: bool,
 ) -> None:
     """Walk ``A | B | C``, linking each stage to its neighbours."""
     pipeline = next(pipelines)
@@ -726,7 +725,7 @@ def _walk_pipeline(
             linked[i] = replace(
                 command,
                 piped_into=after,
-                captures_stdout=command.captures_stdout or (captured and last),
+                diverts_output=command.diverts_output or (diverted and last),
             )
     previous: Invocation | None = None
     for i, stage in enumerate(stages):
@@ -744,7 +743,7 @@ def _walk_pipeline(
                 cwd=cwd,
                 out=out,
                 pipelines=pipelines,
-                captured=captured,
+                diverted=diverted,
                 sink=linked[i + 1] if i + 1 < len(stages) else None,
             )
 
@@ -768,11 +767,10 @@ def _command(node: Node, *, cwd: str | None, pipeline: int) -> Invocation:
     """Return a ``command`` node as an ``Invocation``, not yet linked."""
     env: dict[str, str] = {}
     words: list[str] = []
-    captures = expands = False
+    diverts = expands = False
     for part in node.parts:
         if part.kind == "redirect":
-            # Only a redirect of stdout hides output; ``2>&1`` does not.
-            captures |= part.type in {">", ">>", ">&", ">|"} and part.input in {None, 1}
+            diverts |= _diverts(part)
         elif part.kind == "assignment" and not words:
             key, _, value = part.word.partition("=")
             env[key] = value
@@ -788,7 +786,7 @@ def _command(node: Node, *, cwd: str | None, pipeline: int) -> Invocation:
         cwd=cwd,
         pipeline=pipeline,
         env_prefix=env,
-        captures_stdout=captures,
+        diverts_output=diverts,
         expands=expands,
     )
 
@@ -802,11 +800,21 @@ def _cd(cwd: str | None, args: tuple[str, ...]) -> str | None:
     return resolve(cwd, paths[0])
 
 
-def _redirects_stdout(node: Node) -> bool:
-    """Return whether a compound node sends its output to a file."""
-    return hasattr(node, "redirects") and any(
-        r.type in {">", ">>", ">&", ">|"} and r.input in {None, 1}
-        for r in node.redirects
+def _diverts(redirect: Node) -> bool:
+    """Return whether ``redirect`` writes a file or keeps stdout off the screen."""
+    if redirect.type in {"<", "<<", "<<-", "<<<", "<&"}:
+        return False
+    return redirect.input in {None, 1} or not _drops_or_merges(redirect)
+
+
+# An input redirect is neither, so ``ReadOnly`` counts ``<`` and a heredoc as
+# writing: a wrong ``False`` only serializes, so only what is known safe passes.
+def _drops_or_merges(redirect: Node) -> bool:
+    """Return whether ``redirect`` sends output to ``/dev/null`` or another descriptor."""
+    output = redirect.output
+    return redirect.type in {">", ">>", ">|", ">&", "&>", "&>>"} and (
+        isinstance(output, int)
+        or (not isinstance(output, str) and output.word == "/dev/null")
     )
 
 
@@ -823,7 +831,7 @@ def _children(node: Node) -> list[Node]:
 
 def _sink_blocks(sink: Invocation, *, counted: bool) -> bool:
     """Return whether ``sink`` does more to what flows into it than cut it."""
-    if sink.captures_stdout:
+    if sink.diverts_output:
         return True
     if _passes_through(sink.exe):
         return False

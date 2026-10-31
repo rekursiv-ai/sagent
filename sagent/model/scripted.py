@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from treekle import PlainTree
 
     from sagent.providers.table import ModelTable
-    from sagent.providers.types import ProviderSharedResources, UsageWindow
+    from sagent.providers.types import ProviderResources, UsageWindow
     from sagent.session.types import Attachment
 
 
@@ -70,7 +70,7 @@ class ScriptedProvider(AsyncResource):
         self,
         *,
         name: str = "",
-        resources: ProviderSharedResources | None = None,
+        resources: ProviderResources | None = None,
         replies: Sequence[Reply] = (),
         capability: ModelCapability | None = None,
         models: ModelTable | None = None,
@@ -102,7 +102,7 @@ class ScriptedProvider(AsyncResource):
         return self._name
 
     @property
-    def resources(self) -> ProviderSharedResources:
+    def resources(self) -> ProviderResources:
         """Return what this provider shares with others."""
         return self._resources
 

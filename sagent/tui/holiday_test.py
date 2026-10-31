@@ -73,9 +73,9 @@ US_2026 = {
 
 
 @pytest.mark.usefixtures("los_angeles")
-def test_each_holiday_starts_on_its_us_date_in_2026() -> None:
+def test_each_holiday_falls_on_its_us_date_in_2026() -> None:
     assert {
-        each.name: each.starts(2026)[0].strftime("%m-%d") for each in holidays()
+        each.name: each.dates(2026)[0].strftime("%m-%d") for each in holidays()
     } == US_2026
 
 
@@ -106,14 +106,14 @@ LOCAL_SEASONS = {
 }
 
 
-def _first_starts(name: str, *, years: range) -> list[str]:
-    starts = cast("Callable[[int], tuple[date, ...]]", getattr(holiday, name))
-    return [starts(year)[0].strftime("%m-%d") for year in years]
+def _first_dates(name: str, *, years: range) -> list[str]:
+    dates = cast("Callable[[int], tuple[date, ...]]", getattr(holiday, name))
+    return [dates(year)[0].strftime("%m-%d") for year in years]
 
 
 @pytest.mark.parametrize("name", sorted(PUBLISHED))
 def test_computed_dates_match_published_dates(name: str) -> None:
-    assert _first_starts(name, years=range(2026, 2036)) == PUBLISHED[name].split()
+    assert _first_dates(name, years=range(2026, 2036)) == PUBLISHED[name].split()
 
 
 @pytest.mark.parametrize(
@@ -127,7 +127,7 @@ def test_seasons_start_on_the_local_date(
 ) -> None:
     zone(zone_name)
     expected = LOCAL_SEASONS[zone_name][season].split()
-    assert _first_starts(season, years=range(2026, 2036)) == expected
+    assert _first_dates(season, years=range(2026, 2036)) == expected
 
 
 @pytest.mark.parametrize("zone_name", ["America/New_York", "America/Los_Angeles"])
@@ -144,7 +144,7 @@ def test_vesak_is_the_un_day_of_vesak(
         " 05-10 05-29 05-19 05-07 05-26 05-16 05-05 05-23 05-12 05-01 05-20 05-08"
         " 05-27 05-27"
     )
-    assert _first_starts("vesak", years=range(2005, 2031)) == un.split()
+    assert _first_dates("vesak", years=range(2005, 2031)) == un.split()
 
 
 def test_after_the_un_dates_vesak_is_mays_first_full_moon_in_utc() -> None:
@@ -189,7 +189,7 @@ def test_holi_falls_on_the_users_own_date(
         "03-19",
     ]
     us[2018 - 2008] = year_2018
-    assert _first_starts("holi", years=range(2008, 2031)) == us
+    assert _first_dates("holi", years=range(2008, 2031)) == us
 
 
 def test_mid_autumn_follows_the_month_holding_the_equinox() -> None:
@@ -323,7 +323,7 @@ def _icon_names(day: date, *, draws: int = 1) -> set[str]:
     }
 
 
-def _names_of(holiday_name: str) -> set[str]:
+def _holiday_icons(holiday_name: str) -> set[str]:
     (match,) = (h for h in holidays() if h.name == holiday_name)
     return {icon.name for icon in match.icons}
 
@@ -385,11 +385,12 @@ def test_every_icon_shows_on_light_and_dark_terminals(background: str) -> None:
         (date(2026, 10, 31), "Halloween"),
         (date(2026, 11, 1), "Halloween"),
         (date(2026, 11, 2), None),
-        # Easter 2026 is a Sunday: its weekend, Friday to Sunday.
-        (date(2026, 4, 2), None),
-        (date(2026, 4, 3), "Easter"),
+        # Easter is seen at work on Monday, not on Good Friday: Saturday to Monday.
+        (date(2026, 4, 3), None),
+        (date(2026, 4, 4), "Easter"),
         (date(2026, 4, 5), "Easter"),
-        (date(2026, 4, 6), None),
+        (date(2026, 4, 6), "Easter"),
+        (date(2026, 4, 7), None),
         # Valentine's Day 2028 is a Monday: a workday, so only that day.
         (date(2028, 2, 11), None),
         (date(2028, 2, 13), None),
@@ -409,7 +410,7 @@ def test_window_is_the_day_or_its_whole_weekend(
     day: date,
     holiday_name: str | None,
 ) -> None:
-    expected = set[str]() if holiday_name is None else _names_of(holiday_name)
+    expected = set[str]() if holiday_name is None else _holiday_icons(holiday_name)
     assert _icon_names(day, draws=20) == expected
 
 
@@ -417,9 +418,9 @@ def test_window_is_the_day_or_its_whole_weekend(
 def test_overlapping_holidays_are_all_chosen() -> None:
     # March 20, 2026: spring begins, and with it Nowruz; Eid al-Fitr too.
     expected = (
-        _names_of("First day of spring")
-        | _names_of("Nowruz")
-        | _names_of("Eid al-Fitr")
+        _holiday_icons("First day of spring")
+        | _holiday_icons("Nowruz")
+        | _holiday_icons("Eid al-Fitr")
     )
     assert _icon_names(date(2026, 3, 20), draws=200) == expected
 

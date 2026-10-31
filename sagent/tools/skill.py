@@ -36,7 +36,7 @@ from sagent.agent.agents_md import frontmatter
 from sagent.lib.userdirs import data_dir
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import parse, schema_of
+from sagent.tools.types import json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -102,7 +102,7 @@ class Skill:
     description = (files(__package__) / "assets" / "skill.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     user_dir: Path = field(
         default_factory=lambda: data_dir() / "rekursiv-ai" / "sagent" / "skills",

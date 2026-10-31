@@ -299,7 +299,7 @@ class Views:
     async def _inherit(self, root: Commands, label: str) -> None:
         """Take up, for ``label``, what its ancestors chose."""
         if self.team is not None and label in self.team:
-            _ = await root.commands_for(self.team, label)
+            _ = await root.child_commands(self.team, label)
 
     def _track(self, task: asyncio.Task[None]) -> None:
         """Keep ``task`` until it ends; print why, if it fails."""

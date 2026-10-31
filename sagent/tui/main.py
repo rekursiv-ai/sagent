@@ -4,8 +4,9 @@ A terminal on stdin opens the interactive screen; anything else is read to
 its end as one prompt, answered, and printed. Sessions are journaled under
 the per-project directory and resumable by id, from this directory or any.
 
-``run`` builds its console while stdout is patched: Rich keeps the stream it
-was built with, and only the patched one prints above the prompt.
+``run`` prints through one ``Screen`` over the patched stdout, above the prompt:
+its console writes there, and so do ``sys.stdout`` and ``sys.stderr`` until the
+session ends.
 
 Examples:
   python -m sagent                                   # interactive
@@ -100,6 +101,7 @@ from sagent.tools.play_audio import PlayAudio
 from sagent.tools.read import Read
 from sagent.tools.session import Session
 from sagent.tools.skill import Skill
+from sagent.tools.types import ToolContext
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
 from sagent.tools.write import Write
@@ -273,11 +275,7 @@ async def run(
         contextlib.redirect_stdout(screen := Screen(proxy)),
         contextlib.redirect_stderr(screen),
     ):
-        printer = ConsolePrinter(
-            Console(stderr=True),
-            show_thinking=show_thinking,
-            screen=screen,
-        )
+        printer = ConsolePrinter(Console(file=screen), show_thinking=show_thinking)
 
         def shown() -> int:
             return printer.output_width
@@ -335,7 +333,7 @@ async def run(
             "sagent --resume-all": "pick one anywhere",
         }
         column = max(map(len, ways)) + 3
-        # The printer wrote through the proxy, closed by now with the prompt.
+        # The printer's screen writes to the proxy, closed by now with the session.
         sys.stderr.write(
             "\n".join(
                 ["Resume this session with:"]
@@ -572,7 +570,7 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
             _chosen_tools(
                 flags,
                 known=[
-                    *_builders(cwd=cwd, team=team, session=fetch),
+                    *_builders(cwd=cwd, team=team),
                     *(n for n in flags.tools or () if any(s.names(n) for s in wanted)),
                 ],
             )
@@ -588,7 +586,7 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
         _logging(flags.log_level, path=path, interactive=interactive)
         try:
             mcp = await servers_stack.enter_async_context(McpSession(wanted))
-            tools = _tools(flags, cwd=cwd, team=team, session=fetch, mcp=mcp.tools())
+            tools = _tools(flags, cwd=cwd, team=team, mcp=mcp.tools())
         except ValueError as e:
             sys.stderr.write(f"Error: {error_text(e)}\n")
             return 1
@@ -600,7 +598,7 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
             model=model,
             tools=tools,
             journal=journal,
-            cwd=cwd,
+            tool_context=ToolContext(cwd=cwd, fetch_session=fetch),
             interactive=interactive,
         )
         async with contextlib.AsyncExitStack() as stack:
@@ -822,7 +820,7 @@ def _agent(
     model: Model,
     tools: Sequence[Tool],
     journal: JsonlJournal | None,
-    cwd: Path,
+    tool_context: ToolContext,
     interactive: bool,
 ) -> Agent:
     """Return the root agent ``flags`` describe, not yet opened."""
@@ -844,7 +842,7 @@ def _agent(
         journal=journal,
         compactor=compactor,
         pruner=pruner,
-        cwd=cwd,
+        tool_context=tool_context,
         max_rounds=flags.max_tool_call_rounds,
         max_spend_usd=flags.max_budget_usd,
         persistent_retry=interactive,
@@ -928,11 +926,10 @@ def _tools(
     *,
     cwd: Path,
     team: Team,
-    session: FetchSession,
     mcp: Sequence[Tool] = (),
 ) -> list[Tool]:
     """Return the tools ``--tools`` names, MCP servers' among them."""
-    builders = _builders(cwd=cwd, team=team, session=session)
+    builders = _builders(cwd=cwd, team=team)
     served = {t.name: t for t in mcp}
     names = _chosen_tools(flags, known=[*builders, *served])
     tools = {
@@ -945,11 +942,10 @@ def _builders(
     *,
     cwd: Path,
     team: Team,
-    session: FetchSession,
 ) -> dict[str, Callable[[], Tool]]:
     """Return how to build each built-in tool, by its name, in their default order."""
     read, edit, grep, glob, ls = Read(), Edit(), Grep(), Glob(), List()
-    fetch = WebFetch(session=session)
+    fetch = WebFetch()
     return {
         "Bash": lambda: Bash(peers=(read, edit, grep, glob, ls, fetch)),
         "Read": lambda: read,
@@ -958,12 +954,12 @@ def _builders(
         "Grep": lambda: grep,
         "Glob": lambda: glob,
         "List": lambda: ls,
-        "WebSearch": lambda: WebSearch(session=session),
+        "WebSearch": WebSearch,
         "WebFetch": lambda: fetch,
-        "PaperSearch": lambda: PaperSearch(session=session),
-        "PaperDetails": lambda: PaperDetails(session=session),
-        "PaperAuthor": lambda: PaperAuthor(session=session),
-        "PaperFetch": lambda: PaperFetch(session=session),
+        "PaperSearch": PaperSearch,
+        "PaperDetails": PaperDetails,
+        "PaperAuthor": PaperAuthor,
+        "PaperFetch": PaperFetch,
         "Memory": lambda: Memory(directory=project_dir(cwd) / "memory"),
         "PlayAudio": PlayAudio,
         "AgentSpawn": lambda: AgentSpawn(team=team),

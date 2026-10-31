@@ -2,8 +2,8 @@
 
 Typical usage example:
 
-  result = await PaperAuthor(session=session).call(context, {"query": "Yoshua Bengio"})
-  result = await PaperAuthor(session=session).call(
+  result = await PaperAuthor().call(context, {"query": "Yoshua Bengio"})
+  result = await PaperAuthor().call(
       context, {"ids": "1741101", "operation": "papers", "year_from": 2022},
   )
 """
@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING, Annotated, Literal
 
 import asyncio
 
-from wesearch.fetch import FetchSession
 from wesearch.paper.authors import author_metadata, author_papers, search_authors
 from wesearch.paper.errors import PaperError
 from wesearch.paper.render import (
@@ -31,13 +30,14 @@ import cachetools
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import error, paper_ids, summary_ids
-from sagent.tools.types import Arg, parse, schema_of
+from sagent.tools.types import Arg, json_schema, parse
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from treekle import PlainTree
+    from wesearch.fetch import FetchSession
 
     from sagent.tools.types import ToolContext
 
@@ -100,12 +100,9 @@ class PaperAuthor:
     description = (files(__package__) / "assets" / "paperauthor.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay())
-
-    session: FetchSession = field(repr=False)
-    """Connections, browser, and egress every lookup reuses; whoever made it closes it."""
 
     cache: cachetools.LRUCache[tuple[object, ...], str] = field(
         default_factory=lambda: cachetools.LRUCache[tuple[object, ...], str](
@@ -163,8 +160,8 @@ class PaperAuthor:
           ValueError: The arguments contradict each other.
 
         """
-        del context
         a = parse(arguments, PaperAuthor.Arguments)
+        session = context.fetch_session
         query = a.query.strip()
         # Author ids are integer strings, so a bundle splits on digits.
         ids = paper_ids(a.ids, looks_like_id=str.isdigit)
@@ -196,14 +193,14 @@ class PaperAuthor:
             return UncategorizedToolResult(call_id="", content=cached)
         try:
             if query:
-                text = await self._search(query, limit=a.limit)
+                text = await self._search(query, limit=a.limit, session=session)
             elif a.operation == "papers":
-                text = await self._papers(ids[0], a)
+                text = await self._papers(ids[0], a, session=session)
             else:
                 records = await asyncio.to_thread(
                     author_metadata,
                     ids,
-                    session=self.session,
+                    session=session,
                 )
                 text = "\n\n".join(
                     format_author_block(r) if r is not None else f"{label}: not found"
@@ -216,13 +213,19 @@ class PaperAuthor:
         self.cache[key] = text
         return UncategorizedToolResult(call_id="", content=text)
 
-    async def _search(self, query: str, *, limit: int | None) -> str:
+    async def _search(
+        self,
+        query: str,
+        *,
+        limit: int | None,
+        session: FetchSession,
+    ) -> str:
         """Return the authors named like ``query``, most prolific first."""
         found = await asyncio.to_thread(
             search_authors,
             query,
             limit=limit,
-            session=self.session,
+            session=session,
         )
         if not found.records:
             return "(no results)"
@@ -230,7 +233,13 @@ class PaperAuthor:
             truncation_notice(len(found.records), found.total)
         )
 
-    async def _papers(self, author_id: str, a: PaperAuthor.Arguments) -> str:
+    async def _papers(
+        self,
+        author_id: str,
+        a: PaperAuthor.Arguments,
+        *,
+        session: FetchSession,
+    ) -> str:
         """Return one author's papers, one per line."""
         listing = await asyncio.to_thread(
             author_papers,
@@ -238,7 +247,7 @@ class PaperAuthor:
             limit=a.limit,
             year_from=a.year_from,
             year_to=a.year_to,
-            session=self.session,
+            session=session,
         )
         if not listing.records:
             return "(no results)"

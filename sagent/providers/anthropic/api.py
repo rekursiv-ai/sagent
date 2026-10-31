@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
     from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
-    from sagent.providers.types import ProviderSharedResources, UsageWindow
+    from sagent.providers.types import ProviderResources, UsageWindow
     from sagent.session.types import Attachment
 else:
     from wrapt import lazy_import
@@ -77,7 +77,7 @@ class Anthropic(HasModels, AsyncResource):
         self,
         *,
         name: str = "",
-        resources: ProviderSharedResources | None = None,
+        resources: ProviderResources | None = None,
     ) -> None:
         self._name = name or self.section
         self._owns_resources = resources is None
@@ -90,7 +90,7 @@ class Anthropic(HasModels, AsyncResource):
         return self._name
 
     @property
-    def resources(self) -> ProviderSharedResources:
+    def resources(self) -> ProviderResources:
         """Return what this provider shares with others."""
         return self._resources
 

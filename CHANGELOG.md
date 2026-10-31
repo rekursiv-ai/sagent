@@ -3,13 +3,44 @@
 All notable sagent changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Changed
+
+- An MCP sign-in belongs to one configuration file's entry: two projects, or a
+  project and the user's file, naming the same server keep separate sign-ins,
+  and removing one leaves the other signed in. `sagent mcp remove` and
+  `sagent mcp logout` also forget every sign-in of that file whose entry it no
+  longer has, as after a URL edited by hand; a file that does not read, and
+  JSON given inline to `--mcp-config`, are left alone. Sign-ins made before
+  this are not found; sign in again.
+- `sagent mcp remove` with no `--scope` skips a configuration file that does
+  not read and removes the server from the other.
+- `sagent.tools.mcp.logout` is a coroutine.
+
+- Functions are named for what they return: `sagent.tools.types.schema_of` is
+  `json_schema`, `sagent.providers.openai.login.account_of` is
+  `codex_account`, `sagent.providers.testing.port_of` is `bound_port`,
+  `sagent.tui.render.header_of` is `call_header`, `Team.label_for` is
+  `Team.child_label`, and `Commands.commands_for` is `child_commands`.
+- `Agent(cwd=, root=, max_result_chars=, columns=)` is
+  `Agent(tool_context=ToolContext(...))`. Every `ToolContext` field has a
+  default; the agent fixes where it started from the context's `origin`, and a
+  spawned agent takes a copy of its parent's context, with its own file
+  tracker.
+- `ToolContext.fetch_session` carries the fetch session the web and paper
+  tools use; `WebFetch`, `WebSearch`, `PaperSearch`, `PaperDetails`,
+  `PaperAuthor` and `PaperFetch` take no `session`. Unset, it is wesearch's
+  process-wide session.
+- `ProviderSharedResources` is `ProviderResources`.
+
 ## 0.2.1 - 2026-10-30
 
 ### Added
 
 - The welcome logo becomes a holiday icon on 26 holidays, for that day, or
-  Friday to Sunday when it falls on a weekend; overlapping holidays are picked
-  at random. Dates follow US observance: computed for seasons, Lunar New
+  Friday to Sunday when it falls on a weekend (Easter: Saturday to Monday);
+  overlapping holidays are picked at random. Dates follow US observance: computed for seasons, Lunar New
   Year, Mid-Autumn, Holi, Diwali, Vaisakhi, Easter, Thanksgiving and the
   Hebrew holidays; announced for the Eids and Vesak. Terminals without 256
   colors, or with `NO_COLOR`, keep the logo.

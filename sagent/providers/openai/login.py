@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
     import httpx2
 
-    from sagent.providers.types import ProviderSharedResources
+    from sagent.providers.types import ProviderResources
 
 
 __all__ = [
@@ -64,7 +64,7 @@ __all__ = [
     "CodexLogin",
     "CodexTokens",
     "DeviceCode",
-    "account_of",
+    "codex_account",
     "poll_device_code",
     "refresh_grant",
     "request_device_code",
@@ -132,7 +132,7 @@ class CodexLogin:
         self,
         path: Path | None = None,
         *,
-        resources: ProviderSharedResources,
+        resources: ProviderResources,
     ) -> None:
         self.path = (path or self.default_path()).expanduser()
         self._resources = resources
@@ -277,7 +277,7 @@ class CodexLogin:
 
         """
         tokens = await self._tokens()
-        return account_of(
+        return codex_account(
             CodexTokens(
                 access_token=from_plain(tokens.get("access_token"), str, default=""),
                 refresh_token="",
@@ -511,7 +511,7 @@ async def revoke_refresh_token(
     response.raise_for_status()
 
 
-def account_of(tokens: CodexTokens) -> CodexAccount:
+def codex_account(tokens: CodexTokens) -> CodexAccount:
     """Return the plan and the email a login's tokens carry, the ID token first.
 
     Args:

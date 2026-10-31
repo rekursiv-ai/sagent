@@ -24,7 +24,7 @@ from sagent.providers.table import ModelTags
 from sagent.runtime import types
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import parse, schema_of
+from sagent.tools.types import json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -86,7 +86,7 @@ class AgentSelf:
     description = (files(__package__) / "assets" / "agentself.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     team: Team = field(repr=False)
     """Where the caller is found, and the catalog it may switch within."""

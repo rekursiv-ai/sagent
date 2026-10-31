@@ -14,8 +14,6 @@ import secrets
 import socket
 import time
 
-from mcp import StdioServerParameters
-from mcp.client.auth import OAuthClientProvider
 from mcp.client.session_group import StreamableHttpParameters
 from mcp.server.auth.provider import (
     AccessToken,
@@ -47,9 +45,21 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
 
+_WEB = McpServer(
+    name="web",
+    parameters=StreamableHttpParameters(url="https://h/mcp"),
+    source="/p/mcp.json",
+)
+_OTHER = McpServer(name="other", parameters=StreamableHttpParameters(url="https://o"))
+
+
+def _storage(server: McpServer = _WEB) -> McpTokenStorage:
+    return McpTokenStorage(server.key, source=server.source)
+
+
 @pytest.mark.asyncio
 async def test_tokens_and_client_are_kept_per_server_in_a_private_file() -> None:
-    storage = McpTokenStorage("web")
+    storage = _storage()
     assert await storage.get_tokens() is None
     assert await storage.get_client_info() is None
     token = OAuthToken(
@@ -63,11 +73,12 @@ async def test_tokens_and_client_are_kept_per_server_in_a_private_file() -> None
     )
     await storage.set_tokens(token)
     await storage.set_client_info(client)
-    again = McpTokenStorage("web")
+    again = _storage()
     assert await again.get_tokens() == token
     assert await again.get_client_info() == client
-    assert await McpTokenStorage("other").get_tokens() is None
-    path = config_dir() / "rekursiv-ai" / "secrets" / "mcp" / "web.json"
+    assert await _storage(_OTHER).get_tokens() is None
+    path = config_dir() / "rekursiv-ai" / "secrets" / "mcp" / f"{_WEB.key}.json"
+    assert json_loads(path.read_text(), dict[str, object])["source"] == "/p/mcp.json"
     assert path.stat().st_mode & 0o777 == 0o600
     assert path.parent.stat().st_mode & 0o777 == 0o700
 
@@ -75,7 +86,7 @@ async def test_tokens_and_client_are_kept_per_server_in_a_private_file() -> None
 @pytest.mark.asyncio
 async def test_two_changes_at_once_keep_both() -> None:
     """Each change reads the file, then writes it; neither may write over the other."""
-    storage = McpTokenStorage("web")
+    storage = _storage()
     token = OAuthToken(
         access_token="a1",  # noqa: S106 -- A test's token, no secret.
         token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
@@ -89,18 +100,10 @@ async def test_two_changes_at_once_keep_both() -> None:
     assert await storage.get_client_info() == client
 
 
-def test_a_session_s_auth_reads_responses_as_the_sdk_s_does() -> None:
-    """The SDK reads a response's body as it needs; its wrapper must not stop it."""
-    assert (
-        mcp_auth._Shared.requires_response_body
-        is OAuthClientProvider.requires_response_body
-    )
-
-
 @pytest.mark.asyncio
 async def test_a_change_waits_for_another_task_holding_the_file() -> None:
     """Only the task holding the lock may write without taking it; any other waits."""
-    storage = McpTokenStorage("web")
+    storage = _storage()
     token = OAuthToken(
         access_token="a1",  # noqa: S106 -- A test's token, no secret.
         token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
@@ -145,20 +148,59 @@ async def test_sessions_open_at_once_renew_once_and_share_the_renewal(
 async def test_a_token_refused_before_it_seems_to_expire_is_renewed_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A server may give no expiry, or revoke a token early: a 401 then renews it.
-
-    Two sessions meet the refusal at once; one renews, and the other takes the
-    token it kept.
-    """
+    """A server may give no expiry, or revoke a token early: a 401 then renews it."""
     authority = _Authority(says_expiry=False)
     async with _protected(authority) as url:
         server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
         await _sign_in(server, monkeypatch=monkeypatch)
         authority.tokens.clear()
-        async with McpSession([server]) as first, McpSession([server]) as second:
+        first, second = McpSession([server]), McpSession([server])
+        try:
+            await asyncio.gather(first.aopen(), second.aopen())
             for session in (first, second):
                 assert [t.name for t in session.tools()] == ["mcp__web__greet"]
+        finally:
+            await asyncio.gather(first.aclose(), second.aclose())
     assert authority.renewed == 1
+
+
+@pytest.mark.asyncio
+async def test_a_session_refused_after_another_renewed_takes_the_renewal() -> None:
+    """Refused a token another session already renewed, it renews nothing itself.
+
+    A server that hands out a new refresh token with each renewal refuses the old
+    one, so a second renewal would spend the first's and lose the sign-in.
+    """
+    old, new = (
+        OAuthToken(
+            access_token=access,
+            token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
+            refresh_token=f"r-{access}",
+        )
+        for access in ("a-old", "a-new")
+    )
+    await _storage().save(
+        mcp_auth._MemoryStorage(
+            tokens=new,
+            client=OAuthClientInformationFull(
+                client_id="c1",
+                redirect_uris=[AnyUrl("http://127.0.0.1:1/callback")],
+            ),
+        ),
+    )
+    shared = await mcp_auth.session_auth(
+        "web",
+        "https://h/mcp",
+        key=_WEB.key,
+        source=_WEB.source,
+    )
+    assert isinstance(shared, mcp_auth._Shared)
+    context = shared.auth.context
+    async with shared._renewing(old):
+        assert context.current_tokens == new
+        assert context.is_token_valid()
+    async with shared._renewing(new):
+        assert not context.is_token_valid()
 
 
 @pytest.mark.asyncio
@@ -170,7 +212,7 @@ async def test_logging_out_keeps_another_project_s_server_of_the_same_name(
         theirs = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
         await _sign_in(theirs, monkeypatch=monkeypatch)
     mine = McpServer(name="web", parameters=StreamableHttpParameters(url="https://b"))
-    assert logout(mine) is False
+    assert await logout(mine) is False
     assert McpTokenStorage(theirs.key).path.exists()
 
 
@@ -370,13 +412,6 @@ async def test_a_browser_that_never_comes_back_gives_way_to_a_paste(
         await login(server, show=paste.shown.append, wait_sec=0.05)
         assert "No browser came back" in paste.shown[-1]
         assert await McpTokenStorage(server.key).get_tokens() is not None
-
-
-@pytest.mark.asyncio
-async def test_only_a_remote_server_signs_in() -> None:
-    local = McpServer(name="git", parameters=StdioServerParameters(command="x"))
-    with pytest.raises(ValueError, match="MCP server 'git' runs locally"):
-        await login(local, show=list[str]().append)
 
 
 def _never(url: str) -> None:

@@ -65,12 +65,12 @@ from sagent.session.types import (
 )
 from sagent.tools.display import ToolDisplay
 from sagent.tools.skill import Skill
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
     from sagent.agent.types import Journal
     from sagent.runtime.types import ModelContextEvent
-    from sagent.tools.types import ToolContext
 
 
 @pytest.fixture(autouse=True)
@@ -96,7 +96,7 @@ def _agent(
         model=provider["scripted"],
         tools=tools,
         journal=journal,
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         system_prompt=system_prompt,
         max_rounds=max_rounds,
         max_spend_usd=max_spend_usd,
@@ -721,25 +721,43 @@ def test_the_agent_hands_its_settings_to_the_runtime(tmp_path: Path) -> None:
     agent = Agent(
         model=provider["scripted"],
         tools=[_Tool(name="A"), _Tool(name="B")],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path, max_result_chars=1234, columns=99),
         persistent_retry=True,
-        max_result_chars=1234,
     )
 
     assert list(agent.tools) == ["A", "B"]
     assert agent.runtime.persistent_retry is True
-    assert agent.runtime.tool_context.cwd == tmp_path
-    assert agent.runtime.tool_context.max_result_chars == 1234
+    context = agent.runtime.tool_context
+    assert (context.cwd, context.max_result_chars, context.columns) == (
+        tmp_path,
+        1234,
+        99,
+    )
     default = Agent(model=provider["scripted"])
     assert default.runtime.persistent_retry is False
     assert default.runtime.tool_context.max_result_chars == 50_000
     assert default.runtime.tool_context.spill_dir is None
 
 
+def test_an_agent_fixes_where_it_started_on_a_copy_of_the_context_given(
+    tmp_path: Path,
+) -> None:
+    given = ToolContext(cwd=tmp_path)
+    agent = Agent(model=ScriptedProvider()["scripted"], tool_context=given)
+    context = agent.runtime.tool_context
+    context.cwd = tmp_path / "elsewhere"
+    assert (context.root, agent.root) == (tmp_path, tmp_path)
+    assert (given.cwd, given.root) == (tmp_path, None)
+
+
 def test_a_journaled_agent_spills_cut_output_beside_its_journal(tmp_path: Path) -> None:
     provider = ScriptedProvider()
     journal = JsonlJournal(tmp_path / "s1" / "session.jsonl")
-    agent = Agent(model=provider["scripted"], journal=journal, cwd=tmp_path)
+    agent = Agent(
+        model=provider["scripted"],
+        journal=journal,
+        tool_context=ToolContext(cwd=tmp_path, spill_dir=tmp_path / "other"),
+    )
     assert agent.runtime.tool_context.spill_dir == tmp_path / "s1"
 
 
@@ -771,7 +789,11 @@ class _Dropper(NoShrinker):
 
 
 def test_a_pruner_that_prunes_is_asked_by_the_runtime(tmp_path: Path) -> None:
-    agent = Agent(model=ScriptedProvider()["scripted"], cwd=tmp_path, pruner=_Dropper)
+    agent = Agent(
+        model=ScriptedProvider()["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+        pruner=_Dropper,
+    )
 
     pruner = agent.session.pruner
     assert isinstance(pruner, _Dropper)
@@ -781,7 +803,7 @@ def test_a_pruner_that_prunes_is_asked_by_the_runtime(tmp_path: Path) -> None:
 def test_a_summary_compactor_is_the_runtimes(tmp_path: Path) -> None:
     agent = Agent(
         model=ScriptedProvider()["scripted"],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         compactor=SummaryCompactor,
     )
 
@@ -803,7 +825,7 @@ async def test_an_overflow_is_compacted_and_called_again(tmp_path: Path) -> None
     )
     agent = Agent(
         model=provider["scripted"],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         system_prompt="S",
         compactor=SummaryCompactor,
         agents_md=_config(tmp_path),
@@ -965,7 +987,7 @@ async def test_a_compaction_starts_a_new_window_in_the_journal(tmp_path: Path) -
     )
     agent = Agent(
         model=provider["scripted"],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         journal=journal,
         compactor=SummaryCompactor,
         agents_md=_config(tmp_path),
@@ -1131,7 +1153,11 @@ async def test_a_compaction_reads_the_window_prompt_afresh(tmp_path: Path) -> No
 def test_a_new_session_restates_where_and_as_what_it_runs(tmp_path: Path) -> None:
     _ = (tmp_path / "AGENTS.md").write_text("be terse\n")
     provider = ScriptedProvider(capability=_capability(cutoff="June 2026"))
-    agent = Agent(model=provider["scripted"], cwd=tmp_path, agents_md=_config(tmp_path))
+    agent = Agent(
+        model=provider["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+        agents_md=_config(tmp_path),
+    )
 
     (turn,) = _session(agent).updates()
 
@@ -1154,7 +1180,7 @@ def test_an_agent_without_the_environment_is_told_only_its_model(
     provider = ScriptedProvider(capability=_capability(cutoff="June 2026"))
     agent = Agent(
         model=provider["scripted"],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         agents_md=AgentsMdConfig(tiers=frozenset()),
         environment=False,
     )
@@ -1317,7 +1343,7 @@ def test_each_file_skipped_is_told_to_the_user_once(tmp_path: Path) -> None:
     agent = Agent(
         model=ScriptedProvider()["scripted"],
         tools=[Skill(user_dir=tmp_path / "u", builtin_dir=tmp_path / "b")],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         agents_md=_config(tmp_path),
     )
     told: list[str] = []
@@ -1536,7 +1562,10 @@ def _two_models() -> ModelCatalog:
 
 def test_a_model_switched_away_from_is_cached_as_it_was_left(tmp_path: Path) -> None:
     catalog = _two_models()
-    agent = Agent(model=catalog["scripted"]["a+2k"], cwd=tmp_path)
+    agent = Agent(
+        model=catalog["scripted"]["a+2k"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
     left = agent.model.settings
 
     agent.model = catalog["scripted"]["b"]
@@ -1558,7 +1587,7 @@ async def test_a_resumed_agent_recalls_its_model_its_cache_and_its_prompt(
             model=catalog["scripted"]["a+1k"],
             journal=journal,
             system_prompt="mine",
-            cwd=tmp_path,
+            tool_context=ToolContext(cwd=tmp_path),
             agents_md=_config(tmp_path),
         )
         async with agent:
@@ -1568,7 +1597,7 @@ async def test_a_resumed_agent_recalls_its_model_its_cache_and_its_prompt(
         again = Agent(
             model=catalog["scripted"]["a"],
             journal=journal,
-            cwd=tmp_path,
+            tool_context=ToolContext(cwd=tmp_path),
             agents_md=_config(tmp_path),
         )
         await again.recall(catalog)
@@ -1587,7 +1616,11 @@ async def test_an_agent_with_nothing_stood_recalls_nothing(tmp_path: Path) -> No
     catalog = _two_models()
     model = catalog["scripted"]["a"]
     async with JsonlJournal(tmp_path / "s" / "session.jsonl") as journal:
-        agent = Agent(model=model, journal=journal, cwd=tmp_path)
+        agent = Agent(
+            model=model,
+            journal=journal,
+            tool_context=ToolContext(cwd=tmp_path),
+        )
         await agent.recall(catalog)
     assert (agent.model, agent.model_cache, agent.system_prompt) == (model, {}, None)
 
@@ -1601,7 +1634,7 @@ async def test_the_prompt_stands_once_and_the_default_withdraws_it(
         model=ScriptedProvider()["scripted"],
         journal=journal,
         system_prompt="mine",
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
     )
     async with agent:
         _session(agent).persist()
@@ -1622,7 +1655,11 @@ async def test_the_prompt_stands_once_and_the_default_withdraws_it(
 async def test_the_model_stands_once_until_it_changes(tmp_path: Path) -> None:
     catalog = _two_models()
     journal = RecordingJournal()
-    agent = Agent(model=catalog["scripted"]["a"], journal=journal, cwd=tmp_path)
+    agent = Agent(
+        model=catalog["scripted"]["a"],
+        journal=journal,
+        tool_context=ToolContext(cwd=tmp_path),
+    )
     async with agent:
         _session(agent).persist()
         agent.model.settings = replace(
@@ -1872,7 +1909,7 @@ async def test_a_resumed_session_signs_in_as_the_account_it_stood(
     first = Agent(
         model=catalog.signed_in("vendor", account="work")["wide"],
         journal=journal,
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         agents_md=_config(tmp_path),
         account="work",
     )
@@ -1883,7 +1920,7 @@ async def test_a_resumed_session_signs_in_as_the_account_it_stood(
     again = Agent(
         model=fresh["vendor"]["wide"],
         journal=journal,
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         agents_md=_config(tmp_path),
     )
     await again.recall(fresh)
@@ -1962,7 +1999,11 @@ def _halting(agent: Agent, request: Request) -> Response:
 async def test_an_agent_closes_the_models_it_was_given(tmp_path: Path) -> None:
     provider = _Counting()
     first, second, third = (provider["scripted"] for _ in range(3))
-    agent = Agent(model=first, cwd=tmp_path, agents_md=_config(tmp_path))
+    agent = Agent(
+        model=first,
+        tool_context=ToolContext(cwd=tmp_path),
+        agents_md=_config(tmp_path),
+    )
     agent.model = second
     async with agent:
         agent.model = third

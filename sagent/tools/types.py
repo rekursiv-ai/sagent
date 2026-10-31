@@ -5,12 +5,12 @@ names its edits, a ``ShellCommandResult`` its exit code -- so the session keeps
 the act itself, not a description of it. The runtime fills in ``call_id``.
 
 A tool holds no agent's state; each call gets that agent's ``ToolContext``, so
-one tool serves every agent. What every agent shares, such as an HTTP client,
-a tool takes when it is built.
+one tool serves every agent. The context also carries what the session's agents
+share, such as the fetch session, which a spawned agent inherits.
 
 A tool declares its arguments once, as a dataclass whose fields are each
 ``Annotated[T, "description"]``, with an ``Arg`` for bounds or a key that is
-no Python name: ``schema_of`` makes the JSON schema the model sees from it,
+no Python name: ``json_schema`` makes the JSON schema the model sees from it,
 and ``parse`` turns the model's arguments back into it.
 
 Typical usage example:
@@ -24,7 +24,7 @@ Typical usage example:
 
       name = "Echo"
       description = "Say the text back."
-      schema = schema_of(Arguments)
+      schema = json_schema(Arguments)
       display = ToolDisplay(output=DisplaySpec())
 
       def summary(self, arguments: Mapping[str, PlainTree]) -> str:
@@ -61,6 +61,8 @@ import difflib
 import hashlib
 
 from treekle import PlainTree
+from wesearch.fetch import FetchSession
+from wesearch.fetch.session import default_session
 
 
 if TYPE_CHECKING:
@@ -80,8 +82,8 @@ __all__ = [
     "Skipping",
     "Tool",
     "ToolContext",
+    "json_schema",
     "parse",
-    "schema_of",
 ]
 
 
@@ -197,7 +199,7 @@ class Arg:
     """The model's name for the argument when it is no Python name, such as ``-B``."""
 
 
-def schema_of(arguments: type[DataclassInstance]) -> Mapping[str, PlainTree]:
+def json_schema(arguments: type[DataclassInstance]) -> Mapping[str, PlainTree]:
     """Return the JSON schema of a tool's ``Arguments`` dataclass.
 
     Each field is ``Annotated[T, "description"]``, with an optional ``Arg``;
@@ -399,9 +401,9 @@ class FileTracker:
 
 @dataclass(slots=True, kw_only=True)
 class ToolContext:
-    """One agent's state that its tools share."""
+    """One agent's state that its tools share, and what its session shares."""
 
-    cwd: Path
+    cwd: Path = field(default_factory=Path.cwd)
     """The working directory; a shell ``cd`` moves it."""
 
     root: Path | None = None
@@ -422,6 +424,11 @@ class ToolContext:
     columns: int | Callable[[], int] = 80
     """The width a command's output is shown in, as ``COLUMNS``; a callable is read
     as each command starts, so a frontend's window can change size between them."""
+
+    fetch_session: FetchSession = field(default_factory=default_session, repr=False)
+    """The connections, cookies, browser and egress every web fetch reuses; whoever
+    made it closes it. Unset, the process's shared one, whose files go where the
+    user's data directory was when it was first made."""
 
     @property
     def origin(self) -> Path:

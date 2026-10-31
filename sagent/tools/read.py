@@ -36,7 +36,7 @@ from sagent.tools.command_analyzer import (
     sed_mutates,
 )
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import Arg, parse, schema_of
+from sagent.tools.types import Arg, json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -91,7 +91,7 @@ class Read:
     description = (files(__package__) / "assets" / "read.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay())
 

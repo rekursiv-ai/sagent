@@ -71,7 +71,7 @@ if TYPE_CHECKING:
     )
     from sagent.model.types import Request
     from sagent.providers.types import (
-        ProviderSharedResources,
+        ProviderResources,
         ToolMount,
         UsageWindow,
     )
@@ -102,7 +102,7 @@ class GoogleCLI(HasModels, AsyncResource):
         self,
         *,
         name: str = "",
-        resources: ProviderSharedResources | None = None,
+        resources: ProviderResources | None = None,
     ) -> None:
         self._name = name or self.section
         self._owns_resources = resources is None
@@ -117,7 +117,7 @@ class GoogleCLI(HasModels, AsyncResource):
         return self._name
 
     @property
-    def resources(self) -> ProviderSharedResources:
+    def resources(self) -> ProviderResources:
         """Return what this provider shares with others."""
         return self._resources
 

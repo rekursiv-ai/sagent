@@ -7,11 +7,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, override
 
-import io
 import logging
 import time
 
-from rich.console import Console
 from treekle import PlainTree
 
 import pytest
@@ -48,9 +46,8 @@ from sagent.tools.glob_tool import Glob
 from sagent.tools.grep import Grep
 from sagent.tools.read import Read
 from sagent.tools.write import Write
-from sagent.tui.console import ConsolePrinter
 from sagent.tui.recording import RecordingPrinter
-from sagent.tui.render import Scrollback, error_text, header_of, show_result
+from sagent.tui.render import Scrollback, call_header, error_text, show_result
 from sagent.tui.types import CommandOutput, Header
 
 
@@ -241,11 +238,7 @@ def test_thinking_a_notice_interrupts_reopens_under_a_new_heading() -> None:
 
 
 def test_word_sized_thinking_deltas_print_one_heading_and_the_joined_text() -> None:
-    out = io.StringIO()
-    printer = ConsolePrinter(
-        Console(file=out, width=200, color_system=None, highlight=False),
-        show_thinking=True,
-    )
+    printer = RecordingPrinter(show_thinking=True, width=200)
     render = Scrollback(printer, tools=_tools())
     words = [f"word{i} " for i in range(20)]
     for word in words:
@@ -262,7 +255,7 @@ def test_word_sized_thinking_deltas_print_one_heading_and_the_joined_text() -> N
             ),
         ),
     )
-    rows = [row.rstrip() for row in out.getvalue().split("\n")]
+    rows = [row.rstrip() for row in printer.text.split("\n")]
     assert rows == ["∴ Thinking", f"  {''.join(words).rstrip()}", "", "Answer.", ""]
 
 
@@ -454,32 +447,28 @@ def test_a_child_s_results_show_only_when_they_fail() -> None:
     ]
 
 
-def _console() -> tuple[Scrollback, ConsolePrinter, io.StringIO]:
-    """Return a scrollback over a real printer, and what the printer writes to."""
-    out = io.StringIO()
-    printer = ConsolePrinter(
-        Console(file=out, width=60, color_system=None, highlight=False),
-    )
-    return Scrollback(printer, tools=_tools()), printer, out
-
-
-def _rows(out: io.StringIO) -> list[str]:
-    return [row.rstrip() for row in out.getvalue().splitlines() if row.strip()]
+def _rows(printer: RecordingPrinter) -> list[str]:
+    return [row.rstrip() for row in printer.text.splitlines() if row.strip()]
 
 
 def test_a_child_s_failure_names_its_own_call_again() -> None:
-    render, _, out = _console()
+    render, printer = _renderer()
     turn = _turn(call("Echo", "1", text="a"), call("Echo", "2", text="b"))
     render(types.ChildEvent(label="c", inner=turn))
     render(types.ChildEvent(label="c", inner=_result("1", "broke", is_error=True)))
-    assert _rows(out) == ["  c: Echo a", "  c: Echo b", "  c: Echo a", "    ✗ c: broke"]
+    assert _rows(printer) == [
+        "  c: Echo a",
+        "  c: Echo b",
+        "  c: Echo a",
+        "    ✗ c: broke",
+    ]
 
 
 def test_a_child_s_failure_right_under_its_call_does_not_name_it_again() -> None:
-    render, _, out = _console()
+    render, printer = _renderer()
     render(types.ChildEvent(label="c", inner=_turn(call("Echo", "1", text="a"))))
     render(types.ChildEvent(label="c", inner=_result("1", "broke", is_error=True)))
-    assert _rows(out) == ["  c: Echo a", "    ✗ c: broke"]
+    assert _rows(printer) == ["  c: Echo a", "    ✗ c: broke"]
 
 
 def test_a_result_whose_call_is_unknown_sits_under_no_call() -> None:
@@ -501,13 +490,13 @@ def test_a_result_whose_call_is_unknown_sits_under_no_call() -> None:
 
 
 def test_a_result_that_shows_nothing_names_no_call_again() -> None:
-    render, _, out = _console()
+    render, printer = _renderer()
     render(_turn(call("Hidden", "1"), call("Hidden", "2"), call("Echo", "3", text="c")))
     render(types.CohortStarted())
     for call_id in ("1", "2"):
         render(_result(call_id, "x"))
     render(_result("3", "said c"))
-    assert _rows(out) == ["  Hidden", "  Hidden", "  Echo c", "    said c"]
+    assert _rows(printer) == ["  Hidden", "  Hidden", "  Echo c", "    said c"]
 
 
 def test_a_hidden_result_between_a_call_and_its_failure_names_no_call_again() -> None:
@@ -542,7 +531,7 @@ def test_show_result_puts_every_row_under_its_call() -> None:
 def test_a_result_below_a_row_printed_past_scrollback_names_its_call_again(
     writer: str,
 ) -> None:
-    render, printer, out = _console()
+    render, printer = _renderer()
     render(_turn(call("Echo", "1", text="a")))
     render(types.CohortStarted())
     match writer:
@@ -551,7 +540,7 @@ def test_a_result_below_a_row_printed_past_scrollback_names_its_call_again(
         case _:
             getattr(printer, writer)("x")
     render(_result("1", "said a"))
-    assert _rows(out)[-2:] == ["  Echo a", "    said a"]
+    assert _rows(printer)[-2:] == ["  Echo a", "    said a"]
 
 
 def test_a_child_s_failures_messages_and_suspensions_are_labelled(
@@ -897,11 +886,10 @@ def test_a_model_error_shows_and_says_what_the_user_can_do(
 
 def test_a_child_s_long_reply_hangs_under_its_label() -> None:
     """A child's words wrapped back to column 0, under its label, not its text."""
-    out = io.StringIO()
-    printer = ConsolePrinter(Console(file=out, width=30, color_system=None))
+    printer = RecordingPrinter(width=30)
     render = Scrollback(printer, tools=_tools())
     render(types.ChildEvent(label="Agent_0", inner=_turn(text="word " * 12)))
-    rows = [r.rstrip() for r in out.getvalue().split("\n") if r.strip()]
+    rows = _rows(printer)
     assert len(rows) > 1
     assert rows[0].startswith("Agent_0: word")
     assert all(r.startswith(" " * 9) and r[9] != " " for r in rows[1:]), rows
@@ -1146,7 +1134,7 @@ def test_a_call_names_a_path_below_where_sagent_started_relative_to_it(
     arguments: dict[str, PlainTree],
     label: str,
 ) -> None:
-    header = header_of(
+    header = call_header(
         ToolCall(call_id="1", name=tool.name, arguments=arguments),
         tools={tool.name: tool},
         home=Path("/home/u/repo"),
@@ -1155,8 +1143,8 @@ def test_a_call_names_a_path_below_where_sagent_started_relative_to_it(
 
 
 def test_a_header_is_its_tool_s_label_and_display_or_the_call_s_name() -> None:
-    echo = header_of(call("Echo", "1", text="hi"), tools=_tools())
-    gone = header_of(call("Gone", "2"), tools=_tools(), agent="c")
+    echo = call_header(call("Echo", "1", text="hi"), tools=_tools())
+    gone = call_header(call("Gone", "2"), tools=_tools(), agent="c")
     assert echo == Header(key="1", label="Echo hi", display=_SHOWN)
     assert gone == Header(key="c: 2", label="c: Gone", display=ToolDisplay())
 

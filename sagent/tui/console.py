@@ -2,7 +2,8 @@ r"""The scrollback, printed with Rich.
 
 A call's header sits at the indent. Under it, at the output indent, come its
 input rows, the first after the mark, then its results with no mark: the mark
-says input, so a long body is not a column of boxes.
+says input, so a long body is not a column of boxes. An edit's or a write's
+diff is its input shown, so right under the header it takes the mark too.
 
 A result names the call it belongs to, and the printer alone decides whether to
 label that call again: it does unless the last row on screen is that call's,
@@ -10,7 +11,7 @@ whoever wrote the rows since.
 
 Typical usage example:
 
-  printer = ConsolePrinter(Console(stderr=True))
+  printer = ConsolePrinter(Console(file=Screen(sys.stderr)))
   bash = Header(key="1", label="Bash list files\\nls -la", display=Bash().display)
   printer.call(bash)
   printer.output("a.py", display=bash.display, header=bash)
@@ -18,8 +19,8 @@ Typical usage example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol, override
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, BinaryIO, Protocol, Self, TextIO, override
 
 import contextlib
 import io
@@ -34,7 +35,8 @@ from sagent.tui.types import Sticky, fill, hang
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Generator, Iterable, Iterator, Sequence
+    from types import TracebackType
 
     from rich.cells import cell_len
     from rich.color import Color
@@ -114,24 +116,27 @@ class ConsolePrinter:
     """Scrollback on a Rich console.
 
     Args:
-      console: Where to print; built inside ``patch_stdout`` so its writes
-        land above the prompt.
+      console: Where to print: a console writing to a ``Screen``. A row the
+        screen counts between a call and its result, this printer's or another
+        writer's sent through it (as ``run`` sends stdout and stderr), labels
+        that call again.
       show_thinking: Whether reasoning shows; hidden by default, though the
         session keeps every summary the model returns.
       max_label_lines: The most rows one call's header may take; its input
         is bounded by its display's ``command.lines``.
       style: The colors; dark-terminal ones when omitted.
-      mark: What a call's first input row shows in ``output_indent``'s middle.
-      screen: What every row reaches the terminal through, this printer's and
-        the rest of the program's, so a row written past this printer labels the
-        next result's call again; one over the console's own file when omitted.
+      mark: What shows in ``output_indent``'s middle on a call's first row of
+        input: its first input row, or its diff's first row right under it.
+
+    Raises:
+      TypeError: ``console`` writes to no ``Screen``.
 
     """
 
     indent = "  "
     output_indent = indent + "  "
-    """What starts every row under a call's header but its first input row: the
-    header's indent, a cell for the mark, and a space."""
+    """What starts every row under a call's header but the first row of its input,
+    which ``marked`` starts: the header's indent, a cell for the mark, a space."""
 
     def __init__(
         self,
@@ -141,10 +146,10 @@ class ConsolePrinter:
         max_label_lines: int = 12,
         style: ConsoleStyle | None = None,
         mark: str = "⎿",
-        screen: Screen | None = None,
     ) -> None:
-        self.screen = screen if screen is not None else Screen(console.file)
-        console.file = self.screen
+        if not isinstance(console.file, Screen):
+            raise TypeError(f"The console writes to {console.file!r}, not a Screen.")
+        self.screen = console.file
         self.console = console
         self.show_thinking = show_thinking
         self.max_label_lines = max_label_lines
@@ -153,10 +158,14 @@ class ConsolePrinter:
         self.sticky = Sticky()
         self.gap_owed = False
         # pragma: no mutate start -- no screen has written -1 rows, so this names no
-        # call's row before the first one prints.
-        self._last_row: tuple[str, int] = ("", -1)
-        """The call whose row is the last on screen, and ``screen.rows`` then."""
+        # call before the first one prints.
+        self._tail = _Tail(key="", header=-1, rows=-1)
         # pragma: no mutate end
+
+    @property
+    def marked(self) -> Text:
+        """Return what starts a call's first row of input: the indent and the mark."""
+        return Text(f"{self.indent}{self.mark} ", style=self.style.quiet)
 
     @property
     def output_width(self) -> int:
@@ -268,6 +277,7 @@ class ConsolePrinter:
             # A label names the call in words, such as Bash's description.
             prose=True,
         )
+        label_end = self.screen.rows
         display = header.display
         rest = rest.rstrip("\n")
         if rest.strip():
@@ -276,11 +286,11 @@ class ConsolePrinter:
             body.stylize(self.style.quiet)
             self._rows(
                 display.command.keep(list(body.split("\n", allow_blank=True))),
-                first=Text(f"{self.indent}{self.mark} ", style=self.style.quiet),
+                first=self.marked,
                 rest=Text(self.output_indent, style=self.style.quiet),
                 spec=display.command,
             )
-        self._last_row = (header.key, self.screen.rows)
+        self._tail = _Tail(key=header.key, header=label_end, rows=self.screen.rows)
 
     def output(
         self,
@@ -302,11 +312,10 @@ class ConsolePrinter:
         lines = display.output.keep(self._lines(text.rstrip("\n"), self.style.quiet))
         if not lines:
             return
-        self._relabel(header)
-        self._gap()
-        indent = Text(self.output_indent, style=self.style.quiet)
-        self._rows(lines, first=indent, rest=indent, spec=display.output)
-        self._record_last(header)
+        with self._under(header):
+            self._gap()
+            indent = Text(self.output_indent, style=self.style.quiet)
+            self._rows(lines, first=indent, rest=indent, spec=display.output)
 
     def diff(
         self,
@@ -318,6 +327,9 @@ class ConsolePrinter:
     ) -> None:
         """Write ``diff`` highlighted, its words marked, cut to ``lines``.
 
+        A diff shows the call's input, an edit's or a write's text, so right
+        under the header its first row takes the mark, as input rows do.
+
         Args:
           diff: A unified diff.
           path: The file it changes, for its lexer.
@@ -325,17 +337,17 @@ class ConsolePrinter:
           header: The call it belongs to.
 
         """
-        self._relabel(header)
-        self._gap()
-        render_diff(
-            self.console,
-            _shown(diff),
-            row_indent=self.output_indent,
-            path=_shown(path),
-            lines=lines,
-            sticky=self.sticky,
-        )
-        self._record_last(header)
+        with self._under(header):
+            self._gap()
+            render_diff(
+                self.console,
+                _shown(diff),
+                row_indent=self.output_indent,
+                first=self.marked if self._tail.header == self.screen.rows else None,
+                path=_shown(path),
+                lines=lines,
+                sticky=self.sticky,
+            )
 
     def error(self, text: str) -> None:
         """Write what failed outside any call, red after ``✗`` at the indent."""
@@ -343,9 +355,8 @@ class ConsolePrinter:
 
     def failed(self, text: str, *, header: Header | None = None) -> None:
         """Write how the call ``header`` names failed, red after ``✗``, under it."""
-        self._relabel(header)
-        self._failure(text, indent=self.output_indent)
-        self._record_last(header)
+        with self._under(header):
+            self._failure(text, indent=self.output_indent)
 
     def halt(self, text: str) -> None:
         """Write ``text`` bold red, wrapped between two rules as wide as a fill.
@@ -438,15 +449,17 @@ class ConsolePrinter:
         shown = Text(_shown(text).removesuffix("\n"), style=style)
         return list(shown.split("\n", allow_blank=True))
 
-    def _relabel(self, header: Header | None) -> None:
-        """Label the call ``header`` again, unless the last row on screen is its."""
-        if header is not None and self._last_row != (header.key, self.screen.rows):
+    # The call is labelled again unless the last row on screen is its, and its rows then
+    # end where the rows written inside do.
+    @contextlib.contextmanager
+    def _under(self, header: Header | None) -> Generator[None]:
+        """Print the rows written inside under the call ``header``, labelled if need be."""
+        last = (self._tail.key, self._tail.rows)
+        if header is not None and last != (header.key, self.screen.rows):
             self.call(header)
-
-    def _record_last(self, header: Header | None) -> None:
-        """Record that the last row on screen is the call ``header``'s."""
+        yield
         if header is not None:
-            self._last_row = (header.key, self.screen.rows)
+            self._tail = replace(self._tail, rows=self.screen.rows)
 
     def _gap(self) -> None:
         """Print the blank line owed after a user bar or before a reply block."""
@@ -474,15 +487,23 @@ class TextStream(Protocol):
         """Return its file descriptor."""
         ...
 
+    @property
+    def encoding(self) -> str | None:
+        """Return the encoding it writes in; ``None`` for one held in memory."""
+        ...
 
-# A ``StringIO`` only for its type: Rich's ``Console.file`` takes an ``IO[str]``, and
-# typeshed reconciles ``TextIOBase`` with ``TextIO`` only there. Every write goes on
-# to ``stream``; the buffer stays empty.
-class Screen(io.StringIO):
-    """A stream to the terminal that counts the rows written through it.
+    @property
+    def errors(self) -> str | None:
+        """Return how it handles text its encoding cannot hold."""
+        ...
+
+
+class Screen(TextIO):
+    """A write-only stream to the terminal that counts the rows written through it.
 
     A row ends at a newline, so a write that moves nothing, such as the title's
-    escape, counts for none.
+    escape, counts for none. Its encoding and errors are its stream's; reading
+    and seeking raise ``io.UnsupportedOperation``, and it has no ``buffer``.
 
     Args:
       stream: Where the writes go.
@@ -490,7 +511,6 @@ class Screen(io.StringIO):
     """
 
     def __init__(self, stream: TextStream) -> None:
-        super().__init__()
         self.stream = stream
         self.rows = 0
         """Rows written so far: the newlines."""
@@ -500,6 +520,12 @@ class Screen(io.StringIO):
         """Write ``s`` to the stream, and count its rows."""
         self.rows += s.count("\n")
         return self.stream.write(s)
+
+    @override
+    def writelines(self, lines: Iterable[str], /) -> None:
+        """Write each of ``lines``."""
+        for line in lines:
+            self.write(line)
 
     @override
     def flush(self) -> None:
@@ -515,6 +541,125 @@ class Screen(io.StringIO):
     def fileno(self) -> int:
         """Return the stream's file descriptor."""
         return self.stream.fileno()
+
+    @override
+    def writable(self) -> bool:
+        """Return ``True``: a screen is written."""
+        return True
+
+    @override
+    def readable(self) -> bool:
+        """Return ``False``: a screen is never read."""
+        return False
+
+    @override
+    def seekable(self) -> bool:
+        """Return ``False``: a screen only moves forward."""
+        return False
+
+    @property
+    @override
+    def encoding(self) -> str:
+        """Return the stream's encoding; ``utf-8``, as Rich reads none, if it has none."""
+        return self.stream.encoding or "utf-8"
+
+    @property
+    @override
+    def errors(self) -> str | None:
+        """Return how the stream handles text its encoding cannot hold."""
+        return self.stream.errors
+
+    @property
+    @override
+    def newlines(self) -> None:
+        """Return ``None``: nothing is read, so no newline was seen."""
+        return None
+
+    @property
+    @override
+    def buffer(self) -> BinaryIO:
+        """Raise ``AttributeError``: as ``StringIO`` has none, a screen has no bytes."""
+        raise AttributeError("buffer")
+
+    @property
+    @override
+    def line_buffering(self) -> bool:
+        """Return ``False``: the stream decides when to flush."""
+        return False
+
+    @property
+    @override
+    def mode(self) -> str:
+        """Return ``w``."""
+        return "w"
+
+    @property
+    @override
+    def name(self) -> str:
+        """Return ``<screen>``."""
+        return "<screen>"
+
+    @property
+    @override
+    def closed(self) -> bool:
+        """Return ``False``: closing the stream is its owner's."""
+        return False
+
+    @override
+    def close(self) -> None:
+        """Leave the stream open: its owner closes it."""
+
+    @override
+    def read(self, n: int = -1, /) -> str:
+        """Raise: a screen is never read."""
+        raise io.UnsupportedOperation("read")
+
+    @override
+    def readline(self, limit: int = -1, /) -> str:
+        """Raise: a screen is never read."""
+        raise io.UnsupportedOperation("readline")
+
+    @override
+    def readlines(self, hint: int = -1, /) -> list[str]:
+        """Raise: a screen is never read."""
+        raise io.UnsupportedOperation("readlines")
+
+    @override
+    def seek(self, offset: int, whence: int = 0, /) -> int:
+        """Raise: a screen only moves forward."""
+        raise io.UnsupportedOperation("seek")
+
+    @override
+    def tell(self) -> int:
+        """Raise: a screen only moves forward."""
+        raise io.UnsupportedOperation("tell")
+
+    @override
+    def truncate(self, size: int | None = None, /) -> int:
+        """Raise: a screen only moves forward."""
+        raise io.UnsupportedOperation("truncate")
+
+    @override
+    def __enter__(self) -> Self:
+        return self
+
+    @override
+    def __exit__(
+        self,
+        kind: type[BaseException] | None,
+        value: BaseException | None,
+        traceback: TracebackType | None,
+        /,
+    ) -> None:
+        del kind, value, traceback
+
+    @override
+    def __iter__(self) -> Iterator[str]:
+        raise io.UnsupportedOperation("iter")
+
+    @override
+    def __next__(self) -> str:
+        raise io.UnsupportedOperation("next")
 
 
 class Title:
@@ -564,3 +709,17 @@ def _shown(text: str) -> str:
         lambda m: f"^{chr(ord(m.group()) ^ 0x40)}",
         text,
     )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Tail:
+    """The call whose row is the last on screen, and where its rows end."""
+
+    key: str
+    """The call's ``Header.key``."""
+
+    header: int
+    """``screen.rows`` right after its header: a diff then takes the mark."""
+
+    rows: int
+    """``screen.rows`` right after its last row."""

@@ -6,7 +6,7 @@ it, so nothing reaches the network.
 
 from __future__ import annotations
 
-from dataclasses import MISSING, dataclass, fields
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from wesearch.fetch import FetchSession
@@ -38,11 +38,6 @@ _BOB = AuthorRecord(author_id="2262347", name="Bob")
 _PAPER = PaperRecord(title="Attention", year=2017, abstract="All you need, really.")
 
 
-def test_a_lookup_needs_the_session_it_shares() -> None:
-    (session,) = [f for f in fields(PaperAuthor) if f.name == "session"]
-    assert (session.default, session.default_factory) == (MISSING, MISSING)
-
-
 @pytest.mark.parametrize(
     ("arguments", "label"),
     [
@@ -70,14 +65,21 @@ async def test_a_name_finds_authors_and_is_kept(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    session = FetchSession()
     calls = _fake(
         monkeypatch,
         "search_authors",
         AuthorSearchResult(records=[_ADA, _BOB], total=9),
     )
     tool = _tool()
-    first = await tool.call(ToolContext(cwd=tmp_path), {"query": " Ada ", "limit": 2})
-    again = await tool.call(ToolContext(cwd=tmp_path), {"query": "Ada", "limit": 2})
+    first = await tool.call(
+        ToolContext(cwd=tmp_path, fetch_session=session),
+        {"query": " Ada ", "limit": 2},
+    )
+    again = await tool.call(
+        ToolContext(cwd=tmp_path, fetch_session=session),
+        {"query": "Ada", "limit": 2},
+    )
     assert (
         first.text()
         == again.text()
@@ -87,7 +89,7 @@ async def test_a_name_finds_authors_and_is_kept(
         )
     )
     assert first.call_id == ""
-    assert calls == [_Call(args=("Ada",), kwargs={"limit": 2, "session": tool.session})]
+    assert calls == [_Call(args=("Ada",), kwargs={"limit": 2, "session": session})]
 
 
 @pytest.mark.asyncio
@@ -105,11 +107,15 @@ async def test_ids_are_looked_up_in_one_batch_and_kept_when_all_are_found(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    session = FetchSession()
     calls = _fake(monkeypatch, "author_metadata", [_ADA, _BOB])
     tool = _tool()
-    first = await tool.call(ToolContext(cwd=tmp_path), {"ids": "1741101, 2262347"})
+    first = await tool.call(
+        ToolContext(cwd=tmp_path, fetch_session=session),
+        {"ids": "1741101, 2262347"},
+    )
     again = await tool.call(
-        ToolContext(cwd=tmp_path),
+        ToolContext(cwd=tmp_path, fetch_session=session),
         {"ids": ["1741101", "2262347"]},
     )
     assert (
@@ -118,7 +124,7 @@ async def test_ids_are_looked_up_in_one_batch_and_kept_when_all_are_found(
         == (f"{format_author_block(_ADA)}\n\n{format_author_block(_BOB)}")
     )
     assert calls == [
-        _Call(args=(["1741101", "2262347"],), kwargs={"session": tool.session}),
+        _Call(args=(["1741101", "2262347"],), kwargs={"session": session}),
     ]
 
 
@@ -140,6 +146,7 @@ async def test_an_authors_papers_come_with_every_filter_and_are_kept(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    session = FetchSession()
     calls = _fake(
         monkeypatch,
         "author_papers",
@@ -155,10 +162,10 @@ async def test_an_authors_papers_come_with_every_filter_and_are_kept(
         "year_to": 2020,
         "abstract_chars": 3,
     }
-    first = await tool.call(ToolContext(cwd=tmp_path), arguments)
-    again = await tool.call(ToolContext(cwd=tmp_path), arguments)
+    first = await tool.call(ToolContext(cwd=tmp_path, fetch_session=session), arguments)
+    again = await tool.call(ToolContext(cwd=tmp_path, fetch_session=session), arguments)
     none = await tool.call(
-        ToolContext(cwd=tmp_path),
+        ToolContext(cwd=tmp_path, fetch_session=session),
         {"ids": "2262347", "operation": "papers"},
     )
     assert (
@@ -176,7 +183,7 @@ async def test_an_authors_papers_come_with_every_filter_and_are_kept(
             "limit": 5,
             "year_from": 2015,
             "year_to": 2020,
-            "session": tool.session,
+            "session": session,
         },
     )
     assert len(calls) == 2
@@ -288,7 +295,7 @@ class _Call:
 
 
 def _tool() -> PaperAuthor:
-    return PaperAuthor(session=FetchSession())
+    return PaperAuthor()
 
 
 def _fake(

@@ -26,6 +26,7 @@ from sagent.session.types import (
     UncategorizedRecord,
     UserMessage,
 )
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
@@ -35,7 +36,7 @@ if TYPE_CHECKING:
 def _agent(tmp_path: Path) -> Agent:
     return Agent(
         model=ScriptedProvider(replies=[reply("hello")])["scripted"],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         system_prompt="S",
         agents_md=AgentsMdConfig(system_dir=tmp_path / "s", user_dir=tmp_path / "u"),
     )

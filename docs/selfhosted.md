@@ -30,20 +30,16 @@ hf download Qwen/Qwen3.6-27B --local-dir /opt/models/qwen3.6-27b
 Run it from Python:
 
 ```python
-from sagent.agent import Agent
-from sagent.lib.codec import immutable
-from sagent.providers import SelfHosted, SelfHostedModel
+from sagent.agent.agent import Agent
+from sagent.providers.selfhosted.server import SelfHosted
 
-provider = SelfHosted.from_key("Qwen/Qwen3.6-27B+bfloat16+cuda")
-model: SelfHostedModel = provider.model()
-agent = Agent(
-    model=model,
-    system="Answer concisely.",
-    tools=[],
-)
-result = await agent.run(immutable({"prompt": "Say hi."}))
-print(result.content)
+async with SelfHosted() as local:
+    model = local["Qwen/Qwen3.6-27B+bfloat16+cuda"]
+    async with Agent(model=model, system_prompt="Answer concisely.") as agent:
+        print(await agent.send("Say hi."))
 ```
+
+The weights load on the first request.
 
 Run Qwen 3.6 27B from the CLI:
 
@@ -54,8 +50,8 @@ sagent --provider SelfHosted --model Qwen/Qwen3.6-27B+bfloat16+cuda
 Test Qwen 3 0.6B on macbook:
 
 ```bash
-# To reduce memory: shorten response tokens, use shorter bare prompt, load no tools, use less effort
-sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+mps --max-response-tokens 64  --max-tool-call-rounds 1 --tools none --effort none
+# To reduce memory: use a shorter bare prompt, load no tools, use less effort
+sagent --provider SelfHosted --model Qwen/Qwen3-0.6B+float16+mps --max-tool-call-rounds 1 --tools none --effort none
 ```
 
 Note that on the first turn, the model might need extra warmup time (e.g., run compile).
@@ -64,8 +60,10 @@ SelfHosted model specs are the HuggingFace repo ID or local path followed by
 `+` options in any order:
 
 ```text
-MODEL[+DEVICE][+DTYPE][+compile]
+MODEL[+DEVICE][+DTYPE][+compile][+SIZE]
 ```
+
+`SIZE` caps the context window, such as `+200k`; `+fullcontext`, the default, uses the config's.
 
 Supported devices are `cpu`, `cuda`, `mps`, and `shard`. `shard` delegates
 placement to `accelerate` through `device_map="auto"` so large models can shard

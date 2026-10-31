@@ -41,10 +41,12 @@ from sagent.session.types import (
 )
 from sagent.settings.harvest import harvest
 from sagent.tools.display import DisplaySpec, ToolDisplay
+from sagent.tools.mcp_settings import McpSettings
 from sagent.tui.prompt import Panes, Staged
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.render import Scrollback
-from sagent.tui.slash import Commands
+from sagent.tui.slash import Commands, owners_without_agent
+from sagent.tui.types import CommandOutput
 
 
 if TYPE_CHECKING:
@@ -53,7 +55,7 @@ if TYPE_CHECKING:
     from sagent.providers.types import (
         Provider,
         ProviderFactory,
-        ProviderSharedResources,
+        ProviderResources,
     )
     from sagent.tools.types import ToolContext
 
@@ -151,7 +153,7 @@ class _Picky(ScriptedProvider):
         self,
         *,
         name: str,
-        resources: ProviderSharedResources,
+        resources: ProviderResources,
         serves: frozenset[str],
         capability: ModelCapability | None = None,
     ) -> None:
@@ -172,7 +174,7 @@ class _Signing(_Picky):
         self,
         *,
         name: str,
-        resources: ProviderSharedResources,
+        resources: ProviderResources,
         account: str | None = None,
     ) -> None:
         super().__init__(
@@ -196,7 +198,7 @@ class _Signing(_Picky):
         return Logins(config_dir() / "rekursiv-ai" / "secrets" / "signing.json")
 
 
-def _wide(*, name: str, resources: ProviderSharedResources) -> Provider:
+def _wide(*, name: str, resources: ProviderResources) -> Provider:
     return ScriptedProvider(
         name=name,
         resources=resources,
@@ -365,6 +367,15 @@ async def test_help_on_one_setting_says_all_it_knows() -> None:
         "error",
         "[/help] no setting 'nothing-at-all'",
     )
+
+
+def test_what_an_owner_with_no_agent_shows_is_said_as_a_note(tmp_path: Path) -> None:
+    said: list[CommandOutput] = []
+    ((mount, owner),) = owners_without_agent(cwd=tmp_path, say=said.append)
+    assert mount == ("mcp",)
+    assert isinstance(owner, McpSettings)
+    owner.show("Open https://sign.in")
+    assert said == [CommandOutput(text="Open https://sign.in", tone="note")]
 
 
 @pytest.mark.asyncio
@@ -989,7 +1000,7 @@ async def test_a_child_that_joins_later_inherits_once_its_commands_are_made() ->
         parent="Agent",
     )
 
-    _ = await desk.commands.commands_for(team, "late")
+    _ = await desk.commands.child_commands(team, "late")
 
     assert _shown(screens) == {"Agent": False, "late": False}
 
@@ -998,7 +1009,7 @@ async def test_a_child_that_joins_later_inherits_once_its_commands_are_made() ->
 async def test_a_choice_a_child_cannot_take_says_why_and_stops_there() -> None:
     """A setting with no closest value, such as a screen's, cannot roll on."""
     desk, screens = _rolled(("a", "Agent"))
-    child = await desk.commands.commands_for(
+    child = await desk.commands.child_commands(
         desk.team or Team(catalog=desk.catalog),
         "a",
     )

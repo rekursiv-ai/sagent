@@ -17,7 +17,7 @@ import uuid
 
 from sagent.session.types import FileWriteResult, UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import parse, schema_of
+from sagent.tools.types import json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -50,7 +50,7 @@ class Write:
     description = (files(__package__) / "assets" / "write.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay())
 

@@ -76,7 +76,7 @@ def _setup(
     team = Team(catalog=catalog)
     agent = Agent(
         model=catalog["scripted"]["priced"],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         compactor=compactor,
         journal=journal,
         system_prompt="",
@@ -368,7 +368,10 @@ async def test_read_by_record_finds_a_call_with_its_result_in_another_s_session(
     tmp_path: Path,
 ) -> None:
     _, tool = _setup(tmp_path, journal=RecordingJournal())
-    watcher = Agent(model=ScriptedProvider()["scripted"], cwd=tmp_path)
+    watcher = Agent(
+        model=ScriptedProvider()["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
     _ = tool.team.join(watcher, label="watcher")
     tool.team.watch("watcher", "Agent")
 
@@ -402,7 +405,10 @@ async def test_another_s_session_is_only_read(
 ) -> None:
     _, tool = _setup(tmp_path)
     _ = tool.team.join(
-        Agent(model=ScriptedProvider()["scripted"], cwd=tmp_path),
+        Agent(
+            model=ScriptedProvider()["scripted"],
+            tool_context=ToolContext(cwd=tmp_path),
+        ),
         label="kid",
         parent="Agent",
     )
@@ -415,7 +421,10 @@ async def test_another_s_session_is_only_read(
 @pytest.mark.asyncio
 async def test_list_and_search_reach_a_child_s_session(tmp_path: Path) -> None:
     _, tool = _setup(tmp_path)
-    kid = Agent(model=ScriptedProvider()["scripted"], cwd=tmp_path)
+    kid = Agent(
+        model=ScriptedProvider()["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+    )
     _ = tool.team.join(kid, label="kid", parent="Agent")
     kid.session.append(UserMessage(content="kid's own words"))
 

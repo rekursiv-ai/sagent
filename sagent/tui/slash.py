@@ -185,6 +185,8 @@ class Commands:
         ] + self._watching()
 
     # Listed with no agent, so the shell knows a command before it builds a model.
+    # Each runs ``Commands``' own method, never a subclass's override: the shell lists
+    # these before any instance exists.
     @classmethod
     def actions(cls) -> list[Action]:
         """Return each action ``quit`` to ``login``, as yet run on no agent.
@@ -381,7 +383,7 @@ class Commands:
         for child in team.children(self._label):
             if key in team.choices.get(child, {}):
                 continue
-            await (await self.commands_for(team, child)).take(key, args)
+            await (await self.child_commands(team, child)).take(key, args)
 
     async def take(self, key: str, args: str) -> None:
         """Take ``args`` for ``key`` from an ancestor: apply it, then pass it on.
@@ -479,7 +481,7 @@ class Commands:
             if not text.startswith("/"):
                 team.send("user", label, text)
                 sent.append(label)
-            elif await (await self.commands_for(team, label))(text):
+            elif await (await self.child_commands(team, label))(text):
                 said.append(self._stop(team, label))
         return "\n".join(
             [*said, *([f"user→{', '.join(sent)}: {text}"] if sent else [])],
@@ -493,7 +495,7 @@ class Commands:
         label = await AgentSpawn(team=team).start_watcher(own)
         return [f"started {label}, watching {own}"]
 
-    async def commands_for(self, team: Team, label: str) -> Commands:
+    async def child_commands(self, team: Team, label: str) -> Commands:
         """Return the commands of ``team``'s agent ``label``, made once, inherited.
 
         Args:

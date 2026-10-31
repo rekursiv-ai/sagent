@@ -7,14 +7,14 @@ import socket
 
 import pytest
 
-from sagent.providers.testing import free_port, port_of, send, visit
+from sagent.providers.testing import bound_port, free_port, send, visit
 
 
 def test_a_free_port_can_be_bound() -> None:
     port = free_port()
     with socket.socket() as bound:
         bound.bind(("127.0.0.1", port))
-        assert port_of(bound) == port
+        assert bound_port(bound) == port
 
 
 @pytest.mark.asyncio
@@ -31,7 +31,7 @@ async def test_a_visit_returns_the_status_of_the_answer() -> None:
         writer.close()
 
     server = await asyncio.start_server(answer, "127.0.0.1", 0)
-    port = port_of(server.sockets[0])
+    port = bound_port(server.sockets[0])
     async with server:
         assert await visit(port, "/a?b=c") == 418
         assert await send(port, b"garbage\r\n") == 418

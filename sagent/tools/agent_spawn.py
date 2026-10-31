@@ -54,7 +54,7 @@ from sagent.session.types import (
 )
 from sagent.tools.display import ToolDisplay
 from sagent.tools.skill import Skill
-from sagent.tools.types import Arg, parse, schema_of
+from sagent.tools.types import Arg, FileTracker, json_schema, parse
 from sagent.tools.watch import Feed
 
 
@@ -147,7 +147,7 @@ class AgentSpawn:
     description = (files(__package__) / "assets" / "agentspawn.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     team: Team = field(repr=False)
     """Who spawns, and where the child joins."""
@@ -250,7 +250,7 @@ class AgentSpawn:
             raise ValueError(
                 f"{a.label!r} is reserved: {', '.join(sorted(_TAKEN))}.",
             )
-        label = a.label or self.team.label_for(parent_label)
+        label = a.label or self.team.child_label(parent_label)
         parent = self.team[parent_label]
         allowed = _allowed(parent, a.tools)
         model = await self._model(
@@ -324,7 +324,9 @@ class AgentSpawn:
         if self.team.above(watched) is not None:
             raise ValueError(f"{watched!r} is no unwatched root.")
         label = label or (
-            "watcher" if "watcher" not in self.team else self.team.label_for("watcher")
+            "watcher"
+            if "watcher" not in self.team
+            else self.team.child_label("watcher")
         )
         resumed = journal is not None
         path = target.session.journal.path
@@ -420,7 +422,7 @@ class AgentSpawn:
             label = (
                 spec.label
                 if spec.label not in self.team
-                else self.team.label_for(parent_label)
+                else self.team.child_label(parent_label)
             )
             try:
                 allowed = _allowed(parent, spec.tools)
@@ -686,7 +688,6 @@ def _agent_from_parent(
     max_spend_usd: float | None = None,
 ) -> Agent:
     """Return a new agent with ``parent``'s settings, but those it is given."""
-    context = parent.runtime.tool_context
     agent = Agent(
         model=model,
         tools=list(parent.tools.values()),
@@ -694,16 +695,20 @@ def _agent_from_parent(
         system_prompt=system_prompt,
         journal=journal,
         compactor=parent.compactor_factory,
-        cwd=context.cwd,
-        root=parent.root,
+        # All of the parent's but what one agent alone keeps: a field added later
+        # is inherited unless it is reset here.
+        tool_context=replace(
+            parent.runtime.tool_context,
+            files=FileTracker(),
+            label="",
+            spill_dir=None,
+        ),
         max_rounds=max_rounds,
         max_spend_usd=max_spend_usd,
         agents_md=parent.agents_md,
-        max_result_chars=context.max_result_chars,
         environment=parent.environment,
         account=account,
         persistent_retry=parent.runtime.persistent_retry,
-        columns=context.columns,
     )
     agent.model_cache = dict(parent.model_cache)
     return agent

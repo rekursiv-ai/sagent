@@ -58,6 +58,7 @@ from sagent.session.types import (
 from sagent.tools.display import ToolDisplay
 from sagent.tools.read import Read
 from sagent.tools.skill import Skill
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
@@ -67,7 +68,6 @@ if TYPE_CHECKING:
     from sagent.runtime.tape import ContextSplice
     from sagent.runtime.types import ModelContextEvent
     from sagent.session.types import SessionRecord
-    from sagent.tools.types import ToolContext
 
 
 _SUMMARY_TEXT = "<analysis>scratch notes</analysis>\n<summary>the gist</summary>"
@@ -106,7 +106,7 @@ def _agent(
     agent = Agent(
         model=provider["scripted"],
         tools=[Read()],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         system_prompt=system_prompt,
         compactor=SummaryCompactor,
     )
@@ -434,7 +434,7 @@ def _tooled(tmp_path: Path, *, tools: Sequence[_Wait]) -> SummaryCompactor:
     agent = Agent(
         model=provider["scripted"],
         tools=tools,
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         system_prompt="",
         compactor=SummaryCompactor,
     )
@@ -507,7 +507,7 @@ async def test_what_a_summary_costs_the_agent_spends(tmp_path: Path) -> None:
     agent = Agent(
         model=provider["scripted"],
         journal=journal,
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         compactor=SummaryCompactor,
     )
     told: list[types.RuntimeEvent] = []
@@ -1121,7 +1121,7 @@ def _skilled(tmp_path: Path, *bodies: tuple[str, str]) -> Agent:
     return Agent(
         model=provider["scripted"],
         tools=[Skill(user_dir=tmp_path / "user")],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         compactor=SummaryCompactor,
     )
 
@@ -1267,7 +1267,11 @@ async def test_the_summary_runs_at_a_lower_effort_then_restores_it(
     provider = ScriptedProvider(
         capability=_capability(efforts=frozenset({"none", "low", "high", "max"})),
     )
-    agent = Agent(model=provider["scripted"], cwd=tmp_path, system_prompt="")
+    agent = Agent(
+        model=provider["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+        system_prompt="",
+    )
     agent.model.settings = replace(agent.model.settings, thinking_effort="high")
     seen = _EffortSeen(agent=agent)
     provider.replies.append(seen)
@@ -1283,7 +1287,11 @@ async def test_the_effort_is_restored_after_a_failure(tmp_path: Path) -> None:
     provider = ScriptedProvider(
         capability=_capability(efforts=frozenset({"none", "high"})),
     )
-    agent = Agent(model=provider["scripted"], cwd=tmp_path, system_prompt="")
+    agent = Agent(
+        model=provider["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+        system_prompt="",
+    )
     agent.model.settings = replace(agent.model.settings, thinking_effort="high")
     seen = _EffortSeen(agent=agent, answer=ValueError("bad"))
     provider.replies.append(seen)
@@ -1551,7 +1559,7 @@ async def test_a_resumed_agent_goes_on_counting_its_turns_and_compactions(
         first = ScriptedProvider(replies=[reply("one"), _SUMMARY])
         agent = Agent(
             model=first["scripted"],
-            cwd=tmp_path,
+            tool_context=ToolContext(cwd=tmp_path),
             journal=journal,
             compactor=SummaryCompactor,
         )
@@ -1562,7 +1570,7 @@ async def test_a_resumed_agent_goes_on_counting_its_turns_and_compactions(
         again = ScriptedProvider(replies=[reply("two")])
         agent = Agent(
             model=again["scripted"],
-            cwd=tmp_path,
+            tool_context=ToolContext(cwd=tmp_path),
             journal=journal,
             compactor=SummaryCompactor,
         )
@@ -1633,7 +1641,7 @@ async def test_a_reply_the_summary_keeps_does_not_make_it_due_again(
     )
     agent = Agent(
         model=provider["scripted"],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         system_prompt="",
         compactor=partial(SummaryCompactor, keep_recent=2),
     )
@@ -1799,7 +1807,7 @@ async def test_a_job_still_running_is_named_after_the_summary(tmp_path: Path) ->
     agent = Agent(
         model=provider["scripted"],
         tools=[wait],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         system_prompt="",
         compactor=SummaryCompactor,
     )
@@ -1887,7 +1895,7 @@ def _auditing(
     agent = Agent(
         model=provider["scripted"],
         tools=[Read()],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         system_prompt="S",
         journal=journal,
         compactor=partial(SummaryCompactor, style="session-audit"),

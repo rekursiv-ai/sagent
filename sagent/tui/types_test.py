@@ -12,7 +12,7 @@ from rich.text import Text
 
 import pytest
 
-from sagent.tui.console import ConsolePrinter
+from sagent.tui.console import ConsolePrinter, Screen
 from sagent.tui.types import Printer, Sticky, fill, hang
 
 
@@ -32,7 +32,7 @@ def _members() -> set[str]:
 
 
 def test_the_console_printer_is_a_printer() -> None:
-    printer: Printer = ConsolePrinter(Console(file=io.StringIO()))
+    printer: Printer = ConsolePrinter(Console(file=Screen(io.StringIO())))
     assert isinstance(printer, ConsolePrinter)
 
 
@@ -53,7 +53,7 @@ def test_the_console_printer_has_every_member_a_printer_declares() -> None:
         "failed",
         "halt",
     }
-    printer = ConsolePrinter(Console(file=io.StringIO()))
+    printer = ConsolePrinter(Console(file=Screen(io.StringIO())))
     assert {name for name in members if not hasattr(printer, name)} == set()
     found = dict[str, object]((name, getattr(printer, name)) for name in members)
     assert all(callable(found[name]) for name in members - {"show_thinking"})

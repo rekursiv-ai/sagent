@@ -16,11 +16,11 @@ reads, each later file replacing an earlier one's entry of the same name:
 
 An entry runs a local server (``command``, ``args``, ``env``, ``cwd``) or
 reaches a remote one over streamable HTTP (``url``, or Antigravity's
-``serverUrl``, and ``headers``); ``sagent mcp add`` writes these, and
-``sagent mcp add-json`` any other key below. ``${VAR}`` and ``${VAR:-default}`` take their
-value from the environment. ``enabled_tools`` keeps only the tools it names,
-``disabled_tools`` then drops the ones it names, ``disabled: true`` skips the
-server, and ``description`` says what it is for.
+``serverUrl``, and ``headers``); ``sagent mcp add`` writes these, and ``sagent
+mcp add-json`` any other key below. ``${VAR}`` and ``${VAR:-default}`` take
+their value from the environment. ``enabled_tools`` keeps only the tools it
+names, ``disabled_tools`` then drops the ones it names, ``disabled: true``
+skips the server, and ``description`` says what it is for.
 
 ``loading`` decides what the model sees:
 
@@ -41,8 +41,10 @@ local server's stderr goes to ``state_dir() / "rekursiv-ai" / "sagent" /
 
 A remote server that asks for an OAuth sign-in is skipped until ``login``
 (``sagent mcp login <server>``) makes one, and ``logout`` (``sagent mcp
-logout``) forgets it; see ``mcp_auth``. ``sagent mcp list`` connects to each
-server and says how it went.
+logout``) forgets it; see ``mcp_auth``. A sign-in belongs to one file's entry:
+``remove`` and ``logout`` also forget every sign-in of that file whose entry it
+no longer has, as after a URL edited by hand. ``sagent mcp list`` connects to
+each server and says how it went.
 
 Typical usage example:
 
@@ -54,7 +56,7 @@ Typical usage example:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import (
@@ -82,8 +84,13 @@ from sagent.providers.login import SIGN_IN_ERRORS, file_lock
 from sagent.session.projects import project_dir
 from sagent.session.types import Attachment, UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
-from sagent.tools.mcp_auth import McpTokenStorage, login_auth, session_auth
-from sagent.tools.types import parse, schema_of
+from sagent.tools.mcp_auth import (
+    McpTokenStorage,
+    login_auth,
+    session_auth,
+    sign_ins,
+)
+from sagent.tools.types import json_schema, parse
 from sagent.types import AsyncResource
 
 
@@ -179,17 +186,21 @@ class McpServer:
     """Its URL or command line as the configuration writes it, ``${VAR}`` unread;
     ``target`` when empty."""
 
+    source: str = ""
+    """The configuration file it is in, as an absolute path; ``--mcp-config`` for
+    JSON given inline, ``""`` for none."""
+
     def __post_init__(self) -> None:
         """Reject a name no tool name can hold, or one that blurs where it ends."""
         _check_name(self.name)
 
-    # Its name alone would give two projects' ``docs`` one sign-in and one log; its
-    # URL alone, one account to every name for it. Written, so a variable's value
-    # never changes it.
+    # Its file too, so a sign-in belongs to one file's entry: only that file's
+    # entries can use it, so only that file decides when it is unused. Written, so
+    # a variable's value never changes it.
     @property
     def key(self) -> str:
-        """Return what names its sign-in and its log: its name and where it is."""
-        return _key(self.name, self.written or self.target)
+        """Return what names its sign-in and its log: its file, name, and where it is."""
+        return _key(self.source, self.name, self.written or self.target)
 
     @property
     def transport(self) -> Literal["stdio", "http"]:
@@ -246,11 +257,16 @@ def servers(
 
     """
     files = () if strict else (_config_file(cwd, scope=s) for s in ("user", "local"))
-    sources = [(str(p), p.read_text(encoding="utf-8")) for p in files if p.is_file()]
+    sources = [
+        (str(p.resolve()), p.read_text(encoding="utf-8")) for p in files if p.is_file()
+    ]
     for flag in flags:
         is_json = flag.lstrip().startswith("{")
+        # Resolved: one relative name given from two directories is two files.
         sources.append(
-            ("--mcp-config", flag) if is_json else (flag, Path(flag).read_text()),
+            ("--mcp-config", flag)
+            if is_json
+            else (str(Path(flag).resolve()), Path(flag).read_text()),
         )
     entries: dict[str, tuple[str, Mapping[str, PlainTree]]] = {}
     for source, text in sources:
@@ -298,50 +314,77 @@ async def remove_server(
     cwd: Path,
     scope: McpScope | None = None,
 ) -> McpScope:
-    """Remove server ``name`` from ``scope``'s file, and its saved sign-in.
+    """Remove server ``name`` from ``scope``'s file, and the sign-ins it leaves unused.
 
     Args:
       name: The server's name.
       cwd: The working directory, which names its project's file.
-      scope: Where it is; ``None`` looks in ``local``, then ``user``.
+      scope: Where it is; ``None`` looks in ``local``, then ``user``, past a file
+        that does not read.
 
     Returns:
       scope: Whose file it was removed from.
 
     Raises:
-      ValueError: No file looked in names it.
+      ValueError: No file looked in names it; the first that did not read, if any.
 
     """
     scopes: tuple[McpScope, ...] = ("local", "user") if scope is None else (scope,)
+    unread: list[ValueError] = []
     for where in scopes:
         path = _config_file(cwd, scope=where)
+        # One hold, cleanup within it: ``file_lock`` taken again by its holder waits
+        # on itself, and an ``add`` and ``login`` landing between the write and the
+        # cleanup would have their new sign-in forgotten.
         async with _locked(path):
-            document, listed = _file_config(path)
+            try:
+                document, listed = _file_config(path)
+            except ValueError as e:
+                unread.append(e)
+                continue
             if name not in listed:
                 continue
-            removed = listed.pop(name)
+            listed.pop(name)
             _write_config(path, document, listed)
-        key = _signed_in_key(name, removed)
-        # The other scope may name the same server, and keep using its sign-in.
-        still = (
-            _signed_in_key(name, entry)
-            for p in (_config_file(cwd, scope=s) for s in ("local", "user"))
-            for n, entry in _file_config(p)[1].items()
-            if n == name
-        )
-        if key is not None and key not in still:
-            McpTokenStorage(key).path.unlink(missing_ok=True)
+            _forget_unnamed(str(path.resolve()), listed)
         return where
+    if unread:
+        raise unread[0]
     raise ValueError(f"No MCP server {name!r} in {' or '.join(scopes)}.")
 
 
-def logout(server: McpServer) -> bool:
-    """Forget ``server``'s saved sign-in; return whether there was one."""
+async def logout(server: McpServer) -> bool:
+    """Forget ``server``'s saved sign-in, and every other its file no longer names.
+
+    A sign-in whose entry was edited or removed by hand stays until then: no entry
+    can use it again. A file given inline, or one that does not read, is not swept.
+
+    Args:
+      server: The server signed out of.
+
+    Returns:
+      signed_in: Whether ``server`` itself had a sign-in.
+
+    """
     try:
         McpTokenStorage(server.key).path.unlink()
     except FileNotFoundError:
-        return False
-    return True
+        signed_in = False
+    else:
+        signed_in = True
+    if server.source in {"", "--mcp-config"}:
+        return signed_in
+    path = Path(server.source)
+    # Only sagent's own files are written, so only they take a lock; another
+    # tool's file gets none beside it.
+    owned = path.is_relative_to((data_dir() / "rekursiv-ai" / "sagent").resolve())
+    async with _locked(path) if owned else nullcontext():
+        try:
+            _, listed = _file_config(path)
+        except ValueError:
+            return signed_in
+        _forget_unnamed(server.source, listed)
+    return signed_in
 
 
 class McpConnection:
@@ -562,7 +605,7 @@ class McpServerTool:
         runs_tools = connection.server.loading == "on_demand"
         self._runs_tools = runs_tools
         self.name = f"mcp__{connection.server.name}"
-        self.schema = schema_of(
+        self.schema = json_schema(
             McpServerTool.Arguments if runs_tools else McpServerTool.ResourceArguments,
         )
         self.display = ToolDisplay()
@@ -791,6 +834,7 @@ async def login(
             login_auth(
                 p.url,
                 key=server.key,
+                source=server.source,
                 show=show,
                 headless=headless,
                 wait_sec=wait_sec,
@@ -844,7 +888,12 @@ async def _transport(
             auth=(
                 auth
                 if auth is not None
-                else await session_auth(server.name, p.url, key=server.key)
+                else await session_auth(
+                    server.name,
+                    p.url,
+                    key=server.key,
+                    source=server.source,
+                )
             ),
         ) as http,
         streamable_http_client(
@@ -1048,6 +1097,7 @@ def _server(name: str, raw: Mapping[str, PlainTree], *, source: str) -> McpServe
         return McpServer(
             name=name,
             written=_written(entry),
+            source=source,
             parameters=parameters,
             description=entry.get("description", ""),
             enabled_tools=tuple(enabled) if enabled is not None else None,
@@ -1067,16 +1117,33 @@ def _written(entry: _Entry) -> str:
 
 
 # A sign-in is made only for a server that reads, so one that does not has none.
-def _signed_in_key(name: str, raw: Mapping[str, PlainTree]) -> str | None:
+def _signed_in_key(
+    name: str,
+    raw: Mapping[str, PlainTree],
+    *,
+    source: str,
+) -> str | None:
     """Return the key a sign-in of the server ``raw`` would have; ``None`` if malformed."""
     try:
-        return _key(name, _written(_checked(name, raw, source="")))
+        return _key(source, name, _written(_checked(name, raw, source=source)))
     except ValueError:
         return None
 
 
-def _key(name: str, where: str) -> str:
-    return hashlib.sha256(f"{name}\0{where}".encode()).hexdigest()[:16]
+# Every key is ``source``'s own, so only ``source``'s entries could use one; the
+# caller holds ``source``'s lock, so no entry is added while it decides.
+def _forget_unnamed(source: str, listed: Mapping[str, Mapping[str, PlainTree]]) -> None:
+    """Forget every sign-in of ``source`` that no entry of ``listed`` would use."""
+    used = {
+        _signed_in_key(name, entry, source=source) for name, entry in listed.items()
+    }
+    for key, path in sign_ins(source).items():
+        if key not in used:
+            path.unlink(missing_ok=True)
+
+
+def _key(source: str, name: str, where: str) -> str:
+    return hashlib.sha256(f"{source}\0{name}\0{where}".encode()).hexdigest()[:16]
 
 
 def _expand(text: str) -> str:

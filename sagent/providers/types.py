@@ -35,7 +35,7 @@ __all__ = [
     "ProcessPool",
     "Provider",
     "ProviderFactory",
-    "ProviderSharedResources",
+    "ProviderResources",
     "ToolMount",
     "ToolServer",
     "UsageWindow",
@@ -112,7 +112,7 @@ class ToolServer(Resource, Protocol):
         ...
 
 
-class ProviderSharedResources(Resource, Protocol):
+class ProviderResources(Resource, Protocol):
     """What every provider in a catalog shares; each opens on first use."""
 
     @property
@@ -137,13 +137,13 @@ class ProviderFactory(Protocol):
         self,
         *,
         name: str,
-        resources: ProviderSharedResources,
+        resources: ProviderResources,
     ) -> Provider:
         """Return a provider the catalog knows as ``name``, sharing ``resources``."""
         ...
 
 
-class ModelCatalog(ProviderSharedResources, Protocol):
+class ModelCatalog(ProviderResources, Protocol):
     """Every provider, by name, sharing one set of resources."""
 
     factories: Mapping[str, ProviderFactory]
@@ -186,7 +186,7 @@ class Provider(Resource, Protocol):
     """The other names it answers to, as ``acli``; its class's, read before it is built."""
 
     @property
-    def resources(self) -> ProviderSharedResources:
+    def resources(self) -> ProviderResources:
         """Return what this provider shares with others."""
         ...
 

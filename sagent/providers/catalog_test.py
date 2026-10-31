@@ -52,7 +52,7 @@ if TYPE_CHECKING:
     import httpx2
 
     from sagent.providers.catalog import Listed
-    from sagent.providers.types import Model, ProviderSharedResources, UsageWindow
+    from sagent.providers.types import Model, ProviderResources, UsageWindow
 
 
 def test_every_registered_provider_is_built_under_its_name() -> None:
@@ -500,7 +500,7 @@ class _Serving(ScriptedProvider):
         *,
         serves: frozenset[str],
         name: str = "",
-        resources: ProviderSharedResources | None = None,
+        resources: ProviderResources | None = None,
     ) -> None:
         super().__init__(name=name, resources=resources)
         self.serves = serves
@@ -894,7 +894,7 @@ class _Recorded(AsyncResource):
 
     aliases: ClassVar[tuple[str, ...]] = ()
 
-    def __init__(self, *, name: str, resources: ProviderSharedResources) -> None:
+    def __init__(self, *, name: str, resources: ProviderResources) -> None:
         self._name = name
         self._resources = resources
         self.closes = 0
@@ -906,7 +906,7 @@ class _Recorded(AsyncResource):
         return self._name
 
     @property
-    def resources(self) -> ProviderSharedResources:
+    def resources(self) -> ProviderResources:
         return self._resources
 
     @property
@@ -935,7 +935,7 @@ class _Factory:
     def __init__(self, *, built: list[_Recorded]) -> None:
         self._built = built
 
-    def __call__(self, *, name: str, resources: ProviderSharedResources) -> _Recorded:
+    def __call__(self, *, name: str, resources: ProviderResources) -> _Recorded:
         provider = _Recorded(name=name, resources=resources)
         self._built.append(provider)
         return provider

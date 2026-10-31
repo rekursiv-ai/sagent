@@ -45,7 +45,7 @@ if TYPE_CHECKING:
         ModelSettings,
     )
     from sagent.model.types import Request, Response, TextChunk
-    from sagent.providers.types import ProviderSharedResources, UsageWindow
+    from sagent.providers.types import ProviderResources, UsageWindow
     from sagent.session.types import Attachment
 else:
     from wrapt import lazy_import
@@ -104,7 +104,7 @@ class OpenAICompatible(HasModels, AsyncResource):
         self,
         *,
         name: str = "",
-        resources: ProviderSharedResources | None = None,
+        resources: ProviderResources | None = None,
         api_key: str = "",
         base_url: str = "",
     ) -> None:
@@ -121,7 +121,7 @@ class OpenAICompatible(HasModels, AsyncResource):
         return self._name
 
     @property
-    def resources(self) -> ProviderSharedResources:
+    def resources(self) -> ProviderResources:
         """Return what this provider shares with others."""
         return self._resources
 

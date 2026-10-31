@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
     import httpx2
 
-    from sagent.providers.types import ProviderSharedResources
+    from sagent.providers.types import ProviderResources
 else:
     from wrapt import lazy_import
 
@@ -93,7 +93,7 @@ class LlamaCpp(OpenAICompatible):
         self,
         *,
         name: str = "",
-        resources: ProviderSharedResources | None = None,
+        resources: ProviderResources | None = None,
         api_key: str = "",
         base_url: str = "",
         model_path: str = "",

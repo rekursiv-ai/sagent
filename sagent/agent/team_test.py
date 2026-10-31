@@ -46,6 +46,7 @@ from sagent.session.types import (
     UserMessage,
 )
 from sagent.tools.agent_send import AgentSend
+from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
@@ -58,7 +59,7 @@ if TYPE_CHECKING:
     from sagent.providers.types import (
         Model,
         ProviderFactory,
-        ProviderSharedResources,
+        ProviderResources,
     )
     from sagent.runtime.tape import ContextSplice, TapeRecord, TapeRef
 
@@ -71,7 +72,7 @@ def _agent(tmp_path: Path, team: Team | None = None) -> Agent:
     """Return an agent; one in ``team`` can reply by AgentSend."""
     return Agent(
         model=ScriptedProvider()["scripted"],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         tools=[AgentSend(team=team)] if team is not None else [],
     )
 
@@ -109,7 +110,7 @@ def test_a_root_is_agent_and_its_children_are_numbered(tmp_path: Path) -> None:
     ]
 
     assert labels == ["Agent", "Agent_0", "Agent_1"]
-    assert team.label_for("Agent") == "Agent_2"
+    assert team.child_label("Agent") == "Agent_2"
     assert first.runtime.tool_context.label == "Agent_0"
     assert dict(team) == {"Agent": root, "Agent_0": first, "Agent_1": second}
     assert len(team) == 3
@@ -124,8 +125,8 @@ def test_a_label_left_free_is_given_again(tmp_path: Path) -> None:
     _ = team.join(_agent(tmp_path), parent="Agent")
 
     assert team.leave("Agent_0") is first
-    assert team.label_for("Agent") == "Agent_0"
-    assert team.label_for(None) == "Agent"
+    assert team.child_label("Agent") == "Agent_0"
+    assert team.child_label(None) == "Agent"
     assert "Agent_0" not in team
 
 
@@ -134,7 +135,7 @@ def test_a_child_may_be_named(tmp_path: Path) -> None:
     _ = team.join(_agent(tmp_path))
 
     assert team.join(_agent(tmp_path), label="reviewer", parent="Agent") == "reviewer"
-    assert team.label_for("reviewer") == "reviewer_0"
+    assert team.child_label("reviewer") == "reviewer_0"
 
 
 @pytest.mark.parametrize(
@@ -875,7 +876,7 @@ async def test_debts_stand_in_the_journal_and_come_back(tmp_path: Path) -> None:
         _ = team.join(_agent(tmp_path))
         agent = Agent(
             model=ScriptedProvider()["scripted"],
-            cwd=tmp_path,
+            tool_context=ToolContext(cwd=tmp_path),
             journal=journal,
         )
         async with agent:
@@ -886,7 +887,7 @@ async def test_debts_stand_in_the_journal_and_come_back(tmp_path: Path) -> None:
         _ = again.join(_agent(tmp_path))
         agent = Agent(
             model=ScriptedProvider()["scripted"],
-            cwd=tmp_path,
+            tool_context=ToolContext(cwd=tmp_path),
             journal=journal,
         )
         async with agent:
@@ -943,7 +944,7 @@ async def test_choices_stand_in_the_journal_and_come_back(tmp_path: Path) -> Non
             team = _team()
             agent = Agent(
                 model=ScriptedProvider()["scripted"],
-                cwd=tmp_path,
+                tool_context=ToolContext(cwd=tmp_path),
                 journal=journal,
             )
             async with agent:
@@ -967,7 +968,7 @@ class _Accounts:
         self.replies.setdefault(account, deque()).extend(replies)
 
     def factories(self, account: str | None) -> dict[str, ProviderFactory]:
-        def build(*, name: str, resources: ProviderSharedResources) -> _Signing:
+        def build(*, name: str, resources: ProviderResources) -> _Signing:
             return _Signing(name=name, resources=resources, account=account, of=self)
 
         return {"sub": build, "plain": ScriptedProvider}
@@ -980,7 +981,7 @@ class _Signing(ScriptedProvider):
         self,
         *,
         name: str,
-        resources: ProviderSharedResources,
+        resources: ProviderResources,
         account: str | None,
         of: _Accounts,
     ) -> None:
@@ -1032,7 +1033,7 @@ async def _session(
     team = Team(catalog=catalog)
     agent = Agent(
         model=catalog["sub"]["scripted"],
-        cwd=tmp_path,
+        tool_context=ToolContext(cwd=tmp_path),
         account=account,
         persistent_retry=persistent_retry,
     )
@@ -1596,7 +1597,7 @@ async def test_a_provider_without_logins_is_left_alone(tmp_path: Path) -> None:
     provider = catalog["plain"]
     assert isinstance(provider, ScriptedProvider)
     provider.replies.extend([_spent("5-hour")])
-    agent = Agent(model=provider["scripted"], cwd=tmp_path)
+    agent = Agent(model=provider["scripted"], tool_context=ToolContext(cwd=tmp_path))
     team.join(agent)
     await agent.aopen()
     try:

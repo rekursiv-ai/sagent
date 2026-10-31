@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     import transformers
 
     from sagent.model.types import Request
-    from sagent.providers.types import ProviderSharedResources, UsageWindow
+    from sagent.providers.types import ProviderResources, UsageWindow
     from sagent.session.types import Attachment
     from sagent.tools.types import Tool
 else:
@@ -107,7 +107,7 @@ class SelfHosted(AsyncResource):
         self,
         *,
         name: str = "",
-        resources: ProviderSharedResources | None = None,
+        resources: ProviderResources | None = None,
         model: str = "Qwen/Qwen3.6-27B",
         trust_remote_code: bool = False,
     ) -> None:
@@ -126,7 +126,7 @@ class SelfHosted(AsyncResource):
         return self._name
 
     @property
-    def resources(self) -> ProviderSharedResources:
+    def resources(self) -> ProviderResources:
         """Return what this provider shares with others."""
         return self._resources
 

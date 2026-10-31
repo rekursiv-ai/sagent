@@ -41,7 +41,7 @@ from sagent.providers.login import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from sagent.providers.types import ProviderSharedResources
+    from sagent.providers.types import ProviderResources
 
 
 __all__ = [
@@ -63,7 +63,7 @@ class ClaudeLogin:
         self,
         path: Path | None = None,
         *,
-        resources: ProviderSharedResources,
+        resources: ProviderResources,
     ) -> None:
         default = path is None or path == self.default_path()
         if default and platform.system() == "Darwin":
@@ -238,7 +238,7 @@ class _File:
         self.lock = self.path.with_suffix(".lock")
 
     async def read(self) -> dict[str, object]:
-        return _login_of(await asyncio.to_thread(_read_text, self.path))
+        return _claude_login(await asyncio.to_thread(_read_text, self.path))
 
     async def write(self, stored: Mapping[str, object]) -> None:
         document = _document(await asyncio.to_thread(_read_text, self.path))
@@ -256,7 +256,7 @@ class _Keychain:
         self.lock = Path("~/.claude/.credentials.lock").expanduser()
 
     async def read(self) -> dict[str, object]:
-        return _login_of(await _security(*_find_entry(), "-w"))
+        return _claude_login(await _security(*_find_entry(), "-w"))
 
     async def write(self, stored: Mapping[str, object]) -> None:
         document = _document(await _security(*_find_entry(), "-w"))
@@ -355,7 +355,7 @@ def _document(text: str) -> dict[str, object]:
     return json_loads(text or "{}", dict[str, object])
 
 
-def _login_of(text: str) -> dict[str, object]:
+def _claude_login(text: str) -> dict[str, object]:
     stored = _document(text)
     return from_plain(stored.get("claudeAiOauth"), dict[str, object], default={})
 

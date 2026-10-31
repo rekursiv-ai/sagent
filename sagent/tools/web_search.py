@@ -2,7 +2,7 @@
 
 Typical usage example:
 
-  result = await WebSearch(session=FetchSession()).call(context, {"query": "python 3.14 release notes"})
+  result = await WebSearch().call(context, {"query": "python 3.14 release notes"})
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ import asyncio
 import re
 import time
 
-from wesearch.fetch import FetchSession, PolicyParams, Transport
+from wesearch.fetch import PolicyParams, Transport
 from wesearch.mcp.types import SearchParamsSchema
 from wesearch.search.render import format_result
 from wesearch.search.search import search
@@ -28,7 +28,7 @@ from sagent.session.types import (
     WebSearchResults,
 )
 from sagent.tools.display import ToolDisplay
-from sagent.tools.types import parse, schema_of
+from sagent.tools.types import json_schema, parse
 
 
 if TYPE_CHECKING:
@@ -78,12 +78,9 @@ class WebSearch:
     description = (files(__package__) / "assets" / "websearch.md").read_text(
         encoding="utf-8",
     )
-    schema = schema_of(Arguments)
+    schema = json_schema(Arguments)
 
     display: ToolDisplay = field(default=ToolDisplay())
-
-    session: FetchSession = field(repr=False)
-    """Connections, browser, and egress every search reuses; whoever made it closes it."""
 
     policy: PolicyParams = field(default_factory=PolicyParams)
     """How to fetch result pages when a call does not say."""
@@ -138,7 +135,7 @@ class WebSearch:
                 backend=a.backend,
                 categories=a.categories,
                 transport=a.transport or self.policy.transport,
-                session=self.session,
+                session=context.fetch_session,
             )
         except BotDetectionError as e:
             # The instance may say more than its class does, such as how long
