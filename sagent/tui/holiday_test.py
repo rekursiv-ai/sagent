@@ -379,27 +379,33 @@ def test_every_icon_shows_on_light_and_dark_terminals(background: str) -> None:
 @pytest.mark.parametrize(
     ("day", "holiday_name"),
     [
-        # Halloween 2026 is a Saturday: Friday opens the window.
+        # Halloween 2026 is a Saturday: its weekend, Friday to Sunday.
         (date(2026, 10, 29), None),
         (date(2026, 10, 30), "Halloween"),
         (date(2026, 10, 31), "Halloween"),
-        (date(2026, 11, 1), None),
+        (date(2026, 11, 1), "Halloween"),
+        (date(2026, 11, 2), None),
+        # Easter 2026 is a Sunday: its weekend, Friday to Sunday.
+        (date(2026, 4, 2), None),
+        (date(2026, 4, 3), "Easter"),
+        (date(2026, 4, 5), "Easter"),
+        (date(2026, 4, 6), None),
         # Valentine's Day 2028 is a Monday: a workday, so only that day.
         (date(2028, 2, 11), None),
         (date(2028, 2, 13), None),
         (date(2028, 2, 14), "Valentine's Day"),
         (date(2028, 2, 15), None),
-        # Hanukkah 2026 begins at sundown Friday, December 4, through the
-        # eighth night, December 12.
+        # Hanukkah 2026 begins at sundown Friday, December 4: that day only.
         (date(2026, 12, 3), None),
         (date(2026, 12, 4), "Hanukkah"),
-        (date(2026, 12, 12), "Hanukkah"),
-        (date(2026, 12, 13), None),
-        # Hanukkah 2031 begins at sundown Tuesday, December 9.
-        (date(2031, 12, 9), "Hanukkah"),
+        (date(2026, 12, 5), None),
+        # Kwanzaa begins Saturday, December 26, 2026, and is gone by New Year's.
+        (date(2026, 12, 27), "Kwanzaa"),
+        (date(2026, 12, 28), None),
+        (date(2027, 1, 1), "New Year's"),
     ],
 )
-def test_window_runs_from_the_last_workday_through_the_last_day(
+def test_window_is_the_day_or_its_whole_weekend(
     day: date,
     holiday_name: str | None,
 ) -> None:
@@ -416,11 +422,6 @@ def test_overlapping_holidays_are_all_chosen() -> None:
         | _names_of("Eid al-Fitr")
     )
     assert _icon_names(date(2026, 3, 20), draws=200) == expected
-
-
-def test_kwanzaa_runs_into_the_new_year() -> None:
-    expected = _names_of("Kwanzaa") | _names_of("New Year's")
-    assert _icon_names(date(2027, 1, 1), draws=200) == expected
 
 
 def test_an_asset_error_names_the_asset(
