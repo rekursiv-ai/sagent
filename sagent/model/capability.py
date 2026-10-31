@@ -17,7 +17,7 @@ from sagent.model.cost import PriceCatalog, ServiceTier
 
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
 
 __all__ = [
@@ -240,7 +240,10 @@ class ModelCapability:
     account_auth: bool = False
 
     def check(self, settings: ModelSettings) -> None:
-        """Raise unless this model offers every choice in ``settings``.
+        """Raise unless this model offers every choice in ``settings``, its size too.
+
+        A size is offered when it is what its own count names here: within the
+        window, in the band that count falls in.
 
         Args:
           settings: The choices to check.
@@ -251,6 +254,46 @@ class ModelCapability:
         """
         for name in model_setting_names():
             _check_offered(self.model_id, name, settings.value(name), self.values(name))
+        size = settings.context_size
+        tier = settings.service_tier
+        if size != self.prices[tier, size.tokens or "fullcontext"]:
+            whole = self.prices[tier, "fullcontext"].display_name
+            raise ValueError(
+                f"context_size={size.display_name} is not offered by"
+                f" {self.model_id or 'this model'}; allowed: 1 to {whole}",
+            )
+
+    def choose(
+        self,
+        settings: ModelSettings,
+        choices: Mapping[ModelSettingName, object],
+    ) -> ModelSettings:
+        """Return ``settings`` with ``choices`` made; a new tier sizes the context again.
+
+        Args:
+          settings: Choices already made on this model.
+          choices: The values to choose, by setting.
+
+        Returns:
+          settings: Each choice made, the context sized at the tier chosen.
+
+        Raises:
+          ValueError: A choice this model does not offer, named with what it does.
+
+        """
+        tier = choices.get("service_tier")
+        for name, value in choices.items():
+            if name != "service_tier":
+                settings = settings.with_value(name, value)
+        if tier is not None:
+            tier = cast(ServiceTier, tier)
+            # ``fit`` puts back a default for whatever is not offered: check first.
+            for name in model_setting_names():
+                value = tier if name == "service_tier" else settings.value(name)
+                _check_offered(self.model_id, name, value, self.values(name))
+            settings = self.fit(settings, was=self, service_tier=tier)
+        self.check(settings)
+        return settings
 
     def values(self, name: ModelSettingName) -> tuple[object, ...]:
         """Return the values this model offers on the setting ``name``.

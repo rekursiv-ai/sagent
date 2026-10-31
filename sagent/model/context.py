@@ -30,6 +30,6 @@ type ContextSizeName = Literal[
 class ContextSize:
     """A context's size: the price band it falls in, its tokens, and how it reads."""
 
-    context_name: ContextSizeName = "smallcontext"
+    context_name: ContextSizeName = "fullcontext"
     tokens: int = 0
     display_name: str = "0"

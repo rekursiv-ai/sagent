@@ -849,6 +849,11 @@ def test_a_card_starts_on_its_effective_date(tmp_path: Path, quoted: bool) -> No
         ([_model(context_size_default="huge")], {}, "context_size_default"),
         ([_model(context_size_default=0)], {}, "context_size_default"),
         ([_model(cache_ttl_sec=[])], {}, "^cache_ttl_sec offers nothing selectable"),
+        (
+            [_model(service_tier=["auto", "priority"])],
+            {},
+            "^Model 'example-1.0' offers service_tier 'priority' with no price",
+        ),
         ([_model()], {"unknown": True}, "unknown"),
     ],
 )
