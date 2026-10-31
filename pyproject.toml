@@ -138,8 +138,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["sagent"]
-# The vendored pytest harness imports pytest, a test-group dependency.
-exclude = ["**/*_test.py", "**/conftest.py", "sagent/lib/testing/**"]
+# The vendored pytest harness imports pytest, a test-group dependency; the
+# provider helpers serve only sign-in tests.
+exclude = ["**/*_test.py", "**/conftest.py", "sagent/lib/testing/**", "sagent/providers/testing.py"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [".github/**", ".codespell-ignore"]
