@@ -29,7 +29,6 @@ from sagent.lib.files.grep import (
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
-    from typing import BinaryIO
 
     import os
 
@@ -52,11 +51,7 @@ def backend(rg: bool) -> Iterator[None]:
     found = shutil.which("rg")
     if rg and found is None:
         pytest.skip("ripgrep is not installed")
-    # A test for the ``rg`` backend must reach it, whatever the size switch says.
-    with (
-        patch("shutil.which", return_value=found if rg else None),
-        patch("sagent.lib.files.grep.SMALL_FILES", -1),
-    ):
+    with patch("shutil.which", return_value=found if rg else None):
         yield
 
 
@@ -251,8 +246,9 @@ def test_a_bad_query_fails_in_every_backend(
 def test_a_missing_path_is_an_error_not_no_matches(
     tmp_path: Path,
 ) -> None:
-    with pytest.raises(GrepError, match="no such file or directory"):
+    with pytest.raises(GrepError) as raised:
         grep(tmp_path / "nope", Query(pattern="x"))
+    assert str(raised.value) == f"no such file or directory: {tmp_path / 'nope'}"
 
 
 @_BOTH
@@ -511,72 +507,26 @@ def test_each_rg_run_gets_the_timeout(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
 @pytest.mark.parametrize(
-    ("files", "pattern", "sample_scan_sec", "runs_rg"),
+    "query",
     [
-        (3, "value", 0.000_5, False),
-        (65, "value", None, True),
-        (40, r"\w+\s*=\s*\d+$", None, True),
+        Query(pattern="value", output_mode="count"),
+        Query(pattern=r"async def t.*\n(.*\n){0,25}.*main\(", multiline=True),
     ],
-    ids=["few-files", "many-files", "slow-pattern-on-big-text"],
+    ids=["literal", "backtracking-multiline"],
 )
-def test_rg_starts_only_when_it_would_finish_first(
-    tmp_path: Path,
-    files: int,
-    pattern: str,
-    sample_scan_sec: float | None,
-    runs_rg: bool,
-) -> None:
-    """Python answers small searches before ``rg`` could start; big ones go to it.
+def test_rg_answers_every_search_when_installed(tmp_path: Path, query: Query) -> None:
+    r"""Python ``re`` backtracks without bound, and holds the GIL while it does.
 
-    The small search's sample scan is timed by a fixed clock: on a loaded runner
-    the real one projected past ``_RG_MS`` and started ``rg``. A slower host only
-    makes the slow pattern slower, so that case keeps the real clock.
+    ``async def test_.*\\n(.*\\n){0,25}.*main\\._main\\(`` with ``multiline`` ran
+    past 30 s over a 99 KB test file that ``rg`` searched in 13 ms, and froze the
+    sagent process that asked. A 16 KB sample timed beforehand missed it: the
+    blowup began after the sample ended.
     """
-    for i in range(files):
-        (tmp_path / f"{i:03}.py").write_text("value = 1\n" * 2_000)
-    clock = (
-        contextlib.nullcontext()
-        if sample_scan_sec is None
-        else patch(
-            "sagent.lib.files.grep.time.perf_counter",
-            side_effect=[0.0, sample_scan_sec],
-        )
-    )
-    with (
-        clock,
-        patch("sagent.lib.files.grep.SMALL_FILES", 64),
-        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
-    ):
-        found = grep(tmp_path, Query(pattern=pattern, output_mode="count"))
-    assert found == [f"{tmp_path}/{i:03}.py:2000" for i in range(files)]
-    assert run.called is runs_rg
-
-
-@pytest.mark.parametrize("rg", [True], ids=["rg"])
-@pytest.mark.parametrize(
-    ("named", "runs_rg"),
-    [(3, False), (4, True)],
-    ids=["at-the-cap", "past-the-cap"],
-)
-def test_the_file_cap_counts_the_last_file_in(
-    tmp_path: Path,
-    named: int,
-    runs_rg: bool,
-) -> None:
-    """``SMALL_FILES`` files stay in-process; the next one starts ``rg``.
-
-    The names descend, so either backend answering in sorted order rather than
-    the order the caller named them would answer wrongly.
-    """
-    paths = [tmp_path / f"{i:02}.py" for i in reversed(range(named))]
-    for path in paths:
-        path.write_text("value = 1\n")
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 3),
-        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
-    ):
-        assert grep(paths, Query(pattern="value")) == list(map(str, paths))
-    assert run.called is runs_rg
+    f = tmp_path / "f.py"
+    f.write_text("value = 1\n")
+    with patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run:
+        grep(f, query)
+    assert run.called
 
 
 def test_a_file_vanishing_mid_walk_is_skipped_not_a_walk_stopper(
@@ -606,38 +556,6 @@ def test_a_file_vanishing_mid_walk_is_skipped_not_a_walk_stopper(
     every = {str(tmp_path / name) for name in ("a.py", "b.py", "c.py")}
     assert set(found) < every
     assert len(found) == 2
-
-
-@pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_missing_named_file_still_errors_on_the_in_process_path(
-    tmp_path: Path,
-) -> None:
-    """The size probe drops what it cannot stat, so ``grep`` names the fault."""
-    (tmp_path / "f.txt").write_text("hit\n")
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 8),
-        pytest.raises(GrepError, match="no such file or directory"),
-    ):
-        grep([tmp_path / "f.txt", tmp_path / "nope"], Query(pattern="hit"))
-
-
-@pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_projected_cost_equal_to_the_budget_starts_rg(tmp_path: Path) -> None:
-    """``_RG_MS`` is a ceiling, not a target: a cost equal to it still starts ``rg``."""
-    paths = [tmp_path / f"{i:02}.py" for i in range(4)]
-    for path in paths:
-        path.write_text("value = 1\n")
-    # Four files at 0.25 ms project to exactly the 1 ms budget. Both values are
-    # exact in binary, so the tie is landed on instead of stepped over, and the
-    # test keeps testing it if the real constants are ever retuned.
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 4),
-        patch("sagent.lib.files.grep._PER_FILE_MS", 0.25),
-        patch("sagent.lib.files.grep._RG_MS", 1.0),
-        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
-    ):
-        assert grep(paths, Query(pattern="value")) == list(map(str, paths))
-    assert run.called
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
@@ -1029,67 +947,22 @@ def test_an_unreadable_file_is_skipped(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-@pytest.mark.parametrize(
-    ("pattern", "expected"),
-    [(r"\Ahit", ["f.txt:1:hit"])],
-    ids=["ripgrep-only-syntax"],
-)
-def test_a_pattern_python_cannot_judge_goes_to_rg(
-    tmp_path: Path,
-    pattern: str,
-    expected: list[str],
-) -> None:
-    file = tmp_path / "f.txt"
-    file.write_text("hit\n")
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 8),
-        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
-        contextlib.chdir(tmp_path),
-    ):
+def test_ripgrep_only_syntax_under_a_relative_path(tmp_path: Path) -> None:
+    (tmp_path / "f.txt").write_text("hit\n")
+    with contextlib.chdir(tmp_path):
         found = grep(
             pathlib.Path("f.txt"),
-            Query(pattern=pattern, output_mode="content"),
+            Query(pattern=r"\Ahit", output_mode="content"),
         )
-    assert run.called
-    assert found == expected
+    assert found == ["f.txt:1:hit"]
 
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_pattern_python_rejects_gets_rgs_answer(tmp_path: Path) -> None:
+def test_an_invalid_pattern_gets_rgs_error(tmp_path: Path) -> None:
     file = tmp_path / "f.txt"
     file.write_text("hit\n")
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 8),
-        patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run,
-        pytest.raises(GrepError, match="ripgrep error"),
-    ):
+    with pytest.raises(GrepError, match="ripgrep error \\(exit 2\\)"):
         grep(file, Query(pattern="("))
-    assert run.called
-
-
-@pytest.mark.parametrize("rg", [True], ids=["rg"])
-def test_a_sample_file_that_will_not_open_is_left_out(tmp_path: Path) -> None:
-    paths = [tmp_path / name for name in ("a.txt", "b.txt")]
-    for path in paths:
-        path.write_text("value = 1\n" * 8)
-    real = pathlib.Path.open
-    opened: list[str] = []
-
-    def flaky(self: pathlib.Path, mode: str = "r") -> BinaryIO:
-        opened.append(self.name)
-        if self.name == "a.txt":
-            raise PermissionError(self)
-        assert mode == "rb"
-        return real(self, "rb")
-
-    with (
-        patch("sagent.lib.files.grep.SMALL_FILES", 8),
-        patch("sagent.lib.files.grep._SAMPLE", 16),
-        patch("sagent.lib.files.grep._search_file", return_value=[]),
-        patch("pathlib.Path.open", flaky),
-    ):
-        assert grep(paths, Query(pattern="value")) == []
-    assert opened == ["a.txt", "b.txt"]
 
 
 def test_a_name_outside_every_path_sorts_last() -> None:

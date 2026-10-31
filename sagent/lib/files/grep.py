@@ -25,7 +25,6 @@ import os
 import re
 import shutil
 import subprocess
-import time
 
 import rignore
 
@@ -72,41 +71,6 @@ _NEEDS_PCRE2: Final = ("look-around", "backreferences are not supported")
 # named files stay well under both when split here.
 ARGV_CHARS: Final = 100_000
 """Most characters of named paths one ``rg`` run takes."""
-
-# Starting ``rg`` and walking costs ~5 ms. Python's ``re`` runs ~0.02 to ~50 ns a
-# character depending on the pattern, so the choice is measured, not guessed:
-# list up to ``SMALL_FILES`` files (a bigger tree goes to ``rg`` after ~2 ms),
-# time the compiled pattern over ``_SAMPLE`` characters of their text, and search
-# in-process only when the projected cost beats ``_RG_MS``.
-#
-# Raising ``SMALL_FILES`` is not the free win it looks like: the walk that
-# counts the files is discarded when ``rg`` then runs, so every larger tree
-# pays it twice, and ``_projected_ms`` already vetoes a tree past
-# ``_RG_MS / _PER_FILE_MS`` files -- so a higher cap buys no in-process search.
-SMALL_FILES: Final = 128
-"""Most files searched in-process when ``rg`` is installed; ``-1`` always uses it."""
-_SAMPLE: Final = 16 << 10
-_RG_MS: Final = 4.0
-_PER_FILE_MS: Final = 0.02
-
-_Found = list[list[tuple[str, Path, bool]]]
-"""Per target, each file to search: its printed name, path, and whether walked."""
-
-
-# Python ``re`` and ripgrep read most syntax alike but not all: ``&&`` in a class,
-# ``\A``/``\Z``, ``(?>``, ``{,n}``, ``\N{}``, ``\p{}``, ``\x{}``, POSIX classes. With
-# ``rg`` installed the answer must be ripgrep's, so only a pattern made of the
-# shared core -- literals, ``.``, classes without these, anchors, ``\w\d\s\b``,
-# groups, alternation, ``?*+{m,n}`` -- is searched in-process.
-_SHARED: Final = re.compile(
-    r"""(?x)
-    (?: [^\\\[\]{}()&]                       # a plain character or metachar
-      | \\[\\.^$|?*+()\[\]{}/\-dDwWsSbBnrt]   # an escape both read the same
-      | \{\d+(?:,\d*)?\}                      # a bounded repeat with a minimum
-      | \(\?[:imsx]*:? | \( | \)              # plain and non-capturing groups
-      | \[\^?\]?(?:[^\]\\\[&]|\\[\\\]\-dDwWsSnrt^])*\]  # a class with no set ops
-    )*""",
-)
 
 
 class GrepError(Exception):
@@ -211,13 +175,16 @@ def grep_rows(
     if not targets:
         return []
     rg = shutil.which("rg")
-    found = None if rg is None else _small(targets, query)
-    if rg is not None and found is None:
+    # However small the search, never in-process when ``rg`` is installed: Python
+    # ``re`` backtracks without bound while holding the GIL, so one pattern froze
+    # the calling process for good. Ripgrep's engine is linear, and its run is
+    # bounded by ``timeout_sec``.
+    if rg is not None:
         return _grep_rg(rg, targets, query, timeout_sec=timeout_sec)
     for path in targets:
         if not path.exists():
             raise GrepError(f"no such file or directory: {path}")
-    return _grep_python(targets, query, found=found)
+    return _grep_python(targets, query)
 
 
 def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
@@ -435,8 +402,11 @@ def _run_rg(
         if 'the literal "\\n" is not allowed' in err:
             err = _NEWLINE_HINT
         # A named path rg cannot open: the same error the Python backend gives.
+        # Ripgrep 15 words a lone missing path ``rg: P: IO error for operation
+        # on P: No such file ...``, which a greedy name would swallow whole.
         missing = re.search(
-            r"^rg: (.*): No such file or directory \(os error 2\)$",
+            r"^rg: (.*?): (?:IO error for operation on .*: )?"
+            r"No such file or directory \(os error 2\)$",
             err,
             re.MULTILINE,
         )
@@ -519,18 +489,12 @@ def _references_newline(pattern: str) -> bool:
     return False
 
 
-def _grep_python(
-    paths: Sequence[Path],
-    query: Query,
-    *,
-    found: _Found | None = None,
-) -> list[Row]:
+def _grep_python(paths: Sequence[Path], query: Query) -> list[Row]:
     """Answer ``query`` in Python, matching ripgrep's output line for line."""
     pattern = _compile(query)
     lines: list[Row] = []
-    listed = found if found is not None else (list(_files(p, query)) for p in paths)
-    for files in listed:
-        for name, file, walked in files:
+    for path in paths:
+        for name, file, walked in _files(path, query):
             rows = _search_file(pattern, file, name=name, walked=walked, query=query)
             if lines and rows and _has_context(query):
                 lines.append(Row(text="--"))
@@ -542,12 +506,12 @@ def _grep_python(
 def _files(named: Path, query: Query) -> list[tuple[str, Path, bool]]:
     """Return ``named`` itself, or each file a walk of it keeps, in path order."""
     if named.is_dir():
-        return _sorted((name, path, True) for name, path, _ in _walked(named, query))
+        return _sorted((name, path, True) for name, path in _walked(named, query))
     return [(str(named), named, False)]
 
 
-def _walked(named: Path, query: Query) -> Iterator[tuple[str, Path, int]]:
-    """Yield each regular file a walk of directory ``named`` keeps, with its size."""
+def _walked(named: Path, query: Query) -> Iterator[tuple[str, Path]]:
+    """Yield each regular file a walk of directory ``named`` keeps."""
     # ``rg .`` prints ``./a``: a walked file is named under the argument as
     # given, which a ``Path`` join would normalize away.
     prefix = str(named) + "/"
@@ -555,8 +519,7 @@ def _walked(named: Path, query: Query) -> Iterator[tuple[str, Path, int]]:
     # ``ignore_hidden=False`` is ``--hidden``.
     for file in rignore.walk(named, ignore_hidden=False, overrides=_globs(query)):
         # A walk lists a symlink without following it; only a regular file is
-        # searched. The size rides along from this same call so that ``_small``
-        # need not stat every walked file a second time.
+        # searched.
         try:
             status = file.lstat()
         except OSError:
@@ -567,7 +530,7 @@ def _walked(named: Path, query: Query) -> Iterator[tuple[str, Path, int]]:
             file.match(g) for g in TYPE_GLOBS[query.file_type]
         ):
             continue
-        yield prefix + str(file)[start:], file, status.st_size
+        yield prefix + str(file)[start:], file
 
 
 # Splitting the name per component sorts as ``--sort path`` does.
@@ -769,70 +732,3 @@ def _row(
         prefix_end=len(prefix),
         column=len(prefix) + column if column >= 0 else -1,
     )
-
-
-def _small(targets: Sequence[Path], query: Query) -> _Found | None:
-    """Return the files to search when doing it in-process beats starting ``rg``."""
-    # ``grep`` returns before this on no targets, so one target already exceeds a
-    # negative ``SMALL_FILES``; a separate ``< 0`` guard would never decide a run.
-    if query.pcre or len(targets) > SMALL_FILES:
-        return None
-    if not _SHARED.fullmatch(query.pattern):
-        return None
-    try:
-        pattern = _compile(query)
-    except GrepError:
-        return None  # Ripgrep's dialect, not Python's: ripgrep judges it.
-    found: _Found = []
-    files: list[Path] = []
-    # pragma: no mutate start -- a one-byte seed reaches the dispatch only at
-    # the exact ``_SAMPLE`` boundary, and then only through a timing estimate
-    # no test can pin to a single byte.
-    size = 0
-    # pragma: no mutate end
-    for target in targets:
-        walked = target.is_dir()
-        sized: Iterator[tuple[str, Path, int]]
-        if walked:
-            sized = _walked(target, query)
-        else:
-            # A missing named file is dropped rather than raised on, so that
-            # ``grep``'s own existence check names it as the fault instead of
-            # an ``OSError`` escaping from the size probe.
-            try:
-                sized = iter([(str(target), target, target.stat().st_size)])
-            except OSError:
-                sized = iter(())
-        kept: list[tuple[str, Path, bool]] = []
-        for name, path, grown in sized:
-            size += grown
-            files.append(path)
-            if len(files) > SMALL_FILES:
-                return None
-            kept.append((name, path, walked))
-        # A named target contributes a single entry, so this only ever orders
-        # the files a walk found -- which is what ``rg --sort path`` gives.
-        found.append(_sorted(kept))
-    return found if _projected_ms(pattern, files, size) < _RG_MS else None
-
-
-def _projected_ms(pattern: re.Pattern[str], files: Sequence[Path], size: int) -> float:
-    """Project the in-process cost of ``files`` from ``pattern``'s speed on them."""
-    if size <= _SAMPLE:
-        return len(files) * _PER_FILE_MS
-    sample = ""
-    for file in files:
-        try:
-            with file.open("rb") as handle:
-                sample += _decode(handle.read(_SAMPLE - len(sample)))
-        except OSError:
-            continue
-        if len(sample) >= _SAMPLE:
-            break
-    # A NUL ends no line here; a pattern never matching keeps the scan full.
-    probe = sample + "\0"
-    start = time.perf_counter()
-    for _ in pattern.finditer(probe):
-        pass
-    scan_ms = (time.perf_counter() - start) * 1000 * size / max(1, len(probe))
-    return scan_ms + len(files) * _PER_FILE_MS
