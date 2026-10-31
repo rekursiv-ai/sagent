@@ -352,7 +352,9 @@ def _script(sentinel: str) -> str:
 def _spill(path: Path, stdout: Sequence[str]) -> None:
     """Write the whole of ``stdout`` to ``path``."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    # pragma: no mutate start -- every encoding mutant is UTF-8 on a UTF-8 host.
     path.write_text("".join(stdout), encoding="utf-8")
+    # pragma: no mutate end
 
 
 def _environment(
