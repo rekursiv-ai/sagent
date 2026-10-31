@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Final, Literal
 
 import codecs
 import dataclasses
+import itertools
 import os
 import re
 import shutil
@@ -33,7 +34,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Sequence
 
 
-OutputMode = Literal["content", "files_with_matches", "count"]
+OutputMode = Literal["content", "files_with_matches", "files_without_match", "count"]
 
 TYPE_GLOBS: Final[dict[str, tuple[str, ...]]] = {
     "py": ("*.py",),
@@ -88,7 +89,8 @@ class Query:
         allowed.
       exclude: Skip walked files matching this glob (``rg --glob !PAT``).
       file_type: A :data:`TYPE_GLOBS` name (``rg --type``).
-      output_mode: Matching lines, matching files, or per-file counts.
+      output_mode: Matching lines, files with or without a match, or per-file
+        counts (of matches under ``only_matching``, else of lines).
       context_before: Lines shown before each match (``rg -B``).
       context_after: Lines shown after each match (``rg -A``).
       case_insensitive: ``rg -i``.
@@ -96,6 +98,17 @@ class Query:
       multiline: Let a match span lines (``rg -U --multiline-dotall``).
       pcre: PCRE2 syntax only (``rg -P``); needs ``rg``.
       text: Search binary files as text (``rg --text``).
+      invert: Select the lines that do not match (``rg -v``).
+      word: Match only where no word character borders the match (``rg -w``).
+      whole_line: Match only whole lines (``rg -x``).
+      fixed: Read ``pattern`` as text, not a regex (``rg -F``).
+      only_matching: One row per match, holding just the match (``rg -o``).
+      max_count: Stop each file after this many selected lines; 0 for no cap
+        (``rg -m``).
+      search_ignored: Also walk what ignore files name (``rg --no-ignore``).
+      follow: Follow symlinks in a walk (``rg -L``).
+      max_depth: Walk at most this many levels below a named directory; 0 for
+        no cap (``rg --max-depth``).
 
     """
 
@@ -111,6 +124,15 @@ class Query:
     multiline: bool = False
     pcre: bool = False
     text: bool = False
+    invert: bool = False
+    word: bool = False
+    whole_line: bool = False
+    fixed: bool = False
+    only_matching: bool = False
+    max_count: int = 0
+    search_ignored: bool = False
+    follow: bool = False
+    max_depth: int = 0
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -123,7 +145,8 @@ class Row:
         after its ``name:N:``/``name-N-`` prefix; 0 for a row that is not a line.
       column: Character offset in ``text`` where the line's first match begins;
         ``-1`` when no match begins there: context, ``--``, a count, a file
-        name, a binary-file note, or a line a multiline match continues onto.
+        name, a binary-file note, an inverted line, or a line a multiline match
+        continues onto.
 
     """
 
@@ -162,7 +185,7 @@ def grep_rows(
 
     Raises:
       GrepError: A path is missing, ``file_type`` is unknown, the pattern is
-        invalid, or the search could not finish.
+        invalid, two options cannot combine, or the search could not finish.
 
     """
     targets: list[Path] = [paths] if isinstance(paths, Path) else list(paths)
@@ -172,6 +195,12 @@ def grep_rows(
         raise GrepError(
             f"unknown type: {query.file_type!r} (expected one of {sorted(TYPE_GLOBS)})",
         )
+    if clash := _clash(query):
+        raise GrepError(clash)
+    # Here, not from ``rg``'s stderr: ``--no-messages`` silences it.
+    for path in targets:
+        if not path.exists():
+            raise GrepError(f"no such file or directory: {path}")
     if not targets:
         return []
     rg = shutil.which("rg")
@@ -181,9 +210,6 @@ def grep_rows(
     # bounded by ``timeout_sec``.
     if rg is not None:
         return _grep_rg(rg, targets, query, timeout_sec=timeout_sec)
-    for path in targets:
-        if not path.exists():
-            raise GrepError(f"no such file or directory: {path}")
     return _grep_python(targets, query)
 
 
@@ -210,6 +236,10 @@ def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
         # map -- made when at most ten paths, all files, are named, and never on
         # macOS -- so one query over one file would answer two ways.
         "--no-mmap",
+        # A walked file rg cannot read -- unreadable, a broken or looping link --
+        # is skipped, as the Python backend skips it; unsilenced, its message
+        # and exit 2 would fail the whole search.
+        "--no-messages",
         # No ``--sort path``: it makes ripgrep search one file at a time (8x
         # slower on this repo). Its parallel output is grouped per file and
         # sorted here instead, and control-byte field separators make each
@@ -229,9 +259,11 @@ def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
         cmd.extend(["-U", "--multiline-dotall"])
     if query.output_mode == "files_with_matches":
         cmd.append("-l")
+    elif query.output_mode == "files_without_match":
+        cmd.append("--files-without-match")
     elif query.output_mode == "count":
         cmd.append("-c")
-    else:
+    elif _columned(query):
         cmd.append("--column")
     if query.context_before > 0:
         cmd.extend(["-B", str(query.context_before)])
@@ -246,6 +278,23 @@ def rg_command(rg: str, paths: Sequence[Path], query: Query) -> list[str]:
         cmd.append("--text")
     if query.pcre:
         cmd.append("-P")
+    for on, flag in (
+        (query.invert, "-v"),
+        (query.word, "-w"),
+        (query.whole_line, "-x"),
+        (query.fixed, "-F"),
+        (query.only_matching, "-o"),
+    ):
+        if on:
+            cmd.append(flag)
+    if query.max_count:
+        cmd.extend(["--max-count", str(query.max_count)])
+    if query.search_ignored:
+        cmd.append("--no-ignore")
+    if query.follow:
+        cmd.append("--follow")
+    if query.max_depth:
+        cmd.extend(["--max-depth", str(query.max_depth)])
     cmd.extend(["--", query.pattern, *map(str, paths)])
     return cmd
 
@@ -293,7 +342,7 @@ def _grep_rg(
 def _file_blocks(out: bytes, *, query: Query) -> list[tuple[str, list[Row]]]:
     """Group ripgrep's output into ``(file, rows)`` blocks."""
     lines = out.removesuffix(b"\n").split(b"\n") if out else []
-    if query.output_mode == "files_with_matches":
+    if query.output_mode in {"files_with_matches", "files_without_match"}:
         names = (line.decode(errors="replace") for line in lines)
         return [(name, [Row(text=name)]) for name in names]
     blocks: list[tuple[str, list[Row]]] = []
@@ -343,13 +392,16 @@ def _content_row(
     shown = "-" if marker == _CONTEXT else ":"
     prefix = f"{name}{shown}{number.decode()}{shown}" if query.line_numbers else ""
     prefix = prefix or f"{name}{shown}"
-    if marker == _MATCH:
+    column = -1
+    if marker == _MATCH and _columned(query):
         byte_column, _, rest = rest.partition(marker)
-        column = len(prefix) + len(
-            rest[: int(byte_column) - 1].decode(errors="replace"),
+        # Under ``-o`` the column indexes the source line, but the row holds
+        # only the match, which therefore begins the row's text.
+        column = len(prefix) + (
+            0
+            if query.only_matching
+            else len(rest[: int(byte_column) - 1].decode(errors="replace"))
         )
-    else:
-        column = -1
     text = prefix + rest.decode(errors="replace")
     return name, int(number), Row(text=text, prefix_end=len(prefix), column=column)
 
@@ -397,21 +449,12 @@ def _run_rg(
         raise GrepError(
             f"ripgrep timed out after {timeout_sec:g}s; narrow the path or pattern.",
         ) from error
-    if done.returncode >= 2:
-        err = done.stderr.decode(errors="replace").strip() or "unknown"
+    # Exit 2 with nothing said is files ``--no-messages`` skipped; what was found
+    # stands.
+    err = done.stderr.decode(errors="replace").strip()
+    if done.returncode >= 2 and err:
         if 'the literal "\\n" is not allowed' in err:
             err = _NEWLINE_HINT
-        # A named path rg cannot open: the same error the Python backend gives.
-        # Ripgrep 15 words a lone missing path ``rg: P: IO error for operation
-        # on P: No such file ...``, which a greedy name would swallow whole.
-        missing = re.search(
-            r"^rg: (.*?): (?:IO error for operation on .*: )?"
-            r"No such file or directory \(os error 2\)$",
-            err,
-            re.MULTILINE,
-        )
-        if missing:
-            raise GrepError(f"no such file or directory: {missing[1]}")
         raise GrepError(f"ripgrep error (exit {done.returncode}): {err}")
     # Bytes, split on ``\n`` alone: a ``\r`` inside a matched line is part of
     # it, and text-mode decoding would turn it into a line break.
@@ -452,8 +495,16 @@ def _compile(query: Query) -> re.Pattern[str]:
             "pcre=true requires ripgrep, which is not installed;"
             " the Python fallback cannot provide PCRE2 semantics.",
         )
-    if not query.multiline and _references_newline(query.pattern):
+    if not query.multiline and (
+        "\n" in query.pattern if query.fixed else _references_newline(query.pattern)
+    ):
         raise GrepError(_NEWLINE_HINT)
+    pattern = re.escape(query.pattern) if query.fixed else query.pattern
+    # Ripgrep 14's ``-w`` asks only that no word character border the match.
+    if query.word:
+        pattern = rf"(?<!\w)(?:{pattern})(?!\w)"
+    if query.whole_line:
+        pattern = f"^(?:{pattern})$"
     # Ripgrep always matches ``^``/``$`` at line boundaries.
     flags = re.MULTILINE
     if query.multiline:
@@ -461,7 +512,7 @@ def _compile(query: Query) -> re.Pattern[str]:
     if query.case_insensitive:
         flags |= re.IGNORECASE
     try:
-        return re.compile(query.pattern, flags)
+        return re.compile(pattern, flags)
     except re.error as error:
         raise GrepError(
             f"ripgrep error (Python fallback): invalid regex pattern: {error}",
@@ -516,12 +567,25 @@ def _walked(named: Path, query: Query) -> Iterator[tuple[str, Path]]:
     # given, which a ``Path`` join would normalize away.
     prefix = str(named) + "/"
     start = len(str(named)) + 1
+    ignores = not query.search_ignored
     # ``ignore_hidden=False`` is ``--hidden``.
-    for file in rignore.walk(named, ignore_hidden=False, overrides=_globs(query)):
-        # A walk lists a symlink without following it; only a regular file is
-        # searched.
+    walker = rignore.walk(
+        named,
+        ignore_hidden=False,
+        read_ignore_files=ignores,
+        read_parents_ignores=ignores,
+        read_git_ignore=ignores,
+        read_global_git_ignore=ignores,
+        read_git_exclude=ignores,
+        overrides=_globs(query),
+        max_depth=query.max_depth or None,
+        follow_links=query.follow,
+    )
+    for file in _entries(iter(walker)):
+        # Unless following, a walk lists a symlink without following it; only a
+        # regular file is searched, and a broken link is none.
         try:
-            status = file.lstat()
+            status = file.stat() if query.follow else file.lstat()
         except OSError:
             continue
         if not S_ISREG(status.st_mode):
@@ -531,6 +595,19 @@ def _walked(named: Path, query: Query) -> Iterator[tuple[str, Path]]:
         ):
             continue
         yield prefix + str(file)[start:], file
+
+
+# A followed link that is broken or loops raises from ``next`` and the walk goes
+# on past it, as ripgrep skips it; a ``for`` loop would end the walk there.
+def _entries(walker: Iterator[Path]) -> Iterator[Path]:
+    """Yield each path ``walker`` lists, skipping the entries it fails on."""
+    while True:
+        try:
+            yield next(walker)
+        except StopIteration:
+            return
+        except OSError:
+            continue
 
 
 # Splitting the name per component sorts as ``--sort path`` does.
@@ -628,31 +705,98 @@ def _file_lines(
     query: Query,
 ) -> list[Row]:
     """Render one file's output lines."""
+    split = _lines(text)
     if query.multiline:
-        count, hits = _multiline_hits(pattern, text)
+        count, chosen = _multiline_hits(pattern, text)
+        shown = chosen
     else:
         hits = _line_hits(pattern, text)
-        count = len(hits)
+        # Selected lines, each with its match column; a line in trailing
+        # context that is selected shows as one, though ``max_count`` was met.
+        shown = (
+            {i: -1 for i in range(len(split)) if i not in hits}
+            if query.invert
+            else hits
+        )
+        chosen = dict(itertools.islice(shown.items(), query.max_count or None))
+        count = len(chosen)
+    if query.only_matching:
+        count = sum(len(_matches(pattern, split[i])) for i in chosen)
+    if query.output_mode == "files_without_match":
+        return [] if count else [Row(text=name)]
     if not count:
         return []
-    split = _lines(text)
     if query.output_mode == "files_with_matches":
         return [Row(text=name)]
     if query.output_mode == "count":
         return [Row(text=f"{name}:{count}")]
     if not _has_context(query):
-        return [_row(name, i, split[i], query=query, column=hits[i]) for i in hits]
+        return [
+            row
+            for i in chosen
+            for row in _selected(
+                pattern,
+                name=name,
+                index=i,
+                split=split,
+                shown=shown,
+                query=query,
+            )
+        ]
     out: list[Row] = []
-    for start, end in _context_groups(list(hits), len(split), query=query):
+    for start, end in _context_groups(list(chosen), len(split), query=query):
         if out:
             out.append(Row(text="--"))
-        out.extend(
-            _row(name, j, split[j], query=query, column=hits[j])
-            if j in hits
-            else _row(name, j, split[j], query=query, separator="-")
-            for j in range(start, end)
-        )
+        for j in range(start, end):
+            out.extend(
+                _selected(
+                    pattern,
+                    name=name,
+                    index=j,
+                    split=split,
+                    shown=shown,
+                    query=query,
+                )
+                if j in shown
+                else [_row(name, j, split[j], query=query, separator="-")],
+            )
     return out
+
+
+def _selected(
+    pattern: re.Pattern[str],
+    *,
+    name: str,
+    index: int,
+    split: list[str],
+    shown: dict[int, int],
+    query: Query,
+) -> list[Row]:
+    """Render selected line ``index``: whole, or one row per match under ``-o``."""
+    line = split[index]
+    if not query.only_matching:
+        return [_row(name, index, line, query=query, column=shown[index])]
+    return [
+        _row(name, index, match.group(), query=query, column=0)
+        for match in _matches(pattern, line)
+    ]
+
+
+# Ripgrep's engine never reports an empty match where the previous match ended,
+# which Python's ``finditer`` does: ``o*`` over ``foo`` is ``""``, ``"oo"`` to
+# ripgrep, and ``""``, ``"oo"``, ``""`` to Python.
+def _matches(pattern: re.Pattern[str], line: str) -> list[re.Match[str]]:
+    """Return each match in ``line``, in the order ripgrep reports them."""
+    found: list[re.Match[str]] = []
+    pos = 0
+    last = -1
+    while pos <= len(line) and (match := pattern.search(line, pos)) is not None:
+        empty = match.start() == match.end()
+        if not (empty and match.start() == last):
+            found.append(match)
+            last = match.end()
+        pos = match.end() + empty
+    return found
 
 
 # Ripgrep searches a pattern that can match a newline across lines and ``-c``
@@ -685,6 +829,30 @@ def _multiline_hits(
     # Ripgrep locates only the first line of a run of matched lines.
     located = {i: -1 if i - 1 in lines else column for i, column in lines.items()}
     return (len(matches) if across else len(lines)), dict(sorted(located.items()))
+
+
+def _clash(query: Query) -> str:
+    """Name a combination ripgrep answers inconsistently; ``""`` when none."""
+    if query.multiline:
+        # ``rg -U -v`` prints inverted lines yet counts none; ``-U -m 1`` prints
+        # a match run past the cap; ``-U -o`` repeats a column per line.
+        for on, name in (
+            (query.invert, "invert"),
+            (query.only_matching, "only_matching"),
+            (query.max_count > 0, "max_count"),
+        ):
+            if on:
+                return f"{name} cannot combine with multiline."
+    # ``rg -o -v`` prints whole lines but counts zero; ``grep -o -v`` prints none.
+    if query.invert and query.only_matching:
+        return "only_matching cannot combine with invert."
+    return ""
+
+
+def _columned(query: Query) -> bool:
+    """Return whether content rows carry ``rg --column``'s match column."""
+    # ``rg -v --column`` puts a column on context lines and none on selected ones.
+    return query.output_mode == "content" and not query.invert
 
 
 def _has_context(query: Query) -> bool:
