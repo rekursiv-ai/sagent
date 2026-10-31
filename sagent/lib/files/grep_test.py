@@ -524,7 +524,10 @@ def test_rg_answers_every_search_when_installed(tmp_path: Path, query: Query) ->
     """
     f = tmp_path / "f.py"
     f.write_text("value = 1\n")
-    with patch("sagent.lib.files.grep.subprocess.run", wraps=subprocess.run) as run:
+    with patch(
+        "sagent.lib.files.grep.subprocess.run",
+        wraps=subprocess.run,
+    ) as run:
         grep(f, query)
     assert run.called
 
