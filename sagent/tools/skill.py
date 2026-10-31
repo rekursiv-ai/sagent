@@ -30,6 +30,8 @@ import re
 
 from treekle import ReadError, from_plain
 
+import yaml
+
 from sagent.agent.agents_md import frontmatter
 from sagent.lib.userdirs import data_dir
 from sagent.session.types import UncategorizedToolResult
@@ -152,15 +154,30 @@ class Skill:
         ]
         visited: set[Path] = set()
         stamps: list[tuple[Path, _Stamp]] = []
+        skipped: list[str] = []
         found: dict[str, SkillInfo] = {}
         for root, source in roots:
-            for info in _skills_under(root, source, visited, stamps):
+            for info in _skills_under(root, source, visited, stamps, skipped):
                 found.setdefault(info.name, info)
         self._scans[resolved] = _Scan(
             skills=tuple(found.values()),
             stamps=tuple(stamps),
+            skipped=tuple(skipped),
         )
         return list(found.values())
+
+    def skipped(self, context: ToolContext) -> tuple[str, ...]:
+        """Return why each skill visible from where the agent started was left unread.
+
+        Args:
+          context: The calling agent's state; its ``origin`` finds the skills.
+
+        Returns:
+          skipped: One line per ``SKILL.md`` whose frontmatter will not parse.
+
+        """
+        self.discover(context.origin)
+        return self._scans[context.origin.resolve()].skipped
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
         """Return ``Skill <name>``."""
@@ -239,6 +256,7 @@ def _skills_under(
     source: Source,
     visited: set[Path],
     stamps: list[tuple[Path, _Stamp]],
+    skipped: list[str],
 ) -> Iterator[SkillInfo]:
     """Yield every skill below ``root``, depth first, in name order; stamp each path read."""
     # Stamped before reading: a write landing between them then shows as a change.
@@ -249,10 +267,10 @@ def _skills_under(
             continue
         visited.add(resolved)
         stamps.append((child / "SKILL.md", _stamp(child / "SKILL.md")))
-        info = _load(child, source)
+        info = _load(child, source, skipped)
         if info is not None:
             yield info
-        yield from _skills_under(child, source, visited, stamps)
+        yield from _skills_under(child, source, visited, stamps, skipped)
 
 
 # Mtime moves when a file is written or a directory gains or loses an entry; a
@@ -275,7 +293,7 @@ def _subdirs(directory: Path) -> list[Path]:
         return []
 
 
-def _load(directory: Path, source: Source) -> SkillInfo | None:
+def _load(directory: Path, source: Source, skipped: list[str]) -> SkillInfo | None:
     """Return the skill ``directory/SKILL.md`` holds; ``None`` for none or a bad one."""
     path = directory / "SKILL.md"
     try:
@@ -285,7 +303,13 @@ def _load(directory: Path, source: Source) -> SkillInfo | None:
     except (OSError, UnicodeDecodeError):
         logger.warning("Skipping unreadable skill %s.", path)
         return None
-    meta, body = frontmatter(raw)
+    try:
+        meta, body = frontmatter(raw, source=str(path))
+    except yaml.YAMLError as e:
+        why = f"Skipping skill {path}: its frontmatter will not parse: {e}"
+        logger.warning(why)
+        skipped.append(why)
+        return None
     try:
         name = from_plain(meta.get("name"), str, default="") or directory.name
         description = from_plain(meta.get("description"), str, default="")
@@ -321,3 +345,5 @@ class _Scan:
 
     skills: tuple[SkillInfo, ...]
     stamps: tuple[tuple[Path, _Stamp], ...]
+    skipped: tuple[str, ...]
+    """Why each ``SKILL.md`` left unread was."""

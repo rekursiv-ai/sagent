@@ -17,7 +17,7 @@ import re
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from sagent.tui.settings.types import HasSettings, Setting
+    from sagent.settings.types import HasSettings, Setting
 
 
 __all__ = [

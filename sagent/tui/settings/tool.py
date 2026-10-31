@@ -15,9 +15,9 @@ from typing import TYPE_CHECKING, cast
 
 import dataclasses
 
+from sagent.settings.types import Setting, SettingError
 from sagent.tools.display import DisplaySpec, override
 from sagent.tools.types import Tool
-from sagent.tui.settings.types import Setting, SettingError
 
 
 if TYPE_CHECKING:

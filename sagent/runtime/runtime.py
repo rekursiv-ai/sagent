@@ -538,8 +538,11 @@ class Runtime:
         # assign another model, as a login whose quota reset.
         self.before_call: Callable[[bool], Awaitable[None]] | None = None
         # Asked when the model in use fails a call: it may assign another that can
-        # get past the failure, which is then called at once.
-        self.after_failure: Callable[[BaseException], Awaitable[None]] | None = None
+        # get past the failure, which is then called at once; or say when, in
+        # seconds since the epoch, a wait for it should end instead.
+        self.after_failure: (
+            Callable[[BaseException], Awaitable[float | None]] | None
+        ) = None
         self.running_tools: dict[str, asyncio.Task[None]] = {}
         self.cohort: set[str] = set()
         # A cohort started and not preempted, so its draining is published.
@@ -1364,11 +1367,11 @@ class Runtime:
                             break
 
                         case ModelResponseError(exception=exc):
-                            if (
-                                self._called_model is self.model
-                                and self.after_failure is not None
-                            ):
-                                await self.after_failure(exc)
+                            wake = (
+                                await self._after_failure(exc)
+                                if self._called_model is self.model
+                                else None
+                            )
                             # A failure of a model switched away from says nothing
                             # of the one in use: the gate asks it, at once.
                             if self._called_model is not self.model:
@@ -1402,9 +1405,13 @@ class Runtime:
                                 and self._retries < 60
                             ):
                                 self.model_call = None
-                                delay = max(
-                                    exc.retry_after_sec,
-                                    min(5.0 * (1 << self._retries), 300.0),
+                                delay = (
+                                    max(
+                                        exc.retry_after_sec,
+                                        min(5.0 * (1 << self._retries), 300.0),
+                                    )
+                                    if wake is None
+                                    else max(wake - time.time(), 0.0)
                                 )
                                 self._retries += 1
                                 self.service_suspended_until = time.time() + delay
@@ -1530,6 +1537,8 @@ class Runtime:
                             )
                             self._cancel_model()
                             self._stop_all_tools(mode="detach")
+                            # A compaction calls the model too: not on a spent login.
+                            await self._before_call(turn_start=False)
                             # What the user typed goes into what is compacted;
                             # only ``Clear`` discards it.
                             for staged in queued:
@@ -1833,8 +1842,7 @@ class Runtime:
                         # suspension's, the turn goes on, on the model asked now.
                         self._failed = False
                         self.service_suspended_until = None
-                        if self.before_call is not None:
-                            await self.before_call(self._steps == 0)
+                        await self._before_call(turn_start=self._steps == 0)
                         self._called_model = self.model
                         model_call: asyncio.Task[None] = asyncio.create_task(
                             self._stream_and_post(self._next_generation()),
@@ -1848,6 +1856,27 @@ class Runtime:
                 self.publish(SaveSession())
             except Exception as exc:  # noqa: BLE001 -- The loop must outlive one pass's failure.
                 log_exception_or_warning(logger, "dispatch loop iteration raised", exc)
+
+    # The hooks are advisory: one that raises is logged, and the runtime goes on
+    # as without it, or the turn would hang with no call in flight to end it.
+    async def _before_call(self, *, turn_start: bool) -> None:
+        """Ask ``before_call`` about the next call; a failure of its own is logged."""
+        if self.before_call is None:
+            return
+        try:
+            await self.before_call(turn_start)
+        except Exception as exc:  # noqa: BLE001 -- An advisory hook must not stop the call.
+            log_exception_or_warning(logger, "before_call raised", exc)
+
+    async def _after_failure(self, exc: BaseException) -> float | None:
+        """Ask ``after_failure`` about ``exc``; a failure of its own is logged, as ``None``."""
+        if self.after_failure is None:
+            return None
+        try:
+            return await self.after_failure(exc)
+        except Exception as raised:  # noqa: BLE001 -- An advisory hook must not hang the turn.
+            log_exception_or_warning(logger, "after_failure raised", raised)
+            return None
 
     def pending_mid_stream(self) -> Sequence[UserMessage | AgentToAgentMessage]:
         """Return what the user sent while the model streams, in order.

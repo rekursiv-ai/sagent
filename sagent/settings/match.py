@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from sagent.tui.settings.types import Setting
+    from sagent.settings.types import Setting
 
 
 __all__ = [

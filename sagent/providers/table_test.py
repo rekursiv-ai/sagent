@@ -45,7 +45,12 @@ _EVERY = {
     "output": ["none"],
 }
 _WHOLE = "A catalog's thinking must state effort, budget, and output."
-_ALIASES = "Catalogs may not use YAML aliases."
+_ALIASES = "YAML aliases are not allowed."
+
+
+def _in(path: Path, *, line: int, message: str) -> str:
+    """Match ``message`` as the strict loader reports it for ``path`` at ``line``."""
+    return f"^{re.escape(f'{path}, line {line}: {message}')}$"
 
 
 def _exactly(message: str) -> str:
@@ -976,11 +981,28 @@ def test_a_card_given_twice_is_rejected(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("text", "line", "message"),
+    [
+        ("models: []\nmodels: []", 2, "the key 'models' is given twice."),
+        ("models: []\n1: bad", 2, "YAML mapping keys must be strings."),
+        ("models: &rows []\nprofiles: {bad: {context: *rows}}", 2, _ALIASES),
+    ],
+)
+def test_a_document_the_strict_loader_refuses_names_file_and_line(
+    tmp_path: Path,
+    text: str,
+    line: int,
+    message: str,
+) -> None:
+    path = tmp_path / "x.yaml"
+    path.write_text(text)
+    with pytest.raises(ValueError, match=_in(path, line=line, message=message)):
+        _load(path)
+
+
+@pytest.mark.parametrize(
     ("text", "message"),
     [
-        ("models: []\nmodels: []", "gives key 'models' twice"),
-        ("models: []\n1: bad", _exactly("Catalog mapping keys must be strings.")),
-        ("models: &rows []\nprofiles: {bad: {context: *rows}}", _exactly(_ALIASES)),
         ("", "CatalogDocument"),
         ("models: []", "no section 'vendor'"),
         ("models: []\nproviders: {vendor: {}}", "does not say what it sends"),
@@ -1020,7 +1042,7 @@ def test_an_alias_inside_a_list_is_rejected(tmp_path: Path) -> None:
         " cache_write_1h: 0, cache_read: 0}]}\n"
         "- {model_id: b-1.0, prices: [*card]}\n",
     )
-    with pytest.raises(ValueError, match=_exactly(_ALIASES)):
+    with pytest.raises(ValueError, match=_in(path, line=4, message=_ALIASES)):
         _load(path)
 
 

@@ -427,6 +427,16 @@ async def test_a_child_runs_its_task_answers_and_stays(tmp_path: Path) -> None:
         UncategorizedToolResult,
         types.ModelResponseComplete,
     ]
+    # A child's move to another login is the parent's to show too.
+    child = setup.team["Agent_0"].runtime
+    switched = types.LoginSwitched(provider="scripted", was="default", now="work")
+    spent = types.LoginsSpent(provider="scripted", resets=())
+    child.publish(switched)
+    child.publish(spent)
+    assert [e.inner for e in setup.seen if isinstance(e, types.ChildEvent)][-2:] == [
+        switched,
+        spent,
+    ]
     first = setup.children.requests[0]
     # One conversation to vendors, the child a named agent within it.
     mine = setup.parent.runtime.request()

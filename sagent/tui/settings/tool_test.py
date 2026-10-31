@@ -13,14 +13,14 @@ from treekle import PlainTree
 import pytest
 
 from sagent.session.types import UncategorizedToolResult
+from sagent.settings.harvest import harvest
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tui.settings.harvest import harvest
 from sagent.tui.settings.tool import ToolDisplaySettings
 
 
 if TYPE_CHECKING:
+    from sagent.settings.types import Setting
     from sagent.tools.types import Tool, ToolContext
-    from sagent.tui.settings.types import Setting
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

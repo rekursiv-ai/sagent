@@ -3018,8 +3018,8 @@ wheels = [
 
 [[package]]
 name = "rekursiv-ai-typings"
-version = "0.1.11"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#375d1a755cb82496a2db947f96ed6c4cb5e3b2c3" }
+version = "0.1.12"
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#94439e9ff77c4748176e8d771e67d9b9a411078d" }
 
 [[package]]
 name = "requests"
@@ -3302,7 +3302,7 @@ wheels = [
 
 [[package]]
 name = "sagent"
-version = "0.2.0"
+version = "0.2.1"
 source = { editable = "." }
 dependencies = [
     { name = "bashlex" },
@@ -4208,7 +4208,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.15"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#10e86d9ceb0ed3266b6c96b4db46fb661e6f3e4e" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#38b3a40e6f269ac3ad5e44fe94fcca44f947a6f9" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },

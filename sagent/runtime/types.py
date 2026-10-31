@@ -65,6 +65,7 @@ __all__ = [
     "RuntimeEvent",
     "SaveSession",
     "Scheduled",
+    "Skipped",
     "StatusChanged",
     "UserDeferredMessage",
     "UserQueuedMessage",
@@ -458,10 +459,14 @@ class LoginSwitched:
     """The login the next call signs in as."""
 
     window: str = ""
-    """The window ``was`` spent, as ``5-hour``; ``""`` for a move back after a reset."""
+    """The window ``was`` spent, as ``5-hour``, or ``signed out``; ``""`` when ``was``
+    was not left for a failure: back after a reset, or as the order says."""
 
     until: float = 0.0
-    """When that window resets, in seconds since the epoch; ``0`` for a move back."""
+    """When that window resets, in seconds since the epoch; ``0`` when unknown."""
+
+    first: str = ""
+    """The first login in the order: ``now`` itself, unless ``now`` stands in for it."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -471,6 +476,14 @@ class LoginsSpent:
     provider: str
     resets: tuple[tuple[str, float], ...]
     """Each login and when it resets, soonest first."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Skipped:
+    """A directive or skill file left unread, such as for frontmatter that will not parse."""
+
+    text: str
+    """Which file, and why; what the user is shown."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -562,6 +575,7 @@ type RuntimeEvent = (
     | ChildDoneEvent
     | Charged
     | Scheduled
+    | Skipped
 )
 
 

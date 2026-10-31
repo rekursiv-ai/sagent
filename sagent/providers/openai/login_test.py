@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, override
+from typing import TYPE_CHECKING, override
 from urllib.parse import parse_qs, urlparse
 
 import asyncio
@@ -17,13 +17,13 @@ import os
 import socket
 import stat
 import time
-import webbrowser
 
 from treekle import from_plain, json_dumps, json_loads
 
 import httpx2
 import pytest
 
+from sagent.lib.files.owner_only import write_private
 from sagent.model.exceptions import AuthError
 from sagent.providers.openai import login
 from sagent.providers.openai.lease import LeasedToken
@@ -39,6 +39,7 @@ from sagent.providers.openai.login import (
     revoke_refresh_token,
 )
 from sagent.providers.resources import SharedResources
+from sagent.providers.testing import free_port, port_of, visit
 
 
 if TYPE_CHECKING:
@@ -345,9 +346,10 @@ def test_a_stored_login_is_private_even_over_a_leftover_staging_file(
     staged = auth.with_suffix(".tmp")
     staged.write_text("old")
     staged.chmod(0o644)
-    login._write_private(auth, "{}")
+    write_private(auth, "{}")
     assert _mode(auth) == 0o600
     assert auth.read_text() == "{}"
+    assert staged.read_text() == "old"
 
 
 @pytest.mark.asyncio
@@ -478,19 +480,23 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
     }
 
 
-@pytest.mark.parametrize("pasted", [_stale, _no_code])
+@pytest.mark.parametrize(
+    ("pasted", "message"),
+    [(_stale, "belongs to another sign-in"), (_no_code, "holds no sign-in code")],
+)
 @pytest.mark.asyncio
 async def test_a_pasted_code_must_belong_to_this_sign_in(
     auth: Path,
     monkeypatch: pytest.MonkeyPatch,
     pasted: Callable[[str, str], str],
+    message: str,
 ) -> None:
     monkeypatch.setattr(login, "_browser_code", _no_browser)
     paster = _Paster(pasted=pasted)
     monkeypatch.setattr(builtins, "input", paster.input)
     server = _Server(replies=[])
     async with _Served(server) as shared:
-        with pytest.raises(AuthError, match="another sign-in"):
+        with pytest.raises(AuthError, match=message):
             await CodexLogin(auth, resources=shared).sign_in(show=paster.show)
     assert server.requests == []
 
@@ -559,7 +565,7 @@ async def test_a_headless_sign_in_opens_no_browser_and_takes_the_paste(
 async def test_the_browser_redirects_back_with_the_code(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    port = _free_port()
+    port = free_port()
     opened: list[str] = []
     visits: list[asyncio.Task[int]] = []
 
@@ -567,7 +573,7 @@ async def test_the_browser_redirects_back_with_the_code(
         opened.append(url)
         loop = asyncio.get_running_loop()
         visits.extend(
-            loop.create_task(_get(port, target))
+            loop.create_task(visit(port, target))
             for target in (
                 "/auth/callback?code=c1&state=wrong",
                 "/auth/callback?code=c1&state=s1",
@@ -575,7 +581,7 @@ async def test_the_browser_redirects_back_with_the_code(
         )
         return True
 
-    monkeypatch.setattr(webbrowser, "open", open_in_browser)
+    monkeypatch.setattr(login, "open_browser", open_in_browser)
     shown: list[str] = []
     code = await login._browser_code(
         "https://sign.in",
@@ -593,36 +599,15 @@ async def test_the_browser_redirects_back_with_the_code(
 async def test_a_browser_that_never_redirects_gives_way_to_a_paste(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(webbrowser, "open", _nowhere)
+    monkeypatch.setattr(login, "open_browser", _nowhere)
     code = await login._browser_code(
         "https://sign.in",
         state="s",
         show=list[str]().append,
-        port=_free_port(),
+        port=free_port(),
         timeout_sec=0.01,
     )
     assert code == ""
-
-
-@pytest.mark.asyncio
-async def test_the_redirect_is_answered_only_on_its_path_with_its_state() -> None:
-    code = asyncio.Future[str]()
-    server = await asyncio.start_server(
-        lambda reader, writer: login._redirected(reader, writer, state="s1", code=code),
-        "127.0.0.1",
-        0,
-    )
-    port = _port(server.sockets[0])
-    async with server:
-        assert await _get(port, "/auth/callback?code=c1&state=wrong") == 400
-        assert await _get(port, "/elsewhere?code=c1&state=s1") == 400
-        assert await _get(port, "/auth/callback?state=s1") == 400
-        assert await _raw(port, b"garbage\r\n") == 400
-        assert not code.done()
-        assert await _get(port, "/auth/callback?code=c1&state=s1") == 200
-        # A second redirect after the first is answered and changes nothing.
-        assert await _get(port, "/auth/callback?code=c2&state=s1") == 200
-    assert code.result() == "c1"
 
 
 @pytest.mark.asyncio
@@ -631,7 +616,7 @@ async def test_a_browser_sign_in_gives_way_when_its_port_is_taken() -> None:
     with socket.socket() as taken:
         taken.bind(("127.0.0.1", 0))
         taken.listen(1)
-        port = _port(taken)
+        port = port_of(taken)
         assert (
             await login._browser_code(
                 "https://x",
@@ -909,6 +894,9 @@ async def test_a_refresh_token_is_revoked_at_the_issuer() -> None:
     (sent,) = server.requests
     assert str(sent.url) == f"{_ISSUER}/oauth/revoke"
     assert _json(sent)["token"] == out
+    assert set(from_plain(sent.extensions["timeout"], dict[str, float]).values()) == {
+        10.0,
+    }
 
 
 def test_the_account_of_tokens_reads_the_id_token_first() -> None:
@@ -939,40 +927,6 @@ def _hold(lock: Path) -> int:
     held = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
     fcntl.flock(held, fcntl.LOCK_EX)
     return held
-
-
-def _free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return _port(probe)
-
-
-def _port(bound: _Bound) -> int:
-    return bound.getsockname()[1]
-
-
-class _Bound(Protocol):
-    """An IPv4 socket, whose address typeshed leaves untyped."""
-
-    def getsockname(self) -> tuple[str, int]: ...
-
-
-async def _get(port: int, target: str) -> int:
-    """Return the status a GET of ``target`` on ``port`` answers with."""
-    return await _raw(
-        port,
-        f"GET {target} HTTP/1.1\r\nhost: localhost\r\n\r\n".encode(),
-    )
-
-
-async def _raw(port: int, request: bytes) -> int:
-    reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    writer.write(request)
-    await writer.drain()
-    status = int((await reader.readline()).split()[1])
-    writer.close()
-    await writer.wait_closed()
-    return status
 
 
 @dataclass(slots=True, kw_only=True)

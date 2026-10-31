@@ -17,10 +17,16 @@ Examples:
   python -m sagent --model work@oaisub/gpt+highthink+fast
   python -m sagent --effort max --tool.Bash.display.output.lines 3,1
   python -m sagent login --provider oaisub --account work
+  python -m sagent mcp                               # the MCP commands
+  python -m sagent mcp list                          # each MCP server's state
+  python -m sagent mcp add -t http linear https://mcp.linear.app/mcp
+  python -m sagent mcp login linear --headless       # sign in to a remote one
 
 Every setting ``/help`` lists is a flag too, matched as the prompt matches it:
 ``--NAME VALUE``. They apply once the agent is built, in order, ``--model``
-last, so what the model's name says wins.
+last, so what the model's name says wins. Every action the shell may run,
+``/login`` and ``/mcp.add`` among them, is a command: ``sagent login ARGS``,
+``sagent mcp add ARGS``, each with ``--help``.
 
 """
 
@@ -34,9 +40,11 @@ import argparse
 import asyncio
 import contextlib
 import functools
+import itertools
 import logging
 import math
 import os
+import shlex
 import signal
 import sys
 import time
@@ -49,11 +57,10 @@ from sagent.agent.agents_md import AgentsMdConfig
 from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.pruner import Pruner
 from sagent.agent.team import Team
+from sagent.lib.files.owner_only import open_private
 from sagent.lib.userdirs import data_dir, state_dir
-from sagent.model.exceptions import AuthError
 from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.providers.table import ModelTags
-from sagent.providers.types import HasLogin
 from sagent.runtime import types
 from sagent.session.jsonl import JournalInUseError, JsonlJournal
 from sagent.session.legacy_journal import (
@@ -69,6 +76,10 @@ from sagent.session.projects import (
     project_dir,
 )
 from sagent.session.types import ToolCall, ToolResult
+from sagent.settings.flags import flags
+from sagent.settings.harvest import harvest
+from sagent.settings.match import match
+from sagent.settings.types import SettingError
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
@@ -78,6 +89,8 @@ from sagent.tools.edit import Edit
 from sagent.tools.glob_tool import Glob
 from sagent.tools.grep import Grep
 from sagent.tools.list import List
+from sagent.tools.mcp import McpServer, McpSession, servers
+from sagent.tools.mcp_settings import add_config_arguments
 from sagent.tools.memory import Memory
 from sagent.tools.paper_author import PaperAuthor
 from sagent.tools.paper_details import PaperDetails
@@ -100,19 +113,20 @@ from sagent.tui.prompt import (
     repaint_on_change,
 )
 from sagent.tui.render import error_text, login_text, suspended_text
-from sagent.tui.settings.flags import flags
-from sagent.tui.settings.harvest import harvest
-from sagent.tui.settings.match import match
-from sagent.tui.settings.types import SettingError
-from sagent.tui.slash import Commands, headless_wanted
+from sagent.tui.slash import (
+    Commands,
+    apply_setting,
+    help_text,
+    owners_without_agent,
+)
 from sagent.tui.tree import pick
-from sagent.tui.types import Frame
+from sagent.tui.types import CommandOutput, Frame
 from sagent.tui.views import Views
 from sagent.tui.welcome import print_welcome
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Generator, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 
     from prompt_toolkit import PromptSession
     from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
@@ -132,12 +146,10 @@ if TYPE_CHECKING:
     from sagent.providers.types import (
         Model,
         ModelCatalog as Catalog,
-        Provider,
     )
     from sagent.session.projects import SessionInfo
+    from sagent.settings.types import Setting
     from sagent.tools.types import Tool
-    from sagent.tui.settings.types import Setting
-    from sagent.tui.types import CommandOutput
 else:
     from wrapt import lazy_import
 
@@ -169,21 +181,23 @@ def main() -> int:
       code: The process exit code.
 
     """
-    parser = argparse.ArgumentParser(
-        description=(__doc__ or "").strip(),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        allow_abbrev=False,
-    )
-    static = _add_arguments(parser)
+    argv = sys.argv[1:]
+    if argv and not argv[0].startswith("-"):
+        command = _action(argv)
+    else:
+        parser = argparse.ArgumentParser(
+            description=(__doc__ or "").strip(),
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            allow_abbrev=False,
+        )
+        static = _add_arguments(parser)
+        try:
+            rest, given = flags(argv, static=static)
+        except ValueError as e:
+            parser.error(str(e))
+        command = _main(cast("Flags", parser.parse_args(rest)), given=given)
     try:
-        rest, given = flags(sys.argv[1:], static=static)
-    except ValueError as e:
-        parser.error(str(e))
-    parsed = cast("Flags", parser.parse_args(rest))
-    if parsed.command not in (None, "login"):
-        parser.error(f"unknown command {parsed.command!r}; the only one is login")
-    try:
-        return asyncio.run(_main(parsed, given=given))
+        return asyncio.run(command)
     # ``_signals`` answers the first SIGINT by cancelling the run, which
     # ``asyncio.run`` re-raises as ``CancelledError``: uncaught, a Ctrl+C
     # printed a traceback and exited 1.
@@ -194,8 +208,6 @@ def main() -> int:
 class Flags(Protocol):
     """Parsed command-line flags."""
 
-    command: str | None
-    headless: bool | None
     allow_providers: str
     name: str
     system_prompt: str | None
@@ -215,6 +227,8 @@ class Flags(Protocol):
     resume_limit: int
     resume_persistent: bool
     add_dir: list[Path]
+    mcp_config: list[str]
+    strict_mcp_config: bool
     history: Path | None
     output_format: str
     input_format: str
@@ -247,9 +261,10 @@ async def run(
         if history is not None
         else state_dir() / "rekursiv-ai" / "sagent" / "repl-history"
     )
-    # Enter writes history before it clears the line, so a missing directory
-    # would leave the sent text in the prompt.
-    path.parent.mkdir(parents=True, exist_ok=True)
+    # Made now: Enter writes history before it clears the line, so a missing
+    # directory would leave the sent text in the prompt. Private: it is all
+    # the user typed.
+    os.close(open_private(path, os.O_WRONLY))
     # Not ``patch_stdout``: it builds its proxy with no way to set the batch time.
     # Whatever else writes to the terminal, such as a library's warning, goes through
     # the printer's screen, so a result below it names its call again.
@@ -320,11 +335,13 @@ async def run(
             "sagent --resume-all": "pick one anywhere",
         }
         column = max(map(len, ways)) + 3
-        printer.line(
+        # The printer wrote through the proxy, closed by now with the prompt.
+        sys.stderr.write(
             "\n".join(
                 ["Resume this session with:"]
                 + [f"{command:<{column}}# {what}" for command, what in ways.items()],
-            ),
+            )
+            + "\n",
         )
 
 
@@ -370,12 +387,6 @@ async def _tree(views: Views) -> None:
 def _add_arguments(parser: argparse.ArgumentParser) -> frozenset[str]:
     """Register flags on ``parser``; return every option string it now knows."""
     actions = [
-        parser.add_argument(
-            "command",
-            nargs="?",
-            help="'login' signs in to the model's provider, as --provider and"
-            " --account say, and exits.",
-        ),
         *_session_arguments(parser),
         *_run_arguments(parser),
     ]
@@ -466,12 +477,6 @@ def _run_arguments(parser: argparse.ArgumentParser) -> list[argparse.Action]:
     """Register what builds the agent: its tools, prompt, caps, and helpers."""
     return [
         parser.add_argument(
-            "--headless",
-            action=argparse.BooleanOptionalAction,
-            help="For login: sign in without a browser; print the URL, paste the"
-            " code back. Default: headless over ssh, or on Linux with no display.",
-        ),
-        parser.add_argument(
             "--allow-providers",
             default=os.environ.get("SAGENT_ALLOW_PROVIDERS", ""),
             metavar="LIST",
@@ -540,6 +545,7 @@ def _run_arguments(parser: argparse.ArgumentParser) -> list[argparse.Action]:
             metavar="DIR",
             help="More directories whose AGENTS.md files extend the prompt.",
         ),
+        *add_config_arguments(parser),
     ]
 
 
@@ -552,31 +558,43 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
         ModelCatalog() as catalog,
         Team(catalog=catalog) as team,
         FetchSession() as fetch,
+        contextlib.AsyncExitStack() as servers_stack,
     ):
         try:
-            name = _provider_name(catalog, flags)
+            name = _provider_name(catalog, flags.allow_providers)
             model = catalog.model("default", current=name)
-            if flags.command == "login":
-                agent = Agent(model=model)
-                await _configure(agent, catalog=catalog, screen=screen, given=given)
-                return await _login(
-                    agent.model.provider,
-                    headless=headless_wanted(os.environ)
-                    if flags.headless is None
-                    else flags.headless,
-                )
-            tools = _tools(flags, cwd=cwd, team=team, session=fetch)
-        except (KeyError, ValueError) as e:
+            wanted = _wanted(
+                servers(cwd, flags=flags.mcp_config, strict=flags.strict_mcp_config),
+                tools=flags.tools,
+            )
+            # Checked before the journal is made, so a mistyped name leaves no
+            # session behind; a server's own tools are known only once it connects.
+            _chosen_tools(
+                flags,
+                known=[
+                    *_builders(cwd=cwd, team=team, session=fetch),
+                    *(n for n in flags.tools or () if any(s.names(n) for s in wanted)),
+                ],
+            )
+        except (KeyError, OSError, ValueError) as e:
             sys.stderr.write(f"Error: {error_text(e)}\n")
             return 1
         path = _journal_path(flags, cwd=cwd, interactive=interactive)
         if path is not None and is_legacy(path) and not upgrade(path):
             sys.stderr.write("[resume] nothing to resume; starting fresh.\n")
             path = new_session_path(project_dir(cwd))
+        # Before the servers connect: at a terminal, what they log must reach the
+        # session's file, not overlay the screen.
+        _logging(flags.log_level, path=path, interactive=interactive)
+        try:
+            mcp = await servers_stack.enter_async_context(McpSession(wanted))
+            tools = _tools(flags, cwd=cwd, team=team, session=fetch, mcp=mcp.tools())
+        except ValueError as e:
+            sys.stderr.write(f"Error: {error_text(e)}\n")
+            return 1
         if interactive:
             print_welcome(folder=cwd)
         journal = JsonlJournal(path) if path is not None else None
-        _logging(flags.log_level, path=path, interactive=interactive)
         agent = _agent(
             flags,
             model=model,
@@ -632,9 +650,9 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
 
 # The allow list bounds the team too: a spawned agent finds its models in the same
 # catalog. ``$SAGENT_PROVIDER`` joins it, never fails it.
-def _provider_name(catalog: ModelCatalog, flags: Flags) -> str:
+def _provider_name(catalog: ModelCatalog, allow: str) -> str:
     """Narrow ``catalog`` to ``--allow-providers``; return the provider to start on."""
-    allowed = [p.strip() for p in flags.allow_providers.split(",") if p.strip()]
+    allowed = [p.strip() for p in allow.split(",") if p.strip()]
     provider = os.environ.get("SAGENT_PROVIDER")
     if not allowed:
         return catalog.name(provider if provider is not None else default_provider())
@@ -644,18 +662,118 @@ def _provider_name(catalog: ModelCatalog, flags: Flags) -> str:
     return catalog.name(provider)
 
 
-async def _login(provider: Provider, *, headless: bool) -> int:
-    """Sign in to ``provider``; return the exit code."""
-    if not isinstance(provider, HasLogin):
-        sys.stderr.write(f"Error: {provider.name} has no interactive sign-in.\n")
-        return 1
-    # A pasted code from another sign-in, or no answer at the prompt at all.
+# The MCP actions need no model, so they run where no provider is set up; only
+# an action of the agent's own, such as ``login``, builds one.
+async def _action(argv: Sequence[str]) -> int:
+    """Run the action ``sagent NAME... ARGS`` names, as ``/NAME ARGS`` runs it."""
+    # Its lines are the output; what goes wrong goes to the log, as interactive.
+    _logging(os.environ.get("SAGENT_LOG_LEVEL"), path=None, interactive=True)
     try:
-        await provider.login(headless=headless)
-    except (AuthError, EOFError, OSError, RuntimeError, ValueError) as e:
-        sys.stderr.write(f"Error: {error_text(e)}\n")
+        found = await _dispatch(
+            harvest(owners_without_agent(cwd=Path.cwd(), say=_print_to_shell)),
+            argv,
+        )
+        return await _agent_action(argv) if found is None else found
+    # As at the prompt: what an action did not turn into a message, said as one.
+    except Exception as e:
+        logger.warning("command %r failed", argv, exc_info=True)
+        _print_to_shell(CommandOutput(text=error_text(e), tone="error"))
         return 1
-    return 0
+
+
+async def _agent_action(argv: Sequence[str]) -> int:
+    """Run the agent's action ``argv`` names, after the setting flags it gives."""
+    screen = _Screen()
+    async with ModelCatalog() as catalog:
+        name = _provider_name(catalog, os.environ.get("SAGENT_ALLOW_PROVIDERS", ""))
+        agent = Agent(model=catalog.model("default", current=name))
+        commands = Commands(
+            agent,
+            catalog=catalog,
+            say=_print_to_shell,
+            screen=screen,
+            panes=Panes(),
+        )
+        settings = harvest(commands.owners())
+
+        async def apply_flags(tail: list[str]) -> list[str]:
+            rest, given = flags(tail, static=_action_options(tail, settings))
+            await _configure(agent, catalog=catalog, screen=screen, given=given)
+            return rest
+
+        found = await _dispatch(settings, argv, configure=apply_flags)
+    if found is not None:
+        return found
+    words = " ".join(_command_words(argv))
+    _print_to_shell(
+        CommandOutput(
+            text=f"unknown command: sagent {words}; see sagent --help",
+            tone="error",
+        ),
+    )
+    return 2
+
+
+async def _dispatch(
+    settings: Sequence[Setting],
+    argv: Sequence[str],
+    *,
+    configure: Callable[[list[str]], Awaitable[list[str]]] | None = None,
+) -> int | None:
+    """Run the action ``argv`` names, or list its group; ``None`` if it names neither."""
+    words = _command_words(argv)
+    actions = [s for s in settings if s.cli and s.value is None]
+    for n in range(len(words), 0, -1):
+        named = tuple(words[:n])
+        action = next((a for a in actions if a.name == named), None)
+        if action is not None:
+            tail = list(argv[n:])
+            rest = tail if configure is None else await configure(tail)
+            return (
+                0
+                if await apply_setting(action, shlex.join(rest), say=_print_to_shell)
+                else 1
+            )
+        if not any(a.name[:n] == named for a in actions):
+            continue
+        if len(words) > n or any(w not in ("-h", "--help") for w in argv[n:]):
+            _print_to_shell(
+                CommandOutput(
+                    text=f"unknown command: sagent {' '.join(words)};"
+                    f" see sagent {' '.join(named)} --help",
+                    tone="error",
+                ),
+            )
+            return 2
+        text = help_text(settings, ".".join(named))
+        _print_to_shell(CommandOutput(text=f"[/help] {text}", tone="note"))
+        return 0
+    return None
+
+
+def _command_words(argv: Sequence[str]) -> list[str]:
+    """Return the words before the first flag: an action's name, and what follows."""
+    return list(itertools.takewhile(lambda w: not w.startswith("-"), argv))
+
+
+def _action_options(tail: Sequence[str], settings: Sequence[Setting]) -> set[str]:
+    """Return the ``--NAME`` words of ``tail`` that name no setting: the action's."""
+    values = [s for s in settings if s.cli and s.value is not None]
+    before = tail[: tail.index("--")] if "--" in tail else tail
+    return {
+        option
+        for word in before
+        if (option := word.partition("=")[0]).startswith("--")
+        and match(values, option[2:]) is None
+    }
+
+
+def _print_to_shell(output: CommandOutput) -> None:
+    """Print what a command run from the shell says: an error to stderr, else stdout."""
+    if output.tone == "error":
+        sys.stderr.write(f"Error: {output.text}\n")
+    else:
+        sys.stdout.write(f"{output.text}\n")
 
 
 def _system(flags: Flags) -> str | None:
@@ -774,17 +892,44 @@ def _dropped(output: CommandOutput) -> None:
     del output
 
 
+# All for none.
+#
+# A server named by no tool is never started, so ``--tools none`` connects none.
+def _wanted(found: Sequence[McpServer], *, tools: list[str] | None) -> list[McpServer]:
+    """Return the servers of ``found`` that ``--tools`` names a tool of."""
+    if tools is None:
+        return list(found)
+    return [s for s in found if any(s.names(name) for name in tools)]
+
+
 def _tools(
     flags: Flags,
     *,
     cwd: Path,
     team: Team,
     session: FetchSession,
+    mcp: Sequence[Tool] = (),
 ) -> list[Tool]:
-    """Return the tools ``--tools`` names."""
+    """Return the tools ``--tools`` names, MCP servers' among them."""
+    builders = _builders(cwd=cwd, team=team, session=session)
+    served = {t.name: t for t in mcp}
+    names = _chosen_tools(flags, known=[*builders, *served])
+    tools = {
+        name: served[name] if name in served else builders[name]() for name in names
+    }
+    return list(tools.values())
+
+
+def _builders(
+    *,
+    cwd: Path,
+    team: Team,
+    session: FetchSession,
+) -> dict[str, Callable[[], Tool]]:
+    """Return how to build each built-in tool, by its name, in their default order."""
     read, edit, grep, glob, ls = Read(), Edit(), Grep(), Glob(), List()
     fetch = WebFetch(session=session)
-    builders: dict[str, Callable[[], Tool]] = {
+    return {
         "Bash": lambda: Bash(peers=(read, edit, grep, glob, ls, fetch)),
         "Read": lambda: read,
         "Write": Write,
@@ -807,19 +952,22 @@ def _tools(
         "Skill": Skill,
         "BackgroundTask": BackgroundTask,
     }
+
+
+def _chosen_tools(flags: Flags, *, known: Sequence[str]) -> list[str]:
+    """Return the tools ``--tools`` asks for, of ``known``; every one when unset."""
     named = flags.tools
-    names = list(builders) if named is None else [] if named == ["none"] else named
+    names = list(known) if named is None else [] if named == ["none"] else list(named)
     if flags.ephemeral and "Memory" in names:
         if named is not None:
             raise ValueError("--ephemeral saves no memories; drop Memory from --tools.")
         names.remove("Memory")
-    unknown = sorted(set(names) - set(builders))
+    unknown = sorted(set(names) - set(known))
     if unknown:
         raise ValueError(
-            f"unknown tools {', '.join(unknown)}; known: {', '.join(builders)}",
+            f"unknown tools {', '.join(unknown)}; known: {', '.join(known)}",
         )
-    tools = {name: builders[name]() for name in names}
-    return list(tools.values())
+    return names
 
 
 def _journal_path(flags: Flags, *, cwd: Path, interactive: bool) -> Path | None:
@@ -939,7 +1087,8 @@ def _logging(level: str | None, *, path: Path | None, interactive: bool) -> None
         if path is not None
         else data_dir() / "rekursiv-ai" / "sagent" / "repl.log"
     )
-    log.parent.mkdir(parents=True, exist_ok=True)
+    # Private, as the journal it sits beside is.
+    os.close(open_private(log, os.O_WRONLY))
     handler = logging.FileHandler(log)
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"),

@@ -8,12 +8,14 @@ from typing import Final
 import pytest
 
 from sagent.model.cost import TokenCost, TokenCount
+from sagent.model.exceptions import RateLimitedError, RetryableError
 from sagent.model.types import Response
 from sagent.runtime.tape import ContextSplice, TapeRef
 from sagent.runtime.types import (
     CompactComplete,
     DetachedResult,
     Markers,
+    ModelCallSuspended,
     ModelContextEvent,
     labeled_agent_send_text,
     wire_role,
@@ -131,6 +133,23 @@ def _turn(text: str) -> Response:
         spend=TokenCost(),
         stop_reason="end_turn",
     )
+
+
+@pytest.mark.parametrize(
+    ("exception", "attempt", "opens"),
+    [
+        (RateLimitedError("spent"), 1, True),
+        (RateLimitedError("spent"), 2, False),
+        (RetryableError("down"), 1, False),
+    ],
+)
+def test_only_a_first_rate_limit_opens_a_quota_wait(
+    exception: RetryableError,
+    attempt: int,
+    opens: bool,
+) -> None:
+    suspended = ModelCallSuspended(exception=exception, until=0.0, attempt=attempt)
+    assert suspended.opens_a_quota_wait is opens
 
 
 if __name__ == "__main__":

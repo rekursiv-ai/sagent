@@ -27,6 +27,7 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -42,6 +43,7 @@ from treekle import ReadError, from_plain
 import yaml
 
 from sagent.lib.userdirs import data_dir
+from sagent.lib.yaml import split_frontmatter
 from sagent.model.capability import literal_members
 
 
@@ -127,7 +129,8 @@ def directives(cwd: Path, *, config: AgentsMdConfig | None = None) -> str:
 
     """
     cfg = config if config is not None else AgentsMdConfig()
-    return _format([f for f in _discover(cwd, cfg, set()) if not f.globs], cfg.preamble)
+    found = _discover(cwd, cfg, set(), skipped=[])
+    return _format([f for f in found if not f.globs], cfg.preamble)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -158,6 +161,9 @@ class Directives:
     _framed: set[str] = field(default_factory=set[str], init=False)
     _read: set[str] = field(default_factory=set[str], init=False)
 
+    skipped: list[str] = field(default_factory=list[str], init=False)
+    """Why each file left unread was, in the order they were reached."""
+
     def start(self) -> str:
         """Forget the last window; return the root's unconditional files, as one section.
 
@@ -167,7 +173,7 @@ class Directives:
         """
         root = self.root.resolve()
         self._read = set()
-        found = _discover(root, self.config, self._read)
+        found = _discover(root, self.config, self._read, skipped=self.skipped)
         self._known = [(f, root) for f in found]
         self._checked = {
             root,
@@ -232,7 +238,7 @@ class Directives:
             self._checked.add(d)
             self._known.extend(
                 (f, d)
-                for f in _read_project(d, self._read, self.config)
+                for f in _read_project(d, self._read, self.config, skipped=self.skipped)
                 if f.tier in self.config.tiers
             )
             d = d.parent
@@ -265,27 +271,30 @@ class _File:
         )
 
 
-def frontmatter(raw: str) -> tuple[dict[str, object], str]:
+def frontmatter(raw: str, *, source: str = "") -> tuple[dict[str, object], str]:
     """Return a Markdown file's YAML frontmatter, and its body without it.
 
     Args:
       raw: The file's text; a leading byte-order mark is dropped.
+      source: Where ``raw`` came from, named in errors.
 
     Returns:
       meta: The frontmatter's mapping; empty when there is none, or it is no
         YAML mapping, such as a list.
       body: The text after the frontmatter.
 
+    Raises:
+      YAMLError: The frontmatter will not parse; the message names the
+        file's line, and ``source``.
+
     """
-    raw = raw.removeprefix("\ufeff")
-    match = re.match(r"\A---\r?\n(.*?)\r?\n---\r?\n", raw, flags=re.DOTALL)
-    if match is None:
-        return {}, raw
-    body = raw[match.end() :]
+    split = split_frontmatter(raw, source=source)
+    if split is None:
+        return {}, raw.removeprefix("\ufeff")
+    parsed, body = split
     try:
-        parsed: object = yaml.safe_load(match.group(1))
         return from_plain(parsed, dict[str, object], default={}), body
-    except (yaml.YAMLError, ReadError):
+    except ReadError:
         return {}, body
 
 
@@ -392,22 +401,28 @@ def _resolve(ref: str, base: Path) -> Path | None:
     return (base / ref).resolve()
 
 
-def _discover(cwd: Path, cfg: AgentsMdConfig, seen: set[str]) -> list[_File]:
+def _discover(
+    cwd: Path,
+    cfg: AgentsMdConfig,
+    seen: set[str],
+    *,
+    skipped: list[str],
+) -> list[_File]:
     """Return every directive file not in ``seen``, lowest precedence first; add each."""
     out: list[_File] = []
+    read = partial(_read, seen=seen, depth=0, cfg=cfg, skipped=skipped)
     if "Managed" in cfg.tiers:
-        out.extend(
-            _read(cfg.system_dir / cfg.filename, "Managed", seen, depth=0, cfg=cfg),
-        )
-        out.extend(_read_dir(cfg.system_dir / "rules", "Managed", seen, cfg))
+        out.extend(read(cfg.system_dir / cfg.filename, "Managed"))
+        out.extend(_read_dir(cfg.system_dir / "rules", "Managed", seen, cfg, skipped))
     if "User" in cfg.tiers:
-        out.extend(_read(cfg.user_dir / cfg.filename, "User", seen, depth=0, cfg=cfg))
-        out.extend(_read_dir(cfg.user_dir / "rules", "User", seen, cfg))
+        out.extend(read(cfg.user_dir / cfg.filename, "User"))
+        out.extend(_read_dir(cfg.user_dir / "rules", "User", seen, cfg, skipped))
     if not {"Project", "Local"} & cfg.tiers:
         return out
     resolved = cwd.resolve()
     for d in [*reversed(resolved.parents), resolved, *cfg.additional_dirs]:
-        out.extend(f for f in _read_project(d, seen, cfg) if f.tier in cfg.tiers)
+        found = _read_project(d, seen, cfg, skipped=skipped)
+        out.extend(f for f in found if f.tier in cfg.tiers)
     return out
 
 
@@ -422,20 +437,33 @@ def _format(files: list[_File], preamble: str) -> str:
     return "\n\n".join(parts)
 
 
-def _read_project(d: Path, seen: set[str], cfg: AgentsMdConfig) -> list[_File]:
+def _read_project(
+    d: Path,
+    seen: set[str],
+    cfg: AgentsMdConfig,
+    *,
+    skipped: list[str],
+) -> list[_File]:
     """Return one directory's project and local files, in their order, each governing ``d``."""
     name = Path(cfg.filename)
+    read = partial(_read, seen=seen, depth=0, cfg=cfg, skipped=skipped)
     found = [
-        *_read(d / cfg.filename, "Project", seen, depth=0, cfg=cfg),
-        *_read(d / cfg.dot_dir / cfg.filename, "Project", seen, depth=0, cfg=cfg),
-        *_read_dir(d / cfg.dot_dir / "rules", "Project", seen, cfg),
-        *_read(d / f"{name.stem}.local{name.suffix}", "Local", seen, depth=0, cfg=cfg),
+        *read(d / cfg.filename, "Project"),
+        *read(d / cfg.dot_dir / cfg.filename, "Project"),
+        *_read_dir(d / cfg.dot_dir / "rules", "Project", seen, cfg, skipped),
+        *read(d / f"{name.stem}.local{name.suffix}", "Local"),
     ]
     tree = d.resolve()
     return [replace(f, tree=tree) for f in found]
 
 
-def _read_dir(d: Path, tier: Tier, seen: set[str], cfg: AgentsMdConfig) -> list[_File]:
+def _read_dir(
+    d: Path,
+    tier: Tier,
+    seen: set[str],
+    cfg: AgentsMdConfig,
+    skipped: list[str],
+) -> list[_File]:
     """Return every ``.md`` file under ``d``, sorted."""
     if not d.is_dir():
         return []
@@ -443,9 +471,8 @@ def _read_dir(d: Path, tier: Tier, seen: set[str], cfg: AgentsMdConfig) -> list[
         found = sorted(d.rglob("*.md"))
     except OSError:
         return []
-    return [
-        f for p in found if p.is_file() for f in _read(p, tier, seen, depth=0, cfg=cfg)
-    ]
+    read = partial(_read, seen=seen, depth=0, cfg=cfg, skipped=skipped)
+    return [f for p in found if p.is_file() for f in read(p, tier)]
 
 
 # An included file governs what the file including it does: a rule's include is part of
@@ -453,13 +480,14 @@ def _read_dir(d: Path, tier: Tier, seen: set[str], cfg: AgentsMdConfig) -> list[
 def _read(
     path: Path,
     tier: Tier,
-    seen: set[str],
     *,
+    seen: set[str],
     depth: int,
     cfg: AgentsMdConfig,
+    skipped: list[str],
     globs: tuple[str, ...] = (),
 ) -> list[_File]:
-    """Return ``path`` and what it includes, each once."""
+    """Return ``path`` and what it includes, each once; add why to ``skipped`` if not."""
     if depth >= cfg.max_depth:
         return []
     try:
@@ -473,7 +501,14 @@ def _read(
         raw = resolved.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError):
         return []
-    meta, body = frontmatter(raw)
+    # A rule whose ``paths:`` cannot be read would govern every path.
+    try:
+        meta, body = frontmatter(raw, source=str(resolved))
+    except yaml.YAMLError as e:
+        why = f"Skipping {resolved}: its frontmatter will not parse: {e}"
+        logger.warning(why)
+        skipped.append(why)
+        return []
     body = _strip_comments(body)
     if not body.strip():
         return []
@@ -487,5 +522,15 @@ def _read(
     own = _globs(meta) or globs
     out = [_File(path=resolved, content=body, tier=tier, globs=own)]
     for include in _includes(body, resolved.parent):
-        out.extend(_read(include, tier, seen, depth=depth + 1, cfg=cfg, globs=own))
+        out.extend(
+            _read(
+                include,
+                tier,
+                seen=seen,
+                depth=depth + 1,
+                cfg=cfg,
+                skipped=skipped,
+                globs=own,
+            ),
+        )
     return out

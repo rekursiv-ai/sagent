@@ -30,8 +30,7 @@ import re
 
 from treekle import PlainTree, from_plain, json_dumps
 
-import yaml
-
+from sagent.lib.yaml import parse
 from sagent.tools.types import Tool
 
 
@@ -256,8 +255,9 @@ class ReadOnly:
           ReadError: The asset does not fit this class.
 
         """
-        text = (files(__package__) / "assets" / "bash.yaml").read_text(encoding="utf-8")
-        return from_plain(yaml.safe_load(text), cls)
+        asset = files(__package__) / "assets" / "bash.yaml"
+        text = asset.read_text(encoding="utf-8")
+        return from_plain(parse(text, aliases=True, source=str(asset)), cls)
 
     def reads(self, command: str) -> bool:
         """Return whether ``command`` only reads.
@@ -587,7 +587,7 @@ def moves(command: str) -> bool:
         node = pending.pop()
         if node.kind == "command":
             words = [p.word for p in node.parts if p.kind == "word"]
-            while words and words[0] in {"builtin", "command"} and len(words) > 1:
+            while words and words[0] in {"builtin", "command"}:
                 words = words[1:]
             if words and (
                 words[0] in {"cd", "pushd", "popd", "source", ".", "eval", "exec"}

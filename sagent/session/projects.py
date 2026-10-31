@@ -36,6 +36,7 @@ import uuid
 
 from treekle import json_loads
 
+from sagent.lib.files.owner_only import open_private
 from sagent.lib.userdirs import data_dir
 from sagent.session.types import (
     SessionRecord,
@@ -196,7 +197,7 @@ def new_session_path(directory: Path) -> Path:
             )
             continue
         path = session / "session.jsonl"
-        os.close(os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+        os.close(open_private(path, os.O_EXCL | os.O_WRONLY))
         return path
 
 

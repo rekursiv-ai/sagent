@@ -23,6 +23,7 @@ import os
 
 from treekle import json_dumps, json_loads
 
+from sagent.lib.files.owner_only import open_private
 from sagent.session.types import (
     CONCRETE_TYPES,
     ContextClear,
@@ -172,16 +173,12 @@ def _line(record: SessionRecord, *, classes: Mapping[str, type]) -> bytes:
 
 def _open_locked(path: Path) -> int:
     """Open ``path`` for appending, locked against any other process."""
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
+    fd = open_private(path, os.O_RDWR | os.O_APPEND)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         os.close(fd)
         raise JournalInUseError(f"Journal {path} is open in another process.") from None
-    # ``O_CREAT``'s mode applies only to a new file; one made before, or by
-    # another tool, keeps whatever it had.
-    os.fchmod(fd, 0o600)
     # A crash mid-write leaves a line without its newline; ending it keeps the
     # next record from joining the torn one into a line nothing can read.
     size = os.fstat(fd).st_size

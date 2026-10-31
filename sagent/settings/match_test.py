@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from sagent.tui.settings.match import Tier, match
-from sagent.tui.settings.types import Setting
+from sagent.settings.match import Tier, match
+from sagent.settings.types import Setting
 
 
 async def _ok(args: str) -> str:

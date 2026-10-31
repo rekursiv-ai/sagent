@@ -1,14 +1,17 @@
-"""How a tool call shows in the terminal: its input row and its output.
+r"""How a tool call shows in the terminal: its input row and its output.
 
 A long result shows a few lines from each end, with ``⋯ N lines ⋯`` between:
 across 894 results over 20 lines, the line that mattered sat in the tail 16.9%
 of the time and the head 6.7%, so keeping only the head loses it more often.
 
+A spec only picks lines; the printer fits each kept line to its row, since only
+it knows the pane and what leads the row.
+
 Typical usage example:
 
   display = override(Bash().display, "output.lines=3,1")
-  for row in display.output.render(result.text(), width=80):
-      print(row)
+  for line in display.output.keep(result.text().split("\\n")):
+      print(line.marker if isinstance(line, Elided) else line)
 """
 
 from __future__ import annotations
@@ -18,15 +21,13 @@ from typing import TYPE_CHECKING, Literal
 
 
 if TYPE_CHECKING:
-    from rich.cells import chop_cells
-else:
-    from wrapt import lazy_import
-
-    chop_cells = lazy_import("rich.cells", "chop_cells")  # 60 ms cold.
+    from collections.abc import Sequence
 
 
 __all__ = [
     "DisplaySpec",
+    "Elided",
+    "Overflow",
     "ToolDisplay",
     "override",
 ]
@@ -56,46 +57,45 @@ class DisplaySpec:
         if self.width < 0 or (self.lines is not None and min(self.lines) < 0):
             raise ValueError(f"{self} has a negative count.")
 
-    def render(self, text: str, *, width: int) -> list[str]:
-        """Return the rows to print for ``text``.
+    def keep[T](self, lines: Sequence[T]) -> list[T | Elided]:
+        """Return the lines of a block that show, the rest counted between them.
 
-        Lines are kept whole, then each is fit to the width, so a long line
-        never shows as a fragment.
+        Lines are kept whole, never cut to rows, so a long line never shows
+        as a fragment of itself.
 
         Args:
-          text: The block, newlines and all.
-          width: The pane's width, used when ``self.width`` is ``0``; ``0``
-            for no limit.
+          lines: The block's lines, styled or not.
 
         Returns:
-          rows: What to print; empty when the block is hidden or blank.
+          kept: The head and tail ``self.lines`` keeps, with an ``Elided``
+            between them when it drops any; empty when it is ``(0, 0)``.
 
         """
-        if not self.shows(text):
+        if self.lines is None:
+            return list(lines)
+        head, tail = self.lines
+        if head + tail == 0:
             return []
-        rows = text.rstrip("\n").split("\n")
-        marker = -1
-        if self.lines is not None and len(rows) > sum(self.lines):
-            head, tail = self.lines
-            hidden = len(rows) - head - tail
-            rows = [
-                *rows[:head],
-                f"⋯ {hidden} lines ⋯",
-                *(rows[-tail:] if tail else ()),
-            ]
-            marker = head
-        fit = self.width or width
+        if len(lines) <= head + tail:
+            return list(lines)
+        # Not ``lines[-tail:]``: with no tail, ``lines[-0:]`` is every line.
         return [
-            part
-            for i, row in enumerate(rows)
-            for part in (
-                [row] if i == marker else _fit(row, width=fit, overflow=self.overflow)
-            )
+            *lines[:head],
+            Elided(hidden=len(lines) - head - tail),
+            *lines[len(lines) - tail :],
         ]
 
-    def shows(self, text: str) -> bool:
-        """Return whether ``text`` prints a row: it is not blank, and not hidden."""
-        return bool(text.strip()) and self.lines != (0, 0)
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Elided:
+    """The lines a ``DisplaySpec`` dropped, shown as ``⋯ N lines ⋯``."""
+
+    hidden: int
+
+    @property
+    def marker(self) -> str:
+        """Return the row that stands for the dropped lines."""
+        return f"⋯ {self.hidden} lines ⋯"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -180,14 +180,3 @@ def _overflow(raw: str) -> Overflow:
     if raw == "ellipsis":
         return "ellipsis"
     raise ValueError(f"overflow must be fold or ellipsis, not {raw!r}.")
-
-
-def _fit(line: str, *, width: int, overflow: Overflow) -> list[str]:
-    """Return ``line`` as rows no wider than ``width`` cells."""
-    if width <= 0:
-        return [line]
-    rows = chop_cells(line, width) or [""]
-    if overflow == "fold" or len(rows) == 1:
-        return rows
-    # One cell for the mark: a line cut silently looks like a short one.
-    return [(chop_cells(line, max(1, width - 1)) or [""])[0] + "…"]

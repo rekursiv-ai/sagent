@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 import base64
 import logging
 import math
+import re
 import uuid
 
 from treekle import (
@@ -79,6 +80,8 @@ __all__ = [
     "encode",
     "estimate",
     "events",
+    "quota_window",
+    "reset_sec",
     "to_exception",
 ]
 
@@ -394,7 +397,11 @@ def to_exception(
         return AuthError(text)
     wait_sec = _retry_after(fields, headers=headers or {})
     if status == 429 or kind == "RESOURCE_EXHAUSTED":
-        return RateLimitedError(text, retry_after_sec=wait_sec)
+        return RateLimitedError(
+            text,
+            retry_after_sec=wait_sec,
+            limit=quota_window(lower),
+        )
     if (
         status in (408, 409)
         or status >= 500
@@ -402,6 +409,72 @@ def to_exception(
     ):
         return OverloadedError(text, retry_after_sec=wait_sec)
     return RuntimeError(f"Gemini replied {status} {kind}: {text}")
+
+
+# The API's per-minute throttle also says "check quota", and names no reset; read as
+# a spent quota, it would move the model off a login that is fine in a minute.
+def quota_window(message: str) -> str:
+    """Return ``quota`` when ``message`` names when a spent quota resets; else ``""``.
+
+    Args:
+      message: The error's text, lower-cased.
+
+    Returns:
+      window: ``quota``, a window every model of the login shares, or ``""``.
+
+    """
+    return "quota" if reset_sec(message) > 0 else ""
+
+
+# The server's words, which agy passes on: "Resets in 2h39m52s." from agy 1.2
+# (antigravity-cli#1018), "Your quota will reset after 155h19m17s." before it.
+def reset_sec(message: str) -> float:
+    """Return the wait a spent quota's message names; ``0`` when it names none.
+
+    Args:
+      message: The error's text, lower-cased.
+
+    Returns:
+      seconds: The wait it names.
+
+    """
+    # Go's spelling of a duration: ``155h19m17s``, ``1m0.5s``, or ``500ms``.
+    found = re.search(
+        r"reset(?:s in| after) (?:(\d+)h)?(?:(\d+)m(?!s))?(?:(\d+(?:\.\d+)?)(m?)s)?",
+        message,
+    )
+    if found is None:
+        return 0.0
+    hours, minutes, seconds, milli = found.groups()
+    return (
+        float(hours or 0) * 3_600
+        + float(minutes or 0) * 60
+        + float(seconds or 0) / (1_000 if milli else 1)
+    )
+
+
+def _number(raw: str | None) -> float | None:
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
+
+
+def _object(value: object) -> dict[str, object]:
+    try:
+        return from_plain(value, dict[str, object])
+    except ReadError:
+        return {}
+
+
+def _objects(value: object) -> list[dict[str, object]]:
+    try:
+        return from_plain(value, list[dict[str, object]])
+    except ReadError:
+        return []
 
 
 def _contents(
@@ -749,28 +822,6 @@ def _retry_after(fields: Mapping[str, object], *, headers: Mapping[str, str]) ->
                 return seconds
     lower = {key.lower(): value for key, value in headers.items()}
     seconds = _number(lower.get("retry-after"))
-    return 0.0 if seconds is None else seconds
-
-
-def _number(raw: str | None) -> float | None:
-    if raw is None:
-        return None
-    try:
-        value = float(raw)
-    except ValueError:
-        return None
-    return value if math.isfinite(value) else None
-
-
-def _object(value: object) -> dict[str, object]:
-    try:
-        return from_plain(value, dict[str, object])
-    except ReadError:
-        return {}
-
-
-def _objects(value: object) -> list[dict[str, object]]:
-    try:
-        return from_plain(value, list[dict[str, object]])
-    except ReadError:
-        return []
+    if seconds is not None:
+        return seconds
+    return reset_sec(str(fields.get("message") or "").casefold())

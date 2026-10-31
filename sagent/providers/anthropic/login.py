@@ -15,23 +15,27 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import urlencode
 
 import asyncio
 import base64
 import getpass
 import hashlib
-import os
 import platform
 import secrets
 import time
-import webbrowser
 
 from treekle import from_plain, json_dumps, json_loads
 
+from sagent.lib.files.owner_only import write_private
 from sagent.lib.posix.child import Child
 from sagent.model.exceptions import AuthError
-from sagent.providers.login import file_lock
+from sagent.providers.login import (
+    file_lock,
+    open_browser,
+    pasted_code,
+    redirected,
+)
 
 
 if TYPE_CHECKING:
@@ -239,7 +243,7 @@ class _File:
     async def write(self, stored: Mapping[str, object]) -> None:
         document = _document(await asyncio.to_thread(_read_text, self.path))
         await asyncio.to_thread(
-            _write_private,
+            write_private,
             self.path,
             json_dumps(document | {"claudeAiOauth": stored}),
         )
@@ -279,7 +283,13 @@ async def _browser_code(
     """Return the code the browser redirects back with, and the redirect it used."""
     code = asyncio.Future[str]()
     server = await asyncio.start_server(
-        lambda reader, writer: _redirected(reader, writer, state=state, code=code),
+        lambda reader, writer: redirected(
+            reader,
+            writer,
+            path="/callback",
+            state=state,
+            code=code,
+        ),
         "127.0.0.1",
         0,
     )
@@ -287,7 +297,7 @@ async def _browser_code(
     url = _authorize_url(redirect, challenge, state)
     async with server:
         show(f"Sign in to Claude in your browser:\n\n  {url}\n")
-        webbrowser.open(url)
+        open_browser(url)
         try:
             return await asyncio.wait_for(code, timeout=300.0), redirect
         except TimeoutError:
@@ -304,42 +314,8 @@ async def _pasted_code(
     redirect = "https://platform.claude.com/oauth/code/callback"
     url = _authorize_url(redirect, challenge, state)
     show(f"Open this, sign in, and paste the code it shows:\n\n  {url}\n")
-    pasted = (await asyncio.to_thread(input, "Code: ")).strip()
-    code, _, pasted_state = pasted.partition("#")
-    if pasted_state != state:
-        raise AuthError("the pasted code belongs to another sign-in")
-    return code, redirect
-
-
-async def _redirected(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-    *,
-    state: str,
-    code: asyncio.Future[str],
-) -> None:
-    """Answer the browser's redirect, and take the code it carries."""
-    request_line = (await reader.readline()).decode(errors="replace")
-    target = request_line.split(" ")[1] if request_line.count(" ") >= 2 else ""
-    url = urlparse(target)
-    params = parse_qs(url.query)
-    received = (params.get("code") or [""])[0]
-    ok = url.path == "/callback" and bool(received)
-    ok = ok and (params.get("state") or [""])[0] == state
-    page = (
-        "Signed in; you can close this tab."
-        if ok
-        else "Sign-in failed; see the terminal."
-    )
-    writer.write(
-        f"HTTP/1.1 {200 if ok else 400} {'OK' if ok else 'Bad Request'}\r\n"
-        f"content-type: text/plain\r\ncontent-length: {len(page)}\r\n"
-        f"connection: close\r\n\r\n{page}".encode(),
-    )
-    await writer.drain()
-    writer.close()
-    if ok and not code.done():
-        code.set_result(received)
+    pasted = await asyncio.to_thread(input, "Code: ")
+    return pasted_code(pasted, state=state), redirect
 
 
 def _authorize_url(redirect: str, challenge: str, state: str) -> str:
@@ -386,18 +362,6 @@ def _login_of(text: str) -> dict[str, object]:
 
 def _read_text(path: Path) -> str:
     return path.read_text() if path.exists() else ""
-
-
-def _write_private(path: Path, text: str) -> None:
-    """Replace ``path`` with ``text``, never readable by anyone else, even briefly."""
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    staged = path.with_suffix(".tmp")
-    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    # ``O_CREAT``'s mode applies only to a new file; one left over keeps its own.
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w") as file:
-        file.write(text)
-    staged.replace(path)
 
 
 def _find_entry() -> tuple[str, ...]:

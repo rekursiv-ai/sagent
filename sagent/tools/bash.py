@@ -104,7 +104,7 @@ class Bash:
         """Return ``Bash <description>``, then the command's lines."""
         header = f"Bash {str(arguments.get('description', '')).strip()}".rstrip()
         command = str(arguments.get("command", ""))
-        command = command.replace("\r\n", "\n").replace("\t", "    ").strip("\n")
+        command = command.replace("\r\n", "\n").strip("\n")
         return f"{header}\n{command}" if command else header
 
     def serialize_key(

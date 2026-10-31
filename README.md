@@ -219,6 +219,59 @@ endpoint. Point `LLAMA_CPP_SERVER` at a built `llama-server` binary and
 
 See [Self-hosted Models](https://github.com/rekursiv-ai/sagent/blob/main/docs/selfhosted.md) for options, local snapshot paths, and runtime requirements.
 
+## MCP
+
+Sagent calls the tools of MCP servers. Manage them with `sagent mcp`, which
+takes the arguments `claude mcp` does; each command has `--help`, and each is
+also `/mcp.COMMAND` at the prompt:
+
+```bash
+sagent mcp add git -- uvx mcp-server-git                       # a local command
+sagent mcp add -t http linear https://mcp.linear.app/mcp       # a remote URL
+sagent mcp add -t http github https://api.githubcopilot.com/mcp/ \
+  -H 'Authorization: Bearer ${GITHUB_TOKEN}'                   # read at connect
+sagent mcp login linear    # OAuth sign-in to a remote server; --headless over ssh
+sagent mcp list            # each server, and whether it connects
+sagent mcp get linear      # one server
+sagent mcp logout linear   # forget its sign-in
+sagent mcp remove linear   # and the server
+```
+
+`add` writes this project's servers; `-s user` writes every project's. A
+session reads the servers it starts with; one already open keeps its own.
+
+Each tool becomes `mcp__<server>__<tool>`. An `on_demand` server is one tool,
+`mcp__<server>`, that lists, describes, and runs its tools, so a large server
+costs no tokens until used. Its options beyond `add`'s flags go in with
+`add-json`, as the entry another tool's `mcpServers` JSON holds:
+
+```bash
+sagent mcp add-json linear '{"url": "https://mcp.linear.app/mcp", "loading": "on_demand"}'
+```
+
+A remote server that signs users in with OAuth, as Linear and Notion do, needs
+one sign-in before it connects. One that takes a token instead, as GitHub's
+does, reads it from its header. Config copied from Claude Code, Cursor, or Pi
+works as it is: pass the file with `--mcp-config PATH`.
+
+In code, open the servers and pass their tools:
+
+```python
+from pathlib import Path
+
+from sagent import tools
+from sagent.agent import Agent
+from sagent.providers import Google
+from sagent.tools.mcp import McpSession, servers
+
+model = Google.from_env().model("gemini-pro-3.1")
+async with McpSession(servers(Path.cwd())) as mcp:
+    async with Agent(model=model, tools=[tools.Read(), *mcp.tools()]) as agent:
+        ...
+```
+
+See the `sagent.tools.mcp` docstring for every field.
+
 ## Security and privacy
 
 Sagent is an agent runtime, not a sandbox. Enabled tools run with the current
@@ -237,7 +290,7 @@ OS/container sandbox when a task needs hard isolation. See
 <details>
 <summary>How Sagent compares to aider, LangChain, Claude Code, Codex CLI, Gemini CLI, and other adjacent projects</summary>
 
-Not yet in Sagent: MCP, LSP, native sandboxing, desktop UI, tree-sitter repo map, hosted service, browser automation.
+Not yet in Sagent: LSP, native sandboxing, desktop UI, tree-sitter repo map, hosted service, browser automation.
 
 This comparison focuses on the runtime shape rather than every feature
 of each project.

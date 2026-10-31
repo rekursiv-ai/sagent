@@ -4,10 +4,16 @@ A call's header sits at the indent. Under it, at the output indent, come its
 input rows, the first after the mark, then its results with no mark: the mark
 says input, so a long body is not a column of boxes.
 
+A result names the call it belongs to, and the printer alone decides whether to
+label that call again: it does unless the last row on screen is that call's,
+whoever wrote the rows since.
+
 Typical usage example:
 
   printer = ConsolePrinter(Console(stderr=True))
-  printer.call("Bash list files\\nls -la", display=Bash().display)
+  bash = Header(key="1", label="Bash list files\\nls -la", display=Bash().display)
+  printer.call(bash)
+  printer.output("a.py", display=bash.display, header=bash)
 """
 
 from __future__ import annotations
@@ -21,25 +27,27 @@ import re
 import sys
 
 from sagent.runtime import types
-from sagent.tools.display import DisplaySpec
+from sagent.tools.display import Elided
 from sagent.tui.diff import highlight_source, render_diff
 from sagent.tui.markdown import TightMarkdown
-from sagent.tui.types import Sticky, fill
+from sagent.tui.types import Sticky, fill, hang
 
 
 if TYPE_CHECKING:
-    from rich.cells import cell_len, chop_cells
+    from collections.abc import Sequence
+
+    from rich.cells import cell_len
     from rich.color import Color
     from rich.console import Console
     from rich.style import Style
     from rich.text import Text
 
-    from sagent.tools.display import ToolDisplay
+    from sagent.tools.display import DisplaySpec, ToolDisplay
+    from sagent.tui.types import Header
 else:
     from wrapt import lazy_import
 
     cell_len = lazy_import("rich.cells", "cell_len")
-    chop_cells = lazy_import("rich.cells", "chop_cells")  # 60 ms cold.
     Color = lazy_import("rich.color", "Color")
     Style = lazy_import("rich.style", "Style")
     Text = lazy_import("rich.text", "Text")
@@ -110,12 +118,13 @@ class ConsolePrinter:
         land above the prompt.
       show_thinking: Whether reasoning shows; hidden by default, though the
         session keeps every summary the model returns.
-      max_label_lines: The most rows one call's header and input may take.
+      max_label_lines: The most rows one call's header may take; its input
+        is bounded by its display's ``command.lines``.
       style: The colors; dark-terminal ones when omitted.
       mark: What a call's first input row shows in ``output_indent``'s middle.
-      screen: What the rest of the program writes to the terminal through, so a
-        write past this printer ends ``last_call``; one over the console's own
-        file when omitted.
+      screen: What every row reaches the terminal through, this printer's and
+        the rest of the program's, so a row written past this printer labels the
+        next result's call again; one over the console's own file when omitted.
 
     """
 
@@ -134,38 +143,49 @@ class ConsolePrinter:
         mark: str = "⎿",
         screen: Screen | None = None,
     ) -> None:
-        self.console = console
         self.screen = screen if screen is not None else Screen(console.file)
+        console.file = self.screen
+        self.console = console
         self.show_thinking = show_thinking
         self.max_label_lines = max_label_lines
         self.style = style if style is not None else ConsoleStyle()
         self.mark = mark
         self.sticky = Sticky()
         self.gap_owed = False
-        self._writes = 0
-        self._call: tuple[str | None, int] = (None, -1)
-
-    @property
-    def last_call(self) -> str | None:
-        """The key of the call whose header printed last, until anything is written."""
-        key, written = self._call
-        return key if written == self._written() else None
+        # pragma: no mutate start -- no screen has written -1 rows, so this names no
+        # call's row before the first one prints.
+        self._last_row: tuple[str, int] = ("", -1)
+        """The call whose row is the last on screen, and ``screen.rows`` then."""
+        # pragma: no mutate end
 
     @property
     def output_width(self) -> int:
         """Return the cells a row under a call's header has after its indent."""
-        return self._width(self.output_indent)
+        return self.console.width - cell_len(self.output_indent)
 
     def line(self, text: str) -> None:
         """Write ``text`` as it is, with no markup read in it."""
         self._gap()
         self.console.print(_shown(text), markup=False, highlight=False)
 
-    def note(self, text: str) -> None:
-        """Write ``text`` dim."""
+    def note(self, text: str, *, lead: str = "", prose: bool = False) -> None:
+        """Write ``text`` dim, after ``lead``.
+
+        Args:
+          text: What the harness says.
+          lead: Who says it, such as a child's ``Agent_0: ``; the rows after
+            the first hang under the text.
+          prose: Whether it breaks between words, as a model's reply does.
+
+        """
         self._gap()
-        for row in _shown(text).splitlines() or [""]:
-            self.console.print(Text(row, style=self.style.quiet))
+        first = Text(_shown(lead), style=self.style.quiet)
+        self._rows(
+            self._lines(text, self.style.quiet) or [Text()],
+            first=first,
+            rest=Text(" " * first.cell_len),
+            prose=prose,
+        )
 
     def user(self, text: str) -> None:
         """Write ``text`` as dark-gray bars, between blank lines.
@@ -210,67 +230,83 @@ class ConsolePrinter:
 
         """
         del closes
-        rows = _shown(text).splitlines()
-        if not opens and not rows:
+        lines = self._lines(text, self.style.quiet)
+        if not opens and not lines:
             return
         self._gap()
         if opens:
             self.console.print(Text("∴ Thinking", style=self.style.heading))
-        for row in rows:
-            self.console.print(Text(f"{self.indent}{row}", style=self.style.quiet))
+        indent = Text(self.indent, style=self.style.quiet)
+        self._rows(lines, first=indent, rest=indent, prose=True)
 
-    def call(
-        self,
-        label: str,
-        *,
-        display: ToolDisplay,
-        key: str | None = None,
-    ) -> None:
-        """Write the header, wrapped, then its input rows, the first after ``mark``.
+    def call(self, header: Header) -> None:
+        """Write the label, wrapped, then the input rows, the first after ``mark``.
 
         A summary carries its argument whole, so the cap is here, where the
         width is known: ``max_label_lines`` rows, the last saying how many more.
+        The input is highlighted whole before it is cut, as a row alone would
+        lose the quote or heredoc it sits in.
 
         Args:
-          label: The header, then zero or more input lines.
-          display: How the input rows show, and in what language.
-          key: Which call this is, kept as ``last_call`` until a row follows.
+          header: The call: its label, then zero or more input lines.
 
         """
         self._gap()
-        header, _, rest = _shown(label).partition("\n")
-        width = self._width(self.indent)
-        name, sep, _ = header.partition(" ")
+        label, _, rest = _shown(header.label).partition("\n")
+        name, sep, _ = label.partition(" ")
         # Continuations hang under the argument, so the tool name stands alone;
         # a name taking over half the width leaves too little room, so wrap flush.
-        hang = " " * (len(name) + 1) if sep and len(name) + 1 <= width // 2 else ""
-        for row in self._wrap(header, width, hang):
-            self.console.print(Text(f"{self.indent}{row}", style=self.style.quiet))
-        rows = display.command.render(rest, width=self.output_width)
-        for i, row in enumerate(rows):
+        under = cell_len(name) + 1 <= (self.console.width - cell_len(self.indent)) // 2
+        indent = Text(self.indent, style=self.style.quiet)
+        hang(
+            self.console,
+            Text(label, style=self.style.quiet),
+            first=indent,
+            rest=indent + " " * (cell_len(name) + 1) if sep and under else indent,
+            width=self.console.width,
+            max_rows=self.max_label_lines,
+            # A label names the call in words, such as Bash's description.
+            prose=True,
+        )
+        display = header.display
+        rest = rest.rstrip("\n")
+        if rest.strip():
             # An unknown or empty language highlights as plain text.
-            body = highlight_source(row, display.command_language)
+            body = highlight_source(rest, display.command_language)
             body.stylize(self.style.quiet)
-            lead = f"{self.indent}{self.mark} " if i == 0 else self.output_indent
-            self.console.print(Text(lead, style=self.style.quiet) + body)
-        self._call = (key, self._written())
+            self._rows(
+                display.command.keep(list(body.split("\n", allow_blank=True))),
+                first=Text(f"{self.indent}{self.mark} ", style=self.style.quiet),
+                rest=Text(self.output_indent, style=self.style.quiet),
+                spec=display.command,
+            )
+        self._last_row = (header.key, self.screen.rows)
 
-    def output(self, text: str, *, display: ToolDisplay) -> None:
+    def output(
+        self,
+        text: str,
+        *,
+        display: ToolDisplay,
+        header: Header | None = None,
+    ) -> None:
         """Write the rows ``display.output`` keeps of ``text``, at the output indent.
 
         Args:
           text: What the tool returned.
           display: How much of it shows, and how wide.
+          header: The call it belongs to; nothing labels it when no row shows.
 
         """
-        rows = display.output.render(_shown(text), width=self.output_width)
-        if not rows:
+        if not _shown(text).strip():
             return
+        lines = display.output.keep(self._lines(text.rstrip("\n"), self.style.quiet))
+        if not lines:
+            return
+        self._relabel(header)
         self._gap()
-        for row in rows:
-            self.console.print(
-                Text(f"{self.output_indent}{row}", style=self.style.quiet),
-            )
+        indent = Text(self.output_indent, style=self.style.quiet)
+        self._rows(lines, first=indent, rest=indent, spec=display.output)
+        self._record_last(header)
 
     def diff(
         self,
@@ -278,6 +314,7 @@ class ConsolePrinter:
         *,
         path: str,
         lines: tuple[int, int] | None = None,
+        header: Header | None = None,
     ) -> None:
         """Write ``diff`` highlighted, its words marked, cut to ``lines``.
 
@@ -285,8 +322,10 @@ class ConsolePrinter:
           diff: A unified diff.
           path: The file it changes, for its lexer.
           lines: Rows kept from the head and tail; ``None`` keeps all.
+          header: The call it belongs to.
 
         """
+        self._relabel(header)
         self._gap()
         render_diff(
             self.console,
@@ -296,14 +335,17 @@ class ConsolePrinter:
             lines=lines,
             sticky=self.sticky,
         )
+        self._record_last(header)
 
     def error(self, text: str) -> None:
         """Write what failed outside any call, red after ``✗`` at the indent."""
         self._failure(text, indent=self.indent)
 
-    def failed(self, text: str) -> None:
-        """Write how a call failed, red after ``✗`` at the output indent."""
+    def failed(self, text: str, *, header: Header | None = None) -> None:
+        """Write how the call ``header`` names failed, red after ``✗``, under it."""
+        self._relabel(header)
         self._failure(text, indent=self.output_indent)
+        self._record_last(header)
 
     def halt(self, text: str) -> None:
         """Write ``text`` bold red, wrapped between two rules as wide as a fill.
@@ -328,73 +370,89 @@ class ConsolePrinter:
         """Write ``lead`` then ``text`` as filled bars, between blank lines."""
         self.gap_owed = True
         self._gap()
-        rows = text.rstrip("\n").split("\n")
         # A bar is 80 whatever it holds, outside the turn's edge: what was said
         # is prose, so it wraps rather than widening.
-        width = fill(0, total_padding=0, width=self.console.width)
-        if width <= cell_len(lead):
-            self.console.print(Text(lead + text), style=style)
-        else:
-            first, *_ = chop_cells(rows[0], width - cell_len(lead)) or [""]
-            chunks = [lead + first]
-            rest = width - len(self.indent)
-            if tail := rows[0][len(first) :]:
-                chunks += [self.indent + c for c in chop_cells(tail, rest)]
-            for raw in rows[1:]:
-                chunks += [self.indent + c for c in chop_cells(raw, rest) or [""]]
-            for chunk in chunks:
-                row = Text(chunk)
-                row.append(" " * max(0, width - row.cell_len))
-                self.console.print(row, style=style)
+        self._rows(
+            self._lines(text.rstrip("\n"), style) or [Text()],
+            first=Text(lead, style=style),
+            rest=Text(self.indent, style=style),
+            width=fill(0, total_padding=0, width=self.console.width),
+            background=style,
+            prose=True,
+        )
         self.gap_owed = True
 
     # Every row keeps all its text, wrapped under the text, never under ``✗``.
     def _failure(self, text: str, *, indent: str) -> None:
         """Write ``text`` in red after ``indent``, its first row after ``✗``; never nothing."""
         self._gap()
-        rows = DisplaySpec(lines=None).render(
-            _shown(text),
-            width=self._width(f"{indent}✗ "),
+        shown = text.rstrip("\n") if text.strip() else "<no error message>"
+        self._rows(
+            self._lines(shown, self.style.failure),
+            first=Text(f"{indent}✗ ", style=self.style.failure),
+            rest=Text(f"{indent}  ", style=self.style.failure),
         )
-        for i, row in enumerate(rows or ["<no error message>"]):
-            glyph = "✗" if i == 0 else " "
-            self.console.print(
-                Text(f"{indent}{glyph} {row}", style=self.style.failure),
+
+    # A dropped run's marker always folds: cut with ``…``, it would hide the count it
+    # exists to show.
+    def _rows(
+        self,
+        lines: Sequence[Text | Elided],
+        *,
+        first: Text,
+        rest: Text,
+        spec: DisplaySpec | None = None,
+        width: int = 0,
+        background: Style | None = None,
+        prose: bool = False,
+    ) -> None:
+        """Print each line hung after ``rest``, the very first after ``first``."""
+        for i, line in enumerate(lines):
+            lead = first if i == 0 else rest
+            if isinstance(line, Elided):
+                marker = Text(line.marker, style=self.style.quiet)
+                hang(
+                    self.console,
+                    marker,
+                    first=lead,
+                    rest=rest,
+                    width=width or self.console.width,
+                )
+                continue
+            hang(
+                self.console,
+                line,
+                first=lead,
+                rest=rest,
+                width=width or self.console.width,
+                limit=spec.width if spec is not None else 0,
+                overflow=spec.overflow if spec is not None else "fold",
+                prose=prose,
+                background=background,
             )
 
-    # Every write of this printer, and only a write, starts here; ``_written`` counts
-    # them with the screen's, so ``last_call`` ends whoever writes below the call.
+    def _lines(self, text: str, style: Style) -> list[Text]:
+        """Return ``text`` shown safe, as styled lines; a final newline ends the last."""
+        if not text:
+            return []
+        shown = Text(_shown(text).removesuffix("\n"), style=style)
+        return list(shown.split("\n", allow_blank=True))
+
+    def _relabel(self, header: Header | None) -> None:
+        """Label the call ``header`` again, unless the last row on screen is its."""
+        if header is not None and self._last_row != (header.key, self.screen.rows):
+            self.call(header)
+
+    def _record_last(self, header: Header | None) -> None:
+        """Record that the last row on screen is the call ``header``'s."""
+        if header is not None:
+            self._last_row = (header.key, self.screen.rows)
+
     def _gap(self) -> None:
         """Print the blank line owed after a user bar or before a reply block."""
-        self._writes += 1
         if self.gap_owed:
             self.console.print()
             self.gap_owed = False
-
-    def _written(self) -> int:
-        """Return how many writes reached the terminal: this printer's and the screen's."""
-        return self._writes + self.screen.written
-
-    def _width(self, indent: str) -> int:
-        """Return the cells a row has after ``indent``."""
-        return self.console.width - cell_len(indent)
-
-    def _wrap(self, text: str, width: int, hang: str) -> list[str]:
-        """Return ``text`` cut to ``width`` cells, at most ``max_label_lines`` rows."""
-        usable = max(1, width)
-        rows: list[str] = []
-        for raw in text.splitlines() or [""]:
-            head, *_ = chop_cells(raw, usable) or [""]
-            rows.append(head)
-            if tail := raw[len(head) :]:
-                # ``call`` hangs at most half the width, so a cell or more remains.
-                rows.extend(
-                    hang + part for part in chop_cells(tail, usable - len(hang))
-                )
-        if len(rows) <= self.max_label_lines:
-            return rows
-        kept = self.max_label_lines - 1
-        return [*rows[:kept], f"... ({len(rows) - kept} more lines)"]
 
 
 class TextStream(Protocol):
@@ -417,8 +475,14 @@ class TextStream(Protocol):
         ...
 
 
-class Screen(io.TextIOBase):
-    """A stream to the terminal that counts what was written through it.
+# A ``StringIO`` only for its type: Rich's ``Console.file`` takes an ``IO[str]``, and
+# typeshed reconciles ``TextIOBase`` with ``TextIO`` only there. Every write goes on
+# to ``stream``; the buffer stays empty.
+class Screen(io.StringIO):
+    """A stream to the terminal that counts the rows written through it.
+
+    A row ends at a newline, so a write that moves nothing, such as the title's
+    escape, counts for none.
 
     Args:
       stream: Where the writes go.
@@ -426,14 +490,15 @@ class Screen(io.TextIOBase):
     """
 
     def __init__(self, stream: TextStream) -> None:
+        super().__init__()
         self.stream = stream
-        self.written = 0
-        """Characters written so far."""
+        self.rows = 0
+        """Rows written so far: the newlines."""
 
     @override
     def write(self, s: str, /) -> int:
-        """Write ``s`` to the stream, and count it."""
-        self.written += len(s)
+        """Write ``s`` to the stream, and count its rows."""
+        self.rows += s.count("\n")
         return self.stream.write(s)
 
     @override

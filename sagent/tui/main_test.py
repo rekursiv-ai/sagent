@@ -15,8 +15,12 @@ import functools
 import io
 import logging
 import os
+import pty
 import re
+import select
 import signal
+import stat
+import subprocess
 import sys
 import time
 
@@ -73,11 +77,17 @@ from sagent.session.types import (
     UserMessage,
     record_classes,
 )
+from sagent.settings.flags import flags
+from sagent.settings.harvest import harvest
+from sagent.settings.types import SettingError
+from sagent.tools import mcp_settings
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.bash import Bash
 from sagent.tools.display import ToolDisplay
+from sagent.tools.function import tool
+from sagent.tools.mcp import McpServer, McpSession
 from sagent.tools.memory import Memory
 from sagent.tools.paper_author import PaperAuthor
 from sagent.tools.paper_details import PaperDetails
@@ -89,11 +99,9 @@ from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
 from sagent.tui import main
 from sagent.tui.console import ConsolePrinter, Screen
-from sagent.tui.prompt import Input, prompt_text
-from sagent.tui.settings.flags import flags
-from sagent.tui.settings.types import SettingError
+from sagent.tui.prompt import Input, Panes, prompt_text
 from sagent.tui.slash import Commands
-from sagent.tui.types import CommandOutput
+from sagent.tui.types import CommandOutput, Header
 from sagent.tui.views import Views
 
 
@@ -106,7 +114,7 @@ if TYPE_CHECKING:
         ProviderFactory,
         ProviderSharedResources,
     )
-    from sagent.tools.types import ToolContext
+    from sagent.tools.types import Tool, ToolContext
 
 
 def _flags(*argv: str) -> main.Flags:
@@ -276,7 +284,7 @@ def test_the_flags_default_to_a_fresh_interactive_session(
     for name in ("SAGENT_PROVIDER", "SAGENT_ALLOW_PROVIDERS", "SAGENT_LOG_LEVEL"):
         monkeypatch.delenv(name, raising=False)
     flags = _flags()
-    assert (flags.command, flags.allow_providers) == (None, "")
+    assert flags.allow_providers == ""
     assert (flags.system_prompt, flags.append_system_prompt) == (None, "")
     assert flags.compact is True
     assert (flags.tools, flags.name) == (None, "Agent")
@@ -310,10 +318,10 @@ def test_the_environment_supplies_provider_allow_list_and_log_level(
     monkeypatch.setenv("SAGENT_LOG_LEVEL", "INFO")
     flags = _flags()
     assert (flags.allow_providers, flags.log_level) == ("deep,scripted", "INFO")
-    assert main._provider_name(_Script().catalog(), _flags()) == "deep"
+    assert main._provider_name(_Script().catalog(), flags.allow_providers) == "deep"
     monkeypatch.setenv("SAGENT_PROVIDER", "sig")
     catalog = _Script().catalog()
-    assert main._provider_name(catalog, _flags()) == "signing"
+    assert main._provider_name(catalog, flags.allow_providers) == "signing"
     assert list(catalog.factories) == ["deep", "scripted", "signing"]
 
 
@@ -325,7 +333,6 @@ def test_the_parser_names_every_option_it_knows_so_the_rest_are_settings() -> No
 
 def test_the_flags_parse_into_their_types() -> None:
     flags = _flags(
-        "login",
         "--no-compact",
         "--tools",
         "Read",
@@ -351,7 +358,7 @@ def test_the_flags_parse_into_their_types() -> None:
         "a",
         "b",
     )
-    assert (flags.command, flags.compact) == ("login", False)
+    assert flags.compact is False
     assert flags.tools == ["Read", "Bash"]
     assert (flags.max_budget_usd, flags.max_tool_call_rounds) == (2.5, 3)
     assert (flags.session, flags.history, flags.resume_limit) == (
@@ -436,15 +443,120 @@ def test_a_count_or_amount_that_fits_is_taken() -> None:
     assert main._positive_float("0.01") == 0.01
 
 
-def test_an_unknown_command_is_a_usage_error(
+@pytest.mark.parametrize("word", ["logout", "hello"])
+def test_an_unknown_command_names_the_known_ones(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    word: str,
+) -> None:
+    _argv(monkeypatch, word, "there")
+    assert main.main() == 2
+    assert capsys.readouterr().err == (
+        f"Error: unknown command: sagent {word} there; see sagent --help\n"
+    )
+    del script
+
+
+def test_a_word_a_command_does_not_take_is_refused(
+    script: _Script,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _argv(monkeypatch, "logout")
-    with pytest.raises(SystemExit) as exit_info:
-        main.main()
-    assert exit_info.value.code == 2
-    assert "unknown command 'logout'; the only one is login" in capsys.readouterr().err
+    _argv(monkeypatch, "login", "--provider", "signing", "extra")
+    assert main.main() == 1
+    assert capsys.readouterr().err == (
+        "Error: [/login] unrecognized arguments: extra; see sagent login --help\n"
+    )
+    provider = script.providers["signing"]
+    assert isinstance(provider, _Signing)
+    assert provider.signed_in == 0
+
+
+def test_a_commands_setting_flags_match_as_the_sessions_do(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--effrt`` is ``--model.thinking.effort`` after a command too, as alone."""
+    _argv(monkeypatch, "login", "--provider", "signing", "--effrt", "none")
+    assert main.main() == 0, capsys.readouterr()
+    provider = script.providers["signing"]
+    assert isinstance(provider, _Signing)
+    assert provider.signed_in == 1
+
+
+def test_an_unknown_tool_is_refused_before_a_session_file_is_made(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    _argv(monkeypatch, "--provider", "scripted", "--tools", "Nope")
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 1
+    assert capsys.readouterr().err.startswith(
+        "Error: ValueError: unknown tools Nope; known: Bash, ",
+    )
+    assert not project_dir(tmp_path).exists()
+    del script
+
+
+def test_a_tool_its_server_does_not_give_is_refused_once_it_connects(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    server = tmp_path / "server.py"
+    server.write_text(
+        "from mcp.server.mcpserver import MCPServer\n"
+        "app = MCPServer('good')\n"
+        "@app.tool()\n"
+        "def shout(text: str) -> str:\n"
+        "    return text.upper()\n"
+        "app.run()\n",
+    )
+    config = {
+        "mcpServers": {"good": {"command": sys.executable, "args": [str(server)]}},
+    }
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--ephemeral",
+        "--strict-mcp-config",
+        "--mcp-config",
+        json_dumps(config),
+        "--tools",
+        "mcp__good__yell",
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 1
+    assert capsys.readouterr().err.startswith(
+        "Error: ValueError: unknown tools mcp__good__yell; known: Bash, ",
+    )
+    del script
+
+
+def test_mcp_keeps_its_own_flags(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = {
+        "mcpServers": {"off": {"url": "https://mcp.example/mcp", "disabled": True}},
+    }
+    _argv(
+        monkeypatch,
+        "mcp",
+        "list",
+        "--strict-mcp-config",
+        "--mcp-config",
+        json_dumps(config),
+    )
+    assert main.main() == 0
+    assert capsys.readouterr().out == "[/mcp.list] off  http  every_request  disabled\n"
 
 
 def test_what_a_setting_flag_says_is_dropped() -> None:
@@ -842,9 +954,9 @@ def test_an_account_that_is_no_name_is_an_error(
     [
         (
             AuthError("the code was for another sign-in"),
-            "Error: AuthError: the code was for another sign-in\n",
+            "Error: [/login] AuthError: the code was for another sign-in\n",
         ),
-        (EOFError(), "Error: EOFError\n"),
+        (EOFError(), "Error: [/login] EOFError\n"),
     ],
     ids=["refused", "no-input"],
 )
@@ -874,8 +986,293 @@ def test_login_to_a_provider_without_one_is_an_error(
 ) -> None:
     _argv(monkeypatch, "login", "--provider", "scripted")
     assert main.main() == 1
-    assert capsys.readouterr().err == "Error: scripted has no interactive sign-in.\n"
+    assert capsys.readouterr().err == (
+        "Error: [/login] scripted has no interactive sign-in\n"
+    )
     del script
+
+
+# Run as its own process: only a real terminal shows whether the prompt lets go
+# of it while a sign-in asks for the address.
+_PASTING = """
+import asyncio
+import sys
+from pathlib import Path
+
+from sagent.model.scripted import ScriptedProvider
+from sagent.providers.catalog import ModelCatalog
+from sagent.providers.login import Logins
+from sagent.tui import main
+
+
+class Pasting(ScriptedProvider):
+    async def login(self, *, headless: bool = False) -> None:
+        pasted = await asyncio.to_thread(input, "Address: ")
+        Path("pasted").write_text(f"{headless} {pasted}")
+
+    @property
+    def logins(self) -> Logins:
+        return Logins(Path("logins.json"))
+
+
+main.ModelCatalog = lambda account=None: ModelCatalog(
+    factories=lambda account: {"pasting": Pasting},
+    account=account,
+)
+sys.argv = ["sagent", "--ephemeral", "--history", "history"]
+sys.exit(main.main())
+"""
+
+
+def _until(fd: int, wanted: bytes, *, seen: bytearray, timeout_sec: float = 30) -> None:
+    """Read the terminal ``fd`` into ``seen`` until ``wanted`` shows after its start."""
+    start = len(seen)
+    deadline = time.monotonic() + timeout_sec
+    while wanted not in seen[start:]:
+        left = deadline - time.monotonic()
+        nothing: list[int] = []
+        ready, _, _ = select.select([fd], nothing, nothing, max(left, 0))
+        if not ready:
+            raise AssertionError(f"no {wanted!r} in {bytes(seen[start:])!r}")
+        # Linux says EIO once the child has closed the terminal: it exited.
+        try:
+            read = os.read(fd, 4096)
+        except OSError:
+            read = b""
+        if not read:
+            raise AssertionError(
+                f"exited before {wanted!r}; it said {bytes(seen[start:])!r}",
+            )
+        seen.extend(read)
+
+
+def test_a_headless_login_at_the_prompt_takes_the_address_pasted(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "driver.py").write_text(_PASTING)
+    homes = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
+    env = {
+        **{k: v for k, v in os.environ.items() if not k.startswith("SAGENT_")},
+        **{name: str(tmp_path / name) for name in homes},
+        "SAGENT_PROVIDER": "pasting",
+        "TERM": "xterm",
+        "PROMPT_TOOLKIT_NO_CPR": "1",
+    }
+    terminal, child = pty.openpty()
+    seen = bytearray()
+    with subprocess.Popen(
+        [sys.executable, "driver.py"],
+        cwd=tmp_path,
+        stdin=child,
+        stdout=child,
+        stderr=child,
+        env=env,
+        start_new_session=True,
+    ) as proc:
+        os.close(child)
+        try:
+            _until(terminal, b"[/model]", seen=seen)
+            os.write(terminal, b"/login --headless\r")
+            _until(terminal, b"Address: ", seen=seen)
+            os.write(terminal, b"https://back/?code=c\r")
+            _until(terminal, b"[/login] pasting signed in", seen=seen)
+            os.write(terminal, b"/quit\r")
+            assert proc.wait(timeout=30) == 0
+        finally:
+            proc.kill()
+            os.close(terminal)
+    assert (tmp_path / "pasted").read_text() == "True https://back/?code=c"
+
+
+def test_mcp_verbs_run_from_the_shell_without_a_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """No provider is set up, and none is needed to manage MCP servers."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("SAGENT_PROVIDER", "nowhere")
+    for argv, out in [
+        (("mcp", "list"), "No MCP servers. Add one with `sagent mcp add`"),
+        (
+            ("mcp", "add", "-t", "http", "web", "https://h/mcp"),
+            "Added MCP server 'web' to local; sessions started from now use it.",
+        ),
+        (("mcp", "get", "web"), "web  http  every_request  failed: "),
+        (("mcp", "logout", "web"), "MCP server 'web' had no sign-in."),
+        (
+            ("mcp", "remove", "web"),
+            "Removed MCP server 'web' from local; sessions started from now go",
+        ),
+    ]:
+        _argv(monkeypatch, *argv)
+        assert main.main() == 0, argv
+        said = capsys.readouterr()
+        assert said.out.startswith(f"[/mcp.{argv[1]}] {out}"), (argv, said)
+        assert said.err == "", (argv, said)
+
+
+def test_mcp_login_shows_the_sign_in_page_then_what_it_did(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The page to open is said along the way, as at the prompt; no error is."""
+
+    async def sign_in(
+        server: McpServer,
+        *,
+        show: Callable[[str], object],
+        headless: bool,
+    ) -> None:
+        del headless
+        show(f"Open https://auth/{server.name}")
+
+    monkeypatch.setattr(mcp_settings, "login", sign_in)
+    config = {"mcpServers": {"web": {"url": "https://h/mcp"}}}
+    _argv(monkeypatch, "mcp", "login", "web", "--mcp-config", json_dumps(config))
+    assert main.main() == 0
+    said = capsys.readouterr()
+    assert (said.out, said.err) == (
+        "Open https://auth/web\n[/mcp.login] Signed in to MCP server 'web'.\n",
+        "",
+    )
+
+
+def test_mcp_commands_log_to_the_log_file_not_the_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    logs: logging.Logger,
+) -> None:
+    config = {"mcpServers": {"dead": {"url": "http://127.0.0.1:9/mcp"}}}
+    _argv(monkeypatch, "mcp", "list", "--mcp-config", json_dumps(config))
+    assert main.main() == 0
+    said = capsys.readouterr()
+    assert said.out.startswith("[/mcp.list] dead  http  every_request  failed: ")
+    assert said.err == ""
+    for handler in logs.handlers:
+        handler.flush()
+    log = data_dir() / "rekursiv-ai" / "sagent" / "repl.log"
+    assert "MCP server 'dead' failed to connect" in log.read_text()
+
+
+@pytest.mark.parametrize("argv", [("mcp",), ("mcp", "--help"), ("mcp", "-h")])
+def test_a_group_lists_its_commands(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...],
+) -> None:
+    _argv(monkeypatch, *argv)
+    assert main.main() == 0
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == "[/help] mcp commands"
+    assert [line.split()[0] for line in out[1:] if line.startswith("  /")] == [
+        "/mcp.list",
+        "/mcp.get",
+        "/mcp.add",
+        "/mcp.add-json",
+        "/mcp.remove",
+        "/mcp.login",
+        "/mcp.logout",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("argv", "said", "code"),
+    [
+        (
+            ("mcp", "frob"),
+            "Error: unknown command: sagent mcp frob; see sagent mcp --help\n",
+            2,
+        ),
+        (
+            ("mcp", "login"),
+            (
+                "Error: [/mcp.login] the following arguments are required: name;"
+                " see sagent mcp login --help\n"
+            ),
+            1,
+        ),
+        (
+            ("mcp", "login", "nope"),
+            "Error: [/mcp.login] No MCP server 'nope'; configured: git\n",
+            1,
+        ),
+        (
+            ("mcp", "login", "git"),
+            (
+                "Error: [/mcp.login] ValueError: MCP server 'git' runs locally;"
+                " it needs no sign-in.\n"
+            ),
+            1,
+        ),
+        (
+            ("mcp", "list", "--effort", "high"),
+            (
+                "Error: [/mcp.list] unrecognized arguments: --effort high;"
+                " see sagent mcp list --help\n"
+            ),
+            1,
+        ),
+    ],
+)
+def test_a_bad_mcp_command_is_an_error_not_a_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: tuple[str, ...],
+    said: str,
+    code: int,
+) -> None:
+    config = {"mcpServers": {"git": {"command": "uvx", "args": ["mcp-server-git"]}}}
+    flags = ("--strict-mcp-config", "--mcp-config", json_dumps(config))
+    _argv(monkeypatch, *argv, *(flags if len(argv) > 1 and argv[1] != "frob" else ()))
+    assert main.main() == code
+    assert capsys.readouterr().err == said
+
+
+def test_every_shell_command_runs_as_its_prompt_command_does(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """``sagent NAME ARGS`` and ``/NAME ARGS`` reach one action and say one thing."""
+    monkeypatch.chdir(tmp_path)
+    agent = Agent(model=script.catalog()["scripted"]["scripted"], cwd=tmp_path)
+    said: list[CommandOutput] = []
+    commands = Commands(
+        agent,
+        catalog=script.catalog(),
+        say=said.append,
+        screen=main._Screen(),
+        panes=Panes(),
+    )
+    actions = [s for s in harvest(commands.owners()) if s.cli and s.value is None]
+    assert [" ".join(s.name) for s in actions] == [
+        "login",
+        "mcp list",
+        "mcp get",
+        "mcp add",
+        "mcp add-json",
+        "mcp remove",
+        "mcp login",
+        "mcp logout",
+    ]
+    for action in actions:
+        dotted = ".".join(action.name)
+        for args, code in [("--help", 0), ("--bogus", 1)]:
+            _argv(monkeypatch, *action.name, args)
+            assert main.main() == code, (action.name, args)
+            shell = capsys.readouterr()
+            asyncio.run(commands(f"/{dotted} {args}"))
+            (prompt,) = said
+            said.clear()
+            if code == 0:
+                assert prompt.tone == "note"
+                assert prompt.text == f"[/{dotted}] {action.help_long.rstrip()}"
+                assert (shell.out, shell.err) == (f"{prompt.text}\n", "")
+            else:
+                assert prompt.tone == "error"
+                assert (shell.out, shell.err) == ("", f"Error: {prompt.text}\n")
 
 
 def test_the_allow_list_picks_the_provider_and_bounds_the_team(
@@ -931,6 +1328,15 @@ def test_without_an_allow_list_every_provider_is_offered(
     assert main.main() == 0
     assert seen == ["deep/deep", "label=Agent"]
     assert list(script.catalogs[0].factories) == ["scripted", "deep", "signing"]
+
+
+def _no_welcome(*, folder: Path) -> None:
+    del folder
+
+
+def _no_tools(flags: main.Flags, **kwargs: object) -> list[Tool]:
+    del flags, kwargs
+    return []
 
 
 def _note_model(seen: list[str]) -> Callable[[Agent, main.Flags], object]:
@@ -1103,6 +1509,95 @@ def test_an_interactive_run_opens_the_prompt_and_names_the_model(
         and h.baseFilename == str(journal.with_suffix(".log"))
         for h in logs.handlers
     )
+    del script
+
+
+def test_an_interactive_run_logs_a_failed_mcp_server_to_its_file_not_the_terminal(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    logs: logging.Logger,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = {"mcpServers": {"dead": {"url": "http://127.0.0.1:9/mcp"}}}
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--history",
+        str(tmp_path / "h"),
+        "--mcp-config",
+        json_dumps(config),
+    )
+    _stdin(monkeypatch, tty=True)
+    _quick_prints(monkeypatch)
+    monkeypatch.setattr(main, "print_welcome", _no_welcome)
+    with (
+        create_pipe_input() as pipe,
+        create_app_session(input=pipe, output=DummyOutput()),
+    ):
+        pipe.send_text("/quit\r")
+        assert main.main() == 0
+    assert "MCP server" not in capsys.readouterr().err
+    (journal,) = project_dir(tmp_path).glob("*/session.jsonl")
+    for handler in logs.handlers:
+        handler.flush()
+    assert "MCP server 'dead' failed to connect" in (
+        journal.with_suffix(".log").read_text()
+    )
+    del script
+
+
+@pytest.mark.parametrize(
+    ("named", "connected"),
+    [
+        (None, ["git", "github"]),
+        (("none",), []),
+        (("Read",), []),
+        (("mcp__git",), ["git"]),
+        (("Read", "mcp__github__search"), ["github"]),
+        (("mcp__git__log", "mcp__github"), ["git", "github"]),
+    ],
+)
+def test_only_the_servers_tools_names_are_connected(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    named: tuple[str, ...] | None,
+    connected: list[str],
+) -> None:
+    opened: list[list[str]] = []
+
+    class _Opened(McpSession):
+        def __init__(self, servers: Sequence[McpServer]) -> None:
+            opened.append([s.name for s in servers])
+            super().__init__([])
+
+    config = {
+        "mcpServers": {
+            "git": {"command": "git-mcp"},
+            "github": {"url": "https://api.example/mcp"},
+        },
+    }
+    monkeypatch.setattr(main, "McpSession", _Opened)
+    monkeypatch.setattr(main, "_tools", _no_tools)
+    monkeypatch.setattr(main, "_headless", _note_model([]))
+    tools = () if named is None else ("--tools", *named)
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--ephemeral",
+        "--strict-mcp-config",
+        "--mcp-config",
+        json_dumps(config),
+        *tools,
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    assert opened == [connected]
     del script
 
 
@@ -1333,6 +1828,42 @@ def test_the_web_tools_share_one_session_and_bash_knows_its_peers() -> None:
         "WebFetch",
     ]
     assert all(peer is tools[peer.name] for peer in bash.peers)
+
+
+def test_mcp_tools_join_the_built_in_ones_and_tools_can_name_them() -> None:
+    catalog = _Script().catalog()
+    team = Team(catalog=catalog)
+    extra = [tool(lambda: "x", name="mcp__srv__echo")]
+
+    def names(*argv: str) -> list[str]:
+        return [
+            t.name
+            for t in main._tools(
+                _flags(*argv),
+                cwd=Path("/w"),
+                team=team,
+                session=FetchSession(),
+                mcp=extra,
+            )
+        ]
+
+    assert names() == [*_DEFAULT_TOOLS, "mcp__srv__echo"]
+    assert names("--tools", "Read", "mcp__srv__echo") == ["Read", "mcp__srv__echo"]
+    assert names("--tools", "Read") == ["Read"]
+
+
+def test_mcp_config_flags_parse() -> None:
+    parsed = _flags(
+        "--mcp-config",
+        "a.json",
+        "--mcp-config",
+        "{}",
+        "--strict-mcp-config",
+    )
+    assert parsed.mcp_config == ["a.json", "{}"]
+    assert parsed.strict_mcp_config is True
+    plain = _flags()
+    assert (plain.mcp_config, plain.strict_mcp_config) == ([], False)
 
 
 def test_memories_live_in_the_project_directory(tmp_path: Path) -> None:
@@ -1633,7 +2164,10 @@ def test_interactive_logging_goes_to_the_session_s_file_never_stderr(
     logs.addHandler(logging.StreamHandler(io.StringIO()))
     kept = logging.FileHandler(tmp_path / "kept.log")
     logs.addHandler(kept)
+    (tmp_path / "s.log").write_text("")
+    (tmp_path / "s.log").chmod(0o664)
     main._logging(None, path=tmp_path / "s.jsonl", interactive=True)
+    assert stat.S_IMODE((tmp_path / "s.log").stat().st_mode) == 0o600
     streams: list[logging.Handler] = [
         h for h in logs.handlers if type(h) is logging.StreamHandler
     ]
@@ -1658,6 +2192,8 @@ def test_interactive_logging_without_a_journal_uses_the_shared_file(
         isinstance(h, logging.FileHandler) and h.baseFilename == str(log)
         for h in logs.handlers
     )
+    assert stat.S_IMODE(log.stat().st_mode) == 0o600
+    assert stat.S_IMODE(log.parent.stat().st_mode) == 0o700
     assert logging.getLogger("sagent").level == logging.WARNING
 
 
@@ -1898,10 +2434,19 @@ def test_records_streams_each_kind_of_event_and_drops_the_rest() -> None:
     ((record,),) = [main._records(suspended, tools=tools)]
     assert record["descriptor"] == "text/x-notice"
     assert str(record["content"]).startswith("Weekly limit reached. Resumes ")
-    switched = types.LoginSwitched(provider="acli", was="work", now="default")
+    switched = types.LoginSwitched(
+        provider="acli",
+        was="work",
+        now="default",
+        first="default",
+    )
     assert main._records(switched, tools=tools) == [
-        {"descriptor": "text/x-notice", "content": "[default reset; back on default]"},
+        {"descriptor": "text/x-notice", "content": "[on default, first in order]"},
     ]
+    spent = types.LoginsSpent(provider="acli", resets=(("work", time.time() + 60),))
+    ((notice,),) = [main._records(spent, tools=tools)]
+    assert notice["descriptor"] == "text/x-notice"
+    assert str(notice["content"]).startswith("[no acli login has quota: work ")
     result = ShellCommandResult(call_id="1", stdout="out", exit_code=2, is_error=True)
     assert main._records(result, tools=tools) == [
         {
@@ -2020,12 +2565,12 @@ async def test_run_says_how_to_resume_a_journaled_session(
 
 
 @pytest.mark.asyncio
-async def test_a_write_to_stderr_during_a_session_ends_the_last_call(
+async def test_a_write_to_stderr_during_a_session_names_the_call_again(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     made: list[ConsolePrinter] = []
-    seen: list[str | None] = []
+    labels: list[str] = []
 
     class _Kept(ConsolePrinter):
         def __init__(
@@ -2038,13 +2583,19 @@ async def test_a_write_to_stderr_during_a_session_ends_the_last_call(
             super().__init__(console, show_thinking=show_thinking, screen=screen)
             made.append(self)
 
+        @override
+        def call(self, header: Header) -> None:
+            super().call(header)
+            labels.append(header.label)
+
     class _Warns(Commands):
         @override
         async def __call__(self, line: str) -> bool:
             if line == "/warn":
-                made[0].call("Read a.py", display=ToolDisplay(), key="1")
+                read = Header(key="1", label="Read a.py", display=ToolDisplay())
+                made[0].call(read)
                 print("a library warning", file=sys.stderr)  # noqa: T201 -- A library writing to stderr is what is tested.
-                seen.append(made[0].last_call)
+                made[0].failed("gone", header=read)
                 return False
             return await super().__call__(line)
 
@@ -2065,7 +2616,7 @@ async def test_a_write_to_stderr_during_a_session_ends_the_last_call(
                 ),
                 timeout=5,
             )
-    assert seen == [None]
+    assert labels == ["Read a.py", "Read a.py"]
 
 
 @pytest.mark.asyncio
@@ -2241,6 +2792,9 @@ def test_help_opens_with_the_module_s_summary(
         in out
     )
     assert "python -m sagent login" in out
+    assert "python -m sagent mcp list" in out
+    assert "python -m sagent mcp login linear --headless" in out
+    assert "``sagent mcp add ARGS``, each with ``--help``" in " ".join(out.split())
     assert "Every setting ``/help`` lists is a flag too" in out
 
 
@@ -2676,7 +3230,10 @@ async def test_run_labels_calls_by_their_tool_and_quits_by_command(
 async def test_run_says_every_way_to_resume(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # The hint wraps at the terminal's width, so a narrow one splits its lines.
+    monkeypatch.setenv("COLUMNS", "200")
     async with (
         JsonlJournal(tmp_path / "abc" / "journal.jsonl") as journal,
         Agent(model=ScriptedProvider()["scripted"], journal=journal) as agent,
@@ -2744,7 +3301,9 @@ async def test_run_gives_every_agent_s_commands_the_width_output_shows_in(
 async def test_a_long_session_id_pushes_every_resume_comment_out(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
     async with (
         JsonlJournal(tmp_path / "5c67e618b5cb" / "journal.jsonl") as journal,
         Agent(model=ScriptedProvider()["scripted"], journal=journal) as agent,
@@ -2862,6 +3421,26 @@ async def test_run_keeps_history_in_the_per_user_file_by_default() -> None:
             )
     history = state_dir() / "rekursiv-ai" / "sagent" / "repl-history"
     assert "/help" in history.read_text()
+    assert stat.S_IMODE(history.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_history_an_older_version_left_open_is_made_private() -> None:
+    history = state_dir() / "rekursiv-ai" / "sagent" / "repl-history"
+    history.parent.mkdir(parents=True)
+    history.write_text("")
+    history.chmod(0o664)
+    async with Agent(model=ScriptedProvider()["scripted"]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("\x04")
+            await asyncio.wait_for(
+                main.run(agent, catalog=_Script().catalog(), print_batch_sec=0),
+                timeout=5,
+            )
+    assert stat.S_IMODE(history.stat().st_mode) == 0o600
 
 
 def test_a_listing_exactly_at_the_cap_hides_nothing(

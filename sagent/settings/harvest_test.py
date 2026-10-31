@@ -9,8 +9,8 @@ import re
 
 import pytest
 
-from sagent.tui.settings.harvest import harvest
-from sagent.tui.settings.types import Setting
+from sagent.settings.harvest import harvest
+from sagent.settings.types import Setting
 
 
 if TYPE_CHECKING:

@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import urlencode
 
 import asyncio
 import base64
@@ -35,12 +35,17 @@ import hashlib
 import os
 import secrets
 import time
-import webbrowser
 
 from treekle import ReadError, from_plain, json_dumps, json_loads
 
+from sagent.lib.files.owner_only import write_private
 from sagent.model.exceptions import AuthError
-from sagent.providers.login import file_lock
+from sagent.providers.login import (
+    file_lock,
+    open_browser,
+    read_pasted_code,
+    redirected,
+)
 from sagent.providers.openai.lease import LeasedToken
 
 
@@ -342,7 +347,7 @@ class CodexLogin:
             "tokens": tokens,
             "last_refresh": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         }
-        await asyncio.to_thread(_write_private, self.path, json_dumps(stored))
+        await asyncio.to_thread(write_private, self.path, json_dumps(stored))
         self._adopt(tokens)
         # A token that carries no expiry lives as long as its grant said.
         self._expires_at = issued.expires_at
@@ -600,7 +605,13 @@ async def _browser_code(
     code = asyncio.Future[str]()
     try:
         server = await asyncio.start_server(
-            lambda reader, writer: _redirected(reader, writer, state=state, code=code),
+            lambda reader, writer: redirected(
+                reader,
+                writer,
+                path="/auth/callback",
+                state=state,
+                code=code,
+            ),
             "127.0.0.1",
             port,
         )
@@ -608,7 +619,7 @@ async def _browser_code(
         return ""
     async with server:
         show(f"Sign in to ChatGPT in your browser:\n\n  {url}\n")
-        webbrowser.open(url)
+        open_browser(url)
         try:
             return await asyncio.wait_for(code, timeout=timeout_sec)
         except TimeoutError:
@@ -622,52 +633,8 @@ async def _pasted_code(
     show: Callable[[str], object],
 ) -> str:
     """Return the code in the redirect the user pastes from the browser."""
-    show(
-        f"Open this and sign in:\n\n  {url}\n\nThe page it ends on fails to load;"
-        " paste that page's address here.\n",
-    )
-    pasted = (await asyncio.to_thread(input, "Address: ")).strip()
-    redirected = urlparse(pasted)
-    if redirected.scheme:
-        params = parse_qs(redirected.query)
-        code = (params.get("code") or [""])[0]
-        pasted_state = (params.get("state") or [""])[0]
-    else:
-        code, _, pasted_state = pasted.partition("#")
-    if not code or pasted_state != state:
-        raise AuthError("The pasted address belongs to another sign-in.")
-    return code
-
-
-async def _redirected(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-    *,
-    state: str,
-    code: asyncio.Future[str],
-) -> None:
-    """Answer the browser's redirect, and take the code it carries."""
-    request_line = (await reader.readline()).decode(errors="replace")
-    target = request_line.split(" ")[1] if request_line.count(" ") >= 2 else ""
-    url = urlparse(target)
-    params = parse_qs(url.query)
-    received = (params.get("code") or [""])[0]
-    ok = url.path == "/auth/callback" and bool(received)
-    ok = ok and (params.get("state") or [""])[0] == state
-    page = (
-        "Signed in; you can close this tab."
-        if ok
-        else "Sign-in failed; see the terminal."
-    )
-    writer.write(
-        f"HTTP/1.1 {200 if ok else 400} {'OK' if ok else 'Bad Request'}\r\n"
-        f"content-type: text/plain\r\ncontent-length: {len(page)}\r\n"
-        f"connection: close\r\n\r\n{page}".encode(),
-    )
-    await writer.drain()
-    writer.close()
-    if ok and not code.done():
-        code.set_result(received)
+    show(f"Sign in to ChatGPT in your browser:\n\n  {url}\n")
+    return await read_pasted_code(state=state, show=show, browser_tried=False)
 
 
 def _authorize_url(redirect: str, *, challenge: str, state: str) -> str:
@@ -736,15 +703,3 @@ def _expiry(token: str) -> float:
 
 def _read_text(path: Path) -> str:
     return path.read_text() if path.exists() else ""
-
-
-def _write_private(path: Path, text: str) -> None:
-    """Replace ``path`` with ``text``, never readable by anyone else, even briefly."""
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    staged = path.with_suffix(".tmp")
-    fd = os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    # ``O_CREAT``'s mode applies only to a new file; one left over keeps its own.
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w") as file:
-        file.write(text)
-    staged.replace(path)

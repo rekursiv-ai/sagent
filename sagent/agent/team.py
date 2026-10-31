@@ -42,6 +42,7 @@ from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final, override
 
+import asyncio
 import logging
 import time
 
@@ -813,43 +814,60 @@ class _Precedence:
         # the user made since, of provider or account, starts it over.
         self._serving = agent.account or "default"
         self._chosen = (agent.account, agent.model.provider.name)
-        # Logins that failed to sign in this session, after a move onto them.
-        self._signed_out: set[str] = set()
+        # Logins whose provider would not serve the model this session.
+        self._unserved: set[str] = set()
+        # Whether a call has been made: a session's first move is no news.
+        self._started = False
 
     async def before_call(self, turn_start: bool) -> None:
-        """At a turn's first call, move to the first login with quota left.
+        """Move to the first login with quota left: off a spent one, or at a turn's start.
 
         Args:
           turn_start: Whether the call is the turn's first.
 
         """
         logins = self._logins()
-        if not turn_start or logins is None:
+        if logins is None:
             return
-        now = time.time()
-        want = self._first_live(logins, now=now)
+        # Only a turn's call starts the session: a compaction before it must not
+        # spend the start's one quiet move.
+        quiet = turn_start and not self._started
+        self._started = self._started or turn_start
+        ranked = await asyncio.to_thread(self._ranked, logins, now=time.time())
+        # A login in use but signed out is not ranked; its failure moves it on.
+        spent = dict(ranked).get(self._serving)
+        want = next((a for a, s in ranked if s is None), None)
+        if not turn_start and spent is None:
+            return
         if want is None or want == self._serving:
             return
-        model = self._agent.model.capability.model_id
-        spent = logins.spent(self._serving, model, now=now)
         if spent is None:
-            await self._move(logins)
+            await self._move(logins, quiet=quiet)
         else:
-            await self._move(logins, window=spent.window, until=spent.until)
+            await self._move(
+                logins,
+                window=spent.window,
+                until=spent.until,
+                quiet=quiet,
+            )
 
-    async def after_failure(self, exc: BaseException) -> None:
+    async def after_failure(self, exc: BaseException) -> float | None:
         """Move off a login that spent a window, or that a move found signed out.
 
         Args:
           exc: Why the model in use failed its call.
 
+        Returns:
+          wake: With every login spent, when the first resets, which the call
+            waits for; else ``None``.
+
         """
         logins = self._logins()
         if logins is None:
-            return
+            return None
         now = time.time()
         if isinstance(exc, AuthError) and self._serving != self._chosen_login():
-            self._signed_out.add(self._serving)
+            await logins.sign_out(self._serving)
             window, until = "signed out", 0.0
         elif isinstance(exc, RateLimitedError) and (
             exc.limit or exc.retry_after_sec > self._quota_wait_sec
@@ -862,14 +880,16 @@ class _Precedence:
                 Spent(window=window, model=model, until=until),
             )
         else:
-            return
-        if not await self._move(logins, window=window, until=until):
-            self._agent.runtime.publish(
-                types.LoginsSpent(
-                    provider=self._agent.model.provider.name,
-                    resets=self._resets(logins, now=now),
-                ),
-            )
+            return None
+        if await self._move(logins, window=window, until=until):
+            return None
+        resets = await asyncio.to_thread(self._resets, logins, now=now)
+        if not resets:
+            return None
+        self._agent.runtime.publish(
+            types.LoginsSpent(provider=self._agent.model.provider.name, resets=resets),
+        )
+        return resets[0][1]
 
     def _logins(self) -> Logins | None:
         """Return the provider's logins, the user's switches since taken up; else ``None``."""
@@ -880,33 +900,29 @@ class _Precedence:
         if chosen != self._chosen:
             self._chosen = chosen
             self._serving = self._chosen_login()
+            self._unserved.clear()
         return provider.logins
 
     def _chosen_login(self) -> str:
         return self._agent.account or "default"
 
-    def _order(self, logins: Logins) -> tuple[str, ...]:
-        """Return the logins to try: the one chosen, if any, then the provider's order."""
-        chosen = self._agent.account
-        order = logins.order()
-        if chosen is not None:
-            order = (chosen, *(a for a in order if a != chosen))
-        return tuple(a for a in order if a not in self._signed_out)
-
-    def _first_live(self, logins: Logins, *, now: float) -> str | None:
+    def _ranked(
+        self,
+        logins: Logins,
+        *,
+        now: float,
+    ) -> tuple[tuple[str, Spent | None], ...]:
+        """Return the logins to try, the one chosen first, as one read of the ledger has them."""
         model = self._agent.model.capability.model_id
-        return next(
-            (a for a in self._order(logins) if logins.spent(a, model, now=now) is None),
-            None,
-        )
+        ranked = logins.ranked(model, now=now, first=self._agent.account)
+        return tuple((a, s) for a, s in ranked if a not in self._unserved)
 
     def _resets(self, logins: Logins, *, now: float) -> tuple[tuple[str, float], ...]:
         """Return each login's reset, soonest first."""
-        model = self._agent.model.capability.model_id
         resets = (
             (account, spent.until)
-            for account in self._order(logins)
-            if (spent := logins.spent(account, model, now=now)) is not None
+            for account, spent in self._ranked(logins, now=now)
+            if spent is not None
         )
         return tuple(sorted(resets, key=lambda reset: reset[1]))
 
@@ -918,12 +934,17 @@ class _Precedence:
         *,
         window: str = "",
         until: float = 0.0,
+        quiet: bool = False,
     ) -> bool:
         """Sign the model in as the first login with quota left that serves it."""
         agent = self._agent
         current = agent.model
         provider = current.provider.name
-        while (account := self._first_live(logins, now=time.time())) is not None:
+        while True:
+            ranked = await asyncio.to_thread(self._ranked, logins, now=time.time())
+            account = next((a for a, s in ranked if s is None), None)
+            if account is None:
+                return False
             if account == self._serving:
                 return False
             try:
@@ -940,8 +961,11 @@ class _Precedence:
                     account,
                     exc_info=True,
                 )
-                self._signed_out.add(account)
+                self._unserved.add(account)
                 continue
+            if quiet:
+                self._serving = account
+                return True
             agent.runtime.publish(
                 types.LoginSwitched(
                     provider=provider,
@@ -949,8 +973,8 @@ class _Precedence:
                     now=account,
                     window=window,
                     until=until,
+                    first=ranked[0][0],
                 ),
             )
             self._serving = account
             return True
-        return False

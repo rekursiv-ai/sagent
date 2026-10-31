@@ -513,6 +513,8 @@ async def test_a_spent_quota_waits_for_the_reset_agy_names(
     with pytest.raises(RateLimitedError) as raised:
         await _stream(model, Request(records=_HELLO))
     assert raised.value.retry_after_sec == wait_sec
+    # Only a quota that names its reset is the login's, spent for every model.
+    assert raised.value.limit == ("quota" if wait_sec else "")
     await model.provider.aclose()
 
 

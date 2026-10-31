@@ -27,8 +27,7 @@ import re
 
 from treekle import from_plain
 
-import yaml
-
+from sagent.lib.yaml import parse
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
@@ -125,7 +124,10 @@ class ModelTable(Mapping[str, ModelCapability]):
           table: The section's models, validated, and the document's roles.
 
         """
-        document = from_plain(_load(path.read_text()), _CatalogDocument)
+        document = from_plain(
+            parse(path.read_text(), source=str(path)),
+            _CatalogDocument,
+        )
         for layer in (document.reference, *document.profiles.values()):
             _require_whole_thinking(layer)
         # Read only to validate: a bad profile fails here, not at the first
@@ -508,41 +510,6 @@ def _in_family(model_id: str, *, name: str) -> bool:
         return True
     head, _, major = name.rpartition("-")
     return head == family and (version == major or version.startswith(f"{major}."))
-
-
-def _load(text: str) -> object:
-    """Return the YAML document ``text``, refused if ``_validate_yaml`` refuses it."""
-    loader = (yaml.CSafeLoader if yaml.__with_libyaml__ else yaml.SafeLoader)(text)
-    try:
-        node = loader.get_single_node()
-        _validate_yaml(node, seen=set())
-        return None if node is None else loader.construct_document(node)
-    finally:
-        loader.dispose()
-
-
-def _validate_yaml(node: yaml.Node | None, *, seen: set[int]) -> None:
-    """Reject aliases, keys that are not strings, and keys given twice."""
-    if node is None:
-        return
-    if id(node) in seen:
-        raise ValueError("Catalogs may not use YAML aliases.")
-    seen.add(id(node))
-    if isinstance(node, yaml.MappingNode):
-        keys: set[str] = set()
-        for key, value in node.value:
-            if (
-                not isinstance(key, yaml.ScalarNode)
-                or key.tag != "tag:yaml.org,2002:str"
-            ):
-                raise ValueError("Catalog mapping keys must be strings.")
-            if key.value in keys:
-                raise ValueError(f"The catalog gives key {key.value!r} twice.")
-            keys.add(key.value)
-            _validate_yaml(value, seen=seen)
-    elif isinstance(node, yaml.SequenceNode):
-        for value in node.value:
-            _validate_yaml(value, seen=seen)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

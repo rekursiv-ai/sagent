@@ -374,7 +374,7 @@ def _holiday_console(*, color_system: Literal["truecolor", "standard"]) -> Conso
 
 def test_holiday_icon_replaces_the_logo_beside_the_wordmark() -> None:
     console = _holiday_console(color_system="truecolor")
-    render_welcome(console, folder=Path("/research"), holiday=_PUMPKIN)
+    render_welcome(console, folder=Path("/research"), icon=_PUMPKIN)
     plain = console.export_text(styles=False, clear=False)
     first = next(line for line in plain.splitlines() if "███████╗" in line)
     assert first.startswith("│  " + "█" * 11 + "   ███████╗")
@@ -384,7 +384,7 @@ def test_holiday_icon_replaces_the_logo_beside_the_wordmark() -> None:
 
 def test_few_color_terminal_keeps_the_logo_on_a_holiday() -> None:
     console = _holiday_console(color_system="standard")
-    render_welcome(console, folder=Path("/research"), holiday=_PUMPKIN)
+    render_welcome(console, folder=Path("/research"), icon=_PUMPKIN)
     assert "▼" in console.export_text(styles=False)
 
 
@@ -403,9 +403,12 @@ def test_print_welcome_shows_todays_holiday(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(welcome, "Console", to_stderr)
     monkeypatch.setattr(welcome, "holiday_icon", pumpkin)
+    before = date.today()  # noqa: DTZ011 -- The local date is the subject.
     welcome.print_welcome(folder=Path("/research"))
+    after = date.today()  # noqa: DTZ011 -- The local date is the subject.
     assert "▼" not in console.export_text(styles=False)
-    assert asked == [date.today()]  # noqa: DTZ011 -- The local date is the subject.
+    (today,) = asked
+    assert today in {before, after}
 
 
 def test_frame_has_equal_top_and_bottom_breathing_room() -> None:
