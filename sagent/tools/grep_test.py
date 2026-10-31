@@ -520,7 +520,6 @@ _REFUSAL = "Search with Grep: pattern, path, glob, -i, -C, output_mode."
             "find . -print -name '*.py' | xargs grep foo",
             {"pattern": "foo", "output_mode": "content", "glob": "*.py"},
         ),
-        ("find . | xargs grep foo | wc -l", {"pattern": "foo", "output_mode": "count"}),
         (
             "grep -rln foo /src",
             {"pattern": "foo", "path": "/src", "output_mode": "files_with_matches"},
@@ -581,10 +580,74 @@ _REFUSAL = "Search with Grep: pattern, path, glob, -i, -C, output_mode."
             "grep foo f | tail -3",
             {"pattern": "foo", "path": "f", "output_mode": "content", "keep_last": 3},
         ),
-        ("grep foo f | wc -l", {"pattern": "foo", "path": "f", "output_mode": "count"}),
+        # ``wc -l`` counts the lines printed, which Grep's rows are; a count
+        # would differ on a binary file, whose matches print as one note.
+        (
+            "grep foo f | wc -l",
+            {"pattern": "foo", "path": "f", "output_mode": "content"},
+        ),
+        (
+            "grep -o foo f | wc -l",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-o": True},
+        ),
+        (
+            "find . | xargs grep foo | wc -l",
+            {"pattern": "foo", "output_mode": "content"},
+        ),
         (
             "grep foo f | head -5 | wc -l",
-            {"pattern": "foo", "path": "f", "output_mode": "count", "keep_first": 5},
+            {"pattern": "foo", "path": "f", "output_mode": "content", "keep_first": 5},
+        ),
+        (
+            "grep -A 1 foo f | wc -l",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-A": 1},
+        ),
+        (
+            "grep -rL foo . | wc -l",
+            {"pattern": "foo", "output_mode": "files_without_match"},
+        ),
+        (
+            "grep -rl foo . | wc -l",
+            {"pattern": "foo", "output_mode": "files_with_matches"},
+        ),
+        (
+            "rg -c foo a b | wc -l",
+            {"pattern": "foo", "path": ["a", "b"], "output_mode": "count"},
+        ),
+        (
+            "rg -m 1 -A 2 foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-m": 1, "-A": 2},
+        ),
+        # Grep answers as ripgrep does, where GNU grep's output differs.
+        (
+            "grep -co foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "count", "-o": True},
+        ),
+        (
+            "grep -c foo a b | wc -l",
+            {"pattern": "foo", "path": ["a", "b"], "output_mode": "count"},
+        ),
+        (
+            "grep -o -A 1 foo f",
+            {
+                "pattern": "foo",
+                "path": "f",
+                "output_mode": "content",
+                "-o": True,
+                "-A": 1,
+            },
+        ),
+        (
+            "grep -m 1 -A 2 foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-m": 1, "-A": 2},
+        ),
+        (
+            "grep -m 1 -C 2 foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-m": 1, "-C": 2},
+        ),
+        (
+            "grep -m 1 -B 2 foo f",
+            {"pattern": "foo", "path": "f", "output_mode": "content", "-m": 1, "-B": 2},
         ),
         ("cat f | grep foo", {"pattern": "foo", "path": "f", "output_mode": "content"}),
         ("cat f | rg foo", {"pattern": "foo", "path": "f", "output_mode": "content"}),
@@ -633,6 +696,7 @@ def test_a_plain_file_search_becomes_the_grep_for_it(
         "grep -g x foo f",
         "grep -m x foo f",
         "rg --max-depth x foo",
+        "grep -r --include x",
         "grep --weird=val foo f",
         "grep -Z foo f",
         "grep -A2 foo f",
@@ -665,9 +729,9 @@ def test_a_search_no_grep_matches_is_refused_with_advice(command: str) -> None:
         "echo hi | grep x",
         # Only the shell does these.
         "grep -q foo f",
-        # Grep cannot say these as grep means them.
+        # Grep cannot say these: it refuses the pair, joins text with ``|``,
+        # and reads 0 as no cap.
         "grep -ov foo f",
-        "grep -co foo f",
         "grep -F -e a -e b f",
         "grep -m 0 foo f",
         "rg --max-depth 0 foo",
