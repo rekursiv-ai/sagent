@@ -96,7 +96,7 @@ def _agent(
             cache_ttl_sec=frozenset({300.0, 3600.0}),
             default=ModelSettings(
                 cache_ttl_sec=300.0,
-                context_size=prices["auto", "fullcontext"],
+                context_size=prices["fullcontext"],
             ),
         ),
     )

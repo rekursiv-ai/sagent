@@ -144,7 +144,7 @@ def _capability(
         knowledge_cutoff=cutoff,
         limits=ModelLimits(max_request_tokens=200_000, max_response_tokens=8_000),
         prices=prices,
-        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+        default=ModelSettings(context_size=prices["fullcontext"]),
     )
 
 
@@ -1533,7 +1533,7 @@ def test_the_model_is_named_with_its_window(tmp_path: Path) -> None:
         model_id="opus",
         limits=ModelLimits(max_request_tokens=1_000_000, max_response_tokens=8_000),
         prices=prices,
-        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+        default=ModelSettings(context_size=prices["fullcontext"]),
     )
     provider = ScriptedProvider(capability=capability)
     _, agent = _agent(tmp_path, provider=provider)
@@ -1542,7 +1542,7 @@ def test_the_model_is_named_with_its_window(tmp_path: Path) -> None:
     session.append(first)
     agent.model.settings = replace(
         agent.model.settings,
-        context_size=prices["auto", 258_000],
+        context_size=prices[258_000],
     )
     (smaller,) = session.updates()
 
@@ -1664,7 +1664,7 @@ async def test_the_model_stands_once_until_it_changes(tmp_path: Path) -> None:
         _session(agent).persist()
         agent.model.settings = replace(
             agent.model.settings,
-            context_size=agent.model.capability.prices["auto", 3_000],
+            context_size=agent.model.capability.prices[3_000],
         )
         _session(agent).persist()
 

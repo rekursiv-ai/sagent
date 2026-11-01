@@ -248,8 +248,7 @@ class AgentModel:
 
     def _sizes(self) -> tuple[str, ...]:
         """Return ``default``, then each size this model's price bands name."""
-        model = self.agent.model
-        sizes = model.capability.prices.sizes(model.settings.service_tier)
+        sizes = self.agent.model.capability.prices.sizes()
         return ("default", *(size.context_name for size in sizes))
 
     async def _context(self, size: str) -> str:
@@ -310,9 +309,12 @@ class AgentModel:
         return self._axis_value(field)
 
     def _choose(self, picked: dict[ModelSettingName, object]) -> None:
-        """Set the model's ``picked`` choices; a new tier sizes the context again."""
+        """Set the model's ``picked`` choices."""
         model = self.agent.model
-        model.settings = model.capability.choose(model.settings, picked)
+        settings = model.settings
+        for field, value in picked.items():
+            settings = settings.with_value(field, value)
+        model.settings = settings
 
     # ``default`` is a fresh model's; an effort or a tier reads as its tag does
     # in a model line, ``highthink`` and ``fast`` too.

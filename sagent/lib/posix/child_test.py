@@ -88,6 +88,39 @@ async def test_a_cancel_while_a_child_starts_stops_it_and_its_jobs(
 
 
 @pytest.mark.asyncio
+async def test_a_second_cancel_while_a_child_starts_still_stops_it(
+    tmp_path: Path,
+    started: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A task group cancelling every member can cancel one twice."""
+    real = asyncio.create_subprocess_exec
+    leaders: list[Process] = []
+    handed = asyncio.Event()
+
+    async def slow(*argv: str, **options: object) -> Process:
+        del options
+        leader = await real(*argv, start_new_session=True)
+        leaders.append(leader)
+        await handed.wait()
+        return leader
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", slow)
+    starting = asyncio.create_task(
+        Child.start("/bin/sh", "-c", f"echo $$ > {tmp_path}/shell.pid; exec sleep 60"),
+    )
+    started.append(await written_pid(tmp_path / "shell.pid"))
+    starting.cancel()
+    await asyncio.sleep(0.01)
+    starting.cancel()
+    await asyncio.sleep(0.01)
+    handed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(starting, timeout=5)
+    assert await gone_within(started)
+
+
+@pytest.mark.asyncio
 async def test_a_child_that_cannot_start_raises_and_leaves_nothing(
     tmp_path: Path,
 ) -> None:
@@ -166,6 +199,27 @@ async def test_a_job_that_ignores_term_dies_with_its_group_after_the_grace(
     started.extend([child.process.pid, await written_pid(tmp_path / "job.pid")])
     await asyncio.wait_for(child.stop(), timeout=5)
     assert await gone_within(started)
+
+
+@pytest.mark.asyncio
+async def test_jobs_outliving_their_leader_are_asked_to_stop_before_the_kill(
+    tmp_path: Path,
+    started: list[int],
+) -> None:
+    """The grace is the jobs' too: a server's worker gets to flush what it holds."""
+    child = await Child.start(
+        "/bin/sh",
+        "-c",
+        'sh -c \'trap "echo term > asked; exit 0" TERM; echo $$ > job.pid; '
+        "while :; do sleep 0.01; done' &",
+        group=True,
+        cwd=tmp_path,
+    )
+    started.extend([child.process.pid, await written_pid(tmp_path / "job.pid")])
+    assert await asyncio.wait_for(child.exited(), timeout=5) == 0
+    assert await asyncio.wait_for(child.stop(), timeout=5) == 0
+    assert await gone_within(started)
+    assert (tmp_path / "asked").read_text() == "term\n"
 
 
 @pytest.mark.asyncio
@@ -286,7 +340,7 @@ async def test_a_group_gone_or_not_this_users_is_left_alone(
     started: list[int],
 ) -> None:
     """A group whose jobs run as another user refuses the signal; the stop goes on."""
-    child = await Child.start("/bin/sh", "-c", "exit 0", group=True)
+    child = await Child.start("/bin/sh", "-c", "exit 0", group=True, grace_sec=0.0)
     started.append(child.process.pid)
     assert await child.exited() == 0
     signalled: list[tuple[int, int]] = []
@@ -297,7 +351,31 @@ async def test_a_group_gone_or_not_this_users_is_left_alone(
 
     monkeypatch.setattr(os, "killpg", refuse)
     assert await child.stop() == 0
-    assert signalled == [(child.process.pid, signal.SIGKILL)]
+    # Asked whether any job is left, the group refused: no signal follows.
+    assert signalled == [(child.process.pid, 0)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refusal", [ProcessLookupError, PermissionError])
+async def test_a_group_that_goes_before_its_signal_is_left_alone(
+    monkeypatch: pytest.MonkeyPatch,
+    refusal: type[OSError],
+    started: list[int],
+) -> None:
+    """Its last job can exit, or change user, between the question and the signal."""
+    child = await Child.start("/bin/sh", "-c", "exit 0", group=True, grace_sec=0.0)
+    started.append(child.process.pid)
+    assert await child.exited() == 0
+    signalled: list[tuple[int, int]] = []
+
+    def refuse_signals(pgid: int, sig: int) -> None:
+        signalled.append((pgid, sig))
+        if sig:
+            raise refusal
+
+    monkeypatch.setattr(os, "killpg", refuse_signals)
+    assert await child.stop() == 0
+    assert signalled == [(child.process.pid, 0), (child.process.pid, signal.SIGKILL)]
 
 
 @pytest.mark.asyncio
@@ -399,8 +477,9 @@ async def test_finished_work_is_its_result_and_a_cancel_waits_for_it() -> None:
     assert await finish(asyncio.sleep(0, result="now")) == "now"
     waiting = asyncio.create_task(finish(work()))
     await asyncio.sleep(0)
-    waiting.cancel()
-    await asyncio.sleep(0)
+    for _ in range(2):
+        waiting.cancel()
+        await asyncio.sleep(0)
     assert not waiting.done()
     gate.set()
     with pytest.raises(asyncio.CancelledError):

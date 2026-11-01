@@ -81,7 +81,7 @@ def _row(
         ),
         limits=ModelLimits(max_request_tokens=window),
         prices=prices,
-        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+        default=ModelSettings(context_size=prices["fullcontext"]),
     )
 
 
@@ -510,8 +510,8 @@ def test_parse_refuses_two_of_one_kind_and_unknown_choices(
 
 def test_settings_name_their_size_their_effort_and_only_choices_made() -> None:
     row = _row(bands=(272_000,))
-    small = replace(row.default, context_size=row.prices["auto", "smallcontext"])
-    counted = replace(row.default, context_size=row.prices["auto", 100_000])
+    small = replace(row.default, context_size=row.prices["smallcontext"])
+    counted = replace(row.default, context_size=row.prices[100_000])
     lines = [
         str(ModelTags.from_settings(row, row.default)),
         str(ModelTags.from_settings(row, small, provider="vendor")),
@@ -853,6 +853,21 @@ def test_a_card_starts_on_its_effective_date(tmp_path: Path, quoted: bool) -> No
             [_model(service_tier=["auto", "priority"])],
             {},
             "^Model 'example-1.0' offers service_tier 'priority' with no price",
+        ),
+        (
+            [
+                _model(
+                    prices=[
+                        _FREE,
+                        _FREE | {"effective_prompt_tokens": 200_000},
+                        _FREE | {"service_tier": "flex"},
+                        _FREE
+                        | {"service_tier": "flex", "effective_prompt_tokens": 272_000},
+                    ],
+                ),
+            ],
+            {},
+            "^Model 'example-1.0' bands its tiers at different sizes",
         ),
         ([_model()], {"unknown": True}, "unknown"),
     ],

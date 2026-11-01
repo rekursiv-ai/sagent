@@ -75,7 +75,7 @@ def _capability(model_id: str) -> ModelCapability:
         thinking_effort=frozenset({"none", "low", "high"}),
         thinking_budget=frozenset({"none", "auto"}),
         thinking_output=frozenset({"none", "text"}),
-        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+        default=ModelSettings(context_size=prices["fullcontext"]),
     )
 
 
@@ -566,7 +566,7 @@ async def test_a_child_compacts_as_its_parent_does(tmp_path: Path) -> None:
     setup = _setup(tmp_path, reply("ready"), compactor=SummaryCompactor)
     setup.parent.model.settings = replace(
         setup.parent.model.settings,
-        context_size=setup.parent.model.capability.prices["auto", 1_000],
+        context_size=setup.parent.model.capability.prices[1_000],
     )
     async with setup.team:
         _ = await _spawn(setup, tmp_path, {"prompt": "wait"})

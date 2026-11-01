@@ -27,6 +27,7 @@ import signal
 
 
 if TYPE_CHECKING:
+    from asyncio import Future
     from collections.abc import Awaitable, Collection, Mapping
     from pathlib import Path
 
@@ -106,12 +107,17 @@ class Child:
         try:
             process = await asyncio.shield(starting)
         except asyncio.CancelledError:
-            # A start that failed left nothing to stop, and its error is not
-            # the caller's: the cancel is.
-            with contextlib.suppress(Exception):
-                await cls(process=await starting, group=group, grace_sec=0.0).stop()
+            await finish(cls._abandon(starting, group=group))
             raise
         return cls(process=process, group=group, grace_sec=grace_sec)
+
+    @classmethod
+    async def _abandon(cls, starting: Future[Process], *, group: bool) -> None:
+        """Kill what ``starting`` starts, which no caller will hold."""
+        # A start that failed left nothing to stop, and its error is not the
+        # caller's: the cancel is.
+        with contextlib.suppress(Exception):
+            await cls(process=await starting, group=group, grace_sec=0.0).stop()
 
     async def __aenter__(self) -> Self:
         """Return this child, which leaving the block stops."""
@@ -148,15 +154,32 @@ class Child:
     async def _stop(self) -> int:
         if self._stopped is not None:
             return self._stopped
-        if self.process.returncode is None and self.grace_sec > 0:
+        if self.grace_sec > 0 and self._reachable():
             self._signal(signal.SIGTERM)
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self.exited(), timeout=self.grace_sec)
-        # A group outlives its leader while any job in it runs.
-        if self.group or self.process.returncode is None:
+                await asyncio.wait_for(self._ended(), timeout=self.grace_sec)
+        if self._reachable():
             self._signal(signal.SIGKILL)
         self._stopped = await self.exited()
         return self._stopped
+
+    # A group outlives its leader while any job in it runs.
+    def _reachable(self) -> bool:
+        """Return whether a signal would reach the process, or a job of its group."""
+        if self.process.returncode is None:
+            return True
+        if not self.group:
+            return False
+        try:
+            os.killpg(self.process.pid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    async def _ended(self) -> None:
+        """Return once no signal would reach anything left to stop."""
+        while self._reachable():  # noqa: ASYNC110 -- No event marks the exit of a group's last job.
+            await asyncio.sleep(0.01)
 
     def _signal(self, sig: int) -> None:
         """Send ``sig`` to the group, else to the process; one that has gone is fine."""
@@ -182,8 +205,14 @@ async def finish[T](work: Awaitable[T]) -> T:
 
     """
     running = asyncio.ensure_future(work)
-    try:
-        return await asyncio.shield(running)
-    except asyncio.CancelledError:
-        await running
-        raise
+    cancels = 0
+    # Each cancel is held off, however many arrive, until the work is done.
+    while not running.done():
+        try:
+            _ = await asyncio.wait((running,))
+        except asyncio.CancelledError:
+            cancels += 1
+    result = running.result()
+    if cancels:
+        raise asyncio.CancelledError
+    return result

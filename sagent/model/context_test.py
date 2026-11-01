@@ -12,7 +12,7 @@ from sagent.model.cost import PriceCatalog
 
 
 def test_the_default_is_the_whole_window_a_catalog_of_unknown_window_names() -> None:
-    assert ContextSize() == PriceCatalog()["auto", "fullcontext"]
+    assert ContextSize() == PriceCatalog()["fullcontext"]
 
 
 def test_fields_are_keyword_only_and_frozen() -> None:

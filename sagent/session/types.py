@@ -20,11 +20,15 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
-from typing import Final, Literal, cast, override
+from typing import TYPE_CHECKING, Final, Literal, cast, overload, override
 
-from treekle import PlainTree, immutable
+from treekle import PlainTree, from_plain, immutable, to_plain
 
 from sagent.model.capability import SummaryKind, ThinkingEffort
+
+
+if TYPE_CHECKING:
+    from treekle import Classes, MutablePlainTree
 
 
 __all__ = [
@@ -58,15 +62,17 @@ __all__ = [
     "WebSearchResult",
     "WebSearchResults",
     "record_classes",
+    "stored_plain",
+    "stored_record",
 ]
 
 
 CONCRETE_TYPES: Final = MappingProxyType[type, type](
     {Mapping: MappingProxyType, Sequence: tuple},
 )
-"""How records are stored: ``to_plain`` given this and the record's class as its
-target, and ``from_plain`` given this, write each JSON field as the plain object
-the provider sent, and read it back frozen."""
+"""How a record's JSON fields are stored: written as the plain objects the
+provider sent, and read back frozen. :func:`stored_plain` and
+:func:`stored_record` apply it."""
 
 
 def _no_json() -> Mapping[str, PlainTree]:
@@ -578,3 +584,79 @@ def record_classes() -> dict[str, type]:
             IncompleteRecord,
         )
     }
+
+
+# Every journal, row, and document stores a record through this pair, so each
+# names its classes the same way: a writer left to call ``to_plain`` itself wrote
+# import paths, and its rows outlived the module the classes moved out of.
+def stored_plain(
+    record: object,
+    *,
+    classes: Classes = MappingProxyType({}),
+) -> dict[str, MutablePlainTree]:
+    """Return ``record`` as stored plain data, which :func:`stored_record` reads.
+
+    Args:
+      record: A record, or any class ``classes`` names.
+      classes: The classes a tag may name, by the name it writes; empty for
+        :func:`record_classes`.
+
+    Returns:
+      plain: The record, each class tagged by its name alone and each ``JSON``
+        field the plain object the provider sent.
+
+    """
+    plain = to_plain(
+        record,
+        classes=classes or record_classes(),
+        sort=False,
+        default_concrete_types=CONCRETE_TYPES,
+    )
+    assert isinstance(plain, dict)
+    return plain
+
+
+@overload
+def stored_record(
+    plain: object,
+    *,
+    classes: Classes = ...,
+) -> SessionRecord: ...
+
+
+@overload
+def stored_record[R](
+    plain: object,
+    target: type[R],
+    *,
+    classes: Classes = ...,
+) -> R: ...
+
+
+def stored_record(
+    plain: object,
+    target: object = SessionRecord,
+    *,
+    classes: Classes = MappingProxyType({}),
+) -> object:
+    """Return the record :func:`stored_plain` wrote as ``plain``.
+
+    Args:
+      plain: Stored plain data, frozen or not.
+      target: The record class, or a union of them; any session record by
+        default.
+      classes: The classes a tag may name, as :func:`stored_plain` took them.
+
+    Returns:
+      record: The record, its ``JSON`` fields frozen.
+
+    Raises:
+      ReadError: ``plain`` does not read as ``target``.
+
+    """
+    return from_plain(
+        plain,
+        target,
+        classes=classes or record_classes(),
+        default_concrete_types=CONCRETE_TYPES,
+    )

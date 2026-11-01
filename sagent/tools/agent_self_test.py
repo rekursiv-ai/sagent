@@ -42,7 +42,7 @@ def _capability(model_id: str) -> ModelCapability:
         thinking_effort=frozenset({"none", "low", "high"}),
         thinking_budget=frozenset({"none", "auto"}),
         thinking_output=frozenset({"none", "text"}),
-        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+        default=ModelSettings(context_size=prices["fullcontext"]),
     )
 
 
@@ -210,7 +210,7 @@ async def test_a_switch_with_settings_applies_them_to_the_new_model(
 
 
 @pytest.mark.asyncio
-async def test_a_tier_whose_prices_band_otherwise_sizes_the_context_again(
+async def test_a_tier_priced_flat_keeps_the_size_another_tier_bands(
     tmp_path: Path,
 ) -> None:
     prices = PriceCatalog(
@@ -226,7 +226,7 @@ async def test_a_tier_whose_prices_band_otherwise_sizes_the_context_again(
         limits=ModelLimits(max_request_tokens=1_000_000),
         prices=prices,
         service_tier=frozenset({"auto", "priority"}),
-        default=ModelSettings(context_size=prices["auto", "smallcontext"]),
+        default=ModelSettings(context_size=prices["smallcontext"]),
     )
     catalog = ModelCatalog(
         factories={"scripted": partial(ScriptedProvider, capability=capability)},
@@ -241,7 +241,7 @@ async def test_a_tier_whose_prices_band_otherwise_sizes_the_context_again(
     _ = await _patch(AgentSelf(team=team), tmp_path, {"service_tier": "priority"})
 
     assert agent.model.settings.service_tier == "priority"
-    assert agent.model.settings.context_size == prices["priority", "smallcontext"]
+    assert agent.model.settings.context_size == prices["smallcontext"]
 
 
 def _windowed(model_id: str) -> ModelTable:
@@ -253,7 +253,7 @@ def _windowed(model_id: str) -> ModelTable:
                 model_id=model_id,
                 limits=ModelLimits(max_request_tokens=1_000_000),
                 prices=prices,
-                default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+                default=ModelSettings(context_size=prices["fullcontext"]),
             ),
         ),
     )

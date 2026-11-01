@@ -68,7 +68,7 @@ def _setup(
         model_id="priced",
         limits=ModelLimits(max_request_tokens=200_000, max_response_tokens=8_000),
         prices=prices,
-        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+        default=ModelSettings(context_size=prices["fullcontext"]),
     )
     catalog = ModelCatalog(
         factories={"scripted": partial(ScriptedProvider, capability=capability)},

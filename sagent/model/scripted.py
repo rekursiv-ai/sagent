@@ -92,7 +92,7 @@ class ScriptedProvider(AsyncResource):
                     max_response_tokens=8_000,
                 ),
                 prices=prices,
-                default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+                default=ModelSettings(context_size=prices["fullcontext"]),
             )
         )
 

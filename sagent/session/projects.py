@@ -26,7 +26,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import contextlib
 import logging
@@ -34,16 +34,10 @@ import os
 import re
 import uuid
 
-from treekle import json_loads
-
 from sagent.lib.files.owner_only import open_private
 from sagent.lib.userdirs import data_dir
-from sagent.session.types import (
-    SessionRecord,
-    TurnContext,
-    UserMessage,
-    record_classes,
-)
+from sagent.session.jsonl import read_record
+from sagent.session.types import TurnContext, UserMessage
 
 
 if TYPE_CHECKING:
@@ -360,7 +354,6 @@ def _infos(paths: Iterable[Path], *, limit: int | None) -> list[SessionInfo]:
 # each record's class first, so a record nested in a snapshot never leads a line.
 def _peek(path: Path, *, mtime: float) -> SessionInfo | None:
     """Return what ``path`` says of itself; ``None`` when unreadable or nothing was said."""
-    classes = record_classes()
     said = False
     title = model = ""
     records = 0
@@ -371,12 +364,12 @@ def _peek(path: Path, *, mtime: float) -> SessionInfo | None:
                     continue
                 records += 1
                 if line.startswith(b'{"py/object": "UserMessage"') and not title:
-                    message = _record(line, classes=classes)
+                    message = read_record(line)
                     if isinstance(message, UserMessage):
                         said = True
                         title = (message.content or "").strip()
                 elif line.startswith(b'{"py/object": "TurnContext"'):
-                    settings = _record(line, classes=classes)
+                    settings = read_record(line)
                     if isinstance(settings, TurnContext) and settings.model is not None:
                         model = settings.model
     except OSError:
@@ -392,14 +385,6 @@ def _peek(path: Path, *, mtime: float) -> SessionInfo | None:
         records=records,
         model=model,
     )
-
-
-def _record(line: bytes, *, classes: dict[str, type]) -> SessionRecord | None:
-    """Return the record ``line`` holds, or ``None`` when it holds none."""
-    try:
-        return cast(SessionRecord, json_loads(line, SessionRecord, classes=classes))
-    except ValueError:
-        return None
 
 
 def _found(base: Path, pattern: str) -> Iterator[Path]:
