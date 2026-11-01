@@ -111,6 +111,10 @@ def test_user_content_is_what_each_record_says_on_the_users_side() -> None:
         AgentToAgentMessage(content="done", sender="worker", attachments=(image,)),
     ) == ("[from worker]: done", (image,))
     assert wire.user_content(AgentToAgentMessage(content="anon")) == ("anon", ())
+    assert wire.user_content(AgentToAgentMessage(sender="worker")) == (
+        "[from worker]: ",
+        (),
+    )
     assert wire.user_content(SystemMessage(content="note")) == (
         "<system-reminder>\nnote\n</system-reminder>",
         (),
@@ -171,6 +175,14 @@ def test_cache_key_is_one_uuid_per_conversation() -> None:
     assert (
         wire.cache_key(Request(system=("Be brief.",), records=opening.records)) != key
     )
+
+
+def test_a_cache_key_stays_what_servers_already_cached_under() -> None:
+    """A changed derivation would miss every cache warmed before it."""
+    opening = Request(system=("Be terse.",), records=(UserMessage(content="fix it"),))
+    assert wire.cache_key(opening) == "f5f0d197-6e7e-4635-8212-2bf150e8ee15"
+    unsaid = Request(system=("Be terse.", "Be kind."), records=())
+    assert wire.cache_key(unsaid) == "6d37463b-2987-499a-9561-9cd41b761bf5"
 
 
 def _error(message: str, *, code: str = "", kind: str = "") -> dict[str, object]:
@@ -315,6 +327,14 @@ def test_an_unrecognized_error_names_the_status_code_and_message() -> None:
         ({}, {"resets_in_seconds": 259_200}, 259_200.0),
         ({}, {"resets_at": 10}, 0.0),
         ({}, {}, 0.0),
+        # Neither is a wait: the first is no number, the second no finite one.
+        ({}, {"resets_in_seconds": None}, 0.0),
+        ({}, {"resets_in_seconds": True}, 0.0),
+        ({}, {"resets_in_seconds": False, "resets_at": True}, 0.0),
+        ({"retry-after": "inf"}, {}, 0.0),
+        ({}, {"resets_in_seconds": "nan", "resets_at": 1_030}, 30.0),
+        ({"x-ratelimit-reset-tokens": "0.5"}, {}, 0.5),
+        ({"x-ratelimit-reset-tokens": "-3"}, {}, 0.0),
     ],
 )
 def test_a_rate_limit_carries_the_advised_wait(
@@ -328,6 +348,42 @@ def test_a_rate_limit_carries_the_advised_wait(
     error = wire.to_exception(429, body=body, headers=headers)
     assert isinstance(error, RateLimitedError)
     assert error.retry_after_sec == wait_sec
+
+
+@pytest.mark.parametrize(
+    ("minutes", "limit"),
+    [("1440", "daily"), ("2880", "2-day"), ("90", "90-minute"), ("120", "2-hour")],
+)
+def test_a_spent_window_of_any_span_is_named(minutes: str, limit: str) -> None:
+    headers = {
+        "x-codex-primary-window-minutes": minutes,
+        "x-codex-primary-used-percent": "100",
+    }
+    error = wire.to_exception(429, body="limit", headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert error.limit == limit
+
+
+@pytest.mark.parametrize("resource", ["requests", "tokens"])
+def test_an_api_keys_spent_window_names_no_login_limit(resource: str) -> None:
+    """Only a ChatGPT login's windows have a span to name."""
+    headers = {f"x-ratelimit-remaining-{resource}": "0"}
+    error = wire.to_exception(429, body="slow", headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert (error.limit, error.retry_after_sec) == ("", 0.0)
+
+
+def test_a_spent_window_without_a_reset_counts_as_resetting_first() -> None:
+    headers = {
+        "x-codex-primary-window-minutes": "300",
+        "x-codex-primary-used-percent": "100",
+        "x-codex-secondary-window-minutes": "10080",
+        "x-codex-secondary-used-percent": "100",
+        "x-codex-secondary-reset-at": "0.5",
+    }
+    error = wire.to_exception(429, body="limit", headers=headers)
+    assert isinstance(error, RateLimitedError)
+    assert error.limit == "weekly"
 
 
 @pytest.mark.parametrize(
@@ -416,6 +472,31 @@ def test_rate_limits_are_an_api_keys_request_and_token_windows(now: float) -> No
     assert wire.rate_limits({}) == ()
 
 
+@pytest.mark.parametrize(
+    ("limit", "remaining", "expected"),
+    [
+        (None, "5", UsageWindow(label="tokens")),
+        (None, "0", UsageWindow(label="tokens", blocked=True)),
+        ("0", "0", UsageWindow(label="tokens", blocked=True)),
+        ("1", "0", UsageWindow(label="tokens", utilization=1.0, blocked=True)),
+        ("2", "1", UsageWindow(label="tokens", utilization=0.5)),
+        ("100", "-50", UsageWindow(label="tokens", utilization=1.0, blocked=True)),
+        ("100", "150", UsageWindow(label="tokens", utilization=0.0)),
+    ],
+    ids=["no-limit", "no-limit-spent", "zero", "one", "one-left", "over", "under"],
+)
+def test_an_api_keys_window_is_read_from_what_it_reports(
+    limit: str | None,
+    remaining: str,
+    expected: UsageWindow,
+) -> None:
+    """A window without a reset has none; utilization is clamped to [0, 1]."""
+    headers = {"x-ratelimit-remaining-tokens": remaining}
+    if limit is not None:
+        headers["x-ratelimit-limit-tokens"] = limit
+    assert wire.rate_limits(headers) == (expected,)
+
+
 def test_rate_limits_are_a_chatgpt_logins_windows_by_span(now: float) -> None:
     headers = {
         "x-codex-primary-window-minutes": "10080",
@@ -434,6 +515,15 @@ def test_rate_limits_are_a_chatgpt_logins_windows_by_span(now: float) -> None:
         "x-codex-secondary-window-minutes": "0",
     }
     assert wire.rate_limits(odd) == (UsageWindow(label="90m"),)
+    # A window with no span is skipped, not the end of the windows.
+    later = {
+        "x-codex-primary-window-minutes": "0",
+        "x-codex-secondary-window-minutes": "1",
+        "x-codex-secondary-used-percent": "150",
+    }
+    assert wire.rate_limits(later) == (
+        UsageWindow(label="1m", utilization=1.0, blocked=True),
+    )
 
 
 if __name__ == "__main__":
