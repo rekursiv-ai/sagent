@@ -2,7 +2,7 @@
 # ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 -P "$0" "$@"
 Convert old sagent session logs into journals today's sagent resumes.
 
 Each old ``<id>/session.jsonl`` under the paths given is rewritten in place
