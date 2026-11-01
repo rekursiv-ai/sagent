@@ -135,8 +135,7 @@ def user_content(record: SessionRecord) -> tuple[str, tuple[Attachment, ...]] | 
             return f"<system-reminder>\n{text}\n</system-reminder>", ()
         case TurnContext() if record.text():
             return f"<system-reminder>\n{record.text()}\n</system-reminder>", ()
-        case _:
-            return None
+    return None
 
 
 def image_url(attachment: Attachment, *, limits: ModelLimits) -> str | None:
@@ -154,7 +153,6 @@ def image_url(attachment: Attachment, *, limits: ModelLimits) -> str | None:
         return None
     return _data_url(
         attachment.data,
-        mime=attachment.mime_descriptor,
         max_edge_px=limits.max_image_edge_px,
         max_bytes=limits.max_image_bytes,
     )
@@ -301,7 +299,7 @@ def rate_limits(headers: Mapping[str, str]) -> tuple[UsageWindow, ...]:
 # Every request resends the whole conversation, so without the cache each image
 # would be shrunk and encoded again on every turn.
 @lru_cache(maxsize=64)
-def _data_url(data: bytes, *, mime: str, max_edge_px: int, max_bytes: int) -> str:
+def _data_url(data: bytes, *, max_edge_px: int, max_bytes: int) -> str:
     data, mime = image.shrink(data, max_edge_px=max_edge_px, max_bytes=max_bytes)
     return f"data:{mime};base64,{base64.b64encode(data).decode()}"
 
@@ -375,8 +373,8 @@ def _retry_after(headers: Mapping[str, str], *, fields: Mapping[str, object]) ->
             wait = None
     # A ChatGPT login's spent window says when it refills in the body.
     if wait is None:
-        wait = _number(str(fields.get("resets_in_seconds", "")))
-    if wait is None and (at := _number(str(fields.get("resets_at", "")))) is not None:
+        wait = _number(fields.get("resets_in_seconds"))
+    if wait is None and (at := _number(fields.get("resets_at"))) is not None:
         wait = at - time.time()
     if wait is not None:
         return wait
@@ -391,11 +389,11 @@ def _retry_after(headers: Mapping[str, str], *, fields: Mapping[str, object]) ->
     return max(delays, default=0.0)
 
 
-def _number(raw: str | None) -> float | None:
-    if raw is None:
-        return None
+def _number(raw: object) -> float | None:
+    """Return ``raw``, a header's text or a body's field, as a finite number."""
+    # Read as text, so a missing value, a ``bool`` or an object is no number.
     try:
-        value = float(raw)
+        value = float(str(raw))
     except ValueError:
         return None
     return value if math.isfinite(value) else None
