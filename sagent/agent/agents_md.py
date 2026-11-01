@@ -231,7 +231,7 @@ class Directives:
 
     def _reach(self, directory: Path) -> None:
         """Read ``directory`` and each above it, up to the first already read."""
-        if not {"Project", "Local"} & self.config.tiers:
+        if not bool({"Project", "Local"} & self.config.tiers):
             return
         d = directory
         while d not in self._checked:
@@ -292,8 +292,9 @@ def frontmatter(raw: str, *, source: str = "") -> tuple[dict[str, object], str]:
     if split is None:
         return {}, raw.removeprefix("\ufeff")
     parsed, body = split
+    # Empty frontmatter parses to ``None``, which is no mapping either.
     try:
-        return from_plain(parsed, dict[str, object], default={}), body
+        return from_plain(parsed, dict[str, object]), body
     except ReadError:
         return {}, body
 
@@ -342,7 +343,8 @@ def _strip_comments(text: str) -> str:
         if not (raw.startswith("<!--") and "-->" in raw):
             continue
         start, end = tok.map
-        residue = re.sub(r"<!--[\s\S]*?-->", "", "".join(lines[start:end]))
+        # At the top level a block's content is its lines, verbatim.
+        residue = re.sub(r"<!--[\s\S]*?-->", "", tok.content)
         if residue.strip():
             replaced[start] = residue if residue.endswith("\n") else residue + "\n"
             dropped.update(range(start + 1, end))
@@ -362,9 +364,8 @@ def _includes(text: str, base: Path) -> list[Path]:
 
 def _walk(tokens: Iterable[Token], *, base: Path, paths: list[Path]) -> None:
     """Collect ``@path`` includes from the text of ``tokens``, skipping code."""
+    # Only text is scanned: code and inline HTML are tokens of their own.
     for tok in tokens:
-        if tok.type in ("code_block", "fence", "code_inline", "html_inline"):
-            continue
         if tok.type == "html_block":
             if tok.content.lstrip().startswith("<!--") and "-->" in tok.content:
                 _scan(
@@ -410,14 +411,14 @@ def _discover(
 ) -> list[_File]:
     """Return every directive file not in ``seen``, lowest precedence first; add each."""
     out: list[_File] = []
-    read = partial(_read, seen=seen, depth=0, cfg=cfg, skipped=skipped)
+    read = partial(_read, seen=seen, cfg=cfg, skipped=skipped)
     if "Managed" in cfg.tiers:
         out.extend(read(cfg.system_dir / cfg.filename, "Managed"))
         out.extend(_read_dir(cfg.system_dir / "rules", "Managed", seen, cfg, skipped))
     if "User" in cfg.tiers:
         out.extend(read(cfg.user_dir / cfg.filename, "User"))
         out.extend(_read_dir(cfg.user_dir / "rules", "User", seen, cfg, skipped))
-    if not {"Project", "Local"} & cfg.tiers:
+    if not bool({"Project", "Local"} & cfg.tiers):
         return out
     resolved = cwd.resolve()
     for d in [*reversed(resolved.parents), resolved, *cfg.additional_dirs]:
@@ -446,7 +447,7 @@ def _read_project(
 ) -> list[_File]:
     """Return one directory's project and local files, in their order, each governing ``d``."""
     name = Path(cfg.filename)
-    read = partial(_read, seen=seen, depth=0, cfg=cfg, skipped=skipped)
+    read = partial(_read, seen=seen, cfg=cfg, skipped=skipped)
     found = [
         *read(d / cfg.filename, "Project"),
         *read(d / cfg.dot_dir / cfg.filename, "Project"),
@@ -471,7 +472,7 @@ def _read_dir(
         found = sorted(d.rglob("*.md"))
     except OSError:
         return []
-    read = partial(_read, seen=seen, depth=0, cfg=cfg, skipped=skipped)
+    read = partial(_read, seen=seen, cfg=cfg, skipped=skipped)
     return [f for p in found if p.is_file() for f in read(p, tier)]
 
 
@@ -482,9 +483,9 @@ def _read(
     tier: Tier,
     *,
     seen: set[str],
-    depth: int,
     cfg: AgentsMdConfig,
     skipped: list[str],
+    depth: int = 0,
     globs: tuple[str, ...] = (),
 ) -> list[_File]:
     """Return ``path`` and what it includes, each once; add why to ``skipped`` if not."""
@@ -498,7 +499,7 @@ def _read(
         return []
     seen.add(str(resolved))
     try:
-        raw = resolved.read_text(encoding="utf-8")
+        raw = resolved.read_bytes().decode()
     except (OSError, UnicodeDecodeError):
         return []
     # A rule whose ``paths:`` cannot be read would govern every path.

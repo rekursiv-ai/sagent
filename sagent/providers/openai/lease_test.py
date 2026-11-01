@@ -79,8 +79,36 @@ async def test_a_refusal_already_answered_by_another_call_borrows_nothing() -> N
 
 @pytest.mark.asyncio
 async def test_a_borrowed_login_cannot_sign_in() -> None:
-    with pytest.raises(AuthError, match="lent by another process"):
+    with pytest.raises(
+        AuthError,
+        match=r"^This ChatGPT login is lent by another process; sign in there\.$",
+    ):
         await BorrowedLogin(_Lender()).sign_in(show=list[str]().append)
+
+
+@pytest.mark.asyncio
+async def test_renewing_before_any_token_names_none_refused() -> None:
+    lender = _Lender()
+    borrowed = BorrowedLogin(lender)
+    await borrowed.renew()
+    assert await borrowed.token() == ("t1", "acct")
+    assert lender.asked == [""]
+
+
+@pytest.mark.parametrize(("left_sec", "borrows"), [(300.0, 1), (300.5, 1), (299.5, 2)])
+@pytest.mark.asyncio
+async def test_a_token_is_kept_until_five_minutes_are_left(
+    monkeypatch: pytest.MonkeyPatch,
+    left_sec: float,
+    borrows: int,
+) -> None:
+    lender = _Lender(lifetime_sec=1_000.0)
+    monkeypatch.setattr(time, "time", lambda: 0.0)
+    borrowed = BorrowedLogin(lender)
+    await borrowed.token()
+    monkeypatch.setattr(time, "time", lambda: 1_000.0 - left_sec)
+    await borrowed.token()
+    assert len(lender.asked) == borrows
 
 
 if __name__ == "__main__":

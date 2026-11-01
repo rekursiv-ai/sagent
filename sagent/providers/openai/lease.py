@@ -73,7 +73,7 @@ class BorrowedLogin:
 
     def __init__(self, lease: TokenLease) -> None:
         self._lease = lease
-        self._token = LeasedToken(access_token="", account_id="", expires_at=0.0)
+        self._token: LeasedToken | None = None
         self._lock = asyncio.Lock()
 
     async def token(self) -> tuple[str, str]:
@@ -85,24 +85,25 @@ class BorrowedLogin:
 
         """
         async with self._lock:
+            token = self._token
             # Five minutes early, so a token never expires mid-request.
-            if time.time() > self._token.expires_at - 300.0:
-                self._token = await self._lease(rejected="")
-        return self._token.access_token, self._token.account_id
+            if token is None or time.time() > token.expires_at - 300.0:
+                token = self._token = await self._lease(rejected="")
+        return token.access_token, token.account_id
 
     async def renew(self) -> None:
         """Borrow a token other than the one the server just refused."""
         # Named before the wait: a call that borrowed while this one waited
         # holds a token the lender does not see as refused, so it lends that.
-        rejected = self._token.access_token
+        rejected = _access(self._token)
         async with self._lock:
-            if self._token.access_token == rejected:
+            if _access(self._token) == rejected:
                 self._token = await self._lease(rejected=rejected)
 
     async def sign_in(
         self,
         *,
-        headless: bool = False,
+        headless: bool = False,  # pragma: no mutate -- unread.
         show: Callable[[str], object] = print,
     ) -> None:
         """Refuse: a borrowed login is signed in by the process lending it.
@@ -117,3 +118,8 @@ class BorrowedLogin:
         """
         del headless, show
         raise AuthError("This ChatGPT login is lent by another process; sign in there.")
+
+
+def _access(token: LeasedToken | None) -> str:
+    """Return ``token``'s access token; empty before any is lent."""
+    return "" if token is None else token.access_token

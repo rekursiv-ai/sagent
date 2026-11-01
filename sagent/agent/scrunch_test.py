@@ -5,9 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+import logging
+
 import pytest
 
-from sagent.agent.scrunch import scrunch
+from sagent.agent.scrunch import safe_boundaries, scrunch
 from sagent.model.scripted import call, reply
 from sagent.model.types import Response
 from sagent.runtime.types import ModelContextEvent
@@ -308,6 +310,164 @@ async def test_the_last_pass_that_fits_reports_no_shortfall() -> None:
     )
 
     assert stopped == ""
+
+
+@pytest.mark.asyncio
+async def test_a_partition_stops_growing_once_past_one_summary() -> None:
+    summarize = _Summarizer(size=1)
+    context = _messages(5, 10)
+
+    _, stopped = await scrunch(
+        context,
+        summarize=summarize,
+        tokens=_tokens,
+        target_tokens=49,
+        max_partition_tokens=100,
+        summary_tokens=15,
+    )
+
+    assert stopped == ""
+    assert summarize.calls == [context[:2]]
+
+
+@pytest.mark.asyncio
+async def test_a_second_entry_over_the_limit_is_left_out() -> None:
+    summarize = _Summarizer(size=1)
+    context = [UserMessage(content="a" * 3), UserMessage(content="b" * 10)]
+
+    _, stopped = await scrunch(
+        context,
+        summarize=summarize,
+        tokens=_tokens,
+        target_tokens=12,
+        max_partition_tokens=100,
+        summary_tokens=1,
+    )
+
+    assert stopped == ""
+    assert summarize.calls == [context[:1]]
+
+
+@pytest.mark.asyncio
+async def test_one_summary_is_expected_to_take_1500_tokens() -> None:
+    summarize = _Summarizer(size=1)
+    context = _messages(3, 1_501)
+
+    _, stopped = await scrunch(
+        context,
+        summarize=summarize,
+        tokens=_tokens,
+        target_tokens=3 * 1_501 - 1,
+        max_partition_tokens=1_600,
+    )
+
+    assert stopped == ""
+    # 1,501 tokens is already past one summary, so nothing more is taken.
+    assert summarize.calls == [context[:1]]
+
+
+@pytest.mark.asyncio
+async def test_sixteen_passes_are_made_at_most() -> None:
+    summarize = _Summarizer(size=1_000)
+
+    _, stopped = await scrunch(
+        _messages(300, 100),
+        summarize=summarize,
+        tokens=_tokens,
+        target_tokens=1,
+        max_partition_tokens=1_600,
+    )
+
+    assert stopped == "no fit after 16 passes"
+    assert len(summarize.calls) == 16
+
+
+@pytest.mark.asyncio
+async def test_the_first_summary_estimate_is_one_below_the_cap() -> None:
+    summarize = _Summarizer(size=1)
+    context = _messages(11, 1)
+
+    _, stopped = await scrunch(
+        context,
+        summarize=summarize,
+        tokens=_tokens,
+        target_tokens=10,
+        max_partition_tokens=5,
+    )
+
+    assert stopped == ""
+    # Four tokens expected of a summary, plus the one to remove.
+    assert summarize.calls == [context[:5]]
+
+
+@pytest.mark.asyncio
+async def test_a_learned_summary_estimate_is_one_below_the_cap() -> None:
+    summaries: list[tuple[ModelContextEvent, ...]] = [
+        tuple(UserMessage(content="s") for _ in range(10)),
+        (UserMessage(content="s"),),
+    ]
+    calls: list[list[ModelContextEvent]] = []
+
+    async def summarize(
+        part: list[ModelContextEvent],
+    ) -> tuple[tuple[ModelContextEvent, ...], str]:
+        calls.append(part)
+        return summaries.pop(0), ""
+
+    _, stopped = await scrunch(
+        [UserMessage(content="b" * 20), *_messages(2, 1)],
+        summarize=summarize,
+        tokens=_tokens,
+        target_tokens=11,
+        max_partition_tokens=5,
+        summary_tokens=1,
+    )
+
+    assert stopped == ""
+    # A ten-token summary teaches an estimate of four, the cap less one.
+    assert [len(part) for part in calls] == [1, 5]
+
+
+@pytest.mark.asyncio
+async def test_a_partition_over_the_cap_and_a_rejection_are_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    summarize = _Summarizer(size=1, dropped=["lost"])
+
+    with caplog.at_level(logging.WARNING, logger="sagent.agent.scrunch"):
+        _, stopped = await scrunch(
+            [*_messages(2, 5), UserMessage(content="c" * 20)],
+            summarize=summarize,
+            tokens=_tokens,
+            target_tokens=1,
+            max_partition_tokens=5,
+            summary_tokens=1,
+        )
+
+    assert stopped == ""
+    # Passes 0 and 1 fill the cap exactly, which is no excess.
+    assert caplog.messages == [
+        "scrunch pass 0 rejected: the summary dropped input (lost)",
+        "scrunch pass 2: the partition exceeds the cap (6 > 5 tokens)",
+        "scrunch pass 3: the partition exceeds the cap (21 > 5 tokens)",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_cap_of_one_token_is_allowed() -> None:
+    _, stopped = await scrunch(
+        _messages(2, 1),
+        summarize=_Summarizer(size=0),
+        tokens=_tokens,
+        target_tokens=1,
+        max_partition_tokens=1,
+    )
+
+    assert stopped == ""
+
+
+def test_the_boundary_before_the_first_entry_is_safe() -> None:
+    assert safe_boundaries([]) == [True]
 
 
 @pytest.mark.asyncio

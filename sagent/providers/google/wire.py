@@ -824,4 +824,5 @@ def _retry_after(fields: Mapping[str, object], *, headers: Mapping[str, str]) ->
     seconds = _number(lower.get("retry-after"))
     if seconds is not None:
         return seconds
-    return reset_sec(str(fields.get("message") or "").casefold())
+    # A missing message reads as ``none``, which names no reset.
+    return reset_sec(str(fields.get("message")).casefold())

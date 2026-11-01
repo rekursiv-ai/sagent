@@ -23,6 +23,7 @@ returns the tokens; :func:`refresh_grant` and :func:`revoke_refresh_token` after
 
 from __future__ import annotations
 
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -136,15 +137,14 @@ class CodexLogin:
     ) -> None:
         self.path = (path or self.default_path()).expanduser()
         self._resources = resources
-        self._access = ""
-        self._account_id = ""
-        self._expires_at = 0.0
+        self._adopt({})
         self._lock = asyncio.Lock()
+        self._file_lock = self.path.with_suffix(".json.lock")
 
     @classmethod
     def default_path(cls) -> Path:
         """Return the file ``codex`` keeps its login in: under ``$CODEX_HOME``, else ``~/.codex``."""
-        home = os.environ.get("CODEX_HOME", "")
+        home = os.environ.get("CODEX_HOME") or ""
         return (
             Path(home) / "auth.json" if home else Path("~/.codex/auth.json")
         ).expanduser()
@@ -211,32 +211,26 @@ class CodexLogin:
 
         """
         verifier = secrets.token_urlsafe(64)
+        # A SHA-256 digest is 32 bytes, which base64 pads with exactly one ``=``.
         challenge = (
             base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-            .rstrip(b"=")
+            .removesuffix(b"=")
             .decode()
         )
-        state = secrets.token_urlsafe(32)
+        state = secrets.token_urlsafe()
         # The registered redirect is this exact string: ``127.0.0.1`` or any
         # other port is refused by the server.
         redirect = "http://localhost:1455/auth/callback"
         url = _authorize_url(redirect, challenge=challenge, state=state)
-        code = "" if headless else await _browser_code(url, state=state, show=show)
-        if not code:
-            code = await _pasted_code(url, state=state, show=show)
-        grant = await _grant(
+        code = await _code(url, state=state, show=show, headless=headless)
+        grant = await _exchange(
             self._resources.http,
-            {
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": redirect,
-                "client_id": _client_id(),
-                "code_verifier": verifier,
-            },
-            form=True,
+            code,
+            redirect=redirect,
+            verifier=verifier,
             issuer=ISSUER,
         )
-        async with self._lock, file_lock(self.path.with_suffix(".json.lock")):
+        async with self._lock, file_lock(self._file_lock):
             await self._save(_issued(grant))
 
     async def sign_in_device(self, *, show: Callable[[str], object] = print) -> None:
@@ -258,7 +252,7 @@ class CodexLogin:
                 tokens = await poll_device_code(http, code)
                 if tokens is not None:
                     break
-        async with self._lock, file_lock(self.path.with_suffix(".json.lock")):
+        async with self._lock, file_lock(self._file_lock):
             await self._save(tokens)
 
     async def sign_out(self) -> None:
@@ -266,7 +260,7 @@ class CodexLogin:
         tokens = await self._tokens()
         await revoke_refresh_token(
             self._resources.http,
-            from_plain(tokens.get("refresh_token"), str, default=""),
+            _text(tokens, "refresh_token"),
         )
 
     async def account(self) -> CodexAccount:
@@ -277,49 +271,40 @@ class CodexLogin:
 
         """
         tokens = await self._tokens()
-        return codex_account(
-            CodexTokens(
-                access_token=from_plain(tokens.get("access_token"), str, default=""),
-                refresh_token="",
-                account_id="",
-                id_token=from_plain(tokens.get("id_token"), str, default=""),
-                expires_at=0.0,
-            ),
-        )
+        return _account(_text(tokens, "id_token"), _text(tokens, "access_token"))
 
     def _expiring(self) -> bool:
         # Five minutes early, so a token never expires mid-request.
         return time.time() > self._expires_at - 300.0
 
     def _adopt(self, tokens: Mapping[str, object]) -> None:
-        self._access = from_plain(tokens.get("access_token"), str, default="")
-        self._account_id = from_plain(tokens.get("account_id"), str, default="")
+        self._access = _text(tokens, "access_token")
+        self._account_id = _text(tokens, "account_id")
         self._expires_at = _expiry(self._access)
 
     # A refresh token works once: two processes refreshing together leave one
     # of them holding a revoked token.
     async def _renew(self) -> None:
         """Rotate the token, under a lock every process on this login shares."""
-        async with file_lock(self.path.with_suffix(".json.lock")):
+        async with file_lock(self._file_lock):
             before = self._access
             tokens = await self._tokens()
             self._adopt(tokens)
             if self._access != before and not self._expiring():
                 return  # Another process rotated it while this one waited.
+            # What the answer leaves out stays stored: ``_save`` keeps it.
             await self._save(
                 await refresh_grant(
                     self._resources.http,
-                    from_plain(tokens.get("refresh_token"), str, default=""),
-                    account_id=from_plain(tokens.get("account_id"), str, default=""),
-                    id_token=from_plain(tokens.get("id_token"), str, default=""),
+                    _text(tokens, "refresh_token"),
                 ),
             )
 
     async def _tokens(self) -> dict[str, object]:
         """Return the stored tokens."""
-        stored = _stored(await asyncio.to_thread(_read_text, self.path))
+        stored = await asyncio.to_thread(_stored, self.path)
         tokens = from_plain(stored.get("tokens"), dict[str, object], default={})
-        if from_plain(tokens.get("refresh_token"), str, default=""):
+        if _text(tokens, "refresh_token"):
             return tokens
         if (
             stored.get("auth_mode") in ("apikey", "api_key")
@@ -332,7 +317,7 @@ class CodexLogin:
 
     async def _save(self, issued: CodexTokens) -> None:
         """Store tokens, keeping every other field ``codex`` keeps beside them."""
-        stored = _stored(await asyncio.to_thread(_read_text, self.path))
+        stored = await asyncio.to_thread(_stored, self.path)
         tokens = from_plain(stored.get("tokens"), dict[str, object], default={})
         tokens["access_token"] = issued.access_token
         for name, value in (
@@ -383,12 +368,7 @@ async def request_device_code(
         verification_url=f"{issuer}/codex/device",
         user_code=from_plain(issued.get("user_code") or issued.get("usercode"), str),
         device_auth_id=from_plain(issued.get("device_auth_id"), str),
-        interval_sec=from_plain(
-            issued.get("interval"),
-            float,
-            default=5.0,
-            strict=False,
-        ),
+        interval_sec=float(str(issued.get("interval", 5.0))),
     )
 
 
@@ -423,16 +403,11 @@ async def poll_device_code(
         return None
     response.raise_for_status()
     approved = json_loads(response.text, dict[str, object])
-    grant = await _grant(
+    grant = await _exchange(
         http,
-        {
-            "grant_type": "authorization_code",
-            "code": from_plain(approved.get("authorization_code"), str),
-            "redirect_uri": f"{issuer}/deviceauth/callback",
-            "client_id": _client_id(),
-            "code_verifier": from_plain(approved.get("code_verifier"), str),
-        },
-        form=True,
+        from_plain(approved.get("authorization_code"), str),
+        redirect=f"{issuer}/deviceauth/callback",
+        verifier=from_plain(approved.get("code_verifier"), str),
         issuer=issuer,
     )
     return _issued(grant)
@@ -442,7 +417,7 @@ async def refresh_grant(
     http: httpx2.AsyncClient,
     refresh_token: str,
     *,
-    account_id: str,
+    account_id: str = "",
     id_token: str = "",
     issuer: str = ISSUER,
 ) -> CodexTokens:
@@ -464,16 +439,17 @@ async def refresh_grant(
       HTTPStatusError: The issuer failed otherwise.
 
     """
-    grant = await _grant(
-        http,
-        {
+    # Codex posts a renewal as JSON, and a code exchange as a form.
+    response = await http.post(
+        f"{issuer}/oauth/token",
+        json={
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
             "client_id": _client_id(),
         },
-        form=False,
-        issuer=issuer,
+        timeout=15.0,
     )
+    grant = _granted(response)
     return _issued(
         grant,
         refresh_token=refresh_token,
@@ -521,7 +497,12 @@ def codex_account(tokens: CodexTokens) -> CodexAccount:
       account: The ChatGPT plan and the email; empty where no token says.
 
     """
-    claims = [_claims(t) for t in (tokens.id_token, tokens.access_token)]
+    return _account(tokens.id_token, tokens.access_token)
+
+
+def _account(*tokens: str) -> CodexAccount:
+    """Return the plan and the email ``tokens`` carry, the first token first."""
+    claims = [_claims(t) for t in tokens]
     plans = (
         _claim(c, "https://api.openai.com/auth", "chatgpt_plan_type") for c in claims
     )
@@ -535,19 +516,31 @@ def codex_account(tokens: CodexTokens) -> CodexAccount:
     )
 
 
-async def _grant(
+async def _exchange(
     http: httpx2.AsyncClient,
-    request: Mapping[str, str],
+    code: str,
     *,
-    form: bool,
+    redirect: str,
+    verifier: str,
     issuer: str,
 ) -> dict[str, object]:
-    """Post a token request: a code exchange as a form, a refresh as JSON."""
-    url = f"{issuer}/oauth/token"
-    if form:
-        response = await http.post(url, data=dict(request), timeout=15.0)
-    else:
-        response = await http.post(url, json=dict(request), timeout=15.0)
+    """Exchange a sign-in's code for its tokens."""
+    response = await http.post(
+        f"{issuer}/oauth/token",
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect,
+            "client_id": _client_id(),
+            "code_verifier": verifier,
+        },
+        timeout=15.0,
+    )
+    return _granted(response)
+
+
+def _granted(response: httpx2.Response) -> dict[str, object]:
+    """Return what a token request was granted."""
     if response.status_code in (400, 401):
         raise AuthError(
             "The ChatGPT login has expired or been revoked; sign in again.",
@@ -567,7 +560,7 @@ def _issued(
     """Return the tokens ``grant`` issued, the rest kept from before."""
     access = from_plain(grant.get("access_token"), str)
     expires_at = _expiry(access)
-    if expires_at <= 0:
+    if not expires_at:
         # A token that carries no expiry lives as long as the grant says.
         expires_in = from_plain(grant.get("expires_in"), float, default=0.0)
         if expires_in <= 0:
@@ -578,32 +571,34 @@ def _issued(
         expires_at = time.time() + expires_in
     return CodexTokens(
         access_token=access,
-        refresh_token=from_plain(grant.get("refresh_token"), str, default="")
-        or refresh_token,
+        refresh_token=_text(grant, "refresh_token") or refresh_token,
         account_id=_claim(
             _claims(access),
             "https://api.openai.com/auth",
             "chatgpt_account_id",
         )
         or account_id,
-        id_token=from_plain(grant.get("id_token"), str, default="") or id_token,
+        id_token=_text(grant, "id_token") or id_token,
         expires_at=expires_at,
     )
 
 
-# ``""`` when no browser reaches us within five minutes, as over ssh, or when
-# another process holds the one port the redirect may name.
-async def _browser_code(
+# Headless, or when another process holds the one port the redirect may name, no
+# browser is opened: the user opens the link anywhere and pastes where it lands.
+# Otherwise the browser has five minutes to come back first.
+async def _code(
     url: str,
     *,
     state: str,
     show: Callable[[str], object],
+    headless: bool,
     port: int = 1455,
-    timeout_sec: float = 300.0,
 ) -> str:
-    """Return the code the browser redirects back to ``port`` with."""
+    """Return the code the browser redirects back to ``port`` with, or the user pastes."""
+    show(f"Sign in to ChatGPT in your browser:\n\n  {url}\n")
     code = asyncio.Future[str]()
     try:
+        # Loopback alone: a sign-in code must not be offered to the network.
         server = await asyncio.start_server(
             lambda reader, writer: redirected(
                 reader,
@@ -616,25 +611,20 @@ async def _browser_code(
             port,
         )
     except OSError:
-        return ""
+        return await read_pasted_code(state=state, show=show, browser_tried=False)
+    # Held open while the user pastes, too, so nothing else listening at the
+    # redirect is handed the code.
     async with server:
-        show(f"Sign in to ChatGPT in your browser:\n\n  {url}\n")
-        open_browser(url)
-        try:
-            return await asyncio.wait_for(code, timeout=timeout_sec)
-        except TimeoutError:
-            return ""
-
-
-async def _pasted_code(
-    url: str,
-    *,
-    state: str,
-    show: Callable[[str], object],
-) -> str:
-    """Return the code in the redirect the user pastes from the browser."""
-    show(f"Sign in to ChatGPT in your browser:\n\n  {url}\n")
-    return await read_pasted_code(state=state, show=show, browser_tried=False)
+        if not headless:
+            open_browser(url)
+            # Over ssh the browser cannot reach us; its address bar holds the code.
+            with suppress(TimeoutError):
+                return await asyncio.wait_for(code, timeout=300.0)
+        return await read_pasted_code(
+            state=state,
+            show=show,
+            browser_tried=not headless,
+        )
 
 
 def _authorize_url(redirect: str, *, challenge: str, state: str) -> str:
@@ -661,23 +651,27 @@ def _client_id() -> str:
     return "app_EMoamEEZ73f0CkXaXp7hrann"
 
 
-def _stored(text: str) -> dict[str, object]:
+def _stored(path: Path) -> dict[str, object]:
+    """Return what the login file holds; nothing when it is missing or not an object."""
     try:
-        return json_loads(text or "{}", dict[str, object])
-    except ValueError:
+        return json_loads(path.read_text(), dict[str, object])
+    except (FileNotFoundError, ValueError):
         return {}
+
+
+def _text(fields: Mapping[str, object], name: str) -> str:
+    """Return the text field ``name``; empty when absent."""
+    return from_plain(fields.get(name), str, default="")
 
 
 # Every token read is lenient: a token shaped unexpectedly has no claims, so
 # the paths that renew it stay reachable.
 def _claims(token: str) -> dict[str, object]:
     """Return a JWT's claims, unverified."""
-    parts = token.split(".")
-    if len(parts) < 2:
-        return {}
-    payload = parts[1] + "=" * (-len(parts[1]) % 4)
     try:
-        return json_loads(base64.urlsafe_b64decode(payload), dict[str, object])
+        _, payload, *_ = token.split(".")
+        # Surplus padding is ignored; too little is an error.
+        return json_loads(base64.urlsafe_b64decode(payload + "=="), dict[str, object])
     except ValueError:
         return {}
 
@@ -687,8 +681,8 @@ def _claim(claims: Mapping[str, object], *keys: str) -> str:
     *scopes, key = keys
     try:
         for scope in scopes:
-            claims = from_plain(claims.get(scope), dict[str, object], default={})
-        return from_plain(claims.get(key), str, default="")
+            claims = from_plain(claims.get(scope), dict[str, object])
+        return from_plain(claims.get(key), str)
     except ReadError:
         return ""
 
@@ -696,10 +690,6 @@ def _claim(claims: Mapping[str, object], *keys: str) -> str:
 def _expiry(token: str) -> float:
     """Return a JWT's expiry in seconds since the epoch; ``0`` when it has none."""
     try:
-        return from_plain(_claims(token).get("exp"), float, default=0.0)
+        return from_plain(_claims(token).get("exp"), float)
     except ReadError:
         return 0.0
-
-
-def _read_text(path: Path) -> str:
-    return path.read_text() if path.exists() else ""

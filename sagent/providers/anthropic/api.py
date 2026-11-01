@@ -113,7 +113,7 @@ class Anthropic(HasModels, AsyncResource):
 
     async def credentials(self) -> dict[str, str]:
         """Return the headers that authenticate a request."""
-        key = os.environ.get("ANTHROPIC_API_KEY", "")
+        key = os.environ.get("ANTHROPIC_API_KEY") or ""
         if not key:
             raise AuthError("ANTHROPIC_API_KEY is not set.")
         return {"x-api-key": key}
@@ -160,7 +160,9 @@ class Anthropic(HasModels, AsyncResource):
         """
         attempt = 0
         while True:
+            # pragma: no mutate start -- ``None`` is as false as ``False``.
             started = False
+            # pragma: no mutate end
             try:
                 async with self._reply(
                     "/v1/messages",
@@ -266,7 +268,7 @@ class AnthropicModel(AsyncResource):
         self._provider = provider
         self._capability = capability
         self._settings = settings
-        self._answered_at = 0.0
+        self._answered_at: float | None = None
 
     @property
     def provider(self) -> Anthropic:
@@ -349,14 +351,14 @@ class AnthropicModel(AsyncResource):
           betas: The beta features the body uses.
 
         """
-        idle_sec = time.time() - self._answered_at
+        answered_at = self._answered_at
         return wire.encode(
             request,
             capability=self.capability,
             settings=self.settings,
             system=self.provider.system(request, settings=self.settings),
-            cache_expired=self._answered_at > 0.0
-            and idle_sec > self.settings.cache_ttl_sec,
+            cache_expired=answered_at is not None
+            and time.time() - answered_at > self.settings.cache_ttl_sec,
         )
 
 

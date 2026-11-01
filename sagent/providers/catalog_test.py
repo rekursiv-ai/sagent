@@ -454,6 +454,26 @@ def test_a_vendor_short_or_whole_then_its_transport_names_the_provider(
     assert ModelCatalog().name(spelling) == name
 
 
+def test_any_run_of_separators_in_a_name_is_dropped() -> None:
+    assert ModelCatalog().name("OpenAI--Sub") == "openai-sub"
+
+
+def test_a_cached_repos_line_names_its_provider_alone() -> None:
+    """A model id may hold a slash: the provider is what precedes the first."""
+    provider = _windowed()
+    other = provider["narrow"]
+    memory = ModelMemory.from_model(
+        provider["wide"],
+        {
+            "selfhosted/org/narrow-1.0": CachedModel(
+                capability=other.capability,
+                settings=other.settings,
+            ),
+        },
+    )
+    assert memory.cache[0].startswith("selfhosted/narrow-1.0")
+
+
 @pytest.mark.parametrize(
     ("spelling", "message"),
     [
@@ -772,10 +792,50 @@ async def test_recall_builds_the_model_and_its_cache_from_their_lines() -> None:
     )
     assert list(cache) == ["scripted/narrow-1.0"]
     assert cache["scripted/narrow-1.0"].settings.thinking_effort == "high"
+    assert cache["scripted/narrow-1.0"].capability.model_id == "narrow-1.0"
     assert (
         str(ModelTags.from_settings(model.capability, settings, provider="scripted"))
         == memory.model
     )
+
+
+class _Repos(ScriptedProvider):
+    """Serves any model, and keeps each name it was asked for."""
+
+    def __init__(self, *, name: str = "", resources: ProviderResources | None = None):
+        super().__init__(name=name, resources=resources)
+        self.asked: list[str] = []
+
+    @override
+    def __getitem__(self, model: str) -> ScriptedModel:
+        self.asked.append(model)
+        return super().__getitem__(model)
+
+
+@pytest.mark.parametrize(
+    ("line", "account"),
+    [("work@repos/org/m", "work"), ("repos/org/m", None)],
+    ids=["named", "default"],
+)
+@pytest.mark.asyncio
+async def test_recall_signs_in_as_its_line_says_and_asks_for_the_whole_repo(
+    line: str,
+    account: str | None,
+) -> None:
+    """A Hugging Face repo id holds a slash of its own."""
+    accounts: list[str | None] = []
+
+    def per_account(named: str | None) -> dict[str, type[_Repos]]:
+        accounts.append(named)
+        return {"repos": _Repos}
+
+    catalog = ModelCatalog(factories=per_account)
+    model, _ = await recall(ModelMemory(model=line), catalog=catalog)
+    provider = catalog.signed_in("repos", account=account)
+    assert model.provider is provider
+    assert isinstance(provider, _Repos)
+    assert (provider.name, provider.asked) == ("repos", ["org/m"])
+    assert accounts[-1] == account
 
 
 @pytest.mark.asyncio

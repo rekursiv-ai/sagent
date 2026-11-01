@@ -230,7 +230,7 @@ class Logins:
             for a in order
             if a not in family.signed_out_at
             or now - family.signed_out_at[a] > self.signed_out_sec
-            or self._written(a) > family.signed_out_at[a]
+            or self._written_since(a, family.signed_out_at[a])
         )
 
     async def added(self, account: str | None) -> None:
@@ -242,8 +242,7 @@ class Logins:
 
         """
         name = account or "default"
-        if name != "default":
-            check_account(name)
+        check_account(name)
 
         def signed_in(f: _Family) -> _Family:
             added = (
@@ -294,16 +293,15 @@ class Logins:
 
         """
         for account in order or ():
-            if account != "default":
-                check_account(account)
+            check_account(account)
         await self._edit(lambda f: replace(f, precedence=order))
 
-    def _written(self, account: str) -> float:
-        """Return when ``account``'s file was last written; ``0`` with no file."""
+    def _written_since(self, account: str, at: float) -> bool:
+        """Return whether ``account``'s file was written after ``at``; not with no file."""
         try:
-            return self.path(account).stat().st_mtime
+            return self.path(account).stat().st_mtime > at
         except OSError:
-            return 0.0
+            return False
 
     def _family(self) -> _Family:
         """Return what the ledger keeps for this default."""
@@ -421,15 +419,18 @@ def open_browser(url: str) -> None:
                 "/bin/sh",
                 "-c",
                 '"$@" &',
-                "sh",
+                "sh",  # pragma: no mutate -- ``$0``, which the script never reads.
                 browser.name,
                 *(arg.replace("%s", url) for arg in browser.args),
             ],
-            stdin=subprocess.DEVNULL,
+            # A shell gives a job it puts in the background ``/dev/null`` as
+            # stdin whatever its own, so this keeps only the shell off it.
+            stdin=subprocess.DEVNULL,  # pragma: no mutate
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
-            check=False,
+            # The shell exits 0 once it has put the browser in the background.
+            check=False,  # pragma: no mutate
         )
 
 
@@ -462,7 +463,9 @@ async def redirected(
             received = params.get("code", [""])[0]
             ok = url.path == path and params.get("state") == [state] and bool(received)
         case _:
+            # pragma: no mutate start -- a refused request's code is never read.
             received, ok = "", False
+            # pragma: no mutate end
     page = (
         "Signed in; you can close this tab."
         if ok
@@ -503,7 +506,7 @@ def pasted_code(pasted: str, *, state: str) -> str:
         code, _, pasted_state = pasted.strip().partition("#")
         params = {"code": [code] if code else [], "state": [pasted_state]}
     # ``parse_qs`` drops a blank ``code=``, so an empty list is no code.
-    codes = params.get("code", [])
+    codes = params.get("code", [])  # pragma: no mutate -- ``None`` is no code too.
     if not codes:
         raise AuthError("The pasted address holds no sign-in code.")
     if params.get("state") != [state]:
@@ -600,13 +603,13 @@ def _read[T, D](value: object, target: type[T], *, default: D) -> T | D:
 
 def _spent(
     family: _Family,
-    account: str | None,
+    account: str,
     model: str,
     *,
     now: float,
 ) -> Spent | None:
     """Return the window keeping ``account`` from ``model`` longest; ``None`` if none."""
-    marks = family.spent.get(account or "default", ())
+    marks = family.spent.get(account, ())
     live = [s for s in marks if s.until > now and s.covers(model)]
     return max(live, key=lambda s: s.until) if live else None
 

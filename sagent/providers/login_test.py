@@ -6,8 +6,11 @@ from pathlib import Path
 from typing import override
 
 import asyncio
+import logging
 import os
 import stat
+import subprocess
+import sys
 import time
 import webbrowser
 
@@ -60,6 +63,47 @@ async def test_the_redirect_is_answered_only_on_its_path_with_its_state(
         # A second redirect after the first is answered and changes nothing.
         assert await visit(port, f"{path}?code=c2&state=s1") == 200
     assert code.result() == "c1"
+
+
+async def _answer(port: int, request: bytes) -> str:
+    """Send ``request`` to ``port`` as it is; return the whole answer."""
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(request)
+    await writer.drain()
+    answer = (await reader.read()).decode()
+    writer.close()
+    await writer.wait_closed()
+    return answer
+
+
+@pytest.mark.asyncio
+async def test_the_redirect_tells_the_browser_whether_the_sign_in_took() -> None:
+    """A request line that is not UTF-8 is read as near as it decodes, and refused."""
+    code = asyncio.Future[str]()
+    server = await asyncio.start_server(
+        lambda reader, writer: redirected(
+            reader,
+            writer,
+            path="/cb",
+            state="s1",
+            code=code,
+        ),
+        "127.0.0.1",
+        0,
+    )
+    port = bound_port(server.sockets[0])
+    failed = "Sign-in failed; see the terminal."
+    signed_in = "Signed in; you can close this tab."
+    async with server:
+        assert await _answer(port, b"GET /cb\xff?code=c&state=s1 HTTP/1.1\r\n\r\n") == (
+            "HTTP/1.1 400 Bad Request\r\ncontent-type: text/plain\r\n"
+            f"content-length: {len(failed)}\r\nconnection: close\r\n\r\n{failed}"
+        )
+        assert await _answer(port, b"GET /cb?code=c&state=s1 HTTP/1.1\r\n\r\n") == (
+            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
+            f"content-length: {len(signed_in)}\r\nconnection: close\r\n\r\n{signed_in}"
+        )
+    assert code.result() == "c"
 
 
 _ANOTHER = r"^The pasted address belongs to another sign-in\.$"
@@ -133,6 +177,42 @@ def test_a_browser_command_opens_the_url_and_never_writes_to_the_terminal(
     # elsewhere, as mutmut's ``os.wait()``, finds a process it never started.
     with pytest.raises(ChildProcessError):
         os.waitpid(int((tmp_path / "pid").read_text()), os.WNOHANG)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Reads its session from /proc.")
+def test_a_browser_command_runs_in_a_session_of_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The terminal's hangup, when it closes, must not reach the browser."""
+    script = tmp_path / "browser"
+    script.write_text(
+        "#!/bin/sh\n"
+        f"cut -d' ' -f6 /proc/$$/stat > {tmp_path / 'sid.tmp'}\n"
+        f"mv {tmp_path / 'sid.tmp'} {tmp_path / 'sid'}\n",
+    )
+    script.chmod(0o700)
+    command = webbrowser.GenericBrowser([str(script), "%s"])
+    monkeypatch.setattr(webbrowser, "get", lambda: command)
+    open_browser("https://example.com")
+    sid = tmp_path / "sid"
+    deadline = time.monotonic() + 5
+    while not sid.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert int(sid.read_text()) != os.getsid(0)
+
+
+def test_a_browser_command_that_cannot_start_raises_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise FileNotFoundError("/bin/sh")
+
+    command = webbrowser.GenericBrowser(["browser", "%s"])
+    monkeypatch.setattr(webbrowser, "get", lambda: command)
+    monkeypatch.setattr(subprocess, "run", missing)
+    open_browser("https://example.com")
 
 
 def test_a_browser_that_is_no_command_opens_the_url_its_own_way(
@@ -404,6 +484,85 @@ def test_a_window_covers_every_model_or_only_its_family(
     assert spent.covers(model) is covered
 
 
+def test_a_family_is_every_word_after_the_span() -> None:
+    """``weekly Opus Fast`` names the family ``opus fast``, not ``fast``."""
+    spent = Spent(window="weekly Opus Fast", model="fast-1", until=10.0)
+    assert spent.covers("opus-5.5")
+
+
+@pytest.mark.asyncio
+async def test_of_an_accounts_windows_the_one_resetting_last_keeps_it(
+    tmp_path: Path,
+) -> None:
+    logins = Logins(tmp_path / "auth.json")
+    _save(logins, "default")
+    now = time.time()
+    weekly = Spent(window="weekly", model="m", until=now + 200.0)
+    await logins.spend(None, Spent(window="5-hour", model="m", until=now + 100.0))
+    await logins.spend(None, weekly)
+    await logins.spend(None, Spent(window="", model="m", until=now + 50.0))
+    assert window(logins, "default", "m", now=now) == weekly
+
+
+@pytest.mark.asyncio
+async def test_a_window_resetting_now_is_spent_no_longer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logins = Logins(tmp_path / "auth.json")
+    _save(logins, "default")
+    monkeypatch.setattr(time, "time", lambda: 1_000.0)
+    await logins.spend(None, Spent(window="5-hour", model="m", until=1_000.0))
+    kept = json_loads(_ledger().read_text(), dict[str, dict[str, object]])
+    assert "spent" not in kept[str(logins.default)]
+
+
+@pytest.mark.asyncio
+async def test_a_sign_out_is_kept_through_the_last_moment_of_its_day(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Passed over until a day has gone by, and kept on the ledger until then."""
+    logins = Logins(tmp_path / "auth.json")
+    _save(logins, "default", "work", "home")
+    now = [1_000.0]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    os.utime(logins.path("work"), (1_000.0, 1_000.0))
+    await logins.sign_out("work")
+    # Its file written at the sign-out, not since: still signed out.
+    assert [a for a, _ in logins.ranked("m", now=1_000.0)] == ["default", "home"]
+    end = 1_000.0 + logins.signed_out_sec
+    assert [a for a, _ in logins.ranked("m", now=end)] == ["default", "home"]
+    now[0] = end
+    await logins.sign_out("home")
+    kept = json_loads(_ledger().read_text(), dict[str, dict[str, dict[str, object]]])
+    assert sorted(kept[str(logins.default)]["signed_out_at"]) == ["home", "work"]
+
+
+@pytest.mark.asyncio
+async def test_signing_in_as_the_default_adds_no_account(tmp_path: Path) -> None:
+    logins = Logins(tmp_path / "auth.json")
+    _save(logins, "default", "work")
+    await logins.added(None)
+    await logins.added("default")
+    await logins.added("work")
+    kept = json_loads(_ledger().read_text(), dict[str, dict[str, object]])
+    assert kept[str(logins.default)]["added"] == ["work"]
+
+
+@pytest.mark.asyncio
+async def test_a_ledger_that_is_no_object_reads_as_empty_and_says_so(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    logins = Logins(tmp_path / "auth.json")
+    _save(logins, "default", "work")
+    _ledger().write_text("[1]")
+    with caplog.at_level(logging.WARNING, logger=login.__name__):
+        assert logins.order() == ("default", "work")
+    assert caplog.messages == [f"{_ledger()} does not read; starting it afresh"]
+
+
 @pytest.mark.asyncio
 async def test_the_first_live_account_skips_each_spent_until_it_resets(
     tmp_path: Path,
@@ -493,8 +652,9 @@ async def test_a_field_another_version_wrote_is_read_past_and_kept(
 @pytest.mark.asyncio
 async def test_an_entry_that_does_not_read_is_dropped_and_the_rest_kept(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A malformed mark must not stop a sign-in from being noted."""
+    """A malformed mark must not stop a sign-in from being noted, and says so."""
     logins = Logins(tmp_path / "auth.json")
     _save(logins, "default", "work")
     until = time.time() + 60
@@ -508,7 +668,12 @@ async def test_an_entry_that_does_not_read_is_dropped_and_the_rest_kept(
             },
         ),
     )
-    assert window(logins, "default", "m", now=until - 1) is not None
+    with caplog.at_level(logging.WARNING, logger=login.__name__):
+        assert window(logins, "default", "m", now=until - 1) is not None
+    assert caplog.messages == [
+        "passing over a ledger entry that does not read: {'window': 5}",
+        "passing over a ledger entry that does not read: 'bad'",
+    ]
     await logins.added("work")
     assert window(logins, "default", "m", now=until - 1) is not None
     assert window(logins, "work", "m", now=until - 1) is None

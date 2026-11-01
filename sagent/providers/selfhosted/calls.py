@@ -70,16 +70,16 @@ def _strip(
 ) -> tuple[list[ToolCall], str]:
     """Take each block ``pattern`` matches out of ``text`` that ``parse`` reads."""
     calls: list[ToolCall] = []
-    kept: list[str] = []
-    end = 0
-    for match in re.finditer(pattern, text, flags=re.DOTALL):
+
+    def taken(match: re.Match[str]) -> str:
+        """Return what replaces the block: nothing once read, else the block."""
         parsed = parse(match.group(1))
         if parsed is None or any(call.name.lower() not in names for call in parsed):
-            continue
+            return match.group(0)
         calls.extend(replace(call, name=names[call.name.lower()]) for call in parsed)
-        kept.append(text[end : match.start()])
-        end = match.end()
-    return calls, "".join((*kept, text[end:]))
+        return ""
+
+    return calls, re.sub(pattern, taken, text, flags=re.DOTALL)
 
 
 def _qwen_calls(body: str) -> list[ToolCall] | None:

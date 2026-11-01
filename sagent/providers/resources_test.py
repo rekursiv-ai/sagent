@@ -10,11 +10,14 @@ import signal
 
 import pytest
 
+from sagent.lib.posix.child import Child
 from sagent.providers.resources import SharedResources, SubprocessPool
 from sagent.providers.tool_server import McpToolServer
 
 
 if TYPE_CHECKING:
+    from asyncio.subprocess import Process
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
 
@@ -190,17 +193,43 @@ async def test_a_line_far_past_asyncios_default_limit_is_read_whole(
 
 @pytest.mark.asyncio
 async def test_a_process_runs_in_the_environment_given(tmp_path: Path) -> None:
+    """The spare started ahead too, which the next acquire takes."""
     out = tmp_path / "env"
     script = 'printf %s "$ACCOUNT" > "$0.$$"; read line'
     async with SubprocessPool() as pool:
-        process = await pool.acquire(
-            ["sh", "-c", script, str(out)],
-            env={"ACCOUNT": "work"},
-        )
-        assert process.stdin is not None
-        process.stdin.write(b"\n")
-        await process.wait()
-    assert (tmp_path / f"env.{process.pid}").read_text() == "work"
+        for _ in range(2):
+            process = await pool.acquire(
+                ["sh", "-c", script, str(out)],
+                env={"ACCOUNT": "work"},
+            )
+            assert process.stdin is not None
+            process.stdin.write(b"\n")
+            await process.wait()
+            assert (tmp_path / f"env.{process.pid}").read_text() == "work"
+
+
+@pytest.mark.asyncio
+async def test_a_released_process_is_stopped_with_the_pools_grace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Five seconds by default; closing the pool stops none a second time."""
+    graces: list[float] = []
+    stop = Child.stop
+
+    async def recorded(child: Child) -> int:
+        graces.append(child.grace_sec)
+        return await stop(child)
+
+    monkeypatch.setattr(Child, "stop", recorded)
+    pool = SubprocessPool()
+    process = await pool.acquire(_argv(tmp_path / "pids"), env={})
+    assert process.stdin is not None
+    process.stdin.write(b"\n")
+    await pool.release(process)
+    assert graces == [5.0]
+    await pool.aclose()
+    assert graces == [5.0, 5.0], "the spare, and nothing released already"
 
 
 @pytest.mark.asyncio
@@ -220,21 +249,31 @@ async def test_a_process_runs_in_its_own_session_without_our_stderr(
 
 
 @pytest.mark.asyncio
-async def test_a_spare_that_failed_to_start_is_replaced(tmp_path: Path) -> None:
-    script = tmp_path / "claude"
-    script.write_text(
-        f"#!/bin/sh\n{_WAITS}\n".replace('"$0"', f'"{tmp_path / "pids"}"'),
-    )
-    script.chmod(0o700)
+async def test_a_spare_that_failed_to_start_is_replaced(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its binary gone as it starts, the next acquire starts one afresh."""
+    starts = [0]
     async with SubprocessPool() as pool:
-        first = await pool.acquire([str(script)], env={})
-        # Gone before the spare starts: its start fails.
-        script.rename(tmp_path / "moved")
-        await asyncio.sleep(0)
-        (tmp_path / "moved").rename(script)
-        second = await pool.acquire([str(script)], env={})
+        spawn = pool._spawn
+
+        async def fails_second(
+            argv: Sequence[str],
+            *,
+            env: Mapping[str, str],
+        ) -> Process:
+            starts[0] += 1
+            if starts[0] == 2:
+                raise FileNotFoundError(argv[0])
+            return await spawn(argv, env=env)
+
+        monkeypatch.setattr(pool, "_spawn", fails_second)
+        first = await pool.acquire(_argv(tmp_path / "pids"), env={})
+        second = await pool.acquire(_argv(tmp_path / "pids"), env={})
         assert second.pid != first.pid
         assert second.returncode is None
+    assert starts[0] == 4
 
 
 @pytest.mark.asyncio

@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, override
 
 import asyncio
 import base64
@@ -23,6 +23,7 @@ from mcp.client._memory import InMemoryTransport
 from mcp.client.session_group import StreamableHttpParameters
 from mcp.server.lowlevel import Server
 from mcp.shared.auth import OAuthToken
+from treekle import json_loads
 
 import mcp.types as mcp_types
 import pytest
@@ -500,7 +501,8 @@ async def test_an_entry_that_does_not_read_is_still_removed(tmp_path: Path) -> N
     path = project_dir(tmp_path) / "mcp.json"
     _write(path, {"bad": {}, "worse": {}, "git": {"command": "uvx"}})
     assert await remove_server("bad", cwd=tmp_path) == "local"
-    assert list(json.loads(path.read_text())["mcpServers"]) == ["worse", "git"]
+    servers = json_loads(path.read_text(), dict[str, dict[str, object]])["mcpServers"]
+    assert list(servers) == ["worse", "git"]
 
 
 @pytest.mark.asyncio
@@ -931,12 +933,21 @@ async def test_signing_in_to_a_server_that_asks_for_none_keeps_no_tokens() -> No
 async def test_a_sign_in_that_stops_raises_why_not_the_group_around_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    @asynccontextmanager
-    async def _stops(url: str, **_: object) -> AsyncGenerator[None]:
+    class _Stops(contextlib.AbstractAsyncContextManager[None]):
+        """A sign-in that stops as it starts."""
+
+        @override
+        async def __aenter__(self) -> None:
+            # The SDK's task groups wrap what stops a sign-in, as here.
+            raise ExceptionGroup("sign-in", [EOFError("nothing pasted")])
+
+        @override
+        async def __aexit__(self, *exc: object) -> None:
+            del exc
+
+    def _stops(url: str, **_: object) -> _Stops:
         del url
-        # The SDK's task groups wrap what stops a sign-in, as here.
-        raise ExceptionGroup("sign-in", [EOFError("nothing pasted")])
-        yield
+        return _Stops()
 
     monkeypatch.setattr(mcp, "login_auth", _stops)
     remote = McpServer(name="web", parameters=StreamableHttpParameters(url="u"))

@@ -156,7 +156,7 @@ class OpenAICompatible(HasModels, AsyncResource):
           AuthError: The key variable is named but not set.
 
         """
-        key = self._api_key or os.environ.get(self.key_variable, "")
+        key = self._api_key or os.environ.get(self.key_variable) or ""
         if key:
             return {"authorization": f"Bearer {key}"}
         if self.key_variable:
@@ -233,12 +233,16 @@ class OpenAICompatible(HasModels, AsyncResource):
         """
         attempt = 0
         while True:
+            # pragma: no mutate start -- ``None`` is as false as ``False``, and
+            # HTTP header names are case-insensitive.
             started = False
+            accept = {"accept": "text/event-stream"}
+            # pragma: no mutate end
             try:
                 async with self._reply(
                     self.path,
                     body=body,
-                    headers={**headers, "accept": "text/event-stream"},
+                    headers={**headers, **accept},
                 ) as response:
                     async for event in wire.events(response.aiter_lines()):
                         started = True

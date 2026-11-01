@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, override
 
-from treekle import json_dumps, json_loads
+from treekle import ReadError, json_dumps, json_loads
 
 import httpx2
 import pytest
@@ -325,6 +325,39 @@ async def test_retrying_stops_after_five_attempts(slept: list[float]) -> None:
             await _stream(_Vendor(resources=shared)["default"])
     assert len(server.requests) == 5
     assert slept == [0.5, 1.0, 2.0, 4.0]
+
+
+@pytest.mark.asyncio
+async def test_thirty_seconds_is_still_short_enough_to_wait_out_here(
+    slept: list[float],
+) -> None:
+    server = _Server(
+        replies=[_failed(429, "Slow", headers={"retry-after": "30"}), _ok()],
+    )
+    async with _Served(server) as shared:
+        await _stream(_Vendor(resources=shared)["default"])
+    assert slept == [30.0]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_is_not_a_json_object_is_refused() -> None:
+    server = _Server(replies=[httpx2.Response(200, content=b"[42]")])
+    async with _Served(server) as shared:
+        with pytest.raises(ReadError):
+            await _Vendor(resources=shared).reply("/things", body={}, headers={})
+
+
+def test_a_reply_s_reasoning_goes_back_under_the_vendor_s_field() -> None:
+    vendor = _Vendor()
+    kimi = vendor["default"]
+    asked = Request(
+        records=(
+            UserMessage(content="hi"),
+            Thinking(content="Hmm."),
+            AssistantMessage(content="Hello"),
+        ),
+    )
+    assert "reasoning_content" in json_dumps(vendor.encode(asked, model=kimi))
 
 
 @pytest.mark.asyncio

@@ -317,6 +317,8 @@ async def test_the_envelope_is_asked_for_the_model_streamed_to() -> None:
         provider = _Enveloping(resources=shared)
         await _stream(provider["gemini-flash"].stream(_REQUEST))
     assert provider.wrapped_models == ["gemini-3.8-flash"]
+    # A subscription's envelope names the session the request belongs to.
+    assert provider.wrapped_requests == [_REQUEST]
     assert _body(server.requests[0])["wrapped"] is True
 
 
@@ -550,11 +552,12 @@ class _Renewing(Google):
 
 
 class _Enveloping(Google):
-    """A provider that wraps each body, remembering the model it was for."""
+    """A provider that wraps each body, remembering the model and request it was for."""
 
     def __init__(self, *, resources: SharedResources) -> None:
         super().__init__(resources=resources)
         self.wrapped_models: list[str] = []
+        self.wrapped_requests: list[Request] = []
 
     @override
     async def envelope(
@@ -564,8 +567,8 @@ class _Enveloping(Google):
         model: str,
         request: Request,
     ) -> Mapping[str, object]:
-        del request
         self.wrapped_models.append(model)
+        self.wrapped_requests.append(request)
         return {**body, "wrapped": True}
 
 
