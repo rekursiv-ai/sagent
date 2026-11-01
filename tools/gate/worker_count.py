@@ -2,7 +2,7 @@
 # ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 -P "$0" "$@"
 Size a worker pool: parse a ``--workers`` argument, or compute the machine's default.
 
 Run (``python -m tools.gate.worker_count``), it prints the machine's default

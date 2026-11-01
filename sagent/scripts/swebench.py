@@ -2,7 +2,7 @@
 # ruff: noqa: EXE003, D300, D205 -- Polyglot shell/Python script.
 # fmt: off
 '''' 2>/dev/null #
-exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 "$0" "$@"
+exec uv --quiet --project "$(dirname "$0")" run --frozen --no-sync python3 -P "$0" "$@"
 Run SWE-bench Verified with sagent, Claude Code, and Codex; grade and compare them.
 
 Each agent solves each task alone, headless, in a fresh checkout at the task's
