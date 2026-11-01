@@ -16,8 +16,11 @@ on:
 permissions:
   contents: read
 
+# A PR run cancels the one it supersedes. A push to main is grouped by commit: the
+# export waits on CI for the commit it merged, and a later push must neither
+# cancel that run nor replace it while it waits to start.
 concurrency:
-  group: package-validation-${{ github.workflow }}-${{ github.ref }}
+  group: package-validation-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: true
 
 jobs:
