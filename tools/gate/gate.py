@@ -97,7 +97,7 @@ def context() -> Context:
         root=Path.cwd(),
         environ=os.environ,
         run=run_argv,
-        output=_output,
+        output=output_argv,
         installed=_installed,
         which=shutil.which,
     )
@@ -268,6 +268,57 @@ class Flags(Protocol):
     argv: list[str]
 
 
+def output_argv(argv: Sequence[str]) -> str | None:
+    """Run ``argv``; return its stdout, or None when it failed or is not installed.
+
+    Stderr is the tool's diagnostics and reaches the hook's own: capturing it
+    hid why a widened gate fell back to its floor.
+
+    Args:
+      argv: The command.
+
+    Returns:
+      stdout: The command's output on exit 0; None otherwise.
+
+    """
+    try:
+        done = subprocess.run(  # noqa: S603 -- gate argv.
+            argv,
+            stdout=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+    except FileNotFoundError:
+        _missing(argv[0])
+        return None
+    return done.stdout if done.returncode == 0 else None
+
+
+def _missing(tool: str) -> int:
+    """Report a tool that is not installed; return the shell's status for it."""
+    sys.stderr.write(f"{tool}: command not found\n")
+    return 127
+
+
+def _installed(module: str) -> bool:
+    try:
+        return util.find_spec(module) is not None
+    except ModuleNotFoundError:
+        return False
+
+
+def _process(pid: int) -> tuple[int, str] | None:
+    """Return ``pid``'s parent and command line, from ``ps``."""
+    done = subprocess.run(  # noqa: S603 -- fixed command, numeric pid.
+        ["ps", "-o", "ppid=,command=", "-p", str(pid)],  # noqa: S607 -- system ps.
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    parent, _, command = done.stdout.strip().partition(" ")
+    return (int(parent), command) if parent.isdigit() else None
+
+
 def _parse_args(
     parser: argparse.ArgumentParser,
     argv: Sequence[str] | None = None,
@@ -323,42 +374,3 @@ def _run_once(flags: Flags, context: Context) -> int:
 
 def _run_threaded(flags: Flags, context: Context) -> int:
     return threaded(flags.gate, context=context, command=flags.argv)
-
-
-def _output(argv: Sequence[str]) -> str | None:
-    try:
-        done = subprocess.run(  # noqa: S603 -- gate argv.
-            argv,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-    except FileNotFoundError:
-        _missing(argv[0])
-        return None
-    return done.stdout if done.returncode == 0 else None
-
-
-def _missing(tool: str) -> int:
-    """Report a tool that is not installed; return the shell's status for it."""
-    sys.stderr.write(f"{tool}: command not found\n")
-    return 127
-
-
-def _installed(module: str) -> bool:
-    try:
-        return util.find_spec(module) is not None
-    except ModuleNotFoundError:
-        return False
-
-
-def _process(pid: int) -> tuple[int, str] | None:
-    """Return ``pid``'s parent and command line, from ``ps``."""
-    done = subprocess.run(  # noqa: S603 -- fixed command, numeric pid.
-        ["ps", "-o", "ppid=,command=", "-p", str(pid)],  # noqa: S607 -- system ps.
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    parent, _, command = done.stdout.strip().partition(" ")
-    return (int(parent), command) if parent.isdigit() else None

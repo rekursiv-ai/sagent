@@ -232,8 +232,32 @@ def test_output_is_stdout_only_on_success(
 ) -> None:
     processes.status, processes.stdout = status, "a\n"
 
-    assert gate._output(["tool"]) == expected
+    assert gate.output_argv(["tool"]) == expected
     assert gate.run_argv(["tool"]) == status
+
+
+def test_output_lets_the_tools_diagnostics_through(
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    """A gate that falls back must say why on the hook's own stderr."""
+    assert (
+        gate.output_argv(
+            [sys.executable, "-c", "import sys; print('out'); sys.stderr.write('why')"],
+        )
+        == "out\n"
+    )
+    assert capfd.readouterr().err == "why"
+
+
+def test_a_failing_tools_output_is_none_not_a_raise() -> None:
+    assert gate.output_argv([sys.executable, "-c", "raise SystemExit(3)"]) is None
+
+
+def test_a_missing_tool_is_named_by_output_alone(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert gate.output_argv(["no-such-tool-anywhere"]) is None
+    assert capsys.readouterr().err == "no-such-tool-anywhere: command not found\n"
 
 
 @pytest.mark.parametrize(
@@ -261,7 +285,7 @@ def test_a_missing_tool_is_exit_127_not_a_traceback(
 ) -> None:
     """A commit must not die on a tool a machine lacks, as ``npm`` once did."""
     assert gate.run_argv(["no-such-tool-anywhere"]) == 127
-    assert gate._output(["no-such-tool-anywhere"]) is None
+    assert gate.output_argv(["no-such-tool-anywhere"]) is None
     assert "no-such-tool-anywhere" in capsys.readouterr().err
 
 
