@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, override
 
 import asyncio
 import gc
+import os
 import signal
 import socket
 
@@ -22,6 +23,7 @@ from treekle import json_dumps
 import httpx2
 import pytest
 
+from sagent.lib.posix.pids import kill_and_reap, written_pid
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.llamacpp import server
 from sagent.providers.llamacpp.server import LlamaCpp
@@ -41,7 +43,7 @@ _LIVES = (
     'echo "loading model"\nprintf "%s\\n" "$@" > "$FAKE_LLAMA_ARGS.tmp"\n'
     'mv "$FAKE_LLAMA_ARGS.tmp" "$FAKE_LLAMA_ARGS"\nexec sleep 30\n'
 )
-_DIES = 'echo "error: failed to open model"\necho "done"\nexit 1\n'
+_DIES = 'echo "error: failed to open model"\necho "done" >&2\nexit 1\n'
 # Each ``sleep`` off the server's stdout: one holding the pipe outlives the
 # kill, the test's loop closes first, and the transport it strands, collected
 # in a later test, pins that test's frames -- a dropped provider is never freed.
@@ -288,18 +290,40 @@ async def test_docker_desktops_server_is_found_when_none_is_on_path(
 
 @pytest.mark.asyncio
 async def test_no_model_named_is_an_error_before_anything_starts() -> None:
-    with pytest.raises(RuntimeError, match="LLAMA_CPP_MODEL"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^Name a GGUF file with model_path= or LLAMA_CPP_MODEL\.$",
+    ):
         await LlamaCpp().endpoint()
 
 
 @pytest.mark.asyncio
 async def test_no_server_found_says_how_to_name_one() -> None:
-    with pytest.raises(RuntimeError, match="set LLAMA_CPP_SERVER"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"^llama-server was not found; set LLAMA_CPP_SERVER\.$",
+    ):
         await LlamaCpp(model_path="/m.gguf").endpoint()
 
 
 @pytest.mark.asyncio
-async def test_a_server_that_exits_reports_its_log(bare: Path) -> None:
+async def test_a_server_that_exits_reports_its_log(
+    bare: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its error output is its log too; its reader gets a moment to catch up."""
+    real = asyncio.wait
+    waited: list[float | None] = []
+
+    async def wait(
+        tasks: set[asyncio.Task[None]],
+        *,
+        timeout: float | None = None,  # noqa: ASYNC109 -- ``asyncio.wait``'s own.
+    ) -> tuple[set[asyncio.Task[None]], set[asyncio.Task[None]]]:
+        waited.append(timeout)
+        return await real(tasks, timeout=timeout)
+
+    monkeypatch.setattr(asyncio, "wait", wait)
     _install(bare, _DIES)
     fake = _Http(up=False)
     async with (
@@ -312,6 +336,53 @@ async def test_a_server_that_exits_reports_its_log(bare: Path) -> None:
     assert str(raised.value) == (
         "llama-server exited; its log:\nerror: failed to open model\ndone"
     )
+    # The stop that follows waits on the reader too, unbounded.
+    assert waited[0] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_a_server_whose_job_holds_its_output_still_stops(
+    bare: Path,
+    tmp_path: Path,
+) -> None:
+    """A job it started keeps the log open; the reader is stopped, not waited out."""
+    job = tmp_path / "job.pid"
+    _install(bare, f"sleep 60 &\necho $! > {job}\n{_LIVES}")
+    try:
+        async with _Served(_Http(ready=tmp_path / "args.txt")) as shared:
+            local = LlamaCpp(resources=shared, model_path="/m.gguf")
+            await local.endpoint()
+            await asyncio.wait_for(local.aclose(), timeout=5)
+    finally:
+        kill_and_reap([await written_pid(job)])
+
+
+@pytest.mark.asyncio
+async def test_a_line_that_is_not_utf8_is_logged_as_near_as_it_reads() -> None:
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"bad \xff byte\n")
+    reader.feed_eof()
+    log = server._Log()
+    await server._read_log(reader, into=log)
+    assert log.failure("x") == "x; its log:\nbad \ufffd byte"
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_exits_as_it_is_asked_to_is_left_alone() -> None:
+    """It can exit between the check and the signal."""
+
+    def gone(pid: int, sig: int) -> None:
+        del pid, sig
+        raise ProcessLookupError
+
+    running = await asyncio.create_subprocess_exec("sleep", "60")
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "kill", gone)
+            server._terminate(running)
+    finally:
+        running.kill()
+        await running.wait()
 
 
 @pytest.mark.asyncio
@@ -444,11 +515,17 @@ async def test_a_running_server_is_checked_once_and_never_started(
 
 @pytest.mark.asyncio
 async def test_a_running_server_that_answers_an_error_is_not_up() -> None:
+    """Asked again promptly, each ask given a second."""
     fake = _Http(statuses=[503, 200])
+    loop = asyncio.get_running_loop()
+    began = loop.time()
     async with _Served(fake) as shared:
         local = LlamaCpp(resources=shared, base_url="http://box/v1")
         assert await local.endpoint() == "http://box/v1"
+    assert loop.time() - began < 0.5
     assert len(fake.requests) == 2
+    each = dict.fromkeys(("connect", "read", "write", "pool"), 1.0)
+    assert [request.extensions["timeout"] for request in fake.requests] == [each] * 2
 
 
 def test_a_port_is_read_only_from_an_ipv4_socket(
@@ -460,7 +537,10 @@ def test_a_port_is_read_only_from_an_ipv4_socket(
     monkeypatch.chdir(tmp_path)
     with socket.socket(socket.AF_UNIX) as unix:
         unix.bind("s")
-        with pytest.raises(TypeError, match="IPv4"):
+        with pytest.raises(
+            TypeError,
+            match=r"^The socket is not bound to an IPv4 address\.$",
+        ):
             server._port(unix)
     with socket.socket() as ipv4:
         ipv4.bind(("127.0.0.1", 0))

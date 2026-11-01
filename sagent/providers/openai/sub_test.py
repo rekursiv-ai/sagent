@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Literal, override
 
 import base64
 import re
@@ -17,6 +17,7 @@ import pytest
 
 from sagent.model.exceptions import AuthError
 from sagent.model.types import Request, Response
+from sagent.providers.login import Logins
 from sagent.providers.openai import responses, token_count, wire
 from sagent.providers.openai.lease import LeasedToken
 from sagent.providers.openai.sub import OpenAISub
@@ -302,6 +303,47 @@ async def test_login_signs_in_through_the_codex_login(
     await sub.login(headless=headless)
     assert signed == [headless]
     await sub.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("auth")
+async def test_login_opens_the_browser_unless_told_not_to_and_keeps_the_account(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    signed: list[bool] = []
+    added: list[str | None] = []
+
+    async def sign_in(self: object, *, headless: bool = False) -> None:
+        del self
+        signed.append(headless)
+
+    async def add(self: Logins, account: str | None) -> None:
+        del self
+        added.append(account)
+
+    sub = OpenAISub(name="work-sub", account="work")
+    monkeypatch.setattr(type(sub._login), "sign_in", sign_in)
+    monkeypatch.setattr(Logins, "added", add)
+    await sub.login()
+    assert (sub.name, signed, added) == ("work-sub", [False], ["work"])
+    await sub.aclose()
+
+
+@pytest.mark.parametrize(
+    ("purpose", "compaction"),
+    [("compaction", ""), ("main", "auto")],
+)
+@pytest.mark.usefixtures("auth")
+def test_only_a_compaction_with_a_trigger_names_it(
+    purpose: Literal["main", "compaction"],
+    compaction: Literal["", "auto", "manual"],
+) -> None:
+    asked = replace(_REQUEST, purpose=purpose, compaction=compaction)
+    sent = OpenAISub().headers(asked)
+    assert "compaction" not in json_loads(
+        sent["x-codex-turn-metadata"],
+        dict[str, object],
+    )
 
 
 @pytest.fixture

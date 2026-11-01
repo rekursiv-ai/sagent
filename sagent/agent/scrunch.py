@@ -186,12 +186,14 @@ def _partition(
     """Return the oldest partition to summarize next."""
     n = len(view)
     safe = safe_boundaries(view)
-    limit = max(min(cap, deficit + summary_tokens), summary_tokens + 1)
+    # Past ``summary_tokens`` already: the deficit is positive and the cap above it.
+    limit = min(cap, deficit + summary_tokens)
     stop = 0
     used = 0
     while stop < n:
         size = tokens([view[stop]])
-        if stop > 0 and used + size > limit:
+        # An oldest entry over the limit is still taken, by the growth below.
+        if used + size > limit:
             break
         used += size
         stop += 1

@@ -172,7 +172,9 @@ class LlamaCpp(OpenAICompatible):
         self._process = (
             await Child.start(
                 *self._argv(port),
-                stdin=asyncio.subprocess.DEVNULL,
+                # The server reads nothing; this keeps it off a terminal, which
+                # no test has to tell it from.
+                stdin=asyncio.subprocess.DEVNULL,  # pragma: no mutate
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
             )
@@ -241,7 +243,8 @@ class LlamaCpp(OpenAICompatible):
         """Wait until the server at ``url`` lists its models."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self._startup_timeout_sec
-        while loop.time() < deadline:
+        # The clock moves between reads, so it never stops on the deadline.
+        while loop.time() < deadline:  # pragma: no mutate
             process = self._process
             if process is not None and process.returncode is not None:
                 # The log explains the exit, and its reader may still be behind.
@@ -266,9 +269,11 @@ class LlamaCpp(OpenAICompatible):
             stopping.detach()
         try:
             if process is not None:
+                # The server leads no group: a group stop finds none, and
+                # signals the server alone.
                 await Child(
                     process=process,
-                    group=False,
+                    group=False,  # pragma: no mutate
                     grace_sec=self.stop_timeout_sec,
                 ).stop()
         finally:

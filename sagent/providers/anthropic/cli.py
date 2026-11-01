@@ -316,10 +316,11 @@ class AnthropicCLIModel(AsyncResource):
                     env=env,
                 )
             elif not held:
+                told = (*claude.waiting, *unseen)
                 await claude.say(
                     _content(
-                        (*claude.waiting, *unseen),
-                        replay=False,
+                        told,
+                        lines=_new_lines(told),
                         limits=self.capability.limits,
                     ),
                 )
@@ -369,7 +370,11 @@ class AnthropicCLIModel(AsyncResource):
         )
         self._claude = _Claude(process, started_with=started_with)
         await self._claude.say(
-            _content(request.records, replay=True, limits=self.capability.limits),
+            _content(
+                request.records,
+                lines=_transcript(request.records),
+                limits=self.capability.limits,
+            ),
         )
         return self._claude
 
@@ -458,8 +463,11 @@ class _Claude:
     def __init__(self, process: Process, *, started_with: tuple[str, ...]) -> None:
         self.process = process
         self.started_with = started_with
+        # pragma: no mutate start -- the first turn's ``saw`` sets both before
+        # anything reads them.
         self.seen: tuple[SessionRecord, ...] = ()
         self.held: tuple[ToolCall, ...] = ()
+        # pragma: no mutate end
         self.waiting: tuple[SessionRecord, ...] = ()
         """Notes that came with tool results, for the next user line to carry."""
 
@@ -556,7 +564,7 @@ class _Claude:
                     )
         except TimeoutError:
             return False  # A call the CLI never made, as for a tool it lacks.
-        self.held = ()
+        # The calls stay held until ``saw`` records the turn they continue.
         self.waiting += tuple(
             r for r in results if isinstance(r, (SystemMessage, TurnContext))
         )
@@ -587,7 +595,9 @@ class _Claude:
         if stdout is None:
             raise ValueError("claude was started without stdout")
         # The window last reported, and when it resets, as the API's headers say.
+        # pragma: no mutate start -- ``None`` reads as no headers too.
         unified: dict[str, str] = {}
+        # pragma: no mutate end
         while True:
             # A model that goes quiet this long has dropped the turn.
             raw = await asyncio.wait_for(stdout.readline(), timeout=600.0)
@@ -625,21 +635,22 @@ class _Claude:
 def _content(
     records: Sequence[SessionRecord],
     *,
-    replay: bool,
+    lines: Sequence[str],
     limits: ModelLimits,
 ) -> list[dict[str, object]]:
-    """Return one user line: the new user messages, or the whole conversation as text."""
+    """Return one user line: ``lines`` as text, then the images ``records`` attach."""
     attachments = [
         attachment
         for record in records
         if isinstance(record, UserMessage)
         for attachment in record.attachments
     ]
-    if replay:
-        text = "\n\n".join(_transcript(records))
-    else:
-        text = "\n\n".join(line for record in records if (line := _said(record)))
-    return wire.content(text, attachments, limits=limits)
+    return wire.content("\n\n".join(lines), attachments, limits=limits)
+
+
+def _new_lines(records: Sequence[SessionRecord]) -> list[str]:
+    """Return what a user line carries for each new record that says anything."""
+    return [line for record in records if (line := _said(record))]
 
 
 def _shrunk[R: ToolResult](result: R, *, limits: ModelLimits) -> R:
@@ -691,20 +702,15 @@ def _transcript(records: Sequence[SessionRecord]) -> list[str]:
                 )
             case ToolResult():
                 lines.append(f"{record.call_id} returned: {record.text()}")
+            # pragma: no mutate start -- the rest say nothing a transcript keeps.
             case _:
                 pass
+            # pragma: no mutate end
     return lines
 
 
 def _digest(tools: Sequence[Tool]) -> str:
-    offered = [
-        {
-            "name": tool.name,
-            "description": tool.description,
-            "schema": mutable(tool.schema),
-        }
-        for tool in tools
-    ]
+    offered = [[tool.name, tool.description, mutable(tool.schema)] for tool in tools]
     return hashlib.sha256(json_dumps(offered).encode()).hexdigest()
 
 

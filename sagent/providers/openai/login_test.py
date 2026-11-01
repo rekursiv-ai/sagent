@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, override
@@ -147,6 +147,7 @@ async def test_a_token_about_to_expire_is_renewed_and_stored(auth: Path) -> None
             "refresh_token": "r1",
             "account_id": "acct-1",
             "id_token": "i1",
+            "keep": "too",
         },
     )
     fresh = _token("new", account="acct-2")
@@ -170,19 +171,35 @@ async def test_a_token_about_to_expire_is_renewed_and_stored(auth: Path) -> None
         "refresh_token": "r2",
         "account_id": "acct-2",
         "id_token": "i1",
+        "keep": "too",
     }
     assert _mode(auth) == 0o600
     assert (auth.parent / "auth.json.lock").exists()
 
 
 @pytest.mark.asyncio
-async def test_a_token_with_more_than_five_minutes_left_is_kept(auth: Path) -> None:
-    access = _token("a", expires_in_sec=310.0)
+async def test_a_token_with_five_minutes_left_is_kept(
+    auth: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = time.time()
+    access = _jwt({"exp": now + 300.0})
     _store(auth, {"access_token": access, "refresh_token": "r", "account_id": "acct"})
+    monkeypatch.setattr(time, "time", lambda: now)
     server = _Server(replies=[])
     async with _Served(server) as shared:
         assert await CodexLogin(auth, resources=shared).token() == (access, "acct")
     assert server.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_stored_login_without_a_token_is_renewed(auth: Path) -> None:
+    _store(auth, {"refresh_token": "r1", "account_id": "acct"})
+    fresh = _token("fresh")
+    server = _Server(replies=[_reply({"access_token": fresh, "refresh_token": "r2"})])
+    async with _Served(server) as shared:
+        assert await CodexLogin(auth, resources=shared).token() == (fresh, "acct")
+    assert _json(server.requests[0]) == _refresh("r1")
 
 
 @pytest.mark.asyncio
@@ -276,7 +293,8 @@ async def test_a_refused_refresh_says_to_sign_in_again(auth: Path) -> None:
         ("", "holds no ChatGPT login"),
         ("not json", "holds no ChatGPT login"),
         ('{"tokens": {"access_token": "a"}}', "holds no ChatGPT login"),
-        ('{"auth_mode": "apikey", "OPENAI_API_KEY": "sk"}', "holds an API key"),
+        ("[1]", "holds no ChatGPT login"),
+        ('{"auth_mode": "apikey"}', "holds an API key"),
         ('{"auth_mode": "api_key"}', "holds an API key"),
         ('{"OPENAI_API_KEY": "sk"}', "holds an API key"),
     ],
@@ -316,7 +334,10 @@ async def test_a_token_without_an_expiry_lives_as_long_as_its_grant(auth: Path) 
         assert await codex.token() == (plain, "a")
         assert await codex.token() == (plain, "a")
         assert len(server.requests) == 1
-        with pytest.raises(AuthError, match="no expiry"):
+        with pytest.raises(
+            AuthError,
+            match=r"^The ChatGPT login was issued with no expiry; sign in again\.$",
+        ):
             await codex.renew()
 
 
@@ -324,6 +345,7 @@ async def test_a_token_without_an_expiry_lives_as_long_as_its_grant(auth: Path) 
     "token",
     [
         "a.bm90IGpzb24.c",  # A payload that is not JSON.
+        f"a.{_part([1])}.c",  # One that is no object.
         _jwt({"exp": "tomorrow"}),
         "opaque",
     ],
@@ -415,15 +437,61 @@ def _no_code(state: str, challenge: str) -> str:
     return f"http://localhost:1455/auth/callback?state={state}"
 
 
-async def _no_browser(url: str, *, state: str, show: Callable[[str], object]) -> str:
-    del url, state, show
-    return ""
+@dataclass(slots=True, kw_only=True)
+class _Listened:
+    """Where each sign-in asked to listen, and the port it was given."""
+
+    hosts: list[str | None] = field(default_factory=list[str | None])
+    ports: list[int | None] = field(default_factory=list[int | None])
+    bound: list[int] = field(default_factory=list[int])
+
+
+@pytest.fixture(autouse=True)
+def listened(monkeypatch: pytest.MonkeyPatch) -> _Listened:
+    """Listen on a free port where a sign-in asks for the one ``codex`` registered."""
+    seen = _Listened()
+    real = asyncio.start_server
+
+    async def start_server(
+        callback: Callable[
+            [asyncio.StreamReader, asyncio.StreamWriter],
+            Awaitable[None] | None,
+        ],
+        host: str | None = None,
+        port: int | None = None,
+    ) -> asyncio.Server:
+        seen.hosts.append(host)
+        seen.ports.append(port)
+        server = await real(callback, host, 0 if port == 1455 else port)
+        seen.bound.append(bound_port(server.sockets[0]))
+        return server
+
+    monkeypatch.setattr(asyncio, "start_server", start_server)
+    return seen
+
+
+def _no_browser(url: str) -> bool:
+    raise AssertionError(url)
+
+
+def _pasted_c(prompt: str = "") -> str:
+    """Paste sign-in ``s``'s code ``c``."""
+    del prompt
+    return "c#s"
+
+
+_LINK = "Sign in to ChatGPT in your browser:\n\n  {}\n"
+_ANYWHERE = (
+    "Open it in a browser anywhere, then paste the address it was sent to,"
+    " though it fails to load:\n"
+)
 
 
 @pytest.mark.asyncio
 async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
     auth: Path,
     monkeypatch: pytest.MonkeyPatch,
+    listened: _Listened,
 ) -> None:
     challenges: list[str] = []
 
@@ -432,7 +500,7 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
         return f"http://localhost:1455/auth/callback?code=the-code&state={state}"
 
     paster = _Paster(pasted=pasted)
-    monkeypatch.setattr(login, "_browser_code", _no_browser)
+    monkeypatch.setattr(login, "open_browser", _no_browser)
     monkeypatch.setattr(builtins, "input", paster.input)
     access = _token("signed-in", account="acct-9")
     server = _Server(
@@ -442,11 +510,20 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
     )
     async with _Served(server) as shared:
         codex = CodexLogin(auth, resources=shared)
-        await codex.sign_in(show=paster.show)
+        await codex.sign_in(headless=True, show=paster.show)
         assert await codex.token() == (access, "acct-9")
+    # Headless, the redirect's port is still held while the user pastes.
+    assert (listened.hosts, listened.ports) == (["127.0.0.1"], [1455])
+    assert paster.shown == [_LINK.format(_shown_url(paster.shown)), _ANYWHERE]
     (sent,) = server.requests
+    assert str(sent.url) == "https://auth.openai.com/oauth/token"
+    assert set(from_plain(sent.extensions["timeout"], dict[str, float]).values()) == {
+        15.0,
+    }
     form = _form(sent)
     verifier = form.pop("code_verifier")
+    # 64 and 32 random bytes, base64url without padding.
+    assert len(verifier) == 86
     assert form == {
         "grant_type": "authorization_code",
         "code": "the-code",
@@ -472,12 +549,15 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
         "id_token_add_organizations": "true",
         "originator": "codex_cli_rs",
     }
+    assert len(params["state"]) == 43
     assert _tokens(auth) == {
         "access_token": access,
         "refresh_token": "r",
         "id_token": "i",
         "account_id": "acct-9",
     }
+    assert _stored(auth)["auth_mode"] == "chatgpt"
+    assert (auth.parent / "auth.json.lock").exists()
 
 
 @pytest.mark.parametrize(
@@ -491,13 +571,16 @@ async def test_a_pasted_code_must_belong_to_this_sign_in(
     pasted: Callable[[str, str], str],
     message: str,
 ) -> None:
-    monkeypatch.setattr(login, "_browser_code", _no_browser)
+    monkeypatch.setattr(login, "open_browser", _no_browser)
     paster = _Paster(pasted=pasted)
     monkeypatch.setattr(builtins, "input", paster.input)
     server = _Server(replies=[])
     async with _Served(server) as shared:
         with pytest.raises(AuthError, match=message):
-            await CodexLogin(auth, resources=shared).sign_in(show=paster.show)
+            await CodexLogin(auth, resources=shared).sign_in(
+                headless=True,
+                show=paster.show,
+            )
     assert server.requests == []
 
 
@@ -506,49 +589,8 @@ async def test_a_pasted_code_and_state_alone_are_enough(
     auth: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(login, "_browser_code", _no_browser)
+    monkeypatch.setattr(login, "open_browser", _no_browser)
     paster = _Paster(pasted=_hashed)
-    monkeypatch.setattr(builtins, "input", paster.input)
-    server = _Server(
-        replies=[_reply({"access_token": _token("x"), "refresh_token": "r"})],
-    )
-    async with _Served(server) as shared:
-        await CodexLogin(auth, resources=shared).sign_in(show=paster.show)
-    assert _form(server.requests[0])["code"] == "the-code"
-
-
-@pytest.mark.asyncio
-async def test_sign_in_takes_the_browsers_code_without_a_paste(
-    auth: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def browser(url: str, *, state: str, show: Callable[[str], object]) -> str:
-        del url, state, show
-        return "from-browser"
-
-    def no_paste(prompt: str = "") -> str:
-        raise AssertionError(prompt)
-
-    monkeypatch.setattr(login, "_browser_code", browser)
-    monkeypatch.setattr(builtins, "input", no_paste)
-    server = _Server(
-        replies=[_reply({"access_token": _token("x"), "refresh_token": "r"})],
-    )
-    async with _Served(server) as shared:
-        await CodexLogin(auth, resources=shared).sign_in(show=list[str]().append)
-    assert _form(server.requests[0])["code"] == "from-browser"
-
-
-@pytest.mark.asyncio
-async def test_a_headless_sign_in_opens_no_browser_and_takes_the_paste(
-    auth: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def browser(url: str, *, state: str, show: Callable[[str], object]) -> str:
-        raise AssertionError((url, state, show))
-
-    paster = _Paster(pasted=_hashed)
-    monkeypatch.setattr(login, "_browser_code", browser)
     monkeypatch.setattr(builtins, "input", paster.input)
     server = _Server(
         replies=[_reply({"access_token": _token("x"), "refresh_token": "r"})],
@@ -559,6 +601,39 @@ async def test_a_headless_sign_in_opens_no_browser_and_takes_the_paste(
             show=paster.show,
         )
     assert _form(server.requests[0])["code"] == "the-code"
+
+
+@pytest.mark.asyncio
+async def test_sign_in_takes_the_browsers_code_without_a_paste(
+    auth: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    listened: _Listened,
+) -> None:
+    opened: list[str] = []
+    visits: list[asyncio.Task[int]] = []
+
+    def open_in_browser(url: str) -> bool:
+        opened.append(url)
+        state = parse_qs(urlparse(url).query)["state"][0]
+        target = f"/auth/callback?code=from-browser&state={state}"
+        visits.append(asyncio.create_task(visit(listened.bound[0], target)))
+        return True
+
+    def no_paste(prompt: str = "") -> str:
+        raise AssertionError(prompt)
+
+    monkeypatch.setattr(login, "open_browser", open_in_browser)
+    monkeypatch.setattr(builtins, "input", no_paste)
+    server = _Server(
+        replies=[_reply({"access_token": _token("x"), "refresh_token": "r"})],
+    )
+    shown: list[str] = []
+    async with _Served(server) as shared:
+        await CodexLogin(auth, resources=shared).sign_in(show=shown.append)
+    assert _form(server.requests[0])["code"] == "from-browser"
+    assert [await visited for visited in visits] == [200]
+    assert shown == [_LINK.format(*opened)]
+    assert (listened.hosts, listened.ports) == (["127.0.0.1"], [1455])
 
 
 @pytest.mark.asyncio
@@ -583,15 +658,16 @@ async def test_the_browser_redirects_back_with_the_code(
 
     monkeypatch.setattr(login, "open_browser", open_in_browser)
     shown: list[str] = []
-    code = await login._browser_code(
+    code = await login._code(
         "https://sign.in",
         state="s1",
         show=shown.append,
+        headless=False,
         port=port,
     )
     assert code == "c1"
     assert opened == ["https://sign.in"]
-    assert shown == ["Sign in to ChatGPT in your browser:\n\n  https://sign.in\n"]
+    assert shown == [_LINK.format("https://sign.in")]
     assert [await visit for visit in visits] == [400, 200]
 
 
@@ -599,34 +675,55 @@ async def test_the_browser_redirects_back_with_the_code(
 async def test_a_browser_that_never_redirects_gives_way_to_a_paste(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    waited: list[dict[str, float]] = []
+
+    async def wait_for(code: asyncio.Future[str], **limits: float) -> str:
+        del code
+        waited.append(limits)
+        raise TimeoutError
+
     monkeypatch.setattr(login, "open_browser", _nowhere)
-    code = await login._browser_code(
+    monkeypatch.setattr(asyncio, "wait_for", wait_for)
+    monkeypatch.setattr(builtins, "input", _pasted_c)
+    shown: list[str] = []
+    code = await login._code(
         "https://sign.in",
         state="s",
-        show=list[str]().append,
+        show=shown.append,
+        headless=False,
         port=free_port(),
-        timeout_sec=0.01,
     )
-    assert code == ""
+    assert code == "c"
+    # Five minutes, then the paste: the link was shown once already.
+    assert waited == [{"timeout": 300.0}]
+    assert shown == [
+        _LINK.format("https://sign.in"),
+        (
+            "No browser came back. Paste the address it was sent to, though it fails"
+            " to load:\n"
+        ),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_a_browser_sign_in_gives_way_when_its_port_is_taken() -> None:
+async def test_a_browser_sign_in_gives_way_when_its_port_is_taken(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(login, "open_browser", _no_browser)
+    monkeypatch.setattr(builtins, "input", _pasted_c)
     shown: list[str] = []
     with socket.socket() as taken:
         taken.bind(("127.0.0.1", 0))
         taken.listen(1)
-        port = bound_port(taken)
-        assert (
-            await login._browser_code(
-                "https://x",
-                state="s",
-                show=shown.append,
-                port=port,
-            )
-            == ""
+        code = await login._code(
+            "https://x",
+            state="s",
+            show=shown.append,
+            headless=False,
+            port=bound_port(taken),
         )
-    assert shown == []
+    assert code == "c"
+    assert shown == [_LINK.format("https://x"), _ANYWHERE]
 
 
 @pytest.mark.asyncio
@@ -642,6 +739,14 @@ async def test_sign_in_device_polls_until_the_code_is_approved(
         await real_sleep(0)
 
     monkeypatch.setattr(asyncio, "sleep", sleep)
+    limits: list[float | None] = []
+    real_timeout = asyncio.timeout
+
+    def timeout(delay: float | None) -> asyncio.Timeout:
+        limits.append(delay)
+        return real_timeout(delay)
+
+    monkeypatch.setattr(asyncio, "timeout", timeout)
     access = _token("device", account="acct-d")
     server = _Server(
         replies=[
@@ -663,6 +768,9 @@ async def test_sign_in_device_polls_until_the_code_is_approved(
         "Open https://auth.openai.com/codex/device and enter the code ABCD-1234.\n",
     ]
     assert waits == [3.0, 3.0, 3.0]
+    # Fifteen minutes to approve it.
+    assert limits == [900.0]
+    assert (auth.parent / "auth.json.lock").exists()
     issue, *polls, exchange = server.requests
     assert str(issue.url) == "https://auth.openai.com/api/accounts/deviceauth/usercode"
     assert _json(issue) == {"client_id": _CLIENT}
@@ -844,6 +952,42 @@ async def test_an_approval_that_is_no_object_is_refused() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_approved_code_issuing_tokens_alone_keeps_nothing_else() -> None:
+    access = _jwt({"exp": time.time() + 600.0})
+    server = _Server(
+        replies=[
+            _reply({"authorization_code": "c", "code_verifier": "v"}),
+            _reply({"access_token": access}),
+        ],
+    )
+    code = DeviceCode(
+        verification_url="",
+        user_code="W",
+        device_auth_id="d",
+        interval_sec=1.0,
+    )
+    async with _http(server) as http:
+        tokens = await poll_device_code(http, code, issuer=_ISSUER)
+
+    assert tokens is not None
+    assert tokens == CodexTokens(
+        access_token=access,
+        refresh_token="",
+        account_id="",
+        id_token="",
+        expires_at=tokens.expires_at,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_device_code_that_is_no_object_is_refused() -> None:
+    server = _Server(replies=[httpx2.Response(200, content=b"[]")])
+    async with _http(server) as http:
+        with pytest.raises(ValueError, match="dict"):
+            _ = await request_device_code(http, issuer=_ISSUER)
+
+
+@pytest.mark.asyncio
 async def test_a_device_code_with_no_interval_is_polled_every_five_seconds() -> None:
     server = _Server(replies=[_reply({"user_code": "W", "device_auth_id": "d"})])
     async with _http(server) as http:
@@ -872,7 +1016,38 @@ async def test_a_refresh_keeps_what_its_answer_leaves_out() -> None:
         id_token=identity,
         expires_at=tokens.expires_at,
     )
-    assert _json(server.requests[0]) == {**_refresh(old)}
+    (sent,) = server.requests
+    assert str(sent.url) == f"{_ISSUER}/oauth/token"
+    assert _json(sent) == _refresh(old)
+    assert set(from_plain(sent.extensions["timeout"], dict[str, float]).values()) == {
+        15.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_refresh_with_nothing_to_keep_leaves_it_empty() -> None:
+    # A token without an expiry lives as long as the grant says, even a second.
+    plain, held = _jwt({"sub": "plain"}), _token("r")
+    server = _Server(replies=[_reply({"access_token": plain, "expires_in": 1})])
+    async with _http(server) as http:
+        tokens = await refresh_grant(http, held, issuer=_ISSUER)
+
+    assert tokens == CodexTokens(
+        access_token=plain,
+        refresh_token=held,
+        account_id="",
+        id_token="",
+        expires_at=tokens.expires_at,
+    )
+    assert tokens.expires_at == pytest.approx(time.time() + 1.0, abs=5)
+
+
+@pytest.mark.asyncio
+async def test_a_grant_that_is_no_object_is_refused() -> None:
+    server = _Server(replies=[httpx2.Response(200, content=b"[]")])
+    async with _http(server) as http:
+        with pytest.raises(ValueError, match="dict"):
+            _ = await refresh_grant(http, "r", issuer=_ISSUER)
 
 
 @pytest.mark.asyncio
@@ -880,7 +1055,10 @@ async def test_a_refresh_keeps_what_its_answer_leaves_out() -> None:
 async def test_a_refused_refresh_is_an_auth_error(status: int) -> None:
     server = _Server(replies=[_reply({}, status=status)])
     async with _http(server) as http:
-        with pytest.raises(AuthError, match="sign in again"):
+        with pytest.raises(
+            AuthError,
+            match=r"^The ChatGPT login has expired or been revoked; sign in again\.$",
+        ):
             _ = await refresh_grant(http, "r", account_id="a", issuer=_ISSUER)
 
 

@@ -17,10 +17,11 @@ Typical usage example:
 
 from __future__ import annotations
 
+from bisect import bisect
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from itertools import accumulate
+from itertools import accumulate, takewhile
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -201,9 +202,10 @@ class Pruner:
     def _cold(self) -> bool:
         """Return whether the prompt cache has outlived its lifetime since the last answer."""
         lifetime = self._agent.model.settings.cache_ttl_sec
+        # A model with no cache has none to go cold.
         return (
-            self._answered_at is not None
-            and lifetime > 0.0
+            bool(lifetime)
+            and self._answered_at is not None
             and time.monotonic() - self._answered_at > lifetime
         )
 
@@ -236,12 +238,12 @@ def reads(context: Sequence[ModelContextEvent]) -> list[int]:
       reads: ``k``, as :func:`cut` takes it, one per entry.
 
     """
-    out = [0] * len(context)
+    out: list[int] = []
     seen = 0
-    for i in reversed(range(len(context))):
-        out[i] = seen
-        seen += isinstance(context[i], Response)
-    return out
+    for entry in reversed(context):
+        out.append(seen)
+        seen += isinstance(entry, Response)
+    return out[::-1]
 
 
 def superseded(context: Sequence[ModelContextEvent]) -> set[int]:
@@ -291,18 +293,16 @@ def idle(context: Sequence[ModelContextEvent]) -> list[int]:
 
     """
     out = reads(context)
-    named = [
-        (
-            x,
-            " ".join(
-                s
-                for call in entry.records
-                if isinstance(call, ToolCall)
-                for s in _strings(call.arguments)
-            ),
-        )
-        for x, entry in enumerate(context)
-        if isinstance(entry, Response)
+    replies = [(x, e) for x, e in enumerate(context) if isinstance(e, Response)]
+    at = [x for x, _ in replies]
+    said = [
+        [
+            s
+            for call in reply.records
+            if isinstance(call, ToolCall)
+            for s in _strings(call.arguments)
+        ]
+        for _, reply in replies
     ]
     for i, entry in enumerate(context):
         if not isinstance(entry, (FileReadResult, FileEditResult, FileWriteResult)):
@@ -310,11 +310,10 @@ def idle(context: Sequence[ModelContextEvent]) -> list[int]:
         if entry.path is None:
             continue
         names = (entry.path, str(PurePosixPath(*PurePosixPath(entry.path).parts[-2:])))
-        for x, said in reversed(named):
-            if x <= i:
-                break
-            if any(name in said for name in names):
-                out[i] = out[x]
+        # The replies after ``i``, latest first.
+        for r in reversed(range(bisect(at, i), len(at))):
+            if any(name in s for name in names for s in said[r]):
+                out[i] = out[at[r]]
                 break
     return out
 
@@ -418,14 +417,11 @@ def left_in(
       left: ``N``.
 
     """
-    first = next(
-        (i for i, entry in enumerate(context) if isinstance(entry, Response)),
-        len(context),
-    )
+    before = takewhile(lambda entry: not isinstance(entry, Response), context)
     return requests_left(
         requests=sum(isinstance(entry, Response) for entry in context),
         prompt=sum(tokens),
-        first=sum(tokens[:first]),
+        first=sum(tokens[: len(list(before))]),
         limit=limit,
     )
 
@@ -485,7 +481,6 @@ def drop(runtime: Runtime, indices: Sequence[int], *, stub: str) -> None:
         )
     runtime.append_splice(
         mask=full_tape_mask(runtime.tape),
-        insert_after=None,
         payload=tuple(context),
         strategy="prune",
         paired_externally=unpaired_call_ids(context),
@@ -705,8 +700,6 @@ def _covered(span: tuple[float, float], spans: Sequence[tuple[float, float]]) ->
         if first > start:
             break
         start = max(start, last)
-        if start >= end:
-            return True
     return start >= end
 
 

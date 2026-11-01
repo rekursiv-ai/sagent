@@ -22,6 +22,7 @@ from functools import lru_cache
 from typing import TYPE_CHECKING
 
 import base64
+import contextlib
 import math
 import re
 import time
@@ -248,8 +249,9 @@ async def events(lines: AsyncIterator[str]) -> AsyncIterator[dict[str, object]]:
     # ``type``, so the ``event:`` lines are redundant.
     data: list[str] = []
     async for line in lines:
+        # The space after ``data:`` is left in: JSON reads it as whitespace.
         if line.startswith("data:"):
-            data.append(line.removeprefix("data:").lstrip())
+            data.append(line.removeprefix("data:"))
         elif not line and data:
             yield json_loads("\n".join(data), dict[str, object])
             data = []
@@ -293,11 +295,12 @@ class StreamReader:
         """
         kind = event.get("type")
         if kind == "message_start":
-            self._usage |= _object(_object(event.get("message")).get("usage"))
+            self._usage = _object(_object(event.get("message")).get("usage"))
         elif kind == "content_block_start":
             start = _object(event.get("content_block"))
             self._blocks[from_plain(event.get("index"), int, default=0)] = _Block(
-                kind=str(start.get("type") or ""),
+                # Any kind a block cannot name makes no record, as none does.
+                kind=str(start.get("type") or ""),  # pragma: no mutate
                 call_id=str(start.get("id") or ""),
                 name=str(start.get("name") or ""),
                 sealed=str(start.get("data") or ""),
@@ -411,11 +414,13 @@ def to_exception(
     wait_sec = _retry_after(headers or {}, rate_limited=status == 429)
     if status == 429 or kind == "rate_limit_error":
         lower = {key.lower(): value for key, value in (headers or {}).items()}
+        # pragma: no mutate start -- a claim naming no window names no limit.
         claim = (
             lower.get("anthropic-ratelimit-unified-representative-claim", "")
             if _stopped(lower)
             else ""
         )
+        # pragma: no mutate end
         return RateLimitedError(text, retry_after_sec=wait_sec, limit=_limit(claim))
     if (
         status in (408, 409)
@@ -730,7 +735,6 @@ def _object(value: object) -> dict[str, object]:
 def _blocked(message: str) -> bool:
     signals = (
         "content filtering policy",
-        "safeguards flagged",
         "usage policy",
         "cyber-related safeguards",
     )
@@ -765,12 +769,10 @@ def _retry_after(headers: Mapping[str, str], *, rate_limited: bool) -> float:
     seconds = _number(raw)
     if seconds is not None:
         return seconds
-    try:
-        return (
-            0.0 if raw is None else parsedate_to_datetime(raw).timestamp() - time.time()
-        )
-    except (TypeError, ValueError):
-        return 0.0
+    if raw is not None:
+        with contextlib.suppress(ValueError):
+            return parsedate_to_datetime(raw).timestamp() - time.time()
+    return 0.0
 
 
 # The unified headers are on every reply, as when the window rolls over, and

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, date, datetime
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -11,6 +12,7 @@ import time
 
 import pytest
 
+from sagent.agent import pruner as pruner_module
 from sagent.agent.agent import Agent, NoShrinker
 from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.pruner import (
@@ -21,6 +23,7 @@ from sagent.agent.pruner import (
     expired,
     idle,
     limit_tokens,
+    prices,
     reads,
     requests_left,
     saving,
@@ -93,7 +96,7 @@ def _agent(
                 max_response_tokens=min(8_000, window // 4),
             ),
             prices=prices,
-            cache_ttl_sec=frozenset({300.0, 3600.0}),
+            cache_ttl_sec=frozenset({0.0, 300.0, 3600.0}),
             default=ModelSettings(
                 cache_ttl_sec=300.0,
                 context_size=prices["fullcontext"],
@@ -134,7 +137,7 @@ def _turns(*results: str, tail: str = "done", requests: int = 0) -> list[Session
 def _read(
     call_id: str,
     path: str,
-    *ranges: tuple[int, int | None],
+    *ranges: tuple[int | None, int | None],
 ) -> list[SessionRecord]:
     """Return a Read of ``ranges`` of ``path``, 1000 tokens long; all of it when none."""
     return [
@@ -246,7 +249,7 @@ def test_a_result_the_model_has_not_read_is_never_dropped(tmp_path: Path) -> Non
     assert _results(agent) == {"read": _STUB, "unread": "y" * 4000}
 
 
-_P = "/repo/agent/x.py"
+_P = "/home/me/repo/agent/x.py"
 
 
 @pytest.mark.parametrize(
@@ -268,6 +271,19 @@ _P = "/repo/agent/x.py"
         ),
         ([*_read("a", _P, (3, None)), *_read("b", _P, (1, 10))], set[str]()),
         ([*_read("a", _P, (3, 4)), *_read("b", _P, (1, None))], {"a"}),
+        # A read with no start starts at line 1.
+        ([*_read("a", _P), *_read("b", _P, (2, None))], set[str]()),
+        ([*_read("a", _P, (None, 10)), *_read("b", _P, (2, 9))], set[str]()),
+        ([*_read("a", _P, (None, 10)), *_read("b", _P, (1, 10))], {"a"}),
+        # Covered already, a later span past a gap changes nothing.
+        (
+            [
+                *_read("a", _P, (1, 10)),
+                *_read("b", _P, (1, 10)),
+                *_read("c", _P, (50, 5)),
+            ],
+            {"a"},
+        ),
         # An earlier read covers nothing; another file covers nothing.
         ([*_read("a", _P, (1, 20)), *_read("b", _P, (1, 10))], set[str]()),
         ([*_read("a", _P), *_read("b", "/repo/agent/y.py")], set[str]()),
@@ -350,6 +366,22 @@ def test_expiry_follows_its_spec(
     )
 
 
+def test_a_result_s_rent_is_what_it_holds_beyond_its_stub() -> None:
+    # H = 4·1·(100 − 10) = 360 < B = 1·230 + 2·100 = 430: not yet.
+    assert (
+        expired(
+            [10.0, 100.0, 10.0, 100.0, 10.0],
+            [1],
+            idle=[0, 4, 0, 0, 0],
+            superseded=set[int](),
+            stub=10.0,
+            prices=(1.0, 2.0),
+            expiry=1.0,
+        )
+        == []
+    )
+
+
 def _read_turn(
     path: str,
     *,
@@ -384,6 +416,41 @@ def test_a_file_result_naming_no_file_is_idle_since_it_came(tmp_path: Path) -> N
     (at,) = (i for i, e in enumerate(context) if isinstance(e, FileEditResult))
 
     assert idle(context)[at] == reads(context)[at]
+
+
+def test_a_file_named_only_before_its_result_is_idle_since_it_came(
+    tmp_path: Path,
+) -> None:
+    context = _context(
+        tmp_path,
+        ToolCall(call_id="g", name="Grep", arguments={"path": _P}),
+        UncategorizedToolResult(call_id="g", content="hit"),
+        *_turns(requests=2),
+        ToolCall(call_id="e", name="Edit"),
+        FileEditResult(call_id="e", path=_P),
+        *_turns(requests=1),
+    )
+    at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
+
+    assert idle(context)[at["e"]] == reads(context)[at["e"]] < reads(context)[at["g"]]
+
+
+def test_a_file_result_after_one_naming_no_file_is_still_followed(
+    tmp_path: Path,
+) -> None:
+    context = _context(
+        tmp_path,
+        ToolCall(call_id="e", name="Edit"),
+        FileEditResult(call_id="e", path=None),
+        *_read("a", _P),
+        *_turns(requests=2),
+        ToolCall(call_id="g", name="Grep", arguments={"path": _P}),
+        UncategorizedToolResult(call_id="g", content="hit"),
+        *_turns(requests=1),
+    )
+    at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
+
+    assert idle(context)[at["a"]] == reads(context)[at["g"]] < reads(context)[at["a"]]
 
 
 @pytest.mark.parametrize("server", [False, True])
@@ -674,7 +741,9 @@ async def test_the_runtime_prunes_before_a_model_call_that_it_pays_for(
     ("requests", "prompt", "first", "left"),
     [
         (0, 100.0, 0.0, 0.0),  # No request yet.
+        (1, 200.0, 100.0, 1.0),  # One request: one more.
         (4, 100.0, 100.0, 4.0),  # No growth: n.
+        (10, 999.0, 994.0, 2.0),  # Half a token a request: room for 2 more.
         (10, 500.0, 100.0, 10.0),  # Room for 12.5 more: n.
         (10, 900.0, 100.0, 1.25),  # Room for 1.25 more.
         (10, 1100.0, 100.0, 0.0),  # Already past the trigger.
@@ -709,6 +778,15 @@ def test_requests_left_is_the_requests_so_far_capped_by_the_room_left(
         ([1, 100, 1, 100, 50], [9] * 5, (1.0, 3.0), 0.5, 1e6, False, []),
         ([1, 100, 1, 900, 1], [0] * 5, None, 2.0, 1e3, False, [1, 3]),  # 1003 → 5.
         ([1, 100, 999, 1, 1], [0] * 5, None, 2.0, 1e3, False, []),  # 1102 → 1003.
+        ([1, 100, 1, 100, 1], [0] * 5, None, 2.0, 5.0, False, []),  # 203 → 5: at L.
+        ([1, 100, 1, 100, 1], [0] * 5, None, 2.0, 203.0, False, [1, 3]),  # At L.
+        ([500, 100, 1, 100, 1], [0] * 5, None, 2.0, 600.0, False, [1, 3]),  # 702 → 504.
+        # At 3: H = 1·10 = K = 1·10, not past it. At 1: 10 < 12.
+        ([1, 100, 1, 11, 9], [0, 0, 0, 1, 0], (1.0, 2.0), 2.0, 1e6, False, []),
+        # At 1 the rent carried from 3 pays: 10 + 1·3 > 12.
+        ([1, 2, 1, 11, 9], [0, 3, 0, 1, 0], (1.0, 2.0), 2.0, 1e6, False, [1, 3]),
+        # At 3: N·r·D = 1·10 = K, not past it. At 1: 20 < 111.
+        ([1, 100, 100, 11, 9], [0, 0, 0, 2, 0], (1.0, 2.0), 1.0, 1e6, False, []),
     ],
 )
 def test_the_cut_follows_its_spec(
@@ -747,6 +825,12 @@ def test_the_cut_follows_its_spec(
         ),
         # The cache breaks at the first chosen: all after it is written again.
         ([3], (1.0, 2.0), Saving(saved=99, rewritten=2, priced=(196, 2 / 99))),
+        # S = 2·2·198 − 1·4; k = 1·4 / (2·198).
+        (
+            [1, 3],
+            (2.0, 3.0),
+            Saving(saved=198, rewritten=4, priced=(788, 4 / 396)),
+        ),
         ([1, 3], None, Saving(saved=198, rewritten=4, priced=None)),
         # A stub as big as its result saves nothing and never pays.
         (
@@ -765,8 +849,19 @@ def test_a_saving_follows_its_spec(
     assert saving(sizes, chosen, stub=1.0, prices=prices, left=2.0) == expected
 
 
+def test_a_saving_of_under_a_token_still_pays_back_in_time() -> None:
+    # D = 0.5; T = 101 − 0.5; k = 1·100.5 / (1·0.5).
+    assert saving(
+        [1.0, 100.0, 1.0, 100.0, 1.0],
+        [3],
+        stub=99.5,
+        prices=(1.0, 2.0),
+        left=2.0,
+    ) == Saving(saved=0.5, rewritten=100.5, priced=(-99.5, 201.0))
+
+
 def test_a_saving_needs_a_result_to_drop() -> None:
-    with pytest.raises(ValueError, match="at least one"):
+    with pytest.raises(ValueError, match=r"^Choose at least one result to drop\.$"):
         _ = saving([1.0], [], stub=0.0, prices=None, left=1.0)
 
 
@@ -778,6 +873,27 @@ def test_only_a_tool_result_may_be_dropped(tmp_path: Path) -> None:
     drop(agent.runtime, [], stub="gone")
     drop(agent.runtime, [2], stub="gone")
     assert _results(agent) == {"c0": "gone"}
+
+
+def test_a_drop_replaces_what_an_earlier_drop_kept(tmp_path: Path) -> None:
+    agent, _, _ = _agent(tmp_path)
+    agent.session.append(
+        *_turns("x" * 400, "y" * 400),
+        ToolCall(call_id="lost", name="Read"),
+        UserMessage(content="next"),
+        AssistantMessage(content="ok"),
+    )
+    at = [
+        i
+        for i, e in enumerate(agent.runtime.context().messages)
+        if isinstance(e, ToolResult)
+    ]
+
+    drop(agent.runtime, at[:1], stub="gone")
+    drop(agent.runtime, at[1:], stub="gone")
+
+    assert _results(agent) == {"c0": "gone", "c1": "gone"}
+    assert [p.paired_externally for p in _prunes(agent)] == [frozenset({"lost"})] * 2
 
 
 def test_nothing_eligible_is_nothing_to_cut() -> None:
@@ -846,9 +962,78 @@ def test_the_compactor_s_own_trigger_is_the_limit(tmp_path: Path) -> None:
     assert not plain_pruner.should_run()
 
 
-def test_a_model_with_no_window_never_compacts(tmp_path: Path) -> None:
-    agent, pruner, _ = _agent(tmp_path, price=None, window=0)
+@pytest.mark.parametrize(("window", "limit"), [(0, math.inf), (1, 1.0)])
+def test_a_model_with_no_window_never_compacts(
+    tmp_path: Path,
+    window: int,
+    limit: float,
+) -> None:
+    agent, pruner, _ = _agent(tmp_path, price=None, window=window)
     agent.session.append(*_turns("x" * 40_000, requests=20))
+
+    assert limit_tokens(agent) == limit
+    assert not pruner.should_run()
+
+
+class _Evening:
+    """Stands in for ``datetime``: 6 October in the evening here, 7 October in UTC."""
+
+    @classmethod
+    def now(cls, tz: object = None) -> datetime:
+        if tz is UTC:
+            return datetime(2026, 10, 7, 1, tzinfo=UTC)
+        return datetime(2026, 10, 6, 18)  # noqa: DTZ001 -- the local wall clock.
+
+
+def test_prices_are_read_off_the_card_of_the_utc_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pruner_module, "datetime", _Evening)
+    halved = replace(_CACHED, cache_read=0.15)
+    provider = ScriptedProvider(
+        capability=ModelCapability(
+            model_id="dated",
+            prices=PriceCatalog(
+                prices={
+                    PriceCondition(): _CACHED,
+                    PriceCondition(effective_date=date(2026, 10, 7)): halved,
+                },
+            ),
+        ),
+    )
+
+    assert prices(provider["dated"], prompt=0) == (0.15 / 1e6, 3.75 / 1e6)
+
+
+def test_a_drop_at_the_trigger_averts_compaction_unexpired(tmp_path: Path) -> None:
+    agent, pruner, _ = _agent(tmp_path, price=None, window=4000)
+    # Results expire only once superseded, which none is.
+    agent.model.settings = replace(
+        agent.model.settings,
+        pruning=PruningPolicy(keep_recent=0),
+    )
+    records = _turns("x" * 8000)
+    agent.session.append(*records)
+    # Padded to the 3,000-token trigger exactly.
+    held = sum(sizes(agent.model, agent.runtime.context().messages))
+    agent.session.append(UserMessage(content="p" * int((3000 - held) * 4)))
+    assert sum(sizes(agent.model, agent.runtime.context().messages)) == 3000
+
+    assert pruner.prune()
+    assert _results(agent) == {"c0": _STUB}
+
+
+def test_a_model_with_no_cache_has_none_to_go_cold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, pruner, _ = _agent(tmp_path)
+    agent.model.settings = replace(agent.model.settings, cache_ttl_sec=0.0)
+    agent.session.append(*_turns("x" * 4000, tail="t" * 4000))
+    now = [1000.0]
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    agent.runtime.publish(types.ModelResponseComplete(response=reply("ok")))
+    now[0] += 1.0
 
     assert not pruner.should_run()
 
@@ -857,7 +1042,7 @@ def test_a_model_with_no_window_never_compacts(tmp_path: Path) -> None:
 async def test_a_pruner_takes_no_instructions(tmp_path: Path) -> None:
     _, pruner, _ = _agent(tmp_path)
 
-    with pytest.raises(ValueError, match="no instructions"):
+    with pytest.raises(ValueError, match=r"^A pruner takes no instructions\.$"):
         await pruner.run("keep the plan")
 
 

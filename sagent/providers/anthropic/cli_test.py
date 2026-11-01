@@ -17,7 +17,7 @@ import tempfile
 import time
 
 from PIL import Image
-from treekle import PlainTree, from_plain, json_dumps, json_loads
+from treekle import PlainTree, ReadError, from_plain, json_dumps, json_loads
 
 import httpx2
 import pytest
@@ -29,8 +29,9 @@ from sagent.model.exceptions import (
     RateLimitedError,
 )
 from sagent.model.types import Request, Response, TextChunk
-from sagent.providers.anthropic import login, wire
+from sagent.providers.anthropic import cli, login, wire
 from sagent.providers.anthropic.cli import AnthropicCLI, AnthropicCLIModel
+from sagent.providers.login import Logins
 from sagent.providers.resources import SharedResources
 from sagent.providers.types import HasLogin
 from sagent.session.types import (
@@ -41,6 +42,7 @@ from sagent.session.types import (
     ContextClear,
     SystemMessage,
     Thinking,
+    TokenUsage,
     ToolCall,
     TurnContext,
     UncategorizedToolResult,
@@ -53,7 +55,7 @@ from sagent.types import AsyncResource
 
 if TYPE_CHECKING:
     from asyncio.subprocess import Process
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     from sagent.providers.types import ProcessPool, ToolMount
     from sagent.session.types import SessionRecord
@@ -661,6 +663,112 @@ async def test_a_throttle_while_the_window_allows_waits_no_reset(
     assert (raised.value.retry_after_sec, raised.value.limit) == (0.0, "")
 
 
+@pytest.mark.parametrize(
+    ("info", "headers"),
+    [
+        (
+            {"status": "rejected", "rateLimitType": "seven_day", "resetsAt": 7},
+            {
+                "anthropic-ratelimit-unified-status": "rejected",
+                "anthropic-ratelimit-unified-representative-claim": "seven_day",
+                "anthropic-ratelimit-unified-reset": "7",
+            },
+        ),
+        (
+            {},
+            {
+                "anthropic-ratelimit-unified-status": "",
+                "anthropic-ratelimit-unified-representative-claim": "",
+            },
+        ),
+    ],
+    ids=["spent", "silent"],
+)
+def test_a_rate_limit_event_reads_as_the_api_s_headers(
+    info: dict[str, object],
+    headers: dict[str, str],
+) -> None:
+    """Spelled as the API sends them, so ``wire`` reads both alike."""
+    event: dict[str, object] = {"type": "rate_limit_event", "rate_limit_info": info}
+    assert cli._unified_headers(event) == headers
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_event_that_says_nothing_says_no_window(
+    claude: _Stub,
+    shared: _Resources,
+) -> None:
+    claude.script([{"type": "rate_limit_event"}, _SPENT])
+    with pytest.raises(RateLimitedError) as raised:
+        await _stream(_model(shared), Request(records=(UserMessage(content="hi"),)))
+    assert raised.value.limit == ""
+
+
+@pytest.mark.asyncio
+async def test_a_line_that_is_not_an_object_is_an_error(
+    claude: _Stub,
+    shared: _Resources,
+) -> None:
+    (claude.dir / "turn.0").write_text("[1]\n")
+    with pytest.raises(ReadError):
+        await _stream(_model(shared), Request(records=(UserMessage(content="hi"),)))
+
+
+@pytest.mark.asyncio
+async def test_claude_quiet_for_ten_minutes_has_dropped_the_turn(
+    claude: _Stub,
+    shared: _Resources,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    claude.script(_said("Hello"))
+    real = asyncio.wait_for
+    waits: list[float | None] = []
+
+    async def recorded[T](awaitable: Awaitable[T], **limits: float | None) -> T:
+        waits.append(limits["timeout"])
+        return await real(awaitable, **limits)
+
+    monkeypatch.setattr(asyncio, "wait_for", recorded)
+    await _stream(_model(shared), Request(records=(UserMessage(content="hi"),)))
+    assert waits
+    assert set(waits) == {600.0}
+
+
+@pytest.mark.asyncio
+async def test_a_new_lines_images_reach_the_running_claude(
+    claude: _Stub,
+    shared: _Resources,
+) -> None:
+    claude.script(_said("Hello"), _said("A dot"))
+    model = _model(shared)
+    first = Request(records=(UserMessage(content="hi"),))
+    reply = _response(await _stream(model, first)).records
+    picture = _png_attachment()
+    seen = UserMessage(content="see", attachments=(picture,))
+    await _stream(model, Request(records=(*first.records, *reply, seen)))
+    ((_, said),) = claude.processes()
+    assert [block["type"] for block in said[1]] == ["text", "image"]
+
+
+def test_a_model_that_takes_no_effort_is_told_none(shared: _Resources) -> None:
+    sonnet = _model(shared, name="sonnet-4.5")
+    assert sonnet.settings.thinking_effort == "none"
+    assert "--effort" not in sonnet.command(Request(), url="http://127.0.0.1:9/m")
+    opus = _model(shared)
+    command = opus.command(Request(), url="http://127.0.0.1:9/m")
+    assert command[command.index("--effort") + 1] == opus.settings.thinking_effort
+
+
+@pytest.mark.asyncio
+async def test_count_takes_records_that_attach_nothing() -> None:
+    model = AnthropicCLI()["opus"]
+    said = Request(records=(UserMessage(content="hi"),))
+    answered = Request(
+        records=(*said.records, TokenUsage(), AssistantMessage(content="hello")),
+    )
+    assert await model.count(answered) > await model.count(said)
+
+
 @pytest.mark.asyncio
 async def test_a_spent_window_with_no_reset_is_still_named(
     claude: _Stub,
@@ -820,15 +928,21 @@ async def test_login_passes_headless_to_the_sign_in(
     headless: bool,
 ) -> None:
     seen: list[bool] = []
+    added: list[str | None] = []
 
     async def sign_in(self: object, *, headless: bool = False) -> None:
         del self
         seen.append(headless)
 
+    async def add(self: object, account: str | None) -> None:
+        del self
+        added.append(account)
+
     monkeypatch.setattr(login.ClaudeLogin, "sign_in", sign_in)
+    monkeypatch.setattr(Logins, "added", add)
     _keep_logins_in(tmp_path, monkeypatch)
     await AnthropicCLI(account="c").login(headless=headless)
-    assert seen == [headless]
+    assert (seen, added) == ([headless], ["c"])
 
 
 @pytest.mark.asyncio

@@ -120,6 +120,18 @@ async def test_the_default_login_is_the_one_claude_keeps_in_home(
 
 
 @pytest.mark.asyncio
+async def test_a_stored_login_without_a_token_is_renewed(tmp_path: Path) -> None:
+    """Its expiry is no promise of a token to hand out."""
+    path = tmp_path / ".credentials.json"
+    oauth = {"refreshToken": "rt-1", "expiresAt": int((_NOW + 3600) * 1000)}
+    path.write_text(json_dumps({"claudeAiOauth": oauth}))
+    server = _Server(replies={_GRANT_URL: [_granted("at-2")]})
+    async with _Served(server) as shared:
+        assert await ClaudeLogin(path, resources=shared).token() == "at-2"
+    assert _body(server.requests[0])["refresh_token"] == oauth["refreshToken"]
+
+
+@pytest.mark.asyncio
 async def test_a_credentials_file_that_is_not_an_object_is_an_error(
     tmp_path: Path,
 ) -> None:
@@ -403,6 +415,54 @@ async def test_sign_in_takes_the_code_the_browser_brings_back(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_sign_in_opens_the_browser_unless_told_not_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Its callback listens on loopback alone: the code must not reach the network."""
+    hosts: list[str | None] = []
+    real = asyncio.start_server
+
+    async def recorded(
+        callback: Callable[
+            [asyncio.StreamReader, asyncio.StreamWriter],
+            Awaitable[None] | None,
+        ],
+        host: str | None = None,
+        port: int | None = None,
+    ) -> asyncio.Server:
+        hosts.append(host)
+        return await real(callback, host, port)
+
+    monkeypatch.setattr(asyncio, "start_server", recorded)
+    browser = _Browser()
+    server = _Server(
+        replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [httpx2.Response(500)]},
+    )
+    async with _Served(server) as shared:
+        claude_login = ClaudeLogin(tmp_path / ".credentials.json", resources=shared)
+        shown: list[str] = []
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(login, "open_browser", browser.open)
+            await claude_login.sign_in(show=shown.append)
+        await asyncio.gather(*browser.tasks)
+    assert len(browser.opened) == 1
+    assert hosts == ["127.0.0.1"]
+
+
+@pytest.mark.asyncio
+async def test_a_profile_that_is_not_an_object_is_an_error(tmp_path: Path) -> None:
+    profile = httpx2.Response(200, content=b"[]")
+    server = _Server(replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [profile]})
+    async with _Served(server) as shared:
+        with pytest.raises(ReadError):
+            await _sign_in(
+                ClaudeLogin(tmp_path / ".credentials.json", resources=shared),
+                browser=_Browser(),
+            )
+
+
+@pytest.mark.asyncio
 async def test_the_redirect_takes_only_this_sign_ins_callback(tmp_path: Path) -> None:
     path = tmp_path / ".credentials.json"
     server = _Server(
@@ -663,6 +723,53 @@ async def test_a_keychain_read_cancelled_midway_ends_security(
             if not _text(Path(f"/proc/{pid}/stat")):
                 break
             await asyncio.sleep(0.01)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_security_says_nothing_whatever_it_printed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = tmp_path / "security"
+    script.write_text("#!/bin/sh\necho partial\nexit 1\n")
+    script.chmod(0o700)
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        partial(_security_at, stub=str(script), real=asyncio.create_subprocess_exec),
+    )
+    assert await login._security(*login._find_entry(), "-w") == ""
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_security_deaf_to_term_is_killed_at_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Nothing it might still say is wanted, so it gets no grace."""
+    script = tmp_path / "security"
+    script.write_text(
+        f"#!/bin/sh\ntrap '' TERM\necho $$ > \"{tmp_path}/pid\"\n"
+        "while :; do sleep 0.01; done\n",
+    )
+    script.chmod(0o700)
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        partial(_security_at, stub=str(script), real=asyncio.create_subprocess_exec),
+    )
+    reading = asyncio.create_task(login._security(*login._find_entry(), "-w"))
+    async with asyncio.timeout(5):
+        while True:
+            if _text(tmp_path / "pid"):
+                break
+            await asyncio.sleep(0.01)
+    reading.cancel()
+    loop = asyncio.get_running_loop()
+    began = loop.time()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(reading, timeout=5)
+    assert loop.time() - began < 0.5
 
 
 def _text(path: Path) -> str:

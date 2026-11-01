@@ -71,8 +71,7 @@ class ClaudeLogin:
         else:
             self._store = _File(path or self.default_path())
         self._resources = resources
-        self._access = ""
-        self._expires_at = 0.0
+        self._adopt({})
         self._lock = asyncio.Lock()
 
     @classmethod
@@ -117,17 +116,15 @@ class ClaudeLogin:
 
         """
         verifier = secrets.token_urlsafe(64)
+        # A SHA-256 digest is 32 bytes, which base64 pads with exactly one ``=``.
         challenge = (
             base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-            .rstrip(b"=")
+            .removesuffix(b"=")
             .decode()
         )
-        state = secrets.token_urlsafe(32)
-        code, redirect = "", ""
-        if not headless:
-            code, redirect = await _browser_code(challenge, state, show=show)
-        if not code:
-            code, redirect = await _pasted_code(challenge, state, show=show)
+        state = secrets.token_urlsafe()
+        browsed = None if headless else await _browser_code(challenge, state, show=show)
+        code, redirect = browsed or await _pasted_code(challenge, state, show=show)
         grant = await self._grant(
             {
                 "grant_type": "authorization_code",
@@ -143,12 +140,19 @@ class ClaudeLogin:
 
     def _expiring(self) -> bool:
         # Five minutes early, so a token never expires mid-request.
-        return time.time() > self._expires_at - 300.0
+        return (
+            not self._access
+            or self._expires_at is None
+            or time.time() > self._expires_at - 300.0
+        )
 
+    # A login without a token, or an expiry, has no token to hand out: the next
+    # request renews it.
     def _adopt(self, stored: Mapping[str, object]) -> None:
-        self._access = from_plain(stored.get("accessToken"), str, default="")
+        access, expires_ms = stored.get("accessToken"), stored.get("expiresAt")
+        self._access = from_plain(access, str) if access else ""
         self._expires_at = (
-            from_plain(stored.get("expiresAt"), float, default=0.0) / 1000.0
+            from_plain(expires_ms, float) / 1000.0 if expires_ms else None
         )
 
     # A refresh token works once: two processes refreshing together leave one
@@ -189,12 +193,15 @@ class ClaudeLogin:
 
     async def _plan(self, grant: Mapping[str, object]) -> dict[str, object]:
         """Return the plan ``claude`` keeps beside the token; ``{}`` when unknown."""
+        # pragma: no mutate start -- HTTP header names are case-insensitive.
+        headers = {
+            "authorization": f"Bearer {grant.get('access_token')}",
+            "anthropic-beta": "oauth-2025-04-20",
+        }
+        # pragma: no mutate end
         response = await self._resources.http.get(
             "https://api.anthropic.com/api/oauth/profile",
-            headers={
-                "authorization": f"Bearer {grant.get('access_token')}",
-                "anthropic-beta": "oauth-2025-04-20",
-            },
+            headers=headers,
             timeout=10.0,
         )
         if response.status_code != 200:
@@ -273,15 +280,16 @@ class _Keychain:
         )
 
 
-# ``""`` when no browser reaches us within five minutes, as over ssh.
+# ``None`` when no browser reaches us within five minutes, as over ssh.
 async def _browser_code(
     challenge: str,
     state: str,
     *,
     show: Callable[[str], object],
-) -> tuple[str, str]:
+) -> tuple[str, str] | None:
     """Return the code the browser redirects back with, and the redirect it used."""
     code = asyncio.Future[str]()
+    # Without a port, the system picks a free one.
     server = await asyncio.start_server(
         lambda reader, writer: redirected(
             reader,
@@ -291,7 +299,6 @@ async def _browser_code(
             code=code,
         ),
         "127.0.0.1",
-        0,
     )
     redirect = f"http://localhost:{server.sockets[0].getsockname()[1]}/callback"
     url = _authorize_url(redirect, challenge, state)
@@ -301,7 +308,7 @@ async def _browser_code(
         try:
             return await asyncio.wait_for(code, timeout=300.0), redirect
         except TimeoutError:
-            return "", redirect
+            return None
 
 
 async def _pasted_code(
@@ -375,7 +382,8 @@ def _find_entry() -> tuple[str, ...]:
     )
 
 
-async def _security(*args: str, commands: str = "") -> str:
+# ``security`` reads stdin only under ``-i``, so the default's text never matters.
+async def _security(*args: str, commands: str = "") -> str:  # pragma: no mutate
     """Run ``security`` with ``args``, writing ``commands`` to its stdin."""
     async with await Child.start(
         "/usr/bin/security",

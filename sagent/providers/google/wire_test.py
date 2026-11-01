@@ -391,6 +391,14 @@ def test_a_row_offering_no_effort_says_nothing_of_one(budget: ThinkingBudget) ->
     assert _encoded_thinking(capability, settings) == {"includeThoughts": True}
 
 
+def test_a_leveled_row_offering_no_level_is_sent_nothing_without_a_budget() -> None:
+    """Only a level could stop Gemini 3's thinking; a row with none has no say."""
+    capability, settings = Google.models().resolve("gemini-pro-3.1")
+    capability = replace(capability, thinking_effort=frozenset({"none"}))
+    settings = replace(settings, thinking_effort="none", thinking_budget="none")
+    assert _encoded_thinking(capability, settings) is None
+
+
 @pytest.mark.parametrize("budget", ["auto", "fixed"])
 def test_gemini_2_5_with_no_effort_is_sent_a_zero_budget(
     budget: ThinkingBudget,
@@ -979,6 +987,7 @@ def test_retry_info_with_an_odd_delay_defers_to_the_header() -> None:
         ),
         ("Your quota will reset after 155h19m17s.", 155 * 3_600 + 19 * 60 + 17),
         ("Resets in 500ms.", 0.5),
+        ("Resets in 2h.", 2 * 3_600),
     ],
 )
 def test_a_spent_quota_without_advice_waits_for_the_reset_it_names(

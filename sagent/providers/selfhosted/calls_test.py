@@ -97,6 +97,21 @@ def test_deepseek_blocks_yield_every_call_they_hold() -> None:
     assert said == "a  b"
 
 
+def test_a_refused_block_leaves_the_next_to_be_read() -> None:
+    text = (
+        '<tool_call>{"name": "Write", "arguments": {}}</tool_call> then '
+        '<tool_call>{"name": "Read", "arguments": {}}</tool_call>'
+    )
+    calls, said = read_calls(text, offered=_OFFERED)
+    assert [call.name for call in calls] == ["Read"]
+    assert said == '<tool_call>{"name": "Write", "arguments": {}}</tool_call> then'
+
+
+def test_deepseek_arguments_may_span_lines() -> None:
+    spread = '{\n  "command": "ls"\n}'
+    assert _named(_ds(_call("Bash", spread))) == [("Bash", {"command": "ls"})]
+
+
 def test_both_dialects_in_one_reply_are_read_qwen_first() -> None:
     text = (
         _ds(_call("Bash", "{}"))

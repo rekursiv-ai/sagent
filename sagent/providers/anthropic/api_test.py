@@ -115,9 +115,29 @@ def _body(request: httpx2.Request) -> dict[str, object]:
 @pytest.mark.asyncio
 async def test_credentials_are_the_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     assert await Anthropic().credentials() == {"x-api-key": "sk-test"}
-    monkeypatch.delenv("ANTHROPIC_API_KEY")
-    with pytest.raises(AuthError, match=r"^ANTHROPIC_API_KEY is not set\.$"):
-        await Anthropic().credentials()
+    for unset in ("", None):
+        if unset is None:
+            monkeypatch.delenv("ANTHROPIC_API_KEY")
+        else:
+            monkeypatch.setenv("ANTHROPIC_API_KEY", unset)
+        with pytest.raises(AuthError, match=r"^ANTHROPIC_API_KEY is not set\.$"):
+            await Anthropic().credentials()
+
+
+@pytest.mark.asyncio
+async def test_a_providers_headers_are_made_from_each_request() -> None:
+    """A subscription names the session each request belongs to."""
+    server = _Server(
+        replies=[
+            _ok(),
+            httpx2.Response(200, content=json_dumps({"input_tokens": 1}).encode()),
+        ],
+    )
+    async with _Served(server) as shared:
+        opus = _Tagged(resources=shared)["opus"]
+        await _stream(opus)
+        await opus.count(_REQUEST)
+    assert [sent.headers["x-system"] for sent in server.requests] == ["Be terse."] * 2
 
 
 @pytest.mark.asyncio
@@ -665,6 +685,14 @@ class _Renewing(Anthropic):
     async def reauthenticate(self) -> bool:
         self.renewals += 1
         return True
+
+
+class _Tagged(Anthropic):
+    """A provider whose every request carries its system prompt in a header."""
+
+    @override
+    def headers(self, request: Request) -> dict[str, str]:
+        return {"x-system": request.system[0]}
 
 
 async def _broken(events: tuple[Mapping[str, object], ...]) -> AsyncIterator[bytes]:

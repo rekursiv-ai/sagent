@@ -51,7 +51,10 @@ def test_a_linked_worktree_is_told_to_stay_put(tmp_path: Path) -> None:
 
     lines = environment(tmp_path / "wt").splitlines()
 
-    assert lines[0].startswith("This working directory is a git worktree")
+    assert lines[0] == (
+        "This working directory is a git worktree (not the primary checkout)."
+        " Stay in this directory -- do not `cd` to the main repository."
+    )
     assert "do not `cd` to the main repository" in lines[0]
     assert lines[1] == "Git repository: true"
 

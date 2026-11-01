@@ -8,6 +8,7 @@ import logging
 import platform
 
 import pytest
+import yaml
 
 from sagent.agent import agents_md
 from sagent.agent.agents_md import AgentsMdConfig, Directives, directives
@@ -756,6 +757,230 @@ def test_a_file_that_cannot_be_resolved_is_skipped(
     monkeypatch.setattr(Path, "resolve", refuse)
 
     assert directives(tmp_path, config=cfg) == ""
+
+
+def test_a_window_keeps_what_it_skipped_in_every_tier_and_include(
+    tmp_path: Path,
+    cfg: AgentsMdConfig,
+) -> None:
+    broken = "---\na: 1\na: 2\n---\nbody\n"
+    _write(cfg.system_dir / "AGENTS.md", "managed\n@./inc.md\n")
+    included = _write(cfg.system_dir / "inc.md", broken)
+    managed = _write(cfg.system_dir / "rules" / "m.md", broken)
+    user = _write(cfg.user_dir / "rules" / "u.md", broken)
+    top = _write(cfg.user_dir / "AGENTS.md", broken)
+    window = Directives(root=tmp_path / "root", config=cfg)
+
+    _ = window.start()
+
+    assert [line.split(":")[0] for line in window.skipped] == [
+        f"Skipping {p.resolve()}" for p in (included, managed, top, user)
+    ]
+
+
+@pytest.mark.parametrize("where", ["AGENTS.md", "rules/r.md"])
+def test_managed_includes_nest_at_most_five_deep(
+    tmp_path: Path,
+    cfg: AgentsMdConfig,
+    where: str,
+) -> None:
+    for i in range(10):
+        _write(
+            cfg.system_dir / f"f{i}.md",
+            f"level{i}\n@{cfg.system_dir}/f{i + 1}.md\n",
+        )
+    _write(cfg.system_dir / where, f"root\n@{cfg.system_dir}/f0.md\n")
+
+    section = directives(tmp_path, config=cfg)
+
+    assert "level3" in section
+    assert "level4" not in section
+
+
+@pytest.mark.parametrize(
+    ("tiers", "kept"),
+    [(frozenset({"Project"}), "project-rule"), (frozenset({"Local"}), "local-rule")],
+)
+def test_a_project_or_local_tier_alone_reads_directories(
+    tmp_path: Path,
+    tiers: frozenset[agents_md.Tier],
+    kept: str,
+) -> None:
+    for d in (tmp_path, tmp_path / "sub"):
+        _write(d / "AGENTS.md", "project-rule\n")
+        _write(d / "AGENTS.local.md", "local-rule\n")
+    cfg = AgentsMdConfig(
+        system_dir=tmp_path / "system",
+        user_dir=tmp_path / "user",
+        tiers=tiers,
+    )
+    window = Directives(root=tmp_path, config=cfg)
+
+    started = window.start()
+    later, _ = window.found([tmp_path / "sub"], [], given=set())
+
+    for section in (directives(tmp_path, config=cfg), started, later):
+        assert kept in section
+        assert {"project-rule", "local-rule"} - {kept} & set(section.split()) == set()
+
+
+def test_no_project_tier_opens_no_project_file(tmp_path: Path) -> None:
+    broken = "---\na: 1\na: 2\n---\nbody\n"
+    _write(tmp_path / "AGENTS.md", broken)
+    _write(tmp_path / "sub" / "AGENTS.md", broken)
+    window = Directives(
+        root=tmp_path,
+        config=AgentsMdConfig(
+            system_dir=tmp_path / "system",
+            user_dir=tmp_path / "user",
+            tiers=frozenset({"User"}),
+        ),
+    )
+
+    _ = window.start()
+    _ = window.found([tmp_path / "sub"], [], given=set())
+
+    assert window.skipped == []
+
+
+def test_a_directory_is_read_once_a_window(
+    tmp_path: Path,
+    cfg: AgentsMdConfig,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read: list[Path] = []
+    real = agents_md._read_project
+
+    def counted(
+        d: Path,
+        seen: set[str],
+        config: AgentsMdConfig,
+        *,
+        skipped: list[str],
+    ) -> list[agents_md._File]:
+        read.append(d)
+        return real(d, seen, config, skipped=skipped)
+
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    window = Directives(root=tmp_path, config=cfg)
+    _ = window.start()
+    monkeypatch.setattr(agents_md, "_read_project", counted)
+
+    _ = window.found([sub], [], given=set())
+    _ = window.found([sub], [], given=set())
+
+    assert read == [sub.resolve()]
+
+
+def test_a_file_as_long_as_the_cap_is_given_whole(tmp_path: Path) -> None:
+    cfg = AgentsMdConfig(
+        system_dir=tmp_path / "system",
+        user_dir=tmp_path / "user",
+        large_threshold=10,
+    )
+    _write(tmp_path / "sub" / "AGENTS.md", "0123456789")
+    window = Directives(root=tmp_path, config=cfg)
+    _ = window.start()
+
+    text, _ = window.found([tmp_path / "sub"], [], given=set())
+
+    assert text.endswith(":\n0123456789")
+
+
+def test_a_file_over_the_threshold_is_named_in_the_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    cfg = AgentsMdConfig(
+        system_dir=tmp_path / "system",
+        user_dir=tmp_path / "user",
+        large_threshold=10,
+    )
+    _write(tmp_path / "AGENTS.md", "0123456789")
+    over = _write(tmp_path / "AGENTS.local.md", "0123456789A")
+
+    with caplog.at_level(logging.WARNING, logger=agents_md.__name__):
+        _ = directives(tmp_path, config=cfg)
+
+    assert caplog.messages == [
+        f"AGENTS.md file {over.resolve()} is 11 characters (over 10).",
+    ]
+
+
+def test_the_default_config_reads_the_working_directory(tmp_path: Path) -> None:
+    _write(tmp_path / "AGENTS.md", "default-rule\n")
+
+    assert "default-rule" in directives(tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("text", "stripped"),
+    [
+        ("a\n<!-- c -->\nb\n", "a\nb\n"),
+        ("a\n\n  <!-- c -->\nb\n", "a\n\nb\n"),
+        ("a\n\n<!-- c --> tail\nnext\n", "a\n\n tail\nnext\n"),
+        ("a\n\n<!-- c --> tail", "a\n\n tail\n"),
+        ("<div>x</div>\n\n<!-- c -->\nb\n", "<div>x</div>\n\nb\n"),
+        ("<!-- c -->\n\n<div>--></div>", "\n<div>--></div>"),
+    ],
+)
+def test_comments_are_cut_from_the_text_and_nothing_else(
+    text: str,
+    stripped: str,
+) -> None:
+    assert agents_md._strip_comments(text) == stripped
+
+
+@pytest.mark.parametrize(
+    ("line", "loaded"),
+    [
+        ("x `@code.md` @inc.md", True),
+        ("x `a @inc.md b`", False),
+        ("<!-- c -->@inc.md", True),
+        # Quoted, a comment is left in the text, and only what it wraps hidden.
+        ("> <div>-->\n> @inc.md\n> </div>", False),
+        (">   <!-- c --> @inc.md", True),
+        ("> <!-- c -->@inc.md", True),
+        ("> <!-- c -->\n\n@inc.md", True),
+    ],
+)
+def test_an_include_is_text_outside_code_and_comments(
+    tmp_path: Path,
+    cfg: AgentsMdConfig,
+    line: str,
+    loaded: bool,
+) -> None:
+    _write(tmp_path / "AGENTS.md", f"main\n\n{line}\n")
+    _write(tmp_path / "inc.md", "inc-body\n")
+    _write(tmp_path / "code.md", "code-body\n")
+
+    section = directives(tmp_path, config=cfg)
+
+    assert ("inc-body" in section) is loaded
+    assert "code-body" not in section
+
+
+@pytest.mark.parametrize(
+    ("raw", "parts"),
+    [
+        ("\ufeffbody\n", ({}, "body\n")),
+        ("---\n---\nbody\n", ({}, "body\n")),
+        ("---\na: 1\n---\nbody\n", ({"a": 1}, "body\n")),
+    ],
+)
+def test_frontmatter_splits_off_its_mapping(
+    raw: str,
+    parts: tuple[dict[str, object], str],
+) -> None:
+    assert agents_md.frontmatter(raw) == parts
+
+
+def test_frontmatter_names_no_source_unless_given() -> None:
+    with pytest.raises(yaml.YAMLError) as raised:
+        _ = agents_md.frontmatter("---\na: 1\na: 2\n---\n")
+
+    assert str(raised.value).startswith("line 3:")
 
 
 @pytest.mark.parametrize(

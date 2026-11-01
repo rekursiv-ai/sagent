@@ -13,7 +13,7 @@ import base64
 import io
 
 from PIL import Image
-from treekle import PlainTree, from_plain
+from treekle import PlainTree, ReadError, from_plain
 
 import pypdfium2 as pdfium
 import pytest
@@ -591,6 +591,12 @@ def test_effort_is_sent_as_output_config() -> None:
     body, _ = _encode([UserMessage(content="q")], settings=settings)
     assert body["output_config"] == {"effort": "high"}
     assert "thinking" not in body
+    # A model that takes no effort (the 4.5 Sonnet and Haiku) is told none.
+    body, _ = _encode(
+        [UserMessage(content="q")],
+        settings=replace(settings, thinking_effort="none"),
+    )
+    assert "output_config" not in body
 
 
 @pytest.mark.parametrize(
@@ -918,6 +924,15 @@ async def test_events_gather_data_lines_until_a_blank_line(
     ]
 
 
+@pytest.mark.parametrize("ending", [(), ("",)], ids=["unterminated", "terminated"])
+@pytest.mark.asyncio
+async def test_an_event_that_is_not_an_object_is_an_error(
+    ending: tuple[str, ...],
+) -> None:
+    with pytest.raises(ReadError):
+        _ = [event async for event in wire.events(_lines("data: [1]", *ending))]
+
+
 def _start(**usage: object) -> dict[str, object]:
     return {"type": "message_start", "message": {"usage": usage}}
 
@@ -958,6 +973,14 @@ def test_text_streams_as_chunks_and_finishes_as_one_message() -> None:
     assert chunks == [TextChunk(text="Good"), TextChunk(text="bye")]
     response = reader.response()
     assert response.records == (AssistantMessage(content="Goodbye"),)
+    # Text after a record names that record's successor.
+    later, _ = _read(
+        _start(),
+        _block(0, type="thinking"),
+        _block(1, type="text"),
+        _delta(1, type="text_delta", text="next"),
+    )
+    assert later == [TextChunk(text="next", record=1)]
     assert response.stop_reason == "end_turn"
     assert response.tokens == TokenCount(request=10, response=5)
 
@@ -1115,6 +1138,27 @@ def test_a_reply_is_billed_at_the_speed_it_was_served(
     today = datetime.now(UTC).date()
     assert response.spend == capability.prices[served, tokens.prompt, today] * tokens
     assert response.spend.request == (8.0 if speed == "fast" else 4.0)
+
+
+class _Evening:
+    """Stands in for ``datetime``: 6 October in the evening here, 7 October in UTC."""
+
+    @classmethod
+    def now(cls, tz: object = None) -> datetime:
+        if tz is UTC:
+            return datetime(2026, 10, 7, 1, tzinfo=UTC)
+        return datetime(2026, 10, 6, 18)  # noqa: DTZ001 -- the local wall clock.
+
+
+def test_a_reply_is_billed_at_the_card_of_its_utc_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The vendor dates its cards in UTC; sonnet-5.5's cache reads halved on 7 October."""
+    monkeypatch.setattr(wire, "datetime", _Evening)
+    capability, settings = _model("sonnet-5.5")
+    reader = wire.StreamReader(capability=capability, settings=settings)
+    reader.feed(_start(cache_read_input_tokens=1_000_000))
+    assert reader.response().spend.cache_read == 0.1
 
 
 def _error(kind: str, message: str) -> dict[str, object]:

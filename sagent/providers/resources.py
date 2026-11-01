@@ -114,17 +114,19 @@ class SubprocessPool(AsyncResource):
                 await self.release(process)
 
     async def _spawn(self, argv: Sequence[str], *, env: Mapping[str, str]) -> Process:
+        # ``release`` stops the process, with the pool's grace; this ``Child``
+        # only starts it.
         child = await Child.start(
             *argv,
             group=True,
-            grace_sec=self._grace_sec,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
             # Claude's stream-json lines carry whole tool inputs and outputs;
             # asyncio's 64 KiB default raises mid-turn on the first large one.
-            limit=16 * 1024 * 1024,
+            # A floor, not a contract: any larger serves as well.
+            limit=16 * 1024 * 1024,  # pragma: no mutate
         )
         self._live.add(child.process)
         return child.process
