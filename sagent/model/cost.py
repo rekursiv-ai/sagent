@@ -2,7 +2,7 @@
 
 tokens = TokenCount(request=1_000, response=200, cache_read=5_000)
 prices = model.capability.prices
-prices["auto", "smallcontext"]              # the size ``smallcontext`` names
+prices["smallcontext"]                  # the size ``smallcontext`` names
 cost = prices["auto", tokens.prompt, today] * tokens
 cost.total                              # USD
 """
@@ -189,9 +189,10 @@ class PriceCondition:
 class PriceCatalog:
     """A model's prices, and the context sizes they name.
 
-    ``catalog[tier, size]`` resolves ``smallcontext``, ``midcontext``, ``fullcontext``, or a count
-    to a :class:`ContextSize`; ``catalog[tier, tokens, at]`` is the price of a
-    prompt of ``tokens`` on ``at``.
+    ``catalog[size]`` resolves ``smallcontext``, ``midcontext``, ``fullcontext``,
+    or a count to a :class:`ContextSize`; ``catalog[tier, tokens, at]`` is the
+    price of a prompt of ``tokens`` on ``at``. A size is the model's: its bands
+    are where any tier's price changes, so a tier picks only what it costs.
     """
 
     prices: Mapping[PriceCondition, TokenPrice] = field(
@@ -213,10 +214,7 @@ class PriceCatalog:
         return frozenset(tiers)
 
     @overload
-    def __getitem__(
-        self,
-        key: tuple[ServiceTier, ContextSizeName | int],
-    ) -> ContextSize: ...
+    def __getitem__(self, key: ContextSizeName | int) -> ContextSize: ...
 
     @overload
     def __getitem__(
@@ -226,54 +224,47 @@ class PriceCatalog:
 
     def __getitem__(
         self,
-        key: tuple[ServiceTier, ContextSizeName | int]
-        | tuple[ServiceTier, ContextSizeName | int, date],
+        key: ContextSizeName | int | tuple[ServiceTier, ContextSizeName | int, date],
     ) -> ContextSize | TokenPrice:
-        """Return the size ``key`` names at its tier, or a prompt's price on a date.
+        """Return the size ``key`` names, or a prompt's price at a tier on a date.
 
         Raises:
           KeyError: A size below 1 token, or no price in effect.
 
         """
-        if len(key) == 2:
-            size = _get_context_size(self.prices, key[0], key[1], window=self.window)
+        if not isinstance(key, tuple):
+            size = _get_context_size(self.prices, key, window=self.window)
             if size is None:
                 raise KeyError(key)
             return size
         tier, spec, at = key
-        tokens = spec if isinstance(spec, int) else self[tier, spec].tokens
+        tokens = spec if isinstance(spec, int) else self[spec].tokens
         price = _get_price(self.prices, tier, tokens, at=at)
         if price is None:
             raise KeyError(key)
         return price
 
-    def sizes(self, tier: ServiceTier) -> tuple[ContextSize, ...]:
-        """Return the sizes ``tier`` names, ascending: ``smallcontext``, ``midcontext``, ``fullcontext``.
-
-        Args:
-          tier: The service tier whose bands name them.
+    def sizes(self) -> tuple[ContextSize, ...]:
+        """Return the sizes named, ascending: ``smallcontext``, ``midcontext``, ``fullcontext``.
 
         Returns:
           sizes: Each band's largest prompt, then the window.
 
         """
-        return tuple(_get_context_sizes(self.prices, tier, window=self.window).values())
+        return tuple(_get_context_sizes(self.prices, window=self.window).values())
 
 
 def _get_context_sizes(
     prices: Mapping[PriceCondition, TokenPrice],
-    tier: ServiceTier,
     *,
     window: int,
 ) -> dict[ContextSizeName, ContextSize]:
-    """Return ``tier``'s named sizes: each band's largest prompt, then ``window``."""
-    priced: ServiceTier = "auto" if tier == "default" else tier
+    """Return the named sizes: each band's largest prompt, then ``window``."""
     tops = sorted(
         {
             int(ceil) - 1
             for c in prices
-            if c.service_tier == priced
-            and not math.isinf(ceil := c.token_size_range[1])
+            if not math.isinf(ceil := c.token_size_range[1])
             and (window <= 0 or ceil <= window)
         },
     )
@@ -297,13 +288,12 @@ def _get_context_sizes(
 
 def _get_context_size(
     prices: Mapping[PriceCondition, TokenPrice],
-    tier: ServiceTier,
     spec: ContextSizeName | int,
     *,
     window: int,
 ) -> ContextSize | None:
-    """Return the size ``spec`` names at ``tier``; ``None`` for a count below 1."""
-    sizes = _get_context_sizes(prices, tier, window=window)
+    """Return the size ``spec`` names; ``None`` for a count below 1."""
+    sizes = _get_context_sizes(prices, window=window)
     if isinstance(spec, str):
         return sizes.get(spec, sizes["fullcontext"])
     if spec < 1:

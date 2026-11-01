@@ -7,6 +7,7 @@ from pathlib import Path
 import asyncio
 import os
 import signal
+import sys
 
 import pytest
 
@@ -35,15 +36,32 @@ async def test_a_process_runs_until_it_has_exited(proc: Path) -> None:
             _ = await child.wait()
 
 
-def test_an_unreaped_zombie_does_not_run() -> None:
-    """It only waits for its parent to collect it."""
+@pytest.mark.parametrize(
+    ("proc", "counted"),
+    [
+        pytest.param(
+            Path("/proc"),
+            False,
+            marks=pytest.mark.skipif(
+                sys.platform != "linux",
+                reason="Only Linux lists processes under /proc.",
+            ),
+        ),
+        (Path("/nonexistent/proc"), True),
+    ],
+    ids=["proc", "kill"],
+)
+def test_an_unreaped_zombie_runs_only_where_its_state_is_unreadable(
+    proc: Path,
+    counted: bool,
+) -> None:
+    """It only waits for its parent to collect it, which ``kill(pid, 0)`` cannot tell."""
     pid = os.fork()
     if pid == 0:
         os._exit(0)
     try:
-        while running(pid):
-            os.sched_yield()
-        assert not running(pid)
+        _ = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
+        assert running(pid, proc=proc) == counted
     finally:
         _ = os.waitpid(pid, 0)
 

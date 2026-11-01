@@ -108,7 +108,7 @@ def test_every_row_starts_at_the_size_its_prices_name(
         row: default.context_size
         for row, capability in rows
         if (default := capability.default).context_size
-        != capability.prices[default.service_tier, default.context_size.context_name]
+        != capability.prices[default.context_size.context_name]
     }
     assert unresolved == {}
 
@@ -604,7 +604,7 @@ def _windowed() -> ScriptedProvider:
             thinking_effort=frozenset({"none", "high"}),
             thinking_budget=frozenset({"none", "auto"}),
             service_tier=frozenset(t for t in ("auto", "priority") if t in tiers),
-            default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+            default=ModelSettings(context_size=prices["fullcontext"]),
         )
 
     rows = (

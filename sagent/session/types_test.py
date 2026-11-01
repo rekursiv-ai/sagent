@@ -3,20 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from types import MappingProxyType
 from typing import cast
 
 import json
+import re
 import time
 
-from treekle import from_plain, json_dumps, json_loads, to_plain
+from treekle import json_loads
 
 import pytest
 
 from sagent.session import types
 from sagent.session.types import (
-    CONCRETE_TYPES,
     AgentStatusResult,
     AgentToAgentMessage,
     AssistantMessage,
@@ -44,6 +44,8 @@ from sagent.session.types import (
     WebSearchResult,
     WebSearchResults,
     record_classes,
+    stored_plain,
+    stored_record,
 )
 
 
@@ -83,8 +85,8 @@ def _every_record() -> list[SessionRecord]:
         AgentStatusResult(call_id="8", agent_id="a", content="done", tokens=5),
         SystemMessage(content="reminder", subtype="rules"),
         TokenUsage(info={"request": 1}, rate_limits={"5h": 0.5}),
-        ContextState(kind="k", content="c"),
-        ContextCompaction(summary="sum"),
+        ContextState(kind="k", content="c", extra={"full": [True]}),
+        ContextCompaction(summary="sum", extra={"tokens": {"before": 9}}),
         ContextClear(
             cleared_session_id="old",
             system_prompt="sys",
@@ -225,12 +227,9 @@ def test_record_classes_names_every_dataclass_the_module_defines() -> None:
 def test_every_record_round_trips_through_its_stored_form(
     record: SessionRecord,
 ) -> None:
-    classes = record_classes()
-    text = json_dumps(record, classes=classes, sort=False)
-    assert f'"{type(record).__name__}"' in text
-    assert (
-        cast(SessionRecord, json_loads(text, SessionRecord, classes=classes)) == record
-    )
+    text = json.dumps(stored_plain(record))
+    assert text.startswith(f'{{"py/object": "{type(record).__name__}"')
+    assert stored_record(json_loads(text)) == record
 
 
 def _held(value: object) -> bool:
@@ -244,12 +243,15 @@ def _held(value: object) -> bool:
     return True
 
 
+# Built in the test, not at collection: a record made while pytest collects is frozen
+# before any test runs, so no test is seen to reach ``__post_init__``.
 @pytest.mark.parametrize(
-    "record",
-    _every_record(),
+    "index",
+    range(len(_every_record())),
     ids=[type(r).__name__ for r in _every_record()],
 )
-def test_a_record_holds_its_json_frozen(record: SessionRecord) -> None:
+def test_a_record_holds_its_json_frozen(index: int) -> None:
+    record = _every_record()[index]
     values = [cast("object", getattr(record, item.name)) for item in fields(record)]
     json_fields: list[Mapping[object, object]] = [
         value for value in values if isinstance(value, Mapping)
@@ -264,19 +266,49 @@ def test_a_record_holds_its_json_frozen(record: SessionRecord) -> None:
     ids=[type(r).__name__ for r in _every_record()],
 )
 def test_every_record_stores_its_json_plain(record: SessionRecord) -> None:
-    stored = to_plain(
-        record,
-        sort=False,
-        default_concrete_types=CONCRETE_TYPES,
-    )
+    stored = stored_plain(record)
 
     text = json.dumps(stored)
     assert all(tag not in text for tag in ("py/dict", "py/list", "py/mappingproxy"))
-    back = from_plain(stored, SessionRecord, default_concrete_types=CONCRETE_TYPES)
+    back = stored_record(stored)
     assert back == record
     assert is_dataclass(back)
     assert not isinstance(back, type)
     assert all(_held(cast("object", getattr(back, item.name))) for item in fields(back))
+
+
+def test_a_stored_record_names_every_class_it_holds_alone() -> None:
+    """A union member nested in history is found by its tag, so it carries a name too."""
+    record = ContextClear(
+        history=(
+            UserMessage(content="u"),
+            AssistantMessage(content="a"),
+            FileEditResult(call_id="c", edits=(Splice(after="y"),)),
+        ),
+    )
+
+    stored = stored_plain(record)
+
+    tags = re.findall(r'"py/object": "([^"]+)"', json.dumps(stored))
+    assert tags == ["ContextClear", "AssistantMessage", "FileEditResult"]
+    assert stored_record(stored) == record
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Widened:
+    text: str
+
+
+def test_a_class_outside_the_vocabulary_stores_only_where_classes_name_it() -> None:
+    """A caller widening the vocabulary names its classes; the default refuses them."""
+    classes = {**record_classes(), "_Widened": _Widened}
+
+    stored = stored_plain(_Widened(text="t"), classes=classes)
+
+    assert stored == {"py/object": "_Widened", "text": "t"}
+    assert stored_record(stored, _Widened, classes=classes) == _Widened(text="t")
+    with pytest.raises(TypeError, match="_Widened"):
+        _ = stored_plain(_Widened(text="t"))
 
 
 def test_the_round_trip_cases_cover_every_record_kind() -> None:

@@ -235,7 +235,7 @@ class ModelTable(Mapping[str, ModelCapability]):
         if tags.context is not None:
             settings = replace(
                 settings,
-                context_size=capability.prices[settings.service_tier, tags.context],
+                context_size=capability.prices[tags.context],
             )
         return capability, settings
 
@@ -388,7 +388,7 @@ class ModelTags:
         """
         fresh = capability.default
         size = settings.context_size
-        named = capability.prices[settings.service_tier, size.context_name] == size
+        named = capability.prices[size.context_name] == size
         signed = "" if account is None else f"{account}@"
         return cls(
             model=f"{signed}{provider}/{capability.model_id}"
@@ -681,7 +681,7 @@ def _model(
                 row.manage_context_server_side,
                 (False, True),
             ),
-            context_size=prices[tier, size],
+            context_size=prices[size],
         ),
     )
 
@@ -844,6 +844,13 @@ def _prices(row: _ModelRow) -> PriceCatalog:
                 f"Model {row.model_id!r} has no base card for tier {tier!r}"
                 " (no prompt band, no effective date).",
             )
+    # A size is the model's, named where its price bands change: a tier priced flat
+    # is fine, but two tiers banding apart would name a size neither bills at.
+    banded = {frozenset(t for t in tops if t) for tops in thresholds.values()} - {
+        frozenset(),
+    }
+    if len(banded) > 1:
+        raise ValueError(f"Model {row.model_id!r} bands its tiers at different sizes.")
     return PriceCatalog(prices=prices, window=row.limits.max_request_tokens)
 
 

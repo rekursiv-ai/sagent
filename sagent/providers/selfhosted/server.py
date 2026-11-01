@@ -248,7 +248,7 @@ class SelfHostedModel(AsyncResource):
                 # A chat template told nothing thinks.
                 default=ModelSettings(
                     thinking_effort="high",
-                    context_size=prices["auto", "fullcontext"],
+                    context_size=prices["fullcontext"],
                 ),
             )
         return self._capability
@@ -260,7 +260,7 @@ class SelfHostedModel(AsyncResource):
             capability = self.capability
             self._settings = replace(
                 capability.default,
-                context_size=capability.prices["auto", self._size],
+                context_size=capability.prices[self._size],
             )
         return self._settings
 

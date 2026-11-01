@@ -132,7 +132,7 @@ _DEEP = ModelCapability(
     thinking_effort=frozenset({"none", "high"}),
     thinking_budget=frozenset({"none", "auto"}),
     thinking_output=frozenset({"none", "text"}),
-    default=ModelSettings(context_size=PriceCatalog()["auto", "fullcontext"]),
+    default=ModelSettings(context_size=PriceCatalog()["fullcontext"]),
 )
 
 
@@ -762,7 +762,7 @@ def test_a_resumed_session_comes_back_on_its_model_and_prompt_and_a_flag_wins(
     script.capability = ModelCapability(
         model_id="scripted",
         thinking_effort=frozenset({"none", "low", "high"}),
-        default=ModelSettings(context_size=PriceCatalog()["auto", "fullcontext"]),
+        default=ModelSettings(context_size=PriceCatalog()["fullcontext"]),
     )
     monkeypatch.chdir(tmp_path)
     runs = (
@@ -1767,7 +1767,7 @@ _WIDE = ModelCapability(
     thinking_effort=frozenset({"none", "high"}),
     thinking_budget=frozenset({"none", "auto"}),
     thinking_output=frozenset({"none", "text"}),
-    default=ModelSettings(context_size=_WIDE_PRICES["auto", "fullcontext"]),
+    default=ModelSettings(context_size=_WIDE_PRICES["fullcontext"]),
 )
 _SLIM_PRICES = PriceCatalog(window=100_000)
 _SLIM = ModelCapability(
@@ -1775,7 +1775,7 @@ _SLIM = ModelCapability(
     limits=ModelLimits(max_request_tokens=100_000),
     prices=_SLIM_PRICES,
     thinking_effort=frozenset({"none", "low"}),
-    default=ModelSettings(context_size=_SLIM_PRICES["auto", "fullcontext"]),
+    default=ModelSettings(context_size=_SLIM_PRICES["fullcontext"]),
 )
 
 

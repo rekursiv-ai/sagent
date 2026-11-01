@@ -54,7 +54,7 @@ def _row(prices: PriceCatalog | None = None) -> ModelCapability:
         default=ModelSettings(
             thinking_effort="low",
             cache_ttl_sec=300.0,
-            context_size=catalog["auto", "fullcontext"],
+            context_size=catalog["fullcontext"],
         ),
     )
 
@@ -83,7 +83,7 @@ def test_check_passes_what_is_offered() -> None:
     row = _row()
     row.check(row.default)
     row.check(replace(row.default, thinking_effort="high", service_tier="priority"))
-    for size in (*row.prices.sizes("auto"), row.prices["auto", 258_000]):
+    for size in (*row.prices.sizes(), row.prices[258_000]):
         row.check(replace(row.default, context_size=size))
     ModelCapability().check(ModelSettings())
 
@@ -147,7 +147,7 @@ def test_fit_keeps_each_choice_offered_and_defaults_the_rest() -> None:
     )
 
 
-def test_choose_makes_each_choice_and_sizes_the_context_again_at_a_new_tier() -> None:
+def test_a_tier_priced_flat_keeps_the_size_another_tier_bands() -> None:
     prices = PriceCatalog(
         prices={
             PriceCondition(token_size_range=(0, 272_001)): TokenPrice(request=1.0),
@@ -157,36 +157,9 @@ def test_choose_makes_each_choice_and_sizes_the_context_again_at_a_new_tier() ->
         window=1_000_000,
     )
     row = _row(prices)
-    small = replace(row.default, context_size=prices["auto", "smallcontext"])
+    small = replace(row.default, context_size=prices["smallcontext"])
 
-    chosen = row.choose(small, {"thinking_effort": "high", "service_tier": "priority"})
-
-    assert chosen == replace(
-        small,
-        thinking_effort="high",
-        service_tier="priority",
-        context_size=prices["priority", "smallcontext"],
-    )
-
-
-@pytest.mark.parametrize(
-    ("choices", "match"),
-    [
-        ({"service_tier": "flex"}, "service_tier='flex' is not offered"),
-        ({"thinking_effort": "max"}, "thinking_effort='max' is not offered"),
-        (
-            {"thinking_effort": "max", "service_tier": "priority"},
-            "thinking_effort='max' is not offered by m;",
-        ),
-    ],
-)
-def test_choose_refuses_what_is_not_offered(
-    choices: dict[ModelSettingName, object],
-    match: str,
-) -> None:
-    row = _row()
-    with pytest.raises(ValueError, match=match):
-        _ = row.choose(row.default, choices)
+    row.check(replace(small, service_tier="priority"))
 
 
 def test_fit_takes_a_default_model_s_settings_onto_a_default_model() -> None:
@@ -197,7 +170,7 @@ def test_fit_takes_a_default_model_s_settings_onto_a_default_model() -> None:
 
 def test_fit_keeps_a_named_size_named_on_the_new_model() -> None:
     wide, narrow = _row(_banded(272_000)), _row(_banded(100_000, window=200_000))
-    small = replace(wide.default, context_size=wide.prices["auto", "smallcontext"])
+    small = replace(wide.default, context_size=wide.prices["smallcontext"])
     assert narrow.fit(small, was=wide).context_size == _size(
         "smallcontext",
         100_000,
@@ -207,13 +180,13 @@ def test_fit_keeps_a_named_size_named_on_the_new_model() -> None:
 
 def test_fit_keeps_a_counted_size_a_count_within_the_window() -> None:
     wide, narrow = _row(_banded(272_000)), _row(_banded(window=200_000))
-    counted = replace(wide.default, context_size=wide.prices["auto", 300_000])
+    counted = replace(wide.default, context_size=wide.prices[300_000])
     assert narrow.fit(counted, was=wide).context_size == _size(
         "fullcontext",
         200_000,
         "200k",
     )
-    counted = replace(wide.default, context_size=wide.prices["auto", 150_000])
+    counted = replace(wide.default, context_size=wide.prices[150_000])
     assert narrow.fit(counted, was=wide).context_size == _size(
         "fullcontext",
         150_000,
@@ -221,29 +194,11 @@ def test_fit_keeps_a_counted_size_a_count_within_the_window() -> None:
     )
 
 
-def test_fit_to_a_tier_sizes_the_context_at_that_tier() -> None:
-    prices = PriceCatalog(
-        prices={
-            PriceCondition(token_size_range=(0, 272_001)): TokenPrice(request=1.0),
-            PriceCondition(token_size_range=(272_001, math.inf)): TokenPrice(
-                request=2.0,
-            ),
-            PriceCondition(service_tier="priority"): TokenPrice(request=3.0),
-        },
-        window=1_000_000,
-    )
-    row = _row(prices)
-    small = replace(row.default, context_size=prices["auto", "smallcontext"])
-    fast = row.fit(small, was=row, service_tier="priority")
-    assert (fast.service_tier, fast.context_size) == (
-        "priority",
-        _size("fullcontext", 1_000_000, "1m"),
-    )
-
-
 def test_fit_falls_back_to_the_default_tier_when_one_is_not_offered() -> None:
     row = _row()
-    assert row.fit(row.default, was=row, service_tier="flex").service_tier == "auto"
+    flex = replace(row, service_tier=frozenset({"auto", "flex"}))
+    chosen = replace(row.default, service_tier="flex")
+    assert row.fit(chosen, was=flex).service_tier == "auto"
 
 
 def _offering() -> ModelCapability:

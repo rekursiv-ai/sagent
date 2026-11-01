@@ -176,7 +176,7 @@ def test_a_context_size_chosen_is_the_window_shown(clock: _Clock) -> None:
     model = line.runtime.model
     model.settings = replace(
         model.settings,
-        context_size=model.capability.prices["auto", 100_000],
+        context_size=model.capability.prices[100_000],
     )
     _call(line, clock, sec=1.0, event=_complete(TokenCount(cache_write=25_000)))
     assert " 25%↔)" in line.frame()

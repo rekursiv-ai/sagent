@@ -36,7 +36,7 @@ def _windowed(model_id: str, window: int) -> ModelCapability:
         model_id=model_id,
         limits=ModelLimits(max_request_tokens=window),
         prices=prices,
-        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+        default=ModelSettings(context_size=prices["fullcontext"]),
     )
 
 
@@ -61,7 +61,7 @@ _WIDE = ModelCapability(
     default=ModelSettings(
         thinking_effort="high",
         cache_ttl_sec=300.0,
-        context_size=_WIDE_PRICES["auto", "fullcontext"],
+        context_size=_WIDE_PRICES["fullcontext"],
     ),
 )
 

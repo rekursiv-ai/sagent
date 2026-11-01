@@ -206,7 +206,24 @@ def test_small_and_mid_are_the_band_tops_and_full_the_window(
     tops: tuple[int, ...],
     sizes: list[ContextSize],
 ) -> None:
-    assert _banded(*tops).sizes("auto") == tuple(sizes)
+    assert _banded(*tops).sizes() == tuple(sizes)
+
+
+def test_a_size_is_the_models_whatever_tier_bills_it() -> None:
+    catalog = PriceCatalog(
+        prices={
+            PriceCondition(token_size_range=(0, 272_001)): TokenPrice(),
+            PriceCondition(token_size_range=(272_001, math.inf)): TokenPrice(),
+            PriceCondition(service_tier="priority"): TokenPrice(request=2.0),
+        },
+        window=1_000_000,
+    )
+
+    assert catalog.sizes() == (
+        _size("smallcontext", 272_000, "272k"),
+        _size("fullcontext", 1_000_000, "1m"),
+    )
+    assert catalog["priority", "smallcontext", date.min].request == 2.0
 
 
 @pytest.mark.parametrize(
@@ -225,21 +242,20 @@ def test_a_size_resolves_by_name_or_as_a_count_held_to_the_window(
     spec: ContextSizeName | int,
     size: ContextSize,
 ) -> None:
-    assert _banded(32_000, 256_000)["auto", spec] == size
+    assert _banded(32_000, 256_000)[spec] == size
 
 
 def test_a_name_no_band_reaches_is_the_window() -> None:
-    assert _banded()["auto", "smallcontext"] == _size("fullcontext", 1_000_000, "1m")
+    assert _banded()["smallcontext"] == _size("fullcontext", 1_000_000, "1m")
 
 
 def test_a_count_below_one_is_no_size() -> None:
     with pytest.raises(KeyError):
-        _ = _banded()["auto", 0]
+        _ = _banded()[0]
 
 
-def test_default_names_and_bills_as_auto() -> None:
+def test_default_bills_as_auto() -> None:
     catalog = _banded(272_000)
-    assert catalog["default", "smallcontext"] == catalog["auto", "smallcontext"]
     assert catalog["default", 1, date.min] == catalog["auto", 1, date.min]
     assert catalog.service_tiers == {"auto", "default"}
 

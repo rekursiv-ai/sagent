@@ -4,7 +4,7 @@ model = catalog["anthropic"]["opus"]
 model.capability.thinking_effort                    # every effort level offered
 model.capability.default                            # what a new model starts with
 model.settings.context_size.tokens
-model.capability.prices["auto", "smallcontext"]         # the size ``smallcontext`` names
+model.capability.prices["smallcontext"]             # the size ``smallcontext`` names
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from sagent.model.cost import PriceCatalog, ServiceTier
 
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Mapping, Sequence
+    from collections.abc import Collection, Sequence
 
 
 __all__ = [
@@ -255,45 +255,12 @@ class ModelCapability:
         for name in model_setting_names():
             _check_offered(self.model_id, name, settings.value(name), self.values(name))
         size = settings.context_size
-        tier = settings.service_tier
-        if size != self.prices[tier, size.tokens or "fullcontext"]:
-            whole = self.prices[tier, "fullcontext"].display_name
+        if size != self.prices[size.tokens or "fullcontext"]:
+            whole = self.prices["fullcontext"].display_name
             raise ValueError(
                 f"context_size={size.display_name} is not offered by"
                 f" {self.model_id or 'this model'}; allowed: 1 to {whole}",
             )
-
-    def choose(
-        self,
-        settings: ModelSettings,
-        choices: Mapping[ModelSettingName, object],
-    ) -> ModelSettings:
-        """Return ``settings`` with ``choices`` made; a new tier sizes the context again.
-
-        Args:
-          settings: Choices already made on this model.
-          choices: The values to choose, by setting.
-
-        Returns:
-          settings: Each choice made, the context sized at the tier chosen.
-
-        Raises:
-          ValueError: A choice this model does not offer, named with what it does.
-
-        """
-        tier = choices.get("service_tier")
-        for name, value in choices.items():
-            if name != "service_tier":
-                settings = settings.with_value(name, value)
-        if tier is not None:
-            tier = cast(ServiceTier, tier)
-            # ``fit`` puts back a default for whatever is not offered: check first.
-            for name in model_setting_names():
-                value = tier if name == "service_tier" else settings.value(name)
-                _check_offered(self.model_id, name, value, self.values(name))
-            settings = self.fit(settings, was=self, service_tier=tier)
-        self.check(settings)
-        return settings
 
     def values(self, name: ModelSettingName) -> tuple[object, ...]:
         """Return the values this model offers on the setting ``name``.
@@ -345,30 +312,23 @@ class ModelCapability:
         settings: ModelSettings,
         *,
         was: ModelCapability,
-        service_tier: ServiceTier | None = None,
     ) -> ModelSettings:
-        """Return ``settings`` as this model takes them, at ``service_tier``.
+        """Return ``settings`` as this model takes them.
 
         Each choice this model offers is kept, the rest are its defaults. A size
         ``was`` named stays named; a size counted stays that count, within the window.
 
         Args:
           settings: Choices made on ``was``.
-          was: The model they were made on; this one, to change only the tier.
-          service_tier: The tier to move to; ``None`` keeps the one chosen.
+          was: The model they were made on.
 
         Returns:
           settings: Each choice offered here.
 
         """
         d = self.default
-        tier: ServiceTier = _kept(
-            service_tier or settings.service_tier,
-            self.service_tier,
-            d.service_tier,
-        )
         size = settings.context_size
-        named = was.prices[settings.service_tier, size.context_name] == size
+        named = was.prices[size.context_name] == size
         return ModelSettings(
             thinking_effort=_kept(
                 settings.thinking_effort,
@@ -385,7 +345,11 @@ class ModelCapability:
                 self.thinking_output,
                 d.thinking_output,
             ),
-            service_tier=tier,
+            service_tier=_kept(
+                settings.service_tier,
+                self.service_tier,
+                d.service_tier,
+            ),
             cache_ttl_sec=_kept(
                 settings.cache_ttl_sec,
                 self.cache_ttl_sec,
@@ -396,7 +360,7 @@ class ModelCapability:
                 self.manage_context_server_side,
                 d.manage_context_server_side,
             ),
-            context_size=self.prices[tier, size.context_name if named else size.tokens],
+            context_size=self.prices[size.context_name if named else size.tokens],
             pruning=settings.pruning,
         )
 

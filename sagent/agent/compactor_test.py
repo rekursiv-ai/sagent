@@ -92,7 +92,7 @@ def _capability(
         ),
         prices=prices,
         thinking_effort=efforts,
-        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+        default=ModelSettings(context_size=prices["fullcontext"]),
     )
 
 
@@ -340,7 +340,7 @@ def test_the_models_chosen_size_is_a_smaller_window(tmp_path: Path) -> None:
     _, agent = _agent(tmp_path, capability=_capability(window=1_000_000))
     agent.model.settings = replace(
         agent.model.settings,
-        context_size=agent.model.capability.prices["auto", 272_000],
+        context_size=agent.model.capability.prices[272_000],
     )
 
     assert SummaryCompactor(agent).trigger_tokens() == _trigger(
@@ -353,7 +353,7 @@ def test_a_one_token_size_is_a_size(tmp_path: Path) -> None:
     _, agent = _agent(tmp_path)
     agent.model.settings = replace(
         agent.model.settings,
-        context_size=agent.model.capability.prices["auto", 1],
+        context_size=agent.model.capability.prices[1],
     )
     assert SummaryCompactor(agent).trigger_tokens() == 0
 

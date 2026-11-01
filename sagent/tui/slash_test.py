@@ -133,7 +133,7 @@ def _windowed(
         limits=ModelLimits(max_request_tokens=window),
         prices=prices,
         thinking_effort=efforts,
-        default=ModelSettings(context_size=prices["auto", "fullcontext"]),
+        default=ModelSettings(context_size=prices["fullcontext"]),
     )
 
 

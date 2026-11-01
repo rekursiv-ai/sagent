@@ -1,7 +1,7 @@
 """A journal stored as one JSON line per record, locked to one process at a time.
 
-Each record's JSON fields are written as the plain objects they hold, as
-:data:`~sagent.session.types.CONCRETE_TYPES` says, and read back frozen.
+Each line is a record as :func:`~sagent.session.types.stored_plain` writes
+it, read back through :func:`~sagent.session.types.stored_record`.
 
 Typical usage example:
 
@@ -16,26 +16,27 @@ Typical usage example:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, override
 
 import fcntl
+import json
 import os
 
-from treekle import json_dumps, json_loads
+from treekle import json_loads
 
 from sagent.lib.files.owner_only import open_private
 from sagent.session.types import (
-    CONCRETE_TYPES,
     ContextClear,
     IncompleteRecord,
     SessionRecord,
-    record_classes,
+    stored_plain,
+    stored_record,
 )
 from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping, Sequence
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
 
@@ -63,7 +64,6 @@ class JsonlJournal(AsyncResource):
         self._path = path
         self._fd: int | None = None
         self._window: list[SessionRecord] = []
-        self._classes = record_classes()
 
     @property
     def path(self) -> Path:
@@ -73,7 +73,7 @@ class JsonlJournal(AsyncResource):
     @override
     async def aopen(self) -> None:
         self._fd = _open_locked(self._path)
-        self._window = _last_window(self._path, classes=self._classes)
+        self._window = _last_window(self._path)
 
     @override
     async def aclose(self) -> None:
@@ -107,9 +107,7 @@ class JsonlJournal(AsyncResource):
         if self._fd is None:
             raise RuntimeError(f"Journal {self._path} is not open.")
         with self._path.open("rb") as file:
-            records = [
-                _record(line, classes=self._classes) for line in file if line.strip()
-            ]
+            records = [_record(line) for line in file if line.strip()]
         return iter(records)
 
     def flush(self) -> None:
@@ -120,7 +118,7 @@ class JsonlJournal(AsyncResource):
     def _write(self, records: Sequence[SessionRecord]) -> None:
         if self._fd is None:
             raise RuntimeError(f"Journal {self._path} is not open.")
-        lines = b"".join(_line(record, classes=self._classes) for record in records)
+        lines = b"".join(record_line(record) for record in records)
         # ``os.write`` may stop short, on a full disk or a signal; the rest of
         # the line must follow, or the next record joins a torn one.
         rest = memoryview(lines)
@@ -143,7 +141,7 @@ def read_record(line: bytes) -> SessionRecord:
       record: The record; an ``IncompleteRecord`` for a line torn or not a record.
 
     """
-    return _record(line.removesuffix(b"\n"), classes=record_classes())
+    return _record(line.removesuffix(b"\n"))
 
 
 def record_line(record: SessionRecord) -> bytes:
@@ -156,19 +154,9 @@ def record_line(record: SessionRecord) -> bytes:
       line: Its JSON, newline included.
 
     """
-    return _line(record, classes=record_classes())
-
-
-def _line(record: SessionRecord, *, classes: Mapping[str, type]) -> bytes:
-    return (
-        json_dumps(
-            record,
-            classes=classes,
-            sort=False,
-            default_concrete_types=CONCRETE_TYPES,
-        )
-        + "\n"
-    ).encode()
+    # ``projects.py`` finds a session's title and model by each line's first bytes,
+    # ``{"py/object": "UserMessage"``: ``json.dumps``'s default separators.
+    return (json.dumps(stored_plain(record)) + "\n").encode()
 
 
 def _open_locked(path: Path) -> int:
@@ -187,11 +175,11 @@ def _open_locked(path: Path) -> int:
     return fd
 
 
-def _last_window(path: Path, *, classes: Mapping[str, type]) -> list[SessionRecord]:
+def _last_window(path: Path) -> list[SessionRecord]:
     """Return the records from the last ``ContextClear`` on, reading backward."""
     window: list[SessionRecord] = []
     for line in _reversed_lines(path):
-        record = _record(line, classes=classes)
+        record = _record(line)
         window.append(record)
         if isinstance(record, ContextClear):
             break
@@ -199,15 +187,9 @@ def _last_window(path: Path, *, classes: Mapping[str, type]) -> list[SessionReco
     return window
 
 
-def _record(line: bytes, *, classes: Mapping[str, type]) -> SessionRecord:
+def _record(line: bytes) -> SessionRecord:
     try:
-        read = json_loads(
-            line,
-            SessionRecord,
-            classes=classes,
-            default_concrete_types=CONCRETE_TYPES,
-        )
-        return cast(SessionRecord, read)
+        return stored_record(json_loads(line))
     except ValueError:
         return IncompleteRecord(text=line.decode(errors="replace").rstrip("\n"))
 
