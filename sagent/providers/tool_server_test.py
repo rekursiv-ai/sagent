@@ -250,6 +250,7 @@ async def test_the_server_is_sagent_keeps_no_sessions_and_logs_nothing(
 ) -> None:
     # As a process that never started uvicorn finds them: the server must
     # quiet them itself.
+    monkeypatch.setattr(logging.getLogger("uvicorn"), "handlers", [])
     for name in ("uvicorn.error", "uvicorn.access", "uvicorn.asgi"):
         logger = logging.getLogger(name)
         monkeypatch.setattr(logger, "level", logger.level)
