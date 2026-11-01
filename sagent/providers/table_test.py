@@ -471,6 +471,11 @@ def test_a_line_spells_each_tag_its_one_way(tags: ModelTags, line: str) -> None:
     assert str(tags) == line
 
 
+def test_a_choice_s_value_keeps_any_equals_sign_after_the_first() -> None:
+    tags = ModelTags.parse("opus+high+high budget=a=b")
+    assert (tags.effort, dict(tags.choices)) == ("high", {"thinking_budget": "a=b"})
+
+
 def test_the_name_is_the_model_and_its_size() -> None:
     """What a provider looks a model up by: the effort and tier are not its to read."""
     tags = ModelTags.parse("work@vendor/opus+258k+high+fast budget=auto")
@@ -863,6 +868,24 @@ def test_a_card_starts_on_its_effective_date(tmp_path: Path, quoted: bool) -> No
                         _FREE | {"service_tier": "flex"},
                         _FREE
                         | {"service_tier": "flex", "effective_prompt_tokens": 272_000},
+                    ],
+                ),
+            ],
+            {},
+            "^Model 'example-1.0' bands its tiers at different sizes",
+        ),
+        (
+            [
+                _model(
+                    prices=[
+                        _FREE,
+                        _FREE | {"effective_prompt_tokens": 200_000},
+                        _FREE | {"effective_date": "2026-11-01"},
+                        _FREE
+                        | {
+                            "effective_date": "2026-11-01",
+                            "effective_prompt_tokens": 272_000,
+                        },
                     ],
                 ),
             ],
