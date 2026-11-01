@@ -625,7 +625,9 @@ reportUnnecessaryTypeIgnoreComment = false # Public package drops source-tree-on
 
 [tool.ty.environment]
 python-version = "3.12"  # Intentional; test at 3.12 for exports.
-extra-paths = ["typings"]
+extra-paths = [
+    "typings",
+]
 
 # Mirrors `[tool.basedpyright] exclude`, minus entries ty never walks anyway
 # (`.ipynb`, `node_modules/`). `typings/` is resolved via `extra-paths` and is
