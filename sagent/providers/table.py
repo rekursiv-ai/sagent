@@ -332,18 +332,19 @@ class ModelTags:
         kept: list[str] = [model]
         # Each kind keeps one entry per value: a value spelled twice is one tag.
         sizes: dict[ContextSizeName | int, str] = {}
-        effort: dict[ThinkingEffort, None] = {}
-        tier: dict[ServiceTier, None] = {}
+        efforts: list[ThinkingEffort] = []
+        tiers: list[ServiceTier] = []
         for raw in words:
             word = raw.lower()
             if (size := _size(word)) is not None:
                 sizes.setdefault(size, f"+{word}")
             elif (named := _effort(word)) is not None:
-                effort[named] = None
+                efforts.append(named)
             elif (served := _tier(word)) is not None:
-                tier[served] = None
+                tiers.append(served)
             else:
                 kept.append(raw)
+        effort, tier = tuple(dict.fromkeys(efforts)), tuple(dict.fromkeys(tiers))
         if len(sizes) > 1:
             raise UnsupportedTagError(
                 f"Model {line!r} selects conflicting contexts:"
@@ -844,11 +845,16 @@ def _prices(row: _ModelRow) -> PriceCatalog:
                 f"Model {row.model_id!r} has no base card for tier {tier!r}"
                 " (no prompt band, no effective date).",
             )
-    # A size is the model's, named where its price bands change: a tier priced flat
-    # is fine, but two tiers banding apart would name a size neither bills at.
-    banded = {frozenset(t for t in tops if t) for tops in thresholds.values()} - {
-        frozenset(),
-    }
+    # A size is the model's, named where its price bands change: a tier or date
+    # priced flat is fine, but two banding apart would name a size one never bills at.
+    banded = {
+        frozenset(
+            c.effective_prompt_tokens
+            for c in row.prices
+            if (c.service_tier, c.effective_date) == when and c.effective_prompt_tokens
+        )
+        for when in {(c.service_tier, c.effective_date) for c in row.prices}
+    } - {frozenset()}
     if len(banded) > 1:
         raise ValueError(f"Model {row.model_id!r} bands its tiers at different sizes.")
     return PriceCatalog(prices=prices, window=row.limits.max_request_tokens)
