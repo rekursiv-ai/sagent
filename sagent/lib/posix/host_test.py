@@ -37,6 +37,7 @@ from sagent.lib.posix.host import (
     serve_command,
 )
 from sagent.lib.posix.relay import ThreadedRelay, terminal_size
+from sagent.lib.posix.sockets import accepts
 from sagent.lib.posix.terminal import Terminal
 
 
@@ -239,26 +240,60 @@ class TestHost:
         self,
         short_dir: Path,
     ) -> None:
-        async def count(address: Path) -> int:
-            reader, writer = await asyncio.open_unix_connection(address)
-            writer.write(encode_frame(Frame.VIEWERS))
-            kind, payload = await read_frame(reader)
-            writer.close()
-            assert kind is Frame.VIEWERS
-            return int.from_bytes(payload)
-
         async def run() -> list[int]:
             async with _hosted(_SLEEPER, short_dir) as (spec, _):
                 await _wait_for(lambda: b"ready" in _read(spec.scrollback), 5.0)
-                counts = [await count(spec.address)]
+                counts = [await _viewers(spec.address)]
                 reader, writer = await asyncio.open_unix_connection(spec.address)
                 writer.write(encode_frame(Frame.ATTACH))
                 _ = await _collect(reader, until=b"ready")
-                counts.append(await count(spec.address))
+                counts.append(await _viewers(spec.address))
                 writer.close()
                 return counts
 
         assert asyncio.run(run()) == [0, 1]
+
+    def test_taking_over_detaches_every_other_viewer(self, short_dir: Path) -> None:
+        """As ``tmux attach -d`` does: the terminal taking over is the one left."""
+
+        async def run() -> int:
+            async with _hosted(_SLEEPER, short_dir) as (spec, _):
+                await _wait_for(lambda: b"ready" in _read(spec.scrollback), 5.0)
+                first_reader, first = await asyncio.open_unix_connection(spec.address)
+                first.write(encode_frame(Frame.ATTACH))
+                _ = await _collect(first_reader, until=b"ready")
+                taker_reader, taker = await asyncio.open_unix_connection(spec.address)
+                taker.write(encode_frame(Frame.TAKEOVER))
+                _ = await _collect(taker_reader, until=b"ready")
+                async with asyncio.timeout(5.0):
+                    while await first_reader.read(65_536):
+                        pass
+                count = await _viewers(spec.address)
+                taker.close()
+                first.close()
+                return count
+
+        assert asyncio.run(run()) == 1
+
+    def test_a_second_host_at_a_live_address_refuses_and_starts_nothing(
+        self,
+        short_dir: Path,
+    ) -> None:
+        """It must not unlink the first host's socket and bind its own in its place."""
+        started = short_dir / "started"
+        child = [sys.executable, "-c", f"open({str(started)!r}, 'w')"]
+
+        async def run() -> bool:
+            async with _hosted(_SLEEPER, short_dir) as (spec, _):
+                with pytest.raises(FileExistsError, match="another host serves"):
+                    _ = await asyncio.wait_for(
+                        Host(Terminal(child), spec=spec).serve(),
+                        5,
+                    )
+                return accepts(spec.address)
+
+        assert asyncio.run(run())
+        assert not started.exists()
 
     def test_redraw_asks_the_child_to_repaint_again(self, short_dir: Path) -> None:
         """A viewer back from a suspend asks for the screen it missed."""
@@ -733,6 +768,16 @@ async def _collect(
                 return bytes(seen), decode_status(payload)
             seen += payload
     return bytes(seen), None
+
+
+async def _viewers(address: Path) -> int:
+    """Return the host's count of attached viewers, asked as a one-shot client."""
+    reader, writer = await asyncio.open_unix_connection(address)
+    writer.write(encode_frame(Frame.VIEWERS))
+    kind, payload = await read_frame(reader)
+    writer.close()
+    assert kind is Frame.VIEWERS
+    return int.from_bytes(payload)
 
 
 def _read(path: Path) -> bytes:

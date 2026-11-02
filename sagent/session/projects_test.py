@@ -6,6 +6,7 @@ from pathlib import Path
 
 import logging
 import os
+import re
 import uuid
 
 from treekle import json_dumps
@@ -24,6 +25,7 @@ from sagent.session.projects import (
     new_session_path,
     project_dir,
     scope_dir,
+    unused_session_path,
 )
 from sagent.session.types import (
     Attachment,
@@ -165,6 +167,26 @@ def test_a_colliding_id_is_replaced_by_a_fresh_one(
     assert caplog.messages == [
         f"session id {taken.hex[:12]} already exists; minting another.",
     ]
+
+
+def test_an_unused_session_is_named_but_not_made(tmp_path: Path) -> None:
+    directory = tmp_path / "projects" / "here"
+    path = unused_session_path(directory)
+    assert (path.name, path.parent.parent) == ("session.jsonl", directory)
+    assert re.fullmatch(r"[0-9a-f]{12}", path.parent.name)
+    assert not directory.exists()
+
+
+def test_an_unused_session_skips_an_id_a_session_holds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    taken = uuid.UUID(int=1 << 120)
+    fresh = uuid.UUID(int=2 << 120)
+    (tmp_path / taken.hex[:12]).mkdir()
+    minted = iter([taken, fresh])
+    monkeypatch.setattr(uuid, "uuid4", lambda: next(minted))
+    assert unused_session_path(tmp_path) == tmp_path / fresh.hex[:12] / "session.jsonl"
 
 
 def test_a_missing_directory_lists_nothing(tmp_path: Path) -> None:

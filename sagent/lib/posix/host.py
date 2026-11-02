@@ -21,6 +21,10 @@ The socket carries :class:`Frame` records -- a five-byte header and a payload:
 - An empty ``VIEWERS`` asks how many viewers are attached; the host answers
   with a ``VIEWERS`` holding the count.
 - ``REDRAW`` asks the child to repaint, as a viewer back from a suspend does.
+- ``TAKEOVER`` attaches as ``ATTACH`` does and detaches every other viewer,
+  as ``tmux attach -d`` does.
+
+One host serves an address: a second refuses to start while the first runs.
 
 :func:`launch` starts a command under a host in a session of its own, running
 this module as ``python -m`` (:func:`serve_command`), and returns once it
@@ -29,7 +33,7 @@ listens.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Generator, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -37,6 +41,7 @@ from typing import Final
 import asyncio
 import contextlib
 import enum
+import fcntl
 import logging
 import os
 import signal
@@ -98,6 +103,7 @@ class Frame(enum.IntEnum):
     KEEPALIVE = 11
     VIEWERS = 12
     REDRAW = 13
+    TAKEOVER = 14
 
 
 # The header is one byte of kind and a four-byte payload length. Every integer on the
@@ -265,25 +271,27 @@ class Host:
 
         Raises:
           FileNotFoundError: The child's command is not on PATH.
+          FileExistsError: Another host serves the address; no child started.
 
         """
-        await self._terminal.start()
-        # From here the child exists, so every later failure must still reap
-        # it, exactly as in ``Relay.serve``.
-        try:
-            if self._on_started is not None:
-                pid = self._terminal.pid
-                if pid is None:
-                    raise RuntimeError("terminal started without a child PID")
-                self._on_started(pid)
-            await self._serve_started()
-        finally:
-            await self._terminal.terminate()
-            status = await self._terminal.wait()
-            await self._terminal.close()
-            if self._interrupted is not None:
-                status = 128 + self._interrupted
-            await self._farewell(status)
+        with _owned(self._spec.address):
+            await self._terminal.start()
+            # From here the child exists, so every later failure must still reap
+            # it, exactly as in ``Relay.serve``.
+            try:
+                if self._on_started is not None:
+                    pid = self._terminal.pid
+                    if pid is None:
+                        raise RuntimeError("terminal started without a child PID")
+                    self._on_started(pid)
+                await self._serve_started()
+            finally:
+                await self._terminal.terminate()
+                status = await self._terminal.wait()
+                await self._terminal.close()
+                if self._interrupted is not None:
+                    status = 128 + self._interrupted
+                await self._farewell(status)
         return status
 
     # Torn down in reverse: the handlers go first, then the listener and its path --
@@ -408,10 +416,15 @@ class Host:
         payload: bytes,
     ) -> None:
         """Act on one client frame."""
-        if kind in {Frame.ATTACH, Frame.STOP, Frame.VIEWERS, Frame.REDRAW} and payload:
+        empty = {Frame.ATTACH, Frame.TAKEOVER, Frame.STOP, Frame.VIEWERS, Frame.REDRAW}
+        if kind in empty and payload:
             raise ValueError(f"{kind.name} carries no payload")
         match kind:
-            case Frame.ATTACH:
+            case Frame.ATTACH | Frame.TAKEOVER:
+                if kind is Frame.TAKEOVER:
+                    for viewer in self._viewers - {writer}:
+                        self._drop(viewer)
+                        viewer.close()
                 self._send(writer, encode_frame(Frame.OUTPUT, self._replay()))
                 self._viewers.add(writer)
                 self._terminal.redraw()
@@ -559,6 +572,26 @@ def serve_command(argv: Sequence[str]) -> int:
         return 1
     finally:
         readiness.close()
+
+
+# Binding unlinks whatever socket is at the address, a live host's too; the lock is
+# what tells a stale socket from a host still serving it.
+@contextlib.contextmanager
+def _owned(address: Path) -> Generator[None]:
+    """Hold ``address`` for this host alone, until the block ends."""
+    fd = os.open(
+        address.with_name(f"{address.name}.lock"),
+        os.O_WRONLY | os.O_CREAT,
+        0o600,
+    )
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise FileExistsError(f"another host serves {address}") from None
+        yield
+    finally:
+        os.close(fd)
 
 
 if __name__ == "__main__":

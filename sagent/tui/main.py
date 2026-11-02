@@ -88,6 +88,7 @@ from sagent.session.projects import (
     list_sessions,
     new_session_path,
     project_dir,
+    unused_session_path,
 )
 from sagent.session.types import ToolCall, ToolResult
 from sagent.settings.exceptions import SettingError
@@ -197,8 +198,6 @@ def main() -> int:
 
     """
     argv = sys.argv[1:]
-    # Picking a session, and resuming a hosted one, prompt before any run: they
-    # are inside the same guard.
     try:
         return _run(argv)
     # ``_signals`` answers the first SIGINT by cancelling the run, which
@@ -271,9 +270,8 @@ async def run(
     os.close(open_private(path, os.O_WRONLY))
     # Not ``patch_stdout``: it builds its proxy with no way to set the batch time.
     # Whatever else writes to the terminal, such as a library's warning, goes through
-    # the printer's screen, so a result below it names its call again. A keystroke
-    # waits behind any synchronous work on the loop, so a stall past a frame logs
-    # the code holding it: a jerky prompt then names its own cause.
+    # the printer's screen, so a result below it names its call again. A stall past
+    # a frame logs the code holding the loop, which a keystroke waits behind.
     with (
         watch_stalls(threshold_sec=0.05),
         StdoutProxy(sleep_between_writes=print_batch_sec, raw=True) as proxy,
@@ -386,6 +384,39 @@ async def _tree(views: Views) -> None:
         views.focus(picked)
 
 
+def _run(argv: list[str]) -> int:
+    """Run what ``argv`` names: an action, a session here, or one at its host."""
+    if argv and not argv[0].startswith("-"):
+        return asyncio.run(_action(argv))
+    # No ``allow_abbrev``: ``flags`` takes every word argparse does not know as a
+    # setting, so an abbreviation never reaches argparse to be expanded.
+    parser = argparse.ArgumentParser(
+        description=(__doc__ or "").strip(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    static = _add_arguments(parser)
+    try:
+        rest, given = flags(argv, static=static)
+    except ValueError as e:
+        parser.error(str(e))
+    parsed = cast("Flags", parser.parse_args(rest))
+    journal = _hosted_journal(parsed)
+    if journal is None:
+        return asyncio.run(_main(parsed, given=given))
+    return _resume(
+        journal,
+        command=[
+            sys.executable,
+            "-P",
+            "-m",
+            "sagent",
+            *argv,
+            "--hosted-session",
+            str(journal),
+        ],
+    )
+
+
 # A setting is no flag here: ``flags`` hands argparse only what this knows.
 def _add_arguments(parser: argparse.ArgumentParser) -> frozenset[str]:
     """Register flags on ``parser``; return every option string it now knows."""
@@ -435,8 +466,7 @@ def _session_arguments(parser: argparse.ArgumentParser) -> list[argparse.Action]
             action="store_true",
             help="Resume the latest session of any directory.",
         ),
-        # What a session's host passes the session it runs: the journal the
-        # terminal that started it already picked, so it is not picked twice.
+        # The journal the terminal that started the host already picked.
         parser.add_argument(
             "--hosted-session",
             type=Path,
@@ -563,6 +593,138 @@ def _allow_providers_argument(parser: argparse.ArgumentParser) -> argparse.Actio
         " may use; $SAGENT_PROVIDER joins them. Default:"
         " $SAGENT_ALLOW_PROVIDERS, else every provider.",
     )
+
+
+# Only a real terminal: a host's pty stands in for this descriptor.
+def _hosted_journal(flags: Flags) -> Path | None:
+    """Return the journal a session at a terminal runs hosted on; ``None`` to run here."""
+    if (
+        flags.ephemeral
+        or flags.hosted_session is not None
+        or not os.isatty(real_fd(sys.stdin))
+    ):
+        return None
+    # Named, not made: the hosted session makes it once its flags check out.
+    return _session_path(
+        flags,
+        cwd=Path.cwd(),
+        interactive=True,
+        mint=unused_session_path,
+    )
+
+
+# Outside any event loop: a prompt read on a worker thread outlives Ctrl+C, and
+# ``asyncio.run`` then waits on it forever.
+def _resume(journal: Path, *, command: Sequence[str]) -> int:
+    """Attach this terminal to ``journal``'s session, starting its host if none runs."""
+    address = _host_address(journal)
+    log = address.with_suffix(".log")
+    if not accepts(address):
+        if locked(journal):
+            status = _take_over(journal)
+            if status is not None:
+                return status
+        ready = launch(
+            address,
+            command,
+            log=log,
+            winsize=terminal_size(real_fd(sys.stdin)),
+            timeout_sec=30.0,
+        )
+        # Not ready also when another terminal's host took the address first.
+        if ready is not True and not accepts(address):
+            why = "did not start in time" if ready is None else "failed to start"
+            sys.stderr.write(f"Error: the session's host {why}; see {log}\n")
+            return 1
+    read_only = _join(journal, address)
+    if read_only is None:
+        return 0
+    return asyncio.run(_attach(journal, address=address, log=log, read_only=read_only))
+
+
+def _host_address(journal: Path) -> Path:
+    """Return the socket the host of ``journal``'s session listens on; one per journal."""
+    hosts = state_dir() / "rekursiv-ai" / "sagent" / "hosts"
+    hosts.mkdir(parents=True, exist_ok=True, mode=0o700)
+    digest = hashlib.blake2b(os.fsencode(journal.resolve()), digest_size=8)
+    return socket_address(hosts / f"{digest.hexdigest()}.sock")
+
+
+# A holder with no host is a sagent from before hosting: nothing can attach to it,
+# so killing it is the only way back in.
+def _take_over(
+    journal: Path,
+    *,
+    term_sec: float = 10.0,
+    kill_sec: float = 10.0,
+) -> int | None:
+    """Offer to kill ``journal``'s holder; ``None`` once free, else the status to exit."""
+    pid = lock_holder(journal)
+    session = journal.parent.name
+    if pid is None:
+        sys.stderr.write(
+            f"Error: session {session} is open in another process,"
+            " which has no host to attach to.\n",
+        )
+        return 1
+    terminal = controlling_terminal(pid) or "no terminal"
+    running = len(children(pid))
+    commands = "command" if running == 1 else "commands"
+    answer = _ask(
+        f"Session {session} is open in pid {pid} ({terminal}, {running} {commands}"
+        " running). [K]ill it and resume / [Q]uit: ",
+    )
+    if answer.strip().lower() not in ("k", "kill"):
+        return 0
+    for sig, seconds in ((signal.SIGTERM, term_sec), (signal.SIGKILL, kill_sec)):
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, sig)
+        if unlocked_within(journal, seconds=seconds):
+            return None
+    sys.stderr.write(f"Error: pid {pid} still holds session {session}.\n")
+    return 1
+
+
+def _join(journal: Path, address: Path) -> bool | None:
+    """Ask how to join a hosted session; False takes it over, True watches, None leaves."""
+    # None: the host ended in between; the attach then says so.
+    try:
+        count = asyncio.run(viewers(address))
+    except OSError:
+        count = None
+    if count is None or count == 0:
+        return False
+    others = "terminal" if count == 1 else "terminals"
+    answer = _ask(
+        f"Session {journal.parent.name} is attached in {count} other {others}."
+        " [A]ttach here / [R]ead-only / [Q]uit: ",
+    )
+    return {"a": False, "r": True}.get(answer.strip().lower()[:1])
+
+
+async def _attach(journal: Path, *, address: Path, log: Path, read_only: bool) -> int:
+    """Attach this terminal to the host of ``journal``'s session listening at ``address``."""
+    try:
+        status = await attach(address, read_only=read_only, take_over=not read_only)
+    except OSError:
+        sys.stderr.write(
+            f"Error: the session ended before it could attach; see {log}\n",
+        )
+        return 1
+    if status is None:
+        sys.stderr.write(
+            "\n[sagent] Detached; the session runs on. Attach again with:"
+            f" sagent --resume {journal.parent.name}\n",
+        )
+        return 0
+    return status
+
+
+def _ask(question: str) -> str:
+    """Ask ``question`` on stderr; return the line typed, empty at the end of input."""
+    sys.stderr.write(question)
+    sys.stderr.flush()
+    return cast(str, sys.stdin.readline())
 
 
 async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
@@ -1005,29 +1167,28 @@ def _chosen_tools(flags: Flags, *, known: Sequence[str]) -> list[str]:
     return names
 
 
-# Only a real terminal: a test's stand-in stdin answers ``isatty`` but has no descriptor
-# a host's pty could stand in for.
-def _hosted_journal(flags: Flags) -> Path | None:
-    """Return the journal a session at a terminal runs hosted on; ``None`` to run here."""
-    if (
-        flags.ephemeral
-        or flags.hosted_session is not None
-        or not os.isatty(real_fd(sys.stdin))
-    ):
-        return None
-    return _session_path(flags, cwd=Path.cwd(), interactive=True)
-
-
-def _session_path(flags: Flags, *, cwd: Path, interactive: bool) -> Path | None:
+def _session_path(
+    flags: Flags,
+    *,
+    cwd: Path,
+    interactive: bool,
+    mint: Callable[[Path], Path] = new_session_path,
+) -> Path | None:
     """Return the journal :func:`_journal_path` picks, an old log upgraded first."""
-    path = _journal_path(flags, cwd=cwd, interactive=interactive)
+    path = _journal_path(flags, cwd=cwd, interactive=interactive, mint=mint)
     if path is not None and is_legacy(path) and not upgrade(path):
         sys.stderr.write("[resume] nothing to resume; starting fresh.\n")
-        return new_session_path(project_dir(cwd))
+        return mint(project_dir(cwd))
     return path
 
 
-def _journal_path(flags: Flags, *, cwd: Path, interactive: bool) -> Path | None:
+def _journal_path(
+    flags: Flags,
+    *,
+    cwd: Path,
+    interactive: bool,
+    mint: Callable[[Path], Path] = new_session_path,
+) -> Path | None:
     """Return the journal ``--session``, ``--resume`` and the rest pick; ``None`` for none."""
     here = project_dir(cwd)
     if flags.ephemeral:
@@ -1062,7 +1223,7 @@ def _journal_path(flags: Flags, *, cwd: Path, interactive: bool) -> Path | None:
         or flags.resume_all
     ):
         sys.stderr.write("[resume] nothing to resume; starting fresh.\n")
-    return new_session_path(here)
+    return mint(here)
 
 
 # This directory first, then every one: a prefix unique here wins even when another
@@ -1099,9 +1260,7 @@ def _pick(sessions: Sequence[SessionInfo], *, cap: int) -> SessionInfo | None:
             f" · {title or '(no user messages)'}\n",
         )
     while True:
-        sys.stderr.write("Resume which? [1] ")
-        sys.stderr.flush()
-        line = sys.stdin.readline()
+        line = _ask("Resume which? [1] ")
         if not line:
             return None
         raw = line.strip()
@@ -1120,111 +1279,6 @@ def _ago(seconds: float) -> str:
         if s >= size:
             return f"{s // size}{unit} ago"
     return f"{s}s ago"
-
-
-def _host_address(journal: Path) -> Path:
-    """Return the socket the host of ``journal``'s session listens on; one per journal."""
-    hosts = state_dir() / "rekursiv-ai" / "sagent" / "hosts"
-    hosts.mkdir(parents=True, exist_ok=True, mode=0o700)
-    digest = hashlib.blake2b(os.fsencode(journal.resolve()), digest_size=8)
-    return socket_address(hosts / f"{digest.hexdigest()}.sock")
-
-
-# Outside any event loop: a prompt read on a worker thread outlives Ctrl+C, and
-# ``asyncio.run`` then waits on it forever.
-def _resume(journal: Path, *, command: Sequence[str]) -> int:
-    """Attach this terminal to ``journal``'s session, starting its host if none runs."""
-    address = _host_address(journal)
-    log = journal.with_suffix(".host.log")
-    read_only = False
-    if accepts(address):
-        joining = _join(journal, address)
-        if joining is None:
-            return 1
-        read_only = joining
-    elif locked(journal) and not _take_over(journal):
-        return 1
-    else:
-        ready = launch(
-            address,
-            command,
-            log=log,
-            winsize=terminal_size(real_fd(sys.stdin)),
-            timeout_sec=30.0,
-        )
-        if ready is not True:
-            why = "did not start in time" if ready is None else "failed to start"
-            sys.stderr.write(f"Error: the session's host {why}; see {log}\n")
-            return 1
-    return asyncio.run(_attach(journal, read_only=read_only))
-
-
-async def _attach(journal: Path, *, read_only: bool) -> int:
-    """Attach this terminal to the listening host of ``journal``'s session."""
-    log = journal.with_suffix(".host.log")
-    try:
-        status = await attach(_host_address(journal), read_only=read_only)
-    except OSError:
-        sys.stderr.write(
-            f"Error: the session ended before it could attach; see {log}\n",
-        )
-        return 1
-    if status is None:
-        sys.stderr.write(
-            "\n[sagent] Detached; the session runs on. Attach again with:"
-            f" sagent --resume {journal.parent.name}\n",
-        )
-        return 0
-    return status
-
-
-def _join(journal: Path, address: Path) -> bool | None:
-    """Ask how to join a hosted session; False drives it, True watches, None leaves."""
-    # None: the host ended while asked; the attach then says so.
-    count = asyncio.run(viewers(address))
-    if count is None or count == 0:
-        return False
-    others = "terminal" if count == 1 else "terminals"
-    answer = input(
-        f"Session {journal.parent.name} is attached in {count} other {others}."
-        " [A]ttach here / [R]ead-only / [Q]uit: ",
-    )
-    return {"a": False, "r": True}.get(answer.strip().lower()[:1])
-
-
-# A holder with no host is a sagent from before hosting: nothing can attach to it,
-# so killing it is the only way back in.
-def _take_over(
-    journal: Path,
-    *,
-    term_sec: float = 10.0,
-    kill_sec: float = 10.0,
-) -> bool:
-    """Offer to kill the process with no host that holds ``journal``; True once free."""
-    pid = lock_holder(journal)
-    session = journal.parent.name
-    if pid is None:
-        sys.stderr.write(
-            f"Error: session {session} is open in another process,"
-            " which has no host to attach to.\n",
-        )
-        return False
-    terminal = controlling_terminal(pid) or "no terminal"
-    running = len(children(pid))
-    commands = "command" if running == 1 else "commands"
-    answer = input(
-        f"Session {session} is open in pid {pid} ({terminal}, {running} {commands}"
-        " running). [K]ill it and resume / [Q]uit: ",
-    )
-    if answer.strip().lower() not in ("k", "kill"):
-        return False
-    for sig, seconds in ((signal.SIGTERM, term_sec), (signal.SIGKILL, kill_sec)):
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, sig)
-        if unlocked_within(journal, seconds=seconds):
-            return True
-    sys.stderr.write(f"Error: pid {pid} still holds session {session}.\n")
-    return False
 
 
 # Interactive logs never touch stderr: any write there overlays the prompt.
@@ -1423,36 +1477,3 @@ class _Screen:
     """Whether reasoning shows, settled by ``--screen.thinking`` before a screen opens."""
 
     show_thinking: bool = False
-
-
-def _run(argv: list[str]) -> int:
-    """Run what ``argv`` names: an action, a session here, or one at its host."""
-    if argv and not argv[0].startswith("-"):
-        return asyncio.run(_action(argv))
-    # No ``allow_abbrev``: ``flags`` takes every word argparse does not know as a
-    # setting, so an abbreviation never reaches argparse to be expanded.
-    parser = argparse.ArgumentParser(
-        description=(__doc__ or "").strip(),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    static = _add_arguments(parser)
-    try:
-        rest, given = flags(argv, static=static)
-    except ValueError as e:
-        parser.error(str(e))
-    parsed = cast("Flags", parser.parse_args(rest))
-    journal = _hosted_journal(parsed)
-    if journal is None:
-        return asyncio.run(_main(parsed, given=given))
-    return _resume(
-        journal,
-        command=[
-            sys.executable,
-            "-P",
-            "-m",
-            "sagent",
-            *argv,
-            "--hosted-session",
-            str(journal),
-        ],
-    )

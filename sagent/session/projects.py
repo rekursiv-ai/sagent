@@ -57,6 +57,7 @@ __all__ = [
     "project_dir",
     "scope_dir",
     "session_file",
+    "unused_session_path",
 ]
 
 
@@ -193,6 +194,25 @@ def new_session_path(directory: Path) -> Path:
         path = session / "session.jsonl"
         os.close(open_private(path, os.O_EXCL | os.O_WRONLY))
         return path
+
+
+def unused_session_path(directory: Path) -> Path:
+    """Return the journal of a session in ``directory`` that no session has used.
+
+    Unlike :func:`new_session_path` it makes nothing: whoever opens the journal
+    first makes it, so a session that never starts leaves nothing behind.
+
+    Args:
+      directory: A project or scope directory.
+
+    Returns:
+      path: ``<directory>/<12 hex digits>/session.jsonl``, which does not exist.
+
+    """
+    while True:
+        session = directory / uuid.uuid4().hex[:12]
+        if not session.exists():
+            return session / "session.jsonl"
 
 
 def list_sessions(directory: Path, *, limit: int | None = None) -> list[SessionInfo]:

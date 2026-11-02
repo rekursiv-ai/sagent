@@ -62,6 +62,7 @@ class RemoteTerminal:
         child.
       read_only: Watch only: no keystroke and no geometry reaches the child,
         so another terminal driving it is undisturbed.
+      take_over: Detach every other terminal, as ``tmux attach -d`` does.
 
     """
 
@@ -71,12 +72,15 @@ class RemoteTerminal:
         *,
         detach_key: bytes = DETACH_KEY,
         read_only: bool = False,
+        take_over: bool = False,
     ) -> None:
         self._address = address
         self._detach_key = detach_key
         self._read_only = read_only
+        self._take_over = take_over
         self._reader: asyncio.StreamReader | None = None
         self._writer: asyncio.StreamWriter | None = None
+        self._first: tuple[Frame, bytes] | None = None
         self._exit_status: int | None = None
 
     @property
@@ -92,10 +96,24 @@ class RemoteTerminal:
     async def start(self) -> None:
         """Connect and ask for the replay, then every later chunk.
 
+        A host older than ``TAKEOVER`` drops the client that sends it before
+        any replay, so a take-over it refuses attaches as before instead.
+
         Raises:
           OSError: Nothing is listening at the address.
 
         """
+        if self._take_over:
+            self._reader, self._writer = await asyncio.open_unix_connection(
+                self._address,
+            )
+            self._send(Frame.TAKEOVER)
+            try:
+                self._first = await read_frame(self._reader)
+            except (asyncio.IncompleteReadError, ConnectionError, ValueError):
+                self._writer.close()
+            else:
+                return
         self._reader, self._writer = await asyncio.open_unix_connection(self._address)
         self._send(Frame.ATTACH)
 
@@ -114,10 +132,13 @@ class RemoteTerminal:
         if self._reader is None:
             return
         while True:
-            try:
-                kind, payload = await read_frame(self._reader)
-            except (asyncio.IncompleteReadError, ConnectionError, ValueError):
-                return
+            if self._first is not None:
+                (kind, payload), self._first = self._first, None
+            else:
+                try:
+                    kind, payload = await read_frame(self._reader)
+                except (asyncio.IncompleteReadError, ConnectionError, ValueError):
+                    return
             if kind is Frame.EXIT:
                 self._exit_status = decode_status(payload)
                 return
@@ -179,6 +200,7 @@ async def attach(
     stdout: HasFileno | None = None,
     detach_key: bytes = DETACH_KEY,
     read_only: bool = False,
+    take_over: bool = False,
 ) -> int | None:
     """Drive a hosted child from this terminal until it exits or is detached.
 
@@ -189,17 +211,23 @@ async def attach(
         None.
       detach_key: The keystroke that ends the attach.
       read_only: Watch only; see :class:`RemoteTerminal`.
+      take_over: Detach every other terminal; see :class:`RemoteTerminal`.
 
     Returns:
       status: The child's exit status; ``128 + signal`` when this process was
         signalled away, as a job run directly reports; None when this terminal
-        detached and left it running.
+        detached, or another took over, and left it running.
 
     Raises:
       OSError: Nothing is listening at ``address``.
 
     """
-    remote = RemoteTerminal(address, detach_key=detach_key, read_only=read_only)
+    remote = RemoteTerminal(
+        address,
+        detach_key=detach_key,
+        read_only=read_only,
+        take_over=take_over,
+    )
     relayed = await Relay(
         remote,
         stdin=stdin,

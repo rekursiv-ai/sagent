@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
 
 import os
@@ -12,14 +13,13 @@ import coverage
 import pytest
 
 from tools.gate import fakes, gate, spool
-from tools.testing import testing
+from tools.testing import coverage_summary, testing
 from tools.testing.tiers import TIERS
 from tools.typecheck import typecheck
 
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
     from types import ModuleType
 
 
@@ -104,7 +104,7 @@ def test_pytest_runs_each_changed_files_pairs_with_its_directory_measured(
         existing=["pkg/a_test.py", "pkg/tests/test_a.py", "pkg/b.py"],
     )
 
-    erase, test = _ran(tools)
+    erase, test = tools.calls
     assert erase[1:] == ["-m", "coverage", "erase"]
     assert test[1:4] == ["-m", "pytest", "-q"]
     assert tools.argfiles == [
@@ -127,7 +127,7 @@ def test_pytest_without_pytest_cov_measures_nothing(tmp_path: Path) -> None:
 
     _pytest(tmp_path, tools, ["a.py"], existing=["a_test.py"])
 
-    assert [call[1:3] for call in _ran(tools)] == [["-m", "pytest"]]
+    assert [call[1:3] for call in tools.calls] == [["-m", "pytest"]]
     assert tools.argfiles == [["a_test.py"]]
 
 
@@ -135,12 +135,7 @@ def test_pytest_without_a_pair_runs_nothing(tmp_path: Path) -> None:
     tools = fakes.Recorder()
 
     assert _pytest(tmp_path, tools, ["a.py"]) == 0
-    assert [call[1:3] for call in _ran(tools)] == [["-m", "coverage"]]
-
-
-def _ran(tools: fakes.Recorder) -> list[list[str]]:
-    """Return the processes the gate ran, without its tracked-file listing."""
-    return [call for call in tools.calls if call[:1] != ["git"]]
+    assert [call[1:3] for call in tools.calls] == [["-m", "coverage"]]
 
 
 @pytest.mark.parametrize(("status", "expected"), [(1, 1), (5, 0), (2, 2)])
@@ -217,6 +212,21 @@ def test_a_junk_xdist_threshold_keeps_the_default(
     assert "-n" not in tools.calls[-1]
 
 
+def test_the_xdist_threshold_can_be_lowered(tmp_path: Path) -> None:
+    tools = fakes.Recorder(output="t0_test.py::a\nt1_test.py::a\n")
+
+    _pytest(
+        tmp_path,
+        tools,
+        ["a.py"],
+        dependents="pkg.affected",
+        PRECOMMIT_CODEGRAPH_PYTEST="1",
+        SIDECAR_XDIST_MIN="2",
+    )
+
+    assert "-n" in tools.calls[-1]
+
+
 @pytest.mark.parametrize(("count", "spread"), [(15, False), (16, True)])
 def test_pytest_spreads_only_across_enough_test_files(
     tmp_path: Path,
@@ -239,35 +249,68 @@ def test_pytest_spreads_only_across_enough_test_files(
     assert ("-n" in tools.calls[-1]) is spread
 
 
-def test_every_tracked_file_runs_the_whole_suite_without_walking(
-    tmp_path: Path,
-) -> None:
-    """Under --all-files the graph walk took minutes; plain pytest needs none."""
-    tools = fakes.Recorder(output="a.py\nb_test.py\n", installed=False)
+def test_pytest_reads_its_selection_from_an_argfile(tmp_path: Path) -> None:
+    tools = fakes.Recorder(
+        output="".join(f"t{i}_test.py::a\n" for i in range(16)),
+        installed=False,
+    )
 
     _pytest(
         tmp_path,
         tools,
-        ["a.py", "b_test.py"],
+        ["a.py"],
         dependents="pkg.affected",
         PRECOMMIT_CODEGRAPH_PYTEST="1",
     )
 
-    assert not [call for call in tools.calls if "--emit" in call]
-    assert tools.argfiles == [["."]]
-    assert "-n" in tools.calls[-1]
+    *head, argfile = tools.calls[-1]
+    assert head[1:] == ["-m", "pytest", "-n", "3", "-q", "--tb=short"]
+    name = Path(argfile.removeprefix("@")).name
+    assert name.startswith("precommit-")
+    assert name.endswith(".args")
 
 
-@pytest.mark.parametrize("listed", ["a.py\nb_test.py\nc.py\n", "", None])
-def test_a_partial_or_unknown_listing_still_selects(
+def test_an_unmeasured_run_ignores_a_stale_coverage_file(
     tmp_path: Path,
-    listed: str | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    tools = fakes.Recorder(output=listed, installed=False)
+    """Without pytest-cov a leftover ``.coverage`` describes some other run."""
+    read: list[object] = []
 
-    _pytest(tmp_path, tools, ["a.py", "b_test.py"], existing=["a_test.py"])
+    def shortfall(sources: object) -> list[str]:
+        read.append(sources)
+        return []
 
-    assert tools.argfiles != [["."]]
+    monkeypatch.setattr(coverage_summary, "shortfall", shortfall)
+    tools = fakes.Recorder(installed=False)
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo" / ".coverage").write_text("")
+
+    assert _pytest(tmp_path, tools, ["a.py"], existing=["a_test.py"]) == 0
+    assert read == []
+
+
+def test_the_gate_sizes_the_walk_and_pytest_from_its_own_workers(
+    tmp_path: Path,
+) -> None:
+    tools = fakes.Recorder(
+        output="".join(f"t{i}_test.py::a\n" for i in range(16)),
+        installed=False,
+    )
+
+    _pytest(
+        tmp_path,
+        tools,
+        ["a.py"],
+        dependents="pkg.affected",
+        PRECOMMIT_CODEGRAPH_PYTEST="1",
+        WORKERS_PYTEST="5",
+    )
+
+    [walk] = [call for call in tools.calls if "--emit" in call]
+    assert walk[walk.index("--workers") + 1] == "5"
+    test = tools.calls[-1]
+    assert test[test.index("-n") + 1] == "5"
 
 
 def test_pytest_prefers_the_graphs_tests_to_the_pairs(tmp_path: Path) -> None:
