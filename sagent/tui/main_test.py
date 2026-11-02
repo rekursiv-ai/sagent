@@ -3947,6 +3947,8 @@ def test_one_journal_has_one_private_host_however_it_is_spelled(
     address = main._host_address(journal)
     assert main._host_address(Path("a/../a/session.jsonl")) == address
     assert main._host_address(tmp_path / "b" / "session.jsonl") != address
+    # Short: every byte of the name counts against ``sun_path``'s 104.
+    assert re.fullmatch(r"[0-9a-f]{16}\.sock", address.name)
     hosts = state_dir() / "rekursiv-ai" / "sagent" / "hosts"
     assert address.resolve().parent == hosts.resolve()
     assert stat.S_IMODE(hosts.stat().st_mode) == 0o700
@@ -3957,12 +3959,12 @@ async def test_a_second_terminal_attaches_to_the_running_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Both terminals see it end; only one session ever started."""
+    """The second takes it over and the first detaches; one session ever started."""
     # The host imports the code under test, not the venv's install of another checkout.
     monkeypatch.setenv("PYTHONPATH", os.pathsep.join(sys.path))
     monkeypatch.setattr(main, "terminal_size", _rows_cols)
     asked: list[str] = []
-    monkeypatch.setattr(main, "input", partial(_answer, asked, "a"), raising=False)
+    monkeypatch.setattr(main, "_ask", partial(_answer, asked, "a"))
     journal = tmp_path / "000000000001" / "session.jsonl"
     journal.parent.mkdir()
     starts, attaches = tmp_path / "starts", tmp_path / "attaches"
@@ -3987,7 +3989,7 @@ async def test_a_second_terminal_attaches_to_the_running_session(
     # Ended from outside: a typed line waits out the host's paste-to-Enter delay.
     assert await stop(main._host_address(journal)) == 3
 
-    assert await asyncio.wait_for(asyncio.gather(first, second), 30) == [3, 3]
+    assert await asyncio.wait_for(asyncio.gather(first, second), 30) == [0, 3]
     assert _text(starts) == "s"
     assert asked == [
         (
@@ -4015,9 +4017,8 @@ async def test_a_host_that_does_not_start_says_where_to_look(
     journal = tmp_path / "000000000002" / "session.jsonl"
 
     assert await _resume(journal, command=["unused"]) == 1
-    assert capsys.readouterr().err == (
-        f"Error: the session's host {why}; see {journal.with_suffix('.host.log')}\n"
-    )
+    log = main._host_address(journal).with_suffix(".log")
+    assert capsys.readouterr().err == f"Error: the session's host {why}; see {log}\n"
 
 
 class _Forked:
@@ -4101,7 +4102,7 @@ async def test_kill_ends_the_holder_and_resumes_here(
     journal.parent.mkdir()
     launched: list[Path] = []
     asked: list[str] = []
-    monkeypatch.setattr(main, "input", partial(_answer, asked, answer), raising=False)
+    monkeypatch.setattr(main, "_ask", partial(_answer, asked, answer))
     monkeypatch.setattr(main, "launch", partial(_launched, launched))
     monkeypatch.setattr(main, "terminal_size", _rows_cols)
     monkeypatch.setattr(main, "attach", _exited_7)
@@ -4133,13 +4134,13 @@ async def test_quit_leaves_the_holder_running_and_starts_nothing(
     journal = tmp_path / "abc123" / "session.jsonl"
     journal.parent.mkdir()
     launched: list[Path] = []
-    monkeypatch.setattr(main, "input", partial(_answer, [], "q"), raising=False)
+    monkeypatch.setattr(main, "_ask", partial(_answer, [], "q"))
     monkeypatch.setattr(main, "launch", partial(_launched, launched))
     with _holder(journal) as holder:
         status = await _resume(journal, command=["sagent"])
         assert holder.poll() is None
 
-    assert status == 1
+    assert status == 0
     assert launched == []
 
 
@@ -4160,13 +4161,13 @@ def test_a_new_host_gets_half_a_minute_and_a_holder_ten_seconds_a_signal(
 
     monkeypatch.setattr(main, "launch", launch)
     monkeypatch.setattr(main, "terminal_size", _rows_cols)
-    monkeypatch.setattr(main, "input", partial(_answer, [], "k"), raising=False)
+    monkeypatch.setattr(main, "_ask", partial(_answer, [], "k"))
     monkeypatch.setattr(main, "lock_holder", _no_such_pid)
     monkeypatch.setattr(main, "unlocked_within", unlocked_within)
     journal = tmp_path / "abc123" / "session.jsonl"
 
     assert main._resume(journal, command=[]) == 1
-    assert not main._take_over(journal)
+    assert main._take_over(journal) == 1
     assert waits == [30.0, 10.0, 10.0]
 
 
@@ -4177,11 +4178,11 @@ def test_a_holder_that_outlives_its_kill_is_reported(
 ) -> None:
     """Another user's process ignores both signals; resume must not start a host."""
     journal = tmp_path / "abc123" / "session.jsonl"
-    monkeypatch.setattr(main, "input", partial(_answer, [], "k"), raising=False)
+    monkeypatch.setattr(main, "_ask", partial(_answer, [], "k"))
     monkeypatch.setattr(main, "unlocked_within", _never_unlocked)
     monkeypatch.setattr(main, "lock_holder", _no_such_pid)
 
-    assert not main._take_over(journal, term_sec=0.01, kill_sec=0.01)
+    assert main._take_over(journal, term_sec=0.01, kill_sec=0.01) == 1
     assert capsys.readouterr().err == (
         f"Error: pid {_NO_SUCH_PID} still holds session abc123.\n"
     )
@@ -4198,12 +4199,12 @@ def test_the_kill_prompt_names_the_holder_s_terminal_and_its_commands(
     said: str,
 ) -> None:
     asked: list[str] = []
-    monkeypatch.setattr(main, "input", partial(_answer, asked, "q"), raising=False)
+    monkeypatch.setattr(main, "_ask", partial(_answer, asked, "q"))
     monkeypatch.setattr(main, "lock_holder", _no_such_pid)
     monkeypatch.setattr(main, "controlling_terminal", _fake_terminal)
     monkeypatch.setattr(main, "children", partial(_fake_children, running))
 
-    assert not main._take_over(tmp_path / "abc123" / "session.jsonl")
+    assert main._take_over(tmp_path / "abc123" / "session.jsonl") == 0
     assert asked == [
         (
             f"Session abc123 is open in pid {_NO_SUCH_PID}"
@@ -4230,7 +4231,7 @@ def test_a_holder_the_kernel_does_not_name_is_refused(
     """Without ``/proc/locks``, as on macOS, there is no pid to offer to kill."""
     monkeypatch.setattr(main, "lock_holder", _unnamed)
 
-    assert not main._take_over(tmp_path / "abc123" / "session.jsonl")
+    assert main._take_over(tmp_path / "abc123" / "session.jsonl") == 1
     assert capsys.readouterr().err == (
         "Error: session abc123 is open in another process,"
         " which has no host to attach to.\n"
@@ -4240,19 +4241,19 @@ def test_a_holder_the_kernel_does_not_name_is_refused(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("answer", "status", "attached"),
-    [("a", 7, [False]), ("r", 7, [True]), ("q", 1, [])],
-    ids=["attach", "read-only", "quit"],
+    [("a", 7, [(False, True)]), ("r", 7, [(True, False)]), ("q", 0, [])],
+    ids=["take-over", "read-only", "quit"],
 )
 async def test_a_session_another_terminal_drives_asks_how_to_join(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     answer: str,
     status: int,
-    attached: list[bool],
+    attached: list[tuple[bool, bool]],
 ) -> None:
     asked: list[str] = []
-    joined: list[bool] = []
-    monkeypatch.setattr(main, "input", partial(_answer, asked, answer), raising=False)
+    joined: list[tuple[bool, bool]] = []
+    monkeypatch.setattr(main, "_ask", partial(_answer, asked, answer))
     monkeypatch.setattr(main, "accepts", _always)
     monkeypatch.setattr(main, "viewers", partial(_viewers, 2))
     monkeypatch.setattr(main, "attach", partial(_joined, joined))
@@ -4274,14 +4275,14 @@ async def test_a_session_no_terminal_drives_is_attached_without_asking(
     monkeypatch: pytest.MonkeyPatch,
     count: int | None,
 ) -> None:
-    joined: list[bool] = []
-    monkeypatch.setattr(main, "input", partial(_answer, [], "q"), raising=False)
+    joined: list[tuple[bool, bool]] = []
+    monkeypatch.setattr(main, "_ask", partial(_answer, [], "q"))
     monkeypatch.setattr(main, "accepts", _always)
     monkeypatch.setattr(main, "viewers", partial(_viewers, count))
     monkeypatch.setattr(main, "attach", partial(_joined, joined))
 
     assert await _resume(tmp_path / "abc123" / "session.jsonl", command=[]) == 7
-    assert joined == [False]
+    assert joined == [(False, True)]
 
 
 @pytest.mark.asyncio
@@ -4315,11 +4316,73 @@ async def test_a_session_gone_before_the_attach_says_where_to_look(
     assert await _resume(journal, command=[]) == 1
     assert capsys.readouterr().err == (
         "Error: the session ended before it could attach;"
-        f" see {journal.with_suffix('.host.log')}\n"
+        f" see {main._host_address(journal).with_suffix('.log')}\n"
     )
 
 
-class _CtrlC(io.StringIO):
+def test_ctrl_d_at_the_join_prompt_quits_quietly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(main, "viewers", partial(_viewers, 2))
+    journal = tmp_path / "abc123" / "session.jsonl"
+
+    assert main._join(journal, main._host_address(journal)) is None
+
+
+def test_ctrl_d_at_the_kill_prompt_quits_quietly_and_kills_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    monkeypatch.setattr(main, "lock_holder", _no_such_pid)
+    monkeypatch.setattr(main, "unlocked_within", _never_unlocked)
+
+    assert main._take_over(tmp_path / "abc123" / "session.jsonl") == 0
+
+
+def test_a_new_session_at_a_terminal_makes_nothing_before_it_starts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A flag the session refuses, or a host that never starts, leaves no session."""
+    monkeypatch.chdir(tmp_path)
+    launched: list[Path] = []
+    monkeypatch.setattr(main, "launch", partial(_launched, launched, ready=False))
+    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    _argv(monkeypatch, "--tools", "Nope")
+    with _at_a_terminal(monkeypatch):
+        assert main.main() == 1
+    assert len(launched) == 1
+    assert not project_dir(tmp_path).exists()
+
+
+def test_a_host_another_terminal_started_meanwhile_is_joined(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two terminals launch at once; the one whose host lost joins the winner's."""
+    asked: list[str] = []
+    joined: list[tuple[bool, bool]] = []
+    monkeypatch.setattr(main, "accepts", partial(_in_turn, iter([False, True])))
+    monkeypatch.setattr(main, "launch", partial(_launched, [], ready=False))
+    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    monkeypatch.setattr(main, "viewers", partial(_viewers, 1))
+    monkeypatch.setattr(main, "_ask", partial(_answer, asked, "a"))
+    monkeypatch.setattr(main, "attach", partial(_joined, joined))
+
+    assert main._resume(tmp_path / "abc123" / "session.jsonl", command=[]) == 7
+    assert len(asked) == 1
+    assert joined == [(False, True)]
+
+
+def _in_turn(answers: Iterator[bool], address: Path) -> bool:
+    del address
+    return next(answers)
+
+
+class _Terminal(io.StringIO):
     """A terminal whose user presses Ctrl+C at the first prompt read from it."""
 
     def __init__(self, fd: int) -> None:
@@ -4339,17 +4402,12 @@ class _CtrlC(io.StringIO):
         raise KeyboardInterrupt
 
 
-def _interrupted(*_: object) -> str:
-    raise KeyboardInterrupt
-
-
 @contextlib.contextmanager
 def _at_a_terminal(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
     """Make stdin a real terminal whose user presses Ctrl+C at any prompt."""
     leader, follower = pty.openpty()
     try:
-        monkeypatch.setattr(sys, "stdin", _CtrlC(follower))
-        monkeypatch.setattr(main, "input", _interrupted, raising=False)
+        monkeypatch.setattr(sys, "stdin", _Terminal(follower))
         yield
     finally:
         os.close(leader)
@@ -4459,18 +4517,18 @@ def _launched(
     return ready
 
 
-async def _exited_7(address: Path, *, read_only: bool) -> int | None:
-    del address, read_only
+async def _exited_7(address: Path, *, read_only: bool, take_over: bool) -> int | None:
+    del address, read_only, take_over
     return 7
 
 
-async def _detached(address: Path, *, read_only: bool) -> int | None:
-    del address, read_only
+async def _detached(address: Path, *, read_only: bool, take_over: bool) -> int | None:
+    del address, read_only, take_over
     return None
 
 
-async def _refused(address: Path, *, read_only: bool) -> int | None:
-    del read_only
+async def _refused(address: Path, *, read_only: bool, take_over: bool) -> int | None:
+    del read_only, take_over
     raise ConnectionRefusedError(f"nothing at {address}")
 
 
@@ -4479,9 +4537,15 @@ async def _viewers(count: int | None, address: Path) -> int | None:
     return count
 
 
-async def _joined(joined: list[bool], address: Path, *, read_only: bool) -> int | None:
+async def _joined(
+    joined: list[tuple[bool, bool]],
+    address: Path,
+    *,
+    read_only: bool,
+    take_over: bool,
+) -> int | None:
     del address
-    joined.append(read_only)
+    joined.append((read_only, take_over))
     return 7
 
 

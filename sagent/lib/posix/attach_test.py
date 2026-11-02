@@ -151,6 +151,68 @@ class TestAttach:
         assert b"hello" not in scrollback
         assert not ended
 
+    def test_taking_over_detaches_the_terminal_attached_before(
+        self,
+        short_dir: Path,
+    ) -> None:
+        async def run() -> tuple[int | None, int | None]:
+            async with _hosted(short_dir) as (spec, _):
+                # Expects nothing drawn: the take-over may come before the child draws.
+                first = asyncio.create_task(
+                    _attach_typing(spec, typed=b"", shown=b"", then=b""),
+                )
+                _ = await _viewers_reach(spec.address, 1)
+                taken, _ = await _attach_typing(
+                    spec,
+                    typed=b"",
+                    shown=b"early",
+                    then=DETACH_KEY,
+                    take_over=True,
+                )
+                left, _ = await first
+                return left, taken
+
+        assert asyncio.run(run()) == (None, None)
+
+    def test_taking_over_a_host_older_than_take_over_attaches_plainly(
+        self,
+        short_dir: Path,
+    ) -> None:
+        """Such a host drops a client that sends a kind it does not know."""
+        address = short_dir / "s"
+
+        async def serve(
+            reader: asyncio.StreamReader,
+            writer: asyncio.StreamWriter,
+        ) -> None:
+            kind = (await reader.readexactly(5))[0]
+            if kind == Frame.ATTACH:
+                writer.write(encode_frame(Frame.OUTPUT, b"old host"))
+                writer.write(encode_frame(Frame.EXIT, (4).to_bytes(4)))
+                await writer.drain()
+            writer.close()
+
+        async def run() -> tuple[int | None, bytes]:
+            async with await asyncio.start_unix_server(serve, path=address):
+                stdin_r, stdin_w = os.pipe()
+                out_r, out_w = os.pipe()
+                try:
+                    status = await asyncio.wait_for(
+                        attach(
+                            address,
+                            stdin=os.fdopen(stdin_r),
+                            stdout=os.fdopen(out_w, "wb", buffering=0),
+                            take_over=True,
+                        ),
+                        5.0,
+                    )
+                    return status, os.read(out_r, 65_536)
+                finally:
+                    os.close(stdin_w)
+                    os.close(out_r)
+
+        assert asyncio.run(run()) == (4, b"old host")
+
     def test_viewers_counts_the_terminals_attached(self, short_dir: Path) -> None:
         """A one-shot client asking is not itself counted."""
 
@@ -696,6 +758,7 @@ async def _attach_typing(
     shown: bytes,
     then: bytes,
     read_only: bool = False,
+    take_over: bool = False,
 ) -> tuple[int | None, bytes]:
     """Attach, type ``typed``, wait to see ``shown``, type ``then``; return result."""
     stdin_r, stdin_w = os.pipe()
@@ -708,6 +771,7 @@ async def _attach_typing(
             stdin=os.fdopen(stdin_r),
             stdout=os.fdopen(out_w, "wb", buffering=0),
             read_only=read_only,
+            take_over=take_over,
         ),
     )
     try:
