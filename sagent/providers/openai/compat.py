@@ -216,12 +216,14 @@ class OpenAICompatible(HasModels, AsyncResource):
         body: Mapping[str, object],
         *,
         headers: Mapping[str, str],
+        retry: bool = True,
     ) -> AsyncIterator[dict[str, object]]:
         """Stream the reply to ``body``, retrying a short failure before the first event.
 
         Args:
           body: The request body.
           headers: Headers beyond the credentials.
+          retry: Whether to retry failures before the first event.
 
         Yields:
           event: Each server-sent event, as JSON.
@@ -242,7 +244,7 @@ class OpenAICompatible(HasModels, AsyncResource):
                 async for event in wire.events(response.aiter_lines()):
                     yield event
 
-        async for event in retried(attempt):
+        async for event in retried(attempt) if retry else attempt():
             yield event
 
     async def reply(
@@ -353,7 +355,11 @@ class OpenAIModel(AsyncResource):
         reader = self.provider.reader(model=self)
         body = self.provider.encode(request, model=self)
         headers = self.provider.headers(request)
-        async for event in self.provider.events(body, headers=headers):
+        async for event in self.provider.events(
+            body,
+            headers=headers,
+            retry=request.retry,
+        ):
             chunk = reader.feed(event)
             if chunk is not None:
                 yield chunk

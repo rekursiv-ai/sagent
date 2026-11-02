@@ -58,6 +58,9 @@ class Request:
     max_response_tokens: int = 0
     """The most the reply may hold, as the window leaves room; ``0`` for the model's."""
 
+    retry: bool = True
+    """Allow transport retries before the first response event."""
+
     purpose: Literal["main", "compaction"] = "main"
     """Why the call is made: the agent's own turn, or a summary of its context."""
 
