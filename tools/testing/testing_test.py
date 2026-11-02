@@ -105,14 +105,12 @@ def test_pytest_runs_each_changed_files_pairs_with_its_directory_measured(
         existing=["pkg/a_test.py", "pkg/tests/test_a.py", "pkg/b.py"],
     )
 
-    erase, test = tools.calls
-    assert erase[1:] == ["-m", "coverage", "erase"]
-    assert test[1:4] == ["-m", "pytest", "-q"]
+    [test] = tools.calls
+    assert test[3:6] == ["-m", "pytest", "-q"]
     assert tools.argfiles == [
         [
             "--cov=.",
             "--cov=pkg",
-            "--cov-append",
             "--no-cov-on-fail",
             "--cov-fail-under=0",
             "--cov-report=",
@@ -128,7 +126,7 @@ def test_pytest_without_pytest_cov_measures_nothing(tmp_path: Path) -> None:
 
     _pytest(tmp_path, tools, ["a.py"], existing=["a_test.py"])
 
-    assert [call[1:3] for call in tools.calls] == [["-m", "pytest"]]
+    assert [call[3:5] for call in tools.calls] == [["-m", "pytest"]]
     assert tools.argfiles == [["a_test.py"]]
 
 
@@ -136,7 +134,7 @@ def test_pytest_without_a_pair_runs_nothing(tmp_path: Path) -> None:
     tools = fakes.Recorder()
 
     assert _pytest(tmp_path, tools, ["a.py"]) == 0
-    assert [call[1:3] for call in tools.calls] == [["-m", "coverage"]]
+    assert tools.calls == []
 
 
 @pytest.mark.parametrize(("status", "expected"), [(1, 1), (5, 0), (2, 2)])
@@ -146,16 +144,43 @@ def test_pytest_passes_an_empty_collection_and_fails_a_failure(
     expected: int,
 ) -> None:
     """Exit 5 is a selection whose every test carries a deselected marker."""
-    tools = fakes.Recorder(statuses=[0, status])
+    tools = fakes.Recorder(status=status)
 
     assert _pytest(tmp_path, tools, ["a.py"], existing=["a_test.py"]) == expected
 
 
-def test_a_failed_erase_fails_before_any_test_runs(tmp_path: Path) -> None:
-    tools = fakes.Recorder(status=19)
+def test_a_concurrent_runs_coverage_data_survives_the_gate(tmp_path: Path) -> None:
+    """``coverage erase`` here once deleted a live ``pytest -n24 --cov``'s workers."""
+    tools = fakes.Recorder()
+    live = tmp_path / "repo" / ".coverage.host.pid7.x"
+    live.parent.mkdir()
+    live.write_text("in use")
 
-    assert _pytest(tmp_path, tools, ["a.py"], existing=["a_test.py"]) == 19
-    assert len(tools.calls) == 1
+    _pytest(tmp_path, tools, ["a.py"], existing=["a_test.py"])
+
+    [test] = tools.calls
+    data = Path(test[1].removeprefix("COVERAGE_FILE="))
+    assert test[:2] == ["env", f"COVERAGE_FILE={data}"]
+    assert not data.is_relative_to(tmp_path / "repo")
+    assert live.read_text() == "in use"
+
+
+class _Measured(fakes.Recorder):
+    """Writes ``lines`` of ``a.py`` to the data file pytest is pointed at."""
+
+    def __init__(self, root: Path, *, executed: int) -> None:
+        super().__init__()
+        self.root = root
+        self.executed = executed
+
+    @override
+    def run(self, argv: Sequence[str]) -> int:
+        data = coverage.CoverageData(
+            basename=argv[1].removeprefix("COVERAGE_FILE="),
+        )
+        data.add_lines({str(self.root / "a.py"): list(range(1, self.executed + 1))})
+        data.write()
+        return super().run(argv)
 
 
 @pytest.mark.parametrize(("executed", "expected"), [(2, 1), (4, 0)])
@@ -170,17 +195,33 @@ def test_pytest_fails_changed_sources_below_the_floor(
     root.mkdir()
     (root / "pyproject.toml").write_text("[tool.coverage.report]\nfail_under = 100\n")
     (root / "a.py").write_text("".join(f"x{i} = {i}\n" for i in range(4)))
-    data = coverage.CoverageData(basename=str(root / ".coverage"))
-    data.add_lines({str(root / "a.py"): list(range(1, executed + 1))})
-    data.write()
     monkeypatch.chdir(root)
+    tools = _Measured(root, executed=executed)
 
-    assert _pytest(tmp_path, fakes.Recorder(), ["a.py", "a_test.py"]) == expected
+    assert _pytest(tmp_path, tools, ["a.py", "a_test.py"]) == expected
     assert ("below fail_under=100" in capsys.readouterr().err) is bool(expected)
 
 
-def test_pytest_without_coverage_data_skips_the_summary(tmp_path: Path) -> None:
+def test_pytest_without_coverage_data_skips_the_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No data file is a run that measured nothing, never a 0% shortfall."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    (root / "pyproject.toml").write_text("[tool.coverage.report]\nfail_under = 100\n")
+    (root / "a.py").write_text("x = 1\n")
+    monkeypatch.chdir(root)
+
     assert _pytest(tmp_path, fakes.Recorder(), ["a.py", "a_test.py"]) == 0
+
+
+def test_pytest_measures_only_with_pytest_cov_installed(tmp_path: Path) -> None:
+    tools = _Tiers(missing=frozenset({"pytest_cov"}))
+
+    _pytest(tmp_path, tools, ["a.py"], existing=["a_test.py"])
+
+    assert tools.argfiles == [["a_test.py"]]
 
 
 def test_pytest_without_its_spool_fails(
@@ -265,10 +306,10 @@ def test_pytest_reads_its_selection_from_an_argfile(tmp_path: Path) -> None:
     )
 
     *head, argfile = tools.calls[-1]
-    assert head[1:] == ["-m", "pytest", "-n", "3", "-q", "--tb=short"]
-    name = Path(argfile.removeprefix("@")).name
-    assert name.startswith("precommit-")
-    assert name.endswith(".args")
+    assert head[3:] == ["-m", "pytest", "-n", "3", "-q", "--tb=short"]
+    path = Path(argfile.removeprefix("@"))
+    assert path.name == "pytest.args"
+    assert path.parent.name.startswith("precommit-")
 
 
 def test_an_unmeasured_run_ignores_a_stale_coverage_file(
@@ -278,8 +319,8 @@ def test_an_unmeasured_run_ignores_a_stale_coverage_file(
     """Without pytest-cov a leftover ``.coverage`` describes some other run."""
     read: list[object] = []
 
-    def shortfall(sources: object) -> list[str]:
-        read.append(sources)
+    def shortfall(sources: object, *, data: Path) -> list[str]:
+        read.append((sources, data))
         return []
 
     monkeypatch.setattr(coverage_summary, "shortfall", shortfall)
@@ -370,13 +411,14 @@ def test_the_cli_runs_pytest(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    (tmp_path / "a_test.py").write_text("")
+    for name in ("a.py", "a_test.py"):
+        (tmp_path / name).write_text("")
     monkeypatch.setattr(sys, "argv", ["gate", "spool", "pytest", "a.py"])
     gate.main()
     monkeypatch.setattr(sys, "argv", ["testing", "pytest"])
 
     assert testing.main() == 4
-    assert processes.calls[-1][1:4] == ["-m", "coverage", "erase"]
+    assert processes.calls[-1][3:5] == ["-m", "pytest"]
 
 
 def test_the_cli_runs_a_tier(

@@ -23,13 +23,14 @@ if TYPE_CHECKING:
     import coverage
 
 
-def shortfall(sources: Sequence[str]) -> list[str]:
+def shortfall(sources: Sequence[str], *, data: Path) -> list[str]:
     """Return one line per source below the floor, then the total; [] when met.
 
-    Reads ``.coverage`` and the coverage config from the working directory.
+    Reads the coverage config from the working directory.
 
     Args:
       sources: The changed, non-test sources.
+      data: The coverage data file the run wrote.
 
     Returns:
       lines: Empty when the floor holds or there is none.
@@ -39,7 +40,7 @@ def shortfall(sources: Sequence[str]) -> list[str]:
     # export without pytest-cov has no coverage; the gate calls this only with it.
     import coverage  # noqa: PLC0415 -- optional in exports; see above.
 
-    measured = coverage.Coverage()
+    measured = coverage.Coverage(data_file=str(data))
     # Closed on every path: coverage leaves an unreadable file's connection
     # open, and it then fails whichever later test the collector runs in.
     try:
