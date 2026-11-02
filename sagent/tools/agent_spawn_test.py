@@ -657,7 +657,10 @@ async def test_a_child_and_a_watcher_inherit_every_setting_alike(
         other=[reply("ready")],
     )
     parent = setup.parent
-    width = lambda: 61  # noqa: E731 -- the same callable must reach each heir.
+
+    def width() -> int:
+        return 61
+
     mine = parent.runtime.tool_context
     mine.columns = width
     mine.max_result_chars = 4321
