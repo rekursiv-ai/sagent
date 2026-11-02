@@ -702,6 +702,8 @@ def _transcript(records: Sequence[SessionRecord]) -> list[str]:
                 )
             case ToolResult():
                 lines.append(f"{record.call_id} returned: {record.text()}")
+            case _:
+                continue
     return lines
 
 
