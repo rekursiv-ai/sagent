@@ -135,7 +135,8 @@ def user_content(record: SessionRecord) -> tuple[str, tuple[Attachment, ...]] | 
             return f"<system-reminder>\n{text}\n</system-reminder>", ()
         case TurnContext() if record.text():
             return f"<system-reminder>\n{record.text()}\n</system-reminder>", ()
-    return None
+        case _:
+            return None
 
 
 def image_url(attachment: Attachment, *, limits: ModelLimits) -> str | None:
