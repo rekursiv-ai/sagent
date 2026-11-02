@@ -237,7 +237,10 @@ def script(monkeypatch: pytest.MonkeyPatch) -> _Script:
     return made
 
 
-@pytest.fixture
+# Autouse: ``main.main()`` runs an action through ``_logging``, which adds a root
+# file handler in this test's isolated data dir. Left behind, it outlives that dir
+# and breaks the next test in the worker that logs.
+@pytest.fixture(autouse=True)
 def logs(monkeypatch: pytest.MonkeyPatch) -> Iterator[logging.Logger]:
     """Let a test change the logging setup, and put it back after."""
     root = logging.getLogger()
