@@ -104,7 +104,7 @@ def test_pytest_runs_each_changed_files_pairs_with_its_directory_measured(
         existing=["pkg/a_test.py", "pkg/tests/test_a.py", "pkg/b.py"],
     )
 
-    erase, test = tools.calls
+    erase, test = _ran(tools)
     assert erase[1:] == ["-m", "coverage", "erase"]
     assert test[1:4] == ["-m", "pytest", "-q"]
     assert tools.argfiles == [
@@ -127,7 +127,7 @@ def test_pytest_without_pytest_cov_measures_nothing(tmp_path: Path) -> None:
 
     _pytest(tmp_path, tools, ["a.py"], existing=["a_test.py"])
 
-    assert [call[1:3] for call in tools.calls] == [["-m", "pytest"]]
+    assert [call[1:3] for call in _ran(tools)] == [["-m", "pytest"]]
     assert tools.argfiles == [["a_test.py"]]
 
 
@@ -135,7 +135,12 @@ def test_pytest_without_a_pair_runs_nothing(tmp_path: Path) -> None:
     tools = fakes.Recorder()
 
     assert _pytest(tmp_path, tools, ["a.py"]) == 0
-    assert [call[1:3] for call in tools.calls] == [["-m", "coverage"]]
+    assert [call[1:3] for call in _ran(tools)] == [["-m", "coverage"]]
+
+
+def _ran(tools: fakes.Recorder) -> list[list[str]]:
+    """Return the processes the gate ran, without its tracked-file listing."""
+    return [call for call in tools.calls if call[:1] != ["git"]]
 
 
 @pytest.mark.parametrize(("status", "expected"), [(1, 1), (5, 0), (2, 2)])
@@ -234,6 +239,37 @@ def test_pytest_spreads_only_across_enough_test_files(
     assert ("-n" in tools.calls[-1]) is spread
 
 
+def test_every_tracked_file_runs_the_whole_suite_without_walking(
+    tmp_path: Path,
+) -> None:
+    """Under --all-files the graph walk took minutes; plain pytest needs none."""
+    tools = fakes.Recorder(output="a.py\nb_test.py\n", installed=False)
+
+    _pytest(
+        tmp_path,
+        tools,
+        ["a.py", "b_test.py"],
+        dependents="pkg.affected",
+        PRECOMMIT_CODEGRAPH_PYTEST="1",
+    )
+
+    assert not [call for call in tools.calls if "--emit" in call]
+    assert tools.argfiles == [["."]]
+    assert "-n" in tools.calls[-1]
+
+
+@pytest.mark.parametrize("listed", ["a.py\nb_test.py\nc.py\n", "", None])
+def test_a_partial_or_unknown_listing_still_selects(
+    tmp_path: Path,
+    listed: str | None,
+) -> None:
+    tools = fakes.Recorder(output=listed, installed=False)
+
+    _pytest(tmp_path, tools, ["a.py", "b_test.py"], existing=["a_test.py"])
+
+    assert tools.argfiles != [["."]]
+
+
 def test_pytest_prefers_the_graphs_tests_to_the_pairs(tmp_path: Path) -> None:
     tools = fakes.Recorder(output="b_test.py::t\n", installed=False)
 
@@ -246,7 +282,7 @@ def test_pytest_prefers_the_graphs_tests_to_the_pairs(tmp_path: Path) -> None:
         PRECOMMIT_CODEGRAPH_PYTEST="1",
     )
 
-    walk, _ = tools.calls
+    [walk] = [call for call in tools.calls if "--emit" in call]
     assert walk[3:8] == ["--emit", "nodeids", "--depth", "1", "--workers"]
     assert tools.argfiles == [["b_test.py::t"]]
 

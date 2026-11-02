@@ -504,10 +504,10 @@ def pasted_code(pasted: str, *, state: str) -> str:
     params = parse_qs(urlparse(pasted.strip()).query)
     if not params:
         code, _, pasted_state = pasted.strip().partition("#")
-        params = {"code": [code] if code else [], "state": [pasted_state]}
-    # ``parse_qs`` drops a blank ``code=``, so an empty list is no code.
-    codes = params.get("code", [])  # pragma: no mutate -- ``None`` is no code too.
-    if not codes:
+        params = {"state": [pasted_state]} | ({"code": [code]} if code else {})
+    # ``parse_qs`` drops a blank ``code=``, so a missing key is no code.
+    codes = params.get("code")
+    if codes is None:
         raise AuthError("The pasted address holds no sign-in code.")
     if params.get("state") != [state]:
         raise AuthError("The pasted address belongs to another sign-in.")

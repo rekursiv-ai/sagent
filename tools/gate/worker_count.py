@@ -57,6 +57,7 @@ memory an app marked disposable.
 
 from __future__ import annotations
 
+from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -208,6 +209,10 @@ def _add_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+# Cached: the topology cannot change under a process, and reading it opens about
+# five files per logical CPU (640 on a 128-thread host, ~25 ms), which a caller
+# sizing a pool on every call (``nflsim1.game.physics.run_plays``) paid each time.
+@cache
 def _cores(cpu: Path) -> tuple[int, int]:
     """Return physical cores and physical performance cores."""
     if (cpu / "cpu0" / "topology").is_dir():

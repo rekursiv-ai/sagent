@@ -1117,7 +1117,8 @@ async def test_every_login_spent_waits_for_the_earliest_reset_and_takes_it(
     tmp_path: Path,
 ) -> None:
     logins = _saved("personal")
-    soon = time.time() + 0.5
+    # A real wait, kept short: the call is held by the loop's own timer.
+    soon = time.time() + 0.02
     await logins.spend(
         "personal",
         Spent(window="5-hour", model="scripted", until=soon),
@@ -1132,7 +1133,7 @@ async def test_every_login_spent_waits_for_the_earliest_reset_and_takes_it(
         await agent.aclose()
     assert accounts.served == ["default", "personal"]
     (suspended,) = [e for e in seen if isinstance(e, types.ModelCallSuspended)]
-    assert suspended.until == pytest.approx(soon, abs=0.1)
+    assert suspended.until == pytest.approx(soon, abs=0.005)
     assert _switches(seen) == [("default", "personal")]
 
 

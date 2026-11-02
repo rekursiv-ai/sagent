@@ -1,10 +1,11 @@
-"""Watch processes by pid: one a pid file names, and whether each still runs.
+"""Watch processes by pid: one a file names, one holding a lock, and whether each runs.
 
 Typical usage example:
 
   job = await written_pid(tmp_path / "job.pid")
   await child.stop()
   assert await gone_within([job])
+  lock_holder(journal)  # The pid with an flock on it, or None.
 """
 
 from __future__ import annotations
@@ -13,15 +14,21 @@ from pathlib import Path
 
 import asyncio
 import contextlib
+import fcntl
 import os
 import signal
 import time
 
 
 __all__ = [
+    "children",
+    "controlling_terminal",
     "gone_within",
     "kill_and_reap",
+    "lock_holder",
+    "locked",
     "running",
+    "unlocked_within",
     "written_pid",
 ]
 
@@ -109,6 +116,122 @@ def kill_and_reap(pids: list[int]) -> None:
             os.kill(pid, signal.SIGKILL)
         with contextlib.suppress(ChildProcessError):
             _ = os.waitpid(pid, 0)
+
+
+# ``/proc/locks`` lines read ``1: FLOCK  ADVISORY  WRITE <pid> <maj>:<min>:<inode> 0 EOF``,
+# the device numbers in hex; a waiter blocked behind the holder repeats its number with
+# ``->`` before the type.
+def lock_holder(path: Path, *, proc: Path = Path("/proc")) -> int | None:
+    """Return the pid holding an ``flock`` on ``path``.
+
+    Args:
+      path: The locked file.
+      proc: Where the kernel lists locks, as Linux does; without it, as on
+        macOS, no holder is known.
+
+    Returns:
+      pid: The process that took the lock; None when none holds it or the
+        kernel does not say.
+
+    """
+    info = path.stat()
+    file = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}:{info.st_ino}"
+    try:
+        lines = (proc / "locks").read_text().splitlines()
+    except FileNotFoundError:
+        return None
+    for line in lines:
+        fields = line.split()
+        if fields[1:2] == ["FLOCK"] and fields[5] == file:
+            return int(fields[4])
+    return None
+
+
+def locked(path: Path) -> bool:
+    """Return whether another process holds an ``flock`` on ``path`` now.
+
+    Args:
+      path: The file; one that does not exist is not locked.
+
+    Returns:
+      locked: Whether an exclusive lock on it would block.
+
+    """
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
+def unlocked_within(path: Path, *, seconds: float) -> bool:
+    """Return whether ``path``'s lock is free within ``seconds``.
+
+    Args:
+      path: The locked file.
+      seconds: How long to wait for its holder to let go.
+
+    Returns:
+      unlocked: Whether no process holds it by then.
+
+    """
+    deadline = time.monotonic() + seconds
+    while locked(path):
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.005)
+    return True
+
+
+def children(pid: int, *, proc: Path = Path("/proc")) -> list[int]:
+    """Return the processes whose parent is ``pid``.
+
+    Args:
+      pid: The parent.
+      proc: Where the kernel lists processes; without it, as on macOS, none.
+
+    Returns:
+      pids: Each child's pid, in no particular order.
+
+    """
+    # Each of its threads lists the children it forked: reading those beats reading
+    # every process's ``stat``, 35ms on a host running 1,400 of them.
+    found: list[int] = []
+    for listed in (proc / str(pid) / "task").glob("*/children"):
+        # Gone between the listing and the read.
+        with contextlib.suppress(FileNotFoundError, ProcessLookupError):
+            found += [int(child) for child in listed.read_text().split()]
+    return found
+
+
+def controlling_terminal(pid: int, *, proc: Path = Path("/proc")) -> str | None:
+    """Return the terminal ``pid`` belongs to, as its device path where known.
+
+    Args:
+      pid: The process.
+      proc: Where the kernel lists processes; without it, as on macOS, none.
+
+    Returns:
+      terminal: Its controlling terminal; None when it has none.
+
+    """
+    try:
+        tty = int((proc / str(pid) / "stat").read_text().rsplit(") ", 1)[1].split()[4])
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    if not tty:
+        return None
+    with contextlib.suppress(OSError):
+        device = str((proc / str(pid) / "fd" / "0").readlink())
+        if device.startswith("/dev/"):
+            return device
+    return f"tty {os.major(tty)}:{os.minor(tty)}"
 
 
 def _text(path: Path) -> str:
