@@ -44,6 +44,21 @@ def test_hidden_files_and_directories_are_skipped(tmp_path: Path) -> None:
     assert list(walk.files(tmp_path)) == [kept]
 
 
+def test_hidden_lists_dot_entries_but_never_dot_git(tmp_path: Path) -> None:
+    _write(tmp_path, ".git/HEAD")
+    _write(tmp_path, ".env")
+    _write(tmp_path, ".venv/lib/site.py")
+    _write(tmp_path, "a.py")
+
+    listed = walk.files(tmp_path, hidden=True)
+
+    assert [path.relative_to(tmp_path).as_posix() for path in listed] == [
+        ".env",
+        ".venv/lib/site.py",
+        "a.py",
+    ]
+
+
 def test_a_gitignore_drops_files_and_directories(tmp_path: Path) -> None:
     _write(tmp_path, ".gitignore", "*.log\nbuild/\n")
     _write(tmp_path, "run.log")

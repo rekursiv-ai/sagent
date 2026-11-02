@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import patch
 
+import os
 import shutil
 import subprocess
 
@@ -187,6 +188,52 @@ def test_an_entry_that_vanished_since_the_walk_stays_listed(tmp_path: Path) -> N
         assert glob(tmp_path, "*.py") == [tmp_path / "gone.py"]
 
 
+def test_the_walk_hands_off_to_fd_only_past_the_entry_limit(tmp_path: Path) -> None:
+    """Up to ``_FD_ENTRIES`` entries below the root, the walk's answer stands."""
+    for i in range(3):
+        (tmp_path / f"{i}.py").write_text("")
+
+    def which(name: str) -> str:
+        return f"/usr/bin/{name}"
+
+    with (
+        patch("shutil.which", which),
+        patch("sagent.lib.files.glob._FD_ENTRIES", 3),
+        patch("sagent.lib.files.glob._glob_fd", return_value=[]) as ran,
+    ):
+        assert glob(tmp_path, "**/*.py") == [tmp_path / f"{i}.py" for i in range(3)]
+        assert ran.call_count == 0
+        (tmp_path / "3.py").write_text("")
+        assert glob(tmp_path, "**/*.py") == []
+    assert ran.call_count == 1
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a mode-000 directory")
+def test_a_bounded_glob_never_reads_below_its_depth(tmp_path: Path) -> None:
+    """An unreadable directory past the pattern's depth cannot fail the glob."""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.py").write_text("")
+    (tmp_path / "sub" / "b.py").write_text("")
+    locked = [tmp_path / "locked", tmp_path / "sub" / "locked"]
+    for directory in locked:
+        directory.mkdir()
+        directory.chmod(0)
+    try:
+        assert glob(tmp_path, "*.py") == [tmp_path / "a.py"]
+        assert glob(tmp_path, "sub/*.py") == [tmp_path / "sub" / "b.py"]
+    finally:
+        for directory in locked:
+            directory.chmod(0o700)
+
+
+def test_a_parent_segment_does_not_opt_into_hidden_entries(tmp_path: Path) -> None:
+    """``..`` starts with a dot but names a directory, not a hidden entry."""
+    root = _tree(tmp_path)
+    assert glob(root, f"{root}/sub/../*") == [
+        root / "sub" / ".." / name for name in ("a.py", "b.txt", "link.py")
+    ]
+
+
 @pytest.mark.parametrize("fd", [True], ids=["fd"])
 def test_either_side_of_the_entry_limit_answers_alike(tmp_path: Path) -> None:
     """Over ``_FD_ENTRIES`` the in-process walk gives up and fd finishes instead."""
@@ -228,6 +275,7 @@ def test_a_root_reached_through_a_symlink_names_files_under_that_spelling(
         ("**/[ab].[pt]*", ["a.py", "b.txt"]),
         ("**/.venv/**/*.py", [".venv/site.py"]),
         ("*/**", ["sub/c.py"]),
+        ("**a.py", ["a.py"]),
     ],
     ids=[
         "braces",
@@ -241,6 +289,7 @@ def test_a_root_reached_through_a_symlink_names_files_under_that_spelling(
         "two-classes",
         "two-globstars",
         "globstar-after-a-wildcard",
+        "globstar-inside-a-name",
     ],
 )
 def test_every_glob_metacharacter_reads_as_fd_reads_it(
@@ -264,11 +313,23 @@ def test_a_leading_bracket_in_a_class_is_a_member_not_the_close(
 
 
 @_BOTH
-def test_a_negated_class_may_hold_the_bracket_itself(tmp_path: Path) -> None:
+@pytest.mark.parametrize("bang", ["!", "^"])
+def test_a_negated_class_may_hold_the_bracket_itself(
+    tmp_path: Path,
+    bang: str,
+) -> None:
     """``[!]]`` is "anything but ``]``", so the close sits past the negation."""
     (tmp_path / "]").write_text("")
     (tmp_path / "x").write_text("")
-    assert glob(tmp_path, "**/[!]]") == [tmp_path / "x"]
+    assert glob(tmp_path, f"**/[{bang}]]") == [tmp_path / "x"]
+
+
+@_BOTH
+def test_a_backslash_in_a_class_is_a_member(tmp_path: Path) -> None:
+    r"""``[\]`` names ``\`` itself, as fd reads it."""
+    (tmp_path / "\\").write_text("")
+    (tmp_path / "X").write_text("")
+    assert glob(tmp_path, "**/[\\]") == [tmp_path / "\\"]
 
 
 @_BOTH
@@ -321,6 +382,17 @@ def test_a_failed_fd_run_raises_rather_than_answering_empty(tmp_path: Path) -> N
         pytest.raises(subprocess.CalledProcessError),
     ):
         glob(tmp_path, "**/*.py")
+
+
+@pytest.mark.parametrize("fd", [True], ids=["fd"])
+def test_the_default_fd_timeout_is_thirty_seconds(tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("")
+    with patch(
+        "sagent.lib.files.glob.subprocess.run",
+        return_value=subprocess.CompletedProcess([], 0, "", ""),
+    ) as run:
+        assert glob(tmp_path, "**/*.py") == []
+    assert run.call_args.kwargs["timeout"] == 30
 
 
 @pytest.mark.parametrize("fd", [True], ids=["fd"])
@@ -395,7 +467,7 @@ def test_fd_command_anchors_the_glob_at_the_root(
 @_BOTH
 def test_invalid_ranges_raise_the_public_error(tmp_path: Path) -> None:
     (tmp_path / "a").touch()
-    with pytest.raises(GlobError):
+    with pytest.raises(GlobError, match=r"^invalid glob '\*\*/\[z-a\]': bad"):
         glob(tmp_path, "**/[z-a]")
 
 
@@ -428,7 +500,7 @@ def test_class_members_are_not_regex_set_operations(
     member: str,
 ) -> None:
     (tmp_path / member).touch()
-    (tmp_path / "x").touch()
+    (tmp_path / "X").touch()
     assert glob(tmp_path, f"**/{pattern}") == [tmp_path / member]
 
 

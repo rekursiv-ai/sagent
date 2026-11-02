@@ -33,7 +33,7 @@ import rignore
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Mapping, Sequence
 
 
 OutputMode = Literal["content", "files_with_matches", "files_without_match", "count"]
@@ -353,8 +353,8 @@ def _grep_rg(
 
 # ``-l`` prints one name per line. Content rows read ``name M n M [col M] text``
 # with ``M`` the ``_MATCH``/``_CONTEXT`` byte, which no path holds, so the first
-# one ends the name. ``-c`` rows split at their last ``:``; a binary-file note
-# splits at its fixed suffix, so either preserves colons in the file name.
+# one ends the name. ``-c`` rows and binary-file notes split at their last
+# ``:``, which preserves colons in the file name.
 # ``--`` lines separate context groups and are re-added after sorting.
 def _file_blocks(out: bytes, *, query: Query) -> list[tuple[str, list[Row]]]:
     """Group ripgrep's output into ``(file, rows)`` blocks."""
@@ -363,34 +363,34 @@ def _file_blocks(out: bytes, *, query: Query) -> list[tuple[str, list[Row]]]:
         names = (line.decode(errors="replace") for line in lines)
         return [(name, [Row(text=name)]) for name in names]
     blocks: list[tuple[str, list[Row]]] = []
-    gap = False
-    previous = ("", 0)
+    gap = False  # pragma: no mutate -- the first row sets it before any read.
+    previous: tuple[str, int] | None = None
     for line in lines:
         if line == b"--":
             gap = True
             continue
         cut = min(
-            (i for i in (line.find(_MATCH), line.find(_CONTEXT)) if i >= 0),
-            default=-1,
+            (i for i in (line.find(_MATCH), line.find(_CONTEXT)) if i != -1),
+            default=None,
         )
-        if cut < 0:
+        if cut is None:
             name, text = _plain_row(line.decode(errors="replace"))
             row = Row(text=text)
         else:
             name, number, row = _content_row(line, cut=cut, query=query)
-            matched = row.column >= 0
+            matched = row.column != -1
             # ``-U`` prints a run of matched lines as one block that repeats its
             # first column on every line, so only the run's first line is located.
             if query.multiline and previous == (name, number - 1):
                 row = Row(text=row.text, prefix_end=row.prefix_end)
-            previous = (name, number) if matched else ("", 0)
+            previous = (name, number) if matched else None
         if not blocks or blocks[-1][0] != name:
             blocks.append((name, []))
         elif gap:
             # A gap between groups of one file stays; between files it is
             # re-added after sorting.
             blocks[-1][1].append(Row(text="--"))
-        gap = False
+        gap = False  # pragma: no mutate -- None is as false.
         blocks[-1][1].append(row)
     return blocks
 
@@ -425,9 +425,7 @@ def _content_row(
 
 def _plain_row(row: str) -> tuple[str, str]:
     """Split a ``name:count`` or ``name: binary file matches ...`` row."""
-    note = row.find(": binary file matches (")
-    if note >= 0:
-        return row[:note], row
+    # Neither the count nor the note's text after its ``:`` holds a ``:``.
     return row.rpartition(":")[0], row
 
 
@@ -538,21 +536,23 @@ def _compile(query: Query) -> re.Pattern[str]:
 
 def _references_newline(pattern: str) -> bool:
     """Detect newline escapes outside classes without confusing escaped brackets."""
-    class_start = -1
+    # Inside a class, the index of its first member; a ``]`` there is a member.
+    class_start: int | None = None
     index = 0
     while index < len(pattern):
         char = pattern[index]
         if char == "\\":
-            if class_start < 0 and pattern[index + 1 : index + 2] == "n":
+            if class_start is None and pattern[index + 1 : index + 2] == "n":
                 return True
             index += 2
             continue
-        if char == "[" and class_start < 0:
-            class_start = index + 1 + (pattern[index + 1 : index + 2] == "^")
+        if class_start is None:
+            if char == "[":
+                class_start = index + 1 + (pattern[index + 1 : index + 2] == "^")
+            elif char == "\n":
+                return True
         elif char == "]" and index > class_start:
-            class_start = -1
-        elif char == "\n" and class_start < 0:
-            return True
+            class_start = None
         index += 1
     return False
 
@@ -590,9 +590,9 @@ def _walked(named: Path, query: Query) -> Iterator[tuple[str, Path]]:
         named,
         ignore_hidden=False,
         read_ignore_files=ignores,
-        read_parents_ignores=ignores,
+        read_parents_ignores=ignores,  # pragma: no mutate -- None is on; off is moot.
         read_git_ignore=ignores,
-        read_global_git_ignore=ignores,
+        read_global_git_ignore=ignores,  # pragma: no mutate -- None is on; off is moot.
         read_git_exclude=ignores,
         overrides=_globs(query),
         max_depth=query.max_depth or None,
@@ -691,19 +691,24 @@ def _lines(text: str) -> list[str]:
 # searched by itself, since only that decides how ``^``/``$``/``\s``/lookaround
 # see its ends. A nominee that fails resumes the scan one character on, so a
 # cross-line false hit cannot hide a real match later on the same line.
-def _line_hits(pattern: re.Pattern[str], text: str) -> dict[int, int]:
+def _line_hits(pattern: re.Pattern[str], text: str) -> dict[int, int | None]:
     """Map each 0-based line ``pattern`` matches, searched alone, to its column."""
-    hits: dict[int, int] = {}
+    hits: dict[int, int | None] = {}
     line_no = 0
-    counted = 0
+    counted = 0  # pragma: no mutate -- ``str.count`` reads a None start as 0.
     pos = 0
-    while pos <= len(text) and (match := pattern.search(text, pos)) is not None:
-        start = text.rfind("\n", 0, match.start()) + 1
+    size = len(text)
+    # At ``size`` a match lies on a line already searched alone, so ``<`` would do.
+    while pos <= size:  # pragma: no mutate -- see above.
+        match = pattern.search(text, pos)
+        if match is None:
+            break
+        start = text.rfind("\n", None, match.start()) + 1
         # Past the final newline, or in an empty file, there is no line.
-        if start == len(text) and (not text or text.endswith("\n")):
+        if start == size:
             break
         end = text.find("\n", start)
-        end = len(text) if end < 0 else end
+        end = size if end < 0 else end
         line_no += text.count("\n", counted, start)
         counted = start
         if found := pattern.search(text[start:end]):
@@ -731,7 +736,7 @@ def _file_lines(
         # Selected lines, each with its match column; a line in trailing
         # context that is selected shows as one, though ``max_count`` was met.
         shown = (
-            {i: -1 for i in range(len(split)) if i not in hits}
+            {i: None for i in range(len(split)) if i not in hits}
             if query.invert
             else hits
         )
@@ -786,7 +791,7 @@ def _selected(
     name: str,
     index: int,
     split: list[str],
-    shown: dict[int, int],
+    shown: Mapping[int, int | None],
     query: Query,
 ) -> list[Row]:
     """Render selected line ``index``: whole, or one row per match under ``-o``."""
@@ -806,7 +811,7 @@ def _matches(pattern: re.Pattern[str], line: str) -> list[re.Match[str]]:
     """Return each match in ``line``, in the order ripgrep reports them."""
     found: list[re.Match[str]] = []
     pos = 0
-    last = -1
+    last = -1  # pragma: no mutate -- no match starts before 0.
     while pos <= len(line) and (match := pattern.search(line, pos)) is not None:
         empty = match.start() == match.end()
         if not (empty and match.start() == last):
@@ -825,26 +830,27 @@ def _matches(pattern: re.Pattern[str], line: str) -> list[re.Match[str]]:
 def _multiline_hits(
     pattern: re.Pattern[str],
     text: str,
-) -> tuple[int, dict[int, int]]:
+) -> tuple[int, dict[int, int | None]]:
     """Return the ``-c`` count and each touched 0-based line's match column."""
     matches = [
         match
         for match in pattern.finditer(text)
         if match.start() != len(text) or (text and not text.endswith("\n"))
     ]
-    lines: dict[int, int] = {}
+    lines: dict[int, int | None] = {}
     for match in matches:
-        start = text[: match.start()].count("\n")
-        lines.setdefault(start, match.start() - text.rfind("\n", 0, match.start()) - 1)
+        before = text[: match.start()]
+        start = before.count("\n")
+        lines.setdefault(start, len(before) - before.rfind("\n") - 1)
         # A match ending in ``\n`` ends on that newline's line, not the next.
         for line in range(
             start + 1,
             start + match.group().removesuffix("\n").count("\n") + 1,
         ):
-            lines.setdefault(line, -1)
+            lines.setdefault(line)
     across = any("\n" in match.group() for match in matches)
     # Ripgrep locates only the first line of a run of matched lines.
-    located = {i: -1 if i - 1 in lines else column for i, column in lines.items()}
+    located = {i: None if i - 1 in lines else column for i, column in lines.items()}
     return (len(matches) if across else len(lines)), dict(sorted(located.items()))
 
 
@@ -906,7 +912,7 @@ def _row(
     *,
     query: Query,
     separator: str = ":",
-    column: int = -1,
+    column: int | None = None,
 ) -> Row:
     """Render one line as ``rg --no-heading``: ``:`` for a match, ``-`` for context."""
     prefix = (
@@ -915,5 +921,5 @@ def _row(
     return Row(
         text=prefix + line,
         prefix_end=len(prefix),
-        column=len(prefix) + column if column >= 0 else -1,
+        column=-1 if column is None else len(prefix) + column,
     )

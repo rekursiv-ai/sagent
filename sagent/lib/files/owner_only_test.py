@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import os
+import pathlib
 import stat
 
 import pytest
@@ -56,6 +57,75 @@ def test_a_replace_leaves_no_staged_file_even_when_it_fails(
         write_private(path, "two")
     assert path.read_text() == "one"
     assert sorted(p.name for p in tmp_path.iterdir()) == ["secret.json"]
+
+
+def test_a_replace_stages_beside_the_file_under_a_hidden_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Beside it, so the rename never crosses a filesystem."""
+    path = tmp_path / "secret.json"
+    real = pathlib.Path.replace
+    staged: list[Path] = []
+
+    def recorded(self: Path, target: Path) -> Path:
+        staged.append(self)
+        return real(self, target)
+
+    monkeypatch.setattr("pathlib.Path.replace", recorded)
+    write_private(path, "one")
+    (where,) = staged
+    assert where.parent == tmp_path
+    assert where.name.startswith(".secret.json.")
+
+
+def test_a_failure_after_the_rename_raises_itself(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The staged file is gone by then, which is no second failure."""
+    path = tmp_path / "secret.json"
+    real = pathlib.Path.replace
+
+    def interrupted(self: Path, target: Path) -> Path:
+        real(self, target)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("pathlib.Path.replace", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        write_private(path, "one")
+    assert path.read_text() == "one"
+
+
+def test_a_directory_made_by_another_process_meanwhile_is_kept(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raced = tmp_path / "raced"
+    raced.mkdir()
+    real = pathlib.Path.exists
+
+    def unseen(self: Path) -> bool:
+        return self != raced and real(self)
+
+    monkeypatch.setattr("pathlib.Path.exists", unseen)
+    write_private(raced / "secret.json", "one")
+    assert (raced / "secret.json").read_text() == "one"
+
+
+def test_a_new_file_is_created_private_before_any_chmod(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No moment passes in which another user could open it."""
+
+    def skipped(fd: int, mode: int) -> None:
+        del fd, mode
+
+    monkeypatch.setattr("os.fchmod", skipped)
+    path = tmp_path / "lock"
+    os.close(open_private(path, os.O_RDWR))
+    assert _mode(path) == 0o600
 
 
 def test_an_opened_file_is_made_private_even_if_it_existed(tmp_path: Path) -> None:

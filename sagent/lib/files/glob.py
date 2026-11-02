@@ -192,7 +192,7 @@ def _glob_rignore(
             return None
         if matcher.fullmatch(str(path)[prefix:]) and _listed(path):
             found.append(path)
-    found.sort(key=lambda path: str(path)[prefix:].split("/"))
+    found.sort()
     return found
 
 
@@ -226,10 +226,10 @@ def _translate(pattern: str) -> str:
             if pattern[scan : scan + 1] == "]":
                 scan += 1
             end = pattern.find("]", scan)
-            if end < 0:
+            if end == -1:
                 raise GlobError(f"unclosed character class in glob: {pattern!r}")
             body = pattern[i + 1 : end].replace("\\", "\\\\")
-            negated = body[:1] in {"!", "^"}
+            negated = body[:1] in {"!", "^"}  # pragma: no mutate -- re negates [^ too.
             # No escaping for a leading ``]``: Python ``re`` reads it as a
             # member exactly as globset does, so ``[]]`` carries through whole.
             members = body[1:] if negated else body
@@ -238,7 +238,7 @@ def _translate(pattern: str) -> str:
             i = end + 1
         elif c == "{":
             end = pattern.find("}", i)
-            if end < 0:
+            if end == -1:
                 raise GlobError(f"unclosed alternate group in glob: {pattern!r}")
             choices = pattern[i + 1 : end].split(",")
             if any("{" in choice for choice in choices):
@@ -266,11 +266,7 @@ def _kept_directory(root: Path, names: list[str], *, hidden: bool) -> Path | Non
             for found in rignore.walk(
                 directory,
                 ignore_hidden=not hidden,
-                # pragma: no mutate start -- matching the whole path means no
-                # deeper entry can equal ``child``, so the depth is a cost
-                # bound that no result can distinguish.
                 max_depth=1,
-                # pragma: no mutate end
                 should_exclude_entry=lambda entry: entry.name == ".git",
             )
         )

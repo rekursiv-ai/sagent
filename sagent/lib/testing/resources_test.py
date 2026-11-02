@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Final, cast
 from unittest.mock import patch
 
 import inspect
+import locale
 import os
 import subprocess
 import sys
@@ -22,6 +23,7 @@ from sagent.lib.testing import resources
 from sagent.lib.testing.resources import (
     apply_golden_marker,
     apply_resource_markers,
+    ascii_locale,
     cap_math_threads,
     module_path,
     pytest_collection_modifyitems,
@@ -871,6 +873,25 @@ def test_the_recursion_limit_is_restored_on_exit() -> None:
         _depth(100)
 
     assert sys.getrecursionlimit() == before
+
+
+def test_ascii_locale_refuses_non_ascii_text_that_names_no_encoding(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "x.txt"
+    path.write_text("é", encoding="utf-8")
+
+    with ascii_locale(), pytest.raises(UnicodeDecodeError):
+        path.read_text()
+
+
+def test_ascii_locale_restores_the_locale_on_exit() -> None:
+    before = locale.setlocale(locale.LC_CTYPE)
+
+    with ascii_locale():
+        assert locale.setlocale(locale.LC_CTYPE) == "C"
+
+    assert locale.setlocale(locale.LC_CTYPE) == before
 
 
 if __name__ == "__main__":
