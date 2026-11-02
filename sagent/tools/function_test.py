@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from treekle import PlainTree, from_plain
 
@@ -11,6 +12,7 @@ import pytest
 
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools import types
+from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.function import tool
 
 
@@ -183,6 +185,100 @@ def test_tool_as_a_decorator_takes_the_same_settings() -> None:
         return "pong"
 
     assert ping.name == "Ping"
+
+
+@pytest.mark.asyncio
+async def test_an_omitted_argument_takes_its_default() -> None:
+    result = await tool(greet).call(_context(), {"name": "ann"})
+
+    assert result == UncategorizedToolResult(call_id="", content="hello ann")
+
+
+def test_an_annotated_description_and_bound_outrank_the_docstring() -> None:
+    def pick(count: Annotated[int, "How many.", types.Arg(minimum=1)]) -> str:
+        """Pick.
+
+        Args:
+          count: Ignored, as the annotation says it.
+
+        """
+        return str(count)
+
+    assert tool(pick).schema["properties"] == {
+        "count": {"type": "integer", "description": "How many.", "minimum": 1},
+    }
+
+
+def test_a_parameter_the_docstring_leaves_out_is_described_by_nothing() -> None:
+    def bare(thing: int, other: str) -> str:
+        return f"{thing}{other}"
+
+    # As if written with no annotation: such a parameter takes a string.
+    del bare.__annotations__["other"]
+    made = tool(bare)
+
+    assert made.description == ""
+    assert made.schema["properties"] == {
+        "thing": {"type": "integer", "description": ""},
+        "other": {"type": "string", "description": ""},
+    }
+
+
+def test_the_args_section_ends_at_the_margin_and_keeps_colons_in_a_note() -> None:
+    def ratio(a: str, b: str) -> str:
+        """Ratio.
+
+        Args:
+         a: As x:y, one space in.
+         b: The other: also x:y.
+
+        Returns:
+          the ratio.
+
+        """
+        return a + b
+
+    assert tool(ratio).schema["properties"] == {
+        "a": {"type": "string", "description": "As x:y, one space in."},
+        "b": {"type": "string", "description": "The other: also x:y."},
+    }
+
+
+def test_a_required_parameter_may_follow_one_with_a_default() -> None:
+    def late(first: int = 1, *, second: str) -> str:
+        """Late.
+
+        Args:
+          first: A count.
+          second: A word.
+
+        """
+        return f"{second} {first}"
+
+    assert tool(late).schema["required"] == ["second"]
+
+
+@pytest.mark.asyncio
+async def test_a_partial_keeps_the_types_and_defaults_of_what_it_wraps() -> None:
+    """A partial has no name, and none of the annotations it wraps, of its own."""
+    made = tool(partial(greet, times=2))
+
+    assert made.name == "tool"
+    assert (
+        from_plain(made.schema["properties"], dict[str, dict[str, str]])["times"][
+            "type"
+        ]
+        == "integer"
+    )
+    result = await made.call(_context(), {"name": "ann"})
+    assert result == UncategorizedToolResult(call_id="", content="hello ann hello ann")
+
+
+def test_a_display_shows_as_given_and_hides_the_output_by_default() -> None:
+    shown = ToolDisplay(output=DisplaySpec(lines=None))
+
+    assert tool(greet).display == ToolDisplay()
+    assert tool(greet, display=shown).display is shown
 
 
 if __name__ == "__main__":

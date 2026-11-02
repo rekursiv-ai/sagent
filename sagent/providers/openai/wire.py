@@ -61,6 +61,7 @@ __all__ = [
     "cache_key",
     "events",
     "flatten",
+    "gpt_6",
     "image_url",
     "rate_limits",
     "to_exception",
@@ -157,6 +158,29 @@ def image_url(attachment: Attachment, *, limits: ModelLimits) -> str | None:
         max_edge_px=limits.max_image_edge_px,
         max_bytes=limits.max_image_bytes,
     )
+
+
+def gpt_6(model_id: str) -> bool:
+    """Return whether ``model_id`` is of GPT-5.6 or later, which reason and see alike.
+
+    Args:
+      model_id: The model's exact name.
+
+    Returns:
+      newer: Whether it reasons over every turn and bills an image by the patch
+        with no budget.
+
+    """
+    return model_id in {
+        "astra-6.0",
+        "sol-6.1",
+        "sol-6.0",
+        "luna-6.0",
+        "sol-5.6",
+        "gpt-5.6",
+        "terra-5.6",
+        "luna-5.6",
+    }
 
 
 def cache_key(request: Request) -> str:

@@ -147,8 +147,8 @@ class ModelTable(Mapping[str, ModelCapability]):
         )
         # A provider serving other models than the vendor's own names its own.
         roles = document.roles | from_plain(layer.pop("roles", {}), dict[str, str])
-        ids = [from_plain(raw.get("model_id"), str) for raw in document.models]
-        if unknown := sorted(set(listed) - set(ids)):
+        named = [(from_plain(raw.get("model_id"), str), raw) for raw in document.models]
+        if unknown := sorted(set(listed) - {model_id for model_id, _ in named}):
             raise ValueError(f"Section {section!r} lists unknown models: {unknown}.")
         rows = tuple(
             _unsent_fixed(
@@ -160,7 +160,7 @@ class ModelTable(Mapping[str, ModelCapability]):
                 ),
                 sends=sends,
             )
-            for raw, model_id in zip(document.models, ids, strict=True)
+            for model_id, raw in named
             if model_id in listed
         )
         return cls(rows=rows, roles=roles)

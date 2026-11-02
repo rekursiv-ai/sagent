@@ -121,6 +121,7 @@ def test_a_provider_given_models_serves_them_as_a_vendor_table_does() -> None:
     )
     provider = ScriptedProvider(models=ModelTable(rows=(wide,)))
     model = provider["wide+200k"]
+    assert model.provider is provider
     assert (model.capability.model_id, model.settings.context_size.tokens) == (
         "wide-1.0",
         200_000,
@@ -131,8 +132,12 @@ def test_a_provider_given_models_serves_them_as_a_vendor_table_does() -> None:
 
 
 def test_the_default_capability_is_a_small_window() -> None:
-    limits = ScriptedProvider().capability.limits
+    capability = ScriptedProvider().capability
+    limits = capability.limits
     assert (limits.max_request_tokens, limits.max_response_tokens) == (200_000, 8_000)
+    assert capability.prices.window == 200_000
+    assert capability.default.context_size == capability.prices["fullcontext"]
+    assert capability.default.context_size.tokens == 200_000
 
 
 @pytest.mark.asyncio

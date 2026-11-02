@@ -302,6 +302,15 @@ async def test_arguments_of_the_wrong_type_are_refused(tmp_path: Path) -> None:
                 "replace_all": False,
             },
         ),
+        (
+            "sed -i 's/a/b/' X.txt",
+            {
+                "file_path": "X.txt",
+                "old_string": "a",
+                "new_string": "b",
+                "replace_all": False,
+            },
+        ),
     ],
 )
 def test_a_literal_sed_in_place_becomes_the_edit_that_makes_it(

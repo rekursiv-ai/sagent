@@ -784,8 +784,7 @@ def _said(record: SessionRecord) -> str:
 
 def _with_attachments(text: str, attachments: Sequence[Attachment]) -> str:
     """Return ``text``, each attachment named after it: ``agy`` takes text alone."""
-    named = [_named(a) for a in attachments]
-    return "\n".join([text, *named]) if named else text
+    return "\n".join([text, *(_named(a) for a in attachments)])
 
 
 def _named(attachment: Attachment) -> str:

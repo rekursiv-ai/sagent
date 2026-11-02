@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, override
 import asyncio
 import importlib
 import logging
+import os
 import uuid
 
 from treekle import PlainTree
@@ -303,6 +304,11 @@ def test_the_reminder_lists_the_children_who_owes_whom_and_a_leaf(
             parent="Agent",
             max_depth=0,
         )
+    _ = setup.team.join(
+        Agent(model=ScriptedProvider()["scripted"], tool_context=ToolContext()),
+        label="kid",
+        parent="leaf",
+    )
     setup.team.send("Agent", "asked", "how goes it?")
     setup.team.send("asker", "Agent", "may I?")
 
@@ -313,7 +319,10 @@ def test_the_reminder_lists_the_children_who_owes_whom_and_a_leaf(
         "Your children: leaf, asked (owes you a reply), asker (you owe it a reply)."
     )
     assert said("stranger") == ""
-    assert said("leaf") == "Spawn budget: you are a leaf agent; AgentSpawn will refuse."
+    assert said("leaf") == (
+        "Your children: kid. Spawn budget: you are a leaf agent; AgentSpawn will refuse."
+    )
+    assert said("kid") == "Spawn budget: you are a leaf agent; AgentSpawn will refuse."
 
 
 @pytest.mark.asyncio
@@ -340,6 +349,34 @@ async def test_a_child_spends_from_its_parents_budget_which_halts_past_it(
         assert spent(journal) == pytest.approx(1.2)
         with pytest.raises(BudgetExhaustedError):
             _ = await setup.parent.send("more")
+
+
+@pytest.mark.asyncio
+async def test_a_grandchild_spends_from_each_agent_above_once(tmp_path: Path) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("ready"),
+        reply("done", spend=TokenCost(response=0.25)),
+    )
+    setup.parent.max_spend_usd = 1.0
+    setup.parent.charge(0.4, by="Agent")
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "wait", "label": "mid"})
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "go", "label": "grand"},
+            label="mid",
+        )
+        grand, mid = setup.team["grand"], setup.team["mid"]
+
+        assert grand.max_spend_usd == pytest.approx(0.6)
+        assert mid.spend_usd == pytest.approx(0.25)
+        assert setup.parent.spend_usd == pytest.approx(0.65)
+    assert [(e.usd, e.by) for e in setup.seen if isinstance(e, types.Charged)] == [
+        (0.4, "Agent"),
+        (0.25, "grand"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -400,6 +437,7 @@ async def test_a_child_runs_its_task_answers_and_stays(tmp_path: Path) -> None:
         ),
         reply("three TODOs", tokens=TokenCount(request=5)),
     )
+    setup.parent.runtime.turns = 2
 
     result = await _spawn(setup, tmp_path, {"prompt": "count the TODOs"})
 
@@ -516,7 +554,10 @@ async def test_a_cancelled_spawn_halts_its_child_which_stays(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("arguments", "match"),
     [
-        ({"prompt": "go", "tools": ["Edit"]}, "Unknown tools Edit; yours: Grep, Read"),
+        (
+            {"prompt": "go", "tools": ["Edit", "Write"]},
+            "^Unknown tools Edit, Write; yours: Grep, Read$",
+        ),
         ({"prompt": "go", "provider": "nope"}, "unknown provider .nope.; known: "),
         ({"prompt": "go", "effort": "max"}, "not offered"),
         ({"prompt": "go", "label": "Agent"}, "already labelled 'Agent'"),
@@ -539,7 +580,10 @@ async def test_a_spawn_that_cannot_be_built_is_refused(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("label", "match"),
-    [("stranger", "needs a calling agent"), ("leaf", "you are a leaf")],
+    [
+        ("stranger", r"^AgentSpawn needs a calling agent in the team\.$"),
+        ("leaf", r"^Your depth cap is reached: you are a leaf and cannot spawn\.$"),
+    ],
 )
 async def test_a_caller_that_may_not_spawn_is_refused(
     tmp_path: Path,
@@ -670,9 +714,15 @@ async def test_a_child_and_a_watcher_inherit_every_setting_alike(
     mine.files.saw(read)
     parent.runtime.persistent_retry = True
     parent.environment = False
+    parent.allowed = frozenset({"Grep"})
+    parent.account = "work"
     async with setup.team:
         _ = await _spawn(setup, tmp_path, {"prompt": "wait"})
         assert await setup.spawn.watch("Agent") == "watcher"
+        watcher = setup.team["watcher"]
+        assert (watcher.allowed, watcher.account) == (frozenset({"Grep"}), "work")
+        # A root with no journal keeps no watcher to start again.
+        assert [r for r in parent.session.standing() if r.kind == "watcher"] == []
         for label in ("Agent_0", "watcher"):
             heir = setup.team[label]
             context = heir.runtime.tool_context
@@ -732,6 +782,30 @@ async def test_a_child_given_no_tools_may_call_none(tmp_path: Path) -> None:
 
         assert list(child.tools) == ["Read", "Grep"]
         assert child.allowed == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_a_child_given_every_tool_is_ungated(tmp_path: Path) -> None:
+    setup = _setup(tmp_path, reply("ready"))
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "go", "tools": ["Grep", "Read"]})
+
+        assert setup.team["Agent_0"].allowed is None
+
+
+@pytest.mark.asyncio
+async def test_a_child_told_only_a_model_takes_what_its_name_spells(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(tmp_path, reply("ready"))
+    async with setup.team:
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "go", "model": "scripted+highthink"},
+        )
+
+        assert setup.team["Agent_0"].model.settings.thinking_effort == "high"
 
 
 @pytest.mark.asyncio
@@ -849,9 +923,15 @@ async def test_a_persistent_child_stands_in_its_parents_journal_until_stopped(
                     "effort": "high",
                     "budget": "auto",
                     "max_tool_call_rounds": 3,
+                    "max_depth": 1,
                 },
             )
             (spec,) = setup.team.standing("Agent")
+            # A spawn stands its own record and withdraws none.
+            assert not any(
+                isinstance(r, UncategorizedRecord) and r.kind == "withdrawn"
+                for r in journal
+            )
 
             await setup.team.stop("helper")
 
@@ -861,6 +941,7 @@ async def test_a_persistent_child_stands_in_its_parents_journal_until_stopped(
         journal=str(child_journal(tmp_path / "parent" / "journal.jsonl", "helper")),
         tools=("Grep",),
         max_rounds=3,
+        max_depth=1,
     )
 
 
@@ -943,6 +1024,9 @@ async def test_a_resumed_parent_starts_its_running_children_again(
             "prompt": "remember 7",
             "label": "helper",
             "system": "the helper's prompt",
+            "tools": ["Grep"],
+            "max_tool_call_rounds": 3,
+            "max_depth": 0,
         },
     )
 
@@ -951,6 +1035,8 @@ async def test_a_resumed_parent_starts_its_running_children_again(
         async with setup.parent, setup.team:
             assert await setup.spawn.resume("Agent") == ["helper"]
             helper = setup.team["helper"]
+            assert (helper.allowed, helper.max_rounds) == (frozenset({"Grep"}), 3)
+            assert not setup.team.can_spawn("helper")
 
             assert await helper.send("which number?") == "7"
             assert setup.team.persistent() == ["helper"]
@@ -996,8 +1082,10 @@ async def test_a_resumed_parent_starts_its_childrens_children_again(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("model", ["other", "org/other"], ids=["name", "repo-id"])
 async def test_a_child_stood_before_its_journal_kept_its_model_resumes_on_it(
     tmp_path: Path,
+    model: str,
 ) -> None:
     """Its spec named the model then; its journal names none."""
     child = tmp_path / "parent" / "helper" / "session.jsonl"
@@ -1016,7 +1104,7 @@ async def test_a_child_stood_before_its_journal_kept_its_model_resumes_on_it(
                     "journal": str(child),
                     "tools": [],
                     "provider": "other",
-                    "model": "other",
+                    "model": model,
                 },
             ),
         )
@@ -1025,6 +1113,60 @@ async def test_a_child_stood_before_its_journal_kept_its_model_resumes_on_it(
             helper = setup.team["helper"]
             assert helper.model.provider.name == "other"
             assert await helper.send("which number?") == "7"
+
+
+@pytest.mark.asyncio
+async def test_a_child_stood_with_no_model_anywhere_resumes_on_its_parent_s(
+    tmp_path: Path,
+) -> None:
+    """With nothing stood to recall, it starts as a new child would, as the catalog signs in."""
+    child = tmp_path / "parent" / "helper" / "session.jsonl"
+    child.parent.mkdir(parents=True)
+    async with JsonlJournal(child) as journal:
+        journal.append(UserMessage(content="who are you?"))
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        setup.team.catalog = ModelCatalog(factories=_as_account)
+        setup.team.catalog.use_account("home")
+        setup.parent.model.settings = replace(
+            setup.parent.model.settings,
+            thinking_effort="low",
+        )
+        _session(setup.parent).resume()
+        setup.parent.session.stand(
+            "agent:helper",
+            UncategorizedRecord(
+                kind="persistent_agent",
+                payload={"label": "helper", "journal": str(child), "tools": []},
+            ),
+        )
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["helper"]
+            helper = setup.team["helper"]
+            assert (helper.account, helper.model.settings.thinking_effort) == (
+                "home",
+                "low",
+            )
+            assert await helper.send("which?") == "as home"
+
+
+@pytest.mark.asyncio
+async def test_a_spawn_onto_a_journal_kept_from_before_takes_the_model_it_is_told(
+    tmp_path: Path,
+) -> None:
+    """Only a resume takes the model a journal stood."""
+    await _first_session(
+        tmp_path,
+        {"prompt": "remember 7", "label": "helper", "provider": "other"},
+    )
+
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("ready"), journal=journal)
+        _session(setup.parent).resume()
+        async with setup.team:
+            _ = await _spawn(setup, tmp_path, {"prompt": "go", "label": "helper"})
+
+            assert setup.team["helper"].model.provider.name == "scripted"
 
 
 @pytest.mark.asyncio
@@ -1177,10 +1319,15 @@ async def test_a_child_that_cannot_be_rebuilt_is_skipped(
         _session(setup.parent).resume()
         held = child_journal(tmp_path / "parent" / "journal.jsonl", "locked")
         async with JsonlJournal(held), setup.team:
-            with caplog.at_level(logging.WARNING):
+            with caplog.at_level(logging.WARNING, logger=agent_spawn.__name__):
                 assert await setup.spawn.resume("Agent") == ["kept"]
-    assert any("not resuming agent 'gone'" in m for m in caplog.messages)
-    assert any("not resuming agent 'locked'" in m for m in caplog.messages)
+    gone, locked = (
+        r.getMessage() for r in caplog.records if r.name == agent_spawn.__name__
+    )
+    assert gone.startswith("not resuming agent 'gone': unknown provider 'other'")
+    assert locked == (
+        f"not resuming agent 'locked': Journal {held} is open in pid {os.getpid()}."
+    )
 
 
 @pytest.mark.asyncio
@@ -1320,8 +1467,14 @@ async def test_a_refused_spawn_closes_the_model_it_built(tmp_path: Path) -> None
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("told", "catalogs", "account"),
-    [("work", None, "work"), (None, "home", "home"), (None, None, None)],
-    ids=["told", "the-catalogs", "default"],
+    [
+        ("work", None, "work"),
+        (None, "home", "home"),
+        (None, None, None),
+        ("default", "home", None),
+        ("", "home", None),
+    ],
+    ids=["told", "the-catalogs", "default", "told-default", "told-empty"],
 )
 async def test_a_child_knows_the_account_it_signed_in_as(
     tmp_path: Path,
@@ -1383,11 +1536,20 @@ async def test_watch_starts_the_callers_watcher_its_prompt_the_first_request(
     _ = team.join(root)
     context = root.runtime.tool_context
     async with team:
-        with pytest.raises(ValueError, match="needs a policy"):
+        with pytest.raises(
+            ValueError,
+            match=r"^A watcher needs a policy in prompt\.$",
+        ):
             _ = await spawn.call(context, {"prompt": " ", "watch": True})
         started = await spawn.call(context, {"prompt": "keep me honest", "watch": True})
 
-        assert (started.agent_id, started.state) == ("watcher", "running")
+        assert started == AgentStatusResult(
+            call_id="",
+            agent_id="watcher",
+            agent_kind="watcher",
+            state="running",
+            content="Started your watcher, watcher; it owes you a reply.",
+        )
         assert team.resolve("parent", by="Agent") == ["watcher"]
         assert team.owes("watcher") == {"Agent": "keep me honest"}
         told = [
@@ -1413,6 +1575,7 @@ async def test_a_watcher_of_a_journaled_root_keeps_its_journal_beside_it(
             )
             _ = setup.team.join(other, label="other")
             setup.parent.runtime.persistent_retry = True
+            setup.parent.session.append(UserMessage(content="hi"))
 
             assert await setup.spawn.watch("Agent", before="how") == "watcher"
             assert await setup.spawn.watch("other") == "watcher_0"
@@ -1430,7 +1593,7 @@ async def test_a_watcher_of_a_journaled_root_keeps_its_journal_beside_it(
             assert watcher.system_prompt == "the parent's prompt"
             (first,) = watcher.runtime.inbox.drain_nowait()
             assert isinstance(first, AgentToAgentMessage)
-            assert first.content == "how"
+            assert first.content == "how\n\n[watch]\n> user: hi"
 
 
 @pytest.mark.asyncio
@@ -1448,7 +1611,11 @@ async def test_a_watcher_comes_back_on_resume_and_is_sent_only_what_is_new(
         async with setup.parent, setup.team:
             assert await setup.spawn.resume("Agent") == ["watcher"]
             watcher = setup.team["watcher"]
-            _ = watcher.runtime.inbox.drain_nowait()
+            # It saw "before" already: nothing is new until "after".
+            assert not any(
+                isinstance(m, AgentToAgentMessage)
+                for m in watcher.runtime.inbox.drain_nowait()
+            )
             setup.parent.session.append(UserMessage(content="after"))
             setup.parent.runtime.publish(types.AgentIdle())
 
@@ -1458,6 +1625,78 @@ async def test_a_watcher_comes_back_on_resume_and_is_sent_only_what_is_new(
 
             await setup.team.stop("watcher")
             assert await setup.spawn.resume("Agent") == []
+
+
+async def _watched_once(tmp_path: Path, *, second: bool) -> Path:
+    """Watch a journaled root, after another root when ``second``; return its journal."""
+    root = tmp_path / "parent" / "journal.jsonl"
+    async with JsonlJournal(root) as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            if second:
+                other = Agent(
+                    model=ScriptedProvider()["scripted"],
+                    tool_context=ToolContext(cwd=tmp_path),
+                )
+                _ = setup.team.join(other, label="other")
+                _ = await setup.spawn.watch("other")
+            _ = await setup.spawn.watch("Agent")
+    return root
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_stood_without_a_journal_resumes_on_one_beside_its_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "parent" / "journal.jsonl"
+    async with JsonlJournal(root) as journal:
+        setup = _setup(tmp_path, journal=journal)
+        _session(setup.parent).resume()
+        setup.parent.session.stand(
+            "watcher:watcher",
+            UncategorizedRecord(kind="watcher", payload={"label": "watcher"}),
+        )
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["watcher"]
+
+            assert setup.team["watcher"].session.journal.path == child_journal(
+                root,
+                "watcher",
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_resumes_under_the_label_it_stood_with(tmp_path: Path) -> None:
+    root = await _watched_once(tmp_path, second=True)
+
+    async with JsonlJournal(root) as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["watcher_0"]
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_whose_label_is_taken_resumes_its_own_journal(
+    tmp_path: Path,
+) -> None:
+    root = await _watched_once(tmp_path, second=False)
+
+    async with JsonlJournal(root) as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            _ = setup.team.join(
+                Agent(
+                    model=ScriptedProvider()["scripted"],
+                    tool_context=ToolContext(cwd=tmp_path),
+                ),
+                label="watcher",
+            )
+            assert await setup.spawn.resume("Agent") == ["watcher_0"]
+
+            assert setup.team["watcher_0"].session.journal.path == child_journal(
+                root,
+                "watcher",
+            )
 
 
 @pytest.mark.asyncio
@@ -1481,12 +1720,18 @@ async def test_a_watcher_that_cannot_open_is_refused_or_skipped_on_resume(
     ):
         setup = _setup(tmp_path, journal=journal)
         async with setup.parent, setup.team:
-            with caplog.at_level(logging.WARNING):
+            with caplog.at_level(logging.WARNING, logger=agent_spawn.__name__):
                 assert await setup.spawn.resume("Agent") == []
             with pytest.raises(RuntimeError, match="is open in"):
                 _ = await setup.spawn.watch("Agent")
             assert list(setup.team) == ["Agent"]
-    assert any("not resuming watcher 'watcher'" in m for m in caplog.messages)
+    (skipped,) = (
+        r.getMessage() for r in caplog.records if r.name == agent_spawn.__name__
+    )
+    assert skipped == (
+        f"not resuming watcher 'watcher': Journal {child_journal(root, 'watcher')}"
+        f" is open in pid {os.getpid()}."
+    )
 
 
 def _as_account(account: str | None) -> Mapping[str, Callable[..., ScriptedProvider]]:

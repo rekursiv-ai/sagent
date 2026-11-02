@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from datetime import date
+from itertools import groupby
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import IO, TYPE_CHECKING, Literal, override
 
 import io
 import re
+import time
 
 from rich.cells import cell_len
 from rich.console import Console
+from rich.text import Text
 
 import pytest
 
@@ -401,14 +404,17 @@ def test_print_welcome_shows_todays_holiday(monkeypatch: pytest.MonkeyPatch) -> 
         asked.append(today)
         return _PUMPKIN
 
+    def local(seconds: float | None = None) -> time.struct_time:
+        del seconds
+        # Late on Halloween here is already November in UTC.
+        return time.struct_time((2026, 10, 31, 23, 0, 0, 5, 304, 0))
+
     monkeypatch.setattr(welcome, "Console", to_stderr)
     monkeypatch.setattr(welcome, "holiday_icon", pumpkin)
-    before = date.today()  # noqa: DTZ011 -- The local date is the subject.
+    monkeypatch.setattr(time, "localtime", local)
     welcome.print_welcome(folder=Path("/research"))
-    after = date.today()  # noqa: DTZ011 -- The local date is the subject.
     assert "▼" not in console.export_text(styles=False)
-    (today,) = asked
-    assert today in {before, after}
+    assert asked == [date(2026, 10, 31)]
 
 
 def test_frame_has_equal_top_and_bottom_breathing_room() -> None:
@@ -484,6 +490,296 @@ def test_wrapped_greeting_is_flush_with_the_frame_edge() -> None:
     )
     assert lines[greeting_start].startswith("Good news")
     assert lines[greeting_start + 1] == "begins."
+
+
+def _runs(text: Text) -> list[tuple[str, str]]:
+    """Return ``text`` as runs of cells that share one style, its own first."""
+    styles = [str(text.style)] * len(text.plain)
+    for span in text.spans:
+        styles[span.start : span.end] = [str(span.style)] * (span.end - span.start)
+    return [
+        ("".join(c for c, _ in run), style)
+        for style, run in groupby(zip(text.plain, styles, strict=True), lambda p: p[1])
+    ]
+
+
+class _Printed(Console):
+    """A terminal that keeps each ``Text`` printed instead of drawing it."""
+
+    def __init__(
+        self,
+        *,
+        width: int = 80,
+        height: int = 24,
+        color_system: Literal["256", "truecolor"] = "truecolor",
+        file: IO[str] | None = None,
+    ) -> None:
+        super().__init__(
+            file=file or io.StringIO(),
+            force_terminal=True,
+            width=width,
+            height=height,
+            color_system=color_system,
+        )
+        self.texts: list[Text] = []
+
+    @override
+    def print(self, *objects: object, **kwargs: object) -> None:
+        del kwargs
+        self.texts.extend(o for o in objects if isinstance(o, Text))
+
+
+def _rendered(
+    console: _Printed,
+    *,
+    model: str = "test-model",
+    provider: str = "TestProvider",
+    folder: Path = Path("/research"),
+) -> list[str]:
+    render_welcome(console, model=model, provider=provider, folder=folder)
+    return [t.plain for t in console.texts]
+
+
+def test_the_logo_colors_only_its_three_bars() -> None:
+    rows = welcome._logo_rows(blue="b", green="g", red="r")
+    assert [_runs(row) for row in rows] == [
+        [("   ╔══════╗", "not bold")],
+        [("   ▼      ║", "not bold")],
+        [(" ", "not bold"), ("██████", "bold b"), ("   ║", "not bold")],
+        [(" ", "not bold"), ("█████", "bold g"), ("    ║", "not bold")],
+        [(" ", "not bold"), ("███████", "bold r"), ("  ║", "not bold")],
+        [("   ╚══════╝", "not bold")],
+    ]
+
+
+def test_the_wordmark_dims_its_box_glyphs_beside_an_unstyled_gap() -> None:
+    rows = welcome._banner_rows(
+        icon=welcome._logo_rows(blue="b", green="g", red="r"),
+        blue="b",
+    )
+    assert _runs(rows[0])[1:6] == [
+        ("   ", ""),
+        ("███████", "b"),
+        ("╗", "dim b"),
+        (" █████", "b"),
+        ("╗", "dim b"),
+    ]
+    assert _runs(rows[2])[-1] == ("   ", "")
+
+
+def test_an_icon_shorter_than_the_wordmark_is_refused() -> None:
+    with pytest.raises(ValueError, match="zip"):
+        welcome._banner_rows(icon=[Text("x")], blue="b")
+
+
+@pytest.mark.parametrize(
+    ("width", "rows"),
+    [
+        (80, ["/help commands   ← agents   /tasks tool calls   /quit exit"]),
+        (25, ["/help commands   ← agents", "/tasks tool calls", "/quit exit"]),
+        (17, ["/help commands", "← agents", "/tasks tool calls", "/quit exit"]),
+        (16, ["/help   ←", "/tasks   /quit"]),
+    ],
+)
+def test_commands_fill_each_row_and_drop_descriptions_that_cannot_fit(
+    width: int,
+    rows: list[str],
+) -> None:
+    assert [r.plain for r in welcome._command_rows(width, unicode_ok=True)] == rows
+
+
+def test_a_command_is_bold_and_its_description_dim() -> None:
+    (row,) = welcome._command_rows(80, unicode_ok=True)
+    assert _runs(row)[:3] == [
+        ("/help", "bold"),
+        (" commands", "dim not bold"),
+        ("   ", ""),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("unicode_ok", "framed", "lines"),
+    [
+        (True, True, [("│  ", "dim"), ("abcdef", ""), ("  │", "dim")]),
+        (False, True, [("|  ", "dim"), ("abcdef", ""), ("  |", "dim")]),
+    ],
+)
+def test_a_framed_row_folds_inside_dim_sides(
+    unicode_ok: bool,
+    framed: bool,
+    lines: list[tuple[str, str]],
+) -> None:
+    console = _Printed()
+    welcome._print_framed(
+        console,
+        [Text("abcdefghi")],
+        width=12,
+        framed=framed,
+        unicode_ok=unicode_ok,
+        padding=2,
+    )
+    side = lines[0][0][0]
+    assert [_runs(t) for t in console.texts] == [
+        lines,
+        [(f"{side}  ", "dim"), ("ghi", ""), (f"     {side}", "dim")],
+    ]
+
+
+def test_an_unframed_row_is_only_indented() -> None:
+    console = _Printed()
+    welcome._print_framed(
+        console,
+        [Text("abc")],
+        width=12,
+        framed=False,
+        unicode_ok=True,
+        padding=2,
+    )
+    assert [t.plain for t in console.texts] == ["  abc"]
+
+
+@pytest.mark.parametrize(("width", "height"), [(72, 22), (71, 22), (72, 21)])
+def test_the_banner_shows_only_where_it_fits(width: int, height: int) -> None:
+    plain = "\n".join(_rendered(_Printed(width=width, height=height)))
+    assert ("███████╗" in plain) == (width >= 72 and height >= 22)
+
+
+def test_the_frame_and_the_compact_heading_are_styled() -> None:
+    console = _Printed(width=40)
+    render_welcome(console, folder=Path("/research"), blue="b")
+    top, *_, bottom = (t for t in console.texts if t.plain[:1] in "╭╰")
+    assert _runs(top) == [("╭" + "─" * 38 + "╮", "dim")]
+    assert _runs(bottom) == [("╰" + "─" * 38 + "╯", "dim")]
+    (heading,) = (t for t in console.texts if "SAGENT" in t.plain)
+    assert ("SAGENT", "bold b") in _runs(heading)
+
+
+def test_an_ascii_frame_is_drawn_in_ascii() -> None:
+    raw = io.BytesIO()
+    console = _Printed(file=io.TextIOWrapper(raw, encoding="ascii"))
+    lines = _rendered(console)
+    assert lines[0] == "+" + "-" * 78 + "+"
+    assert lines[-2] == "+" + "-" * 78 + "+"
+    assert any("test-model / TestProvider" in line for line in lines)
+
+
+def test_the_default_colors_paint_the_logos_bars() -> None:
+    console = _Printed()
+    render_welcome(console, folder=Path("/research"))
+    styles = {s for t in console.texts for _, s in _runs(t)}
+    assert {"bold #4a90c4", "bold #93c47d", "bold #e06666", "#4a90c4"} <= styles
+
+
+@pytest.mark.parametrize("color_system", ["256", "truecolor"])
+def test_a_many_color_terminal_shows_the_holiday_icon(
+    color_system: Literal["256", "truecolor"],
+) -> None:
+    console = _Printed(color_system=color_system)
+    assert "▼" not in "\n".join(
+        _rendered_icon(console),
+    )
+
+
+def _rendered_icon(console: _Printed) -> list[str]:
+    render_welcome(console, folder=Path("/research"), icon=_PUMPKIN)
+    return [t.plain for t in console.texts]
+
+
+@pytest.mark.parametrize(
+    ("provider", "shown"),
+    [
+        ("OpenAISubscription", "OpenAI Subscription"),
+        ("AnthropicCLI", "Anthropic CLI"),
+        ("LlamaCpp", "Llama.cpp"),
+        ("Other", "Other"),
+    ],
+)
+def test_a_provider_is_shown_by_its_spoken_name(provider: str, shown: str) -> None:
+    lines = _rendered(_Printed(), model="m", provider=provider)
+    assert any(f"model     m · {shown} " in line for line in lines)
+
+
+def test_a_metadata_row_dims_its_label_only() -> None:
+    console = _Printed()
+    render_welcome(console, model="m", provider="P", folder=Path("/research"))
+    (row,) = (t for t in console.texts if "model" in t.plain)
+    assert _runs(row)[:2] == [("│  model     ", "dim"), ("m · P", "not dim")]
+
+
+@pytest.mark.parametrize(("length", "rows"), [(60, 1), (61, 2)])
+def test_model_and_provider_share_a_row_while_they_fit(length: int, rows: int) -> None:
+    lines = _rendered(_Printed(), model="m" * length, provider="P")
+    labels = [line[3:13].strip() for line in lines]
+    assert labels.count("model") + labels.count("provider") == rows
+
+
+def test_a_model_with_no_provider_keeps_its_separator() -> None:
+    console = _Printed()
+    render_welcome(console, model="m", folder=Path("/research"))
+    (row,) = (t for t in console.texts if "model" in t.plain)
+    assert ("m · ", "not dim") in _runs(row)
+
+
+def _screen_rows(width: int) -> list[str]:
+    """Return the rows a ``width``-cell terminal shows of the welcome."""
+    out = io.StringIO()
+    console = Console(
+        file=out,
+        width=width,
+        height=24,
+        color_system=None,
+        force_terminal=True,
+    )
+    render_welcome(console, model="m", provider="P", folder=Path("/ab"))
+    return out.getvalue().splitlines()
+
+
+def test_a_value_with_no_room_beside_its_label_keeps_one_cell() -> None:
+    lines = _screen_rows(12)
+    assert lines[lines.index("  project   ") + 1] == "…"
+
+
+def test_commands_with_no_room_keep_one_cell_each() -> None:
+    lines = _screen_rows(3)
+    start = lines.index("  /")
+    rows = lines[start : start + 10]
+    # Each command alone, folded at the 3-cell edge under its indent.
+    assert "".join(rows) == "  /help  ←  /tasks  /quit"
+    assert [len(r) for r in rows] == [3, 3, 1, 3, 3, 3, 2, 3, 3, 1]
+
+
+def test_an_unframed_terminal_gives_values_its_width_less_the_label() -> None:
+    lines = _rendered(_Printed(width=15), folder=Path("/ab"))
+    assert "  project   /ab" in lines
+
+
+@pytest.mark.parametrize(
+    ("folder", "home", "width", "unicode_ok", "label"),
+    [
+        ("/abc", "/h", 4, True, "/abc"),
+        ("/a/b/c", "/h", 5, True, "…/b/c"),
+        ("/a/b/c", "/h", 5, False, ".../c"),
+        ("/h/aa/bb/cc", "/h", 9, True, "~/…/bb/cc"),
+        ("/abcdef", "/h", 1, True, "…"),
+        ("/abcdefg", "/h", 3, True, "…fg"),
+    ],
+)
+def test_a_long_folder_keeps_its_end(
+    folder: str,
+    home: str,
+    width: int,
+    unicode_ok: bool,
+    label: str,
+) -> None:
+    assert (
+        welcome._folder_label(
+            Path(folder),
+            home=Path(home),
+            width=width,
+            unicode_ok=unicode_ok,
+        )
+        == label
+    )
 
 
 if __name__ == "__main__":

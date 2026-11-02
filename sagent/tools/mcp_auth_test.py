@@ -37,6 +37,7 @@ import uvicorn
 
 from sagent.lib.userdirs import config_dir
 from sagent.model.exceptions import AuthError
+from sagent.providers.testing import refuse_browsers
 from sagent.tools import mcp_auth
 from sagent.tools.mcp import McpServer, McpSession, login, logout
 from sagent.tools.mcp_auth import McpTokenStorage
@@ -45,6 +46,12 @@ from sagent.tools.types import ToolContext
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable
+
+
+@pytest.fixture(autouse=True)
+def no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a test that opens the user's browser, as a sign-in not headless would."""
+    refuse_browsers(monkeypatch, mcp_auth)
 
 
 _WEB = McpServer(

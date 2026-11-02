@@ -114,6 +114,44 @@ def test_the_feed_shows_what_the_user_sees_and_stubs_the_rest() -> None:
     ]
 
 
+def test_a_message_with_no_content_shows_empty() -> None:
+    shown = lines(
+        [UserMessage(), AgentToAgentMessage(sender="kid", recipient="Agent")],
+        start=0,
+        label="Agent",
+        tools={},
+    )
+    assert shown == ["> user: ", "> kid: "]
+
+
+def test_settings_name_only_what_was_set() -> None:
+    shown = lines(
+        [
+            TurnContext(cwd="/w"),
+            TurnContext(tools=("Read", "Edit")),
+            TurnContext(tools=()),
+        ],
+        start=1,
+        label="Agent",
+        tools={},
+    )
+    assert shown == [
+        "r1 [settings: cwd=/w]",
+        "r2 [settings: tools=Read, Edit]",
+        "r3 [settings: tools=]",
+    ]
+
+
+def test_a_note_of_exactly_80_characters_is_not_cut() -> None:
+    note = "x" * 80
+    shown = lines([SystemMessage(content=note)], start=1, label="Agent", tools={})
+    assert shown == [f"r1 [system] {note}"]
+
+
+def test_a_clear_after_the_first_record_is_shown() -> None:
+    assert lines([ContextClear()], start=1, label="Agent", tools={}) == ["r1 [clear]"]
+
+
 def _watched() -> tuple[Team, Agent, Agent]:
     """Return a team of ``Agent``, journaled, and its ``watcher``, both unopened."""
     team = Team(catalog=ModelCatalog(factories={}))
@@ -232,6 +270,46 @@ def test_other_events_and_an_off_or_gone_watcher_send_nothing() -> None:
 
     assert _told(watcher) == []
     assert feed.sent == 0
+
+
+def test_a_watcher_never_turned_on_or_a_watched_agent_gone_sends_nothing() -> None:
+    team, agent, watcher = _watched()
+    feed = Feed(team=team, watched="Agent", watcher="watcher")
+    agent.session.append(UserMessage(content="go"))
+
+    del team.watching["watcher"]
+    feed(types.AgentIdle())
+    team.watching["watcher"] = True
+    _ = team.leave("Agent")
+    feed(types.AgentIdle())
+
+    assert _told(watcher) == []
+
+
+def test_a_send_names_who_watches_whom_and_each_call_by_its_summary() -> None:
+    team, agent, watcher = _watched()
+    feed = Feed(team=team, watched="Agent", watcher="watcher")
+    agent.session.append(
+        ToolCall(call_id="c1", name="Bash", arguments={"command": "ls"}),
+    )
+
+    feed.send()
+
+    (told,) = watcher.runtime.inbox.drain_nowait()
+    assert told == AgentToAgentMessage(
+        sender="Agent",
+        recipient="watcher",
+        content="[watch]\n  r0 Bash ls",
+    )
+
+
+def test_a_lead_with_nothing_new_goes_alone() -> None:
+    team, _, watcher = _watched()
+    feed = Feed(team=team, watched="Agent", watcher="watcher")
+
+    feed.send("how to watch")
+
+    assert _told(watcher) == ["how to watch"]
 
 
 def test_nothing_new_sends_nothing() -> None:

@@ -382,6 +382,49 @@ def test_an_index_that_cannot_be_read_is_carried_as_none(
     assert briefing.endswith("(no memories yet)")
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ["role ]lead", "role [lead"])
+async def test_either_bracket_alone_is_refused(tmp_path: Path, name: str) -> None:
+    result = await _save(Memory(directory=tmp_path), name)
+    assert result.text() == "name must not contain [ or ]."
+
+
+@pytest.mark.asyncio
+async def test_a_memory_files_under_its_name_s_letters_alone(tmp_path: Path) -> None:
+    deep = tmp_path / "a" / "b"
+    result = await _save(Memory(directory=deep), "__Role__")
+    assert (result.text(), result.call_id) == ("Saved feedback_role.md.", "")
+    assert _names(deep) == ["MEMORY.md", "feedback_role.md"]
+
+
+@pytest.mark.asyncio
+async def test_a_name_that_must_be_quoted_keeps_its_own_letters(tmp_path: Path) -> None:
+    _ = await _save(Memory(directory=tmp_path), "café: menu")
+    text = (tmp_path / "feedback_caf_menu.md").read_text()
+    assert 'name: "café: menu"\n' in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("line", "owner"),
+    [("name: 'Role: lead'", "Role: lead"), ("name: 'a': 1", "'a': 1")],
+)
+async def test_a_single_quoted_name_beside_a_broken_line_is_read_as_yaml(
+    tmp_path: Path,
+    line: str,
+    owner: str,
+) -> None:
+    held = f"---\n{line}\ndescription: a: b\n---\n\nx\n".encode()
+    (tmp_path / "user_role_lead.md").write_bytes(held)
+    (tmp_path / "user_a_1.md").write_bytes(held)
+    result = await _save(Memory(directory=tmp_path), "role lead", kind="user")
+    if owner == "Role: lead":
+        assert result.text().startswith(f"'role lead' files as the memory {owner!r}")
+    else:
+        other = await _save(Memory(directory=tmp_path), "a 1", kind="user")
+        assert other.text().startswith(f"'a 1' files as the memory {owner!r}")
+
+
 async def _save(
     memory: Memory,
     name: str,

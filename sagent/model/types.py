@@ -111,7 +111,9 @@ class Request:
     def response_tokens(self, limits: ModelLimits) -> int:
         """Return the most the reply may hold: the model's limit, or this, if less."""
         cap, limit = self.max_response_tokens, limits.max_response_tokens
-        return cap if cap > 0 and (cap < limit or limit == 0) else limit
+        if cap <= 0:
+            return limit
+        return min(cap, limit) if limit else cap
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -128,7 +128,7 @@ class NoShrinker:
         """Return ``False``: never due."""
         return False
 
-    async def run(self, instructions: str = "") -> None:
+    async def run(self, instructions: str = "") -> None:  # pragma: no mutate -- unread
         """Refuse to shrink.
 
         Args:
@@ -231,7 +231,6 @@ class Agent(AsyncResource):
             compactor=compactor,
             pruner=pruner,
         )
-        self._session.frame()
         self.session: Session = self._session
         # What a child it spawns compacts with, so the child compacts as it does.
         self.compactor_factory: Factory[Shrinker] = compactor
@@ -254,12 +253,9 @@ class Agent(AsyncResource):
         self.runtime.persistent_retry = persistent_retry
         # What the model calls have cost, a resumed session's included.
         self.spend_usd = 0.0
-        # The rounds of the turn so far.
-        self._rounds = 0
         # The tools allowed before the round cap took them all; ``None`` while uncapped.
         self._capped: tuple[frozenset[str] | None] | None = None
-        # Whether no turn is under way: no model call since the runtime went idle.
-        self._idle = True
+        self._new_turn()
         # Models assigned away from, closed at the runtime's next safe point.
         self._retired: list[Model] = []
         # The settings each model was left with, by ``cache_key``: a switch back
@@ -534,17 +530,12 @@ class Agent(AsyncResource):
             self.runtime.tool_context.files.forget()
             self._return_home()
             self._session.frame()
-        elif isinstance(event, UserMessage) or (
-            # A persistent child's turns start with another agent's message; one
-            # arriving mid-turn, such as a child's idle ping, starts none.
-            isinstance(event, AgentToAgentMessage) and self._idle
-        ):
-            self._rounds = 0
-            self._uncap()
+        # The next turn starts afresh: a persistent child's with another agent's
+        # message, which mid-turn, as a child's idle ping, starts none.
+        elif isinstance(event, (UserMessage, types.AgentIdle)):
+            self._new_turn()
         elif isinstance(event, types.ModelResponseComplete):
             self._charge(event.response)
-        if isinstance(event, (types.AgentIdle, types.ModelCallStarted)):
-            self._idle = isinstance(event, types.AgentIdle)
 
     # The turn that reaches the round cap leaves the model no tool to call, so the next
     # answers with what it has; a call then halts the turn.
@@ -558,10 +549,8 @@ class Agent(AsyncResource):
         if (over := self._over_budget()) is not None:
             self._limit = over
         elif called and self._capped is not None:
-            self._limit = RoundLimitError(
-                rounds=self._rounds,
-                max_rounds=self.max_rounds or self._rounds,
-            )
+            # Capped the round the count reached the cap.
+            self._limit = RoundLimitError(rounds=self._rounds, max_rounds=self._rounds)
         elif called:
             self._rounds += 1
             if self.max_rounds is not None and self._rounds >= self.max_rounds:
@@ -582,8 +571,9 @@ class Agent(AsyncResource):
             max_budget_usd=self.max_spend_usd,
         )
 
-    def _uncap(self) -> None:
-        """Give back the tools the round cap took."""
+    def _new_turn(self) -> None:
+        """Count the rounds from none, with the tools the round cap took given back."""
+        self._rounds = 0
         if self._capped is not None:
             (self.runtime.allowed,) = self._capped
             self._capped = None
@@ -636,18 +626,16 @@ class RuntimeSession:
         self.compactor: Shrinker = compactor(agent)
         self.pruner: Shrinker = pruner(agent)
         self._agent = agent
+        # How much of the tape is written: none, until a resume writes what it read.
         self._written = 0
         # What the journal's window reads as, so a merge can write only its part.
         self._lines: list[SessionRecord] = []
-        # Where the model works and what it has seen, when the window's AGENTS.md
-        # files were last looked for.
-        self._seen: tuple[Path, tuple[Path, ...]] | None = None
         self._standing: dict[str, UncategorizedRecord] = {}
         # The model and prompt last stood, so each stands again only when it changes.
         self._memory: ModelMemory | None = None
         self._prompt: str | None = None
-        self._directives = Directives(root=agent.root, config=agent.agents_md)
         self._told: set[str] = set()
+        self.frame()
 
     # A window's prompt is read once, at its start, and never again until the next:
     # any byte it changed mid-window would rewrite the whole cached conversation. What
@@ -662,7 +650,9 @@ class RuntimeSession:
         agent = self._agent
         context = agent.runtime.tool_context
         self._directives = Directives(root=agent.root, config=agent.agents_md)
-        self._seen = None
+        # Where the model works and what it has seen, when the window's AGENTS.md
+        # files were last looked for: at its start, from the root with nothing seen.
+        self._seen: tuple[Path, tuple[Path, ...]] = (agent.root, ())
         standing = [
             self._directives.start(),
             *(
@@ -795,15 +785,14 @@ class RuntimeSession:
         is tried again by the next.
         """
         tape = self._agent.runtime.tape
-        # What came before a splice, then the splice alone.
+        # What came before each splice, then the splice with what follows it.
         ends = [
-            end
-            for i in range(self._written, len(tape))
-            if isinstance(tape[i], ContextSplice)
-            for end in (i, i + 1)
+            i
+            for i, record in enumerate(tape[self._written :], self._written)
+            if isinstance(record, ContextSplice)
         ]
         for end in (*ends, len(tape)):
-            if end > self._written:
+            if end != self._written:
                 self._write(tape[:end], start=self._written)
                 self._written = end
         self._remember()
@@ -914,7 +903,7 @@ class RuntimeSession:
                 key
                 for entry in context
                 if isinstance(entry, SystemMessage) and entry.subtype == "rules"
-                for key in from_plain(entry.extra.get("rules"), list[str], default=[])
+                for key in from_plain(entry.extra.get("rules"), list[str])
             }
             text, matched = self._directives.found(
                 [cwd, *(f.parent for f in files)],
@@ -1129,7 +1118,7 @@ def _prompt(prompt: str | None) -> str:
 
 def _hour(timestamp: str | None) -> str | None:
     """Return an ISO 8601 time to the hour, such as ``2026-10-24T13``."""
-    return timestamp[:13] if timestamp is not None else None
+    return timestamp.partition(":")[0] if timestamp is not None else None
 
 
 def _records(entries: Iterable[types.ModelContextEvent]) -> list[SessionRecord]:
@@ -1237,7 +1226,7 @@ def _grown(
     if len(current) < n:
         return None
     restated: dict[str, str] = {}
-    for old, new in zip(lines, current[:n], strict=True):
+    for old, new in zip(lines, current, strict=False):
         if old == new:
             continue
         if not (
@@ -1257,7 +1246,7 @@ def _restated(records: Iterable[SessionRecord]) -> list[SessionRecord]:
         if not (isinstance(record, UncategorizedRecord) and record.kind == "restated"):
             out.append(record)
             continue
-        texts = from_plain(record.payload.get("results"), dict[str, str], default={})
+        texts = from_plain(record.payload.get("results"), dict[str, str])
         out = [
             _restate(r, texts[r.call_id])
             if isinstance(r, ToolResult) and r.call_id in texts

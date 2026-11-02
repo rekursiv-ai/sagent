@@ -106,7 +106,9 @@ def rows(team: Lineage, *, focused: str, now: float | None = None) -> list[Row]:
     for label in team:
         under.setdefault(team.parent(label), []).append(label)
     out: list[Row] = []
-    _walk(team, under, None, lead="", top=True, focused=focused, now=at, out=out)
+    # pragma: no mutate start -- a root draws no branch, so its lead is never read.
+    _walk(team, under, None, lead="", focused=focused, now=at, out=out)
+    # pragma: no mutate end
     return out
 
 
@@ -122,7 +124,9 @@ def render(shown: list[Row], *, cursor: int, note: str = "") -> FormattedText:
       text: One line per row, then a blank line and the key help.
 
     """
+    # pragma: no mutate start -- with no rows the width is 32 and nothing reads it.
     width = max((len(r.branch) + len(r.text) for r in shown), default=0)
+    # pragma: no mutate end
     width = min(max(width, 32), 72)
     out: list[tuple[str, str]] = []
     for i, row in enumerate(shown):
@@ -141,16 +145,16 @@ async def pick(
     focused: str,
     stop: Callable[[str], str],
     cancel: Callable[[str, str], str],
-    interval_sec: float = 0.2,
 ) -> str | None:
     """Show the tree full screen until a row is picked or the user goes back.
+
+    A changed tree is redrawn as ``repaint_on_change`` polls it.
 
     Args:
       team: The agents.
       focused: The agent the screen shows; the cursor starts on it.
       stop: Called with an agent's label on Delete; returns what to say.
       cancel: Called with a job's agent and call id on Delete; returns what to say.
-      interval_sec: How often a changed tree is redrawn.
 
     Returns:
       label: The agent picked with Enter; ``None`` for Right or Ctrl+C.
@@ -159,15 +163,13 @@ async def pick(
     screen = _Screen(team=team, focused=focused, stop=stop, cancel=cancel)
     app: Application[str | None] = Application(
         layout=Layout(
-            Window(
-                FormattedTextControl(screen.text, focusable=True, show_cursor=False),
-            ),
+            Window(FormattedTextControl(screen.text), always_hide_cursor=True),
         ),
         key_bindings=screen.keys(),
         full_screen=True,
     )
     redraw = asyncio.create_task(
-        repaint_on_change(app.invalidate, screen.text, interval_sec),
+        repaint_on_change(app.invalidate, screen.text),
     )
     try:
         return await app.run_async()
@@ -191,7 +193,7 @@ class _Screen:
         self.cursor = next(
             (
                 i
-                for i, r in enumerate(rows(self.team, focused=self.focused))
+                for i, r in enumerate(self._rows())
                 if r.label == self.focused and not r.call_id
             ),
             0,
@@ -204,8 +206,8 @@ class _Screen:
           text: The rows, the cursor's reversed, then the key help.
 
         """
-        shown = rows(self.team, focused=self.focused)
-        self.cursor = min(self.cursor, max(len(shown) - 1, 0))
+        shown = self._rows()
+        self.cursor = max(min(self.cursor, len(shown) - 1), 0)
         return render(shown, cursor=self.cursor, note=self.note)
 
     def keys(self) -> KeyBindings:
@@ -226,9 +228,12 @@ class _Screen:
 
     # An agent may leave while the cursor sits past it; the cursor falls back a row.
     def _row(self) -> Row | None:
-        shown = rows(self.team, focused=self.focused)
+        shown = self._rows()
         self.cursor = min(self.cursor, len(shown) - 1)
         return shown[self.cursor] if shown else None
+
+    def _rows(self) -> list[Row]:
+        return rows(self.team, focused=self.focused)
 
     def _up(self, event: KeyPressEvent) -> None:
         del event
@@ -236,10 +241,7 @@ class _Screen:
 
     def _down(self, event: KeyPressEvent) -> None:
         del event
-        self.cursor = min(
-            self.cursor + 1,
-            len(rows(self.team, focused=self.focused)) - 1,
-        )
+        self.cursor = min(self.cursor + 1, len(self._rows()) - 1)
 
     def _enter(self, event: KeyPressEvent) -> None:
         row = self._row()
@@ -265,7 +267,6 @@ def _walk(
     parent: str | None,
     *,
     lead: str,
-    top: bool,
     focused: str,
     now: float,
     out: list[Row],
@@ -274,8 +275,9 @@ def _walk(
     labels = under.get(parent, [])
     for n, label in enumerate(labels):
         last = n == len(labels) - 1
-        branch = "" if top else lead + ("└─ " if last else "├─ ")
-        below = "" if top else lead + ("   " if last else "│  ")
+        # A root draws no branch, so its children's start at the margin.
+        branch = "" if parent is None else lead + ("└─ " if last else "├─ ")
+        below = "" if parent is None else lead + ("   " if last else "│  ")
         agent = team[label]
         jobs = [
             (call_id, job)
@@ -291,14 +293,13 @@ def _walk(
                 detail=f"${agent.spend_usd:.2f}",
             ),
         )
-        children = under.get(label, [])
         for k, (call_id, job) in enumerate(jobs):
-            twig = "└─ " if k == len(jobs) - 1 and not children else "├─ "
+            leaf = "└─ " if k == len(jobs) - 1 and label not in under else "├─ "
             tool = agent.tools.get(job.call.name)
             out.append(
                 Row(
                     label=label,
-                    branch=below + twig,
+                    branch=below + leaf,
                     text=tool.summary(job.call.arguments)
                     if tool is not None
                     else job.call.name,
@@ -312,7 +313,6 @@ def _walk(
             under,
             label,
             lead=below,
-            top=False,
             focused=focused,
             now=now,
             out=out,

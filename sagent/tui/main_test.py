@@ -40,6 +40,7 @@ import pytest
 
 from sagent.agent.agent import Agent, NoShrinker, default_system_prompt
 from sagent.agent.compactor import SummaryCompactor
+from sagent.agent.pruner import Pruner
 from sagent.agent.team import Team
 from sagent.lib.posix.attach import stop
 from sagent.lib.posix.detached import await_ready
@@ -106,16 +107,17 @@ from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
 from sagent.tui import main, slash
 from sagent.tui.console import ConsolePrinter
-from sagent.tui.prompt import Input, Panes, prompt_text
+from sagent.tui.prompt import Input, Panes, PromptSource, prompt_text
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.slash import Commands
-from sagent.tui.types import CommandOutput, Header
+from sagent.tui.types import CommandOutput, Frame, Header
 from sagent.tui.views import Views
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator, Sequence
 
+    from prompt_toolkit import PromptSession
     from rich.console import Console
 
     from sagent.model.types import Request, Response
@@ -485,6 +487,185 @@ def test_an_unknown_command_is_named_before_any_model_is_built(
     )
 
 
+@dataclass(slots=True, kw_only=True)
+class _Shown:
+    label: str = "Agent"
+
+
+@dataclass(slots=True, kw_only=True)
+class _TreeViews:
+    """What ``_tree`` asks of the views, and what it did to them."""
+
+    lineage: tuple[str, ...] = ("Agent", "a")
+    current: _Shown = field(default_factory=_Shown)
+    released: list[bool] = field(default_factory=list[bool])
+    focused: list[str] = field(default_factory=list[str])
+    asked: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
+
+    def hold(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def cancel(self) -> None:
+        pass
+
+    def release(self, *, show: bool) -> None:
+        self.released.append(show)
+
+    def focus(self, label: str) -> None:
+        self.focused.append(label)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("picked", "released", "focused"),
+    [
+        (None, [True], []),
+        ("Agent", [True], ["Agent"]),
+        ("a", [False], ["a"]),
+        ("gone", [False], []),
+    ],
+)
+async def test_the_tree_shows_the_agent_picked_or_the_one_before(
+    monkeypatch: pytest.MonkeyPatch,
+    picked: str | None,
+    released: list[bool],
+    focused: list[str],
+) -> None:
+    views = _TreeViews()
+
+    async def pick(lineage: object, **how: object) -> str | None:
+        assert lineage == views.lineage
+        views.asked.append(how)
+        return picked
+
+    monkeypatch.setattr(main, "pick", pick)
+    await main._tree(cast("Views", views))
+    assert (views.released, views.focused) == (released, focused)
+    assert views.asked == [
+        {"focused": "Agent", "stop": views.stop, "cancel": views.cancel},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_tree_that_fails_shows_the_agent_before(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    views = _TreeViews()
+
+    async def pick(lineage: object, **how: object) -> str | None:
+        del lineage, how
+        raise RuntimeError("tree broke")
+
+    monkeypatch.setattr(main, "pick", pick)
+    with pytest.raises(RuntimeError, match="tree broke"):
+        await main._tree(cast("Views", views))
+    assert views.released == [True]
+
+
+def test_an_action_s_options_are_its_own_and_those_no_setting_names() -> None:
+    async def done(args: str) -> str:
+        return args
+
+    def setting(name: str, *, valued: bool) -> Setting:
+        return Setting(
+            name=tuple(name.split(".")),
+            help_short="",
+            apply=done,
+            value=(lambda: "") if valued else None,
+            cli=True,
+        )
+
+    login = replace(setting("login", valued=False), flags=frozenset({"--headless"}))
+    settings = [login, setting("output", valued=True), setting("zap", valued=False)]
+    tail = ["--out=x", "--zap", "--zz", "-q", "--", "--after"]
+    assert main._action_options(login, tail, settings) == {
+        "--headless",
+        "--zap",
+        "--zz",
+    }
+    assert main._action_options(login, ["--zz"], settings) == {"--headless", "--zz"}
+
+
+def test_a_session_flag_is_never_abbreviated(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "--ephem")
+    with pytest.raises(SystemExit):
+        main.main()
+    assert "--ephem" in capsys.readouterr().err
+    _argv(monkeypatch, "--help")
+    with pytest.raises(SystemExit):
+        main.main()
+    out = capsys.readouterr().out
+    assert "Run a coding agent: interactively on a terminal" in out
+    assert "\nExamples:\n  python -m sagent " in out
+    del script
+
+
+def test_a_failed_command_is_logged_with_its_trace(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    seen: list[tuple[str | None, Path | None, bool]] = []
+
+    def noted(level: str | None, *, path: Path | None, interactive: bool) -> None:
+        seen.append((level, path, interactive))
+
+    async def broken(*args: object, **kwargs: object) -> int:
+        del args, kwargs
+        raise RuntimeError("boom")
+
+    monkeypatch.setenv("SAGENT_LOG_LEVEL", "INFO")
+    monkeypatch.setattr(main, "_logging", noted)
+    monkeypatch.setattr(main, "_dispatch", broken)
+    with caplog.at_level(logging.WARNING, logger=main.__name__):
+        assert asyncio.run(main._action(["mcp", "list"])) == 1
+    assert seen == [("INFO", None, True)]
+    (record,) = caplog.records
+    assert record.getMessage() == "command ['mcp', 'list'] failed"
+    assert isinstance(record.exc_info, tuple)
+    assert record.exc_info[0] is RuntimeError
+    assert capsys.readouterr().err == "Error: RuntimeError: boom\n"
+
+
+def test_a_command_s_own_help_and_flags_are_not_the_allow_list_s(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "login", "--help")
+    assert main.main() == 0
+    assert capsys.readouterr().out.startswith("usage: sagent login [-h]")
+    # ``--allow`` abbreviates no flag here: it is login's to refuse.
+    _argv(monkeypatch, "login", "--allow", "signing", "--provider", "signing")
+    assert main.main() == 1
+    assert "unrecognized arguments: --allow signing" in capsys.readouterr().err
+    # A command's name may be followed by words it does not take, for it to refuse.
+    _argv(monkeypatch, "login", "nope", "--provider", "signing")
+    assert main.main() == 1
+    assert "unrecognized arguments: nope" in capsys.readouterr().err
+    del script
+
+
+def test_a_command_says_what_it_did(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # What ``sys.argv`` holds is not what the command reads.
+    _argv(monkeypatch, "--allow-providers", "nowhere")
+    argv = ["login", "--provider", "signing", "--screen.thinking", "show"]
+    assert asyncio.run(main._agent_action(argv)) == 0
+    assert capsys.readouterr().out == "signing signed in\n"
+    del script
+
+
 def test_a_word_a_command_does_not_take_is_refused(
     script: _Script,
     monkeypatch: pytest.MonkeyPatch,
@@ -767,9 +948,10 @@ def test_a_resumed_session_comes_back_on_its_model_and_prompt_and_a_flag_wins(
     runs = (
         ("--effort", "high", "--system-prompt", "mine"),
         ("--continue",),
-        ("--continue", "--effort", "low"),
+        ("--continue", "--effort", "low", "--system-prompt", "theirs"),
     )
     stood: list[str] = []
+    systems: list[str] = []
     for given in runs:
         script.replies.append(reply("ok"))
         _argv(monkeypatch, "--provider", "scripted", "--model", "scripted", *given)
@@ -777,14 +959,14 @@ def test_a_resumed_session_comes_back_on_its_model_and_prompt_and_a_flag_wins(
         assert main.main() == 0
         (path,) = project_dir(tmp_path).glob("*/session.jsonl")
         stood.append(_stood_model(path))
+        systems.append(script.providers["scripted"].requests[-1].system[0])
 
     assert stood == [
         "scripted/scripted+fullcontext+highthink",
         "scripted/scripted+fullcontext+highthink",
         "scripted/scripted+fullcontext+lowthink",
     ]
-    (last,) = script.providers["scripted"].requests
-    assert last.system[0].endswith("mine")
+    assert [s.rpartition("\n\n")[2] for s in systems] == ["mine", "mine", "theirs"]
 
 
 def test_a_resumed_session_comes_back_on_its_account(
@@ -1758,6 +1940,154 @@ def test_only_the_servers_tools_names_are_connected(
     del script
 
 
+@pytest.mark.parametrize(
+    ("strict", "connected"),
+    [((), ["here", "git"]), (("--strict-mcp-config",), ["git"])],
+)
+def test_strict_mcp_config_leaves_out_the_project_s_servers(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    strict: tuple[str, ...],
+    connected: list[str],
+) -> None:
+    opened: list[list[str]] = []
+
+    class _Opened(McpSession):
+        def __init__(self, servers: Sequence[McpServer]) -> None:
+            opened.append([s.name for s in servers])
+            super().__init__([])
+
+    monkeypatch.chdir(tmp_path)
+    project = project_dir(tmp_path) / "mcp.json"
+    project.parent.mkdir(parents=True, exist_ok=True)
+    project.write_text(json_dumps({"mcpServers": {"here": {"command": "here-mcp"}}}))
+    monkeypatch.setattr(main, "McpSession", _Opened)
+    monkeypatch.setattr(main, "_tools", _no_tools)
+    monkeypatch.setattr(main, "_headless", _note_model([]))
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--ephemeral",
+        "--mcp-config",
+        json_dumps({"mcpServers": {"git": {"command": "git-mcp"}}}),
+        *strict,
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    assert opened == [connected]
+    del script
+
+
+def test_an_interactive_session_runs_on_its_team_signed_in_and_waits_out_limits(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    logs: logging.Logger,
+    tmp_path: Path,
+) -> None:
+    ran: list[tuple[bool, bool, Path | None]] = []
+
+    async def run(
+        agent: Agent,
+        *,
+        catalog: ModelCatalog,
+        team: Team,
+        history: Path | None,
+        show_thinking: bool,
+    ) -> None:
+        del catalog, show_thinking
+        ran.append((agent.runtime.persistent_retry, team["lead"] is agent, history))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "run", run)
+    monkeypatch.setattr(main, "print_welcome", _no_welcome)
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--account",
+        "work",
+        "--ephemeral",
+        "--name",
+        "lead",
+        "--history",
+        str(tmp_path / "h"),
+    )
+    _stdin(monkeypatch, tty=True)
+    assert main.main() == 0
+    assert ran == [(True, True, tmp_path / "h")]
+    assert capsys.readouterr().err.startswith("[/model] work@scripted/scripted+")
+    del script, logs
+
+
+def test_an_action_a_flag_names_runs_before_the_session_and_says_nothing(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    signed: list[str] = []
+
+    async def sign_in(
+        server: McpServer,
+        *,
+        show: Callable[[str], object],
+        headless: bool,
+    ) -> None:
+        del headless
+        show("visit")
+        signed.append(server.name)
+
+    class _Unopened(McpSession):
+        def __init__(self, servers: Sequence[McpServer]) -> None:
+            del servers
+            super().__init__([])
+
+    monkeypatch.chdir(tmp_path)
+    project = project_dir(tmp_path) / "mcp.json"
+    project.parent.mkdir(parents=True, exist_ok=True)
+    project.write_text(json_dumps({"mcpServers": {"web": {"url": "https://h/mcp"}}}))
+    monkeypatch.setattr(mcp_settings, "login", sign_in)
+    monkeypatch.setattr(main, "McpSession", _Unopened)
+    monkeypatch.setattr(main, "_headless", _note_model([]))
+    _argv(
+        monkeypatch,
+        "--provider",
+        "signing",
+        "--ephemeral",
+        "--mcp.login",
+        "web",
+        "--login",
+        "",
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    assert signed == ["web"]
+    signing = script.providers["signing"]
+    assert isinstance(signing, _Signing)
+    assert signing.signed_in == 1
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.parametrize(
+    ("model", "owned"),
+    [
+        ("scripted/x", True),
+        ("work@scripted/x", True),
+        ("scripted/x/y", True),
+        ("scripted", False),
+        ("nope/x", False),
+    ],
+)
+def test_a_model_names_its_own_provider_before_its_first_slash(
+    model: str,
+    owned: bool,
+) -> None:
+    assert main._owned(_Script().catalog(), model) is owned
+
+
 _WIDE_PRICES = PriceCatalog(window=1_000_000)
 _WIDE = ModelCapability(
     model_id="wide-1.0",
@@ -1905,6 +2235,7 @@ def _tools(*argv: str, cwd: Path = Path("/w")) -> dict[str, object]:
         _flags(*argv),
         cwd=cwd,
         team=team,
+        mcp=(),
     )
     return {tool.name: tool for tool in tools}
 
@@ -1935,7 +2266,9 @@ _DEFAULT_TOOLS = [
 
 
 def test_every_tool_loads_by_default() -> None:
-    assert list(_tools()) == _DEFAULT_TOOLS
+    tools = _tools()
+    assert list(tools) == _DEFAULT_TOOLS
+    assert [type(t).__name__ for t in tools.values()] == _DEFAULT_TOOLS
 
 
 def test_an_ephemeral_session_keeps_no_memories() -> None:
@@ -1961,7 +2294,9 @@ def test_an_unknown_tool_lists_the_known_ones() -> None:
 def test_the_team_s_tools_share_the_team_and_bash_knows_its_peers() -> None:
     catalog = _Script().catalog()
     team = Team(catalog=catalog)
-    tools = {t.name: t for t in main._tools(_flags(), cwd=Path("/w"), team=team)}
+    tools = {
+        t.name: t for t in main._tools(_flags(), cwd=Path("/w"), team=team, mcp=())
+    }
     web = [WebFetch, WebSearch, PaperSearch, PaperDetails, PaperAuthor, PaperFetch]
     for kind in web:
         assert isinstance(tools[kind.__name__], kind)
@@ -2213,6 +2548,17 @@ def test_resume_by_prefix_prefers_this_directory(tmp_path: Path) -> None:
     _journal(project_dir(tmp_path / "other") / "ab3400000000", *_said("there"))
     assert (
         main._journal_path(_flags("--resume", "ab"), cwd=tmp_path, interactive=False)
+        == here
+    )
+
+
+def test_an_old_session_elsewhere_does_not_blur_a_prefix_unique_here(
+    tmp_path: Path,
+) -> None:
+    here = _journal(project_dir(tmp_path) / "ef1200000000", *_said("here"))
+    _old_session(project_dir(tmp_path / "other") / "ef3400000000", "there")
+    assert (
+        main._journal_path(_flags("--resume", "ef"), cwd=tmp_path, interactive=False)
         == here
     )
 
@@ -2868,7 +3214,7 @@ async def test_a_write_to_stderr_during_a_session_names_the_call_again(
             if line == "/warn":
                 read = Header(key="1", label="Read a.py", display=ToolDisplay())
                 made[0].call(read)
-                print("a library warning", file=sys.stderr)  # noqa: T201 -- A library writing to stderr is what is tested.
+                sys.stderr.write("a library warning\n")
                 made[0].failed("gone", header=read)
                 return False
             return await super().__call__(line)
@@ -3008,8 +3354,35 @@ def test_compact_picks_the_compactor(argv: tuple[str, ...], compactor: type) -> 
 
 
 @pytest.mark.parametrize(
+    ("argv", "pruner"),
+    [((), Pruner), (("--no-prune",), NoShrinker)],
+)
+def test_prune_picks_the_pruner(argv: tuple[str, ...], pruner: type) -> None:
+    agent = main._agent(
+        _flags(*argv),
+        model=ScriptedProvider()["scripted"],
+        tools=(),
+        journal=None,
+        tool_context=ToolContext(cwd=Path("/w")),
+        interactive=False,
+    )
+    assert type(agent.session.pruner) is pruner
+
+
+def test_the_compactor_is_one_of_two_and_compacting_is_a_switch() -> None:
+    assert (_flags().compactor, _flags().prune) == ("summary", True)
+    assert _flags("--compact").compact is True
+    with pytest.raises(SystemExit):
+        _flags("--compactor", "lossy")
+
+
+@pytest.mark.parametrize(
     ("argv", "style"),
-    [((), "summary"), (("--compactor", "session-audit"), "session-audit")],
+    [
+        ((), "summary"),
+        (("--compactor", "summary"), "summary"),
+        (("--compactor", "session-audit"), "session-audit"),
+    ],
 )
 def test_compactor_picks_how_it_compacts(argv: tuple[str, ...], style: str) -> None:
     agent = main._agent(
@@ -3332,6 +3705,88 @@ async def test_run_wires_the_catalog_team_and_printer_into_its_commands(
 
 
 _LEFT, _DOWN, _RIGHT = "\x1b[D", "\x1b[B", "\x1b[C"
+
+
+@pytest.mark.asyncio
+async def test_the_prompt_repaints_and_queues_for_the_view_shown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sources: list[PromptSource] = []
+    entries: list[Input] = []
+    watched: list[Views] = []
+    repaints: list[tuple[Callable[[], None], Callable[[], object]]] = []
+
+    def source(
+        session: PromptSession[str],
+        *,
+        panes: Panes,
+        notice: Callable[[str], None],
+    ) -> PromptSource:
+        sources.append(PromptSource(session, panes=panes, notice=notice))
+        return sources[-1]
+
+    def entry() -> Input:
+        entries.append(Input())
+        return entries[-1]
+
+    started = asyncio.Barrier(3)
+
+    class _Views(Views):
+        @override
+        async def watch(self, interval_sec: float = 0.2) -> None:
+            watched.append(self)
+            await started.wait()
+            await super().watch(interval_sec)
+
+    async def repaint(
+        invalidate: Callable[[], None],
+        frame: Callable[[], object],
+    ) -> None:
+        repaints.append((invalidate, frame))
+        await started.wait()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(main, "PromptSource", source)
+    monkeypatch.setattr(main, "Input", entry)
+    monkeypatch.setattr(main, "Views", _Views)
+    monkeypatch.setattr(main, "repaint_on_change", repaint)
+    catalog = _Script().catalog()
+    async with (
+        Team(catalog=catalog) as team,
+        Agent(model=ScriptedProvider()["scripted"]) as agent,
+        Agent(model=ScriptedProvider()["scripted"]) as kid,
+    ):
+        team.join(agent)
+        team.join(kid, label="kid", parent="Agent")
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            running = asyncio.create_task(
+                main.run(
+                    agent,
+                    catalog=catalog,
+                    team=team,
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                ),
+            )
+            await asyncio.wait_for(started.wait(), timeout=5)
+            (views,) = watched
+            ((invalidate, frame),) = repaints
+            views.focus("kid")
+            (prompt,), (typed,) = sources, entries
+            shown = views.current
+            assert prompt.panes is shown.panes
+            assert invalidate == prompt.session.app.invalidate
+            assert frame() == Frame(
+                deferred=shown.deferred.frame(),
+                input=typed.frame(),
+                status=shown.status.frame(),
+            )
+            pipe.send_text("/quit\r")
+            await asyncio.wait_for(running, timeout=5)
 
 
 @pytest.mark.asyncio

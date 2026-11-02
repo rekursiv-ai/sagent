@@ -27,11 +27,18 @@ from sagent.model.exceptions import AuthError
 from sagent.providers.anthropic import login
 from sagent.providers.anthropic.login import ClaudeLogin
 from sagent.providers.resources import SharedResources
+from sagent.providers.testing import refuse_browsers
 
 
 if TYPE_CHECKING:
     from asyncio.subprocess import Process
     from collections.abc import Awaitable, Callable
+
+
+@pytest.fixture(autouse=True)
+def no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a test that opens the user's browser, as a sign-in not headless would."""
+    refuse_browsers(monkeypatch, login)
 
 
 _GRANT_URL = "https://platform.claude.com/v1/oauth/token"
@@ -676,6 +683,8 @@ async def test_a_keychain_write_keeps_the_login_out_of_every_command_line(
     leaked = [call for call in keychain.calls() if any("at-2" in arg for arg in call)]
     assert leaked == []
     assert _oauth(keychain.entry)["refreshToken"] == "rt-at-2"
+    # Each read, before and after the write, says nothing on stdin.
+    assert (keychain.dir / "read-stdin").read_text() == ""
 
 
 @pytest.mark.asyncio
@@ -842,6 +851,7 @@ dir=$(dirname "$0")
 printf '%s\\0' "$@" >> "$dir/calls"
 printf '\\n' >> "$dir/calls"
 if [ "$*" = "find-generic-password -a {user} -s Claude Code-credentials -w" ]; then
+  cat >> "$dir/read-stdin"
   if [ -e "$dir/entry" ]; then cat "$dir/entry"; exit 0; fi
   echo "security: The specified item could not be found in the keychain." >&2
   exit 44

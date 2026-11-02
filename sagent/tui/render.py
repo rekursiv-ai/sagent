@@ -149,7 +149,7 @@ class Scrollback:
         return (
             isinstance(record, ToolResult)
             and record.stub == "pending"
-            and any(h.key == _key(record.call_id, "") for h in self._held)
+            and any(h.key == _key(record.call_id) for h in self._held)
         )
 
     def __call__(self, event: types.RuntimeEvent) -> None:
@@ -294,10 +294,11 @@ class Scrollback:
             self.show_held()
         match record:
             case UserMessage(content=content):
-                if _delivers(content or ""):
+                text = content or ""
+                if _delivers(text):
                     return
                 self._flush()
-                p.user(content or "")
+                p.user(text)
                 self.shown += 1
             # What the user sent by ``/send`` shows as that command does.
             case AgentToAgentMessage(sender="user", content=content):
@@ -308,17 +309,16 @@ class Scrollback:
                 self._flush()
                 p.agent(sender or "agent", recipient=None, text=content or "")
                 self.shown += 1
+            # A streamed record printed as it streamed; what it still holds prints
+            # before the next row or at the turn's end, as anything held does.
             case Thinking(content=content):
-                if index in streamed:
-                    self._close("thinking")
-                elif p.show_thinking and (content or "").strip():
+                text = content or ""
+                if index not in streamed and p.show_thinking and text.strip():
                     self._flush()
-                    p.thinking(content or "", opens=True, closes=True)
+                    p.thinking(text, opens=True, closes=True)
             case AssistantMessage(content=content):
                 text = (content or "").rstrip("\n")
-                if index in streamed:
-                    self._close("reply")
-                elif text.strip():
+                if index not in streamed and text.strip():
                     self._flush()
                     p.markdown(text)
                 self.shown += bool(text.strip())
@@ -333,7 +333,7 @@ class Scrollback:
             case ToolResult():
                 self._flush()
                 call_id = record.call_id.removesuffix(self.markers.arrival)
-                header = self._calls.get(_key(call_id, ""))
+                header = self._calls.get(_key(call_id))
                 if header is None:
                     self._orphaned(record)
                     return
@@ -370,9 +370,9 @@ class Scrollback:
             for record in event.response.records:
                 if (
                     isinstance(record, AssistantMessage)
-                    and (record.content or "").strip()
+                    and (text := record.content or "").strip()
                 ):
-                    p.note(record.content or "", lead=f"{label}: ", prose=True)
+                    p.note(text, lead=f"{label}: ", prose=True)
                 elif isinstance(record, ToolCall):
                     header = call_header(
                         record,
@@ -430,19 +430,20 @@ class Scrollback:
         streamed, opened = printed.streamed, printed.opened
         # Until it says something a stream is not open: a closing record that
         # is blank prints nothing, so a blank stream must not either.
+        # The other stream closed above, so a stream that opens is the only one open.
         if stream not in opened and held.strip():
-            streamed |= {printed.last}
-            opened |= {stream}
+            streamed = streamed | {printed.last}
+            opened = frozenset({stream})
             if stream == "thinking":
                 self.printer.thinking("", opens=True, closes=False)
         if stream in opened:
             cut = stable_boundary(held)
             # Past the cap, give up on a block boundary but keep whole lines,
             # unless a fence is open: splitting it would print code as prose.
-            if cut <= 0 and len(held) > self.flush_chars:
+            if not cut and len(held) > self.flush_chars:
                 fenced = sum(ln.lstrip().startswith("```") for ln in held.split("\n"))
                 cut = len(held) if fenced % 2 else held.rfind("\n") + 1 or len(held)
-            if cut > 0:
+            if cut:
                 self._block(stream, held[:cut])
                 held = held[cut:]
         self._printed = replace(
@@ -678,7 +679,7 @@ def _without_reminders(text: str) -> str:
 _NOTED: Final = ToolDisplay(output=DisplaySpec(lines=None))
 
 
-def _key(call_id: str, agent: str) -> str:
+def _key(call_id: str, agent: str = "") -> str:
     """Return the key a call's label prints under; a child's names the child."""
     return f"{agent}: {call_id}" if agent else call_id
 

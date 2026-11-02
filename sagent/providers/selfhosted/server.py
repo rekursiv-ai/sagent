@@ -273,7 +273,7 @@ class SelfHostedModel(AsyncResource):
     async def count(self, request: Request) -> int:
         """Return the tokens ``request`` renders to, as the model's tokenizer counts."""
         loaded = await self._loaded()
-        return _render(loaded.tokenizer, request, settings=self.settings).shape[-1]
+        return _render(loaded.tokenizer, request, settings=self.settings).size(1)
 
     def attachment_tokens(self, attachment: Attachment) -> int:
         """Return ``0``: the chat template renders text alone, so no attachment is sent."""
@@ -292,7 +292,7 @@ class SelfHostedModel(AsyncResource):
         """
         loaded = await self._loaded()
         ids = _render(loaded.tokenizer, request, settings=self.settings)
-        prompt = ids.shape[-1]
+        prompt = ids.size(1)
         limits = self.capability.limits
         budget = min(
             request.response_tokens(limits),
@@ -312,7 +312,7 @@ class SelfHostedModel(AsyncResource):
         if said:
             yield TextChunk(text=said)
         records = (*((AssistantMessage(content=said),) if said else ()), *calls)
-        tokens = TokenCount(request=prompt, response=new.shape[-1])
+        tokens = TokenCount(request=prompt, response=new.size(0))
         # ``generate`` says no finish reason; a reply that spent its budget ran out.
         stop_reason = (
             "max_tokens"
@@ -501,7 +501,7 @@ def _generate(
     )
     with torch.inference_mode():
         out = loaded.model.generate(ids, **options)
-    return out[0, ids.shape[-1] :]
+    return out[0, ids.size(1) :]
 
 
 def _options(
@@ -541,7 +541,7 @@ class _Stopped:
         return torch.full(
             (input_ids.shape[0],),
             self._event.is_set(),
-            dtype=torch.bool,
+            dtype=torch.bool,  # pragma: no mutate -- a bool fill is bool anyway.
             device=input_ids.device,
         )
 
@@ -552,12 +552,12 @@ def _messages(request: Request) -> list[dict[str, object]]:
     messages: list[dict[str, object]] = []
     if system := "\n\n".join(text for text in request.system if text):
         messages.append({"role": "system", "content": system})
-    turn: dict[str, object] | None = None
     for record in wire.flatten(request.records):
         if isinstance(record, (AssistantMessage, ToolCall)):
-            if turn is None:
-                turn = {"role": "assistant", "content": ""}
-                messages.append(turn)
+            # The model's records since another turn merge into one message.
+            if not messages or messages[-1]["role"] != "assistant":
+                messages.append({"role": "assistant", "content": ""})
+            turn = messages[-1]
             if isinstance(record, AssistantMessage):
                 turn["content"] = f"{turn['content']}{record.content or ''}"
             else:
@@ -568,10 +568,8 @@ def _messages(request: Request) -> list[dict[str, object]]:
             continue
         said = wire.user_content(record)
         if said is not None:
-            turn = None
             messages.append({"role": "user", "content": said[0]})
         elif isinstance(record, ToolResult):
-            turn = None
             text = record.text()
             messages.append(
                 {

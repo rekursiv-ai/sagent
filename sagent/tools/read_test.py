@@ -237,23 +237,19 @@ async def test_a_write_during_the_read_is_not_taken_for_what_was_seen(
     f = tmp_path / "f.txt"
     f.write_text("old\n")
     os.utime(f, (1_000_000, 1_000_000))
-    original = Path.read_text
+    original = Path.read_bytes
 
-    def racing_read(
-        self: Path,
-        encoding: str | None = None,
-        errors: str | None = None,
-    ) -> str:
-        text = original(self, encoding=encoding, errors=errors)
-        if self == f and text == "old\n":
+    def racing_read(self: Path) -> bytes:
+        data = original(self)
+        if self == f and data == b"old\n":
             f.write_text("new\n")
             os.utime(f, (2_000_000, 2_000_000))
-        return text
+        return data
 
     context = ToolContext(cwd=tmp_path)
-    monkeypatch.setattr(Path, "read_text", racing_read)
+    monkeypatch.setattr(Path, "read_bytes", racing_read)
     first = await Read().call(context, {"file_path": "f.txt"})
-    monkeypatch.setattr(Path, "read_text", original)
+    monkeypatch.setattr(Path, "read_bytes", original)
     second = await Read().call(context, {"file_path": "f.txt"})
     assert "new" in first.text() + second.text()
 
@@ -695,6 +691,140 @@ def test_a_read_after_a_known_cd_names_the_file_from_there() -> None:
 )
 def test_a_command_that_is_no_plain_read_is_not_reads_job(command: str) -> None:
     assert _from_shell(command) is None
+
+
+@pytest.mark.parametrize(
+    ("command", "arguments"),
+    [
+        ("head -n", None),
+        ("head -3 foo.txt", {"file_path": "foo.txt", "limit": 3}),
+        ("head --lines=+3 foo.txt", {"file_path": "foo.txt", "limit": 3}),
+        ("tail --lines=+3 foo.txt", {"file_path": "foo.txt", "offset": 3}),
+        ("tail -n+4 foo.txt", {"file_path": "foo.txt", "offset": 4}),
+        ("tail -5 foo.txt", {"file_path": "foo.txt", "last_lines": 5}),
+        ("tail -n 2 -n 6 foo.txt", {"file_path": "foo.txt", "last_lines": 6}),
+        ("tail -n +2 -6 foo.txt", {"file_path": "foo.txt", "last_lines": 6}),
+        ("sed -n '07,7p' foo.txt", {"file_path": "foo.txt", "offset": 7, "limit": 1}),
+        ("head foo.txt -n", {"file_path": "foo.txt", "limit": 10}),
+        ("tail foo.txt -n", {"file_path": "foo.txt", "last_lines": 10}),
+        ("head --lines=1=2 foo.txt", "refused"),
+        ("head - foo.txt", "refused"),
+        ("tail -n -3 foo.txt", {"file_path": "foo.txt", "last_lines": 3}),
+        # A count's letters are no digits: an ``X`` in it reads as no count.
+        ("head -n X3 foo.txt", "refused"),
+        ("cat -s foo.txt", "refused"),
+    ],
+)
+def test_each_spelling_of_a_count_and_its_sign_is_read(
+    command: str,
+    arguments: dict[str, PlainTree] | str | None,
+) -> None:
+    refused = (
+        "Read each file with the Read tool, all in one block: one round trip,"
+        " and lines numbered to cite."
+    )
+    assert _from_shell(command) == (refused if arguments == "refused" else arguments)
+
+
+@pytest.mark.parametrize("command", ["head -n", "tail -n"])
+def test_a_count_flag_with_no_word_after_it_reads_nothing(command: str) -> None:
+    assert _from_shell(command) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["cat 'a`b'", "cat '[ab]'", "cat 'a?'", "cat 'a$'", "cat 'a*'"],
+)
+def test_a_path_glob_or_expansion_would_read_is_refused(command: str) -> None:
+    assert _from_shell(command) == (
+        "Read each file with the Read tool, all in one block: one round trip,"
+        " and lines numbered to cite."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("at", "binary"), [(8191, True), (8192, False)])
+async def test_a_nul_in_the_first_8192_bytes_marks_the_file_binary(
+    tmp_path: Path,
+    at: int,
+    binary: bool,
+) -> None:
+    (tmp_path / "f").write_bytes(b"a" * at + b"\x00")
+    result = await _read(tmp_path, file_path="f")
+    assert result.text().startswith("[Binary file") is binary
+
+
+@pytest.mark.asyncio
+async def test_line_ends_read_as_a_text_file_s_do(tmp_path: Path) -> None:
+    (tmp_path / "f").write_bytes(b"a\r\nb\rc\n")
+    assert (await _read(tmp_path, file_path="f")).text() == "1\ta\n2\tb\n3\tc\n"
+
+
+@pytest.mark.asyncio
+async def test_a_read_unchanged_since_the_last_is_said_so_for_no_call(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "f").write_text("a\n")
+    context = ToolContext(cwd=tmp_path)
+    _ = await Read().call(context, {"file_path": "f"})
+    again = await Read().call(context, {"file_path": "f"})
+    assert again.text().startswith("[File unchanged")
+    assert again.call_id == ""
+
+
+@pytest.mark.asyncio
+async def test_a_cut_read_never_passes_its_cap(tmp_path: Path) -> None:
+    # 10,000 lines: resuming at the last adds the digit the note must fit.
+    (tmp_path / "f").write_text("".join(f"{i}\n" for i in range(10_000)))
+    numbered = [f"{n}\t{n - 1}\n" for n in range(9_990, 10_001)]
+
+    def cut(kept: int) -> str:
+        left, resume = 11 - kept, 9_990 + kept
+        note = f"\n... ({left:,} more lines. Use offset={resume} to continue.)"
+        return "".join(numbered[:kept]) + note
+
+    # From the least that holds one line and its note.
+    for cap in range(len(cut(1)), 200):
+        context = ToolContext(cwd=tmp_path, max_result_chars=cap)
+        text = (await Read().call(context, {"file_path": "f", "offset": 9_990})).text()
+        assert len(text) <= cap, cap
+        # As many lines as fit beside the note: one more would not.
+        kept = text.count("\t")
+        if kept < 11:
+            assert text == cut(kept), cap
+            assert kept == 10 or len(cut(kept + 1)) > cap, cap
+    # Below that, the one line is kept anyway: a result is never empty.
+    context = ToolContext(cwd=tmp_path, max_result_chars=len(cut(1)) - 1)
+    result = await Read().call(context, {"file_path": "f", "offset": 9_990})
+    assert result.text() == cut(1)
+
+
+@pytest.mark.asyncio
+async def test_a_whole_read_that_fits_its_cap_keeps_every_line(tmp_path: Path) -> None:
+    (tmp_path / "f").write_text("a\nb\n")
+    context = ToolContext(cwd=tmp_path, max_result_chars=len("1\ta\n2\tb\n"))
+    result = await Read().call(context, {"file_path": "f"})
+    assert result.text() == "1\ta\n2\tb\n"
+
+
+@pytest.mark.asyncio
+async def test_a_page_is_rendered_at_twice_72_dpi_as_a_quality_85_jpeg(
+    tmp_path: Path,
+) -> None:
+    _pdf(tmp_path / "doc.pdf", pages=1)
+    result = await _read(tmp_path, file_path="doc.pdf")
+    (attachment,) = result.attachments
+    doc = pdfium.PdfDocument(str(tmp_path / "doc.pdf"))
+    try:
+        page = doc[0]
+        image = page.render(scale=2).to_pil()
+        page.close()
+    finally:
+        doc.close()
+    want = BytesIO()
+    image.save(want, format="JPEG", quality=85, optimize=True)
+    assert attachment.data == want.getvalue()
+    assert Image.open(BytesIO(attachment.data)).size == (72, 72)
 
 
 async def _read(

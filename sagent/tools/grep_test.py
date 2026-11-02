@@ -787,6 +787,104 @@ def test_a_command_that_is_no_file_search_is_not_greps_job(command: str) -> None
     assert _from_shell(command) is None
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        *(
+            f"rg {flag} x"
+            for flag in ("-A", "-B", "-C", "-m", "--max-count", "-e", "-f")
+        ),
+        "rg --color x",
+        *(f"grep {flag} x" for flag in ("-d", "-D", "--label")),
+        *(f"rg {flag} x" for flag in ("-g", "--glob", "-t", "-d", "--max-depth")),
+    ],
+)
+def test_a_flag_s_value_is_no_file_to_search(command: str) -> None:
+    # With nothing left to name a pattern or file, no call stands in for it.
+    assert _from_shell(command) is None
+
+
+def test_patterns_given_by_flag_are_each_searched_for() -> None:
+    assert _from_shell("rg -e x -e y f") == {
+        "output_mode": "content",
+        "pattern": "x|y",
+        "path": "f",
+    }
+
+
+@pytest.mark.parametrize(
+    ("command", "follow"),
+    [("grep -R x .", True), ("grep --dereference-recursive x .", True)],
+)
+def test_grep_s_link_following_recursion_follows_links(
+    command: str,
+    follow: bool,
+) -> None:
+    called = _from_shell(command)
+    assert isinstance(called, dict)
+    assert called["follow"] is follow
+
+
+def test_each_recursion_and_regex_flag_is_read() -> None:
+    for flag in ("-r", "-R"):
+        assert isinstance(_from_shell(f"grep {flag} x"), dict)
+    for flag in ("-E", "-P"):
+        called = _from_shell(f"grep {flag} 'a+' f")
+        assert isinstance(called, dict)
+        assert called["pattern"] == "a+"
+
+
+def test_a_path_with_any_other_letter_is_searched() -> None:
+    called = _from_shell("grep -r x XX")
+    assert isinstance(called, dict)
+    assert called["path"] == "XX"
+
+
+@pytest.mark.asyncio
+async def test_a_cut_result_never_passes_its_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Resuming past 9,999, with 100 left after one or two rows kept, fills the
+    # note's every digit: the reserve must hold all of them.
+    _capture(monkeypatch, rows=[Row(text=f"row{i:05d}") for i in range(10_101)])
+    # From the least that holds the note and one row.
+    for cap in range(62, 160):
+        result = await Grep(max_result_chars=cap).call(
+            ToolContext(cwd=tmp_path),
+            {"pattern": "r", "offset": 9_999},
+        )
+        assert len(result.text()) <= cap, cap
+
+
+def test_rg_reading_its_input_by_dash_is_not_greps_job() -> None:
+    assert _from_shell("rg x -") is None
+
+
+def test_rg_s_s_undoes_an_ignore_case_that_was_never_given() -> None:
+    assert _from_shell("rg -s x f") == {
+        "output_mode": "content",
+        "pattern": "x",
+        "path": "f",
+    }
+
+
+def test_rg_s_dot_flag_searches_hidden_files_as_grep_does() -> None:
+    assert _from_shell("rg -. x f") == {
+        "output_mode": "content",
+        "pattern": "x",
+        "path": "f",
+    }
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["grep -r x 'a`b'", "grep -r x '[ab]'", "grep -r x 'a?'", "grep -r x 'a$'"],
+)
+def test_a_path_glob_or_expansion_would_read_is_refused(command: str) -> None:
+    assert _from_shell(command) == _REFUSAL
+
+
 def _capture(
     monkeypatch: pytest.MonkeyPatch,
     *,

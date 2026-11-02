@@ -64,7 +64,7 @@ class VisionAttention(nn.Module):
     def __init__(self, dim: int, num_heads: int) -> None:
         super().__init__()
         self.num_heads = num_heads
-        self.qkv = nn.Linear(dim, dim * 3, bias=True)
+        self.qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
 
     @override
@@ -118,8 +118,8 @@ class VisionMLP(nn.Module):
 
     def __init__(self, dim: int, intermediate: int) -> None:
         super().__init__()
-        self.linear_fc1 = nn.Linear(dim, intermediate, bias=True)
-        self.linear_fc2 = nn.Linear(intermediate, dim, bias=True)
+        self.linear_fc1 = nn.Linear(dim, intermediate)
+        self.linear_fc2 = nn.Linear(intermediate, dim)
         self.act = nn.GELU(approximate="tanh")
 
     @override
@@ -213,17 +213,26 @@ class VisionModel(nn.Module):
         self.temporal_patch_size = temporal_patch_size
         self.in_channels = in_channels
         self.hidden_size = hidden_size
+        head, uneven = divmod(hidden_size, num_heads)
+        # Each head's channels split in two: half rotate by row, half by column.
+        rotary, odd = divmod(head, 2)
+        if uneven or odd:
+            raise ValueError(
+                f"hidden_size={hidden_size} must split into num_heads={num_heads}"
+                " heads of an even width.",
+            )
         kernel = (temporal_patch_size, patch_size, patch_size)
+        # Each patch is convolved alone, an input the kernel's own size, so no
+        # stride moves the kernel.
         self.patch_embed = nn.Conv3d(
             in_channels,
             hidden_size,
             kernel_size=kernel,
-            stride=kernel,
-            bias=True,
+            stride=kernel,  # pragma: no mutate -- see above.
         )
         self.pos_embed = nn.Embedding(num_position_embeddings, hidden_size)
         self.num_grid_per_side = math.isqrt(num_position_embeddings)
-        self.rotary_pos_emb = VisionRotaryEmbedding(hidden_size // num_heads // 2)
+        self.rotary_pos_emb = VisionRotaryEmbedding(rotary)
         self.blocks = nn.ModuleList(
             [
                 VisionBlock(hidden_size, num_heads, intermediate_size)
@@ -317,7 +326,7 @@ class VisionModel(nn.Module):
                 torch.arange(cols, device=device)[None, :, None, None] * merge
                 + inner[None, None, None, :]
             ).expand(rows, cols, merge, merge)
-            coords = torch.stack((row.reshape(-1), col.reshape(-1)), dim=-1)
+            coords = torch.stack((row.reshape(-1), col.reshape(-1)), dim=1)
             ids.append(coords.repeat(frames, 1))
         return table[torch.cat(ids)].flatten(1)
 

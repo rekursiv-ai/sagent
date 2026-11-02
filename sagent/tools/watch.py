@@ -93,7 +93,7 @@ def lines(
             case SystemMessage(subtype=subtype, content=said):
                 out.append(f"r{n} [{subtype or 'system'}] {_short(said)}")
             case _:
-                pass
+                continue
     return out
 
 
@@ -138,9 +138,7 @@ class Feed:
                 self.send()
                 return
             if self.worked:
-                # pragma: no mutate start -- only its truth is read; None is as false.
                 self.worked = False
-                # pragma: no mutate end
                 self.pending.append(
                     f"[idle: {self.watched} does nothing until messaged]",
                 )

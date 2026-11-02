@@ -56,17 +56,10 @@ def main() -> int:
         if entry_points_name is None:
             raise SystemExit("wheel is missing *.dist-info/entry_points.txt")
         entry_points = archive.read(entry_points_name).decode()
-    required_entry_points = {"sagent": "sagent.tui.main:main"}
-    scripts = _console_scripts(entry_points)
-    missing_entry_points = [
-        f"{name} = {target}"
-        for name, target in required_entry_points.items()
-        if scripts.get(name) != target
-    ]
-    if missing_entry_points:
+    # The one console script the package ships.
+    if _console_scripts(entry_points).get("sagent") != "sagent.tui.main:main":
         raise SystemExit(
-            "wheel is missing required console scripts: "
-            + ", ".join(missing_entry_points),
+            "wheel is missing required console scripts: sagent = sagent.tui.main:main",
         )
     return 0
 

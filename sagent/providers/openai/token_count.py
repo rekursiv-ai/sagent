@@ -143,19 +143,13 @@ class _Tiles:
 
 
 # The images-vision guide's tables (2026-10-03). GPT-6 Sol and Luna and 6.1 Sol
-# are in neither; they take Astra's GPT-6 rule.
+# are in neither; they take Astra's GPT-6 rule, as ``wire.gpt_6`` names them.
+# GPT-4.1 and GPT-4o bill the default, 85 a base and 170 a tile.
 def _vision(model_id: str) -> _Patches | _Tiles:
     """Return how ``model_id`` bills an image."""
-    gpt_6 = _Patches(multiplier=1.2)
+    if wire.gpt_6(model_id):
+        return _Patches(multiplier=1.2)
     rules: dict[str, _Patches | _Tiles] = {
-        "astra-6.0": gpt_6,
-        "sol-6.1": gpt_6,
-        "sol-6.0": gpt_6,
-        "luna-6.0": gpt_6,
-        "sol-5.6": gpt_6,
-        "gpt-5.6": gpt_6,
-        "terra-5.6": gpt_6,
-        "luna-5.6": gpt_6,
         "gpt-5.5": _Patches(multiplier=1.2, budget=10_000),
         "gpt-5.4": _Patches(multiplier=1.2, budget=2_500),
         "gpt-mini-5.4": _Patches(multiplier=1.2, budget=2_500),
@@ -163,8 +157,6 @@ def _vision(model_id: str) -> _Patches | _Tiles:
         "gpt-5.2": _Patches(multiplier=1.2, budget=6_144),
         "gpt-mini-4.1": _Patches(multiplier=1.62, budget=6_144),
         "gpt-5.1": _Tiles(base=70, tile=140),
-        "gpt-4.1": _Tiles(base=85, tile=170),
-        "gpt-omni-4.0": _Tiles(base=85, tile=170),
         "gpt-omni-mini-4.0": _Tiles(base=2833, tile=5667),
     }
     return rules.get(model_id, _Tiles(base=85, tile=170))

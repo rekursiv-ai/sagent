@@ -25,7 +25,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 import base64
@@ -33,10 +32,10 @@ import binascii
 import glob
 import logging
 import os
-import tempfile
 
 from treekle import PlainTree, ReadError, from_plain, json_loads
 
+from sagent.lib.files.owner_only import write_private
 from sagent.lib.userdirs import data_dir
 from sagent.model.cost import TokenCost, TokenCount
 from sagent.model.types import Response
@@ -76,6 +75,7 @@ from sagent.session.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping, Sequence
+    from pathlib import Path
 
     from sagent.runtime.types import ModelContextEvent
 
@@ -178,12 +178,15 @@ def upgrade(path: Path) -> bool:
     records = convert(path)
     if len(records) <= 1:
         return False
-    # Written beside it, then the log moved aside: a crash leaves the log whole.
-    fd, staged = tempfile.mkstemp(dir=path.parent, prefix=".session-", suffix=".jsonl")
-    with os.fdopen(fd, "wb") as file:
-        file.writelines(record_line(record) for record in records)
-    os.link(path, legacy_log(path.parent))
-    Path(staged).replace(path)
+    # The log is kept aside first, then replaced at once: a crash between leaves it
+    # whole in both places, and the next upgrade finds its copy already kept.
+    kept = legacy_log(path.parent)
+    try:
+        os.link(path, kept)
+    except FileExistsError:
+        if not kept.samefile(path):
+            raise
+    write_private(path, b"".join(record_line(record) for record in records))
     return True
 
 
@@ -226,7 +229,8 @@ def _records(path: Path) -> Iterator[_Record]:
 def _tape(records: Sequence[_Record], session_id: str) -> list[TapeRecord]:
     """Return the old records as today's tape."""
     tape: list[TapeRecord] = []
-    ids: dict[int, int] = {}
+    # Never keyed by ``None``, which an update with no id looks up and misses.
+    ids: dict[int | None, int] = {}
     cursor = 0
     for record in records:
         kind = record.get("kind")
@@ -236,12 +240,13 @@ def _tape(records: Sequence[_Record], session_id: str) -> list[TapeRecord]:
             event = _event(record)
             if event is not None:
                 built = ReferrableTapeEvent(ref=ref, event=event)
-                if isinstance(event, UncategorizedToolResult):
-                    ids[_int(record.get("id"), -1)] = len(tape)
+                n = _int(record.get("id"))
+                if isinstance(event, UncategorizedToolResult) and n is not None:
+                    ids[n] = len(tape)
         elif kind in ("clear", "context_clear"):
             built = _splice(ref=ref, mask=full_tape_mask(tape), strategy="clear")
         elif kind == "update":
-            _patch(tape, ids.get(_int(record.get("id"), -1)), record)
+            _patch(tape, ids.get(_int(record.get("id"))), record)
         else:
             built = _splice(
                 ref=ref,
@@ -312,33 +317,32 @@ def _unique(tape: list[TapeRecord]) -> list[TapeRecord]:
         default=-1,
     )
     seen: set[TapeRef] = set()
-    moved: list[tuple[int, TapeRef, TapeRef]] = []
-    kept: list[tuple[int, TapeRecord]] = []
-    for index, record in enumerate(tape):
+    moved: list[tuple[TapeRef, TapeRef]] = []
+    kept: list[TapeRecord] = []
+    for record in tape:
         if record.ref not in seen:
             seen.add(record.ref)
-            kept.append((index, record))
+            kept.append(_carried(record, moved=moved))
         elif not (isinstance(record, ContextSplice) and record.ref in masked):
             after += 1
             fresh = replace(record.ref, ordinal=after)
-            moved.append((index, record.ref, fresh))
-            kept.append((index, replace(record, ref=fresh)))
-    return [_carried(record, at=index, moved=moved) for index, record in kept]
+            kept.append(_carried(replace(record, ref=fresh), moved=moved))
+            moved.append((record.ref, fresh))
+    return kept
 
 
 def _carried(
     record: TapeRecord,
     *,
-    at: int,
-    moved: Sequence[tuple[int, TapeRef, TapeRef]],
+    moved: Sequence[tuple[TapeRef, TapeRef]],
 ) -> TapeRecord:
-    """Return ``record``, a splice at ``at`` also hiding what moved from its mask."""
+    """Return ``record``, a splice also hiding where what it hid moved before it."""
     if not isinstance(record, ContextSplice):
         return record
     extra = tuple(
         MaskRange(session_id=fresh.session_id, lo=fresh.ordinal, hi=fresh.ordinal)
-        for index, ref, fresh in moved
-        if index < at and mask_contains_ref(record.mask, ref)
+        for ref, fresh in moved
+        if mask_contains_ref(record.mask, ref)
     )
     if not extra:
         return record
@@ -552,11 +556,17 @@ def _attachments(raw: PlainTree) -> tuple[Attachment, ...]:
 
 # Some writers took the monotonic clock, which no date reads from.
 def _time(raw: PlainTree) -> str | None:
-    """Return seconds since the epoch as ISO 8601; ``None`` for no plausible date."""
-    seconds = raw if isinstance(raw, int | float) and not isinstance(raw, bool) else 0.0
-    if seconds > 1e15:
-        seconds /= 1e9
-    return datetime.fromtimestamp(seconds, UTC).isoformat() if seconds > 1e9 else None
+    """Return seconds or nanoseconds since the epoch as ISO 8601."""
+    if not isinstance(raw, int | float) or isinstance(raw, bool):
+        return None
+    # Seconds past year 9999 are nanoseconds; a monotonic clock falls short of 2001.
+    for seconds in (raw, raw / 1e9):
+        try:
+            when = datetime.fromtimestamp(seconds, UTC)
+        except (OverflowError, OSError, ValueError):
+            continue
+        return when.isoformat() if seconds > 1e9 else None
+    return None
 
 
 # ``spend`` is the agent's and its children's, as an agent's spend counts today;
@@ -674,7 +684,7 @@ def _joined(parts: Sequence[_Record], descriptor: str) -> str:
 def _object(raw: PlainTree) -> dict[str, PlainTree]:
     """Return ``raw`` as a JSON object; ``{}`` for anything else."""
     try:
-        return from_plain(raw, dict[str, PlainTree], default={})
+        return from_plain(raw, dict[str, PlainTree])
     except ReadError:
         return {}
 
@@ -682,7 +692,7 @@ def _object(raw: PlainTree) -> dict[str, PlainTree]:
 def _list(raw: PlainTree) -> list[PlainTree]:
     """Return ``raw`` as a JSON array; ``[]`` for anything else."""
     try:
-        return from_plain(raw, list[PlainTree], default=[])
+        return from_plain(raw, list[PlainTree])
     except ReadError:
         return []
 
@@ -697,9 +707,9 @@ def _str(raw: PlainTree) -> str:
     return raw if isinstance(raw, str) else ""
 
 
-def _int(raw: PlainTree, default: int) -> int:
-    """Return ``raw`` if an int, else ``default``."""
-    return raw if isinstance(raw, int) and not isinstance(raw, bool) else default
+def _int(raw: PlainTree) -> int | None:
+    """Return ``raw`` if an int, else ``None``."""
+    return raw if isinstance(raw, int) and not isinstance(raw, bool) else None
 
 
 def _bool(raw: PlainTree) -> bool:

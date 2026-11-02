@@ -250,8 +250,54 @@ def test_a_name_no_band_reaches_is_the_window() -> None:
 
 
 def test_a_count_below_one_is_no_size() -> None:
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError) as raised:
         _ = _banded()[0]
+    assert raised.value.args == (0,)
+    assert _banded()[1] == _size("fullcontext", 1, "1")
+
+
+@pytest.mark.parametrize(
+    ("window", "spec", "size"),
+    [
+        # A window unknown holds no count back, and every count is the whole.
+        (0, 5, _size("fullcontext", 5, "5")),
+        (1, 5, _size("fullcontext", 1, "1")),
+    ],
+)
+def test_a_count_is_held_to_a_window_only_when_one_is_known(
+    window: int,
+    spec: int,
+    size: ContextSize,
+) -> None:
+    assert _banded(window=window)[spec] == size
+
+
+@pytest.mark.parametrize(
+    ("tops", "window", "small"),
+    [
+        # A window unknown keeps every band.
+        ((100,), 0, 100),
+        ((100,), 1, None),
+        # A band that ends at the window's last token is one.
+        ((99,), 100, 99),
+    ],
+)
+def test_a_band_is_named_while_it_ends_within_the_window(
+    tops: tuple[int, ...],
+    window: int,
+    small: int | None,
+) -> None:
+    sizes = {s.context_name: s.tokens for s in _banded(*tops, window=window).sizes()}
+
+    assert sizes.get("smallcontext") == small
+
+
+def test_only_two_bands_are_named() -> None:
+    assert [s.context_name for s in _banded(10, 20, 30).sizes()] == [
+        "smallcontext",
+        "midcontext",
+        "fullcontext",
+    ]
 
 
 def test_default_bills_as_auto() -> None:
@@ -284,8 +330,9 @@ def test_the_latest_price_in_effect_applies() -> None:
 
 
 def test_a_tier_priced_nowhere_raises() -> None:
-    with pytest.raises(KeyError):
+    with pytest.raises(KeyError) as raised:
         _ = _banded()["priority", 1, date.min]
+    assert raised.value.args == (("priority", 1, date.min),)
 
 
 def test_an_empty_catalog_raises_rather_than_billing_zero() -> None:

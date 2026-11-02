@@ -10,6 +10,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, override
 
 import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -178,6 +179,7 @@ def test_leaving_or_asking_after_a_stranger_is_a_key_error() -> None:
         (3, 1, (True, True, False)),
         (1, 5, (True, False, False)),
         (None, 0, (True, False, False)),
+        (2, None, (True, True, False)),
     ],
     ids=[
         "no-cap",
@@ -186,6 +188,7 @@ def test_leaving_or_asking_after_a_stranger_is_a_key_error() -> None:
         "child-tightens",
         "child-cannot-loosen",
         "leaf-child",
+        "two-generations",
     ],
 )
 def test_a_depth_cap_holds_for_every_descendant(
@@ -286,9 +289,10 @@ def test_a_spec_is_for_a_persistent_child_only(tmp_path: Path) -> None:
     team = _team()
     _ = team.join(_agent(tmp_path))
 
-    with pytest.raises(ValueError, match="Only a persistent child"):
+    refused = r"^Only a persistent child has a spec to stand\.$"
+    with pytest.raises(ValueError, match=refused):
         _ = team.join(_agent(tmp_path), parent="Agent", spec=_spec("x"))
-    with pytest.raises(ValueError, match="Only a persistent child"):
+    with pytest.raises(ValueError, match=refused):
         _ = team.join(
             _agent(tmp_path),
             label="root2",
@@ -361,6 +365,23 @@ def test_a_spec_joined_under_a_new_label_stands_only_under_that_one(
     assert team.standing("Agent") == [replace(_spec("a"), label="a_0")]
 
 
+def test_a_spec_stood_after_other_records_is_found(tmp_path: Path) -> None:
+    team = _team()
+    root = _agent(tmp_path)
+    _ = team.join(root)
+    root.session.stand("other", UncategorizedRecord(kind="note", payload={}))
+
+    _ = team.join(
+        _agent(tmp_path),
+        label="a",
+        parent="Agent",
+        closing=AsyncExitStack(),
+        spec=_spec("a"),
+    )
+
+    assert team.standing("Agent") == [_spec("a")]
+
+
 def test_a_spec_that_no_longer_reads_is_skipped(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
@@ -372,10 +393,11 @@ def test_a_spec_that_no_longer_reads_is_skipped(
         "agent:old",
         UncategorizedRecord(kind="persistent_agent", payload={"label": "old"}),
     )
+    (stood,) = root.session.standing()
 
     with caplog.at_level(logging.WARNING):
         assert team.standing("Agent") == []
-    assert any("unreadable child record" in m for m in caplog.messages)
+    assert caplog.messages == [f"skipping an unreadable child record: {stood}"]
 
 
 @pytest.mark.parametrize(
@@ -386,8 +408,9 @@ def test_a_spec_that_no_longer_reads_is_skipped(
             "scripted/scripted+1m",
         ),
         ({"system": "S", "effort": "high", "budget": "auto", "output": "text"}, ""),
+        ({"model": "scripted+1m"}, ""),
     ],
-    ids=["with-thinking", "with-settings"],
+    ids=["with-thinking", "with-settings", "model-without-provider"],
 )
 def test_a_spec_stood_with_the_model_it_once_held_reads_as_today_s(
     tmp_path: Path,
@@ -453,6 +476,7 @@ def test_a_watcher_is_its_roots_parent_and_ancestor(tmp_path: Path) -> None:
     _ = team.join(_agent(tmp_path), label="watcher")
     team.watch("watcher", "Agent")
 
+    assert team.watching == {"watcher": True}
     assert team.resolve("parent", by="Agent") == ["watcher"]
     assert team.resolve("ancestors", by="a1") == ["a", "Agent", "watcher"]
     assert team.watched("watcher") == "Agent"
@@ -465,6 +489,7 @@ def test_a_watcher_is_its_roots_parent_and_ancestor(tmp_path: Path) -> None:
 
     _ = team.leave("watcher")
     assert team.resolve("parent", by="Agent") == []
+    assert team.watching == {}
 
 
 def test_a_request_is_owed_and_a_reply_settles_it(tmp_path: Path) -> None:
@@ -473,14 +498,46 @@ def test_a_request_is_owed_and_a_reply_settles_it(tmp_path: Path) -> None:
 
     team.send("Agent", "a", long)
     team.send("a", "a", "note to self")
+    team.send("b", "a1", long.removesuffix(" nine"))
 
     assert team.owes("a") == {"Agent": "one two three four five six seven eight…"}
+    assert team.owes("a1") == {"b": "one two three four five six seven eight"}
     team.send("a", "Agent", "done")
     assert (team.owes("a"), team.owes("Agent")) == ({}, {})
     with pytest.raises(ValueError, match="Unknown agent 'nobody'"):
         team.send("a", "nobody", "hi")
-    with pytest.raises(ValueError, match="No user is watching"):
+    with pytest.raises(
+        ValueError,
+        match=r"^No user is watching; there is no one to tell\.$",
+    ):
         team.send("a", "user", "hi")
+
+
+def test_a_message_to_the_user_is_shown_and_owed_no_reply(tmp_path: Path) -> None:
+    team = _family(tmp_path)
+    shown: list[tuple[str, str]] = []
+    team.to_user = lambda sender, text: shown.append((sender, text))
+
+    team.send("a", "user", "fyi")
+
+    assert shown == [("a", "fyi")]
+    assert team.owes("user") == {}
+
+
+def test_settled_debts_and_dropped_choices_leave_nothing_standing(
+    tmp_path: Path,
+) -> None:
+    team = _family(tmp_path)
+    team.send("Agent", "a", "x")
+    team.send("a", "Agent", "done")
+    team.ask("b", "q")
+    team.answer("b", "r")
+    team.choose("a1", "screen.thinking", "hide")
+    team.choose("a1", "screen.thinking", None)
+    # Giving up a setting never chosen is no error.
+    team.choose("a1", "model.thinking.effort", None)
+
+    assert [team[label].session.standing() for label in team] == [[], [], [], []]
 
 
 def test_a_message_booked_apart_is_delivered_unbooked_again(tmp_path: Path) -> None:
@@ -512,6 +569,23 @@ def test_whom_a_leaver_owed_and_was_owed_is_forgotten(tmp_path: Path) -> None:
     assert not any(type(o).__name__ == "_Dun" for o in agent.runtime.observers)
 
 
+def test_one_who_rejoins_under_a_leaver_s_label_takes_up_none_of_its_ties(
+    tmp_path: Path,
+) -> None:
+    team = _family(tmp_path)
+    team.send("Agent", "a", "x")
+    team.send("a", "b", "y")
+    team.awaited.add("a")
+
+    _ = team.leave("a1")
+    _ = team.leave("a")
+    _ = team.join(_agent(tmp_path, team), label="a", parent="Agent")
+    _did(team["a"], reply("back"))
+
+    assert (team.owes("a"), team.owes("b")) == ({}, {})
+    assert _told(team["Agent"]) == [("a", "[a is idle] back")]
+
+
 @pytest.mark.asyncio
 async def test_a_stopped_agent_tells_those_it_owes(tmp_path: Path) -> None:
     team = _team()
@@ -538,9 +612,30 @@ async def test_a_stopped_agent_tells_those_it_owes(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.asyncio
+async def test_a_child_stopped_with_its_parent_tells_those_it_owes(
+    tmp_path: Path,
+) -> None:
+    team = _team()
+    _ = team.join(_agent(tmp_path))
+    for label, parent in (("a", "Agent"), ("a1", "a")):
+        _ = team.join(
+            _agent(tmp_path),
+            label=label,
+            parent=parent,
+            closing=AsyncExitStack(),
+        )
+    team.send("Agent", "a1", "x")
+
+    await team.stop("a")
+
+    assert _told(team["Agent"]) == [("a1", "[a1 stopped]")]
+
+
 def test_a_reply_owed_an_unwatched_user_is_dropped(tmp_path: Path) -> None:
     team = _family(tmp_path)
     team.ask("a", "q")
+    assert team.owes("a") == {"user": "q"}
 
     team.answer("a", "r")
 
@@ -794,6 +889,30 @@ def test_a_child_that_fails_or_halts_owing_no_one_tells_its_parent(
     assert _told(team["Agent"]) == [("a", said), ("a", "[a is idle] back")]
 
 
+@pytest.mark.parametrize(
+    ("event", "said"),
+    [
+        (
+            types.ModelResponseError(exception=ValueError("down")),
+            "[a failed] ValueError: down",
+        ),
+        (types.ModelResponseCancelled(output_chars_estimate=0), "[a halted]"),
+    ],
+)
+def test_what_a_child_said_before_it_failed_is_not_told_again(
+    tmp_path: Path,
+    event: types.RuntimeEvent,
+    said: str,
+) -> None:
+    team = _family(tmp_path)
+    a = team["a"].runtime
+    a.publish(types.ModelResponseComplete(response=reply("half done")))
+    a.publish(event)
+    _did(team["a"], reply(calls=[call("Read")]))
+
+    assert _told(team["Agent"]) == [("a", said), ("a", "[a is idle]")]
+
+
 def test_an_idle_child_tells_its_parent_all_its_reply_said(tmp_path: Path) -> None:
     team = _family(tmp_path)
 
@@ -914,6 +1033,7 @@ async def test_a_watcher_stands_in_the_journal_it_watches_until_stopped(
         {"label": "watcher", "journal": "/j/watcher.jsonl"},
     )
     assert team["Agent"].session.standing() == []
+    assert team.resolve("parent", by="Agent") == []
 
 
 def test_choices_roll_from_the_nearest_ancestor_and_go_with_their_agent(
@@ -921,6 +1041,7 @@ def test_choices_roll_from_the_nearest_ancestor_and_go_with_their_agent(
 ) -> None:
     team = _family(tmp_path)
     team.choose("Agent", "model.thinking.effort", "high")
+    assert team.inherited("a1") == {"model.thinking.effort": "high"}
     team.choose("a", "model.thinking.effort", "low")
     team.choose("Agent", "screen.thinking", "hide")
 
@@ -1071,6 +1192,100 @@ async def test_a_spent_window_moves_the_call_to_the_next_login_at_once(
 
 
 @pytest.mark.asyncio
+async def test_a_window_that_names_no_reset_is_spent_an_hour(tmp_path: Path) -> None:
+    _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", RateLimitedError("spent", limit="5-hour"))
+    accounts.script("personal", reply("from personal"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    began = time.time()
+    try:
+        assert await agent.send("hi") == "from personal"
+    finally:
+        await agent.aclose()
+    (moved,) = [e for e in seen if isinstance(e, types.LoginSwitched)]
+    assert (moved.provider, moved.was, moved.now, moved.window, moved.first) == (
+        "sub",
+        "default",
+        "personal",
+        "5-hour",
+        "default",
+    )
+    assert moved.until == pytest.approx(began + 3_600.0, abs=0.5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("wait_sec", "served"),
+    [(300.0, ["default"]), (300.5, ["default", "personal"])],
+    ids=["five-minutes-is-a-throttle", "past-five-minutes-is-spent"],
+)
+async def test_an_unnamed_wait_past_five_minutes_is_a_spent_quota(
+    tmp_path: Path,
+    wait_sec: float,
+    served: list[str],
+) -> None:
+    _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", _spent("", wait_sec=wait_sec))
+    accounts.script("personal", reply("from personal"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    try:
+        with contextlib.suppress(RateLimitedError):
+            await agent.send("hi")
+    finally:
+        await agent.aclose()
+    assert accounts.served == served
+
+
+@pytest.mark.asyncio
+async def test_a_turn_on_a_login_with_quota_keeps_its_model_and_reads_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", reply("served"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    model = agent.model
+    reads: list[Path] = []
+    raw = login_module._raw
+
+    def counted(ledger: Path) -> dict[str, dict[str, object]]:
+        reads.append(ledger)
+        return raw(ledger)
+
+    monkeypatch.setattr(login_module, "_raw", counted)
+    try:
+        assert await agent.send("hi") == "served"
+    finally:
+        await agent.aclose()
+    assert agent.model is model
+    assert len(reads) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_model_the_user_picks_while_moved_signs_in_as_their_choice(
+    tmp_path: Path,
+) -> None:
+    """Picked from the catalog, it is the chosen login's, not the one moved to."""
+    logins = _saved("personal")
+    accounts = _Accounts()
+    accounts.script("default", _spent("5-hour"))
+    accounts.script("personal", reply("one"), reply("two"))
+    team, agent, seen = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send("first") == "one"
+        agent.model = team.catalog["sub"]["scripted"]
+        assert await agent.send("second") == "two"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "personal", "personal"]
+    assert _switches(seen) == [("default", "personal"), ("default", "personal")]
+    assert first_live(logins, "scripted", now=time.time()) == "personal"
+
+
+@pytest.mark.asyncio
 async def test_a_turn_after_the_reset_goes_back_to_the_first_login(
     tmp_path: Path,
 ) -> None:
@@ -1093,7 +1308,7 @@ async def test_a_turn_after_the_reset_goes_back_to_the_first_login(
     # The session starts off the spent login quietly; the move back is news.
     assert _switches(seen) == [("personal", "default")]
     (back,) = (e for e in seen if isinstance(e, types.LoginSwitched))
-    assert (back.window, back.first) == ("", "default")
+    assert (back.window, back.until, back.first) == ("", 0.0, "default")
 
 
 @pytest.mark.asyncio
@@ -1117,16 +1332,17 @@ async def test_every_login_spent_waits_for_the_earliest_reset_and_takes_it(
     tmp_path: Path,
 ) -> None:
     logins = _saved("personal")
-    # A real wait, kept short: the call is held by the loop's own timer.
+    accounts = _Accounts()
+    accounts.script("default", _spent("weekly", wait_sec=86_400.0))
+    accounts.script("personal", reply("from personal"))
+    _, agent, seen = await _session(accounts, tmp_path, persistent_retry=True)
+    # A real wait, kept short and taken after the setup: the call is held by the
+    # loop's own timer.
     soon = time.time() + 0.02
     await logins.spend(
         "personal",
         Spent(window="5-hour", model="scripted", until=soon),
     )
-    accounts = _Accounts()
-    accounts.script("default", _spent("weekly", wait_sec=86_400.0))
-    accounts.script("personal", reply("from personal"))
-    _, agent, seen = await _session(accounts, tmp_path, persistent_retry=True)
     try:
         assert await asyncio.wait_for(agent.send("hi"), timeout=10) == "from personal"
     finally:
@@ -1154,6 +1370,7 @@ async def test_no_login_is_asked_twice_and_all_spent_waits_as_ever(
         await agent.aclose()
     assert accounts.served == ["default", "personal", "work"]
     (spent,) = [e for e in seen if isinstance(e, types.LoginsSpent)]
+    assert spent.provider == "sub"
     assert [account for account, _ in spent.resets] == ["work", "default", "personal"]
 
 
@@ -1345,14 +1562,15 @@ async def test_a_compaction_on_a_spent_login_moves_to_one_with_quota_first(
     logins = _saved("personal")
     accounts = _Accounts()
     accounts.script("default", reply("one"))
-    _, agent, _ = await _session(accounts, tmp_path)
+    _, agent, seen = await _session(accounts, tmp_path)
     recording = _Recording()
     agent.runtime.compactor = recording
+    until = time.time() + 60
     try:
         assert await agent.send("first") == "one"
         await logins.spend(
             None,
-            Spent(window="5-hour", model="scripted", until=time.time() + 60),
+            Spent(window="5-hour", model="scripted", until=until),
         )
         agent.runtime.push(types.Compact())
         async with asyncio.timeout(5):
@@ -1360,6 +1578,8 @@ async def test_a_compaction_on_a_spent_login_moves_to_one_with_quota_first(
     finally:
         await agent.aclose()
     assert recording.logins == ["personal"]
+    (moved,) = [e for e in seen if isinstance(e, types.LoginSwitched)]
+    assert (moved.window, moved.until) == ("5-hour", until)
 
 
 @pytest.mark.asyncio
@@ -1415,6 +1635,55 @@ async def test_a_login_whose_provider_lacks_the_model_is_passed_over(
         await agent.aclose()
     assert accounts.served == ["default", "personal"]
     assert _switches(seen) == [("default", "personal")]
+
+
+@pytest.mark.asyncio
+async def test_a_login_passed_over_stays_passed_over_the_next_turn(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _saved("aaa", "personal")
+    accounts = _Accounts(modelless={"aaa"})
+    accounts.script("default", _spent("5-hour"))
+    accounts.script("personal", reply("one"), reply("two"))
+    _, agent, seen = await _session(accounts, tmp_path)
+    try:
+        with caplog.at_level(logging.WARNING, logger="sagent.agent.team"):
+            assert await agent.send("first") == "one"
+            assert await agent.send("second") == "two"
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "personal", "personal"]
+    assert _switches(seen) == [("default", "personal")]
+    assert [
+        (
+            r.getMessage(),
+            isinstance(r.exc_info, tuple) and r.exc_info[0] is UnknownModelError,
+        )
+        for r in caplog.records
+        if r.name == "sagent.agent.team"
+    ] == [("cannot sign sub in as aaa", True)]
+
+
+@pytest.mark.asyncio
+async def test_a_login_passed_over_with_nowhere_to_move_is_not_tried_again(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _saved("aaa")
+    accounts = _Accounts(modelless={"aaa"})
+    accounts.script("default", _spent("5-hour"), _spent("5-hour"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    try:
+        with caplog.at_level(logging.WARNING, logger="sagent.agent.team"):
+            for text in ("first", "second"):
+                with pytest.raises(RateLimitedError):
+                    await agent.send(text)
+    finally:
+        await agent.aclose()
+    assert [
+        r.getMessage() for r in caplog.records if r.name == "sagent.agent.team"
+    ] == ["cannot sign sub in as aaa"]
 
 
 @pytest.mark.asyncio
@@ -1476,6 +1745,8 @@ async def test_a_login_moved_onto_and_found_signed_out_is_passed_over(
         await agent.aclose()
     assert accounts.served == ["default", "personal", "work"]
     assert _switches(seen) == [("default", "personal"), ("personal", "work")]
+    (_, out) = [e for e in seen if isinstance(e, types.LoginSwitched)]
+    assert (out.window, out.until) == ("signed out", 0.0)
 
 
 @pytest.mark.asyncio

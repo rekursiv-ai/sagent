@@ -9,19 +9,25 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import cast, override
 
 import asyncio
+import math
+import re
 import threading
 import time
 
 from torch import Tensor, nn
+from treekle import json_dumps
 
 import pytest
 import torch
 
+from sagent.model.capability import ModelSettings
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
 from sagent.model.exceptions import UnknownModelError
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.catalog import successor
@@ -49,6 +55,12 @@ class _Tokenizer:
 
     text: str = "Hello."
     prompt: tuple[int, ...] = (5, 6, 7)
+    batch: int = 0
+    """How many rows the prompt renders as; ``0`` renders one, unbatched."""
+
+    rejected: type[Exception] = TypeError
+    """What a template rejecting an option raises."""
+
     rejects: frozenset[str] = frozenset()
     """Template options that raise, as a template that lacks them does."""
 
@@ -64,10 +76,13 @@ class _Tokenizer:
     ) -> object:
         self.rendered.append((conversation, kwargs))
         if self.rejects & kwargs.keys():
-            raise TypeError(
+            raise self.rejected(
                 f"unexpected keyword {sorted(self.rejects & kwargs.keys())}",
             )
-        return {"input_ids": torch.tensor(self.prompt), "attention_mask": None}
+        ids = torch.tensor(self.prompt)
+        if self.batch:
+            ids = ids.repeat(self.batch, 1)
+        return {"input_ids": ids, "attention_mask": None}
 
     def decode(self, token_ids: Tensor, *, skip_special_tokens: bool) -> str:
         assert skip_special_tokens
@@ -530,6 +545,8 @@ def test_the_conversation_renders_as_chat_template_messages() -> None:
             TokenUsage(),
             Thinking(content="hidden"),
             AssistantMessage(content="Reading"),
+            # A message with no text adds none.
+            AssistantMessage(content=None),
             AssistantMessage(content=" both."),
             ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a"}),
             ToolCall(call_id="toolu_b", name="Read", arguments={"file_path": "b"}),
@@ -564,6 +581,25 @@ def test_the_conversation_renders_as_chat_template_messages() -> None:
         {"role": "assistant", "content": "Done."},
     ]
     assert server._messages(Request()) == []
+    # A turn the user's words or a result cut off starts another, though the
+    # model speaks again at once.
+    split = Request(
+        records=(
+            AssistantMessage(content="a"),
+            UserMessage(content="b"),
+            AssistantMessage(content="c"),
+            ToolCall(call_id="x", name="Read"),
+            UncategorizedToolResult(call_id="x", content="r"),
+            AssistantMessage(content="d"),
+        ),
+    )
+    assert [(m["role"], m.get("content")) for m in server._messages(split)] == [
+        ("assistant", "a"),
+        ("user", "b"),
+        ("assistant", "c"),
+        ("tool", "r"),
+        ("assistant", "d"),
+    ]
 
 
 @pytest.mark.asyncio
@@ -800,7 +836,248 @@ def test_weights_load_onto_the_fastest_device_there_is(
 def test_a_compiled_model_is_the_one_served(monkeypatch: pytest.MonkeyPatch) -> None:
     hub = _Hub()
     assert _load(monkeypatch, hub, "Org/M+compile").model == "compiled"
-    assert [kind for kind, _ in hub.asked].count("compile") == 1
+    (compiled,) = [model for kind, model in hub.asked if kind == "compile"]
+    assert isinstance(compiled, _Weights)
+
+
+def test_a_name_s_options_are_listed_when_one_is_unknown() -> None:
+    message = (
+        "Unknown option 'x' in 'Org/M+x'; use shard, cpu, cuda, mps, bfloat16,"
+        " float16, float32, compile, no-compile, smallcontext, midcontext,"
+        " fullcontext, 200k."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        server._spec("Org/M+x")
+    with pytest.raises(
+        ValueError,
+        match=r"^A local model's name must start with a repo id or path\.$",
+    ):
+        server._spec("+cpu")
+
+
+def test_a_name_whose_options_hold_a_slash_is_no_repo_id() -> None:
+    """Only the part before the options says where the weights are."""
+    with pytest.raises(UnknownModelError):
+        SelfHosted()["opus+a/b"]
+
+
+@pytest.mark.parametrize("trust", [True, False])
+@pytest.mark.asyncio
+async def test_a_repos_own_code_runs_only_when_trusted(
+    monkeypatch: pytest.MonkeyPatch,
+    trust: bool,
+) -> None:
+    told: list[tuple[str, bool]] = []
+
+    def window(path: str, *, trust_remote_code: bool) -> int:
+        del path
+        told.append(("config", trust_remote_code))
+        return 40
+
+    def load(spec: server._Spec, *, trust_remote_code: bool) -> server._Loaded:
+        del spec
+        told.append(("weights", trust_remote_code))
+        return server._Loaded(model=_Generator(), tokenizer=_Tokenizer())
+
+    monkeypatch.setattr(server, "_window", window)
+    monkeypatch.setattr(server, "_load", load)
+    local = SelfHosted(trust_remote_code=trust) if trust else SelfHosted()
+    model = local["default"]
+    await model.count(_REQUEST)
+    _ = model.capability
+
+    assert told == [("weights", trust), ("config", trust)]
+
+
+def test_a_tool_preamble_joins_a_system_prompt_and_spells_each_schema() -> None:
+    messages = server._with_preamble(
+        [
+            {"role": "system", "content": "Sys."},
+            {"role": "user", "content": "hi"},
+            {"role": "user", "content": "there"},
+        ],
+        tools=(Read(),),
+    )
+
+    schemas = json_dumps([server._schema(Read())], indent=2)
+    assert messages == [
+        {
+            "role": "system",
+            "content": "Sys.\n\nYou have access to the following tools. To call a"
+            ' tool, emit <tool_call>{"name": "...", "arguments": {...}}</tool_call>.\n'
+            f"{schemas}",
+        },
+        {"role": "user", "content": "hi"},
+        {"role": "user", "content": "there"},
+    ]
+
+
+def test_thinking_off_tells_the_template_so() -> None:
+    settings = ModelSettings(thinking_effort="none")
+
+    assert (
+        server.template_options(_REQUEST, settings=settings)["enable_thinking"] is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_template_that_rejects_a_value_is_asked_without_the_feature(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tokenizer = _Tokenizer(rejects=frozenset({"enable_thinking"}), rejected=ValueError)
+    model = _served(monkeypatch, tokenizer=tokenizer)
+
+    assert await model.count(_REQUEST) == 3
+    assert len(tokenizer.rendered) == 2
+
+
+def test_the_default_size_is_the_whole_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = _served(monkeypatch, window=40)
+    bare = SelfHostedModel(provider=model.provider, spec=server._Spec(path="Org/M"))
+    # A banded card, so ``smallcontext`` names a size short of the window.
+    bare._capability = replace(
+        bare.capability,
+        prices=PriceCatalog(
+            prices={
+                PriceCondition(token_size_range=(0, 11)): TokenPrice(),
+                PriceCondition(token_size_range=(11, math.inf)): TokenPrice(),
+            },
+            window=40,
+        ),
+    )
+
+    assert bare.settings.context_size.tokens == 40
+
+
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=[
+                pytest.mark.gpu_torch_cuda,
+                pytest.mark.skipif(
+                    not torch.cuda.is_available(),
+                    reason="requires CUDA",
+                ),
+            ],
+        ),
+    ],
+)
+def test_the_stop_says_done_for_every_row_once_set(device: str) -> None:
+    event = threading.Event()
+    stopped = server._Stopped(event)
+    ids = torch.zeros(3, 5, dtype=torch.long, device=device)
+
+    before = stopped(ids, None)
+    event.set()
+    after = stopped(ids, None)
+
+    assert before.dtype == torch.bool
+    assert (before.tolist(), after.tolist()) == ([False] * 3, [True] * 3)
+    assert after.device == ids.device
+
+
+@pytest.mark.asyncio
+async def test_the_reply_is_the_tokens_after_the_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _served(
+        monkeypatch,
+        model=_Generator(new=4),
+        tokenizer=_Tokenizer(prompt=(5, 6, 7, 8, 9)),
+    )
+    response = (await _reply(model))[-1]
+
+    assert isinstance(response, Response)
+    assert response.tokens == TokenCount(request=5, response=4)
+
+
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.asyncio
+async def test_the_prompt_is_moved_to_the_models_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    device = torch.device("cuda", 0)
+    seen: list[torch.device] = []
+
+    @dataclass(slots=True, kw_only=True)
+    class _On(_Generator):
+        @override
+        def generate(self, inputs: Tensor, **kwargs: object) -> Tensor:
+            seen.append(inputs.device)
+            return _Generator.generate(self, inputs.cpu(), **kwargs)
+
+        @override
+        def parameters(self) -> Iterator[nn.Parameter]:
+            yield nn.Parameter(torch.zeros(1, device=device))
+
+    model = _served(monkeypatch, model=_On())
+    _ = await _reply(model)
+
+    assert seen == [device]
+
+
+@pytest.mark.asyncio
+async def test_a_window_the_prompt_fills_leaves_one_token_of_reply(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    generator = _Generator()
+    model = _served(monkeypatch, model=generator, window=3)
+    await _reply(model)
+
+    assert generator.calls[0]["max_new_tokens"] == 1
+
+
+@pytest.mark.parametrize(("batch", "shape"), [(0, (1, 3)), (2, (2, 3))])
+def test_a_prompt_rendered_as_one_row_or_a_batch_is_a_batch(
+    batch: int,
+    shape: tuple[int, int],
+) -> None:
+    ids = server._render(_Tokenizer(batch=batch), _REQUEST, settings=ModelSettings())
+
+    assert tuple(ids.shape) == shape
+
+
+def test_a_model_compiles_only_when_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    hub = _Hub()
+    loaded = _load(monkeypatch, hub, "Org/M")
+
+    assert "compile" not in [kind for kind, _ in hub.asked]
+    assert isinstance(loaded.model, _Weights)
+
+
+@pytest.mark.asyncio
+async def test_a_reply_is_priced_at_the_card_of_its_utc_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Evening:
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            if tz is UTC:
+                return datetime(2026, 10, 7, 1, tzinfo=UTC)
+            return datetime(2026, 10, 6, 18)  # noqa: DTZ001 -- the local wall clock.
+
+    model = _served(monkeypatch)
+    model._capability = replace(
+        model.capability,
+        prices=PriceCatalog(
+            prices={
+                PriceCondition(): TokenPrice(),
+                PriceCondition(effective_date=date(2026, 10, 7)): TokenPrice(
+                    response=1e6,
+                ),
+            },
+            window=40,
+        ),
+    )
+    monkeypatch.setattr(server, "datetime", _Evening)
+    response = (await _reply(model))[-1]
+
+    assert isinstance(response, Response)
+    assert response.spend.response == 2.0
 
 
 def test_an_attachment_costs_nothing_for_it_is_never_sent() -> None:

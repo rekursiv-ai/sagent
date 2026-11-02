@@ -565,7 +565,8 @@ def report(out: Path, *, agents: Sequence[Agent]) -> str:
 
     Returns:
       text: A Markdown table of per-task means, so agents graded on different
-        numbers of tasks compare; cost is ``?`` unless every task has a price.
+        numbers of tasks compare; cost is ``?`` unless every task has a price,
+        and tokens ``?`` when no task's log says what it spent.
 
     """
     rows = [["agent", "resolved", "graded", "rate", "$/task", "in/task", "out/task"]]
@@ -578,7 +579,7 @@ def report(out: Path, *, agents: Sequence[Agent]) -> str:
         known = [u for i in graded if (u := usage(a, out / a / "logs" / i)) is not None]
         costs = [u.cost_usd for u in known if u.cost_usd is not None]
         priced = bool(costs) and len(costs) == len(known) == len(graded)
-        n = len(known) or 1
+        n = len(known)
         rows.append(
             [
                 a,
@@ -586,8 +587,8 @@ def report(out: Path, *, agents: Sequence[Agent]) -> str:
                 str(len(graded)),
                 f"{100.0 * resolved / len(graded):.0f}%",
                 f"${sum(costs) / len(costs):.3f}" if priced else "?",
-                f"{sum(u.input_tokens for u in known) / n / 1e3:.0f}k",
-                f"{sum(u.output_tokens for u in known) / n / 1e3:.1f}k",
+                f"{sum(u.input_tokens for u in known) / n / 1e3:.0f}k" if n else "?",
+                f"{sum(u.output_tokens for u in known) / n / 1e3:.1f}k" if n else "?",
             ],
         )
     widths = [max(len(r[c]) for r in rows) for c in range(len(rows[0]))]

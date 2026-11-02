@@ -5,13 +5,16 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import base64
+import os
 
 from treekle import json_dumps
 
 import pytest
 
 from sagent.lib.userdirs import data_dir
-from sagent.session import projects
+from sagent.model.cost import TokenCost, TokenCount
+from sagent.runtime.tape import ContextSplice
+from sagent.session import legacy_journal, projects
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.legacy_journal import (
     convert,
@@ -523,6 +526,74 @@ def test_a_payload_not_valid_alone_is_repaired(tmp_path: Path) -> None:
     assert _texts(path) == ["one\n\ntwo", "call c9", "[interrupted]"]
 
 
+def test_a_repaired_payload_keeps_where_it_goes_and_what_answers_it_later(
+    tmp_path: Path,
+) -> None:
+    placed = _log(
+        tmp_path,
+        _user(0, "a"),
+        _said(1, "b"),
+        {
+            "kind": "context_splice",
+            "ref": _ref(2),
+            "mask": [[_ref(0), _ref(0)]],
+            "insert_after": _ref(1),
+            "payload": [
+                {"type": "assistant", "tool_calls": [{"id": "c8", "name": "Bash"}]},
+            ],
+        },
+        _user(3, "c"),
+    )
+    assert _texts(placed) == ["b", "call c8", "[interrupted]", "c"]
+    answered = _log(
+        tmp_path,
+        _user(0, "a"),
+        {
+            "kind": "context_splice",
+            "ref": _ref(1),
+            "mask": [[_ref(0), _ref(0)]],
+            "payload": [
+                {"type": "user", "text": "one"},
+                {"type": "assistant", "text": "x"},
+                {"type": "assistant", "tool_calls": [{"id": "c9", "name": "Bash"}]},
+            ],
+            "paired_externally": ["c9"],
+        },
+        _result(2, "c9", "done"),
+    )
+    assert _texts(answered)[-2:] == ["call c9", "done"]
+
+
+def test_a_v3_result_without_an_error_part_is_no_error(tmp_path: Path) -> None:
+    path = _log(
+        tmp_path,
+        {
+            "kind": "message",
+            "descriptor": "multipart/x-model-message",
+            "content": [
+                {
+                    "descriptor": "multipart/x-tool-call",
+                    "content": [
+                        {"descriptor": "text/x-queue-id", "content": "c1"},
+                        {"descriptor": "application/x-tool-ls", "content": {}},
+                    ],
+                },
+            ],
+        },
+        {
+            "kind": "message",
+            "descriptor": "multipart/x-tool-result",
+            "content": [
+                {"descriptor": "text/x-queue-id", "content": "c1"},
+                {"descriptor": "text/plain", "content": "ok"},
+            ],
+        },
+    )
+    result = _history(path)[-1]
+    assert isinstance(result, UncategorizedToolResult)
+    assert (result.text(), result.is_error) == ("ok", False)
+
+
 def test_an_unanswered_call_is_answered_interrupted(tmp_path: Path) -> None:
     path = _log(tmp_path, _user(0, "go"), _call(1, "c1"))
     assert _texts(path) == ["go", "call c1", "[interrupted]"]
@@ -703,6 +774,360 @@ def test_a_v3_log_converts_through_the_tape(tmp_path: Path) -> None:
     assert (called.name, called.arguments) == ("read", {"file_path": "a"})
     (result,) = [r for r in history if isinstance(r, UncategorizedToolResult)]
     assert result.is_error is True
+
+
+def test_every_kind_keeps_its_time_and_attachments(tmp_path: Path) -> None:
+    when, at = 1_790_000_000, "2026-09-21T14:13:20+00:00"
+    seen = {"timestamp": when, "attachments": [{"mime": "image/png", "data": _PNG}]}
+    path = _log(
+        tmp_path,
+        {**_user(0, "u"), **seen},
+        {**_call(1, "c1", "said"), "timestamp": when},
+        {**_result(2, "c1", "out"), **seen},
+        {
+            "kind": "history",
+            "ref": _ref(3),
+            "type": "system_message",
+            "text": "n",
+            **seen,
+        },
+        {"kind": "history", "ref": _ref(4), "type": "agent_send", "text": "p", **seen},
+    )
+    png = (Attachment(mime_descriptor="image/png", data=b"\x89PNG"),)
+    user, said, call, result, note, peer = _history(path)
+    assert user == UserMessage(timestamp=at, content="u", attachments=png)
+    assert said == AssistantMessage(timestamp=at, content="said")
+    assert isinstance(call, ToolCall)
+    assert call.timestamp == at
+    assert isinstance(result, UncategorizedToolResult)
+    assert (result.timestamp, result.attachments) == (at, png)
+    assert note == SystemMessage(timestamp=at, content="n")
+    assert peer == AgentToAgentMessage(timestamp=at, content="p", attachments=png)
+
+
+def test_an_attachment_that_is_no_strict_base64_is_dropped(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = _log(
+        tmp_path,
+        {**_user(0, "u"), "attachments": [{"mime": "image/png", "data": "iVBO!!Rw=="}]},
+    )
+    (user,) = _history(path)
+    assert isinstance(user, UserMessage)
+    assert user.attachments == ()
+    assert caplog.messages == ["dropping an attachment that does not decode"]
+
+
+def test_a_line_of_no_record_is_logged_with_its_file(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    path = _log(tmp_path, "{nope", _user(0, "u"))
+    assert _texts(path) == ["u"]
+    assert caplog.messages == [f"skipping a line of {path} that holds no record"]
+
+
+def test_a_value_of_the_wrong_type_reads_as_none_given(tmp_path: Path) -> None:
+    path = _log(
+        tmp_path,
+        {"kind": "history", "ref": _ref(0), "type": "user", "text": 5},
+        _call(1, "c", "x"),
+        _result(2, "c", "out", is_error="yes"),
+    )
+    user, said, _, result = _history(path)
+    assert user == UserMessage(content="")
+    assert said == AssistantMessage(content="x")
+    assert isinstance(result, UncategorizedToolResult)
+    assert result.is_error is False
+
+
+@pytest.mark.parametrize(("held", "named"), [("x", "x"), (1, True), (None, None)])
+def test_an_update_names_its_result_by_an_integer_id_alone(
+    tmp_path: Path,
+    held: PlainTree,
+    named: PlainTree,
+) -> None:
+    path = _log(
+        tmp_path,
+        _call(0, "c"),
+        _result(1, "c", "old", id=held),
+        {"kind": "update", "id": named, "content": "new"},
+    )
+    assert _texts(path)[-1] == "old"
+
+
+def test_an_update_to_a_stand_in_marks_what_it_stood_for(tmp_path: Path) -> None:
+    path = _log(
+        tmp_path,
+        _call(0, "c"),
+        _result(1, "c", "old", id=4),
+        {"kind": "update", "id": 4, "content": _DETACHED},
+    )
+    result = _history(path)[-1]
+    assert isinstance(result, UncategorizedToolResult)
+    assert result.stub == "pending"
+
+
+def test_a_ref_less_record_takes_the_sessions_id_from_ordinal_zero(
+    tmp_path: Path,
+) -> None:
+    hide = {
+        "kind": "context_splice",
+        "ref": _ref(9, "m"),
+        "mask": [[_ref(1, "m"), _ref(1, "m")]],
+    }
+    path = _log(
+        tmp_path,
+        {"kind": "meta", "session_id": "m"},
+        {"kind": "history", "type": "user", "text": "zero"},
+        {"kind": "history", "type": "assistant", "text": "one"},
+        {"kind": "history", "type": "assistant", "text": "two"},
+        hide,
+    )
+    assert _texts(path) == ["zero", "two"]
+
+
+def test_a_mask_in_another_session_hides_nothing_here(tmp_path: Path) -> None:
+    path = _log(
+        tmp_path,
+        _user(0, "kept"),
+        {
+            "kind": "context_splice",
+            "ref": _ref(1),
+            "mask": [[_ref(0, "t"), _ref(0, "t")]],
+        },
+    )
+    assert _texts(path) == ["kept"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        [_ref(0), {"ordinal": 0}],
+        [{"ordinal": 0}, _ref(0)],
+        [_ref(0)],
+    ],
+)
+def test_a_malformed_range_is_skipped_and_those_after_it_kept(
+    tmp_path: Path,
+    bad: PlainTree,
+) -> None:
+    path = _log(
+        tmp_path,
+        _user(0, "a"),
+        _user(1, "b"),
+        {"kind": "context_splice", "ref": _ref(2), "mask": [bad, [_ref(1), _ref(1)]]},
+    )
+    assert _texts(path) == ["a"]
+
+
+def test_a_barrier_hides_up_to_its_anchor_or_before_itself(tmp_path: Path) -> None:
+    anchored = _log(
+        tmp_path,
+        _user(0, "a"),
+        _said(1, "b"),
+        _user(2, "c"),
+        {
+            "kind": "context_override",
+            "ref": _ref(3),
+            "barrier": True,
+            "inject_after": _ref(0),
+        },
+    )
+    assert _texts(anchored) == ["b", "c"]
+    first = _log(
+        tmp_path,
+        {"kind": "context_override", "ref": _ref(0), "barrier": True},
+        _user(1, "b"),
+    )
+    assert _texts(first) == ["b"]
+
+
+def test_a_turn_without_a_signature_carries_none(tmp_path: Path) -> None:
+    (said,) = _history(_log(tmp_path, _said(0, "x")))
+    assert isinstance(said, AssistantMessage)
+    assert said.extra == {}
+
+
+def test_a_kindless_record_without_a_session_id_is_no_meta(tmp_path: Path) -> None:
+    path = _log(
+        tmp_path,
+        {"kind": "meta", "session_id": "m", "total_cost_usd": 2.5},
+        {"note": "x"},
+    )
+    clear, *_ = convert(path)
+    assert isinstance(clear, ContextClear)
+    assert clear.extra["spend_usd"] == 2.5
+    assert clear.timestamp is not None
+    assert clear.timestamp.endswith("+00:00")
+
+
+def test_a_v3_log_keeps_times_ids_lines_and_result_attachments(tmp_path: Path) -> None:
+    def part(descriptor: str, content: PlainTree) -> dict[str, PlainTree]:
+        return {"descriptor": descriptor, "content": content}
+
+    nameless = part("multipart/x-tool-call", [part("text/x-queue-id", "c0")])
+    path = _log(
+        tmp_path,
+        {
+            "kind": "message",
+            "descriptor": "multipart/x-user-message",
+            "content": [part("text/plain", "a"), part("text/plain", "b")],
+            "_timestamp": 1_790_000_000,
+        },
+        {
+            "kind": "message",
+            "descriptor": "multipart/x-model-message",
+            "content": [
+                part("text/plain", "go"),
+                nameless,
+                part(
+                    "multipart/x-tool-call",
+                    [part("text/x-queue-id", "c1"), part("application/x-tool-ls", {})],
+                ),
+            ],
+        },
+        {
+            "kind": "message",
+            "descriptor": "multipart/x-tool-result",
+            "_id": 7,
+            "content": [
+                part("text/x-queue-id", "c1"),
+                part("text/plain", "old"),
+                part("image/png", {"_bytes": _PNG}),
+            ],
+        },
+        {"kind": "update", "id": 7, "content": "new"},
+    )
+    user, said, call, result = _history(path)
+    assert user == UserMessage(timestamp="2026-09-21T14:13:20+00:00", content="a\nb")
+    assert said == AssistantMessage(content="go")
+    assert isinstance(call, ToolCall)
+    assert call.name == "ls"
+    assert isinstance(result, UncategorizedToolResult)
+    assert (result.text(), result.is_error) == ("new", False)
+    assert result.attachments == (
+        Attachment(mime_descriptor="image/png", data=b"\x89PNG"),
+    )
+
+
+def test_a_tape_s_splices_keep_what_made_them() -> None:
+    tape = legacy_journal._tape(
+        [
+            _user(0, "a"),
+            {"kind": "clear", "ref": _ref(1)},
+            {"kind": "context_splice", "ref": _ref(2), "strategy": "summary"},
+        ],
+        "s",
+    )
+    assert [r.strategy for r in tape if isinstance(r, ContextSplice)] == [
+        "clear",
+        "summary",
+    ]
+
+
+def test_a_repaired_splice_keeps_what_made_it() -> None:
+    tape = legacy_journal._tape(
+        [
+            _user(0, "a"),
+            {
+                "kind": "context_splice",
+                "ref": _ref(1),
+                "mask": [[_ref(0), _ref(0)]],
+                "strategy": "summary",
+                "payload": [
+                    {
+                        "type": "assistant",
+                        "text": "",
+                        "tool_calls": [{"id": "c9", "name": "Bash"}],
+                    },
+                ],
+            },
+        ],
+        "s",
+    )
+    assert [r.strategy for r in tape if isinstance(r, ContextSplice)] == ["summary"]
+
+
+def test_an_update_names_a_tool_result_alone(tmp_path: Path) -> None:
+    path = _log(
+        tmp_path,
+        _user(0, "go"),
+        {**_said(1, "said"), "id": 3},
+        {"kind": "update", "id": 3, "content": "new"},
+    )
+    assert _texts(path) == ["go", "said"]
+
+
+@pytest.mark.parametrize(
+    ("raw", "when"),
+    [
+        (1_000_000_000, None),
+        (1_000_000_000.5, "2001-09-09T01:46:40.500000+00:00"),
+        (1_000_000_000_000_000, None),
+        (1_790_000_000_000, None),
+        (1_000_000_000_500_000_000, "2001-09-09T01:46:40.500000+00:00"),
+        (1_000_000_000_000_000_000, None),
+        (1e300, None),
+    ],
+    ids=[
+        "exactly-2001",
+        "just-after",
+        "1e15-is-seconds",
+        "milliseconds",
+        "nanoseconds",
+        "nanoseconds-at-2001",
+        "neither",
+    ],
+)
+def test_a_time_s_bounds(tmp_path: Path, raw: PlainTree, when: str | None) -> None:
+    path = _log(tmp_path, {**_user(0, "a"), "timestamp": raw})
+    (user,) = _history(path)
+    assert isinstance(user, UserMessage)
+    assert user.timestamp == when
+
+
+def test_records_sharing_a_ref_move_just_past_everything_else() -> None:
+    tape = legacy_journal._tape(
+        [
+            _user(3, "a"),
+            {"kind": "context_splice", "ref": _ref(1), "mask": [[_ref(5), _ref(7)]]},
+            _said(3, "b"),
+            _said(3, "c"),
+        ],
+        "s",
+    )
+    assert [r.ref.ordinal for r in tape] == [1, 3, 8, 9]
+    assert legacy_journal._tape([], "s") == []
+
+
+def test_an_old_turn_costs_nothing_and_stopped_for_no_reason() -> None:
+    turn = legacy_journal._turn({}, text="hi", timestamp=None)
+    assert (turn.tokens, turn.spend, turn.stop_reason) == (
+        TokenCount(),
+        TokenCost(),
+        "",
+    )
+
+
+def test_an_upgrade_a_crash_cut_short_finishes(tmp_path: Path) -> None:
+    log = _session(tmp_path / "abc", _user(0, "hello"))
+    before = log.read_bytes()
+    os.link(log, projects.legacy_log(log.parent))
+
+    assert upgrade(log)
+
+    assert projects.legacy_log(log.parent).read_bytes() == before
+    assert not is_legacy(log)
+
+
+def test_an_upgrade_never_overwrites_another_log_kept(tmp_path: Path) -> None:
+    log = _session(tmp_path / "abc", _user(0, "hello"))
+    projects.legacy_log(log.parent).write_text("other")
+    with pytest.raises(FileExistsError):
+        upgrade(log)
+    assert is_legacy(log)
 
 
 def _session(directory: Path, *records: PlainTree) -> Path:

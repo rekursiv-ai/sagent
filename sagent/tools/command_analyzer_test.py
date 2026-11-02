@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from treekle import PlainTree
@@ -240,12 +240,12 @@ def test_an_assignment_after_the_name_sets_no_environment() -> None:
     command = bashlex.ast.node(
         kind="command",
         parts=[
-            bashlex.ast.node(kind="word", word="cat"),
-            bashlex.ast.node(kind="assignment", word="X=1"),
-            bashlex.ast.node(kind="word", word="f"),
+            bashlex.ast.node(kind="word", word="cat", parts=[]),
+            bashlex.ast.node(kind="assignment", word="X=1", parts=[]),
+            bashlex.ast.node(kind="word", word="f", parts=[]),
         ],
     )
-    invocation = _command(command, cwd="", pipeline=0)
+    invocation = _command(command)
     assert (invocation.exe, invocation.args) == ("cat", ("f",))
     assert dict(invocation.env_prefix) == {}
 
@@ -824,6 +824,176 @@ def test_a_policy_asset_error_names_the_asset(
     monkeypatch.setattr(command_analyzer, "files", here)
     with pytest.raises(ValueError, match=r"bash\.yaml, line 2: the key 'readers'"):
         ReadOnly.default()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "(cat f)",
+        "{ cat f; }",
+        "(cat f; ls) | head",
+        "cat f >>/dev/null",
+        "cat f >|/dev/null",
+        "cat f &>>/dev/null",
+    ],
+)
+def test_a_subshell_or_drop_that_only_reads_may_run_beside_others(
+    command: str,
+) -> None:
+    assert ReadOnly.default().reads(command)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["(rm x)", "{ cat f; rm x; }", "git -C", "git -C dir", "git -C log"],
+)
+def test_a_subshell_that_writes_or_a_flag_with_no_subcommand_runs_alone(
+    command: str,
+) -> None:
+    """``git -C log`` changes into ``log`` and names no subcommand."""
+    assert not ReadOnly.default().reads(command)
+
+
+def test_an_executors_valued_flags_are_skipped_before_its_command() -> None:
+    policy = ReadOnly.default()
+    niced = replace(
+        policy,
+        leading_flags={**policy.leading_flags, "nice": frozenset({"-n"})},
+    )
+    assert niced.reads("nice -n 5 cat f")
+    assert not niced.reads("nice -n cat rm f")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cd > log && ls",
+        "ls /srv/app && ls",
+        "cd /srv/app extra && ls",
+        "cd $X/.. && ls",
+        "cd ~/../app && ls",
+        "cd /srv/app;",
+    ],
+)
+def test_drop_cd_keeps_what_only_looks_like_a_cd_to_where_it_starts(
+    command: str,
+) -> None:
+    assert drop_cd(command, cwd="/srv/app") == command
+
+
+def test_an_env_value_may_hold_an_equals_sign() -> None:
+    assert dict(_one("X=a=b cat f", "cat").env_prefix) == {"X": "a=b"}
+
+
+@pytest.mark.parametrize(
+    ("command", "diverts"),
+    [
+        ("ls > out 2>/dev/null", True),
+        ("ls 2>/dev/null > out", True),
+        ("ls <<EOF\nx\nEOF", False),
+        ("ls <<-EOF\n\tx\nEOF", False),
+        ("ls <<< x", False),
+        ("ls <&3", False),
+    ],
+)
+def test_any_redirect_that_diverts_diverts_the_command(
+    command: str,
+    diverts: bool,
+) -> None:
+    """An input redirect, a heredoc among them, sends no output anywhere."""
+    assert _one(command, "ls").diverts_output is diverts
+
+
+def test_a_denied_long_flag_is_denied_whatever_its_value_holds() -> None:
+    cat = _one("cat --show-all=x=y f", "cat")
+    assert not replaceable(
+        cat,
+        exes=frozenset({"cat"}),
+        deny=frozenset({"--show-all"}),
+    )
+
+
+def test_a_flags_value_is_no_operand_of_a_replaceable_command() -> None:
+    head = _one("head -n 5", "head")
+    assert not replaceable(
+        head,
+        exes=frozenset({"head"}),
+        takes_value=frozenset({"-n"}),
+    )
+
+
+def test_a_valued_flag_that_ends_the_args_has_no_operand() -> None:
+    assert operands(("-n",), takes_value=frozenset({"-n"})) == ()
+    assert operands(("-n", "5", "f", "g"), takes_value=frozenset({"-n"})) == (
+        "f",
+        "g",
+    )
+    assert operands(("f", "-n", "5", "g"), takes_value=frozenset({"-n"})) == (
+        "f",
+        "g",
+    )
+
+
+def test_a_dot_prefix_names_the_same_path() -> None:
+    assert resolve("", "./f") == "f"
+    assert resolve("/srv", "./f") == "/srv/f"
+
+
+def test_two_tools_given_the_same_arguments_are_two_calls() -> None:
+    cat, head = _Peer(), _Peer(name="Head", exe="head")
+    assert rewrite("cat a; head a", peers=(cat, head), reads=True) == (
+        Rewrite(tool=cat, arguments={"file": "a"}),
+        Rewrite(tool=head, arguments={"file": "a"}),
+    )
+
+
+def test_one_tool_given_different_arguments_is_a_call_for_each() -> None:
+    cat = _Peer()
+    assert rewrite("cat a; cat b", peers=(cat,), reads=True) == (
+        Rewrite(tool=cat, arguments={"file": "a"}),
+        Rewrite(tool=cat, arguments={"file": "b"}),
+    )
+
+
+def test_a_compound_stage_stands_in_the_pipeline_where_it_runs() -> None:
+    command = "ls; cd /srv && grep p f | (sort) | head -5"
+    found = _found(command)
+    grep, head = _one(command, "grep"), _one(command, "head")
+    (compound,) = [i for i in found if i.exe == "\0compound"]
+    assert compound.args == ()
+    assert compound.cwd == grep.cwd == head.cwd == "/srv"
+    assert compound.pipeline == grep.pipeline == head.pipeline != 0
+    assert compound.piped_into is not None
+    assert compound.piped_into.exe == "head"
+    assert compound.piped_from is not None
+    assert compound.piped_from.exe == "grep"
+
+
+def test_what_runs_inside_a_pipeline_stage_shares_its_directory() -> None:
+    found = _found("cd /srv && cat $(ls d) | (grep p f) | head")
+    assert {i.exe: i.cwd for i in found if i.exe in {"ls", "grep"}} == {
+        "ls": "/srv",
+        "grep": "/srv",
+    }
+
+
+def test_a_compound_stage_feeds_the_stage_right_after_it() -> None:
+    grep = _one("(grep p f) | sort | head -5", "grep")
+    assert grep.piped_into is not None
+    assert grep.piped_into.exe == "sort"
+
+
+@pytest.mark.parametrize(
+    ("command", "diverted"),
+    [("((grep p f) | head -5) > out", False), ("(cat f | (grep p f)) > out", True)],
+    ids=["first-stage", "last-stage"],
+)
+def test_only_a_last_compound_stage_reaches_an_enclosing_redirect(
+    command: str,
+    diverted: bool,
+) -> None:
+    """Every earlier stage writes into the next stage, not the file."""
+    assert _one(command, "grep").diverts_output is diverted
 
 
 if __name__ == "__main__":

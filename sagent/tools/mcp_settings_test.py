@@ -22,6 +22,7 @@ from sagent.tools.testing import SHOUT_SERVER
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from sagent.settings.types import Setting
@@ -57,6 +58,55 @@ def test_every_verb_is_an_action_the_command_line_reaches(tmp_path: Path) -> Non
         assert action.help_long.startswith(f"usage: sagent {' '.join(action.name)}")
 
 
+def test_each_verb_says_what_it_does_and_how_it_is_typed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COLUMNS", "300")
+    actions = _actions(tmp_path)
+    assert [(a.help_short, a.usage) for a in actions.values()] == [
+        (
+            "list the MCP servers and whether each connects",
+            "[-h] [--mcp-config PATH|JSON] [--strict-mcp-config]",
+        ),
+        (
+            "show one MCP server and whether it connects",
+            "[-h] [--mcp-config PATH|JSON] [--strict-mcp-config] name",
+        ),
+        (
+            "add an MCP server: a command to run, or a URL",
+            (
+                "[-h] [-t {stdio,http}] [-e KEY=value] [-H 'Key: value'] [-s {local,user}]"
+                " name commandOrUrl [args ...]"
+            ),
+        ),
+        (
+            "add an MCP server from its JSON entry",
+            "[-h] [-s {local,user}] name json",
+        ),
+        ("remove an MCP server, and its sign-in", "[-h] [-s {local,user}] name"),
+        (
+            "sign in to a remote MCP server with OAuth",
+            (
+                "[-h] [--mcp-config PATH|JSON] [--strict-mcp-config]"
+                " [--headless | --no-headless] name"
+            ),
+        ),
+        (
+            "forget a remote MCP server's sign-in",
+            "[-h] [--mcp-config PATH|JSON] [--strict-mcp-config] name",
+        ),
+    ]
+    help_long = actions["mcp.add"].help_long
+    assert "\nAdd an MCP server: a command to run, or a URL.\n" in help_long
+    assert "the server's name" in help_long
+    assert "the command's arguments, after --" in help_long
+    assert "its mcpServers entry, as JSON" in actions["mcp.add-json"].help_long
+    assert {"-t", "--transport", "-e", "--env", "-H", "--header"} <= actions[
+        "mcp.add"
+    ].flags
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verb", _VERBS)
 async def test_help_is_the_same_text_help_long_holds(tmp_path: Path, verb: str) -> None:
@@ -70,7 +120,7 @@ async def test_add_http_writes_its_url_and_headers(tmp_path: Path) -> None:
         tmp_path,
         "add",
         "--transport http linear https://mcp.linear.app/mcp"
-        " -H 'Authorization: Bearer x' --header X-Key:k",
+        " -H 'Authorization: Bearer x:y' --header X-Key:k",
     )
     assert said == (
         "Added MCP server 'linear' to local; sessions started from now use it."
@@ -78,7 +128,7 @@ async def test_add_http_writes_its_url_and_headers(tmp_path: Path) -> None:
     assert _local(tmp_path) == {
         "linear": {
             "url": "https://mcp.linear.app/mcp",
-            "headers": {"Authorization": "Bearer x", "X-Key": "k"},
+            "headers": {"Authorization": "Bearer x:y", "X-Key": "k"},
         },
     }
 
@@ -109,11 +159,11 @@ async def test_add_to_the_user_scope_writes_the_users_file(tmp_path: Path) -> No
 @pytest.mark.parametrize(
     ("args", "said"),
     [
-        ("-t http web https://h -e A=1", "-e/--env is for a stdio server"),
-        ("web uvx -H 'A: 1'", "-H/--header is for an http server"),
-        ("-t http web https://h extra", "an http server takes no arguments"),
-        ("web uvx -e NOEQUALS", "-e takes KEY=value, not 'NOEQUALS'"),
-        ("-t http web https://h -H nocolon", "-H takes 'Key: value', not 'nocolon'"),
+        ("-t http web https://h -e A=1", "^-e/--env is for a stdio server$"),
+        ("web uvx -H 'A: 1'", "^-H/--header is for an http server$"),
+        ("-t http web https://h extra", "^an http server takes no arguments$"),
+        ("web uvx -e NOEQUALS", "^-e takes KEY=value, not 'NOEQUALS'$"),
+        ("-t http web https://h -H nocolon", "^-H takes 'Key: value', not 'nocolon'$"),
         ("-t sse web https://h", "invalid choice: 'sse'"),
         ("-s project web uvx", "invalid choice: 'project'"),
         ("a__b uvx", "MCP server name 'a__b'"),
@@ -137,6 +187,10 @@ async def test_add_json_takes_an_entry_as_other_tools_write_it(tmp_path: Path) -
         """docs '{"serverUrl": "https://h/mcp", "loading": "on_demand"}' -s user""",
     )
     assert said.startswith("Added MCP server 'docs' to user;")
+    user = data_dir() / "rekursiv-ai" / "sagent" / "mcp.json"
+    assert _entries(user) == {
+        "docs": {"serverUrl": "https://h/mcp", "loading": "on_demand"},
+    }
     (server,) = servers(tmp_path)
     assert (server.name, server.loading) == ("docs", "on_demand")
     with pytest.raises(SettingError, match="is no JSON object"):
@@ -154,7 +208,7 @@ async def test_list_and_get_show_each_server_and_how_it_connected(
     await _run(
         tmp_path,
         "add-json",
-        """off '{"url": "https://h/mcp", "disabled": true}'""",
+        """off '{"url": "https://h/mcp", "disabled": true, "description": "docs"}'""",
     )
     assert (await _run(tmp_path, "list")).splitlines() == [
         "good  stdio  every_request  connected, 1 tool",
@@ -167,6 +221,7 @@ async def test_list_and_get_show_each_server_and_how_it_connected(
     assert (await _run(tmp_path, "get", "off")).splitlines() == [
         "off  http  every_request  disabled",
         "  url: https://h/mcp",
+        "  docs",
     ]
     with pytest.raises(
         SettingError,
@@ -206,6 +261,16 @@ async def test_remove_and_logout_forget_what_they_name(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_remove_takes_only_the_scope_named(tmp_path: Path) -> None:
+    await _run(tmp_path, "add", "web uvx")
+    await _run(tmp_path, "add", "-s user web uvx")
+    said = await _run(tmp_path, "remove", "-s user web")
+    assert said.startswith("Removed MCP server 'web' from user;")
+    assert _local(tmp_path) == {"web": {"command": "uvx"}}
+    assert _entries(data_dir() / "rekursiv-ai" / "sagent" / "mcp.json") == {}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(("args", "headless"), [("", None), ("--headless", True)])
 async def test_login_signs_in_to_the_server_named(
     tmp_path: Path,
@@ -214,9 +279,15 @@ async def test_login_signs_in_to_the_server_named(
     headless: bool | None,
 ) -> None:
     signed: list[tuple[str, bool]] = []
+    shown: list[str] = []
 
-    async def sign_in(server: McpServer, *, show: object, headless: bool) -> None:
-        del show
+    async def sign_in(
+        server: McpServer,
+        *,
+        show: Callable[[str], object],
+        headless: bool,
+    ) -> None:
+        show("visit")
         signed.append((server.name, headless))
 
     # At a desk: a display, and no ssh.
@@ -225,11 +296,18 @@ async def test_login_signs_in_to_the_server_named(
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(mcp_settings, "login", sign_in)
     await _run(tmp_path, "add", "-t http web https://h/mcp")
-    said = await _run(tmp_path, "login", f"web {args}")
+    said = await _actions(tmp_path, shown)["mcp.login"].apply(f"web {args}")
     assert said == "Signed in to MCP server 'web'."
     assert signed == [("web", headless is True)]
+    assert shown == ["visit"]
     with pytest.raises(SettingError, match="No MCP server 'nope'"):
         await _run(tmp_path, "login", "nope")
+
+
+@pytest.mark.asyncio
+async def test_naming_a_server_where_there_are_none_says_so(tmp_path: Path) -> None:
+    with pytest.raises(SettingError, match=r"^No MCP server 'x'; configured: none$"):
+        await _run(tmp_path, "get", "x")
 
 
 @pytest.mark.asyncio

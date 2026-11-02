@@ -60,6 +60,24 @@ async def _lines(*lines: str) -> AsyncIterator[str]:
         yield line
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "astra-6.0",
+        "sol-6.1",
+        "sol-6.0",
+        "luna-6.0",
+        "sol-5.6",
+        "gpt-5.6",
+        "terra-5.6",
+        "luna-5.6",
+    ],
+)
+def test_gpt_5_6_on_reasons_over_every_turn(model_id: str) -> None:
+    assert wire.gpt_6(model_id)
+    assert not wire.gpt_6(model_id.upper())
+
+
 @pytest.mark.asyncio
 async def test_events_are_each_data_line_until_done() -> None:
     lines = _lines(

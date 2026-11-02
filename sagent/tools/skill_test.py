@@ -6,6 +6,7 @@ from importlib import util
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
+import html
 import logging
 import os
 import re
@@ -185,12 +186,14 @@ def test_an_invalid_name_is_skipped_with_a_warning(
     caplog: pytest.LogCaptureFixture,
     name: str,
 ) -> None:
-    _write(tmp_path, "ok", name=f"'{name}'")
+    path = _write(tmp_path, "ok", name=f"'{name}'")
     _write(tmp_path, "good", name="good")
     with caplog.at_level(logging.WARNING):
         skills = Skill(user_dir=tmp_path / "u").discover(tmp_path)
     assert _names(skills) == ["good"]
-    assert f"invalid name {name!r}" in caplog.text
+    assert caplog.messages == [
+        f"Skipping skill with invalid name {name!r} at {path.resolve()}.",
+    ]
 
 
 def test_a_sixty_four_character_name_is_allowed(tmp_path: Path) -> None:
@@ -212,7 +215,12 @@ def test_a_non_text_name_or_description_is_skipped_with_a_warning(
     (directory / "SKILL.md").write_text(f"---\n{meta}---\nbody\n", encoding="utf-8")
     with caplog.at_level(logging.WARNING):
         assert Skill(user_dir=tmp_path / "u").discover(tmp_path) == []
-    assert "non-text name or description" in caplog.text
+    assert caplog.messages == [
+        (
+            "Skipping skill with a non-text name or description at"
+            f" {(directory / 'SKILL.md').resolve()}."
+        ),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -316,7 +324,9 @@ def test_an_unreadable_skill_is_skipped_with_a_warning(
     (directory / "SKILL.md").write_bytes(b"\xff\xfe\x00bad")
     with caplog.at_level(logging.WARNING):
         assert Skill(user_dir=tmp_path / "u").discover(tmp_path) == []
-    assert "unreadable skill" in caplog.text
+    assert caplog.messages == [
+        f"Skipping unreadable skill {(directory / 'SKILL.md').resolve()}.",
+    ]
 
 
 def test_directories_without_skill_md_and_stray_files_are_ignored(
@@ -336,12 +346,18 @@ def test_skills_nest_and_list_depth_first_in_name_order(tmp_path: Path) -> None:
     _write(tmp_path, "trax/paper", name="trax-paper")
     _write(tmp_path, "group/inner", name="inner")
     _write(tmp_path, "alpha", name="alpha")
-    assert _names(Skill(user_dir=tmp_path / "u").discover(tmp_path)) == [
-        "alpha",
-        "inner",
-        "trax",
-        "trax-paper",
+    bad = tmp_path / ".sagent" / "skills" / "group" / "bad" / "SKILL.md"
+    bad.parent.mkdir()
+    bad.write_text("---\nname: [unclosed\n---\nbody\n", encoding="utf-8")
+    found = Skill(user_dir=tmp_path / "u", builtin_dir=tmp_path / "b")
+    assert [(s.name, s.source) for s in found.discover(tmp_path)] == [
+        ("alpha", "project"),
+        ("inner", "project"),
+        ("trax", "project"),
+        ("trax-paper", "project"),
     ]
+    (why,) = found.skipped(ToolContext(cwd=tmp_path))
+    assert why.startswith(f"Skipping skill {bad.resolve()}: ")
 
 
 def test_a_link_back_up_the_tree_is_entered_once(tmp_path: Path) -> None:
@@ -349,7 +365,12 @@ def test_a_link_back_up_the_tree_is_entered_once(tmp_path: Path) -> None:
     root = tmp_path / ".sagent" / "skills"
     (root / "trax" / "loop").symlink_to(root)
     (root / "again").symlink_to(root / "trax")
-    assert _names(Skill(user_dir=tmp_path / "u").discover(tmp_path)) == ["trax"]
+    _write(tmp_path, "zeta", name="zeta")
+    # ``again`` sorts before ``trax`` and ``zeta``: a link passed over ends nothing.
+    assert _names(Skill(user_dir=tmp_path / "u").discover(tmp_path)) == [
+        "trax",
+        "zeta",
+    ]
 
 
 def test_a_user_dir_linked_to_a_project_dir_lists_its_skills_once(
@@ -505,6 +526,25 @@ async def test_call_returns_the_escaped_body_in_a_skill_block(tmp_path: Path) ->
         call_id="",
         content="<skill name='alpha' source='project'>\n"
         "hello &lt;world&gt; &amp; &lt;/skill&gt;\n</skill>",
+    )
+
+
+@pytest.mark.parametrize("args", ["", "go \"there\" & 'back' <now>"])
+def test_a_block_escapes_what_html_escape_without_quotes_does(args: str) -> None:
+    """Only ``&``, ``<``, and ``>`` change; quotes reach the model as written."""
+    text = "say \"hi\" & 'bye' <b> </skill>"
+    info = SkillInfo(
+        name="alpha",
+        description="",
+        body=text,
+        source="project",
+        path=Path("SKILL.md"),
+    )
+    tail = f"\n\nArguments: {html.escape(args, quote=False)}" if args else ""
+
+    assert (info.block(args) if args else info.block()) == (
+        "<skill name='alpha' source='project'>\n"
+        f"{html.escape(text, quote=False)}{tail}\n</skill>"
     )
 
 

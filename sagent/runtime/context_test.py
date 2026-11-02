@@ -380,6 +380,8 @@ def test_a_duplicate_ref_is_refused() -> None:
         [],
         [_user("hi")],
         [_user("hi"), reply("hello")],
+        # A window may open on the model's turn, as after a summary.
+        [reply("hello"), _user("hi")],
         [_user("go"), _calling("t1"), _result("t1"), reply("done")],
         [_user("go"), _calling("t1", "t2"), _result("t2"), _result("t1")],
         [_user("a"), AgentToAgentMessage(sender="A", content="b"), _user("c")],
@@ -430,6 +432,31 @@ def test_invalid_contexts_are_named(
 ) -> None:
     with pytest.raises(InvalidContextError, match=match):
         validate_context(messages)
+
+
+@pytest.mark.parametrize(
+    ("added", "runs"),
+    [
+        # Adjacent runs merge, before and after.
+        ([(5, 6), (3, 4)], [(3, 6)]),
+        ([(3, 4), (5, 6)], [(3, 6)]),
+        # A one-ordinal gap keeps two runs.
+        ([(3, 4), (6, 7)], [(3, 4), (6, 7)]),
+        ([(6, 7), (3, 4)], [(3, 4), (6, 7)]),
+        # A run spanning several swallows them.
+        ([(1, 2), (4, 5), (7, 8), (2, 7)], [(1, 8)]),
+        ([(1, 10), (3, 4)], [(1, 10)]),
+    ],
+)
+def test_masked_ranges_are_kept_as_the_fewest_runs(
+    added: list[tuple[int, int]],
+    runs: list[tuple[int, int]],
+) -> None:
+    index = context._MaskIndex()
+    for lo, hi in added:
+        index.add_mask((MaskRange(session_id="s", lo=lo, hi=hi),))
+
+    assert index.intervals_by_session == {"s": runs}
 
 
 def test_a_compacted_tool_round_validates() -> None:

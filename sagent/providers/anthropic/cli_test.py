@@ -33,6 +33,7 @@ from sagent.providers.anthropic import cli, login, wire
 from sagent.providers.anthropic.cli import AnthropicCLI, AnthropicCLIModel
 from sagent.providers.login import Logins
 from sagent.providers.resources import SharedResources
+from sagent.providers.testing import refuse_browsers
 from sagent.providers.types import HasLogin
 from sagent.session.types import (
     AgentToAgentMessage,
@@ -60,6 +61,12 @@ if TYPE_CHECKING:
     from sagent.providers.types import ProcessPool, ToolMount
     from sagent.session.types import SessionRecord
     from sagent.tools.types import ToolContext
+
+
+@pytest.fixture(autouse=True)
+def no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a test that opens the user's browser, as a sign-in not headless would."""
+    refuse_browsers(monkeypatch, login)
 
 
 # Answers each line it reads with the next scripted turn, numbered across every
@@ -523,6 +530,9 @@ async def test_a_fresh_claude_hears_the_conversation_as_a_transcript(
             history=(UserMessage(content="a"),),
         ),
         ContextClear(history=(AssistantMessage(content="b"),)),
+        # Messages that say nothing add no line.
+        AssistantMessage(content=""),
+        AgentToAgentMessage(sender="lead", content=""),
         AgentToAgentMessage(sender="lead", content="status?"),
         AgentToAgentMessage(content="unsigned"),
         SystemMessage(content="Saved."),

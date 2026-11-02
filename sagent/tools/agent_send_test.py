@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 import asyncio
 import importlib
 import logging
+import re
 
 import pytest
 
@@ -361,6 +362,84 @@ async def test_a_delayed_reply_settles_the_debt_when_sent_not_when_it_lands(
         ),
     ]
     assert team.owes("bob") == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("label", "arguments", "message"),
+    [
+        ("Agent", {"to": "", "content": "hi"}, "'to' and 'content' are required."),
+        ("Agent", {"to": "parent", "content": "hi"}, "You have no parent."),
+        ("stranger", {"to": "parent", "content": "hi"}, "You have no parent."),
+        (
+            "Agent",
+            {"to": "user", "content": "hi"},
+            "No user is watching; there is no one to tell.",
+        ),
+    ],
+)
+async def test_each_refusal_says_exactly_why(
+    tmp_path: Path,
+    label: str,
+    arguments: dict[str, PlainTree],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        _ = await AgentSend(team=_team(tmp_path)).call(
+            _context(tmp_path, label),
+            arguments,
+        )
+
+
+@pytest.mark.asyncio
+async def test_every_result_is_for_no_call_and_a_self_send_says_why_it_is_odd(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def later(delay: float, callback: Callable[..., object], *args: object) -> None:
+        del delay, callback, args
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_later", later)
+    team = _team(tmp_path, "bob")
+    send = AgentSend(team=team)
+    results = [
+        await send.call(_context(tmp_path), {"to": "Agent", "content": "x"}),
+        await send.call(_context(tmp_path), {"to": "bob", "content": "x"}),
+        await send.call(_context(tmp_path), {"to": "bob", "content": "x", "delay": 1}),
+    ]
+    assert [r.call_id for r in results] == ["", "", ""]
+    assert results[0].text() == (
+        "Delivered to Agent. Note: you sent yourself a message without a delay;"
+        " this is likely not intentional."
+    )
+
+
+def test_what_is_owed_to_two_is_listed_in_turn(tmp_path: Path) -> None:
+    team = _team(tmp_path, "a", "b")
+    team.send("Agent", "a", "one")
+    team.send("b", "a", "two")
+    assert (
+        AgentSend(team=team)
+        .reminder(_context(tmp_path, "a"))
+        .endswith(
+            "You owe a reply, by AgentSend, to: Agent ('one'), b ('two').",
+        )
+    )
+
+
+def test_a_summary_keeps_the_message_s_trailing_spaces(tmp_path: Path) -> None:
+    send = AgentSend(team=_team(tmp_path))
+    assert send.summary({"to": "b", "content": "x  \n"}) == "AgentSend →b\nx  "
+
+
+def test_a_message_for_one_who_left_is_logged_with_both_names(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    team = _team(tmp_path)
+    with caplog.at_level(logging.WARNING, logger=agent_send.__name__):
+        AgentSend(team=team)._deliver("gone", "Agent", "hi")
+    assert caplog.messages == ["message from Agent to 'gone', which has left"]
 
 
 def test_the_description_reads_as_utf8_whatever_the_locale(

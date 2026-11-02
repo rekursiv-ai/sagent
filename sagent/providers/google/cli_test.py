@@ -9,13 +9,15 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from datetime import UTC, date, datetime
 from pathlib import Path
-from types import MappingProxyType
-from typing import TYPE_CHECKING, Self, override
+from types import MappingProxyType, SimpleNamespace
+from typing import TYPE_CHECKING, Self, cast, override
 
 import asyncio
 import io
 import os
+import shutil
 import stat
 import tempfile
 
@@ -25,13 +27,20 @@ from treekle import PlainTree, json_dumps, json_loads
 import pytest
 import pytest_asyncio
 
-from sagent.model.cost import TokenCount
+from sagent.model.cost import (
+    PriceCatalog,
+    PriceCondition,
+    TokenCost,
+    TokenCount,
+    TokenPrice,
+)
 from sagent.model.exceptions import (
     AuthError,
     DisconnectedError,
     RateLimitedError,
 )
 from sagent.model.types import Request, Response, TextChunk
+from sagent.providers.google import cli
 from sagent.providers.google.cli import GoogleCLI, GoogleCLIModel
 from sagent.providers.resources import SharedResources
 from sagent.session.types import (
@@ -52,6 +61,7 @@ from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
+    from asyncio.subprocess import Process
     from collections.abc import AsyncIterator, Sequence
 
     import httpx2
@@ -119,6 +129,7 @@ async def test_agy_runs_as_our_agent_in_a_home_of_its_own(
 ) -> None:
     """Our prompt is its agent's, our tools its only ones; its login is its own."""
     monkeypatch.setenv("GEMINI_API_KEY", "leak")
+    monkeypatch.setenv("GOOGLE_API_KEY", "leak")
     monkeypatch.setenv("KEEP_ME", "1")
     stub.script([_INIT, *_said("hi", tokens=(10, 2))])
     provider = GoogleCLI(resources=shared)
@@ -145,11 +156,8 @@ async def test_agy_runs_as_our_agent_in_a_home_of_its_own(
         line.split("=", 1) for line in stub.only("env").splitlines() if "=" in line
     )
     home = Path(env["HOME"])
-    assert (env["KEEP_ME"], "GEMINI_API_KEY" in env, env["USERPROFILE"]) == (
-        "1",
-        False,
-        env["HOME"],
-    )
+    assert (env["KEEP_ME"], env["USERPROFILE"]) == ("1", env["HOME"])
+    assert not {"GEMINI_API_KEY", "GOOGLE_API_KEY"} & env.keys()
     assert home.name.startswith("sagent-agy-")
     assert stub.only("cwd") == str(home / "workdir")
     gemini = stub.copied()
@@ -544,6 +552,310 @@ async def test_agy_quiet_too_long_is_a_disconnect(
     await model.provider.aclose()
 
 
+@pytest.mark.asyncio
+async def test_results_beside_a_new_message_start_a_fresh_agy(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    """A held call's results continue its turn only when they are all that is new."""
+    call = ToolCall(call_id="c1", name="Echo", arguments={"text": "x"})
+    shared.mount.calls.put_nowait(call)
+    stub.script(
+        [_INIT, _step("tool", state="ACTIVE", tool="call_mcp_tool")],
+        [_INIT, *_said("fresh")],
+    )
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    request = Request(records=_HELLO, tools=(_Echo(),))
+    held = _response(await _stream(model, request))
+    result = UncategorizedToolResult(call_id="c1", content="x")
+    records = (*_HELLO, *held.records, result, UserMessage(content="and this"))
+
+    done = _response(await _stream(model, Request(records=records, tools=(_Echo(),))))
+
+    assert done.records == (AssistantMessage(content="fresh"),)
+    assert len(stub.processes()) == 2
+    assert shared.mount.answered == []
+    await model.provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_worn_agy_is_replaced_between_turns_not_within_one(
+    shared: _Resources,
+    stub: _Stub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(GoogleCLIModel, "respawn_turns", 1)
+    call = ToolCall(call_id="c1", name="Echo", arguments={"text": "x"})
+    shared.mount.calls.put_nowait(call)
+    stub.script(
+        [
+            _INIT,
+            _step("tool", state="ACTIVE", tool="call_mcp_tool"),
+            "WAIT answered.0",
+            *_said("one"),
+        ],
+        [_INIT, *_said("two")],
+    )
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    tools = (_Echo(),)
+    held = _response(await _stream(model, Request(records=_HELLO, tools=tools)))
+    result = UncategorizedToolResult(call_id="c1", content="x")
+    records = (*_HELLO, *held.records, result)
+    first = _response(await _stream(model, Request(records=records, tools=tools)))
+    # The held call's result finished the first turn in its own agy.
+    assert len(stub.processes()) == 1
+
+    records = (*records, *first.records, UserMessage(content="next"))
+    second = _response(await _stream(model, Request(records=records, tools=tools)))
+
+    assert second.records == (AssistantMessage(content="two"),)
+    assert len(stub.processes()) == 2
+    await model.provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_tool_set_that_differs_in_its_schema_starts_a_fresh_agy(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    stub.script([_INIT, *_said("one")], [_INIT, *_said("two")])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    first = _response(await _stream(model, Request(records=_HELLO, tools=(_Echo(),))))
+    wider = _Echo(schema=MappingProxyType({"type": "object"}))
+    records = (*_HELLO, *first.records, UserMessage(content="again"))
+
+    await _stream(model, Request(records=records, tools=(wider,)))
+
+    assert len(stub.processes()) == 2
+    await model.provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_is_json_but_no_object_is_passed_over(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    stub.script([_INIT, "[1]", *_said("hi")])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    response = _response(await _stream(model, Request(records=_HELLO)))
+    assert response.records == (AssistantMessage(content="hi"),)
+    await model.provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_agy_exiting_says_so_exactly(shared: _Resources, stub: _Stub) -> None:
+    stub.script([_INIT, "EXIT"])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    with pytest.raises(DisconnectedError, match=r"^agy exited before its answer$"):
+        await _stream(model, Request(records=_HELLO))
+    await model.provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_steps_that_say_nothing_or_are_no_reply_add_no_text(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    stub.script(
+        [
+            _INIT,
+            _step("agent_response", state="ACTIVE"),
+            _step("planner", text="a plan"),
+            # A tool step that is done asks nothing of our server.
+            _step("tool", tool="view_file"),
+            {
+                "event": "step_update",
+                "step_update": {
+                    "step_type": "checkpoint",
+                    "usage": {"input_tokens": 4},
+                },
+            },
+            *_said("hi"),
+        ],
+    )
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+
+    events = await _stream(model, Request(records=_HELLO))
+
+    assert events[:-1] == [TextChunk(text="hi")]
+    assert _response(events).tokens == TokenCount(request=5, response=1)
+    assert shared.mount.answered == []
+    await model.provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_closing_lets_go_of_held_calls_and_tolerates_a_home_gone(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    stub.script([_INIT, *_said("hi")])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    await model.aclose()
+    await _stream(model, Request(records=_HELLO))
+    home = Path(stub.only("cwd")).parent
+    await asyncio.to_thread(shutil.rmtree, home)
+    before = shared.mount.cancelled
+
+    await model.provider.aclose()
+
+    assert shared.mount.cancelled == before + 1
+
+
+@pytest.mark.parametrize(
+    ("turns", "context", "worn"),
+    [
+        (99, 0, False),
+        (100, 0, True),
+        # Half a 1,000-token window, and one token over it.
+        (0, 500, False),
+        (0, 501, True),
+    ],
+)
+def test_an_agy_is_worn_after_its_turns_or_half_its_window(
+    turns: int,
+    context: int,
+    worn: bool,
+) -> None:
+    model = GoogleCLI()["gemini-flash"]
+    model._capability = replace(
+        model.capability,
+        limits=replace(model.capability.limits, max_request_tokens=1_000),
+    )
+    seen = SimpleNamespace(seen=SimpleNamespace(turns=turns, context_tokens=context))
+
+    assert model._worn(cast("cli._Agy", seen)) is worn
+
+
+def test_an_agy_counts_each_turn_it_finishes() -> None:
+    agy = cli._Agy(
+        # ``saw`` reads no process.
+        cast("Process", object()),
+        home=Path("/nowhere"),
+        started_with=(),
+        quiet_sec=1.0,
+    )
+    said = Response(
+        records=(AssistantMessage(content="x"),),
+        tokens=TokenCount(),
+        spend=TokenCost(),
+        stop_reason="end_turn",
+    )
+    calling = replace(said, records=(ToolCall(call_id="c", name="Echo"),))
+
+    turns: list[int] = []
+    for response in (said, calling, said, said):
+        agy.saw(_HELLO, response=response, context_tokens=7)
+        turns.append(agy.seen.turns)
+
+    # A reply that stops at calls goes on in the next stream: it finishes no turn.
+    assert turns == [1, 1, 2, 3]
+    assert agy.seen.context_tokens == 7
+
+
+@pytest.mark.parametrize(
+    ("error", "kind", "message"),
+    [
+        (
+            {"error": "Please sign in"},
+            AuthError,
+            "Please sign in; run agy once to sign in",
+        ),
+        ({"error": "resource_exhausted"}, RateLimitedError, "resource_exhausted"),
+        ({"error": "HTTP 429"}, RateLimitedError, "HTTP 429"),
+        ({"status": "CANCELLED"}, RuntimeError, "agy: CANCELLED"),
+        ({}, RuntimeError, "agy: agy failed"),
+    ],
+)
+def test_a_failure_is_what_agy_says_or_its_status(
+    error: dict[str, object],
+    kind: type[Exception],
+    message: str,
+) -> None:
+    failure = cli._failure(error)
+
+    assert type(failure) is kind
+    assert str(failure) == message
+
+
+def test_a_home_is_private_and_its_agent_has_no_tools_section_without_tools(
+    tmp_path: Path,
+) -> None:
+    cli._furnish(tmp_path, system=("Be terse.",), tools=(), url="http://x")
+
+    for directory in (
+        tmp_path / "workdir",
+        tmp_path / ".gemini" / "config" / "agents" / "sagent",
+        tmp_path / ".gemini" / "antigravity-cli",
+    ):
+        assert stat.S_IMODE(directory.stat().st_mode) == 0o700, directory
+    agent = tmp_path / ".gemini" / "config" / "agents" / "sagent" / "agent.md"
+    assert agent.read_text().endswith("---\nBe terse.\n")
+
+
+def test_a_tool_schema_keeps_its_characters(tmp_path: Path) -> None:
+    accented = _Echo(schema=MappingProxyType({"title": "café"}))
+    cli._furnish(tmp_path, system=(), tools=(accented,), url="http://x")
+
+    agent = tmp_path / ".gemini" / "config" / "agents" / "sagent" / "agent.md"
+    assert 'Input schema: {"title":"café"}' in agent.read_text()
+
+
+@pytest.mark.parametrize(
+    ("record", "said"),
+    [
+        (
+            UserMessage(
+                attachments=(Attachment(mime_descriptor="image/png", data=b""),),
+            ),
+            "\n[an image/png attachment, which agy cannot send]",
+        ),
+        (AgentToAgentMessage(sender="lead"), "[from lead]: "),
+        (AgentToAgentMessage(), ""),
+    ],
+)
+def test_a_message_with_no_words_says_none(record: UserMessage, said: str) -> None:
+    assert cli._said(record) == said
+
+
+@pytest.mark.asyncio
+async def test_a_request_counts_as_its_parts_joined() -> None:
+    model = GoogleCLI()["gemini-flash"]
+    request = Request(system=("aaaa", "bbbb"), records=(UserMessage(content="cc"),))
+    text = "aaaa\n\nbbbb\n\nUser: cc"
+
+    assert await model.count(request) == int(
+        len(text) / model.capability.approx_chars_per_token,
+    )
+
+
+def test_a_stream_is_costed_at_the_card_of_its_utc_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Evening:
+        @classmethod
+        def now(cls, tz: object = None) -> datetime:
+            if tz is UTC:
+                return datetime(2026, 10, 7, 1, tzinfo=UTC)
+            return datetime(2026, 10, 6, 18)  # noqa: DTZ001 -- the local wall clock.
+
+    capability = replace(
+        GoogleCLI()["gemini-flash"].capability,
+        prices=PriceCatalog(
+            prices={
+                PriceCondition(): TokenPrice(response=1.0),
+                PriceCondition(effective_date=date(2026, 10, 7)): TokenPrice(
+                    response=2.0,
+                ),
+            },
+            window=1_000,
+        ),
+    )
+    monkeypatch.setattr(cli, "datetime", _Evening)
+    turn = cli._Turn(tokens=TokenCount(response=1_000_000))
+
+    assert turn.response(capability=capability).spend.response == 2.0
+
+
 def test_the_provider_serves_what_agy_offers() -> None:
     """``agy models`` listed 3.8 Flash alone on 2026-10-27, at three efforts."""
     provider = GoogleCLI()
@@ -710,6 +1022,9 @@ class _Mount:
     late: bool = False
     """Whether a held call has stopped waiting, so answering it times out."""
 
+    cancelled: int = 0
+    """How many times every held call was let go."""
+
     def offer(self, tools: Sequence[Tool]) -> None:
         self.offered.append(tuple(tool.name for tool in tools))
 
@@ -723,7 +1038,7 @@ class _Mount:
         self.answered.append((call, result))
 
     def cancel(self) -> None:
-        return
+        self.cancelled += 1
 
 
 class _ToolServer(AsyncResource):

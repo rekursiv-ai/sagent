@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import io
+import math
 
 from PIL import Image
 from treekle import json_dumps, mutable
@@ -151,6 +152,138 @@ def test_an_image_costs_what_the_models_published_formula_says(
     tokens: int,
 ) -> None:
     assert token_count.image_tokens(model_id, width, height) == tokens
+
+
+@pytest.mark.parametrize(
+    ("model_id", "tokens"),
+    [
+        # Four 32 px patches: 1.2 each, or 1.62 for GPT-4.1 mini.
+        *(
+            (model_id, 5)
+            for model_id in (
+                "astra-6.0",
+                "sol-6.1",
+                "sol-6.0",
+                "luna-6.0",
+                "sol-5.6",
+                "gpt-5.6",
+                "terra-5.6",
+                "luna-5.6",
+                "gpt-5.5",
+                "gpt-5.4",
+                "gpt-mini-5.4",
+                "gpt-nano-5.4",
+                "gpt-5.2",
+            )
+        ),
+        ("gpt-mini-4.1", 7),
+        # One 512 px tile.
+        ("gpt-5.1", 70 + 140),
+        ("gpt-omni-mini-4.0", 2833 + 5667),
+        ("gpt-4.1", 85 + 170),
+        ("gpt-omni-4.0", 85 + 170),
+    ],
+)
+def test_each_model_bills_a_small_image_by_its_own_rule(
+    model_id: str,
+    tokens: int,
+) -> None:
+    assert token_count.image_tokens(model_id, 64, 64) == tokens
+
+
+@pytest.mark.parametrize(
+    ("model_id", "budget"),
+    [
+        ("gpt-5.5", 10_000),
+        ("gpt-5.4", 2_500),
+        ("gpt-mini-5.4", 2_500),
+        ("gpt-nano-5.4", 2_500),
+        ("gpt-5.2", 6_144),
+        ("gpt-mini-4.1", 6_144),
+    ],
+)
+def test_an_image_one_patch_over_its_budget_is_shrunk_into_it(
+    model_id: str,
+    budget: int,
+) -> None:
+    rate = 1.62 if model_id == "gpt-mini-4.1" else 1.2
+    # 41 x 61, 73 x 137, and 5 x 1229 patches are each one over a budget.
+    over = {2_500: (41, 61), 10_000: (73, 137), 6_144: (5, 1229)}[budget]
+    width, height = (32 * n for n in over)
+
+    assert token_count.image_tokens(model_id, width, height) < math.ceil(
+        (budget + 1) * rate,
+    )
+
+
+def test_gpt_6_shrinks_no_image_into_a_budget() -> None:
+    assert token_count.image_tokens("astra-6.0", 4096, 4096) == math.ceil(
+        128 * 128 * 1.2,
+    )
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "budget", "fitted"),
+    [
+        # The guide's worked example: 1800 x 2400 into 1,536 patches.
+        (1800, 2400, 1536, (1056, 1408)),
+        (2400, 1800, 1536, (1408, 1056)),
+        # Exactly the budget stays as it is; no budget shrinks nothing.
+        (1600, 1600, 2_500, (1600, 1600)),
+        (1599, 1599, 2_500, (1599, 1599)),
+        (64, 64, 0, (64, 64)),
+        (64, 64, 1, (32, 32)),
+        # A side shrunk below one pixel keeps one.
+        (1, 100_000, 1, (1, 1)),
+        (100_000, 1, 1, (1, 1)),
+    ],
+)
+def test_an_image_is_fit_to_its_patch_budget(
+    width: int,
+    height: int,
+    budget: int,
+    fitted: tuple[int, int],
+) -> None:
+    assert token_count._fit_patches(width, height, budget=budget) == fitted
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "fitted"),
+    [
+        # The 768 px short-side shrink, of either side.
+        (1537, 769, (1535, 768)),
+        (1000, 2000, (768, 1536)),
+        (768, 768, (768, 768)),
+        # A side shrunk below one pixel keeps one.
+        (1, 100_000, (1, 2048)),
+        (100_000, 1, (2048, 1)),
+    ],
+)
+def test_an_image_is_fit_to_its_tiles(
+    width: int,
+    height: int,
+    fitted: tuple[int, int],
+) -> None:
+    assert token_count._fit_tiles(width, height) == fitted
+
+
+@pytest.mark.parametrize(("width", "height"), [(513, 512), (512, 513)])
+def test_a_pixel_past_a_tile_is_another_tile(width: int, height: int) -> None:
+    assert token_count.image_tokens("gpt-5.1", width, height) == 70 + 140 * 2
+
+
+def test_an_image_attached_is_billed_by_its_models_rule() -> None:
+    image = Attachment(mime_descriptor="image/png", data=_png(64, 64))
+    unreadable = Attachment(mime_descriptor="image/png", data=b"not a png")
+
+    assert token_count.attachment_tokens(image, capability=_model("astra-6.0")) == 5
+    assert token_count.attachment_tokens(unreadable, capability=_model("gpt-5.1")) == 0
+
+
+def test_thinking_with_nothing_said_costs_nothing() -> None:
+    request = Request(records=(UserMessage(content="x" * 4), Thinking()))
+
+    assert token_count.estimate(request, capability=_model("kimi-3.0")) == 2
 
 
 def test_a_tall_thin_image_keeps_at_least_one_pixel_a_side() -> None:

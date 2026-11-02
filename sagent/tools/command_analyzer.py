@@ -179,7 +179,7 @@ def rewrite(
     if len(exact) == len(claims) == 1:
         return exact[0]
     if len(exact) == len(claims) and reads and not _falls_back(trees):
-        unique = {json_dumps({"t": r.tool.name, "a": r.arguments}): r for r in exact}
+        unique = {(r.tool.name, json_dumps(r.arguments)): r for r in exact}
         return tuple(unique.values())
     lines = [
         outcome if isinstance(outcome, str) else f"{peer.name} {json_dumps(outcome)}"
@@ -258,7 +258,7 @@ class ReadOnly:
 
         """
         asset = files(__package__) / "assets" / "bash.yaml"
-        text = asset.read_text(encoding="utf-8")
+        text = asset.read_text(encoding="utf-8")  # pragma: no mutate -- UTF-8 too.
         return from_plain(parse(text, aliases=True, source=str(asset)), cls)
 
     def reads(self, command: str) -> bool:
@@ -280,10 +280,17 @@ class ReadOnly:
             return self._safe_command(node)
         if node.kind in {"pipeline", "list"}:
             # Glue kinds are listed, so a kind bashlex adds later fails closed.
-            glue = {"operator", "pipe", "reservedword", "word", "assignment"}
-            return all(self._safe(part) for part in node.parts if part.kind not in glue)
+            return all(
+                self._safe(part)
+                for part in node.parts
+                if part.kind not in {"operator", "pipe", "reservedword"}
+            )
+        # A subshell or group is its brackets around a body; a loop or
+        # conditional is one node of its own kind, which fails below.
         if node.kind == "compound":
-            return all(self._safe(part) for part in node.list)
+            return all(
+                self._safe(part) for part in node.list if part.kind != "reservedword"
+            )
         if node.kind in {"commandsubstitution", "processsubstitution"}:
             return self._safe(node.command)
         # `bashlex` leaves an expansion's text unparsed, so the ``rm`` that
@@ -299,8 +306,7 @@ class ReadOnly:
             return False
         for part in node.parts:
             if part.kind in {"word", "assignment"} and not all(
-                self._safe(sub)
-                for sub in (part.parts if hasattr(part, "parts") else ())
+                self._safe(sub) for sub in part.parts
             ):
                 return False
         words = [part.word for part in node.parts if part.kind == "word"]
@@ -370,19 +376,16 @@ class ReadOnly:
     def _flagged(self, key: str, args: list[str]) -> bool:
         """Return whether any of ``args`` starts with a write flag of ``key``."""
         prefixes = self.write_flags.get(key, ())
-        return bool(prefixes) and any(arg.startswith(prefixes) for arg in args)
+        return any(arg.startswith(prefixes) for arg in args)
 
+    # A valued flag takes the next word whatever it is, as ``git -C`` does; one
+    # that ends the line leaves an index past the end, which slices to nothing.
     def _skip_flags(self, exe: str, args: Sequence[str]) -> int:
         """Return the index of the first argument past ``exe``'s leading flags."""
         takes_value = self.leading_flags.get(exe, frozenset[str]())
         i = 0
         while i < len(args) and args[i].startswith("-"):
-            valued = (
-                args[i] in takes_value
-                and i + 1 < len(args)
-                and not args[i + 1].startswith("-")
-            )
-            i += 2 if valued else 1
+            i += 2 if args[i] in takes_value else 1
         return i
 
 
@@ -411,7 +414,7 @@ def operands(
             out.extend(args[i + 1 :])
             break
         if arg.startswith("-") and arg != "-":
-            i += 2 if arg in takes_value and i + 1 < len(args) else 1
+            i += 2 if arg in takes_value else 1
             continue
         out.append(arg)
         i += 1
@@ -522,9 +525,9 @@ def resolve(cwd: str | None, path: str) -> str | None:
         return path
     if cwd is None:
         return None
-    if path in {"", "."}:
-        return cwd
-    return str(PurePosixPath(cwd) / path) if cwd else path
+    # The joined path drops ``.`` parts and is ``.`` itself when it names no more.
+    joined = str(PurePosixPath(cwd, path))
+    return "" if joined == "." else joined
 
 
 def drop_cd(command: str, *, cwd: str) -> str:
@@ -547,12 +550,9 @@ def drop_cd(command: str, *, cwd: str) -> str:
         return command
     first = trees[0]
     if first.kind == "list":
+        # A list's parts alternate commands and operators; ``cd X;`` has two.
         parts = first.parts
-        if (
-            len(parts) < 3
-            or parts[1].kind != "operator"
-            or parts[1].op not in {"&&", ";"}
-        ):
+        if len(parts) < 3 or parts[1].op not in {"&&", ";"}:
             return command
         cd, rest = parts[0], parts[2]
     elif first.kind == "command" and len(trees) > 1:
@@ -640,11 +640,14 @@ def _walk(
     redirects = node.redirects if hasattr(node, "redirects") else ()
     diverted = diverted or any(_diverts(r) for r in redirects)
     if node.kind == "command":
-        command = _command(node, cwd=cwd, pipeline=next(pipelines))
+        command = _command(node)
+        pipeline = next(pipelines)
         if command.exe:
             out.append(
                 replace(
                     command,
+                    cwd=cwd,
+                    pipeline=pipeline,
                     piped_into=sink,
                     diverts_output=command.diverts_output or diverted,
                 ),
@@ -685,7 +688,7 @@ def _walk_list(
                 here = before
             continue
         if part.kind == "command":
-            command = _command(part, cwd=here, pipeline=-1)
+            command = _command(part)
             if command.exe == "cd" and not command.diverts_output:
                 before = here
                 here = _cd(here, command.args)
@@ -694,6 +697,8 @@ def _walk_list(
         _walk(part, cwd=here, out=out, pipelines=pipelines, diverted=diverted)
 
 
+# Only the last stage's output reaches an enclosing redirect, whether that stage
+# is a command or a compound; every earlier stage writes into the next.
 def _walk_pipeline(
     node: Node,
     *,
@@ -718,14 +723,15 @@ def _walk_pipeline(
                 piped_into=after,
             )
             continue
-        command = _command(stages[i], cwd=cwd, pipeline=pipeline)
+        command = _command(stages[i])
         if command.exe:
-            # Only the last stage's output reaches an enclosing redirect.
-            last = i == len(stages) - 1
             linked[i] = replace(
                 command,
+                cwd=cwd,
+                pipeline=pipeline,
                 piped_into=after,
-                diverts_output=command.diverts_output or (diverted and last),
+                diverts_output=command.diverts_output
+                or (diverted and i == len(stages) - 1),
             )
     previous: Invocation | None = None
     for i, stage in enumerate(stages):
@@ -738,13 +744,14 @@ def _walk_pipeline(
             _walk_substitutions(stage, cwd=cwd, out=out, pipelines=pipelines)
         else:
             # What runs inside a compound stage feeds what the stage feeds.
+            last = i == len(stages) - 1
             _walk(
                 stage,
                 cwd=cwd,
                 out=out,
                 pipelines=pipelines,
-                diverted=diverted,
-                sink=linked[i + 1] if i + 1 < len(stages) else None,
+                diverted=diverted and last,
+                sink=None if last else linked[i + 1],
             )
 
 
@@ -763,8 +770,8 @@ def _walk_substitutions(
             _walk(child, cwd=cwd, out=out, pipelines=pipelines)
 
 
-def _command(node: Node, *, cwd: str | None, pipeline: int) -> Invocation:
-    """Return a ``command`` node as an ``Invocation``, not yet linked."""
+def _command(node: Node) -> Invocation:
+    """Return a ``command`` node as an ``Invocation``, not yet placed or linked."""
     env: dict[str, str] = {}
     words: list[str] = []
     diverts = expands = False
@@ -776,15 +783,10 @@ def _command(node: Node, *, cwd: str | None, pipeline: int) -> Invocation:
             env[key] = value
         elif part.kind == "word":
             words.append(part.word)
-            expands |= any(
-                sub.kind != "tilde"
-                for sub in (part.parts if hasattr(part, "parts") else ())
-            )
+            expands |= any(sub.kind != "tilde" for sub in part.parts)
     return Invocation(
         exe=words[0] if words else "",
         args=tuple(words[1:]),
-        cwd=cwd,
-        pipeline=pipeline,
         env_prefix=env,
         diverts_output=diverts,
         expands=expands,
@@ -794,7 +796,7 @@ def _command(node: Node, *, cwd: str | None, pipeline: int) -> Invocation:
 # Bare ``cd`` goes to ``$HOME`` and ``cd -`` to ``$OLDPWD``, neither in the text.
 def _cd(cwd: str | None, args: tuple[str, ...]) -> str | None:
     """Return where a ``cd`` with ``args`` leaves the shell."""
-    paths = [arg for arg in args if not arg.startswith("-") or arg == "-"]
+    paths = operands(args)
     if not paths or paths[0] == "-":
         return None
     return resolve(cwd, paths[0])
@@ -821,12 +823,11 @@ def _drops_or_merges(redirect: Node) -> bool:
 # `bashlex` hangs children on ``parts``, ``list``, or ``command``, by construct.
 def _children(node: Node) -> list[Node]:
     """Return every node directly under ``node``."""
-    out = [
+    return [
         *(node.parts if hasattr(node, "parts") else ()),
         *(node.list if hasattr(node, "list") else ()),
         *((node.command,) if hasattr(node, "command") else ()),
     ]
-    return [child for child in out if child is not node and hasattr(child, "kind")]
 
 
 def _sink_blocks(sink: Invocation, *, counted: bool) -> bool:
@@ -878,9 +879,10 @@ def _cd_to(node: Node, cwd: str) -> bool:
     words = node.parts
     if len(words) != 2 or words[0].word != "cd":
         return False
-    # A word bash fills in, ``~`` included, names a place the text does not say.
+    # A word bash fills in, ``~`` included, names a place the text does not say;
+    # each fill-in, a tilde too, is one of the word's parts.
     target = words[1]
-    if getattr(target, "parts", ()) or target.word.startswith("~"):
+    if target.parts:
         return False
     here = posixpath.normpath(cwd)
     return posixpath.normpath(PurePosixPath(here) / target.word) == here

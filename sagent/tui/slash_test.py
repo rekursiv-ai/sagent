@@ -39,12 +39,16 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.settings.exceptions import SettingError
 from sagent.settings.harvest import harvest
+from sagent.settings.types import Setting
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.mcp_settings import McpSettings
+from sagent.tui import slash
 from sagent.tui.prompt import Panes, Staged
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.render import Scrollback
+from sagent.tui.settings.runtime import RuntimeSettings
 from sagent.tui.slash import Commands, owners_without_agent
 from sagent.tui.types import CommandOutput
 
@@ -332,6 +336,159 @@ def test_actions_come_first_then_the_model_the_tools_the_screen_and_mcp() -> Non
         "mcp.login",
         "mcp.logout",
     ]
+
+
+def test_each_action_says_how_it_is_typed_and_what_it_does() -> None:
+    assert [(a.name, a.usage, a.help_short) for a in Commands.actions()] == [
+        (("quit",), "", "end the session"),
+        (("exit",), "", "end the session"),
+        (("help",), "[NAME]", "this list, or all one setting says"),
+        (("clear",), "", "wipe context (the journal keeps it)"),
+        (("compact",), "[hints]", "compact history"),
+        (("recompact",), "[hints]", "compact history"),
+        (("halt",), "[AGENTS]", "stop the model call (Ctrl+C), or the agents'"),
+        (("kill",), "ID|LABEL|all", "cancel tool calls, or stop a persistent child"),
+        (("send",), "AGENTS TEXT", "message agents, or run a /COMMAND on them"),
+        (("focus",), "LABEL", "show another agent; what you type goes to it"),
+        (("defer",), "TEXT", "send once the agent idles (Tab)"),
+        (("tasks",), "", "list running tool calls"),
+        (
+            ("login",),
+            "[--headless|--no-headless]",
+            "sign in to the model's provider",
+        ),
+        (
+            ("login", "precedence"),
+            "[PROVIDER] ACCOUNT,...|off",
+            "the order a provider's logins take the model, as quotas run out",
+        ),
+    ]
+
+
+def test_the_actions_that_say_more_say_it() -> None:
+    longer = {".".join(a.name): a.help_long for a in Commands.actions() if a.help_long}
+    assert sorted(longer) == ["focus", "login", "login.precedence", "send"]
+    assert longer["send"] == (
+        "AGENTS: a label, parent, children, ancestors, descendants, all, a*glob,"
+        " {a,b}, or /regex/. /send parent from a root with no parent starts its"
+        " watcher."
+    )
+    assert longer["focus"] == "Left on an empty line picks one from the tree."
+    assert longer["login.precedence"] == (
+        "ACCOUNTs, comma separated; default is the default login. The first with"
+        " quota left signs in, at each turn's start and when a call spends a"
+        " window; an account chosen with /model.provider.account comes first. off"
+        " orders default, then each account as added. PROVIDER is the model's"
+        " when left out."
+    )
+    assert longer["login"] == slash._login_parser().format_help()
+
+
+def test_the_login_action_reads_flags_at_the_prompt_and_the_shell() -> None:
+    desk = _Desk()
+    (login,) = (s for s in desk.commands.settings() if s.name == ("login",))
+    parser = slash._login_parser()
+    assert (login.cli, login.flags) == (True, parser.options)
+    assert login.help_long == parser.format_help()
+    assert {"--headless", "--no-headless"} <= parser.options
+    assert (
+        "Sign in to the model's provider, as --provider, --account and"
+        " --allow-providers say."
+    ) in " ".join(parser.format_help().split())
+    others = [s for s in desk.commands.settings() if s.name != ("login",)]
+    assert {(s.cli, s.flags) for s in others} == {(False, frozenset())}
+
+
+def _setting(*, usage: str = "", said: str = "", fails: bool = False) -> Setting:
+    async def apply(args: str) -> str:
+        if fails:
+            raise SettingError(f"no {args}")
+        return said
+
+    return Setting(name=("x",), help_short="what x is", usage=usage, apply=apply)
+
+
+@pytest.mark.parametrize(
+    ("usage", "row"),
+    [
+        ("", f"  {'/x':<32s}what x is"),
+        ("u" * 28, f"  {'/x ' + 'u' * 28:<32s}what x is"),
+        ("u" * 29, f"  /x {'u' * 29}\n  {'':<32s}what x is"),
+    ],
+)
+def test_a_help_row_wraps_a_name_too_long_for_its_column(usage: str, row: str) -> None:
+    assert slash._listed(_setting(usage=usage), lambda n: f"/{'.'.join(n)}") == row
+
+
+def test_a_long_name_with_no_usage_ends_where_its_name_does() -> None:
+    long = "/" + "n" * 40
+    assert slash._listed(_setting(), lambda _: long) == (
+        f"  {long}\n  {'':<32s}what x is"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_child_keeps_the_choice_it_made_before_its_commands_were() -> None:
+    desk, screens = _rolled()
+    team = desk.team
+    assert team is not None
+    await desk.commands("/screen.thinking hide")
+    team.join(
+        Agent(model=desk.catalog["scripted"]["scripted"]),
+        label="late",
+        parent="Agent",
+    )
+    team.choose("late", "screen.thinking", "show")
+
+    _ = await desk.commands.child_commands(team, "late")
+
+    assert _shown(screens) == {"Agent": False, "late": True}
+
+
+@pytest.mark.asyncio
+async def test_applying_a_setting_says_what_it_did_or_why_not() -> None:
+    said: list[CommandOutput] = []
+    assert await slash.apply_setting(_setting(said="  done \n"), "a", say=said.append)
+    assert not await slash.apply_setting(_setting(fails=True), "a", say=said.append)
+    assert said == [
+        CommandOutput(text="  done", tone="note", command="/x"),
+        CommandOutput(text="no a", tone="error", command="/x"),
+    ]
+
+
+def test_help_on_a_setting_names_it_alone_and_says_more_only_if_it_has_more() -> None:
+    settings = harvest(_Desk().commands.owners())
+    assert slash.help_text(settings, "quit") == "/quit\nend the session"
+    assert slash.help_text(settings, "focus").splitlines() == [
+        "/focus LABEL",
+        "show another agent; what you type goes to it",
+        "Left on an empty line picks one from the tree.",
+    ]
+
+
+def test_help_on_a_dotted_group_lists_its_settings() -> None:
+    settings = harvest(_Desk().commands.owners())
+    rows = slash.help_text(settings, "tool.Echo").splitlines()
+    assert rows[0] == "tool.Echo commands"
+    named = [r.split()[0] for r in rows[1:] if r.startswith("  /")]
+    assert len(named) > 1
+    assert all(n.startswith("/tool.Echo.") for n in named)
+
+
+def test_the_runtime_and_mcp_settings_act_on_this_agent(tmp_path: Path) -> None:
+    desk = _Desk()
+    owners = dict(desk.commands.owners())
+    runtime = owners[("runtime",)]
+    assert isinstance(runtime, RuntimeSettings)
+    assert runtime.runtime is desk.agent.runtime
+    mcp = owners[("mcp",)]
+    assert isinstance(mcp, McpSettings)
+    assert mcp.cwd == desk.agent.runtime.tool_context.origin
+    _ = mcp.show("hi")
+    assert desk.printer.said == [("note", "hi")]
+    ((_, alone),) = owners_without_agent(cwd=tmp_path, say=desk.commands.say)
+    assert isinstance(alone, McpSettings)
+    assert alone.cwd == tmp_path
 
 
 @pytest.mark.asyncio
@@ -831,8 +988,12 @@ async def test_send_parent_from_a_root_starts_its_watcher_once(
     async with team:
         await desk.commands("/send parent keep it honest")
         await desk.commands("/send parent and brief")
+        await desk.commands("/parent.watcher on")
+        await desk.commands("/parent.watcher")
+        assert team.watching == {"watcher": True}
         await desk.commands("/parent.watcher off")
         await desk.commands("/parent.watcher")
+        await desk.commands("/parent.help watcher")
 
         watcher = team["watcher"]
         assert team.resolve("parent", by="Agent") == ["watcher"]
@@ -852,8 +1013,17 @@ async def test_send_parent_from_a_root_starts_its_watcher_once(
             "[/send] started watcher, watching Agent\nuser→watcher: keep it honest",
         ),
         ("note", "[/send] user→watcher: and brief"),
+        ("note", "[/watcher] on"),
+        ("note", "[/watcher] on   (on, off)"),
         ("note", "[/watcher] off"),
         ("note", "[/watcher] off   (on, off)"),
+        (
+            "note",
+            (
+                "[/help] /watcher on|off\nwhether watcher is sent what Agent does"
+                "\nnow: off   (on, off)"
+            ),
+        ),
     ]
 
 
@@ -950,17 +1120,33 @@ def _shown(screens: dict[str, _View]) -> dict[str, bool]:
 
 @pytest.mark.asyncio
 async def test_a_choice_rolls_down_to_each_child_that_made_none() -> None:
-    desk, screens = _rolled(("a", "Agent"), ("b", "Agent"), ("a1", "a"))
+    desk, screens = _rolled(("a", "Agent"), ("b", "Agent"), ("c", "Agent"), ("a1", "a"))
     team = desk.team
     assert team is not None
     await desk.commands("/send b /screen.thinking show")
 
     await desk.commands("/screen.thinking hide")
 
-    assert _shown(screens) == {"Agent": False, "a": False, "a1": False, "b": True}
+    assert _shown(screens) == {
+        "Agent": False,
+        "a": False,
+        "a1": False,
+        "b": True,
+        "c": False,
+    }
     assert team.choices == {
         "b": {"screen.thinking": "show"},
         "Agent": {"screen.thinking": "hide"},
+    }
+    # Commands made by now take a later choice by its roll alone.
+    await desk.commands("/screen.thinking show")
+    await desk.commands("/send b /screen.thinking hide")
+    assert _shown(screens) == {
+        "Agent": True,
+        "a": True,
+        "a1": True,
+        "b": False,
+        "c": True,
     }
 
 
@@ -969,13 +1155,14 @@ async def test_default_on_a_child_takes_its_parent_s_again() -> None:
     desk, screens = _rolled(("a", "Agent"), ("a1", "a"))
     team = desk.team
     assert team is not None
-    await desk.commands("/screen.thinking hide")
-    await desk.commands("/send a /screen.thinking show")
-    assert _shown(screens) == {"Agent": False, "a": True, "a1": True}
+    # The parent's choice is not a fresh screen's, which hides.
+    await desk.commands("/screen.thinking show")
+    await desk.commands("/send a /screen.thinking hide")
+    assert _shown(screens) == {"Agent": True, "a": False, "a1": False}
 
     await desk.commands("/send a /screen.thinking default")
 
-    assert _shown(screens) == {"Agent": False, "a": False, "a1": False}
+    assert _shown(screens) == {"Agent": True, "a": True, "a1": True}
     assert "a" not in team.choices or team.choices["a"] == {}
 
 
@@ -1415,6 +1602,11 @@ async def test_login_precedence_reads_a_list_as_a_person_types_it() -> None:
         "note",
         "[/login.precedence] signing: work (no login saved: zed)",
     )
+    await desk.commands("/login.precedence zed,yo,work")
+    assert desk.printer.said[-1][1].endswith("(no login saved: zed,yo)")
+    # A comma after spaces still lists accounts; it names no provider.
+    await desk.commands("/login.precedence work  ,default")
+    assert provider.logins.precedence() == ("work", "default")
 
 
 @pytest.mark.asyncio

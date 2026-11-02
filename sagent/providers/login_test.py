@@ -58,8 +58,10 @@ async def test_the_redirect_is_answered_only_on_its_path_with_its_state(
         assert await visit(port, "/elsewhere?code=c1&state=s1") == 400
         assert await visit(port, f"{path}?state=s1") == 400
         assert await send(port, b"garbage\r\n") == 400
+        assert await send(port, f"GET {path}?state=s1&code=\r\n".encode()) == 400
         assert not code.done()
-        assert await visit(port, f"{path}?code=c1&state=s1") == 200
+        # A request line may name no HTTP version.
+        assert await send(port, f"GET {path}?code=c1&state=s1\r\n".encode()) == 200
         # A second redirect after the first is answered and changes nothing.
         assert await visit(port, f"{path}?code=c2&state=s1") == 200
     assert code.result() == "c1"
@@ -184,11 +186,12 @@ def test_a_browser_command_runs_in_a_session_of_its_own(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The terminal's hangup, when it closes, must not reach the browser."""
+    """The terminal's hangup, when it closes, must not reach the browser, nor its keys."""
     script = tmp_path / "browser"
     script.write_text(
         "#!/bin/sh\n"
-        f"cut -d' ' -f6 /proc/$$/stat > {tmp_path / 'sid.tmp'}\n"
+        f"{{ cut -d' ' -f6 /proc/$$/stat; readlink /proc/$$/fd/0; }}"
+        f" > {tmp_path / 'sid.tmp'}\n"
         f"mv {tmp_path / 'sid.tmp'} {tmp_path / 'sid'}\n",
     )
     script.chmod(0o700)
@@ -199,7 +202,9 @@ def test_a_browser_command_runs_in_a_session_of_its_own(
     deadline = time.monotonic() + 5
     while not sid.exists() and time.monotonic() < deadline:
         time.sleep(0.01)
-    assert int(sid.read_text()) != os.getsid(0)
+    session, stdin = sid.read_text().split()
+    assert int(session) != os.getsid(0)
+    assert stdin == "/dev/null"
 
 
 def test_a_browser_command_that_cannot_start_raises_nothing(
@@ -211,7 +216,7 @@ def test_a_browser_command_that_cannot_start_raises_nothing(
 
     command = webbrowser.GenericBrowser(["browser", "%s"])
     monkeypatch.setattr(webbrowser, "get", lambda: command)
-    monkeypatch.setattr(subprocess, "run", missing)
+    monkeypatch.setattr(subprocess, "Popen", missing)
     open_browser("https://example.com")
 
 

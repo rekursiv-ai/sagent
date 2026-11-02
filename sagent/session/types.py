@@ -130,18 +130,18 @@ class TurnContext:
 
         """
         lines = (
-            f"Working directory: {self.cwd}" if self.cwd is not None else "",
-            self.environment if self.environment is not None else "",
-            f"Model: {self.model}" if self.model is not None else "",
+            f"Working directory: {self.cwd}" if self.cwd is not None else None,
+            self.environment,
+            f"Model: {self.model}" if self.model is not None else None,
             f"Tools you may call: {', '.join(self.tools) or 'none'}"
             if self.tools is not None
-            else "",
+            else None,
             f"Current time: {_local(self.timestamp)}"
             if self.timestamp is not None
-            else "",
-            self.agents_md if self.agents_md is not None else "",
+            else None,
+            self.agents_md,
         )
-        return "\n".join(line for line in lines if line)
+        return "\n".join(filter(None, lines))
 
 
 # The model greets by the time of day where the user is, so the offset alone is not
@@ -609,7 +609,7 @@ def stored_plain(
     plain = to_plain(
         record,
         classes=classes or record_classes(),
-        sort=False,
+        sort=False,  # pragma: no mutate -- treekle reads ``sort`` by truth: None is False.
         default_concrete_types=CONCRETE_TYPES,
     )
     assert isinstance(plain, dict)

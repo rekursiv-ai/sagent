@@ -117,6 +117,7 @@ async def _ask(
         ({"action": "compact"}, "Session compact", "*"),
         ({"action": "clear"}, "Session clear", "*"),
         ({"action": "read", "ids": "x"}, "Session read", None),
+        ({}, "Session", None),
     ],
 )
 def test_the_summary_names_the_action_and_edits_run_alone(
@@ -133,8 +134,35 @@ def test_the_summary_names_the_action_and_edits_run_alone(
 @pytest.mark.asyncio
 async def test_a_caller_outside_the_team_is_refused(tmp_path: Path) -> None:
     _, tool = _setup(tmp_path)
-    with pytest.raises(ValueError, match="needs a calling agent"):
+    with pytest.raises(
+        ValueError,
+        match=r"^Session needs a calling agent in the team\.$",
+    ):
         _ = await _ask(tool, tmp_path, {"action": "list"}, label="nobody")
+
+
+@pytest.mark.asyncio
+async def test_list_cuts_a_head_only_past_80_and_names_unknown_and_several_calls(
+    tmp_path: Path,
+) -> None:
+    agent, tool = _setup(tmp_path)
+    agent.runtime.append_clear()
+    agent.session.append(
+        UserMessage(content="x" * 80),
+        UserMessage(content="y" * 81),
+        ToolCall(call_id="c2", name="Read"),
+        ToolCall(call_id="c3", name="Grep"),
+        UncategorizedToolResult(call_id="gone", content="orphan"),
+    )
+
+    lines = (await _ask(tool, tmp_path, {"action": "list"})).splitlines()
+
+    assert lines == [
+        f"#0 user message (80 chars): {'x' * 80}",
+        f"#1 user message (81 chars): {'y' * 80}...",
+        "#2 your turn, calling Read, Grep (4 chars): {}{}",
+        "#3 result of ? (6 chars): orphan",
+    ]
 
 
 @pytest.mark.asyncio
@@ -170,17 +198,19 @@ async def test_read_gives_each_entry_whole_once(tmp_path: Path) -> None:
     _, tool = _setup(tmp_path)
 
     text = await _ask(tool, tmp_path, {"action": "read", "ids": [6, 0, 6]})
+    result = await _ask(tool, tmp_path, {"action": "read", "ids": [2]})
 
     assert text == (
         "#0 user message (2 chars): go\ngo\n\n"
         "#6 message from Agent_0 (9 chars): peer says\npeer says"
     )
+    assert result.startswith("#2 result of Read (4,000 chars): ")
 
 
 @pytest.mark.parametrize(
     ("ids", "match"),
     [
-        ([], "Name the entries"),
+        ([], r"^Name the entries in 'ids'; list shows them\.$"),
         ([9], r"No entry #9; your context has 9\."),
         ([-1], "No entry #-1"),
     ],
@@ -218,8 +248,35 @@ async def test_search_reads_the_whole_session_compacted_windows_too(
     ]
     assert tool_args == 'record 4, ToolCall: ...Read {"file_path": "a.py"}...'
     assert none == "No record holds 'absent'."
-    with pytest.raises(ValueError, match="Say what to find"):
+    with pytest.raises(ValueError, match=r"^Say what to find in 'text'\.$"):
         _ = await _ask(tool, tmp_path, {"action": "search", "text": " "})
+
+
+@pytest.mark.asyncio
+async def test_search_shows_60_chars_around_the_first_match(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    journal.append(UserMessage(content=f"{'a' * 70}needle{'b' * 70}needle"))
+    _, tool = _setup(tmp_path, journal=journal)
+
+    found = await _ask(tool, tmp_path, {"action": "search", "text": "NEEDLE"})
+
+    assert found == f"record 0, UserMessage: ...{'a' * 60}needle{'b' * 60}..."
+
+
+@pytest.mark.asyncio
+async def test_a_record_with_no_words_matches_nothing(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    journal.append(
+        ContextClear(),
+        UserMessage(content=None),
+        UncategorizedRecord(kind="note"),
+    )
+    agent, tool = _setup(tmp_path, journal=journal)
+    agent.runtime.append_clear()
+
+    found = await _ask(tool, tmp_path, {"action": "search", "text": "x"})
+
+    assert found == "No record holds 'x'."
 
 
 @pytest.mark.asyncio
@@ -349,7 +406,7 @@ async def test_compact_queues_a_compaction_in_the_style_asked(tmp_path: Path) ->
 async def test_compact_needs_a_compactor(tmp_path: Path) -> None:
 
     _, tool = _setup(tmp_path, compactor=NoShrinker)
-    with pytest.raises(ValueError, match="no compactor"):
+    with pytest.raises(ValueError, match=r"^This agent has no compactor\.$"):
         _ = await _ask(tool, tmp_path, {"action": "compact"})
 
 
@@ -387,6 +444,8 @@ async def test_read_by_record_finds_a_call_with_its_result_in_another_s_session(
     head, result = read.split("\n\n")
     assert head == 'record 1, ToolCall:\nRead {"file_path": "a.py"}'
     assert result.startswith("its result, record 3:\n" + "a" * 100)
+    first = await _ask(tool, tmp_path, {"action": "read", "records": [0]})
+    assert first == "record 0, UserMessage:\ngo"
 
 
 @pytest.mark.asyncio
@@ -394,7 +453,12 @@ async def test_read_by_record_finds_a_call_with_its_result_in_another_s_session(
     ("arguments", "match"),
     [
         ({"action": "read", "records": [99]}, "No record 99; the session has"),
-        ({"action": "list", "agent": "children"}, "'children' names 0 agents"),
+        ({"action": "read", "records": [9]}, r"^No record 9; the session has 9\.$"),
+        ({"action": "read", "records": [-1]}, r"^No record -1; the session has 9\.$"),
+        (
+            {"action": "list", "agent": "children"},
+            r"^'children' names 0 agents; name one\. Agents: Agent, watcher$",
+        ),
         ({"action": "prune", "agent": "kid", "ids": [2]}, "Only list, read and search"),
     ],
 )
@@ -413,6 +477,13 @@ async def test_another_s_session_is_only_read(
         parent="Agent",
     )
     _ = tool.team.leave("kid") if arguments.get("agent") == "children" else None
+    _ = tool.team.join(
+        Agent(
+            model=ScriptedProvider()["scripted"],
+            tool_context=ToolContext(cwd=tmp_path),
+        ),
+        label="watcher",
+    )
 
     with pytest.raises(ValueError, match=match):
         _ = await tool.call(ToolContext(cwd=tmp_path, label="Agent"), arguments)

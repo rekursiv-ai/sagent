@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import math
+import re
 
 from torch import Tensor, nn
+from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLVisionConfig
+from transformers.models.qwen3_vl.modeling_qwen3_vl import Qwen3VLVisionModel
 
 import pytest
 import torch
@@ -192,6 +195,113 @@ def test_a_checkpoints_vision_weights_load_strictly() -> None:
     for name, value in model.state_dict().items():
         key = "model.visual." + name.replace("patch_embed.", "patch_embed.proj.")
         assert torch.equal(value, hf[key]), name
+
+
+def _tiny_reference() -> Qwen3VLVisionModel:
+    """Return the reference encoder, as Hugging Face ships it, in the tiny shape."""
+    config = Qwen3VLVisionConfig(
+        depth=2,
+        hidden_size=8,
+        intermediate_size=8,
+        num_heads=2,
+        in_channels=3,
+        patch_size=2,
+        temporal_patch_size=1,
+        spatial_merge_size=2,
+        out_hidden_size=6,
+        num_position_embeddings=16,
+        deepstack_visual_indexes=[],
+    )
+    config._attn_implementation = "sdpa"
+    torch.manual_seed(0)
+    return Qwen3VLVisionModel(config).eval()
+
+
+@pytest.mark.parametrize(
+    "grid",
+    [
+        [[1, 4, 6], [2, 2, 2]],
+        # Finer than the learned 4x4 grid: positions are interpolated.
+        [[1, 6, 8]],
+    ],
+)
+def test_the_encoder_computes_what_the_reference_does(grid: list[list[int]]) -> None:
+    reference = _tiny_reference()
+    ours = _model(depth=2).eval()
+    state = {f"model.visual.{k}": v for k, v in reference.state_dict().items()}
+    ours.load_state_dict(remap_hf_vision_state_dict(state), strict=True)
+    grid_thw = torch.tensor(grid)
+    pixels = _pixels(grid_thw, seed=1)
+
+    with torch.no_grad():
+        want = reference(pixels, grid_thw).pooler_output
+        got = ours(pixels, grid_thw)
+
+    assert want is not None
+    torch.testing.assert_close(got, want, rtol=0, atol=1e-8)
+
+
+def test_the_default_draws_and_rotary_base_are_the_references() -> None:
+    model = VisionModel(
+        depth=1,
+        hidden_size=8,
+        num_heads=2,
+        intermediate_size=8,
+        in_channels=3,
+        patch_size=2,
+        temporal_patch_size=1,
+        spatial_merge_size=2,
+        out_hidden_size=6,
+        num_position_embeddings=16,
+    )
+
+    assert model.initializer_range == Qwen3VLVisionConfig().initializer_range
+    assert model.rotary_pos_emb.theta == 10_000.0
+
+
+@pytest.mark.parametrize(("hidden_size", "num_heads"), [(9, 2), (6, 2)])
+def test_heads_of_no_even_width_are_refused(hidden_size: int, num_heads: int) -> None:
+    message = (
+        f"hidden_size={hidden_size} must split into num_heads={num_heads}"
+        " heads of an even width."
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        VisionModel(
+            depth=1,
+            hidden_size=hidden_size,
+            num_heads=num_heads,
+            intermediate_size=8,
+            in_channels=3,
+            patch_size=2,
+            temporal_patch_size=1,
+            spatial_merge_size=2,
+            out_hidden_size=6,
+            num_position_embeddings=16,
+        )
+
+
+def test_every_tensor_is_made_on_the_models_device() -> None:
+    """On ``meta``, any tensor made on the CPU instead fails to mix with it."""
+    model = _model(depth=1).to("meta")
+    grid = torch.tensor([[2, 4, 6]])
+
+    out = model(_pixels(grid).to("meta"), grid)
+
+    assert (out.device.type, tuple(out.shape)) == ("meta", (12, 6))
+
+
+@pytest.mark.gpu_torch_cuda
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_the_encoder_on_cuda_computes_what_it_does_on_the_cpu() -> None:
+    """``meta`` takes a CPU index for a lookup; CUDA does not."""
+    model = _model(depth=1).eval()
+    grid = torch.tensor([[2, 4, 6]])
+    pixels = _pixels(grid)
+    with torch.no_grad():
+        want = model(pixels, grid)
+        got = model.to("cuda")(pixels.to("cuda"), grid)
+
+    torch.testing.assert_close(got.cpu(), want, rtol=1e-4, atol=1e-6)
 
 
 if __name__ == "__main__":

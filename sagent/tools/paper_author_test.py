@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import re
+
 from wesearch.fetch import FetchSession
 from wesearch.paper.authors import AuthorSearchResult
 from wesearch.paper.details import Listing
@@ -269,6 +271,105 @@ async def test_arguments_that_contradict_are_refused_before_any_lookup(
     with pytest.raises(ValueError, match=message):
         await _tool().call(ToolContext(cwd=tmp_path), arguments)
     assert calls == [[], [], []]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    [
+        ({}, "Set exactly one of 'query' or 'ids'."),
+        (
+            {"query": "Ada", "operation": "papers"},
+            "'operation=papers' needs exactly one id in 'ids'.",
+        ),
+        (
+            {"ids": "1", "year_from": 2000},
+            "'year_from' / 'year_to' only apply to operation='papers'.",
+        ),
+    ],
+)
+async def test_each_contradiction_says_exactly_what_it_is(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        await _tool().call(ToolContext(cwd=tmp_path), arguments)
+
+
+@pytest.mark.asyncio
+async def test_each_lookup_is_kept_apart_from_the_others(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    search = _fake(
+        monkeypatch,
+        "search_authors",
+        AuthorSearchResult(records=[_ADA], total=1),
+    )
+    metadata = _fake(monkeypatch, "author_metadata", [_ADA])
+    papers = _fake(
+        monkeypatch,
+        "author_papers",
+        Listing(records=[_PAPER, _PAPER], complete=True),
+    )
+    tool = _tool()
+    context = ToolContext(cwd=tmp_path)
+    found = await tool.call(context, {"query": "1741101"})
+    ada = await tool.call(context, {"ids": "1741101"})
+    listed = await tool.call(context, {"ids": "1741101", "operation": "papers"})
+    kept = await tool.call(context, {"ids": "1741101", "operation": "papers"})
+    assert found.text() == format_author_line(_ADA)
+    assert ada.text() == format_author_block(_ADA)
+    assert (
+        listed.text()
+        == kept.text()
+        == f"{format_record(_PAPER)}\n{format_record(_PAPER)}"
+    )
+    assert (len(search), len(metadata), len(papers)) == (1, 1, 1)
+    assert (kept.call_id, ada.call_id) == ("", "")
+
+
+@pytest.mark.asyncio
+async def test_another_id_or_abstract_cut_is_another_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    metadata = _fake(monkeypatch, "author_metadata", [_ADA], [_BOB])
+    papers = _fake(
+        monkeypatch,
+        "author_papers",
+        Listing(records=[_PAPER], complete=True),
+        Listing(records=[_PAPER], complete=True),
+    )
+    tool = _tool()
+    context = ToolContext(cwd=tmp_path)
+    ada = await tool.call(context, {"ids": "1741101"})
+    bob = await tool.call(context, {"ids": "2262347"})
+    full = await tool.call(context, {"ids": "1", "operation": "papers"})
+    cut = await tool.call(
+        context,
+        {"ids": "1", "operation": "papers", "abstract_chars": 3},
+    )
+    assert (ada.text(), bob.text()) == (
+        format_author_block(_ADA),
+        format_author_block(_BOB),
+    )
+    assert (full.text(), cut.text()) == (
+        format_record(_PAPER),
+        format_record(_PAPER, abstract_chars=3),
+    )
+    assert (len(metadata), len(papers)) == (2, 2)
+
+
+@pytest.mark.asyncio
+async def test_a_partial_lookup_has_no_call_id(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fake(monkeypatch, "author_metadata", [None])
+    result = await _tool().call(ToolContext(cwd=tmp_path), {"ids": "9"})
+    assert (result.text(), result.call_id) == ("9: not found", "")
 
 
 @pytest.mark.asyncio

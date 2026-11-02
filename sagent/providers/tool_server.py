@@ -273,7 +273,7 @@ class McpToolServer(AsyncResource):
             interface="asgi3",
             # Upgrades are answered as plain HTTP: the handler takes no
             # WebSocket scope.
-            ws="none",
+            ws="none",  # pragma: no mutate -- uvicorn reads ``"none"`` as ``None``.
             # Quiet, and unconfigured: the caller's logging is the caller's.
             log_level=logging.CRITICAL,
             log_config=None,

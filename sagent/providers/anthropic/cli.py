@@ -463,11 +463,9 @@ class _Claude:
     def __init__(self, process: Process, *, started_with: tuple[str, ...]) -> None:
         self.process = process
         self.started_with = started_with
-        # pragma: no mutate start -- the first turn's ``saw`` sets both before
-        # anything reads them.
-        self.seen: tuple[SessionRecord, ...] = ()
-        self.held: tuple[ToolCall, ...] = ()
-        # pragma: no mutate end
+        # The first turn's ``saw`` sets both before anything reads them.
+        self.seen: tuple[SessionRecord, ...] = ()  # pragma: no mutate -- see above.
+        self.held: tuple[ToolCall, ...] = ()  # pragma: no mutate -- see above.
         self.waiting: tuple[SessionRecord, ...] = ()
         """Notes that came with tool results, for the next user line to carry."""
 
@@ -595,9 +593,7 @@ class _Claude:
         if stdout is None:
             raise ValueError("claude was started without stdout")
         # The window last reported, and when it resets, as the API's headers say.
-        # pragma: no mutate start -- ``None`` reads as no headers too.
-        unified: dict[str, str] = {}
-        # pragma: no mutate end
+        unified: dict[str, str] = {}  # pragma: no mutate -- None: no headers too.
         while True:
             # A model that goes quiet this long has dropped the turn.
             raw = await asyncio.wait_for(stdout.readline(), timeout=600.0)

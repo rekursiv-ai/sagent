@@ -121,7 +121,7 @@ def _text(display: ToolDisplay, path: str) -> str:
     """Return the setting ``path`` of ``display`` as ``override`` reads it back."""
     if path == "command_language":
         return display.command_language
-    part, _, name = path.partition(".")
+    part, name = path.split(".")
     spec = display.command if part == "command" else display.output
     match name:
         case "lines":

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import configparser
 import zipfile
 
 import pytest
@@ -125,8 +126,36 @@ class TestCheckWheelErrors:
         monkeypatch.chdir(tmp_path)
         _write_sagent_wheel(tmp_path, _BASE_FILES)
         _write_wheel(tmp_path / "dist" / "sagent-0.9.0-py3-none-any.whl", {})
-        with pytest.raises(SystemExit, match="exactly one"):
+        with pytest.raises(SystemExit) as raised:
             _ = check_wheel.main()
+        assert str(raised.value) == (
+            "dist/ must hold exactly one Sagent wheel; found"
+            " sagent-0.1.0-py3-none-any.whl, sagent-0.9.0-py3-none-any.whl"
+        )
+
+    def test_a_colon_is_no_delimiter_in_entry_points(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """``entry_points.txt`` names a script with ``=`` alone; ``:`` is in the target."""
+        entry_points = "[console_scripts]\nsagent: sagent.tui.main:main\n"
+        files = _BASE_FILES | {"sagent-0.1.0.dist-info/entry_points.txt": entry_points}
+        monkeypatch.chdir(tmp_path)
+        _write_sagent_wheel(tmp_path, files)
+        with pytest.raises(configparser.ParsingError):
+            _ = check_wheel.main()
+
+    def test_a_percent_in_another_script_is_read_as_written(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        entry_points = _ENTRY_POINTS + "other = pkg.mod:main %x\n"
+        files = _BASE_FILES | {"sagent-0.1.0.dist-info/entry_points.txt": entry_points}
+        monkeypatch.chdir(tmp_path)
+        _write_sagent_wheel(tmp_path, files)
+        assert check_wheel.main() == 0
 
     def test_missing_modules_are_comma_joined(
         self,
@@ -171,6 +200,20 @@ class TestCheckWheelErrors:
         assert _main_error(monkeypatch, tmp_path, files) == (
             "wheel is missing required console scripts: sagent = sagent.tui.main:main"
         )
+
+
+def test_a_build_config_without_excludes_expects_every_module(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "pyproject.toml").write_text(
+        '[tool.hatch.build.targets.wheel]\npackages = ["pkg"]\n',
+    )
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "a_test.py").write_text("")
+
+    assert check_wheel.expected_modules() == frozenset({"pkg/a_test.py"})
 
 
 @pytest.mark.parametrize(

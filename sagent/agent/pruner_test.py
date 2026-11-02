@@ -22,6 +22,7 @@ from sagent.agent.pruner import (
     drop,
     expired,
     idle,
+    left_in,
     limit_tokens,
     prices,
     reads,
@@ -759,6 +760,12 @@ def test_requests_left_is_the_requests_so_far_capped_by_the_room_left(
         requests_left(requests=requests, prompt=prompt, first=first, limit=1000.0)
         == left
     )
+
+
+def test_a_contexts_first_request_is_what_came_before_its_first_reply() -> None:
+    """Growth is from the first request on: 100 tokens in one request, room for 1."""
+    context = [UserMessage(content="a"), reply("b"), UserMessage(content="c")]
+    assert left_in(context, [100.0, 0.0, 100.0], limit=300.0) == 1.0
 
 
 @pytest.mark.parametrize(

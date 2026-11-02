@@ -424,7 +424,8 @@ def _validate_payload(
     # The ``paired_externally`` ids seen on one side, so the other side is refused.
     externally_consumed_by_am: set[str] = set()
     externally_consumed_by_tr: set[str] = set()
-    prev_role: str | None = None
+    # Whether the last turn was the model's.
+    after_model = False
     for entry in payload:
         if isinstance(entry, (SystemMessage, TurnContext)):
             continue
@@ -434,9 +435,9 @@ def _validate_payload(
                     f"unpaired tool_call id(s) in payload: {sorted(pending)}"
                     " (no matching ToolResult; not in paired_externally)",
                 )
-            if prev_role == "assistant":
+            if after_model:
                 raise InvalidPayloadError("payload violates role alternation")
-            prev_role = "assistant"
+            after_model = True
             for tc in calls(entry.records):
                 if tc.call_id in seen_tool_call_ids:
                     raise InvalidPayloadError(
@@ -463,7 +464,7 @@ def _validate_payload(
             seen_results.add(entry.call_id)
             if entry.call_id in pending:
                 pending.discard(entry.call_id)
-                prev_role = None
+                after_model = False
                 continue
             if entry.call_id in paired_externally:
                 if entry.call_id in externally_consumed_by_am:
@@ -474,7 +475,7 @@ def _validate_payload(
                         " partner cannot be both local and external",
                     )
                 externally_consumed_by_tr.add(entry.call_id)
-                prev_role = None
+                after_model = False
                 continue
             raise InvalidPayloadError(
                 f"orphan ToolResult for call_id {entry.call_id!r} in payload"
@@ -486,7 +487,7 @@ def _validate_payload(
                     f"unpaired tool_call id(s) in payload: {sorted(pending)}"
                     " (no matching ToolResult; not in paired_externally)",
                 )
-            prev_role = "user"
+            after_model = False
     if pending:
         raise InvalidPayloadError(
             f"unpaired tool_call id(s) in payload: {sorted(pending)}"

@@ -29,6 +29,8 @@ def test_a_bare_request_is_empty_and_allows_every_tool() -> None:
         (128_000, 200_000, 128_000),
         (0, 20_000, 20_000),
         (0, 0, 0),
+        (128_000, 1, 1),
+        (128_000, -1, 128_000),
     ],
 )
 def test_a_reply_holds_the_least_of_the_models_limit_and_the_requests(

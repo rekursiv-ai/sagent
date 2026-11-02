@@ -145,7 +145,7 @@ class AgentModel:
         """Return the setting for the ``ModelSettings`` field ``field``."""
         return Setting(
             # ``thinking_effort`` is ``thinking.effort``, under ``thinking``.
-            name=tuple(field.split("_", 1))
+            name=("thinking", field.removeprefix("thinking_"))
             if field.startswith("thinking_")
             else (field,),
             help_short=help_short,
@@ -323,7 +323,7 @@ class AgentModel:
         field: ModelSettingName,
         typed: str,
         *,
-        closest: bool = False,
+        closest: bool,
     ) -> object:
         """Return the value ``typed`` names on ``field``."""
         word = typed.strip().lower()

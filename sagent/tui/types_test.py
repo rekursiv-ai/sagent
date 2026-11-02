@@ -12,6 +12,7 @@ from rich.text import Text
 
 import pytest
 
+from sagent.tui import types
 from sagent.tui.console import ConsolePrinter, Screen
 from sagent.tui.types import Printer, Sticky, fill, hang
 
@@ -170,6 +171,167 @@ def test_a_lead_as_wide_as_the_row_folds_as_text() -> None:
 
 def test_a_hung_background_paints_to_the_row_s_width() -> None:
     assert _hung("ab", width=8, background="on red") == ["> ab    "]
+
+
+def test_a_fill_given_no_indent_paints_from_the_edge() -> None:
+    assert Sticky().cells(10, total_padding=4, width=200) == 80
+
+
+@pytest.mark.parametrize(("width", "cells"), [(200, 80), (81, 80), (79, 79)])
+def test_an_empty_block_fills_80_or_the_window(width: int, cells: int) -> None:
+    assert fill(0, total_padding=0, width=width) == cells
+
+
+def _hung_by_default(line: Text, *, width: int, console_width: int = 200) -> list[str]:
+    """Return the rows ``hang`` prints with every choice left as it defaults."""
+    console = Console(file=io.StringIO(), width=console_width, color_system=None)
+    hang(console, line, first=Text("> "), rest=Text("  "), width=width)
+    file = console.file
+    assert isinstance(file, io.StringIO)
+    return file.getvalue().splitlines()
+
+
+def test_a_hung_line_by_default_folds_at_the_edge_with_no_cap() -> None:
+    assert _hung_by_default(Text("aa bb cc dd"), width=7) == [
+        "> aa bb",
+        "   cc d",
+        "  d",
+    ]
+
+
+def test_a_hung_row_prints_whole_past_the_console_s_own_width() -> None:
+    assert _hung_by_default(Text("abcdefghij"), width=12, console_width=5) == [
+        "> abcdefghij",
+    ]
+
+
+def _painted(
+    line: Text,
+    *,
+    width: int,
+    background: str | None = None,
+    max_rows: int = 0,
+) -> str:
+    console = Console(
+        file=io.StringIO(),
+        width=200,
+        color_system="truecolor",
+        force_terminal=True,
+    )
+    hang(
+        console,
+        line,
+        first=Text("> "),
+        rest=Text("  "),
+        width=width,
+        background=background,
+        max_rows=max_rows,
+    )
+    file = console.file
+    assert isinstance(file, io.StringIO)
+    return file.getvalue()
+
+
+def test_a_hung_background_is_painted_and_never_past_the_width() -> None:
+    painted = _painted(Text("abcd"), width=6, background="on red")
+    assert "\x1b[41m" not in painted
+    painted = _painted(Text("ab"), width=6, background="on red")
+    assert "\x1b[41m  \x1b[0m" in painted
+
+
+def test_a_hung_line_at_its_row_cap_says_nothing_more() -> None:
+    assert _hung("abcdefgh", width=6, max_rows=2) == ["> abcd", "  efgh"]
+
+
+def test_the_more_line_counts_the_rows_left_in_the_line_s_style() -> None:
+    assert _hung("a" * 100, width=22, max_rows=2) == [
+        "> " + "a" * 20,
+        "  ... (4 more lines)",
+    ]
+    painted = _painted(Text("a" * 100, style="red"), width=22, max_rows=2)
+    assert "\x1b[31m... (4 more lines)" in painted
+
+
+def test_a_more_line_after_a_row_fits_the_rest_lead() -> None:
+    console = Console(file=io.StringIO(), width=200, color_system=None)
+    hang(
+        console,
+        Text("a" * 40),
+        first=Text(">>>> "),
+        rest=Text(""),
+        width=12,
+        max_rows=2,
+    )
+    file = console.file
+    assert isinstance(file, io.StringIO)
+    assert file.getvalue().splitlines() == [">>>> aaaaaaa", "... (3 more…"]
+
+
+def test_a_row_wider_than_the_console_is_neither_wrapped_nor_cut() -> None:
+    console = Console(file=io.StringIO(), width=8, color_system=None)
+    hang(console, Text("a" * 18), first=Text("> "), rest=Text("  "), width=20)
+    file = console.file
+    assert isinstance(file, io.StringIO)
+    assert file.getvalue().splitlines() == ["> " + "a" * 18]
+
+
+def test_a_more_line_alone_fits_the_first_lead() -> None:
+    console = Console(file=io.StringIO(), width=200, color_system=None)
+    hang(
+        console,
+        Text("abcdefghijkl"),
+        first=Text(">>>> "),
+        rest=Text(""),
+        width=12,
+        max_rows=1,
+    )
+    file = console.file
+    assert isinstance(file, io.StringIO)
+    assert file.getvalue().splitlines() == [">>>> ... (2…"]
+
+
+def test_a_tab_after_a_whole_stop_takes_a_full_stop() -> None:
+    assert _hung("abcdefgh\tx", width=30) == ["> abcdefgh        x"]
+
+
+def test_only_a_tab_s_own_spaces_are_dropped_from_a_row_s_start() -> None:
+    assert _hung("abc def\tg", width=6) == ["> abc ", "  def ", "  g"]
+    assert _hung("abc\tde", width=5) == ["> abc", "  d", "  e"]
+
+
+@pytest.mark.parametrize(
+    ("line", "width", "rows"),
+    [
+        # A cut at a space is between words already.
+        ("aa bb cc", 7, ["> aa bb", "  cc"]),
+        # The last space before the cut, not the first.
+        ("a bb ccccc", 8, ["> a bb", "  ccccc"]),
+        # A leading space is no break: the row before it would be empty.
+        (" aaa aaaa bbb", 6, [">  aaa", "  aaaa", "  bbb"]),
+        # The next word just fits a row, so it moves down whole.
+        ("aa bbbbb", 7, ["> aa", "  bbbbb"]),
+        # One cell more and it cannot, so it folds where it is.
+        ("aa bbbbbx", 7, ["> aa bb", "  bbbx"]),
+        # Only the next word is measured, not all that follows it.
+        ("aa bbbb c dddd", 7, ["> aa", "  bbbb", "  c", "  dddd"]),
+    ],
+)
+def test_hung_prose_breaks_at_the_last_space_its_next_word_fits_after(
+    line: str,
+    width: int,
+    rows: list[str],
+) -> None:
+    assert _hung(line, width=width, prose=True) == rows
+
+
+def test_a_leading_space_is_no_break_even_where_rows_widen() -> None:
+    # Breaking there would leave the first row empty.
+    rows = types._words(Text(" aaaa"), first=3, rest=4)
+    assert [r.plain for r in rows] == [" aa", "aa"]
+
+
+def test_prose_whose_lead_takes_the_row_folds_at_the_edge() -> None:
+    assert _hung("ab cd", width=2, prose=True) == _hung("ab cd", width=2)
 
 
 if __name__ == "__main__":

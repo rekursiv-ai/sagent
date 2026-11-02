@@ -425,12 +425,12 @@ def open_browser(url: str) -> None:
             ],
             # A shell gives a job it puts in the background ``/dev/null`` as
             # stdin whatever its own, so this keeps only the shell off it.
-            stdin=subprocess.DEVNULL,  # pragma: no mutate
+            stdin=subprocess.DEVNULL,  # pragma: no mutate -- see above.
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
             # The shell exits 0 once it has put the browser in the background.
-            check=False,  # pragma: no mutate
+            check=False,  # pragma: no mutate -- see above.
         )
 
 
@@ -456,16 +456,12 @@ async def redirected(
       code: Set to the code of the first good redirect.
 
     """
-    match (await reader.readline()).decode(errors="replace").split():
-        case [_, target, *_]:
-            url = urlparse(target)
-            params = parse_qs(url.query)
-            received = params.get("code", [""])[0]
-            ok = url.path == path and params.get("state") == [state] and bool(received)
-        case _:
-            # pragma: no mutate start -- a refused request's code is never read.
-            received, ok = "", False
-            # pragma: no mutate end
+    received = _redirect_code(
+        (await reader.readline()).decode(errors="replace"),
+        path=path,
+        state=state,
+    )
+    ok = received is not None
     page = (
         "Signed in; you can close this tab."
         if ok
@@ -478,7 +474,7 @@ async def redirected(
     )
     await writer.drain()
     writer.close()
-    if ok and not code.done():
+    if received is not None and not code.done():
         code.set_result(received)
 
 
@@ -645,3 +641,15 @@ def _rewrite(
     families[key] = theirs | known
     # It names the user's accounts and when each ran out.
     write_private(ledger, json_dumps(families))
+
+
+def _redirect_code(request_line: str, *, path: str, state: str) -> str | None:
+    """Return the code a redirect to ``path`` for ``state`` carries; ``None`` if refused."""
+    # ``GET <target> HTTP/1.1``; a line with no target has no path, so no code.
+    _, _, rest = request_line.partition(" ")
+    url = urlparse(rest.partition(" ")[0])
+    params = parse_qs(url.query)
+    received = params.get("code", [""])[0]
+    if url.path == path and params.get("state") == [state] and received:
+        return received
+    return None

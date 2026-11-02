@@ -26,7 +26,7 @@ from sagent.agent.agent import (
     default_system_prompt,
     spent,
 )
-from sagent.agent.agents_md import AgentsMdConfig, directives
+from sagent.agent.agents_md import AgentsMdConfig, Directives, directives
 from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.pruner import drop
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
@@ -69,7 +69,10 @@ from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from sagent.agent.types import Journal
+    from sagent.agent.types import (
+        Agent as AgentProtocol,
+        Journal,
+    )
     from sagent.runtime.types import ModelContextEvent
 
 
@@ -773,7 +776,10 @@ async def test_without_a_compactor_nothing_shrinks(tmp_path: Path) -> None:
     for shrinker in (agent.session.compactor, agent.session.pruner):
         assert isinstance(shrinker, NoShrinker)
         assert not shrinker.should_run()
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(
+            NotImplementedError,
+            match=r"^This agent has no compactor or pruner\.$",
+        ):
             await shrinker.run()
     assert agent.runtime.compactor is None
     assert agent.runtime.compact_due is None
@@ -1759,7 +1765,7 @@ async def test_messages_from_other_agents_start_the_round_count_over(
         reply("one"),
         reply(calls=[call("Nope", "b")]),
         reply("two"),
-        max_rounds=2,
+        max_rounds=1,
     )
     seen = _Seen()
     async with agent:
@@ -2126,6 +2132,8 @@ def test_a_pruned_result_is_journaled_as_itself_and_resumes_pruned(
     session.persist()
 
     assert sum(isinstance(r, ContextClear) for r in journal.history()) == 1
+    # Each turn's usage is written once: the prune does not write the earlier again.
+    assert sum(isinstance(r, TokenUsage) for r in journal.history()) == 2
     _, resumed = _agent(tmp_path, journal=journal)
     _session(resumed).resume()
     assert list(_session(resumed)) == list(session)
@@ -2214,6 +2222,528 @@ def test_a_reply_in_an_appending_pass_still_journals_what_it_cost(
     assert UserMessage(content="two") in list(journal)
     usage = [r for r in journal if isinstance(r, TokenUsage)]
     assert [u.info["spend_usd"] for u in usage] == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_says_what_its_messages_said_together(tmp_path: Path) -> None:
+    both = Response(
+        records=(AssistantMessage(content="one "), AssistantMessage(content="two")),
+        tokens=TokenCount(),
+        spend=TokenCost(),
+        stop_reason="",
+    )
+    wordless = Response(
+        records=(AssistantMessage(content=None),),
+        tokens=TokenCount(),
+        spend=TokenCost(),
+        stop_reason="",
+    )
+    _, agent = _agent(tmp_path, both, wordless)
+    async with agent:
+        assert await agent.send("go") == "one two"
+        assert await agent.send("again") == ""
+
+
+@pytest.mark.asyncio
+async def test_stream_sends_the_text_it_is_given(tmp_path: Path) -> None:
+    provider, agent = _agent(tmp_path, reply("ok"))
+    async with agent:
+        _ = [words async for words in agent.stream("go")]
+
+    assert provider.requests[0].records[0] == UserMessage(content="go")
+
+
+@pytest.mark.asyncio
+async def test_rounds_are_counted_within_a_turn(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope", "a")]),
+        reply(calls=[call("Nope", "b")]),
+        reply(calls=[call("Nope", "c")]),
+        reply("never"),
+        tools=[_Tool(name="Nope")],
+        max_rounds=2,
+    )
+    async with agent:
+        with pytest.raises(RoundLimitError) as raised:
+            _ = await agent.send("go")
+
+    assert (raised.value.rounds, raised.value.max_rounds) == (2, 2)
+    assert [r.allowed for r in provider.requests] == [None, None, frozenset()]
+    assert "observer raised" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_uncapped_agent_counts_calls_without_error(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _, agent = _agent(tmp_path, reply(calls=[call("Nope")]), reply("done"))
+    async with agent:
+        assert await agent.send("go") == "done"
+
+    assert "observer raised" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_the_round_cap_leaves_only_agentsend_of_the_tools_allowed(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope")]),
+        reply("done"),
+        tools=[_Tool(name="Nope"), _Tool(name="AgentSend")],
+        max_rounds=1,
+    )
+    agent.allowed = frozenset({"Nope"})
+    async with agent:
+        _ = await agent.send("go")
+
+    assert provider.requests[1].allowed == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_a_turn_after_one_capped_may_call_tools_again(tmp_path: Path) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Nope", "a")]),
+        reply("first"),
+        reply(calls=[call("Nope", "b")]),
+        reply("second"),
+        tools=[_Tool(name="Nope")],
+        max_rounds=1,
+    )
+    async with agent:
+        assert await agent.send("one") == "first"
+        assert await agent.send("two") == "second"
+
+    assert [r.allowed for r in provider.requests] == [
+        None,
+        frozenset(),
+        None,
+        frozenset(),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_charge_is_journaled_and_told(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    seen = _Seen()
+    async with agent:
+        agent.runtime.observers.append(seen)
+        agent.charge(0.5, by="kid")
+
+    (usage,) = (r for r in journal if isinstance(r, TokenUsage))
+    assert usage.timestamp is not None
+    assert dict(usage.info) == {"spend_usd": 0.5, "agent": "kid"}
+    assert [e for e in seen.events if isinstance(e, types.Charged)] == [
+        types.Charged(usd=0.5, by="kid"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_charge_past_the_cap_mid_turn_ends_it_with_the_cap(
+    tmp_path: Path,
+) -> None:
+    agents: list[Agent] = []
+
+    def charged(request: Request) -> Response:
+        del request
+        agents[0].charge(2.0, by="kid")
+        return reply(calls=[call("Nope")])
+
+    provider = ScriptedProvider(replies=[charged, reply("never")])
+    _, agent = _agent(tmp_path, provider=provider, max_spend_usd=1.0)
+    agents.append(agent)
+    async with agent:
+        with pytest.raises(BudgetExhaustedError):
+            _ = await agent.send("go")
+
+
+def test_each_shrinker_is_built_for_its_agent(tmp_path: Path) -> None:
+    built: list[tuple[str, object]] = []
+
+    def compactor(agent: AgentProtocol) -> NoShrinker:
+        built.append(("compactor", agent))
+        return NoShrinker(agent)
+
+    def pruner(agent: AgentProtocol) -> NoShrinker:
+        built.append(("pruner", agent))
+        return NoShrinker(agent)
+
+    agent = Agent(
+        model=ScriptedProvider()["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+        compactor=compactor,
+        pruner=pruner,
+    )
+
+    assert built == [("compactor", agent), ("pruner", agent)]
+    assert agent.compactor_factory is compactor
+
+
+def test_the_agents_md_config_given_is_the_one_kept(tmp_path: Path) -> None:
+    _ = (tmp_path / "AGENTS.md").write_text("be terse\n")
+    config = replace(_config(tmp_path), preamble="MINE")
+    agent = Agent(
+        model=ScriptedProvider()["scripted"],
+        tool_context=ToolContext(cwd=tmp_path),
+        system_prompt="S",
+        agents_md=config,
+    )
+
+    assert agent.agents_md is config
+    assert agent.runtime.system[-1].startswith("MINE\n\n")
+
+
+def test_a_briefing_is_read_against_the_agents_context(tmp_path: Path) -> None:
+    @dataclass(slots=True, kw_only=True)
+    class Where(_Tool):
+        def briefing(self, context: ToolContext) -> str:
+            return f"in {context.cwd}"
+
+    agent = Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=[Where(name="Where")],
+        tool_context=ToolContext(cwd=tmp_path),
+        system_prompt="S",
+        agents_md=_config(tmp_path),
+    )
+
+    assert agent.runtime.system == ("S", f"in {tmp_path}")
+
+
+@pytest.mark.asyncio
+async def test_a_window_s_start_keeps_each_block_of_its_prompt(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(
+        tmp_path,
+        tools=[_Briefing(name="B", said="index")],
+        journal=journal,
+    )
+    async with agent:
+        pass
+
+    (start,) = _own(journal)
+    assert isinstance(start, ContextClear)
+    assert start.system_prompt == "S\n\nindex"
+
+
+@pytest.mark.asyncio
+async def test_the_default_prompt_never_stands(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal, system_prompt=None)
+    async with agent:
+        pass
+
+    assert not [
+        r
+        for r in journal.history()
+        if isinstance(r, UncategorizedRecord)
+        and r.payload.get("standing") == "system_prompt"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_resume_stands_nothing_already_stood(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, first = _agent(tmp_path, reply("ok"), journal=journal)
+    async with first:
+        _ = await first.send("go")
+    stood = len([r for r in journal.history() if isinstance(r, UncategorizedRecord)])
+
+    _, resumed = _agent(tmp_path, journal=journal)
+    resumed.model = first.model
+    async with resumed:
+        pass
+
+    assert stood == 2
+    assert (
+        len([r for r in journal.history() if isinstance(r, UncategorizedRecord)]) == 2
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_resume_goes_on_counting_turns_and_windows(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    journal.append(
+        ContextClear(system_prompt="S"),
+        UserMessage(content="one"),
+        AgentToAgentMessage(sender="peer", content="two"),
+        ContextClear(system_prompt="S", history=(UserMessage(content="gist"),)),
+        ContextClear(system_prompt="S", history=(UserMessage(content="gist 2"),)),
+        ContextClear(system_prompt="S"),
+        UserMessage(content="three"),
+    )
+    _, agent = _agent(tmp_path, journal=journal)
+    async with agent:
+        assert (agent.runtime.turns, agent.runtime.compactions) == (3, 2)
+
+
+@pytest.mark.asyncio
+async def test_a_journaled_session_s_history_is_its_journal_s(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, reply("hi"), journal=journal)
+    async with agent:
+        _ = await agent.send("go")
+        history = list(agent.session.history())
+
+    assert isinstance(history[0], ContextClear)
+    assert history == list(journal.history())
+
+
+def test_a_window_s_directives_are_looked_for_once_until_something_moves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, agent = _agent(tmp_path)
+    session = _session(agent)
+    looks: list[Path] = []
+    real = Directives.found
+
+    def found(
+        self: Directives,
+        directories: Sequence[Path],
+        paths: Sequence[Path],
+        *,
+        given: set[str],
+    ) -> tuple[str, set[str]]:
+        looks.extend(directories)
+        return real(self, directories, paths, given=given)
+
+    monkeypatch.setattr(Directives, "found", found)
+    (tmp_path / "sub").mkdir()
+    # The window's start looked at the root with nothing seen.
+    session.append(*session.updates())
+    agent.runtime.tool_context.cwd = tmp_path / "sub"
+    session.append(*session.updates())
+    session.append(*session.updates())
+
+    assert looks == [tmp_path / "sub"]
+
+
+def test_a_gate_kept_while_the_model_moves_is_not_stated_again(tmp_path: Path) -> None:
+    (tmp_path / "sub").mkdir()
+    _, agent = _agent(tmp_path, tools=[_Tool(name="a"), _Tool(name="b")])
+    session = _session(agent)
+    agent.allowed = frozenset({"b"})
+    session.append(*session.updates())
+    agent.runtime.tool_context.cwd = tmp_path / "sub"
+    session.append(*session.updates())
+
+    assert session.updates() == []
+
+
+def test_a_gate_on_every_tool_is_no_gate(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path, tools=[_Tool(name="a"), _Tool(name="b")])
+    session = _session(agent)
+    agent.allowed = frozenset({"a", "b"})
+    (first,) = session.updates()
+    session.append(first)
+    agent.allowed = frozenset({"b"})
+    session.append(*session.updates())
+    agent.allowed = None
+    session.append(*session.updates())
+
+    assert isinstance(first, TurnContext)
+    assert first.tools is None
+    assert session.updates() == []
+
+
+def test_a_new_cutoff_states_the_environment_again(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path)
+    session = _session(agent)
+    session.append(*session.updates())
+    agent.model = ScriptedProvider(capability=_capability("other", cutoff="May 2026"))[
+        "other"
+    ]
+
+    (switched,) = session.updates()
+
+    assert isinstance(switched, TurnContext)
+    assert switched.environment is not None
+    assert switched.environment.endswith("Knowledge cutoff: May 2026.")
+
+
+def test_a_setting_stated_with_no_time_is_stated_again(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path)
+    session = _session(agent)
+    (turn,) = session.updates()
+    assert isinstance(turn, TurnContext)
+    session.append(replace(turn, timestamp=None))
+
+    (again,) = session.updates()
+
+    assert isinstance(again, TurnContext)
+    assert again.text().startswith("Current time: ")
+
+
+def test_a_tool_with_nothing_to_remind_says_nothing(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path, tools=[_Reminding(name="Peers")])
+
+    assert [u for u in _session(agent).updates() if isinstance(u, SystemMessage)] == []
+
+
+def test_a_reminder_given_no_text_reads_as_none(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path, tools=[_Reminding(name="Peers")])
+    session = _session(agent)
+    session.append(
+        SystemMessage(subtype="reminder", content=None, extra={"tool": "Peers"}),
+    )
+
+    assert [u for u in session.updates() if isinstance(u, SystemMessage)] == []
+
+
+def test_each_tool_s_reminder_is_weighed_alone(tmp_path: Path) -> None:
+    first = _Reminding(name="A", told="a")
+    second = _Reminding(name="B", told="b")
+    _, agent = _agent(tmp_path, tools=[first, second])
+    session = _session(agent)
+    session.append(*session.updates())
+
+    second.told = "b2"
+    (told,) = session.updates()
+
+    assert isinstance(told, SystemMessage)
+    assert told.content == "b2"
+
+
+@pytest.mark.asyncio
+async def test_every_record_the_agent_writes_is_timed(tmp_path: Path) -> None:
+    rules = tmp_path / ".sagent" / "rules"
+    rules.mkdir(parents=True)
+    _ = (rules / "py.md").write_text("---\npaths: ['*.py']\n---\npy-rule\n")
+    _ = (tmp_path / "a.py").write_text("x")
+    (tmp_path / "elsewhere").mkdir()
+    journal = RecordingJournal()
+    reminding = _Reminding(name="Peers", told="peers: a")
+    _, agent = _agent(tmp_path, reply("one"), journal=journal, tools=[reminding])
+    async with agent:
+        agent.runtime.tool_context.files.saw(tmp_path / "a.py")
+        _ = await agent.send("go")
+        agent.charge(0.5, by="kid")
+        agent.runtime.tool_context.cwd = tmp_path / "elsewhere"
+        await agent.session.clear()
+
+    timed = (
+        ContextClear,
+        SystemMessage,
+        TokenUsage,
+        TurnContext,
+    )
+    kinds = {type(r) for r in journal.history() if isinstance(r, timed)}
+    assert kinds == set(timed)
+    assert [
+        r for r in journal.history() if isinstance(r, timed) and r.timestamp is None
+    ] == []
+    said = {r.subtype for r in journal.history() if isinstance(r, SystemMessage)}
+    assert said == {"rules", "reminder"}
+    (start,) = (
+        r for r in journal.history() if isinstance(r, ContextClear) and r.history
+    )
+    (moved,) = start.history
+    assert isinstance(moved, SystemMessage)
+    assert moved.subtype == "moved"
+    assert moved.timestamp is not None
+
+
+@pytest.mark.parametrize(
+    "splice",
+    [
+        UncategorizedToolResult(call_id="c1", content="was a message"),
+        UserMessage(content="was a result"),
+    ],
+    ids=["message-to-result", "result-to-message"],
+)
+def test_a_record_spliced_into_another_kind_writes_a_new_window(
+    tmp_path: Path,
+    splice: UncategorizedToolResult | UserMessage,
+) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    session = _session(agent)
+    session.resume()
+    _ = agent.runtime.append_history(reply(calls=[call("Echo", "c1")]))
+    replaced = agent.runtime.append_history(
+        UncategorizedToolResult(call_id="c1", content="out")
+        if isinstance(splice, UserMessage)
+        else UserMessage(content="go"),
+    )
+    session.persist()
+
+    _ = agent.runtime.append_splice(
+        mask=(MaskRange(session_id="", lo=replaced.ordinal, hi=replaced.ordinal),),
+        payload=(splice,),
+        strategy="edit",
+        paired_externally=frozenset({"c1"}),
+        discards_content=True,
+    )
+    session.persist()
+
+    (window,) = _own(journal)
+    assert isinstance(window, ContextClear)
+    assert splice in window.history
+
+
+def test_a_session_never_resumed_writes_all_it_holds(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    session = _session(agent)
+    agent.session.append(UserMessage(content="one"))
+
+    session.persist()
+    agent.session.append(UserMessage(content="two"))
+    session.persist()
+
+    assert [r.content for r in journal if isinstance(r, UserMessage)] == ["one", "two"]
+
+
+def test_withdrawing_what_never_stood_is_harmless(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path)
+
+    agent.session.stand("never", None)
+
+    assert agent.session.standing() == []
+
+
+def test_a_reply_after_a_splice_in_one_pass_journals_what_it_cost(
+    tmp_path: Path,
+) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    session = _session(agent)
+    session.resume()
+    last = agent.runtime.append_history(UserMessage(content="one"))
+    session.persist()
+
+    _ = agent.runtime.append_splice(insert_after=last, strategy="note")
+    _ = agent.runtime.append_history(reply("noted", spend=TokenCost(response=0.5)))
+    session.persist()
+
+    usage = [r for r in journal if isinstance(r, TokenUsage)]
+    assert [u.info["spend_usd"] for u in usage] == [0.5]
+
+
+def test_a_splice_written_once_is_not_written_again(tmp_path: Path) -> None:
+    journal = RecordingJournal()
+    _, agent = _agent(tmp_path, journal=journal)
+    session = _session(agent)
+    session.resume()
+    last = agent.runtime.append_history(UserMessage(content="one"))
+    _ = agent.runtime.append_splice(insert_after=last, strategy="note")
+    _ = agent.runtime.append_history(UserMessage(content="two"))
+    session.persist()
+
+    _ = agent.runtime.append_history(UserMessage(content="three"))
+    session.persist()
+
+    said = [r.content for r in journal.history() if isinstance(r, UserMessage)]
+    assert said == ["one", "two", "three"]
 
 
 def test_the_default_prompt_reads_as_utf8_whatever_the_locale(

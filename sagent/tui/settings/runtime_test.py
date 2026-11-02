@@ -54,6 +54,38 @@ async def test_retry_waits_out_a_rate_limit_or_ends_the_turn() -> None:
     assert not runtime.persistent_retry
 
 
+def test_each_setting_says_how_it_is_typed_what_it_takes_and_what_it_does() -> None:
+    runtime = Runtime(model=ScriptedProvider()["scripted"])
+    detach, retry = harvest([(("runtime",), RuntimeSettings(runtime=runtime))])
+    assert (detach.help_short, detach.usage, detach.options(), detach.cli) == (
+        "detach a call the model waits on after this long",
+        "off|SECONDS",
+        ("off",),
+        True,
+    )
+    assert detach.help_long == (
+        "A detached call runs on; its result arrives later as a message, and the"
+        " model works meanwhile."
+    )
+    assert (retry.help_short, retry.usage, retry.options(), retry.cli) == (
+        "wait out a long rate limit, or end the turn on it",
+        "persistent|off",
+        ("persistent", "off"),
+        True,
+    )
+    assert retry.help_long == ""
+
+
+@pytest.mark.asyncio
+async def test_detach_takes_default_as_off_and_any_time_above_zero() -> None:
+    runtime = Runtime(model=ScriptedProvider()["scripted"])
+    detach, _ = harvest([(("runtime",), RuntimeSettings(runtime=runtime))])
+    await detach.apply("5")
+    assert await detach.apply("default") == "off (default)"
+    assert await detach.apply("0.5") == "0.5s"
+    assert await detach.apply("1") == "1s"
+
+
 def test_a_new_runtime_waits_on_every_call() -> None:
     assert Runtime(model=ScriptedProvider()["scripted"]).detach_after_sec is None
 

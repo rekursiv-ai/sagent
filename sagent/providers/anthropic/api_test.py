@@ -21,6 +21,7 @@ from sagent.model.exceptions import (
     UnknownModelError,
 )
 from sagent.model.types import Request, Response, TextChunk
+from sagent.providers import retry
 from sagent.providers.anthropic import api, wire
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import AnthropicCLI
@@ -53,7 +54,7 @@ def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     async def sleep(delay_sec: float) -> None:
         waits.append(delay_sec)
 
-    monkeypatch.setattr(api, "asyncio", SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(retry, "asyncio", SimpleNamespace(sleep=sleep))
     return waits
 
 

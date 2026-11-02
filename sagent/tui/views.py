@@ -288,18 +288,18 @@ class Views:
 
     def _adopt(self) -> None:
         """Have each agent new to the team take up the settings its ancestors chose."""
-        if self.team is None:
+        team = self.team
+        if team is None:
             return
         root = self._views[self._root_label].commands
-        for label in self.team:
-            if label not in self._joined:
-                self._joined.add(label)
-                self._track(asyncio.create_task(self._inherit(root, label)))
+        for label in set(team) - self._joined:
+            self._joined.add(label)
+            self._track(asyncio.create_task(self._inherit(team, root, label)))
 
-    async def _inherit(self, root: Commands, label: str) -> None:
-        """Take up, for ``label``, what its ancestors chose."""
-        if self.team is not None and label in self.team:
-            _ = await root.child_commands(self.team, label)
+    async def _inherit(self, team: Team, root: Commands, label: str) -> None:
+        """Take up, for ``label``, what its ancestors chose, unless it left first."""
+        if label in team:
+            _ = await root.child_commands(team, label)
 
     def _track(self, task: asyncio.Task[None]) -> None:
         """Keep ``task`` until it ends; print why, if it fails."""
