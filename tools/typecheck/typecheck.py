@@ -70,12 +70,12 @@ def typecheck(
         spool was never written.
 
     """
-    spooled = spool.drain(context.directory, gate=name, key=context.key)
+    spooled = gate.drained(name, context=context)
     if spooled is None:
         return gate.unspooled(name)
     count = gate.workers(name, environ=context.environ)
     handed = (
-        spool.drain(context.directory, gate="typecheck-checked", key=context.key)
+        gate.drained("typecheck-checked", context=context)
         if name == "pyrefly-check"
         else None
     )

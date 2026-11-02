@@ -53,6 +53,7 @@ def test_every_gate_imports_without_coverage_installed(
 
 def test_one_gates_depth_never_widens_the_other(tmp_path: Path) -> None:
     """Each gate reads its own variable; the other's is not an opt-in."""
+    fakes.touch(tmp_path, ["a.py"])
     spool.append(tmp_path / "spool", gate="ty-check", key=9, paths=["a.py"])
     checker = fakes.Recorder(output="b.py\n")
     typecheck.typecheck(
