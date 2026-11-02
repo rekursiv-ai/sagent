@@ -12,6 +12,7 @@ from typing import Final
 
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -189,7 +190,10 @@ def test_project_root_is_none_with_no_project_above(tmp_path: Path) -> None:
 
 
 def test_built_wheel_skips_where_no_project_publishes() -> None:
-    with pytest.raises(pytest.skip.Exception, match="not a published package"):
+    with pytest.raises(
+        pytest.skip.Exception,
+        match=r"^this checkout's project is not a published package$",
+    ):
         built_wheel(None)
 
 
@@ -420,6 +424,38 @@ def test_a_stubs_only_wheel_names_no_module_to_import(tmp_path: Path) -> None:
     )
 
     assert top_level_modules(Wheel(path=path, project=tmp_path)) == ("lib",)
+
+
+def test_top_level_modules_are_packages_and_single_files_not_metadata(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "demo_pkg-0.1.0-py3-none-any.whl"
+    _zip(
+        path,
+        "demo/__init__.py",
+        "single.py",
+        "extra-stubs/helper.py",
+        "demo_pkg-0.1.0.dist-info/hook.py",
+        "demo_pkg-0.1.0.data/scripts/tool.py",
+    )
+
+    assert top_level_modules(Wheel(path=path, project=tmp_path)) == ("demo", "single")
+
+
+def test_running_code_that_fails_raises(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "uv").write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
+    (bin_dir / "uv").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    wheel = Wheel(path=tmp_path / "demo.whl", project=_project(tmp_path / "project"))
+
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        wheel.run("pass")
+    assert raised.value.returncode == 3
 
 
 @pytest.mark.cli_uv

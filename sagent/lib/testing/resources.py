@@ -119,7 +119,7 @@ def pytest_configure(config: pytest.Config) -> None:
     # not marked may not reach a GPU: hidden, its stray CUDA use fails here as
     # it does in CI, instead of passing or not on whatever else holds the GPU.
     # Set before any test imports torch, and inherited by xdist workers.
-    markexpr = str(config.getoption("markexpr", default=""))
+    markexpr = str(config.getoption("markexpr"))
     if markexpr and not _selects_any(markexpr, marker="cuda"):
         os.environ["CUDA_VISIBLE_DEVICES"] = ""
 
@@ -405,7 +405,7 @@ def pytest_collection_modifyitems(
     # The mark exists only for ``-m`` selection, and the call-graph walk costs
     # tens of seconds over the whole tree, so a run that cannot select on it
     # skips it.
-    if "golden" in str(config.getoption("markexpr", default="")):
+    if "golden" in str(config.getoption("markexpr")):
         apply_golden_marker(cast(Sequence[GoldenMarkedItem], items))
 
 
@@ -763,7 +763,7 @@ def _apply_skip_policy(
 ) -> None:
     """Skip an item whose resource is unavailable in this environment."""
     for mark in live_llm_marks:
-        if mark in names and not os.environ.get(live_llm_env_var, ""):
+        if mark in names and os.environ.get(live_llm_env_var, "") == "":
             item.add_marker(
                 pytest.mark.skip(
                     reason=(
@@ -773,7 +773,7 @@ def _apply_skip_policy(
                 ),
             )
             return
-    if os.environ.get("CI", "") and not os.environ.get("RUN_INTEGRATION", ""):
+    if os.environ.get("CI", "") != "" and os.environ.get("RUN_INTEGRATION", "") == "":
         for mark in ci_skipped_marks:
             if mark in names:
                 item.add_marker(
@@ -888,7 +888,7 @@ def _imports_golden_support(path: Path) -> bool:
             continue
         seen.add(current)
         for module_name, _symbol in _module_source(current).imports.values():
-            if module_name.rsplit(".", 1)[-1] in {"golden", "bfb"}:
+            if module_name.rpartition(".")[2] in {"golden", "bfb"}:
                 return True
             target_path = module_path(module_name)
             if target_path is not None:
@@ -901,8 +901,6 @@ def _call_target(
     module: _ModuleSource,
 ) -> tuple[Path | None, str, bool] | None:
     function = call.func
-    module_name: str | None = None
-    symbol: str | None = None
     if isinstance(function, ast.Name):
         if function.id in module.functions:
             return module.path, function.id, False
@@ -917,7 +915,7 @@ def _call_target(
         parent, submodule = imported
         # ``from pkg import mod`` binds a module; its attribute is a function there.
         module_name = parent if submodule is None else f"{parent}.{submodule}"
-        symbol = function.attr
+        symbol: str | None = function.attr
     else:
         return None
     if symbol is not None and _is_golden_symbol(module_name, symbol):
@@ -948,6 +946,6 @@ def _reads_checked_in_testdata(
 
 
 def _is_golden_symbol(module_name: str, symbol: str) -> bool:
-    return module_name.rsplit(".", 1)[-1] in {"golden", "bfb"} and (
+    return module_name.rpartition(".")[2] in {"golden", "bfb"} and (
         symbol.startswith("assert_") or symbol == "expect_golden_mismatch"
     )
