@@ -104,6 +104,20 @@ def context(tmp_path: Path, tools: Recorder, **environ: str) -> gate.Context:
     )
 
 
+def touch(tmp_path: Path, paths: Sequence[str]) -> None:
+    """Create each of ``paths`` under :func:`context`'s root, as files a gate reads.
+
+    Args:
+      tmp_path: The test's directory.
+      paths: Root-relative paths; a gate drops spooled paths that do not exist.
+
+    """
+    root = tmp_path / "repo"
+    for path in paths:
+        (root / path).parent.mkdir(parents=True, exist_ok=True)
+        (root / path).touch()
+
+
 class Processes:
     """Stands in for ``subprocess.run``: records argvs, answers ``status``/``stdout``."""
 

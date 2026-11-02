@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import argparse
@@ -14,7 +15,6 @@ from tools.gate import fakes, gate, spool
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from pathlib import Path
 
 
 @pytest.fixture
@@ -69,6 +69,7 @@ def _run_gate(
     **environ: str,
 ) -> int:
     context = fakes.context(tmp_path, tools, **environ)
+    fakes.touch(tmp_path, files)
     spool.append(context.directory, gate="leaks", key=9, paths=files)
     return gate.run(
         "leaks",
@@ -76,6 +77,22 @@ def _run_gate(
         when=when,
         command=["pkg.leaks", "--strict"],
     )
+
+
+def test_a_file_deleted_after_spooling_is_not_handed_on(tmp_path: Path) -> None:
+    """A probe file removed mid-run crashed ty and pyrefly on a missing path."""
+    tools = fakes.Recorder()
+    context = fakes.context(tmp_path, tools)
+    (context.root / "kept.py").touch()
+    spool.append(
+        context.directory,
+        gate="ty-check",
+        key=9,
+        paths=["kept.py", "gone_test.py"],
+    )
+
+    assert gate.drained("ty-check", context=context) == ["kept.py"]
+    assert gate.drained("ty-check", context=context) is None
 
 
 def test_run_hands_a_module_the_spool_at_its_worker_count(tmp_path: Path) -> None:
@@ -179,6 +196,7 @@ def test_the_cli_spools_then_runs_one_module(
 ) -> None:
     """Outside pre-commit every call shares key 1, so the spool meets its gate."""
     for name in ("a.py", "b.py"):
+        Path(name).touch()
         monkeypatch.setattr(sys, "argv", ["gate", "spool", "spooled", name])
         assert gate.main() == 0
     monkeypatch.setattr(

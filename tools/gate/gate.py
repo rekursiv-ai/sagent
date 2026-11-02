@@ -124,7 +124,7 @@ def run(
         the spool was never written.
 
     """
-    files = spool.drain(context.directory, gate=name, key=context.key)
+    files = drained(name, context=context)
     if when is not None and not positive(context.environ.get(when, "")):
         return 0
     if files is None:
@@ -135,6 +135,27 @@ def run(
     return context.run(
         [sys.executable, "-m", *command, "--workers", str(count), "--", *files],
     )
+
+
+def drained(name: str, *, context: Context) -> list[str] | None:
+    """Return spool ``name``'s paths for this run that still exist, removing the spool.
+
+    A file spooled and then deleted before its gate ran -- another process's
+    probe, in a shared worktree -- made ty report an I/O error and the pyrefly
+    fixer raise; no gate can check a file that is gone.
+
+    Args:
+      name: The spool.
+      context: What the gate reads; paths are relative to its root.
+
+    Returns:
+      paths: The surviving paths, in order; None when nothing was ever spooled.
+
+    """
+    spooled = spool.drain(context.directory, gate=name, key=context.key)
+    if spooled is None:
+        return None
+    return [path for path in spooled if (context.root / path).exists()]
 
 
 def threaded(name: str, *, context: Context, command: Sequence[str]) -> int:

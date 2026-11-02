@@ -37,6 +37,7 @@ def _typecheck(
 
 def _spool(tmp_path: Path, *paths: str) -> None:
     """Spool ``paths`` as one pre-commit run does: to every checker's twin."""
+    fakes.touch(tmp_path, paths)
     for name in ("ty-check", "pyrefly-check", "basedpyright"):
         spool.append(tmp_path / "spool", gate=name, key=9, paths=paths)
 
@@ -267,6 +268,7 @@ def test_the_cli_checks_what_the_gate_spooled(
 ) -> None:
     """The spool command and the checker are separate CLIs sharing one spool."""
     for name in ("a.py", "b.py"):
+        Path(name).touch()
         monkeypatch.setattr(sys, "argv", ["gate", "spool", checker, name])
         assert gate.main() == 0
     monkeypatch.setattr(sys, "argv", ["typecheck", *argv])
