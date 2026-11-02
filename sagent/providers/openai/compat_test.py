@@ -318,6 +318,34 @@ async def test_a_short_failure_before_the_first_event_is_retried(
 
 
 @pytest.mark.asyncio
+async def test_events_retry_by_default(slept: list[float]) -> None:
+    server = _Server(replies=[_failed(503, "Busy"), _ok()])
+    async with _Served(server) as shared:
+        events = [
+            event
+            async for event in _Vendor(resources=shared).events(body={}, headers={})
+        ]
+    assert len(events) == len(_said("Hello"))
+    assert len(server.requests) == 2
+    assert slept == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_a_request_can_forbid_unpriced_transport_retries(
+    slept: list[float],
+) -> None:
+    server = _Server(replies=[_failed(503, "Busy"), _ok()])
+    async with _Served(server) as shared:
+        with pytest.raises(OverloadedError, match="Busy"):
+            await _stream(
+                _Vendor(resources=shared)["default"],
+                replace(_REQUEST, retry=False),
+            )
+    assert len(server.requests) == 1
+    assert slept == []
+
+
+@pytest.mark.asyncio
 async def test_retrying_stops_after_five_attempts(slept: list[float]) -> None:
     server = _Server(replies=[_failed(503, "Busy")] * 5)
     async with _Served(server) as shared:
