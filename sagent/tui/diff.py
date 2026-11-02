@@ -9,7 +9,7 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import difflib
 import re
@@ -38,7 +38,10 @@ from sagent.tui.types import Sticky, hang
 
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from pygments.lexer import Lexer
+    from pygments.token import _TokenType
     from rich.console import Console
 
     from sagent.session.types import FileEditResult, FileWriteResult
@@ -403,7 +406,7 @@ def _print_rows(
 class _Monokai(Style):
     """Monokai Extended, in syntect's hex values."""
 
-    styles = {  # noqa: RUF012 -- Pygments reads a class-level mapping.
+    styles: ClassVar[Mapping[_TokenType, str]] = {
         Token: "#f8f8f2",
         Keyword: "#f92672",
         Keyword.Type: "#66d9ef",
