@@ -257,8 +257,8 @@ class Host:
         self._clients: set[asyncio.StreamWriter] = set()
         self._viewers: set[asyncio.StreamWriter] = set()
         self._recent = bytearray()
-        self._recent_trimmed = False
-        self._scrollback_failed = False
+        self._recent_trimmed = False  # pragma: no mutate -- None is as false.
+        self._scrollback_failed = False  # pragma: no mutate -- None is as false.
         self._interrupted: int | None = None
         self._stopping: asyncio.Task[None] | None = None
 

@@ -69,7 +69,7 @@ def accepts(address: Path, *, timeout_sec: float = 0.5) -> bool:
       accepting: Whether a connect succeeded; the connection is closed at once.
 
     """
-    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe = socket.socket(socket.AF_UNIX)
     try:
         probe.settimeout(timeout_sec)
         probe.connect(str(address))
@@ -103,7 +103,7 @@ def _aliased_socket_path(logical_path: Path) -> Path:
     alias_name = hashlib.blake2b(os.fsencode(logical_parent), digest_size=8).hexdigest()
     alias_parent = alias_root / alias_name
     try:
-        alias_parent.symlink_to(logical_parent, target_is_directory=True)
+        alias_parent.symlink_to(logical_parent)
     except FileExistsError:
         if (
             not alias_parent.is_symlink()

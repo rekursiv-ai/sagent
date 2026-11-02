@@ -132,7 +132,7 @@ class TestFrames:
             _ = decode_winsize(b"\x00")
 
     def test_payloads_round_trip_big_endian(self) -> None:
-        assert decode_winsize(encode_winsize(40, 120)) == (40, 120)
+        assert decode_winsize(encode_winsize(300, 400)) == (300, 400)
         assert encode_winsize(1, 2) == b"\x00\x01\x00\x02"
         assert decode_status(b"\x00\x00\x00\x8f") == 143
         assert encode_frame(Frame.ACK, b"\x01") == b"\x07\x00\x00\x00\x01\x01"
@@ -373,7 +373,10 @@ class TestHost:
     @pytest.mark.parametrize(
         ("frame", "reason"),
         [
-            (encode_frame(Frame.EXIT, b"\x00\x00\x00\x00"), "EXIT is a host frame"),
+            (
+                encode_frame(Frame.EXIT, b"\x00\x00\x00\x00"),
+                "EXIT is a host frame, not a client's",
+            ),
             (encode_frame(Frame.ATTACH, b"x"), "ATTACH carries no payload"),
             (encode_frame(Frame.STOP, b"x"), "STOP carries no payload"),
         ],
@@ -397,7 +400,7 @@ class TestHost:
         closed, ended = asyncio.run(run())
         assert closed == b""
         assert not ended
-        assert f"dropping a client that sent {reason}" in caplog.text
+        assert f"dropping a client that sent {reason}" in caplog.messages
 
     def test_a_client_that_leaves_is_forgotten(self, short_dir: Path) -> None:
         """Every ``send`` connects once; a long-lived host must not keep them all."""
@@ -413,6 +416,9 @@ class TestHost:
             serving = asyncio.create_task(host.serve())
             try:
                 await asyncio.wait_for(listening.wait(), 5.0)
+                # No output follows, so only the leaving itself can forget them:
+                # a later chunk would drop them as closed viewers instead.
+                await _wait_for(lambda: b"ready" in _read(spec.scrollback), 5.0)
                 for _ in range(3):
                     reader, writer = await asyncio.open_unix_connection(spec.address)
                     writer.write(encode_frame(Frame.ATTACH))
@@ -489,7 +495,10 @@ class TestHostBranchEdges:
             on_started=lambda _pid: None,
         )
 
-        with pytest.raises(RuntimeError, match="child PID"):
+        with pytest.raises(
+            RuntimeError,
+            match=r"^terminal started without a child PID$",
+        ):
             asyncio.run(host.serve())
         assert terminal.calls == ["start", "terminate", "wait", "close"]
 
@@ -542,18 +551,33 @@ class TestHostBranchEdges:
 
         assert asyncio.run(host.serve()) == 128 + signal.SIGTERM
 
-    def test_record_and_replay_trim_to_a_line(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize(
+        ("written", "replayed"),
+        [
+            (b"ab\ncd\nef", b"ab\ncd\nef"),
+            (b"xab\ncd\nef", b"cd\nef"),
+            (b"xabcdefgh", b"abcdefgh"),
+        ],
+        ids=["exactly-full", "one-over", "trimmed-without-a-newline"],
+    )
+    def test_record_and_replay_trim_to_a_line(
+        self,
+        tmp_path: Path,
+        written: bytes,
+        replayed: bytes,
+    ) -> None:
+        """Only a window that lost bytes starts after its first newline."""
         host = Host(
             _FakeTerminal(),
             spec=HostSpec(
                 address=tmp_path / "s",
                 scrollback=tmp_path / "log",
-                replay_bytes=3,
+                replay_bytes=8,
             ),
         )
         with mock.patch("sagent.lib.posix.host.write_all", return_value=True):
-            host._record(1, b"abc\\ndef")
-        assert host._replay() == b"def"
+            host._record(1, written)
+        assert host._replay() == replayed
 
     def test_record_warns_once_when_scrollback_fails(
         self,
@@ -568,7 +592,7 @@ class TestHostBranchEdges:
             host._record(1, b"x")
             host._record(1, b"y")
         assert host._scrollback_failed
-        assert caplog.text.count("scrollback write failed") == 1
+        assert caplog.messages == [f"scrollback write failed: {tmp_path / 'log'}"]
 
 
 class TestHostSend:
@@ -613,15 +637,33 @@ class TestHostSend:
         assert transport.closing
         assert transport.writes == []
 
-    def test_send_writes_to_a_writer_within_the_backlog_limit(
+    def test_send_drops_a_lagging_viewer_saying_how_far_behind(
         self,
         tmp_path: Path,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
         host = Host(
             _FakeTerminal(),
             spec=HostSpec(address=tmp_path / "s", scrollback=tmp_path / "log"),
         )
-        transport = _RecordingTransport(buffered=1)
+
+        async def run() -> None:
+            host._send(_writer_over(_RecordingTransport(buffered=9 << 20)), b"frame")
+
+        asyncio.run(run())
+        assert caplog.messages == ["dropping a viewer more than 8388608 bytes behind"]
+
+    @pytest.mark.parametrize("buffered", [1, 8 << 20], ids=["little", "at-the-limit"])
+    def test_send_writes_to_a_writer_within_the_backlog_limit(
+        self,
+        tmp_path: Path,
+        buffered: int,
+    ) -> None:
+        host = Host(
+            _FakeTerminal(),
+            spec=HostSpec(address=tmp_path / "s", scrollback=tmp_path / "log"),
+        )
+        transport = _RecordingTransport(buffered=buffered)
 
         async def run() -> None:
             host._send(_writer_over(transport), b"frame")
@@ -629,6 +671,185 @@ class TestHostSend:
 
         asyncio.run(run())
         assert transport.writes == [b"frame"]
+
+
+class TestHostFrames:
+    """What one client frame does to the host's own bookkeeping."""
+
+    def test_taking_over_forgets_and_closes_every_other_viewer_at_once(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        host = Host(
+            _FakeTerminal(),
+            spec=HostSpec(address=tmp_path / "s", scrollback=tmp_path / "log"),
+        )
+        before, taker = _RecordingTransport(), _RecordingTransport()
+
+        async def run() -> tuple[bool, bool, bool]:
+            first, second = _writer_over(before), _writer_over(taker)
+            host._clients |= {first, second}
+            host._viewers.add(first)
+            await host._handle(second, Frame.TAKEOVER, b"")
+            return (
+                host._viewers == {second},
+                first not in host._clients,
+                second in host._clients,
+            )
+
+        assert asyncio.run(run()) == (True, True, True)
+        assert before.closing
+
+    def test_viewers_answers_with_a_four_byte_count(self, tmp_path: Path) -> None:
+        host = Host(
+            _FakeTerminal(),
+            spec=HostSpec(address=tmp_path / "s", scrollback=tmp_path / "log"),
+        )
+        transport = _RecordingTransport()
+
+        async def run() -> None:
+            writer = _writer_over(transport)
+            host._viewers.add(_writer_over(_RecordingTransport()))
+            await host._handle(writer, Frame.VIEWERS, b"")
+
+        asyncio.run(run())
+        assert transport.writes == [encode_frame(Frame.VIEWERS, b"\x00\x00\x00\x01")]
+
+
+class TestHostSignals:
+    """A signal to the host stops the child and becomes its status."""
+
+    def test_each_stop_signal_is_installed_and_names_itself(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        host = Host(
+            _FakeTerminal(),
+            spec=HostSpec(address=tmp_path / "s", scrollback=tmp_path / "log"),
+        )
+
+        async def run() -> tuple[tuple[int, ...], int | None]:
+            installed = host._install_handlers()
+            try:
+                os.kill(os.getpid(), signal.SIGHUP)
+                await _wait_for(lambda: host._interrupted is not None, 5.0)
+            finally:
+                for sig in installed:
+                    _ = asyncio.get_running_loop().remove_signal_handler(sig)
+            return installed, host._interrupted
+
+        assert asyncio.run(run()) == (
+            (signal.SIGTERM, signal.SIGHUP, signal.SIGINT),
+            signal.SIGHUP,
+        )
+
+    def test_a_signal_the_loop_refuses_leaves_the_others_installed(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        host = Host(
+            _FakeTerminal(),
+            spec=HostSpec(address=tmp_path / "s", scrollback=tmp_path / "log"),
+        )
+
+        async def run() -> tuple[int, ...]:
+            loop = asyncio.get_running_loop()
+            real = loop.add_signal_handler
+
+            def refusing_term(
+                sig: int,
+                callback: Callable[[int], None],
+                signum: int,
+            ) -> None:
+                if sig == signal.SIGTERM:
+                    raise ValueError("refused")
+                real(sig, callback, signum)
+
+            with mock.patch.object(loop, "add_signal_handler", refusing_term):
+                installed = host._install_handlers()
+            for sig in installed:
+                _ = loop.remove_signal_handler(sig)
+            return installed
+
+        assert asyncio.run(run()) == (signal.SIGHUP, signal.SIGINT)
+
+
+class TestFarewell:
+    """The last ``EXIT`` frames drain before ``serve`` returns, within a bound."""
+
+    def test_it_waits_for_each_client_to_close(self, tmp_path: Path) -> None:
+        host = Host(
+            _FakeTerminal(),
+            spec=HostSpec(address=tmp_path / "s", scrollback=tmp_path / "log"),
+        )
+
+        async def run() -> tuple[bool, list[bytes]]:
+            transport = _RecordingTransport()
+            writer = _ClosingWriter(transport, delay_sec=0.05)
+            host._clients.add(writer)
+            await host._farewell(3)
+            return writer.closed, transport.writes
+
+        assert asyncio.run(run()) == (True, [encode_frame(Frame.EXIT, (3).to_bytes(4))])
+
+    def test_a_client_failing_to_close_is_no_error(self, tmp_path: Path) -> None:
+        host = Host(
+            _FakeTerminal(),
+            spec=HostSpec(address=tmp_path / "s", scrollback=tmp_path / "log"),
+        )
+
+        async def run() -> None:
+            host._clients.add(
+                _ClosingWriter(_RecordingTransport(), error=ConnectionResetError()),
+            )
+            await host._farewell(0)
+
+        asyncio.run(run())
+
+    def test_a_client_that_never_closes_is_left_after_the_bound(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(host_module, "_FAREWELL_SEC", 0.01)
+        host = Host(
+            _FakeTerminal(),
+            spec=HostSpec(address=tmp_path / "s", scrollback=tmp_path / "log"),
+        )
+
+        async def run() -> None:
+            host._clients.add(_ClosingWriter(_RecordingTransport(), delay_sec=60))
+            await asyncio.wait_for(host._farewell(0), 5.0)
+
+        asyncio.run(run())
+
+
+class _ClosingWriter(asyncio.StreamWriter):
+    """A writer whose close takes ``delay_sec``, or fails with ``error``."""
+
+    def __init__(
+        self,
+        transport: _RecordingTransport,
+        *,
+        delay_sec: float = 0.0,
+        error: OSError | None = None,
+    ) -> None:
+        super().__init__(
+            transport,
+            asyncio.Protocol(),
+            None,
+            asyncio.get_running_loop(),
+        )
+        self._delay_sec = delay_sec
+        self._error = error
+        self.closed = False
+
+    @override
+    async def wait_closed(self) -> None:
+        await asyncio.sleep(self._delay_sec)
+        if self._error is not None:
+            raise self._error
+        self.closed = True
 
 
 class _FakeTerminal(Terminal):
@@ -806,7 +1027,13 @@ def test_decode_frame_inverts_encode_frame() -> None:
 
 @pytest.mark.parametrize(
     "message",
-    [b"", b"\x06\x00\x00", b"\x06\x00\x00\x00\x05ab", b"\x63\x00\x00\x00\x00"],
+    [
+        b"",
+        b"\x06\x00\x00",
+        b"\x06\x00\x00\x00\x05ab",
+        b"\x06\x01\x00\x00\x00",
+        b"\x63\x00\x00\x00\x00",
+    ],
 )
 def test_decode_frame_refuses_a_short_mismatched_or_unknown_record(
     message: bytes,
@@ -823,10 +1050,9 @@ class TestALaunchedHost:
         tmp_path: Path,
     ) -> None:
         read_fd, write_fd = os.pipe()
-        script = (
-            "import os;raise SystemExit(4 if os.get_terminal_size() == (80, 24) else 5)"
-        )
-        argv = [str(tmp_path / "h.sock"), str(write_fd), "24", "80", "--"]
+        # Not 24x80, the size a terminal takes when given none.
+        script = "import os;raise SystemExit(4 if os.get_terminal_size() == (100, 30) else 5)"
+        argv = [str(tmp_path / "h.sock"), str(write_fd), "30", "100", "--"]
 
         assert serve_command([*argv, sys.executable, "-c", script]) == 4
         assert await_ready(read_fd, timeout_sec=1.0) is True
@@ -907,6 +1133,41 @@ class TestALaunchedHost:
                 os.close(fd)
 
         assert ready is None
+
+
+def test_launch_runs_this_module_with_its_arguments_then_the_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The argv ``serve_command`` reads by position, the command after ``--``."""
+    held: list[int] = []
+    argvs: list[Sequence[str]] = []
+
+    def spawn(argv: Sequence[str], *, log: Path, pass_fds: Sequence[int]) -> int:
+        argvs.append(argv)
+        return _hold(held, argv, log=log, pass_fds=pass_fds)
+
+    monkeypatch.setattr(host_module, "spawn_detached", spawn)
+    try:
+        _ = launch(
+            tmp_path / "s",
+            ["cmd", "--flag"],
+            log=tmp_path / "log",
+            winsize=(30, 100),
+            timeout_sec=0.01,
+        )
+    finally:
+        for fd in held:
+            os.close(fd)
+    (argv,) = argvs
+    executable, *flags, address, write_fd = argv[:6]
+    assert (executable, flags, address) == (
+        sys.executable,
+        ["-P", "-m", "sagent.lib.posix.host"],
+        str(tmp_path / "s"),
+    )
+    assert write_fd.isdecimal()
+    assert list(argv[6:]) == ["30", "100", "--", "cmd", "--flag"]
 
 
 def _hold(

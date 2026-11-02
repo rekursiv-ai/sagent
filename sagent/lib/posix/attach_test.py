@@ -22,18 +22,25 @@ import pytest
 
 from sagent.lib.posix.attach import (
     DETACH_KEY,
+    SUSPEND_KEY,
     RemoteTerminal,
     attach,
     stop,
     submit,
     viewers,
 )
-from sagent.lib.posix.host import Frame, Host, HostSpec, encode_frame
+from sagent.lib.posix.host import Frame, Host, HostSpec, encode_frame, encode_winsize
 from sagent.lib.posix.terminal import Terminal
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Generator, Iterator
+    from collections.abc import (
+        AsyncGenerator,
+        Awaitable,
+        Callable,
+        Generator,
+        Iterator,
+    )
 
 
 _ECHO = (
@@ -173,6 +180,125 @@ class TestAttach:
                 return left, taken
 
         assert asyncio.run(run()) == (None, None)
+
+    def test_a_chosen_detach_key_replaces_the_default(self, short_dir: Path) -> None:
+        async def run() -> tuple[int | None, bool]:
+            async with _hosted(short_dir) as (spec, serving):
+                status, _ = await _attach_typing(
+                    spec,
+                    typed=b"kept\n",
+                    shown=b"ECHO:kept",
+                    then=b"\x01",
+                    detach_key=b"\x01",
+                )
+                return status, serving.done()
+
+        assert asyncio.run(run()) == (None, False)
+
+    def test_a_plain_attach_leaves_the_terminal_attached_before(
+        self,
+        short_dir: Path,
+    ) -> None:
+        async def run() -> tuple[int | None, int | None]:
+            async with _hosted(short_dir) as (spec, _):
+                first = asyncio.create_task(
+                    _attach_typing(spec, typed=b"", shown=b"", then=b""),
+                )
+                _ = await _viewers_reach(spec.address, 1)
+                stdin_r, stdin_w = os.pipe()
+                out_r, out_w = os.pipe()
+                second = asyncio.create_task(
+                    attach(
+                        spec.address,
+                        stdin=os.fdopen(stdin_r),
+                        stdout=os.fdopen(out_w, "wb", buffering=0),
+                    ),
+                )
+                try:
+                    both = await _viewers_reach(spec.address, 2)
+                    _ = os.write(stdin_w, b"second\n")
+                    await _wait_for_bytes(spec.scrollback, b"ECHO:second")
+                    _ = os.write(stdin_w, DETACH_KEY)
+                    _ = await asyncio.wait_for(second, 5.0)
+                finally:
+                    os.close(stdin_w)
+                    os.close(out_r)
+                _ = await stop(spec.address)
+                left, _ = await first
+                return both, left
+
+        assert asyncio.run(run()) == (2, 143)
+
+    def test_ctrl_z_stops_this_job_and_its_return_repaints(
+        self,
+        short_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The stop is recorded, not taken: taken, it would stop the test run."""
+        stops: list[int] = []
+        real = os.killpg
+
+        def killpg(group: int, signum: int) -> None:
+            if group == os.getpgrp() and signum == signal.SIGTSTP:
+                stops.append(signum)
+            else:
+                real(group, signum)
+
+        monkeypatch.setattr(os, "killpg", killpg)
+
+        async def run() -> tuple[int | None, bool]:
+            async with _hosted(short_dir) as (spec, _):
+                await _wait_for_bytes(spec.scrollback, b"early")
+                seen = [spec.scrollback.read_bytes().count(b"SIZE")]
+
+                async def repainted() -> bool:
+                    for _ in range(500):
+                        count = spec.scrollback.read_bytes().count(b"SIZE")
+                        if count > seen[-1]:
+                            seen.append(count)
+                            return True
+                        await asyncio.sleep(0.01)
+                    return False
+
+                async def arrived() -> None:
+                    # The host repaints for every attach; the return's own
+                    # repaint must come after that one.
+                    _ = await repainted()
+
+                status, _ = await _attach_typing(
+                    spec,
+                    typed=b"",
+                    shown=b"early",
+                    then=SUSPEND_KEY + DETACH_KEY,
+                    until=arrived,
+                )
+                return status, await repainted()
+
+        assert asyncio.run(run()) == (None, True)
+        assert stops == [signal.SIGTSTP]
+
+    def test_a_signal_to_this_process_ends_the_attach_with_its_status(
+        self,
+        short_dir: Path,
+    ) -> None:
+        """``128 + signal``, as a job run directly reports; the child runs on."""
+
+        async def run() -> tuple[int | None, bool]:
+            async with _hosted(short_dir) as (spec, serving):
+
+                async def signalled() -> None:
+                    os.kill(os.getpid(), signal.SIGTERM)
+
+                status, _ = await _attach_typing(
+                    spec,
+                    typed=b"",
+                    shown=b"early",
+                    then=b"",
+                    until=signalled,
+                )
+                return status, serving.done()
+
+        assert asyncio.run(run()) == (128 + signal.SIGTERM, False)
 
     def test_taking_over_a_host_older_than_take_over_attaches_plainly(
         self,
@@ -564,11 +690,17 @@ class TestTheTerminalBehavesAsBeforeHosting:
 
 
 class _FakeWriter:
-    """Minimal writer boundary for one-shot protocol tests."""
+    """Minimal writer boundary for one-shot protocol tests.
 
-    def __init__(self) -> None:
+    Args:
+      closing_error: Raised by ``wait_closed``, as a peer gone first makes it.
+
+    """
+
+    def __init__(self, closing_error: OSError | None = None) -> None:
         self.closed = False
         self.frames: list[bytes] = []
+        self._closing_error = closing_error
 
     def write(self, frame: bytes) -> None:
         self.frames.append(frame)
@@ -577,7 +709,8 @@ class _FakeWriter:
         self.closed = True
 
     async def wait_closed(self) -> None:
-        return
+        if self._closing_error is not None:
+            raise self._closing_error
 
     def is_closing(self) -> bool:
         return self.closed
@@ -597,6 +730,93 @@ class TestRemoteTerminalEdges:
             await RemoteTerminal(short_dir / "s").close()
 
         asyncio.run(run())
+
+    def test_an_unstarted_terminal_sends_nothing_and_is_closed(
+        self,
+        short_dir: Path,
+    ) -> None:
+        async def run() -> tuple[bool, int]:
+            remote = RemoteTerminal(short_dir / "s")
+            remote.set_winsize(24, 80)
+            await remote.terminate()
+            return await remote.write(b"x"), await remote.wait()
+
+        assert asyncio.run(run()) == (False, 0)
+
+    def test_by_default_it_attaches_and_sends_its_geometry(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        writer = _FakeWriter()
+
+        async def run() -> None:
+            _answering(monkeypatch, b"", writer)
+            remote = RemoteTerminal(Path("unused"))
+            await remote.start()
+            remote.set_winsize(24, 80)
+
+        asyncio.run(run())
+        assert writer.frames == [
+            encode_frame(Frame.ATTACH),
+            encode_frame(Frame.RESIZE, encode_winsize(24, 80)),
+        ]
+
+    def test_after_the_detach_key_nothing_more_is_sent(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        writer = _FakeWriter()
+
+        async def run() -> tuple[bool, bool, int]:
+            _answering(monkeypatch, b"", writer)
+            remote = RemoteTerminal(Path("unused"))
+            await remote.start()
+            typed = await remote.write(b"a")
+            detached = await remote.write(DETACH_KEY)
+            remote.set_winsize(24, 80)
+            await remote.terminate()
+            return typed, detached, await remote.wait()
+
+        assert asyncio.run(run()) == (True, False, 0)
+        assert writer.frames == [
+            encode_frame(Frame.ATTACH),
+            encode_frame(Frame.INPUT, b"a"),
+        ]
+
+    def test_wait_returns_the_status_the_host_reported(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        writer = _FakeWriter()
+
+        async def run() -> tuple[list[bytes], int]:
+            _answering(
+                monkeypatch,
+                encode_frame(Frame.OUTPUT, b"bye")
+                + encode_frame(Frame.EXIT, (5).to_bytes(4)),
+                writer,
+            )
+            remote = RemoteTerminal(Path("unused"))
+            await remote.start()
+            chunks = [chunk async for chunk in remote.output()]
+            return chunks, await remote.wait()
+
+        assert asyncio.run(run()) == ([b"bye"], 5)
+
+    def test_a_peer_gone_before_close_finishes_is_no_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        writer = _FakeWriter(closing_error=ConnectionResetError())
+
+        async def run() -> None:
+            _answering(monkeypatch, b"", writer)
+            remote = RemoteTerminal(Path("unused"))
+            await remote.start()
+            await remote.close()
+
+        asyncio.run(run())
+        assert writer.closed
 
 
 class TestOneShotClients:
@@ -694,6 +914,32 @@ class TestOneShotClients:
         assert asyncio.run(run()) is None
         assert writer.closed
 
+    def test_a_peer_gone_before_close_finishes_keeps_each_answer(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        async def run() -> tuple[bool, int | None, int | None]:
+            _answering(
+                monkeypatch,
+                encode_frame(Frame.ACK, b"\x01"),
+                _FakeWriter(closing_error=BrokenPipeError()),
+            )
+            submitted = await submit(Path("unused"), text="message")
+            _answering(
+                monkeypatch,
+                encode_frame(Frame.VIEWERS, (2).to_bytes(4)),
+                _FakeWriter(closing_error=BrokenPipeError()),
+            )
+            count = await viewers(Path("unused"))
+            _answering(
+                monkeypatch,
+                encode_frame(Frame.EXIT, (3).to_bytes(4)),
+                _FakeWriter(closing_error=BrokenPipeError()),
+            )
+            return submitted, count, await stop(Path("unused"))
+
+        assert asyncio.run(run()) == (True, 2, 3)
+
     def test_submit_then_stop(self, short_dir: Path) -> None:
         async def run() -> tuple[bool, int | None]:
             async with _hosted(short_dir) as (spec, _):
@@ -718,6 +964,24 @@ class TestOneShotClients:
                 return False
 
         assert not asyncio.run(run())
+
+
+# Call it inside the event loop that reads the answer.
+def _answering(
+    monkeypatch: pytest.MonkeyPatch,
+    answer: bytes,
+    writer: _FakeWriter,
+) -> None:
+    """Make the next connection read ``answer``, then the end, and write ``writer``."""
+    reader = asyncio.StreamReader()
+    reader.feed_data(answer)
+    reader.feed_eof()
+
+    async def connect(address: Path) -> tuple[asyncio.StreamReader, _FakeWriter]:
+        del address
+        return reader, writer
+
+    monkeypatch.setattr(asyncio, "open_unix_connection", connect)
 
 
 @contextlib.asynccontextmanager
@@ -751,6 +1015,7 @@ async def _hosted(
 # A person detaches after seeing the screen, not before the replay arrives: the key
 # goes in only once ``shown`` has been mirrored, or the attach could end with nothing
 # drawn and the test would be timing the race rather than the behavior.
+# ``until``, when given, is awaited between seeing ``shown`` and typing ``then``.
 async def _attach_typing(
     spec: HostSpec,
     *,
@@ -759,6 +1024,8 @@ async def _attach_typing(
     then: bytes,
     read_only: bool = False,
     take_over: bool = False,
+    detach_key: bytes = DETACH_KEY,
+    until: Callable[[], Awaitable[None]] | None = None,
 ) -> tuple[int | None, bytes]:
     """Attach, type ``typed``, wait to see ``shown``, type ``then``; return result."""
     stdin_r, stdin_w = os.pipe()
@@ -772,6 +1039,7 @@ async def _attach_typing(
             stdout=os.fdopen(out_w, "wb", buffering=0),
             read_only=read_only,
             take_over=take_over,
+            detach_key=detach_key,
         ),
     )
     try:
@@ -781,6 +1049,8 @@ async def _attach_typing(
             while shown not in mirrored:
                 mirrored += _read_available(out_r)
                 await asyncio.sleep(0.01)
+            if until is not None:
+                await until()
         # Guarded like `typed`: when the child has already exited, the attach has
         # closed its end, and macOS fails even an empty write with EPIPE.
         if then:

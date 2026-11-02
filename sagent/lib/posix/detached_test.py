@@ -8,6 +8,7 @@ import os
 import signal
 import stat
 import sys
+import threading
 
 import pytest
 
@@ -91,10 +92,38 @@ def test_a_child_that_dies_unready_reads_as_a_failure(tmp_path: Path) -> None:
     assert await_ready(read_fd, timeout_sec=10.0) is False
 
 
+def test_a_spawned_child_reads_nothing_and_both_its_streams_are_logged(
+    tmp_path: Path,
+) -> None:
+    """Whatever this process's stdin holds, the child's reads empty."""
+    log = tmp_path / "child.log"
+    script = (
+        "import sys;"
+        "print(repr(sys.stdin.read()), flush=True);"
+        "print('err', file=sys.stderr)"
+    )
+    saved = os.dup(0)
+    _stdin_holding(b"leaked\n")
+    try:
+        before = set(threading.enumerate())
+        pid = spawn_detached([sys.executable, "-c", script], log=log)
+        reapers = [thread for thread in threading.enumerate() if thread not in before]
+    finally:
+        _ = os.dup2(saved, 0)
+        os.close(saved)
+    assert [thread.daemon for thread in reapers] == [True]
+    reapers[0].join(timeout=10.0)
+    # Reaped by its own thread, so nothing is left for this one to reap.
+    with pytest.raises(ChildProcessError):
+        _ = os.waitpid(pid, os.WNOHANG)
+    assert log.read_text() == "''\nerr\n"
+
+
 def test_the_output_goes_to_its_log_and_its_input_is_empty(tmp_path: Path) -> None:
     log = tmp_path / "host.log"
     saved = [os.dup(fd) for fd in (0, 1, 2)]
     try:
+        _stdin_holding(b"leaked\n")
         redirect_stdio(log)
         _ = os.write(1, b"out\n")
         _ = os.write(2, b"err\n")
@@ -106,6 +135,15 @@ def test_the_output_goes_to_its_log_and_its_input_is_empty(tmp_path: Path) -> No
 
     assert (read, log.read_bytes()) == (b"", b"out\nerr\n")
     assert stat.S_IMODE(log.stat().st_mode) == 0o600
+
+
+def _stdin_holding(data: bytes) -> None:
+    """Make fd 0 a pipe that holds ``data`` and then ends."""
+    read_fd, write_fd = os.pipe()
+    _ = os.write(write_fd, data)
+    os.close(write_fd)
+    _ = os.dup2(read_fd, 0)
+    os.close(read_fd)
 
 
 def _open(fd: int) -> bool:

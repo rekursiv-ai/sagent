@@ -169,7 +169,11 @@ def terminal_size(fd: int) -> tuple[int, int]:
 
     """
     try:
-        packed = fcntl.ioctl(fd, termios.TIOCGWINSZ, struct.pack("HHHH", 0, 0, 0, 0))
+        packed = fcntl.ioctl(
+            fd,
+            termios.TIOCGWINSZ,
+            struct.pack("HHHH", 0, 0, 0, 0),  # pragma: no mutate -- ioctl overwrites it
+        )
     except (OSError, ValueError, AttributeError):
         return (24, 80)
     rows, cols, _, _ = struct.unpack("HHHH", packed)
@@ -226,9 +230,11 @@ class Relay:
         self._suspend_key = suspend_key
         self._on_resume = on_resume
         self._interrupted: int | None = None
+        # pragma: no mutate start -- the task is held, never read.
         self._teardown: asyncio.Task[None] | None = None
+        # pragma: no mutate end
         self._old_attr: list[int | list[bytes | int]] | None = None
-        self._out_fd = -1
+        self._out_fd = -1  # pragma: no mutate -- any negative fd is none.
 
     async def serve(self) -> int:
         """Spawn the child, relay until it exits, and restore the terminal.
@@ -264,7 +270,10 @@ class Relay:
                 await self._pump(stdin_fd, out_fd)
             finally:
                 for sig in handlers:
-                    with contextlib.suppress(NotImplementedError, RuntimeError):
+                    with contextlib.suppress(
+                        NotImplementedError,  # pragma: no mutate -- a RuntimeError too.
+                        RuntimeError,
+                    ):
                         asyncio.get_running_loop().remove_signal_handler(sig)
                 # While the child is provably gone and raw mode still stands:
                 # these are emulator modes, so ``tcsetattr`` below cannot undo

@@ -59,10 +59,8 @@ def spawn_detached(
       pid: The child's, which leads its own session.
 
     """
-    with os.fdopen(
-        os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600),
-        "wb",
-    ) as out:
+    out = os.open(log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
         process = subprocess.Popen(  # noqa: S603 -- The caller's own command.
             argv,
             stdin=subprocess.DEVNULL,
@@ -71,6 +69,8 @@ def spawn_detached(
             start_new_session=True,
             pass_fds=tuple(pass_fds),
         )
+    finally:
+        os.close(out)
     # Reaped while the launcher lives, without making its exit wait for the child.
     threading.Thread(target=process.wait, daemon=True).start()
     return process.pid
@@ -85,24 +85,21 @@ class Readiness:
     """
 
     def __init__(self, fd: int) -> None:
-        self._fd = fd
+        self._fd: int | None = fd
 
     # A line, not the bare word: the launcher reads the word alone, so reading
     # one byte more or less than it changes what it reads.
     def accept(self) -> None:
         """Tell the launcher the child is ready."""
-        self._finish(b"ok\n")
+        if self._fd is not None:
+            _ = write_all(self._fd, b"ok\n")
+            self.close()
 
     def close(self) -> None:
         """Release the pipe; a launcher still waiting reads a failure."""
-        self._finish(b"")
-
-    def _finish(self, message: bytes) -> None:
-        if self._fd < 0:
-            return
-        _ = write_all(self._fd, message)
-        os.close(self._fd)
-        self._fd = -1
+        if self._fd is not None:
+            os.close(self._fd)
+            self._fd = None
 
 
 def await_ready(fd: int, *, timeout_sec: float) -> bool | None:

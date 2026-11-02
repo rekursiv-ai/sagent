@@ -6,7 +6,10 @@ from pathlib import Path
 
 import os
 import socket
+import stat
 import tempfile
+import threading
+import time
 
 import pytest
 
@@ -108,6 +111,109 @@ def test_a_temporary_directory_too_long_for_an_alias_is_refused(
 
     with pytest.raises(OSError, match="temporary directory is too long for AF_UNIX"):
         socket_address(tmp_path / ("long-logical-segment-" * 8) / "host.sock")
+
+
+def test_a_missing_deep_directory_is_made_private(tmp_path: Path) -> None:
+    logical = tmp_path / "a" / ("long-state-segment-" * 6) / "host.sock"
+    path = socket_address(logical)
+
+    _bind(path)
+
+    assert stat.S_IMODE(logical.parent.stat().st_mode) == 0o700
+
+
+def test_the_same_long_path_gets_the_same_alias_again(tmp_path: Path) -> None:
+    logical = tmp_path / ("long-state-segment-" * 6) / "host.sock"
+    assert socket_address(logical) == socket_address(logical)
+
+
+def test_an_alias_root_that_is_not_a_directory_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Owner-only but a link, as macOS ``lchmod`` can leave one, is still refused."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(tempfile, "tempdir", "runtime")
+    Path("runtime").mkdir()
+    alias_root = Path("runtime") / f"t-{os.getuid():x}"
+    real = Path.lstat
+
+    def lstat(self: Path) -> os.stat_result:
+        info = real(self)
+        if self != alias_root:
+            return info
+        return os.stat_result((stat.S_IFLNK | 0o700, *info[1:10]))
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    with pytest.raises(PermissionError, match="unsafe socket alias root"):
+        socket_address(Path("long-logical-segment-" * 8) / "host.sock")
+
+
+def test_an_alias_of_exactly_the_limit_is_used(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(tempfile, "tempdir", "runtime")
+    Path("runtime").mkdir()
+    directory = Path("long-logical-segment-" * 8)
+    # The alias is ``runtime/t-<uid>/<16 hex digits>/<name>``.
+    prefix = len(f"runtime/t-{os.getuid():x}/") + 16 + 1
+    name = "s" * (UNIX_SOCKET_PATH_MAX_BYTES - prefix)
+    path = socket_address(directory / name)
+
+    _bind(path)
+
+    assert len(os.fsencode(path)) == UNIX_SOCKET_PATH_MAX_BYTES
+
+
+def test_a_listener_with_a_full_backlog_is_refused_not_waited_on(
+    tmp_path: Path,
+) -> None:
+    """The probe never blocks, so a listener that never accepts cannot hang it."""
+    address = tmp_path / "s"
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    queued: list[socket.socket] = []
+    answers: list[bool] = []
+    try:
+        listener.bind(str(address))
+        listener.listen(0)
+        while True:
+            waiting = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            waiting.setblocking(False)
+            queued.append(waiting)
+            try:
+                waiting.connect(str(address))
+            except BlockingIOError:
+                break
+        started = time.monotonic()
+        probing = threading.Thread(target=lambda: answers.append(accepts(address)))
+        probing.daemon = True
+        probing.start()
+        probing.join(timeout=5.0)
+        elapsed = time.monotonic() - started
+    finally:
+        for waiting in queued:
+            waiting.close()
+        listener.close()
+    assert answers == [False]
+    assert elapsed < 1.0
+
+
+def test_the_probe_waits_half_a_second_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    timeouts: list[float | None] = []
+    real = socket.socket.settimeout
+
+    def settimeout(self: socket.socket, value: float | None) -> None:
+        timeouts.append(value)
+        real(self, value)
+
+    monkeypatch.setattr(socket.socket, "settimeout", settimeout)
+    assert not accepts(tmp_path / "absent")
+    assert timeouts == [0.5]
 
 
 def test_a_listening_socket_accepts_and_a_missing_one_does_not(

@@ -30,6 +30,7 @@ nothing.
   imports run before any fixture.
 - Threads: ``cap_math_threads`` gives each process one math thread.
 - Stack depth: ``recursion_headroom`` caps how deep a test may recurse.
+- Encoding: ``ascii_locale`` makes the default text encoding ASCII.
 - Time and services: ``pytest_collection_modifyitems`` turns each resource
   marker into a timeout, family markers, and a skip where the resource is
   absent.
@@ -48,6 +49,7 @@ from typing import TYPE_CHECKING, Final, Protocol, cast
 
 import ast
 import inspect
+import locale
 import os
 import re
 import shutil
@@ -290,6 +292,25 @@ def recursion_headroom(frames: int) -> Generator[None]:
         yield
     finally:
         sys.setrecursionlimit(before)
+
+
+@contextmanager
+def ascii_locale() -> Generator[None]:
+    """Make the process's default text encoding ASCII, as an ``LC_ALL=C`` host's is.
+
+    Inside, a text open that names no encoding cannot read or write non-ASCII
+    text, so a test can tell a stated ``encoding="utf-8"`` from the default.
+
+    Yields:
+      None: The locale is restored on exit.
+
+    """
+    before = locale.setlocale(locale.LC_CTYPE)
+    locale.setlocale(locale.LC_CTYPE, "C")
+    try:
+        yield
+    finally:
+        locale.setlocale(locale.LC_CTYPE, before)
 
 
 class MarkedItem(Protocol):
