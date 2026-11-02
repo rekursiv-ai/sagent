@@ -382,8 +382,7 @@ def _find_entry() -> tuple[str, ...]:
     )
 
 
-# ``security`` reads stdin only under ``-i``, so the default's text never matters.
-async def _security(*args: str, commands: str = "") -> str:  # pragma: no mutate
+async def _security(*args: str, commands: str = "") -> str:
     """Run ``security`` with ``args``, writing ``commands`` to its stdin."""
     async with await Child.start(
         "/usr/bin/security",

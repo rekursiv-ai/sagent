@@ -15,6 +15,10 @@ import socket
 
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
+    import pytest
+
     from sagent.providers.login import Logins, Spent
 
 
@@ -22,6 +26,7 @@ __all__ = [
     "bound_port",
     "first_live",
     "free_port",
+    "refuse_browsers",
     "send",
     "visit",
     "window",
@@ -49,6 +54,26 @@ class Bound(Protocol):
     """An IPv4 socket, whose address typeshed leaves untyped."""
 
     def getsockname(self) -> tuple[str, int]: ...
+
+
+def refuse_browsers(monkeypatch: pytest.MonkeyPatch, *modules: ModuleType) -> None:
+    """Fail the test that opens a browser through any of ``modules``.
+
+    A test that means to open one patches ``open_browser`` after this; one that
+    does not, or code that stops honoring ``headless``, must not reach the user's
+    real browser.
+
+    Args:
+      monkeypatch: The test's.
+      modules: Each module that calls ``open_browser``.
+
+    """
+
+    def refused(url: str) -> bool:
+        raise AssertionError(f"A test opened a real browser at {url}.")
+
+    for module in modules:
+        monkeypatch.setattr(module, "open_browser", refused)
 
 
 def bound_port(bound: Bound) -> int:

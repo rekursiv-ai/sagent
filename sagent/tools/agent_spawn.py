@@ -156,7 +156,7 @@ class AgentSpawn:
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
         """Return ``AgentSpawn <label>: <first words>``."""
-        label = str(arguments.get("label", "") or "")
+        label = str(arguments.get("label") or "")
         prompt = " ".join(str(arguments.get("prompt", "")).split())
         head = f"AgentSpawn{f' {label}' if label else ''}"
         return f"{head}: {prompt}" if prompt else head
@@ -288,7 +288,6 @@ class AgentSpawn:
             max_rounds=a.max_tool_call_rounds,
             max_depth=a.max_depth,
             spec=spec,
-            recall=False,
         )
         return await self._run(child, label=label, parent=parent, a=a)
 
@@ -429,7 +428,7 @@ class AgentSpawn:
                 model = (
                     self.team.catalog.model(
                         spec.model,
-                        current=parent.model.provider.name,
+                        current=parent.model.provider.name,  # pragma: no mutate -- a P/M name never reads it.
                     )
                     if spec.model
                     else await self._model(
@@ -497,7 +496,7 @@ class AgentSpawn:
         max_rounds: int | None,
         max_depth: int | None,
         spec: ChildSpec | None,
-        recall: bool,
+        recall: bool = False,
     ) -> Agent:
         """Join a child of ``parent`` to the team, then open it and its journal."""
         stack = AsyncExitStack()
@@ -696,13 +695,9 @@ def _agent_from_parent(
         journal=journal,
         compactor=parent.compactor_factory,
         # All of the parent's but what one agent alone keeps: a field added later
-        # is inherited unless it is reset here.
-        tool_context=replace(
-            parent.runtime.tool_context,
-            files=FileTracker(),
-            label="",
-            spill_dir=None,
-        ),
+        # is inherited unless it is reset here. The team sets ``label`` as the
+        # agent joins, and the agent its ``spill_dir`` from its journal.
+        tool_context=replace(parent.runtime.tool_context, files=FileTracker()),
         max_rounds=max_rounds,
         max_spend_usd=max_spend_usd,
         agents_md=parent.agents_md,

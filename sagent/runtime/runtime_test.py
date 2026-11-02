@@ -756,7 +756,7 @@ async def test_a_failed_model_call_is_logged_by_policy(
         r for r in caplog.records if r.getMessage().startswith("model call failed")
     ]
     assert record.levelno == level
-    assert (record.exc_info is not None) is traced
+    assert isinstance(record.exc_info, tuple) is traced
 
 
 @pytest.mark.asyncio

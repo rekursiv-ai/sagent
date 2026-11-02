@@ -175,7 +175,7 @@ class Bash:
         # A wrapped shell's directory may be invisible here; ``_guard`` falls back.
         if not self.exec_prefix:
             context.cwd = await asyncio.to_thread(_existing, context.cwd)
-        sentinel = f"__SAGENT_CWD_{secrets.token_hex(4)}__"
+        sentinel = f"__SAGENT_CWD_{secrets.token_hex(4)}__"  # pragma: no mutate -- any length is unique.
         script = _script(sentinel)
         held = _HeldPipe() if self.exec_prefix else None
         argv = (
@@ -192,7 +192,7 @@ class Bash:
             ]
         )
         started = time.monotonic()
-        reason = ""
+        reason: str | None = None
         try:
             child = await Child.start(
                 *argv,
@@ -250,9 +250,9 @@ class Bash:
             f"{line}\n" for line in err.decode(errors="replace").strip().split("\n")
         ]
         cap = min(self.max_result_chars, context.max_result_chars)
-        diagnostics, _ = context.fit(stderr, reserve=cap * 3 // 4, cap=cap)
+        diagnostics, _ = context.fit(stderr, cap=cap // 4)
         diagnostics = diagnostics.strip()
-        if reason:
+        if reason is not None:
             diagnostics += f"\n[{reason}]"
         spill = (
             context.spill_dir / f"bash-{secrets.token_hex(4)}.txt"
@@ -260,20 +260,23 @@ class Bash:
             else None
         )
         note = f"; full output: {spill}" if spill is not None else ""
+        # Room for the longest the cut can say it left out: every line.
         body, kept = context.fit(
             stdout,
-            reserve=len(diagnostics) + len(note) + 80,
+            reserve=len(diagnostics) + len(_omitted(len(stdout), note=note)),
             cap=cap,
         )
         body = body.strip()
         if kept < len(stdout):
             if spill is not None:
                 await asyncio.to_thread(_spill, spill, stdout)
-            body += f"\n... ({len(stdout) - kept:,} more lines omitted{note})"
+            shown = f"{body}{_omitted(len(stdout) - kept, note=note)}"
+        else:
+            shown = f"{body}\n" if body else ""
         return ShellCommandResult(
             call_id="",
             command=("bash", "-c", a.command),
-            stdout=f"{body}\n" if body else "",
+            stdout=shown,
             stderr=diagnostics.strip(),
             exit_code=proc.returncode,
         )
@@ -330,17 +333,18 @@ def _script(sentinel: str) -> str:
     """Return the script that runs the command ``$1`` and reports where it ended."""
     # The leading newline keeps output without a final one off the report.
     report = f'printf "\\n%s=%s\\n" "{sentinel}" "$(pwd)"'
+    # Bash reads a signal name in any case, so a lowercase ``exit`` is ``EXIT``.
     return (
         f"__sagent_report() {{ local rc=$?; {report}; return $rc; }}\n"
-        "builtin trap __sagent_report EXIT\n"
+        "builtin trap __sagent_report EXIT\n"  # pragma: no mutate -- see above.
         "trap() {\n"
         '  builtin trap "$@" || return\n'
         '  [ "$BASH_SUBSHELL" = 0 ] || return 0\n'
         "  local line\n"
-        "  line=$(builtin trap -p EXIT)\n"
+        "  line=$(builtin trap -p EXIT)\n"  # pragma: no mutate -- see above.
         '  case "$line" in *__sagent_report*) return 0 ;; esac\n'
         '  eval "set -- $line"\n'
-        '  builtin trap -- "__sagent_report; ${3:-}" EXIT\n'
+        '  builtin trap -- "__sagent_report; ${3:-}" EXIT\n'  # pragma: no mutate -- see above.
         "}\n"
         'eval "$1"\n'
         "__rc=$?\n"
@@ -349,12 +353,15 @@ def _script(sentinel: str) -> str:
     )
 
 
+def _omitted(count: int, *, note: str) -> str:
+    """Return the line that ends a cut output: how many lines it left out."""
+    return f"\n... ({count:,} more lines omitted{note})\n"
+
+
 def _spill(path: Path, stdout: Sequence[str]) -> None:
     """Write the whole of ``stdout`` to ``path``."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    # pragma: no mutate start -- every encoding mutant is UTF-8 on a UTF-8 host.
-    path.write_text("".join(stdout), encoding="utf-8")
-    # pragma: no mutate end
+    path.write_bytes("".join(stdout).encode())
 
 
 def _environment(

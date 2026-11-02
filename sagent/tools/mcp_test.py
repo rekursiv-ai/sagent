@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, Self, cast, override
 
 import asyncio
 import base64
@@ -29,10 +29,12 @@ import mcp.types as mcp_types
 import pytest
 
 from sagent.lib.userdirs import config_dir, data_dir, state_dir
+from sagent.providers.testing import refuse_browsers
 from sagent.providers.tool_server import McpToolServer
 from sagent.session.projects import project_dir
 from sagent.session.types import Attachment
-from sagent.tools import mcp
+from sagent.tools import mcp, mcp_auth
+from sagent.tools.display import ToolDisplay
 from sagent.tools.function import tool
 from sagent.tools.mcp import (
     McpConnection,
@@ -53,13 +55,21 @@ from sagent.tools.types import ToolContext
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
+    from contextlib import AbstractAsyncContextManager
 
-    from mcp.client._transport import TransportStreams
+    from mcp.client._transport import Transport, TransportStreams
+    from mcp.client.session import MessageHandlerFnT
     from mcp.server.context import ServerRequestContext
     from treekle import PlainTree
 
     from sagent.tools.mcp import McpScope, McpToolLoading
     from sagent.tools.types import Tool
+
+
+@pytest.fixture(autouse=True)
+def no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a test that opens the user's browser, as a sign-in not headless would."""
+    refuse_browsers(monkeypatch, mcp_auth)
 
 
 _PNG = b"\x89PNG\r\n\x1a\n"
@@ -589,8 +599,254 @@ def test_a_bad_entry_names_its_server(
 
 @pytest.mark.parametrize("name", ["has space", "dot.ted", "", "x" * 60, "a__b"])
 def test_a_server_name_must_fit_in_a_tool_name(name: str) -> None:
-    with pytest.raises(ValueError, match="MCP server name"):
+    with pytest.raises(ValueError, match="MCP server name") as error:
         McpServer(name=name, parameters=StdioServerParameters(command="x"))
+    assert str(error.value) == (
+        f"MCP server name {name!r} must be letters, digits, '_' or '-', at most 59"
+        " of them, with no '__'."
+    )
+
+
+@pytest.mark.parametrize(
+    ("entry", "problem"),
+    [
+        ({"command": 5}, "command"),
+        ({"command": "x", "url": "https://h"}, "gives both 'command' and a URL"),
+        ({"command": "x", "serverUrl": "https://h"}, "gives both 'command' and a URL"),
+        ({}, "gives neither 'command' nor a URL"),
+        ({"type": "sse", "url": "https://h"}, "transport 'sse' is not supported"),
+        ({"url": "${UNSET_FOR_TEST}"}, "$UNSET_FOR_TEST is not set"),
+    ],
+)
+def test_a_bad_entry_says_what_is_wrong_and_in_which_file(
+    tmp_path: Path,
+    entry: dict[str, object],
+    problem: str,
+) -> None:
+    user = data_dir() / "rekursiv-ai" / "sagent" / "mcp.json"
+    _write(user, {"bad": entry})
+    with pytest.raises(ValueError, match=r"^MCP server 'bad': ") as error:
+        servers(tmp_path)
+    message = str(error.value)
+    assert problem in message
+    assert message.endswith(f" (in {user.resolve()}).")
+
+
+@pytest.mark.parametrize(
+    ("entry", "problem"),
+    [
+        ({"command": "x", "serverUrl": "https://h"}, "gives both 'command' and a URL"),
+        ({}, "gives neither 'command' nor a URL"),
+    ],
+)
+def test_a_server_both_or_neither_local_and_remote_says_exactly_so(
+    tmp_path: Path,
+    entry: dict[str, object],
+    problem: str,
+) -> None:
+    user = data_dir() / "rekursiv-ai" / "sagent" / "mcp.json"
+    _write(user, {"bad": entry})
+    with pytest.raises(ValueError, match="MCP server 'bad'") as error:
+        servers(tmp_path)
+    assert str(error.value) == f"MCP server 'bad': {problem} (in {user.resolve()})."
+
+
+@pytest.mark.parametrize("kind", ["stdio", "http", "streamable-http"])
+def test_each_transport_name_is_read(tmp_path: Path, kind: str) -> None:
+    _write(
+        data_dir() / "rekursiv-ai" / "sagent" / "mcp.json",
+        {"s": {"type": kind, "command": "x"}},
+    )
+    assert [s.name for s in servers(tmp_path)] == ["s"]
+
+
+def test_a_file_holding_no_object_is_no_mcp_servers_json(tmp_path: Path) -> None:
+    path = tmp_path / "list.json"
+    path.write_text("[]")
+    with pytest.raises(ValueError, match="is no mcpServers JSON"):
+        servers(tmp_path, flags=[str(path)])
+
+
+def test_an_entry_is_read_as_utf_8(tmp_path: Path) -> None:
+    user = data_dir() / "rekursiv-ai" / "sagent" / "mcp.json"
+    user.parent.mkdir(parents=True, exist_ok=True)
+    user.write_bytes(
+        json.dumps({"mcpServers": {"s": {"command": "x", "description": "café"}}})
+        .replace("\\u00e9", "é")
+        .encode(),
+    )
+    (server,) = servers(tmp_path)
+    assert server.description == "café"
+
+
+def test_an_entry_with_no_choices_takes_the_defaults(tmp_path: Path) -> None:
+    _write(data_dir() / "rekursiv-ai" / "sagent" / "mcp.json", {"s": {"command": "x"}})
+    (server,) = servers(tmp_path)
+    assert (server.description, server.loading, server.disabled) == (
+        "",
+        "every_request",
+        False,
+    )
+    assert (server.enabled_tools, server.disabled_tools) == (None, ())
+
+
+@pytest.mark.parametrize(
+    ("entry", "written"),
+    [
+        (
+            {"command": "uvx", "args": ["a", "${HOME_FOR_TEST}"]},
+            "uvx a ${HOME_FOR_TEST}",
+        ),
+        ({"url": "https://h/${HOME_FOR_TEST}"}, "https://h/${HOME_FOR_TEST}"),
+        ({"serverUrl": "https://g"}, "https://g"),
+        ({"url": "https://u", "serverUrl": "https://g"}, "https://u"),
+    ],
+)
+def test_a_server_keeps_where_it_is_as_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    entry: dict[str, object],
+    written: str,
+) -> None:
+    monkeypatch.setenv("HOME_FOR_TEST", "/h")
+    _write(data_dir() / "rekursiv-ai" / "sagent" / "mcp.json", {"s": entry})
+    (server,) = servers(tmp_path)
+    assert server.written == written
+
+
+def test_a_lowercase_variable_is_filled_too(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("lower_case", "v")
+    _write(
+        data_dir() / "rekursiv-ai" / "sagent" / "mcp.json",
+        {"s": {"command": "${lower_case}"}},
+    )
+    assert _commands(servers(tmp_path)) == {"s": "v"}
+
+
+def test_inline_json_may_start_with_spaces(tmp_path: Path) -> None:
+    flag = '  {"mcpServers": {"s": {"command": "x"}}}'
+    (server,) = servers(tmp_path, flags=[flag], strict=True)
+    assert server.source == "--mcp-config"
+
+
+@pytest.mark.asyncio
+async def test_an_added_server_goes_to_the_project_unless_told(tmp_path: Path) -> None:
+    await add_server("s", {"command": "x"}, cwd=tmp_path)
+    path = project_dir(tmp_path) / "mcp.json"
+    assert path.read_text() == json.dumps(
+        {"mcpServers": {"s": {"command": "x"}}},
+        indent=2,
+    )
+    with pytest.raises(ValueError, match=rf"\(in {re.escape(str(path))}\)\.$"):
+        await add_server("t", {}, cwd=tmp_path)
+
+
+@pytest.mark.asyncio
+async def test_removing_one_server_keeps_its_neighbour_s_sign_in(
+    tmp_path: Path,
+) -> None:
+    await add_server("a", {"url": "https://a"}, cwd=tmp_path)
+    await add_server("b", {"url": "https://b"}, cwd=tmp_path)
+    a, b = servers(tmp_path)
+    kept = await _signed_in(b)
+    gone = await _signed_in(a)
+    await remove_server("a", cwd=tmp_path)
+    assert (kept.exists(), gone.exists()) == (True, False)
+
+
+@pytest.mark.asyncio
+async def test_a_sign_in_forgotten_by_another_first_is_no_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await add_server("a", {"url": "https://a"}, cwd=tmp_path)
+    source = servers(tmp_path)[0].source
+
+    def already_gone(file: str) -> dict[str, Path]:
+        assert file == source
+        return {"x" * 16: tmp_path / "gone.json"}
+
+    monkeypatch.setattr(mcp, "sign_ins", already_gone)
+    assert await remove_server("a", cwd=tmp_path) == "local"
+
+
+@pytest.mark.asyncio
+async def test_logging_out_of_another_tool_s_file_takes_no_lock(
+    tmp_path: Path,
+) -> None:
+    other = tmp_path / "other.json"
+    _write(other, {"s": {"url": "https://s"}})
+    (server,) = servers(tmp_path, flags=[str(other)], strict=True)
+    assert await logout(server) is False
+    assert not other.with_name("other.json.lock").exists()
+
+
+@pytest.mark.asyncio
+async def test_a_server_from_no_file_signs_out_alone() -> None:
+    one = McpServer(name="one", parameters=StreamableHttpParameters(url="https://1"))
+    two = McpServer(name="two", parameters=StreamableHttpParameters(url="https://2"))
+    first, second = await _signed_in(one), await _signed_in(two)
+    assert await logout(one) is True
+    assert (first.exists(), second.exists()) == (False, True)
+
+
+@pytest.mark.asyncio
+async def test_a_login_passes_on_how_to_sign_in_and_uses_the_sign_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[tuple[str, dict[str, object]]] = []
+    used: list[object] = []
+    auth = object()
+
+    @asynccontextmanager
+    async def signing(url: str, **how: object) -> AsyncGenerator[object]:
+        asked.append((url, how))
+        yield auth
+
+    @asynccontextmanager
+    async def reached(server: McpServer, *, auth: object) -> AsyncGenerator[object]:
+        del server
+        used.append(auth)
+        yield object()
+
+    class _Client:
+        def __init__(self, transport: AbstractAsyncContextManager[object]) -> None:
+            self.transport = transport
+
+        async def __aenter__(self) -> Self:
+            async with self.transport:
+                pass
+            return self
+
+        async def __aexit__(self, *exc: object) -> None:
+            del exc
+
+    monkeypatch.setattr(mcp, "login_auth", signing)
+    monkeypatch.setattr(mcp, "_transport", reached)
+    monkeypatch.setattr(mcp, "Client", _Client)
+    remote = McpServer(
+        name="web",
+        parameters=StreamableHttpParameters(url="https://w"),
+        source="/f.json",
+    )
+    show = list[str]().append
+    await login(remote, show=show)
+    assert asked == [
+        (
+            "https://w",
+            {
+                "key": remote.key,
+                "source": "/f.json",
+                "show": show,
+                "headless": False,
+                "wait_sec": 300.0,
+            },
+        ),
+    ]
+    assert used == [auth]
 
 
 @pytest.mark.asyncio
@@ -786,7 +1042,10 @@ async def test_a_failed_relisting_keeps_the_last_list(
         with caplog.at_level(logging.WARNING):
             await connection.relisting
         assert "- echo: Say the text back." in tool.description
-    assert "MCP server 'srv': relisting failed" in caplog.text
+    # The server says only that it failed, which the warning passes on.
+    assert "MCP server 'srv': relisting failed: Internal server error" in (
+        caplog.messages
+    )
 
 
 def test_a_connection_not_yet_attached_says_so() -> None:
@@ -795,6 +1054,75 @@ def test_a_connection_not_yet_attached_says_so() -> None:
     )
     with pytest.raises(RuntimeError, match="MCP server 'srv' is not connected"):
         connection._open()
+    assert (connection.tools(), dict(connection.offered)) == ([], {})
+    assert connection.resources == ()
+
+
+@pytest.mark.asyncio
+async def test_a_list_of_many_pages_is_read_to_its_end() -> None:
+    async with _connected(_Backend(page_size=2)) as connection:
+        assert list(_by_name(connection.tools())) == _BACKEND_TOOLS
+
+
+@pytest.mark.asyncio
+async def test_a_tool_without_a_description_is_described_as_empty(
+    tmp_path: Path,
+) -> None:
+    context = ToolContext(cwd=tmp_path)
+    async with _connected(_Backend(quiet=("hush",))) as connection:
+        hush = _by_name(connection.tools())["mcp__srv__hush"]
+    assert hush.description == ""
+    async with _connected(_Backend(quiet=("hush",)), loading="on_demand") as connection:
+        (tool,) = connection.tools()
+        described = await tool.call(context, {"tool": "hush"})
+    assert "\n- hush: \n" in f"{tool.description}\n"
+    assert json.loads(described.text())["description"] == ""
+    assert described.is_error is None
+
+
+def test_a_listing_shows_a_description_s_first_line_alone() -> None:
+    assert mcp._first_line("  one\ntwo\nthree") == "one"
+    assert mcp._first_line(None) == ""
+
+
+@pytest.mark.asyncio
+async def test_what_the_server_tool_says_of_itself_is_no_error(tmp_path: Path) -> None:
+    context = ToolContext(cwd=tmp_path)
+    async with _connected(_Backend(resources=True), loading="on_demand") as connection:
+        (tool,) = connection.tools()
+        listed = await tool.call(context, {})
+        described = await tool.call(context, {"tool": "echo"})
+        read = await tool.call(context, {"resource": "note://a"})
+        with pytest.raises(
+            ValueError,
+            match=r"it offers: echo, picture, fail, mixed, data\.$",
+        ):
+            await tool.call(context, {"tool": "nope"})
+    assert (listed.is_error, described.is_error, read.is_error) == (None, None, None)
+    assert isinstance(tool, McpServerTool)
+    assert tool.display == ToolDisplay()
+    assert tool.summary({"resource": "note://a"}) == "mcp__srv note://a"
+    assert tool.summary({}) == "mcp__srv"
+
+
+@pytest.mark.asyncio
+async def test_a_server_that_offers_nothing_says_so(tmp_path: Path) -> None:
+    async with _connected(
+        _Backend(),
+        loading="on_demand",
+        enabled_tools=(),
+    ) as connection:
+        (tool,) = connection.tools()
+        with pytest.raises(ValueError, match=r"it offers: none\.$"):
+            await tool.call(ToolContext(cwd=tmp_path), {"tool": "echo"})
+
+
+@pytest.mark.asyncio
+async def test_each_tool_shows_the_default_display() -> None:
+    async with _connected(_Backend()) as connection:
+        echo = _by_name(connection.tools())["mcp__srv__echo"]
+    assert isinstance(echo, McpTool)
+    assert echo.display == ToolDisplay()
 
 
 @pytest.mark.asyncio
@@ -858,6 +1186,7 @@ async def test_a_session_connects_its_servers_and_skips_one_that_fails(
     assert list(status) == ["good", "missing", "off"]
     assert status["good"] == "connected, 1 tool"
     assert status["missing"].startswith("failed: ")
+    assert "absent" in status["missing"]
     assert status["off"] == "disabled"
     assert "MCP server 'missing'" in caplog.text
     assert "off" not in caplog.text
@@ -966,7 +1295,69 @@ async def test_a_connection_that_fails_as_it_closes_is_logged(
     with caplog.at_level(logging.WARNING):
         async with McpSession([server]) as session:
             assert [t.name for t in session.tools()] == _BACKEND_TOOLS
-    assert "MCP server 'srv' disconnected: pipe closed" in caplog.text
+    assert caplog.messages == ["MCP server 'srv' disconnected: pipe closed"]
+
+
+@pytest.mark.asyncio
+async def test_a_session_hands_each_server_s_messages_to_its_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An in-process server has no channel to send a ``list_changed`` on, so the
+    # handler the client is given stands in for one arriving.
+    handlers: list[object] = []
+
+    def recording(
+        transport: Transport,
+        *,
+        message_handler: MessageHandlerFnT,
+    ) -> Client:
+        handlers.append(message_handler)
+        return Client(transport, message_handler=message_handler)
+
+    monkeypatch.setattr(mcp, "_transport", _in_memory)
+    monkeypatch.setattr(mcp, "Client", recording)
+    server = McpServer(name="srv", parameters=StdioServerParameters(command="x"))
+    async with McpSession([server]) as session:
+        (connection,) = session._connections
+        assert handlers == [connection.on_message]
+
+
+@asynccontextmanager
+async def _in_memory(server: McpServer) -> AsyncGenerator[TransportStreams]:
+    """Stand in for a transport to ``server``: the backend's, in-process."""
+    del server
+    async with InMemoryTransport(_Backend().server()) as streams:
+        yield streams
+
+
+@pytest.mark.asyncio
+async def test_a_session_waits_half_a_minute_for_its_servers_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waited: list[float | None] = []
+    wait = asyncio.wait
+
+    # Named as ``asyncio.wait`` names it, which the code calls by keyword.
+    async def timed(
+        futures: Sequence[asyncio.Future[McpConnection]],
+        **how: float | None,
+    ) -> object:
+        waited.append(how["timeout"])
+        return await wait(futures, timeout=how["timeout"])
+
+    monkeypatch.setattr(mcp, "_transport", _in_memory)
+    monkeypatch.setattr(asyncio, "wait", timed)
+    server = McpServer(name="srv", parameters=StdioServerParameters(command="x"))
+    async with McpSession([server]):
+        pass
+    assert waited == [30.0]
+
+
+@pytest.mark.asyncio
+async def test_a_session_never_opened_closes() -> None:
+    session = McpSession([])
+    await session.aclose()
+    assert session.status() == {}
 
 
 @pytest.mark.asyncio
@@ -1019,6 +1410,12 @@ class _Backend:
     during_listing: Callable[[], Awaitable[None]] | None = None
     """Run as the tools are listed, before the list is read."""
 
+    quiet: Sequence[str] = ()
+    """More tools, with no description."""
+
+    page_size: int | None = None
+    """Tools per page of the list; ``None`` lists them in one."""
+
     def server(self) -> Server[object]:
         return Server(
             "srv",
@@ -1033,7 +1430,7 @@ class _Backend:
         ctx: ServerRequestContext[object],
         params: mcp_types.PaginatedRequestParams | None,
     ) -> mcp_types.ListToolsResult:
-        del ctx, params
+        del ctx
         self.listed += 1
         if self.during_listing is not None:
             await self.during_listing()
@@ -1047,11 +1444,25 @@ class _Backend:
             "data": "Return structured content only.",
             **dict.fromkeys(self.extra, "Echo."),
         }
-        return mcp_types.ListToolsResult(
-            tools=[
+        tools = [
+            *(
                 mcp_types.Tool(name=name, description=text, input_schema=_ECHO_SCHEMA)
                 for name, text in described.items()
-            ],
+            ),
+            *(
+                mcp_types.Tool(name=name, input_schema=_ECHO_SCHEMA)
+                for name in self.quiet
+            ),
+        ]
+        if self.page_size is None:
+            return mcp_types.ListToolsResult(tools=tools)
+        cursor = None if params is None else params.cursor
+        # A page's cursor is "p<first tool>"; any other is the client's mistake.
+        start = 0 if cursor is None else int(cursor.removeprefix("p"))
+        end = start + self.page_size
+        return mcp_types.ListToolsResult(
+            tools=tools[start:end],
+            next_cursor=f"p{end}" if end < len(tools) else None,
         )
 
     async def call_tool(

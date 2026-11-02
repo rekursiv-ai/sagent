@@ -13,16 +13,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, ClassVar, override
 
-import asyncio
 import contextlib
 import os
 
 from treekle import from_plain, json_dumps, json_loads
 
-from sagent.model.exceptions import AuthError, DisconnectedError, RetryableError
+from sagent.model.exceptions import AuthError, DisconnectedError
 from sagent.providers import google
 from sagent.providers.google import wire
 from sagent.providers.resources import SharedResources
+from sagent.providers.retry import retried
 from sagent.providers.table import HasModels
 from sagent.types import AsyncResource
 
@@ -188,26 +188,14 @@ class Google(HasModels, AsyncResource):
         """
         url = f"{self.endpoint('streamGenerateContent', model=model)}?alt=sse"
         posted = await self.envelope(body, model=model, request=request)
-        attempt = 0
-        while True:
-            streamed: dict[str, object] | None = None
-            try:
-                async with self._reply(url, body=posted) as response:
-                    async for event in wire.events(response.aiter_lines()):
-                        streamed = event
-                        yield self.unwrap(event)
-                return
-            except RetryableError as failure:
-                # Text the caller already showed cannot be taken back, and a
-                # long wait is the caller's to sit through or not.
-                if (
-                    streamed is not None
-                    or attempt == 4
-                    or failure.retry_after_sec > 30.0
-                ):
-                    raise
-                await asyncio.sleep(max(failure.retry_after_sec, 0.5 * (1 << attempt)))
-                attempt += 1
+
+        async def attempt() -> AsyncIterator[dict[str, object]]:
+            async with self._reply(url, body=posted) as response:
+                async for event in wire.events(response.aiter_lines()):
+                    yield self.unwrap(event)
+
+        async for event in retried(attempt):
+            yield event
 
     async def reply(self, url: str, *, body: Mapping[str, object]) -> dict[str, object]:
         """POST ``body`` to ``url`` and return the JSON reply."""

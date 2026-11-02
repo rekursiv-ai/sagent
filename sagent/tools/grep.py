@@ -365,14 +365,17 @@ class Grep:
             # Past the last entry, saying none matched would be false.
             content = "(no matches in this window)" if rows else "(no matches)"
             return UncategorizedToolResult(call_id="", content=content)
-        note = f"\n... ({len(window):,} more entries; pass offset={start + len(window)} to continue)"
-        body, kept = context.fit(window, reserve=len(note), cap=self.max_result_chars)
-        body = body.rstrip("\n")
+        # Room for the longest note, one naming every entry and the last offset,
+        # less the newline the body ends with, which the note stands in for.
+        note = _more(len(window), offset=start + len(window))
+        body, kept = context.fit(
+            window,
+            reserve=len(note) - 1,
+            cap=self.max_result_chars,
+        )
+        body = body.removesuffix("\n")
         if kept < len(window):
-            body += (
-                f"\n... ({len(window) - kept:,} more entries;"
-                f" pass offset={start + kept} to continue)"
-            )
+            body += _more(len(window) - kept, offset=start + kept)
         return UncategorizedToolResult(call_id="", content=body)
 
     # The ``path:line:`` prefix is kept whole: it is how the row is found.
@@ -391,6 +394,11 @@ class Grep:
         head = f"[{start:,} chars] " if start else ""
         tail = f" [{len(text) - end:,} chars]" if end < len(text) else ""
         return f"{row.text[:cut]}{head}{text[start:end]}{tail}"
+
+
+def _more(entries: int, *, offset: int) -> str:
+    """Return the note saying ``entries`` were cut, and where to resume."""
+    return f"\n... ({entries:,} more entries; pass offset={offset} to continue)"
 
 
 # Flag spellings and their Grep argument, per command; a ``None`` value drops the

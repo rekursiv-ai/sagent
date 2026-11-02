@@ -10,7 +10,7 @@ from PIL import Image
 import pypdfium2 as pdfium
 import pytest
 
-from sagent.model.image import PDFIUM, pages, shrink, size
+from sagent.model.image import PDFIUM, fit, pages, shrink, size
 
 
 def _png(size: tuple[int, int], *, mode: str = "RGB", noisy: bool = False) -> bytes:
@@ -252,8 +252,13 @@ def test_an_svg_passes_through_as_svg(svg: bytes) -> None:
 
 @pytest.mark.parametrize(
     "data",
-    [b"not an image", b"<?xml version='1.0'?><html/>"],
-    ids=["junk", "xml-not-svg"],
+    [
+        b"not an image",
+        b"<?xml version='1.0'?><html/>",
+        # Only the first 256 bytes are looked in; this ``<svg`` ends past them.
+        b"<?xml" + b" " * 248 + b"<svg/>",
+    ],
+    ids=["junk", "xml-not-svg", "svg-too-late"],
 )
 def test_bytes_that_are_no_image_are_a_value_error(data: bytes) -> None:
     with pytest.raises(ValueError, match=r"^Unrecognized image bytes\.$"):
@@ -268,6 +273,23 @@ def test_a_format_with_no_media_type_is_octet_stream() -> None:
         data,
         "application/octet-stream",
     )
+
+
+@pytest.mark.parametrize(
+    ("width", "height", "max_edge_px", "fitted"),
+    [
+        (1000, 1, 10, (10, 1)),
+        (10, 5, 1, (1, 1)),
+        (10, 5, 0, (10, 5)),
+    ],
+)
+def test_a_fit_keeps_each_edge_a_whole_pixel_at_least(
+    width: int,
+    height: int,
+    max_edge_px: int,
+    fitted: tuple[int, int],
+) -> None:
+    assert fit(width, height, max_edge_px=max_edge_px) == fitted
 
 
 def test_a_two_pixel_image_too_heavy_ends_at_one() -> None:

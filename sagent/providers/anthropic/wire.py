@@ -300,7 +300,7 @@ class StreamReader:
             start = _object(event.get("content_block"))
             self._blocks[from_plain(event.get("index"), int, default=0)] = _Block(
                 # Any kind a block cannot name makes no record, as none does.
-                kind=str(start.get("type") or ""),  # pragma: no mutate
+                kind=str(start.get("type") or ""),  # pragma: no mutate -- see above.
                 call_id=str(start.get("id") or ""),
                 name=str(start.get("name") or ""),
                 sealed=str(start.get("data") or ""),
@@ -414,14 +414,11 @@ def to_exception(
     wait_sec = _retry_after(headers or {}, rate_limited=status == 429)
     if status == 429 or kind == "rate_limit_error":
         lower = {key.lower(): value for key, value in (headers or {}).items()}
-        # pragma: no mutate start -- a claim naming no window names no limit.
-        claim = (
-            lower.get("anthropic-ratelimit-unified-representative-claim", "")
-            if _stopped(lower)
-            else ""
+        return RateLimitedError(
+            text,
+            retry_after_sec=wait_sec,
+            limit=_limit(lower) if _stopped(lower) else "",
         )
-        # pragma: no mutate end
-        return RateLimitedError(text, retry_after_sec=wait_sec, limit=_limit(claim))
     if (
         status in (408, 409)
         or status >= 500
@@ -783,12 +780,13 @@ def _stopped(lower: Mapping[str, str]) -> bool:
     return status is None or _blocking(status)
 
 
-def _limit(claim: str) -> str:
-    """Return a spent window's name: ``seven_day_opus`` is ``weekly Opus``; else ``""``."""
+def _limit(lower: Mapping[str, str]) -> str:
+    """Return the claimed window's name: ``seven_day_opus`` is ``weekly Opus``; else ``""``."""
+    claim = lower.get("anthropic-ratelimit-unified-representative-claim")
     for window, name in (("five_hour", "5-hour"), ("seven_day", "weekly")):
         if claim == window:
             return name
-        if claim.startswith(f"{window}_"):
+        if claim is not None and claim.startswith(f"{window}_"):
             return f"{name} {claim.removeprefix(f'{window}_').capitalize()}"
     return ""
 

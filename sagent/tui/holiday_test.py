@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from random import Random
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
+import itertools
 import time
 
 import pytest
@@ -150,6 +151,10 @@ def test_vesak_is_the_un_day_of_vesak(
 def test_after_the_un_dates_vesak_is_mays_first_full_moon_in_utc() -> None:
     # Of every fixed zone, UTC agrees with the most UN years, 20 of 26.
     assert holiday.vesak(2031) == (date(2031, 5, 7),)
+    # `ephem` 4.2: full moons at 2045-05-01 05:52 UTC, and 2075-05-30 02:38
+    # after one on April 30.
+    assert holiday.vesak(2045) == (date(2045, 5, 1),)
+    assert holiday.vesak(2075) == (date(2075, 5, 30),)
 
 
 @pytest.mark.parametrize(
@@ -249,6 +254,20 @@ def test_delta_t_follows_espenak_and_meeus(year: float, seconds: float) -> None:
     # eclipse.gsfc.nasa.gov/SEhelp/deltatpoly2004.html: one polynomial per era.
     jde = 2_451_545.0 + (year - 2000) * 365.25
     assert holiday._delta_t_sec(jde) == pytest.approx(seconds, abs=0.01)
+
+
+@pytest.mark.parametrize("zone_name", ["America/Los_Angeles", "Pacific/Kiritimati"])
+def test_mid_autumn_is_chinas_wherever_the_user_is(
+    zone: Callable[[str], None],
+    zone_name: str,
+) -> None:
+    zone(zone_name)
+    assert _first_dates("mid_autumn", years=range(2026, 2036)) == (
+        PUBLISHED["mid_autumn"].split()
+    )
+    assert holiday.mid_autumn(2082) == (date(2082, 10, 6),)
+    # `lunardate` 0.2: here the equinox falls a day before China's.
+    assert holiday.mid_autumn(1938) == (date(1938, 10, 8),)
 
 
 def test_mid_autumn_2089_is_chinas_date() -> None:
@@ -455,6 +474,293 @@ def test_icon_rows_pack_two_pixels_per_cell() -> None:
     assert row.plain == "▀▄█▀ "
     styles = [str(span.style) for span in row.spans]
     assert styles == ["#ff0000", "#0000ff", "#ff0000", "#ff0000 on #0000ff"]
+
+
+@pytest.fixture(autouse=True)
+def _fresh_holidays() -> Iterator[None]:
+    """Read the asset each test, so no test sees rules another test cached."""
+    holidays.cache_clear()
+    yield
+    holidays.cache_clear()
+
+
+def test_diwali_is_the_first_evening_of_the_kartika_new_moon_s_lunar_day() -> None:
+    # The `holidays` package 0.107, India, 2001-2035. In 2024 the new moon came at
+    # 18:17 India time on November 1, but its lunar day began at 15:54 on October
+    # 31, so October 31's evening was the first within it.
+    published = (
+        "11-14 11-04 10-25 11-12 11-01 10-21 11-09 10-28 10-17 11-05 10-26 11-13 11-03"
+        " 10-23 11-11 10-30 10-19 11-07 10-27 11-14 11-04 10-24 11-12 10-31 10-20 11-08"
+        " 10-29 10-17 11-05 10-26 11-14 11-02 10-22 11-10 10-30"
+    )
+    assert _first_dates("diwali", years=range(2001, 2036)) == published.split()
+
+
+def test_the_2024_lunar_day_begins_when_ephem_says() -> None:
+    # `ephem` 4.2: the moon came within 12 degrees of the sun at JD 2460614.933378
+    # UT, 15:54 India time; over 1990-2100 every Kartika start lands within 2 min.
+    jde = holiday._tithi_start(holiday._moon_phase(307))
+    ut = jde - holiday._delta_t_sec(jde) / 86_400
+    assert ut == pytest.approx(2_460_614.933_378, abs=3 / 1440)
+    # Solved to the root: a ten-millionth of a degree is under a second.
+    assert jde == pytest.approx(2_460_614.934_618_226_3, rel=0, abs=1e-7)
+
+
+@pytest.mark.parametrize(
+    ("ut", "degrees"),
+    [
+        # `ephem` 4.2, in universal time.
+        (2_451_545.0, 302.949_04),
+        (2_460_615.5, 354.166_73),
+        (2_470_000.25, 287.115_57),
+        (2_480_000.75, 157.511_26),
+    ],
+)
+def test_the_moon_s_lead_on_the_sun_is_within_a_hundredth_of_a_degree(
+    ut: float,
+    degrees: float,
+) -> None:
+    jde = ut + holiday._delta_t_sec(ut) / 86_400
+    assert holiday._elongation(jde) == pytest.approx(degrees, abs=0.01)
+
+
+@pytest.mark.parametrize(
+    ("jde", "degrees"),
+    [
+        (2_451_545.0, 302.937_369_408_123_86),
+        (2_460_615.5, 354.149_671_989_362_1),
+        (2_415_020.0, 345.655_320_807_709_36),
+        (2_488_070.0, 243.307_634_797_587_53),
+        (2_469_807.5, 97.919_435_445_277_49),
+    ],
+)
+def test_every_term_of_the_elongation_series_is_pinned(
+    jde: float,
+    degrees: float,
+) -> None:
+    assert holiday._elongation(jde) == pytest.approx(degrees, rel=0, abs=1e-9)
+
+
+def test_india_keeps_utc_plus_five_thirty() -> None:
+    assert holiday._india().utcoffset(None) == timedelta(hours=5, minutes=30)
+
+
+# Computed, pinned: the years where a slip in the Lahiri ayanamsa's epoch or
+# drift first moves the sun's entry into sidereal Aries across midnight.
+@pytest.mark.parametrize(
+    ("year", "day"),
+    [(1950, date(1950, 4, 13)), (2075, date(2075, 4, 14)), (2114, date(2114, 4, 16))],
+)
+def test_vaisakhi_follows_the_ayanamsa_s_drift(year: int, day: date) -> None:
+    assert holiday.vaisakhi(year) == (day,)
+
+
+def test_lunar_new_year_matches_china_each_year_from_1990_to_2099() -> None:
+    # The `holidays` package 0.107, China. Each year from 1990, and from 2008.
+    published = (
+        "01-27 02-15 02-04 01-23 02-10 01-31 02-19 02-07 01-28 02-16 02-05 01-24 02-12"
+        " 02-01 01-22 02-09 01-29 02-18 02-07 01-26 02-14 02-03 01-23 02-10 01-31 02-19"
+        " 02-08 01-28 02-16 02-05 01-25 02-12 02-01 01-22 02-10 01-29 02-17 02-06 01-26"
+        " 02-13 02-03 01-23 02-11 01-31 02-19 02-08 01-28 02-15 02-04 01-24 02-12 02-01"
+        " 01-22 02-10 01-30 02-17 02-06 01-26 02-14 02-02 01-23 02-11 02-01 02-19 02-08"
+        " 01-28 02-15 02-04 01-24 02-12 02-02 01-21 02-09 01-29 02-17 02-05 01-26 02-14"
+        " 02-03 01-23 02-11 01-31 02-19 02-07 01-27 02-15 02-05 01-24 02-12 02-02 01-22"
+        " 02-09 01-29 02-17 02-06 01-26 02-14 02-03 01-24 02-10 01-30 02-18 02-07 01-27"
+        " 02-15 02-05 01-25 02-12 02-01 01-21"
+    )
+    assert _first_dates("lunar_new_year", years=range(1990, 2100)) == published.split()
+
+
+# Dateutil 2.9's `easter`: a year from each place a computus constant shows.
+@pytest.mark.parametrize(
+    "easter_day",
+    [date(1590, 4, 22), date(1700, 4, 11), date(1707, 4, 24), date(3165, 4, 18)],
+)
+def test_easter_matches_an_independent_computus(easter_day: date) -> None:
+    assert holiday.easter(easter_day.year) == (easter_day,)
+
+
+def test_thanksgiving_is_a_thursday_in_its_fourth_week_every_year() -> None:
+    days = [holiday.thanksgiving(year)[0] for year in range(1950, 2050)]
+    assert {(d.weekday(), 22 <= d.day <= 28) for d in days} == {(3, True)}
+
+
+# Rosh Hashanah, hebcal.com; a year never begins on a Sunday, Wednesday or Friday.
+@pytest.mark.parametrize(
+    ("hebrew_year", "new_year"),
+    [
+        (5784, date(2023, 9, 16)),
+        (5785, date(2024, 10, 3)),
+        (5786, date(2025, 9, 23)),
+        (5787, date(2026, 9, 12)),
+        (5788, date(2027, 10, 2)),
+    ],
+)
+def test_the_hebrew_new_year_is_rosh_hashanah(hebrew_year: int, new_year: date) -> None:
+    assert date.fromordinal(holiday._hebrew_new_year(hebrew_year)) == new_year
+
+
+def test_every_hebrew_year_has_a_lawful_length_and_first_day() -> None:
+    starts = [holiday._hebrew_new_year(y) for y in range(5700, 5900)]
+    lengths = {b - a for a, b in itertools.pairwise(starts)}
+    assert lengths == {353, 354, 355, 383, 384, 385}
+    assert {date.fromordinal(s).weekday() for s in starts} == {0, 1, 3, 5}
+
+
+def test_the_arithmetic_islamic_years_leap_on_the_standard_eleven_of_thirty() -> None:
+    # Reingold and Dershowitz, "Calendrical Calculations": years 2, 5, 7, 10, 13,
+    # 16, 18, 21, 24, 26, 29 of each cycle have 355 days. 2019's 1 Muharram began
+    # 1441, year 1 of its cycle.
+    starts = sorted(
+        d for year in range(2019, 2050) for d in holiday._islamic(year, month=1, day=1)
+    )
+    leap = [
+        n + 1
+        for n, (a, b) in enumerate(itertools.pairwise(starts))
+        if b - a == timedelta(355)
+    ]
+    assert leap == [2, 5, 7, 10, 13, 16, 18, 21, 24, 26, 29]
+
+
+@pytest.mark.parametrize(
+    ("month", "day", "first"),
+    [
+        (10, 1, date(2020, 5, 24)),
+        (12, 10, date(2020, 7, 31)),
+        (9, 1, date(2020, 4, 24)),
+    ],
+)
+def test_each_islamic_month_starts_after_those_before_it(
+    month: int,
+    day: int,
+    first: date,
+) -> None:
+    # 1441 AH as kept, which the tabular calendar matches: Eid al-Fitr, Eid
+    # al-Adha, and the first of Ramadan.
+    assert holiday._islamic(2020, month=month, day=day) == (first,)
+
+
+@pytest.mark.parametrize(
+    ("year", "dates"),
+    [
+        (2026, (date(2026, 1, 1),)),
+        (2027, (date(2027, 2, 2),)),
+        (2028, (date(2028, 3, 3),)),
+        (2025, ()),
+        (2029, ()),
+    ],
+)
+def test_listed_dates_hold_from_the_first_year_to_the_last(
+    year: int,
+    dates: tuple[date, ...],
+) -> None:
+    listed = ("2026-01-01", "2027-02-02", "2028-03-03")
+    assert holiday._listed(year, dates=listed, otherwise=lambda _: ()) == dates
+
+
+@pytest.mark.parametrize(
+    ("day", "workday", "today"),
+    [
+        # Sunday, January 2 reaches back to Friday, December 31.
+        (date(2028, 1, 2), "friday", date(2027, 12, 31)),
+        # Saturday, December 30 reaches on to Monday, January 1.
+        (date(2028, 12, 30), "monday", date(2029, 1, 1)),
+    ],
+)
+def test_a_weekend_holiday_reaches_into_the_next_or_last_year(
+    day: date,
+    workday: Literal["friday", "monday"],
+    today: date,
+) -> None:
+    def dates(year: int) -> tuple[date, ...]:
+        return (day,) if year == day.year else ()
+
+    event = holiday.Holiday(name="x", dates=dates, icons=(), workday=workday)
+    assert holiday._in_window(event, today)
+
+
+def test_a_fixed_date_is_its_month_and_day_and_a_name_its_rule() -> None:
+    assert holiday._rule("07-04")(2026) == (date(2026, 7, 4),)
+    assert holiday._rule("easter") is holiday.easter
+    with pytest.raises(ValueError, match="unpack"):
+        holiday._rule("nope")
+
+
+def _delta_t_2004(t: float) -> float:
+    # eclipse.gsfc.nasa.gov/SEhelp/deltatpoly2004.html, 1986-2005, t = y - 2000.
+    return (
+        63.86
+        + 0.3345 * t
+        - 0.060_374 * t**2
+        + 0.001_727_5 * t**3
+        + 0.000_651_814 * t**4
+        + 0.000_023_735_99 * t**5
+    )
+
+
+@pytest.mark.parametrize(
+    ("year", "seconds"),
+    [
+        (1986.0, _delta_t_2004(-14)),
+        (2004.5, _delta_t_2004(4.5)),
+        # 2005 and 2050 open the next polynomials.
+        (2005.0, 62.92 + 0.322_17 * 5 + 0.005_589 * 25),
+        (2050.0, -20 + 32 * 2.3**2 - 0.5628 * 100),
+    ],
+)
+def test_delta_t_uses_each_eras_polynomial_from_its_first_year(
+    year: float,
+    seconds: float,
+) -> None:
+    jde = 2_451_545.0 + (year - 2000) * 365.25
+    assert holiday._delta_t_sec(jde) == pytest.approx(seconds, rel=0, abs=1e-9)
+
+
+# Meeus table 27.C, years 1000-3000: at 3000 and 1000 the millennia y are 1 and -1.
+@pytest.mark.parametrize(
+    ("index", "terms"),
+    [
+        (0, (2_451_623.809_84, 365_242.374_04, 0.051_69, -0.004_11, -0.000_57)),
+        (1, (2_451_716.567_67, 365_241.626_03, 0.003_25, 0.008_88, -0.000_30)),
+        (2, (2_451_810.217_15, 365_242.017_67, -0.115_75, 0.003_37, 0.000_78)),
+        (3, (2_451_900.059_52, 365_242.740_49, -0.062_23, -0.008_23, 0.000_32)),
+    ],
+)
+def test_each_season_follows_every_term_of_meeus_table(
+    index: int,
+    terms: tuple[float, float, float, float, float],
+) -> None:
+    a0, a1, a2, a3, a4 = terms
+    assert holiday._season(3000, index) == pytest.approx(
+        a0 + a1 + a2 + a3 + a4,
+        rel=0,
+        abs=1e-6,
+    )
+    assert holiday._season(1000, index) == pytest.approx(
+        a0 - a1 + a2 - a3 + a4,
+        rel=0,
+        abs=1e-6,
+    )
+
+
+@pytest.mark.parametrize(
+    "pixels",
+    [("RR", "RR", "RR"), ("RR", "R")],
+)
+def test_an_icon_with_an_odd_row_or_a_short_one_is_refused(
+    pixels: tuple[str, ...],
+) -> None:
+    with pytest.raises(ValueError, match="zip"):
+        icon_rows(Icon(name="bad", palette={"R": "#ff0000"}, pixels=pixels))
+
+
+def test_each_terminal_row_is_two_pixel_rows() -> None:
+    icon = Icon(
+        name="test",
+        palette={"R": "#ff0000", "B": "#0000ff"},
+        pixels=("R.", ".R", "B.", "BB"),
+    )
+    assert [r.plain for r in icon_rows(icon)] == ["▀▄", "█▄"]
 
 
 if __name__ == "__main__":

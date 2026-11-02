@@ -35,6 +35,14 @@ def test_a_wait_is_at_most_eight_days(advised: float, wait_sec: float) -> None:
     assert OverloadedError("x", retry_after_sec=advised).retry_after_sec == wait_sec
 
 
+def test_a_rate_limit_names_the_window_spent_if_told() -> None:
+    told = RateLimitedError("spent", limit="weekly")
+    untold = RateLimitedError("spent")
+
+    assert (told.limit, told.retry_after_sec) == ("weekly", 0.0)
+    assert untold.limit == ""
+
+
 def test_no_advised_wait_is_zero() -> None:
     assert RetryableError("x").retry_after_sec == 0.0
     assert DisconnectedError("x").retry_after_sec == 0.0

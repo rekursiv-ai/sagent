@@ -17,7 +17,7 @@ Typical usage example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, BinaryIO, Protocol, Self, TextIO, override
 
 import contextlib
@@ -150,10 +150,7 @@ class ConsolePrinter:
         self.style = style if style is not None else ConsoleStyle()
         self.sticky = Sticky()
         self.gap_owed = False
-        # pragma: no mutate start -- no screen has written -1 rows, so this names no
-        # call before the first one prints.
-        self._tail = _Tail(key="", rows=-1)
-        # pragma: no mutate end
+        self._tail: _Tail | None = None
 
     @property
     def output_width(self) -> int:
@@ -193,7 +190,7 @@ class ConsolePrinter:
           text: What the user said.
 
         """
-        self.sticky.row = 0
+        self.sticky = Sticky()
         self._bar("> ", text=_shown(text), style=self.style.user)
 
     def agent(self, sender: str, recipient: str | None, text: str) -> None:
@@ -253,7 +250,7 @@ class ConsolePrinter:
         name, sep, _ = label.partition(" ")
         # Continuations hang under the argument, so the tool name stands alone;
         # a name taking over half the width leaves too little room, so wrap flush.
-        under = cell_len(name) + 1 <= (self.console.width - cell_len(self.indent)) // 2
+        under = 2 * (cell_len(name) + 1) <= self.console.width - cell_len(self.indent)
         indent = Text(self.indent, style=self.style.quiet)
         hang(
             self.console,
@@ -443,12 +440,14 @@ class ConsolePrinter:
     @contextlib.contextmanager
     def _under(self, header: Header | None) -> Generator[None]:
         """Print the rows written inside under the call ``header``, labelled if need be."""
-        last = (self._tail.key, self._tail.rows)
-        if header is not None and last != (header.key, self.screen.rows):
+        if header is not None and self._tail != _Tail(
+            key=header.key,
+            rows=self.screen.rows,
+        ):
             self.call(header)
         yield
         if header is not None:
-            self._tail = replace(self._tail, rows=self.screen.rows)
+            self._tail = _Tail(key=header.key, rows=self.screen.rows)
 
     def _gap(self) -> None:
         """Print the blank line owed after a user bar or before a reply block."""

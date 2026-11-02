@@ -149,10 +149,7 @@ class AgentSend:
             if to is None:
                 to = await self._watcher(sender)
                 started = f"Started your watcher, {to}, now your parent. "
-        elif to != "user" and to not in self.team:
-            raise ValueError(f"Unknown agent {to!r}. Active: {sorted(self.team)}")
-        elif to == "user" and self.team.to_user is None:
-            raise ValueError("No user is watching; there is no one to tell.")
+        # The team refuses one it cannot reach, before booking or sending anything.
         a = replace(a, to=to)
         if a.delay:
             # Booked now: a reply settles its debt as sent, or the sender is
@@ -187,8 +184,10 @@ class AgentSend:
     async def _watcher(self, label: str) -> str:
         """Start the watcher of ``label``, a root with no parent; return its label."""
         agent = self.team.get(label)
-        spawn = agent.tools.get(AgentSpawn.name) if agent is not None else None
-        allowed = agent.allowed if agent is not None else None
+        if agent is None:
+            raise ValueError("You have no parent.")
+        spawn = agent.tools.get(AgentSpawn.name)
+        allowed = agent.allowed
         if not isinstance(spawn, AgentSpawn) or (
             allowed is not None and AgentSpawn.name not in allowed
         ):

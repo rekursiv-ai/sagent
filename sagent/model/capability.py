@@ -255,8 +255,8 @@ class ModelCapability:
         for name in model_setting_names():
             _check_offered(self.model_id, name, settings.value(name), self.values(name))
         size = settings.context_size
-        if size != self.prices[size.tokens or "fullcontext"]:
-            whole = self.prices["fullcontext"].display_name
+        if size != self.prices[size.tokens or size.context_name]:
+            whole = self.prices.sizes()[-1].display_name
             raise ValueError(
                 f"context_size={size.display_name} is not offered by"
                 f" {self.model_id or 'this model'}; allowed: 1 to {whole}",

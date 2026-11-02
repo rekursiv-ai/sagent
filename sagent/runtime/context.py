@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 import bisect
 import logging
+import math
 
 from sagent.model.types import Response
 from sagent.runtime.tape import (
@@ -199,7 +200,8 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
     """
     pending: set[str] = set()
     seen_results: set[str] = set()
-    prev_role: str | None = None
+    # Whether the last turn was the model's.
+    after_model = False
     for entry in messages:
         if isinstance(entry, (SystemMessage, TurnContext)):
             continue
@@ -208,10 +210,10 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
                 raise InvalidContextError(
                     f"assistant turn with pending tool calls: {sorted(pending)}",
                 )
-            if prev_role == "assistant":
+            if after_model:
                 raise InvalidContextError("provider context violates role alternation")
             pending = {r.call_id for r in entry.records if isinstance(r, ToolCall)}
-            prev_role = "assistant"
+            after_model = True
         elif isinstance(entry, ToolResult):
             if entry.call_id in seen_results:
                 raise InvalidContextError(
@@ -223,13 +225,13 @@ def validate_context(messages: Sequence[ModelContextEvent]) -> None:
                 )
             pending.discard(entry.call_id)
             seen_results.add(entry.call_id)
-            prev_role = None
+            after_model = False
         else:
             if pending:
                 raise InvalidContextError(
                     f"user message before tool results: pending {sorted(pending)}",
                 )
-            prev_role = "user"
+            after_model = False
     if pending:
         raise InvalidContextError(
             f"assistant tool calls without results at end: {sorted(pending)}",
@@ -247,7 +249,7 @@ class _MaskIndex:
 
     def contains(self, ref: TapeRef) -> bool:
         intervals = self.intervals_by_session.get(ref.session_id, [])
-        idx = bisect.bisect_right(intervals, (ref.ordinal, float("inf"))) - 1
+        idx = bisect.bisect_right(intervals, (ref.ordinal, math.inf)) - 1
         return idx >= 0 and intervals[idx][0] <= ref.ordinal <= intervals[idx][1]
 
     @classmethod
@@ -258,6 +260,8 @@ class _MaskIndex:
         stop: int,
     ) -> None:
         idx = bisect.bisect_left(intervals, (start, stop))
+        # Overlapping and adjacent intervals merge, so the list stays the fewest
+        # disjoint runs and ``contains`` reads one of them.
         if idx > 0 and intervals[idx - 1][1] + 1 >= start:
             idx -= 1
         while idx < len(intervals) and intervals[idx][0] <= stop + 1:

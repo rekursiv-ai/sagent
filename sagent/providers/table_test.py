@@ -17,6 +17,7 @@ import yaml
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
+    ModelSettingName,
     ModelSettings,
     model_setting_names,
 )
@@ -719,8 +720,8 @@ def test_the_default_effort_layers_like_any_field(
 def test_the_default_budget_layers_like_any_field(tmp_path: Path) -> None:
     path = _write(
         tmp_path / "x.yaml",
-        _model() | {"thinking_budget_default": "auto"},
-        vendor={"models": {"example-1.0": {"thinking_budget_default": "fixed"}}},
+        _model() | {"thinking_budget_default": "fixed"},
+        vendor={"models": {"example-1.0": {"thinking_budget_default": "auto"}}},
         extra={
             "reference": {
                 "limits": {"max_request_tokens": 1000},
@@ -729,7 +730,7 @@ def test_the_default_budget_layers_like_any_field(tmp_path: Path) -> None:
             },
         },
     )
-    assert _load(path)["example"].default.thinking_budget == "fixed"
+    assert _load(path)["example"].default.thinking_budget == "auto"
 
 
 @pytest.mark.parametrize(
@@ -1168,7 +1169,7 @@ def test_smallcontext_is_the_top_of_the_cheapest_price_band(tmp_path: Path) -> N
     assert capability.prices["auto", 272_001, date.min].request == 1.0
 
 
-@pytest.mark.parametrize("model_id", ["opus-x.5", "opus-5.x", "opus-5."])
+@pytest.mark.parametrize("model_id", ["opus-x.5", "opus-5.x", "opus-5.", "opus-55"])
 def test_a_version_must_be_major_dot_minor_digits(
     tmp_path: Path,
     model_id: str,
@@ -1210,6 +1211,226 @@ def test_a_section_s_roles_replace_the_document_s_it_names(tmp_path: Path) -> No
 def test_a_role_may_name_an_unversioned_id_or_a_vendor_id(target: str) -> None:
     table = ModelTable(rows=(_row(), _row("local-model")), roles={"default": target})
     assert table["default"] is table.exact(target)
+
+
+@pytest.mark.parametrize(
+    ("fields", "name"),
+    [
+        ({"manage_context_server_side": []}, "manage_context_server_side"),
+        ({"service_tier": []}, "service_tier"),
+    ],
+)
+def test_a_setting_offering_nothing_selectable_is_named(
+    tmp_path: Path,
+    fields: dict[str, object],
+    name: str,
+) -> None:
+    path = _write(tmp_path / "x.yaml", _model() | fields)
+    with pytest.raises(ValueError, match=f"^{name} offers nothing selectable"):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    "unsent",
+    [
+        "thinking_effort",
+        "thinking_budget",
+        "thinking_output",
+        "service_tier",
+        "cache_ttl_sec",
+        "manage_context_server_side",
+    ],
+)
+def test_each_setting_unsent_offers_only_its_default(
+    tmp_path: Path,
+    unsent: ModelSettingName,
+) -> None:
+    every = {
+        "thinking": {
+            "effort": ["none", "high"],
+            "budget": ["none", "auto"],
+            "output": ["none", "text"],
+        },
+        "prices": [dict(_FREE), _FREE | {"service_tier": "priority"}],
+        "cache_ttl_sec": [300.0, 3600.0],
+        "manage_context_server_side": [False, True],
+    }
+    sends = [name for name in model_setting_names() if name != unsent]
+    path = _write(tmp_path / "x.yaml", _model() | every, vendor={"sends": sends})
+    row = _load(path)["example"]
+
+    for name in model_setting_names():
+        offered = row.values(name)
+        if name == unsent:
+            assert offered == (row.default.value(name),)
+        else:
+            assert len(offered) > 1, name
+
+
+def test_a_shared_window_as_large_as_its_input_is_accepted(tmp_path: Path) -> None:
+    window = {"max_request_tokens": 1_000, "max_context_tokens": 1_000}
+    path = _write(tmp_path / "x.yaml", _model(limits=window))
+
+    assert _load(path)["example"].limits.max_context_tokens == 1_000
+
+
+def test_a_shared_window_of_one_token_is_still_checked(tmp_path: Path) -> None:
+    window = {"max_request_tokens": 2, "max_context_tokens": 1}
+    path = _write(tmp_path / "x.yaml", _model(limits=window))
+    with pytest.raises(ValueError, match="context smaller than its request"):
+        _load(path)
+
+
+@pytest.mark.parametrize(
+    ("default", "effort"),
+    [("medium", "low"), ("max", "high"), ("high", "high"), ("none", "none")],
+)
+def test_a_default_effort_tries_down_then_up_then_none(
+    tmp_path: Path,
+    default: str,
+    effort: str,
+) -> None:
+    offered = {
+        "effort": ["none", "low", "high"],
+        "budget": ["none"],
+        "output": ["none"],
+    }
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(thinking=offered, thinking_effort_default=default),
+    )
+    assert _load(path)["example"].default.thinking_effort == effort
+
+
+def test_a_default_effort_falls_as_far_as_the_lowest_level_above_none(
+    tmp_path: Path,
+) -> None:
+    offered = {
+        "effort": ["none", "min", "high"],
+        "budget": ["none"],
+        "output": ["none"],
+    }
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(thinking=offered, thinking_effort_default="medium"),
+    )
+    assert _load(path)["example"].default.thinking_effort == "min"
+
+
+def test_a_budget_with_no_default_is_the_least_committing_offered(
+    tmp_path: Path,
+) -> None:
+    # Alphabetically ``fixed`` comes before ``none``; the ladder says otherwise.
+    offered = {"effort": ["none"], "budget": ["fixed", "none"], "output": ["none"]}
+    path = _write(tmp_path / "x.yaml", _model(thinking=offered))
+
+    assert _load(path)["example"].default.thinking_budget == "none"
+
+
+def test_a_row_offering_one_paid_tier_starts_on_it(tmp_path: Path) -> None:
+    cards = [dict(_FREE), _FREE | {"service_tier": "priority"}]
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(prices=cards),
+        vendor={"service_tier": ["priority"]},
+    )
+    assert _load(path)["example"].default.service_tier == "priority"
+
+
+def test_tiers_banding_at_different_sizes_are_rejected_whatever_a_third_does(
+    tmp_path: Path,
+) -> None:
+    cards = [
+        dict(_FREE),
+        _FREE | {"effective_prompt_tokens": 100},
+        _FREE | {"service_tier": "priority"},
+        _FREE | {"service_tier": "priority", "effective_prompt_tokens": 200},
+        _FREE | {"service_tier": "flex"},
+        _FREE | {"service_tier": "flex", "effective_prompt_tokens": 100},
+        _FREE | {"service_tier": "flex", "effective_prompt_tokens": 200},
+    ]
+    path = _write(tmp_path / "x.yaml", _model(prices=cards))
+    with pytest.raises(ValueError, match="bands its tiers at different sizes"):
+        _load(path)
+
+
+def test_a_default_effort_above_every_level_falls_to_the_lowest_level(
+    tmp_path: Path,
+) -> None:
+    offered = {"effort": ["none", "high"], "budget": ["none"], "output": ["none"]}
+    path = _write(
+        tmp_path / "x.yaml",
+        _model(thinking=offered, thinking_effort_default="min"),
+    )
+    assert _load(path)["example"].default.thinking_effort == "high"
+
+
+def test_a_size_of_one_token_is_a_size(tmp_path: Path) -> None:
+    path = _write(tmp_path / "x.yaml", _model(context_size_default=1))
+    _, settings = _load(path).resolve("example-1.0")
+
+    assert settings.context_size.tokens == 1
+
+
+def test_a_card_keeps_every_rate(tmp_path: Path) -> None:
+    price = TokenPrice(
+        request=1.0,
+        response=2.0,
+        cache_write=3.0,
+        cache_write_1h=4.0,
+        cache_read=5.0,
+        tokens_per_unit=1000,
+    )
+    card = {
+        "request": price.request,
+        "response": price.response,
+        "cache_write": price.cache_write,
+        "cache_write_1h": price.cache_write_1h,
+        "cache_read": price.cache_read,
+        "tokens_per_unit": price.tokens_per_unit,
+    }
+    path = _write(tmp_path / "x.yaml", _model(prices=[card]))
+
+    assert _load(path)["example"].prices["auto", 1, date(2026, 1, 1)] == price
+
+
+def test_a_tier_banded_alone_on_one_date_is_one_banding(tmp_path: Path) -> None:
+    """A card of another tier or date, priced flat, does not band apart."""
+    cards = [
+        dict(_FREE),
+        _FREE | {"effective_prompt_tokens": 200},
+        _FREE | {"service_tier": "priority"},
+        _FREE | {"service_tier": "priority", "effective_prompt_tokens": 200},
+        _FREE | {"effective_date": "2027-01-01"},
+    ]
+    path = _write(tmp_path / "x.yaml", _model(prices=cards))
+
+    assert _load(path)["example"].prices["smallcontext"].tokens == 200
+
+
+def test_a_line_names_a_tier_and_choices_only_where_they_differ() -> None:
+    row = replace(
+        _row(),
+        service_tier=frozenset({"auto", "priority"}),
+        cache_ttl_sec=frozenset({0.0, 300.0}),
+    )
+    chosen = replace(row.default, service_tier="priority", cache_ttl_sec=300.0)
+
+    tags = ModelTags.from_settings(row, chosen)
+
+    assert (tags.service_tier, dict(tags.choices)) == (
+        "priority",
+        {"cache_ttl_sec": "300"},
+    )
+    assert ModelTags.from_settings(row, row.default).service_tier is None
+
+
+def test_a_catalog_naming_a_model_twice_with_one_listed_is_rejected(
+    tmp_path: Path,
+) -> None:
+    path = _write(tmp_path / "x.yaml", _model(), _model())
+    with pytest.raises(ValueError, match="twice"):
+        _load(path)
 
 
 class _Plain(yaml.SafeDumper):

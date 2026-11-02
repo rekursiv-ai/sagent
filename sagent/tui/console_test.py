@@ -924,6 +924,239 @@ def test_the_style_picks_the_colors() -> None:
     assert _codes(out.getvalue())[0] == "3"
 
 
+def _styled(*, width: int = 40) -> tuple[ConsolePrinter, io.StringIO]:
+    out = io.StringIO()
+    console = Console(
+        file=Screen(out),
+        width=width,
+        color_system="truecolor",
+        force_terminal=True,
+    )
+    style = ConsoleStyle(
+        quiet=Style(italic=True),
+        failure=Style(underline=True),
+        user=Style(bgcolor="blue"),
+        to_agent=Style(bgcolor="green"),
+        to_user=Style(bgcolor="red"),
+    )
+    return ConsolePrinter(console, style=style), out
+
+
+def _every_run_is(out: io.StringIO, code: str) -> bool:
+    """Return whether every visible character, and every cell a bar paints, has ``code``."""
+    rows = out.getvalue().split("\n")
+    painted = "".join(
+        text for row in rows for codes, text in _runs(row) if code in codes.split(";")
+    )
+    shown = "".join(_visible(row) for row in rows)
+    if code.startswith("4") and len(code) == 2:
+        # A bar's code is its background: every cell of its rows wears it.
+        return len(painted) == len(shown.replace("\n", "")) > 0
+    return sorted(painted.replace(" ", "")) == sorted(shown.replace(" ", "")) != []
+
+
+@pytest.mark.parametrize(
+    ("kind", "code"),
+    [
+        ("call", "3"),
+        ("thinking", "3"),
+        ("note", "3"),
+        ("error", "4"),
+        ("failed", "4"),
+        ("user", "44"),
+        ("agent", "42"),
+        ("to_user", "41"),
+    ],
+)
+def test_every_run_of_a_kind_wears_its_style(kind: str, code: str) -> None:
+    printer, out = _styled(width=12)
+    match kind:
+        case "call":
+            label = "Bash a long description here\nls -la"
+            printer.call(Header(key="1", label=label, display=ToolDisplay()))
+        case "thinking":
+            printer.show_thinking = True
+            printer.thinking("a long thought that wraps", opens=False, closes=False)
+        case "note":
+            printer.note("a long note that wraps", lead="A: ")
+        case "agent":
+            printer.agent("a", "b", "a long message that wraps")
+        case "to_user":
+            printer.agent("a", "user", "a long message that wraps")
+        case _:
+            getattr(printer, kind)("a long text that wraps")
+    assert _every_run_is(out, code), out.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("kind", "code"),
+    [
+        ("call", "3"),
+        ("thinking", "3"),
+        ("note", "3"),
+        ("error", "4"),
+        ("user", "44"),
+    ],
+)
+def test_every_lead_of_a_kind_wears_its_style_as_its_text_does(
+    kind: str,
+    code: str,
+) -> None:
+    printer, out = _styled(width=12)
+    match kind:
+        case "call":
+            label = "Bash a long description here"
+            printer.call(Header(key="1", label=label, display=ToolDisplay()))
+        case "thinking":
+            printer.thinking("a long thought that wraps", opens=False, closes=False)
+        case "note":
+            printer.note("a long note", lead="A: ")
+        case _:
+            getattr(printer, kind)("a long text that wraps")
+    rows = [row for row in out.getvalue().split("\n") if _visible(row).strip()]
+    # The first row's lead, and every later row's: each starts styled.
+    assert all(row.startswith("\x1b[") for row in rows[: 1 if kind == "note" else None])
+    assert all(
+        code in _codes(row)[0].split(";")
+        for row in rows[: 1 if kind == "note" else None]
+    )
+
+
+def test_a_bar_s_width_is_the_fill_of_nothing() -> None:
+    screen = _Pane(width=200, color=True)
+    screen.printer.user("hi")
+    assert [len(_visible(r)) for r in screen.raw()] == [0, 80]
+
+
+def test_a_dropped_run_s_marker_is_quiet() -> None:
+    printer, out = _styled()
+    shown = ToolDisplay(output=DisplaySpec(lines=(1, 1)))
+    printer.output("a\nb\nc\nd", display=shown)
+    marker = next(row for row in out.getvalue().split("\n") if "⋯" in row)
+    assert _every_run_is(io.StringIO(marker), "3")
+
+
+def test_an_output_row_with_no_spec_folds() -> None:
+    screen = _Pane(width=10)
+    screen.printer.output("a" * 12, display=ToolDisplay(output=DisplaySpec(lines=None)))
+    assert screen.rows() == ["    aaaaaa", "    aaaaaa"]
+
+
+@pytest.mark.parametrize(
+    ("width", "name", "hangs"),
+    [
+        # Half of what the indent leaves is 19; the name and its space take 19.
+        (40, "n" * 18, True),
+        (40, "n" * 19, False),
+        # Odd: half of 37 rounds down to 18.
+        (39, "n" * 17, True),
+        (39, "n" * 18, False),
+    ],
+)
+def test_a_header_hangs_under_its_argument_while_its_name_takes_half(
+    width: int,
+    name: str,
+    hangs: bool,
+) -> None:
+    screen = _Pane(width=width)
+    label = f"{name} {'w ' * 30}"
+    screen.printer.call(Header(key="1", label=label, display=ToolDisplay()))
+    second = screen.rows()[1]
+    assert second.startswith(" " * (2 + len(name) + 1)) is hangs
+
+
+def test_a_one_word_header_wraps_flush() -> None:
+    screen = _Pane(width=10)
+    screen.printer.call(Header(key="1", label="a" * 12, display=ToolDisplay()))
+    assert screen.rows() == ["  aaaaaaaa", "  aaaa"]
+
+
+def test_a_header_splits_its_name_at_the_first_space() -> None:
+    screen = _Pane(width=20)
+    label = "Bash a b c d e f g h i j"
+    screen.printer.call(Header(key="1", label=label, display=ToolDisplay()))
+    assert screen.rows()[1].startswith(" " * 7)
+
+
+def test_an_input_keeps_its_blank_lines_and_drops_only_the_final_newline() -> None:
+    screen = _Pane()
+    shown = ToolDisplay(command=DisplaySpec(lines=None))
+    screen.printer.call(Header(key="1", label="H\na\n\nbX\n\n", display=shown))
+    assert screen.rows() == ["  H", "    a", "", "    bX"]
+
+
+def test_an_input_row_is_cut_as_the_command_display_says() -> None:
+    screen = _Pane(width=40)
+    shown = ToolDisplay(command=DisplaySpec(width=6, overflow="ellipsis"))
+    screen.printer.call(Header(key="1", label="H\nabcdefghij", display=shown))
+    assert screen.rows() == ["  H", "    abcde…"]
+
+
+def test_a_halt_s_rules_are_as_wide_as_its_widest_row() -> None:
+    screen = _Pane(width=200)
+    screen.printer.halt("x" * 90 + "\nshort")
+    rows = screen.rows()
+    assert rows[0] == "─" * 90
+
+
+def test_a_bar_keeps_a_last_line_of_spaces() -> None:
+    screen = _Pane(width=12)
+    screen.printer.user("a\n  \n")
+    assert screen.rows() == ["", "> a", ""]
+
+
+def test_an_input_keeps_its_trailing_spaces() -> None:
+    screen = _Pane()
+    screen.printer.call(Header(key="1", label="H\nls  \n", display=ToolDisplay()))
+    assert screen.raw()[1] == "    ls  "
+
+
+def test_a_halt_s_rules_measure_whole_rows_not_words() -> None:
+    screen = _Pane(width=200)
+    screen.printer.halt("w " * 45)
+    assert screen.rows()[0] == "─" * 90
+
+
+def test_thinking_breaks_between_words() -> None:
+    screen = _Pane(width=12)
+    screen.printer.thinking("aaaa bbbbbbbb", opens=False, closes=False)
+    assert screen.rows() == ["  aaaa", "  bbbbbbbb"]
+
+
+def test_a_gap_once_printed_is_owed_no_more() -> None:
+    screen = _Pane()
+    screen.printer.user("u")
+    screen.printer.line("a")
+    assert screen.printer.gap_owed is False
+
+
+def test_the_title_starts_blank() -> None:
+    assert Title().frame() == ""
+
+
+def test_a_gap_is_owed_once() -> None:
+    screen = _Pane()
+    screen.printer.user("u")
+    screen.printer.line("a")
+    screen.printer.line("b")
+    assert screen.rows() == ["", "> u", "", "a", "b"]
+
+
+def test_a_user_message_after_a_wide_turn_narrows_the_fills_to_80() -> None:
+    screen = _Pane(width=200)
+    screen.printer.halt("x" * 90)
+    screen.printer.user("u")
+    screen.printer.halt("x")
+    assert screen.rows()[-1] == "─" * 80
+
+
+@pytest.mark.parametrize("char", ["\x00", "\x08", "\x0b", "\x0c", "\x1f", "\x7f"])
+def test_vertical_tab_form_feed_and_unit_separator_are_shown(char: str) -> None:
+    screen = _Pane()
+    screen.printer.line(f"a{char}b")
+    assert screen.rows() == [f"a^{chr(ord(char) ^ 0x40)}b"]
+
+
 _ALL = ToolDisplay(command=DisplaySpec(lines=None), output=DisplaySpec(lines=None))
 
 _INPUTS = {

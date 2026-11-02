@@ -92,18 +92,7 @@ def encode(
         reasoning: dict[str, object] = {"effort": settings.thinking_effort}
         if settings.thinking_output == "text":
             reasoning["summary"] = "auto"
-        if capability.model_id in frozenset(
-            {
-                "astra-6.0",
-                "sol-6.1",
-                "sol-6.0",
-                "luna-6.0",
-                "sol-5.6",
-                "gpt-5.6",
-                "terra-5.6",
-                "luna-5.6",
-            },
-        ):
+        if wire.gpt_6(capability.model_id):
             reasoning["context"] = "all_turns"
         body["reasoning"] = reasoning
         # Stateless, so the sealed reasoning is the only way it reaches the
@@ -177,8 +166,8 @@ class StreamReader:
         elif kind in ("response.completed", "response.incomplete"):
             self._final = _object(event.get("response"))
         elif kind == "response.failed":
-            reply = _object(event.get("response"))
-            raise wire.to_exception(0, body=reply.get("error") or reply)
+            # ``to_exception`` reads the error the reply nests.
+            raise wire.to_exception(0, body=_object(event.get("response")))
         elif kind == "error":
             raise wire.to_exception(0, body=event)
         return None
@@ -229,7 +218,9 @@ class StreamReader:
                 self._records[index] = AssistantMessage(content=text)
         elif kind == "reasoning":
             summary = "\n\n".join(
-                str(part.get("text") or "") for part in _objects(item.get("summary"))
+                said
+                for part in _objects(item.get("summary"))
+                if (said := str(part.get("text") or ""))
             )
             text = "".join(
                 str(part.get("text") or "") for part in _objects(item.get("content"))

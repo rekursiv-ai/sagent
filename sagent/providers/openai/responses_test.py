@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 import io
@@ -14,7 +14,7 @@ from treekle import mutable
 import pytest
 
 from sagent.model.capability import ModelLimits, ModelSettings, model_setting_names
-from sagent.model.cost import TokenCount
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
 from sagent.model.exceptions import (
     DisconnectedError,
     RateLimitedError,
@@ -507,12 +507,17 @@ def _cost(name: str, tokens: TokenCount, tier: ServiceTier) -> float:
         # Served at a tier the model has no card for: billed as asked.
         ("gpt-pro-5.5", "flex", "priority", "flex"),
         ("luna-6.0", "flex", None, "auto"),
+        ("luna-6.0", "flex", 5, "auto"),
+        ("luna-6.0", "flex", "auto", "auto"),
+        ("luna-6.0", "flex", "scale", "auto"),
+        ("luna-6.0", "priority", "flex", "flex"),
+        ("astra-6.0", "auto", "ultrafast", "ultrafast"),
     ],
 )
 def test_the_reply_is_priced_at_the_tier_served(
     name: str,
     asked: ServiceTier,
-    served: str | None,
+    served: str | int | None,
     billed: ServiceTier,
 ) -> None:
     reader = _reader(name, tier=asked)
@@ -530,7 +535,10 @@ def test_the_reply_is_priced_at_the_tier_served(
 def test_a_reply_that_never_finished_is_a_disconnect() -> None:
     reader = _reader()
     reader.feed({"type": "response.output_text.delta", "delta": "Hal"})
-    with pytest.raises(DisconnectedError):
+    with pytest.raises(
+        DisconnectedError,
+        match=r"^The reply ended before it was finished\.$",
+    ):
         reader.response()
 
 
@@ -544,8 +552,163 @@ def test_a_failed_reply_or_error_event_raises_what_it_means() -> None:
     error = {"type": "error", "code": "content_filter", "message": "Blocked."}
     with pytest.raises(RefusedError, match="Blocked"):
         _reader().feed(error)
-    with pytest.raises(RuntimeError, match="failed"):
+    # An event has no HTTP status: it is ``0``.
+    with pytest.raises(
+        RuntimeError,
+        match=r"^The server replied 0 : \{'status': 'failed'\}$",
+    ):
         _reader().feed({"type": "response.failed", "response": {"status": "failed"}})
+    with pytest.raises(RuntimeError, match=r"^The server replied 0 odd: Huh\.$"):
+        _reader().feed({"type": "error", "code": "odd", "message": "Huh."})
+
+
+def test_parts_that_say_nothing_add_nothing() -> None:
+    reader = _reader()
+    reader.feed(
+        _done(
+            0,
+            {
+                "type": "reasoning",
+                "summary": [{"type": "summary_text"}, {"type": "summary_text"}],
+                "content": [
+                    {"type": "reasoning_text", "text": "a"},
+                    {"type": "reasoning_text"},
+                    {"type": "reasoning_text", "text": "b"},
+                ],
+                "encrypted_content": 5,
+            },
+        ),
+    )
+    reader.feed(
+        _done(
+            1,
+            {
+                "type": "message",
+                "content": [
+                    {"type": "output_text", "text": "x"},
+                    {"type": "output_text"},
+                ],
+            },
+        ),
+    )
+    reader.feed(_done(2, {"type": "function_call", "arguments": "[1]"}))
+    reader.feed(_completed())
+
+    assert reader.response().records == (
+        Thinking(content="ab", summary=None, extra={"reasoning_id": ""}),
+        AssistantMessage(content="x"),
+        ToolCall(call_id="", name="", arguments={}),
+    )
+
+
+def test_reasoning_with_a_summary_alone_is_kept() -> None:
+    reader = _reader()
+    reader.feed(
+        _done(0, {"type": "reasoning", "id": "rs", "summary": [{"text": "Why."}]}),
+    )
+    reader.feed(_completed())
+
+    assert reader.response().records == (
+        Thinking(summary="Why.", extra={"reasoning_id": "rs"}),
+    )
+
+
+def test_a_reply_that_reports_no_usage_used_nothing() -> None:
+    reader = _reader()
+    reader.feed(_completed())
+
+    assert reader.response().tokens == TokenCount()
+
+
+def test_each_delta_names_the_record_its_item_becomes() -> None:
+    reader = _reader()
+    reader.feed(_done(0, {"type": "message", "content": [{"text": "a"}]}))
+    reader.feed(_done(2, {"type": "message", "content": [{"text": "c"}]}))
+    events = [
+        {"type": "response.output_text.delta", "output_index": 1, "delta": "b"},
+        {"type": "response.reasoning_text.delta", "output_index": 1, "delta": "b"},
+        {
+            "type": "response.refusal.delta",
+            "output_index": 1,
+            "item_id": "m",
+            "delta": "b",
+        },
+        {"type": "response.refusal.done", "output_index": 1, "refusal": "b"},
+        {"type": "response.output_text.delta", "output_index": 3},
+        # Only the records before an item's own count.
+        {"type": "response.output_text.delta", "output_index": 2, "delta": "c"},
+    ]
+
+    assert [reader.feed(event) for event in events] == [
+        TextChunk(text="b", record=1),
+        TextChunk(text="b", thinking=True, record=1),
+        TextChunk(text="b", record=1),
+        TextChunk(text="b", record=1),
+        TextChunk(text="", record=2),
+        TextChunk(text="c", record=1),
+    ]
+
+
+def test_a_refusal_with_no_item_id_is_shown_once() -> None:
+    reader = _reader()
+
+    assert reader.feed({"type": "response.refusal.delta", "delta": "No."}) == TextChunk(
+        text="No.",
+    )
+    assert reader.feed({"type": "response.refusal.done", "refusal": "No."}) is None
+    assert reader.feed(
+        {"type": "response.refusal.done", "item_id": "other"},
+    ) == TextChunk(text="")
+
+
+def test_an_item_with_no_index_follows_those_before_it() -> None:
+    reader = _reader()
+    reader.feed(_done(0, {"type": "message", "content": [{"text": "a"}]}))
+    reader.feed(
+        {
+            "type": "response.output_item.done",
+            "item": {"type": "message", "content": [{"text": "b"}]},
+        },
+    )
+    reader.feed(_completed())
+
+    assert reader.response().records == (
+        AssistantMessage(content="a"),
+        AssistantMessage(content="b"),
+    )
+
+
+class _Evening:
+    """Stands in for ``datetime``: 6 October in the evening here, 7 October in UTC."""
+
+    @classmethod
+    def now(cls, tz: object = None) -> datetime:
+        if tz is UTC:
+            return datetime(2026, 10, 7, 1, tzinfo=UTC)
+        return datetime(2026, 10, 6, 18)  # noqa: DTZ001 -- the local wall clock.
+
+
+def test_a_reply_is_billed_at_the_card_of_its_utc_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability, settings = _model()
+    capability = replace(
+        capability,
+        prices=PriceCatalog(
+            prices={
+                PriceCondition(): TokenPrice(response=1.0),
+                PriceCondition(effective_date=date(2026, 10, 7)): TokenPrice(
+                    response=2.0,
+                ),
+            },
+            window=capability.prices.window,
+        ),
+    )
+    monkeypatch.setattr(responses, "datetime", _Evening)
+    reader = responses.StreamReader(capability=capability, settings=settings)
+    reader.feed(_completed(usage={"output_tokens": 1_000_000}))
+
+    assert reader.response().spend.response == 2.0
 
 
 def test_a_model_of_unknown_reply_length_is_sent_no_cap() -> None:

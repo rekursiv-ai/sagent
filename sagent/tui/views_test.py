@@ -7,6 +7,10 @@ from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING
 
 import asyncio
+import functools
+import logging
+
+from prompt_toolkit.keys import Keys
 
 import pytest
 import pytest_asyncio
@@ -17,6 +21,9 @@ from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime import types
 from sagent.session.types import AssistantMessage, UserMessage
+from sagent.tui import views as views_module
+from sagent.tui.console import Title
+from sagent.tui.prompt import Navigation
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.tree_test import _Wait
 from sagent.tui.views import Views
@@ -24,6 +31,8 @@ from sagent.tui.views import Views
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+
+    from sagent.tui.slash import Commands
 
 
 def _catalog() -> ModelCatalog:
@@ -453,6 +462,206 @@ async def test_an_agent_that_joins_takes_up_what_its_ancestors_chose(
 
     assert views.screen("late").show_thinking is False
     assert views.screen("kid").show_thinking is False
+
+
+@pytest.mark.asyncio
+async def test_a_view_is_built_on_its_own_agent_s_parts(
+    stack: AsyncExitStack,
+) -> None:
+    team = await _team(stack)
+    catalog = _catalog()
+    views = Views(
+        team["Agent"],
+        team=team,
+        printer=RecordingPrinter(),
+        catalog=catalog,
+    )
+    team["kid"].spend_usd = 0.75
+    views.focus("kid")
+    view, kid = views.current, team["kid"]
+
+    assert views.catalog is catalog
+    assert isinstance(views.title, Title)
+    assert views.title in kid.runtime.observers
+    assert view.status in kid.runtime.observers
+    assert view.status.spend == kid.spend_usd
+    assert view.scrollback.tools is kid.tools
+    assert view.scrollback.markers is kid.runtime.markers
+    assert view.scrollback.home == kid.runtime.tool_context.origin
+    assert view.deferred.runtime is kid.runtime
+    assert view.deferred.panes is view.panes
+    # Enter while the agent is busy stages what was typed in this view's panes.
+    enter = next(b for b in view.keys.bindings if b.keys == (Keys.ControlM,))
+    handler = enter.handler
+    assert isinstance(handler, functools.partial)
+    assert handler.args[:2] == (kid.runtime, view.panes)
+    assert isinstance(handler.args[2], Navigation)
+    commands = view.commands
+    assert (commands.agent, commands.catalog, commands.team) == (kid, catalog, team)
+    assert commands.panes is view.panes
+    assert commands.screen is views.screen("kid")
+    await views.aclose()
+
+
+@pytest.mark.asyncio
+async def test_closing_drops_what_was_held_and_keeps_the_team_s_other_listener(
+    stack: AsyncExitStack,
+) -> None:
+    root = await _open(stack, "said while held")
+    printer = RecordingPrinter()
+    views = Views(root, team=None, printer=printer, catalog=_catalog())
+    views.hold()
+    root.runtime.push(UserMessage(content="go"))
+    await _idle(root)
+
+    await views.aclose()
+
+    assert "said while held" not in printer.text
+    team = await _team(stack)
+    other = Views(team["Agent"], team=team, printer=printer, catalog=_catalog())
+
+    def listener(sender: str, text: str) -> None:
+        del sender, text
+
+    team.to_user = listener
+    await other.aclose()
+    assert team.to_user is listener
+
+
+@pytest.mark.asyncio
+async def test_focusing_the_shown_label_anew_for_a_new_agent_shows_it(
+    stack: AsyncExitStack,
+) -> None:
+    team = await _team(stack)
+    views = Views(
+        team["Agent"],
+        team=team,
+        printer=RecordingPrinter(),
+        catalog=_catalog(),
+    )
+    views.focus("kid")
+    old = views.current
+    _ = team.leave("kid")
+    _ = team.join(await _open(stack), label="kid", parent="Agent")
+
+    views.focus("kid")
+
+    assert views.current is not old
+    assert views.current.agent is team["kid"]
+    await views.aclose()
+
+
+@pytest.mark.asyncio
+async def test_an_agent_gone_and_back_takes_up_its_ancestors_choices_again(
+    stack: AsyncExitStack,
+) -> None:
+    team = await _team(stack)
+    views = Views(
+        team["Agent"],
+        team=team,
+        printer=RecordingPrinter(),
+        catalog=_catalog(),
+    )
+    views.focus("kid")
+    views.focus("Agent")
+    await views.current.commands("/screen.thinking hide")
+    await views.current.commands("/send kid /screen.thinking show")
+    _ = team.leave("kid")
+    views.follow()
+    _ = team.join(await _open(stack), label="kid", parent="Agent")
+
+    views.follow()
+    await views.aclose()
+
+    assert views.screen("kid").show_thinking is False
+
+
+@pytest.mark.asyncio
+async def test_each_agent_inherits_once(
+    stack: AsyncExitStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team = await _team(stack)
+    views = Views(
+        team["Agent"],
+        team=team,
+        printer=RecordingPrinter(),
+        catalog=_catalog(),
+    )
+    asked: list[str] = []
+    root = views.current.commands
+
+    async def counted(of: Team, label: str) -> Commands:
+        assert of is team
+        asked.append(label)
+        return root
+
+    monkeypatch.setattr(root, "child_commands", counted)
+    _ = team.join(await _open(stack), label="late", parent="Agent")
+    views.follow()
+    views.follow()
+    await views.aclose()
+
+    assert asked.count("late") == 1
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_leaves_before_it_inherits_is_skipped(
+    stack: AsyncExitStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team = await _team(stack)
+    views = Views(
+        team["Agent"],
+        team=team,
+        printer=RecordingPrinter(),
+        catalog=_catalog(),
+    )
+    asked: list[str] = []
+    root = views.current.commands
+
+    async def counted(of: Team, label: str) -> Commands:
+        assert of is team
+        asked.append(label)
+        return root
+
+    monkeypatch.setattr(root, "child_commands", counted)
+    _ = team.join(await _open(stack), label="brief", parent="Agent")
+    views.follow()
+    _ = team.leave("brief")
+
+    await views.aclose()
+
+    assert "brief" not in asked
+
+
+@pytest.mark.asyncio
+async def test_a_failed_stop_is_logged_with_its_trace(
+    stack: AsyncExitStack,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    team = await _team(stack)
+    views = Views(
+        team["Agent"],
+        team=team,
+        printer=RecordingPrinter(),
+        catalog=_catalog(),
+    )
+
+    async def fail(label: str) -> None:
+        raise RuntimeError(f"cannot stop {label}")
+
+    monkeypatch.setattr(team, "stop", fail)
+    with caplog.at_level(logging.WARNING, logger=views_module.__name__):
+        _ = views.stop("kid")
+        await views.aclose()
+
+    (record,) = caplog.records
+    assert record.getMessage() == "stopping an agent failed"
+    assert isinstance(record.exc_info, tuple)
+    assert record.exc_info[0] is RuntimeError
+    assert not views._tasks
 
 
 if __name__ == "__main__":

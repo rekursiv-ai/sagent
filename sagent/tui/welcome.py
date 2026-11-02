@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import date
 from functools import partial
 from pathlib import Path
 from random import Random
 from typing import TYPE_CHECKING
+
+import time
 
 from sagent.tui.holiday import holiday_icon, icon_rows
 from sagent.tui.types import fill
@@ -44,7 +46,7 @@ def print_welcome(
         provider=provider,
         folder=folder,
         icon=holiday_icon(
-            datetime.now(UTC).astimezone().date(),
+            date(*time.localtime()[:3]),
             rng=Random(),  # noqa: S311 -- Picks a picture, not a secret.
         ),
     )

@@ -39,11 +39,22 @@ from sagent.providers.openai.login import (
     revoke_refresh_token,
 )
 from sagent.providers.resources import SharedResources
-from sagent.providers.testing import bound_port, free_port, visit
+from sagent.providers.testing import (
+    bound_port,
+    free_port,
+    refuse_browsers,
+    visit,
+)
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+@pytest.fixture(autouse=True)
+def no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail a test that opens the user's browser, as a sign-in not headless would."""
+    refuse_browsers(monkeypatch, login)
 
 
 _CLIENT = "app_EMoamEEZ73f0CkXaXp7hrann"

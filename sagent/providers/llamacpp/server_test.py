@@ -17,6 +17,7 @@ import gc
 import os
 import signal
 import socket
+import sys
 
 from treekle import json_dumps
 
@@ -340,6 +341,32 @@ async def test_a_server_that_exits_reports_its_log(
     assert waited[0] == 1.0
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Reads its stdin from /proc.")
+@pytest.mark.asyncio
+async def test_the_server_reads_nothing_from_the_terminal(
+    bare: Path,
+    tmp_path: Path,
+) -> None:
+    _install(bare, f"readlink /proc/$$/fd/0 > {tmp_path / 'stdin'}\nexit 1\n")
+    # Our own stdin a pipe, as a terminal would be: the server must not get it.
+    ours, theirs = os.pipe()
+    saved = os.dup(0)
+    os.dup2(ours, 0)
+    try:
+        async with (
+            _Served(_Http(up=False)) as shared,
+            LlamaCpp(resources=shared, model_path="/m.gguf") as local,
+        ):
+            with pytest.raises(RuntimeError, match="exited"):
+                await local.endpoint()
+    finally:
+        os.dup2(saved, 0)
+        for fd in (saved, ours, theirs):
+            os.close(fd)
+
+    assert (tmp_path / "stdin").read_text() == "/dev/null\n"
+
+
 @pytest.mark.asyncio
 async def test_a_server_whose_job_holds_its_output_still_stops(
     bare: Path,
@@ -439,7 +466,10 @@ async def test_a_server_that_ignores_the_request_to_stop_is_killed(
         await local.endpoint()
         process = local._process
         assert process is not None
+        started = asyncio.get_running_loop().time()
         await local.aclose()
+        # Killed once the grace given ran out, not some other.
+        assert asyncio.get_running_loop().time() - started < 0.5
     assert process.returncode == -signal.SIGKILL
 
 

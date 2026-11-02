@@ -11,7 +11,7 @@ import json
 import re
 import time
 
-from treekle import json_loads
+from treekle import PlainTree, ReadError, json_loads
 
 import pytest
 
@@ -49,17 +49,41 @@ from sagent.session.types import (
 )
 
 
+def _json() -> dict[str, PlainTree]:
+    """Return a JSON field as a provider sends it: plain dicts and lists, nested."""
+    return {"k": [1, {"n": 2}]}
+
+
+# Every JSON field is given plain, so each record's own ``__post_init__`` must
+# freeze it: a default is frozen already, and would show nothing.
 def _every_record() -> list[SessionRecord]:
     return [
-        TurnContext(cwd="/w", model="m", effort="high", encoding={"crlf": True}),
+        TurnContext(
+            cwd="/w",
+            model="m",
+            effort="high",
+            encoding={"crlf": True},
+            extra=_json(),
+        ),
         UserMessage(
             content="hi",
             attachments=(Attachment(mime_descriptor="image/png", data=b"\x89PNG"),),
+            extra=_json(),
         ),
         AssistantMessage(content="hello", extra={"id": "a1"}),
-        Thinking(content="hm", encrypted="sealed", summary="s"),
-        ToolCall(call_id="1", name="Read", arguments={"path": "a.py", "n": [1, 2]}),
-        UncategorizedToolResult(call_id="1", content="x", stub="pending"),
+        Thinking(content="hm", encrypted="sealed", summary="s", extra=_json()),
+        ToolCall(
+            call_id="1",
+            name="Read",
+            arguments={"path": "a.py", "n": [1, 2]},
+            extra=_json(),
+        ),
+        UncategorizedToolResult(
+            call_id="1",
+            content="x",
+            stub="pending",
+            extra=_json(),
+        ),
         ShellCommandResult(call_id="2", command=("ls", "-la"), stdout="o", exit_code=0),
         FileReadResult(call_id="3", path="a.py", content="c", ranges=((1, None),)),
         FileWriteResult(call_id="4", path="b.py", content="w"),
@@ -83,8 +107,8 @@ def _every_record() -> list[SessionRecord]:
         ),
         WebFetchResult(call_id="7", url="u", content="page", code=200),
         AgentStatusResult(call_id="8", agent_id="a", content="done", tokens=5),
-        SystemMessage(content="reminder", subtype="rules"),
-        TokenUsage(info={"request": 1}, rate_limits={"5h": 0.5}),
+        SystemMessage(content="reminder", subtype="rules", extra=_json()),
+        TokenUsage(info={"request": 1}, rate_limits={"5h": 0.5}, extra=_json()),
         ContextState(kind="k", content="c", extra={"full": [True]}),
         ContextCompaction(summary="sum", extra={"tokens": {"before": 9}}),
         ContextClear(
@@ -92,8 +116,9 @@ def _every_record() -> list[SessionRecord]:
             system_prompt="sys",
             summary="kept",
             history=(UserMessage(content="before"),),
+            extra=_json(),
         ),
-        AgentToAgentMessage(content="ping", sender="a", recipient="b"),
+        AgentToAgentMessage(content="ping", sender="a", recipient="b", extra=_json()),
         UncategorizedRecord(kind="custom", payload={"k": "v"}),
         IncompleteRecord(text="{torn"),
     ]
@@ -144,6 +169,37 @@ def test_the_time_reads_where_the_user_is(timestamp: str, shown: str) -> None:
 def test_turn_context_text_skips_what_it_does_not_state() -> None:
     assert TurnContext().text() == ""
     assert TurnContext(model="opus").text() == "Model: opus"
+    assert TurnContext(environment="", agents_md="").text() == ""
+
+
+@pytest.mark.parametrize(
+    ("tools", "shown"),
+    [
+        (("Read", "Bash"), "Tools you may call: Read, Bash"),
+        ((), "Tools you may call: none"),
+    ],
+    ids=["some", "none"],
+)
+def test_turn_context_text_names_the_tools_the_model_may_call(
+    tools: tuple[str, ...],
+    shown: str,
+) -> None:
+    assert TurnContext(tools=tools).text() == shown
+
+
+def test_a_stored_record_keeps_its_fields_in_declaration_order() -> None:
+    """``timestamp`` is declared before ``content``, though it sorts after it."""
+    stored = stored_plain(UserMessage(timestamp="t", content="hi"))
+    assert [key for key in stored if not key.startswith("py/")] == [
+        "timestamp",
+        "content",
+        "extra",
+    ]
+
+
+def test_a_stored_record_is_read_as_the_class_asked_for() -> None:
+    with pytest.raises(ReadError):
+        _ = stored_record(stored_plain(UserMessage(content="hi")), ToolCall)
 
 
 def test_a_bare_tool_result_reads_as_nothing() -> None:

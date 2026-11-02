@@ -4,13 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from io import StringIO
 from typing import TYPE_CHECKING
 
 import asyncio
 
 from prompt_toolkit.application.current import create_app_session
+from prompt_toolkit.data_structures import Size
+from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.output.vt100 import Vt100_Output
 from treekle import PlainTree
 
 import pytest
@@ -25,6 +29,8 @@ from sagent.tui.tree import Row, pick, render, rows
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from sagent.tools.types import ToolContext
 
 
@@ -97,6 +103,54 @@ def test_each_agent_follows_its_parent_depth_first_with_the_shown_one_marked() -
     assert {r.call_id for r in shown} == {""}
 
 
+def test_an_agent_calling_its_model_or_compacting_alone_is_busy() -> None:
+    team = _team()
+
+    async def never() -> None:
+        await asyncio.Event().wait()
+
+    async def check() -> None:
+        kid, other = team["kid"].runtime, team["other"].runtime
+        kid.model_call = asyncio.create_task(never())
+        other.compact_task = asyncio.create_task(never())
+        try:
+            assert [r.state for r in rows(team, focused="kid", now=0.0)] == [
+                "idle",
+                "busy",
+                "idle",
+                "busy",
+            ]
+        finally:
+            for task in (kid.model_call, other.compact_task):
+                _ = task.cancel()
+
+    asyncio.run(check())
+
+
+@pytest.mark.asyncio
+async def test_a_last_child_s_job_hangs_from_a_blank_stem_and_never_runs_backwards() -> (
+    None
+):
+    wait = _Wait()
+    team = Team(catalog=ModelCatalog(factories={}))
+    _ = team.join(Agent(model=ScriptedProvider()["scripted"]))
+    provider = ScriptedProvider(replies=[reply(calls=[call("Wait", "w1")])])
+    async with Agent(model=provider["scripted"], tools=[wait]) as kid:
+        _ = team.join(kid, label="kid", parent="Agent")
+        kid.runtime.push(UserMessage(content="go"))
+        await asyncio.wait_for(wait.started.wait(), timeout=5)
+        started = kid.runtime.jobs["w1"].started
+
+        shown = rows(team, focused="Agent", now=started - 5)
+
+        assert [(r.branch, r.text, r.detail) for r in shown] == [
+            ("", "● Agent", "$0.00"),
+            ("└─ ", "kid", "$0.00"),
+            ("   └─ ", "Wait", "0s"),
+        ]
+        kid.runtime.halt()
+
+
 @pytest.mark.asyncio
 async def test_a_busy_agent_lists_its_jobs_but_not_its_spawns() -> None:
     wait, spawn = _Wait(), _Wait(name="AgentSpawn")
@@ -161,12 +215,33 @@ def test_the_cursor_row_is_reversed_and_long_text_is_cut() -> None:
     assert texts[-1].endswith("→ back · stopping b\n")
 
 
-def test_short_rows_draw_at_least_32_wide() -> None:
+def test_short_rows_draw_at_least_32_wide_and_a_full_row_is_not_cut() -> None:
+    assert render(
+        [
+            Row(label="a", branch="", text="a", state="idle", detail=""),
+            Row(label="b", branch="", text="b" * 33, state="idle", detail=""),
+        ],
+        cursor=0,
+    ) == FormattedText(
+        [
+            ("reverse", f" {'a':<33}  idle               "),
+            ("", "\n"),
+            ("", f" {'b' * 33}  idle               "),
+            ("", "\n"),
+            ("fg:ansibrightblack", "\n ↑↓ move · Enter focus · Del stop · → back\n"),
+        ],
+    )
     (first, *_) = render(
         [Row(label="a", branch="", text="a", state="idle", detail="")],
         cursor=0,
     )
     assert first[1] == f" {'a':<32}  idle               "
+
+
+def test_with_no_rows_only_the_keys_are_drawn() -> None:
+    assert render([], cursor=0) == FormattedText(
+        [("fg:ansibrightblack", "\n ↑↓ move · Enter focus · Del stop · → back\n")],
+    )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -202,16 +277,38 @@ async def _pick(
     ):
         pipe.send_text(keys)
         picked = await asyncio.wait_for(
-            pick(
-                team,
-                focused=focused,
-                stop=said.stop,
-                cancel=said.cancel,
-                interval_sec=0,
-            ),
+            pick(team, focused=focused, stop=said.stop, cancel=said.cancel),
             timeout=5,
         )
     return picked, said
+
+
+# ``then`` changes the tree mid-way; with ``team_leaves``, an agent Delete stops leaves
+# ``team``.
+async def _drawn(
+    team: Team,
+    keys: str,
+    *,
+    focused: str,
+    then: Callable[[], None] | None = None,
+    team_leaves: bool = False,
+) -> tuple[str, str]:
+    """Return what ``pick`` writes to a terminal before ``keys``, and in all."""
+    written = StringIO()
+    output = Vt100_Output(written, lambda: Size(rows=24, columns=80), term="xterm")
+    said = _Said(team=team if team_leaves else None)
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=output):
+        picking = asyncio.ensure_future(
+            pick(team, focused=focused, stop=said.stop, cancel=said.cancel),
+        )
+        if then is not None:
+            await asyncio.sleep(0.05)
+            then()
+            await asyncio.sleep(0.3)
+        before = written.getvalue()
+        pipe.send_text(keys)
+        _ = await asyncio.wait_for(picking, timeout=5)
+    return before, written.getvalue()
 
 
 _UP, _DOWN, _RIGHT, _DELETE = "\x1b[A", "\x1b[B", "\x1b[C", "\x1b[3~"
@@ -225,6 +322,8 @@ _UP, _DOWN, _RIGHT, _DELETE = "\x1b[A", "\x1b[B", "\x1b[C", "\x1b[3~"
         (f"{_DOWN}\r", "grand"),
         (f"{_DOWN * 9}\r", "other"),
         (f"{_UP * 9}\r", "Agent"),
+        (f"{_DOWN}{_DOWN}{_UP}\r", "grand"),
+        (f"{_DOWN * 9}{_UP}\r", "grand"),
         (_RIGHT, None),
         ("\x03", None),
     ],
@@ -234,6 +333,67 @@ async def test_the_cursor_starts_on_the_shown_agent_and_enter_picks(
     picked: str | None,
 ) -> None:
     assert (await _pick(_team(), keys))[0] == picked
+
+
+@pytest.mark.asyncio
+async def test_a_shown_agent_not_in_the_tree_starts_the_cursor_on_the_first_row() -> (
+    None
+):
+    assert (await _pick(_team(), "\r", focused="gone"))[0] == "Agent"
+
+
+@pytest.mark.asyncio
+async def test_the_tree_takes_the_full_screen_with_the_cursor_hidden() -> None:
+    _, drawn = await _drawn(_team(), _RIGHT, focused="kid")
+
+    opened, _, rest = drawn.partition("\x1b[?1049h")
+    shown, _, closed = rest.partition("\x1b[?1049l")
+    assert "\x1b[0;7m ├─ ● kid " in shown
+    assert "\x1b[?25h" not in shown
+    assert closed.endswith("\x1b[?25h")
+    assert opened
+
+
+@pytest.mark.asyncio
+async def test_a_tree_that_changes_while_shown_is_redrawn() -> None:
+    team = _team()
+
+    def spend() -> None:
+        team["other"].spend_usd = 0.5
+
+    before_keys, _ = await _drawn(team, _RIGHT, focused="kid", then=spend)
+
+    # The first frame ends with the cursor sent back up the screen; a redraw
+    # writes only what changed: ``$0.00`` became ``$0.50``.
+    first, _, redrawn = before_keys.partition("\x1b[23A")
+    assert "$0.00" in first
+    assert "5" in redrawn
+
+
+@pytest.mark.asyncio
+async def test_what_delete_did_is_said_and_the_cursor_falls_back_a_row() -> None:
+    team = _team()
+
+    _, drawn = await _drawn(
+        team,
+        f"{_DELETE}{_RIGHT}",
+        focused="other",
+        team_leaves=True,
+    )
+
+    # Before the Delete, grand hangs from ``│  ``: these are drawn only after.
+    assert "\x1b[0;7m    └─ grand " in drawn
+    assert "→ back · stopping other" in drawn
+
+
+@pytest.mark.asyncio
+async def test_a_lone_root_is_drawn_under_the_cursor() -> None:
+    team = Team(catalog=ModelCatalog(factories={}))
+    _ = team.join(Agent(model=ScriptedProvider()["scripted"]))
+
+    _, drawn = await _drawn(team, _RIGHT, focused="Agent")
+
+    assert "\x1b[0;7m ● Agent " in drawn
 
 
 @pytest.mark.asyncio

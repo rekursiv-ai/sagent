@@ -124,7 +124,7 @@ class LlamaCpp(OpenAICompatible):
             extra_args or shlex.split(env.get("LLAMA_CPP_EXTRA_ARGS", "")),
         )
         self._startup_timeout_sec = startup_timeout_sec
-        self._process: Process | None = None
+        self._child: Child | None = None
         self._started_url = ""
         self._reached = False
         """Whether the running server named by ``base_url`` has answered once."""
@@ -132,6 +132,11 @@ class LlamaCpp(OpenAICompatible):
         self._reading: asyncio.Task[None] | None = None
         self._stopping: weakref.finalize[[Process], LlamaCpp] | None = None
         self._lock = asyncio.Lock()
+
+    @property
+    def _process(self) -> Process | None:
+        """The running server's process; ``None`` when none was started."""
+        return self._child.process if self._child is not None else None
 
     @override
     async def endpoint(self) -> str:
@@ -169,20 +174,19 @@ class LlamaCpp(OpenAICompatible):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = _port(probe)
-        self._process = (
-            await Child.start(
-                *self._argv(port),
-                # The server reads nothing; this keeps it off a terminal, which
-                # no test has to tell it from.
-                stdin=asyncio.subprocess.DEVNULL,  # pragma: no mutate
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-        ).process
+        self._child = await Child.start(
+            *self._argv(port),
+            grace_sec=self.stop_timeout_sec,
+            # The server reads nothing; this keeps it off the terminal's keys.
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        process = self._child.process
         # A provider dropped without ``aclose``, or a Python exiting first,
         # would leave the server holding its GPU memory.
-        self._stopping = weakref.finalize(self, _terminate, self._process)
-        stdout = self._process.stdout
+        self._stopping = weakref.finalize(self, _terminate, process)
+        stdout = process.stdout
         assert isinstance(stdout, asyncio.StreamReader)
         self._log = _Log()
         # Not a method: a task holding ``self`` would keep a dropped provider,
@@ -241,41 +245,42 @@ class LlamaCpp(OpenAICompatible):
 
     async def _ready(self, url: str) -> None:
         """Wait until the server at ``url`` lists its models."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._startup_timeout_sec
-        # The clock moves between reads, so it never stops on the deadline.
-        while loop.time() < deadline:  # pragma: no mutate
-            process = self._process
-            if process is not None and process.returncode is not None:
-                # The log explains the exit, and its reader may still be behind.
-                assert isinstance(self._reading, asyncio.Task)
-                await asyncio.wait({self._reading}, timeout=1.0)
-                raise RuntimeError(self._log.failure("llama-server exited"))
-            try:
-                response = await self.resources.http.get(f"{url}/models", timeout=1.0)
-                if response.is_success:
-                    return
-            except httpx2.TransportError:
-                pass
-            await asyncio.sleep(0.05)
-        raise RuntimeError(self._log.failure("llama-server did not come up"))
+        try:
+            async with asyncio.timeout(self._startup_timeout_sec):
+                # Polled: a server that is starting has no way to say it is up.
+                while True:
+                    if await self._answers(url):
+                        return
+                    await asyncio.sleep(0.05)
+        except TimeoutError:
+            raise RuntimeError(
+                self._log.failure("llama-server did not come up"),
+            ) from None
+
+    async def _answers(self, url: str) -> bool:
+        """Return whether the server at ``url`` lists its models yet."""
+        process = self._process
+        if process is not None and process.returncode is not None:
+            # The log explains the exit, and its reader may still be behind.
+            assert isinstance(self._reading, asyncio.Task)
+            await asyncio.wait({self._reading}, timeout=1.0)
+            raise RuntimeError(self._log.failure("llama-server exited"))
+        try:
+            response = await self.resources.http.get(f"{url}/models", timeout=1.0)
+        except httpx2.TransportError:
+            return False
+        return response.is_success
 
     async def _stop(self) -> None:
         """Stop the server: politely, then by force after ``stop_timeout_sec``."""
-        process, self._process = self._process, None
+        child, self._child = self._child, None
         reading, self._reading = self._reading, None
         stopping, self._stopping = self._stopping, None
         if stopping is not None:
             stopping.detach()
         try:
-            if process is not None:
-                # The server leads no group: a group stop finds none, and
-                # signals the server alone.
-                await Child(
-                    process=process,
-                    group=False,  # pragma: no mutate
-                    grace_sec=self.stop_timeout_sec,
-                ).stop()
+            if child is not None:
+                _ = await child.stop()
         finally:
             if reading is not None:
                 reading.cancel()

@@ -7,7 +7,14 @@ import socket
 
 import pytest
 
-from sagent.providers.testing import bound_port, free_port, send, visit
+from sagent.providers import login
+from sagent.providers.testing import (
+    bound_port,
+    free_port,
+    refuse_browsers,
+    send,
+    visit,
+)
 
 
 def test_a_free_port_can_be_bound() -> None:
@@ -36,6 +43,14 @@ async def test_a_visit_returns_the_status_of_the_answer() -> None:
         assert await visit(port, "/a?b=c") == 418
         assert await send(port, b"garbage\r\n") == 418
     assert requests == [b"GET /a?b=c HTTP/1.1\r\n", b"garbage\r\n"]
+
+
+def test_a_browser_opened_through_a_refused_module_fails_the_test(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refuse_browsers(monkeypatch, login)
+    with pytest.raises(AssertionError, match=r"^A test opened a real browser at u\.$"):
+        login.open_browser("u")
 
 
 if __name__ == "__main__":

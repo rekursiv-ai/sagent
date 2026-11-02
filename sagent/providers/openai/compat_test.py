@@ -19,8 +19,8 @@ from sagent.model.exceptions import (
     RateLimitedError,
 )
 from sagent.model.types import Request, Response, TextChunk
-from sagent.providers import moonshot
-from sagent.providers.openai import chat, compat, token_count
+from sagent.providers import moonshot, retry
+from sagent.providers.openai import chat, token_count
 from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel
 from sagent.providers.resources import SharedResources
 from sagent.providers.types import UsageWindow
@@ -80,7 +80,7 @@ def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     async def sleep(delay_sec: float) -> None:
         waits.append(delay_sec)
 
-    monkeypatch.setattr(compat, "asyncio", SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(retry, "asyncio", SimpleNamespace(sleep=sleep))
     return waits
 
 

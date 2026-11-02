@@ -182,12 +182,15 @@ class PaperAuthor:
             raise ValueError(
                 f"'year_from' ({a.year_from}) must not exceed 'year_to' ({a.year_to}).",
             )
-        if query:
-            key: tuple[object, ...] = ("search", query, a.limit)
-        elif a.operation == "papers":
-            key = ("papers", ids[0], a.limit, a.year_from, a.year_to, a.abstract_chars)
-        else:
-            key = ("authors", tuple(ids))
+        key = (
+            query,
+            tuple(ids),
+            a.operation,
+            a.limit,
+            a.year_from,
+            a.year_to,
+            a.abstract_chars,
+        )
         cached = self.cache.get(key)
         if cached is not None:
             return UncategorizedToolResult(call_id="", content=cached)

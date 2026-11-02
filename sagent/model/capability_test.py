@@ -15,6 +15,7 @@ from sagent.model.capability import (
     ModelLimits,
     ModelSettingName,
     ModelSettings,
+    PruningPolicy,
     literal_members,
     model_setting_names,
     typed_text,
@@ -147,6 +148,69 @@ def test_fit_keeps_each_choice_offered_and_defaults_the_rest() -> None:
     )
 
 
+def test_fit_keeps_every_choice_offered_whole() -> None:
+    row = replace(_row(), manage_context_server_side=frozenset({False, True}))
+    chosen = ModelSettings(
+        thinking_effort="high",
+        thinking_budget="auto",
+        thinking_output="text",
+        service_tier="priority",
+        cache_ttl_sec=3600.0,
+        manage_context_server_side=True,
+        context_size=row.prices["smallcontext"],
+        pruning=PruningPolicy(keep_recent=2),
+    )
+
+    assert row.fit(chosen, was=row) == chosen
+
+
+def test_fit_takes_the_default_of_every_choice_not_offered() -> None:
+    row = _row()
+    plain = ModelCapability(
+        model_id="plain",
+        thinking_effort=frozenset({"medium"}),
+        thinking_budget=frozenset({"fixed"}),
+        thinking_output=frozenset({"redacted"}),
+        service_tier=frozenset({"flex"}),
+        cache_ttl_sec=frozenset({60.0}),
+        manage_context_server_side=frozenset({True}),
+        default=ModelSettings(
+            thinking_effort="medium",
+            thinking_budget="fixed",
+            thinking_output="redacted",
+            service_tier="flex",
+            cache_ttl_sec=60.0,
+            manage_context_server_side=True,
+        ),
+    )
+    chosen = replace(row.default, thinking_output="text", service_tier="priority")
+
+    fitted = plain.fit(chosen, was=row)
+
+    assert replace(fitted, context_size=plain.default.context_size) == plain.default
+
+
+@pytest.mark.parametrize(
+    ("settings", "message"),
+    [
+        (
+            ModelSettings(thinking_effort="max"),
+            "thinking_effort='max' is not offered by this model; allowed: 'none'",
+        ),
+        (
+            ModelSettings(context_size=_size("fullcontext", 500, "500")),
+            "context_size=500 is not offered by this model; allowed: 1 to 100",
+        ),
+    ],
+)
+def test_a_model_with_no_name_is_this_model(
+    settings: ModelSettings,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        ModelCapability(prices=PriceCatalog(window=100)).check(settings)
+
+
 def test_a_tier_priced_flat_keeps_the_size_another_tier_bands() -> None:
     prices = PriceCatalog(
         prices={
@@ -211,7 +275,12 @@ def _offering() -> ModelCapability:
 def test_a_setting_is_read_and_set_by_name() -> None:
     settings = ModelSettings()
     for name in model_setting_names():
-        value = _offering().values(name)[-1]
+        # The most committing value, which no default is.
+        value = replace(
+            _row(),
+            manage_context_server_side=frozenset({False, True}),
+        ).values(name)[-1]
+        assert value != settings.value(name)
         assert settings.with_value(name, value).value(name) == value
     assert settings.with_value("cache_ttl_sec", 300).value("cache_ttl_sec") == 300.0
 

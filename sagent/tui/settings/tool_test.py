@@ -139,6 +139,15 @@ def test_a_tool_exports_each_display_setting() -> None:
         ("default",),
     )
     assert all(s.cli for s in settings.values())
+    assert [(s.help_short, s.usage) for s in settings.values()] == [
+        ("the command's lines kept from the head and tail", "HEAD,TAIL|all"),
+        ("the command's widest line, in cells; 0 for the pane's", "CELLS"),
+        ("the command's whether a long line folds or is cut", "fold|ellipsis"),
+        ("the output's lines kept from the head and tail", "HEAD,TAIL|all"),
+        ("the output's widest line, in cells; 0 for the pane's", "CELLS"),
+        ("the output's whether a long line folds or is cut", "fold|ellipsis"),
+        ("the Pygments lexer for the input row; empty for none", "LEXER"),
+    ]
 
 
 @pytest.mark.asyncio

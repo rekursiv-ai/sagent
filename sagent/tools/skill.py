@@ -19,10 +19,10 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from html import escape
 from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
+from xml.sax.saxutils import escape
 
 import asyncio
 import logging
@@ -85,6 +85,21 @@ class SkillInfo:
 
     path: Path
     """Its ``SKILL.md``."""
+
+    def block(self, args: str = "") -> str:
+        """Return the body, and ``args``, in the ``<skill>`` block a load returns.
+
+        Args:
+          args: Text passed to the skill; ``""`` for none.
+
+        Returns:
+          block: Both escaped, so neither can close the block early.
+
+        """
+        body = escape(self.body)
+        if args:
+            body += f"\n\nArguments: {escape(args)}"
+        return f"<skill name='{self.name}' source='{self.source}'>\n{body}\n</skill>"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -240,13 +255,7 @@ class Skill:
         if match is None:
             names = ", ".join(s.name for s in skills) or "(none)"
             raise ValueError(f"Unknown skill {a.skill!r}. Available: {names}.")
-        body = escape(match.body, quote=False)
-        if a.args:
-            body += f"\n\nArguments: {escape(a.args, quote=False)}"
-        return UncategorizedToolResult(
-            call_id="",
-            content=f"<skill name='{match.name}' source='{match.source}'>\n{body}\n</skill>",
-        )
+        return UncategorizedToolResult(call_id="", content=match.block(a.args))
 
 
 # Each directory is entered once by its resolved path, so a link back up the
@@ -297,7 +306,7 @@ def _load(directory: Path, source: Source, skipped: list[str]) -> SkillInfo | No
     """Return the skill ``directory/SKILL.md`` holds; ``None`` for none or a bad one."""
     path = directory / "SKILL.md"
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")  # pragma: no mutate -- a UTF-8 host.
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError):
@@ -311,8 +320,10 @@ def _load(directory: Path, source: Source, skipped: list[str]) -> SkillInfo | No
         skipped.append(why)
         return None
     try:
+        # pragma: no mutate start -- each is read for truth, where None is as "".
         name = from_plain(meta.get("name"), str, default="") or directory.name
         description = from_plain(meta.get("description"), str, default="")
+        # pragma: no mutate end
     except ReadError:
         logger.warning(
             "Skipping skill with a non-text name or description at %s.",

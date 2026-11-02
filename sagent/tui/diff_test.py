@@ -17,6 +17,7 @@ from sagent.tui.diff import (
     splice_diff,
     write_diff,
 )
+from sagent.tui.types import Sticky
 
 
 _ADDED = "48;2;34;92;43"
@@ -73,7 +74,7 @@ def test_every_row_starts_with_the_row_indent() -> None:
     out = io.StringIO()
     console = Console(file=out, width=20, color_system=None, highlight=False)
     diff = "@@ -0,0 +1,3 @@\n+a\n+" + "b" * 20 + "\n+c\n"
-    render_diff(console, diff, row_indent="     ", lines=(2, 0))
+    render_diff(console, diff, row_indent="     ", path="", lines=(2, 0))
     assert [row.rstrip() for row in out.getvalue().splitlines()] == [
         "     1 a",
         "     2 " + "b" * 13,
@@ -314,6 +315,35 @@ def test_an_inserted_line_does_not_stop_the_pairing_after_it() -> None:
     assert _styled(rows[1], _REMOVED_WORD) == "b"
 
 
+@pytest.mark.parametrize(
+    ("diff", "row", "word"),
+    [
+        (
+            "@@ -1,2 +1,3 @@\n-same\n-alpha one\n+same\n+alpha two\n+beta three\n",
+            3,
+            "two",
+        ),
+        (
+            "@@ -1,3 +1,2 @@\n-same\n-alpha one\n-beta three\n+same\n+alpha two\n",
+            4,
+            "two",
+        ),
+        (
+            "@@ -1,3 +1,3 @@\n-same\n-alpha one\n-beta one\n+same\n+alpha two\n+beta two\n",
+            5,
+            "two",
+        ),
+    ],
+    ids=["more-added", "more-removed", "two-pairs"],
+)
+def test_lines_after_a_twin_pair_with_the_lines_across_from_them(
+    diff: str,
+    row: int,
+    word: str,
+) -> None:
+    assert _styled(_ansi(diff)[row], _ADDED_WORD) == word
+
+
 def test_the_file_name_picks_the_highlighting() -> None:
     diff = "@@ -1 +1 @@\n-def foo(): pass\n+def bar(): pass\n"
     assert _ansi(diff, path="x.py") != _ansi(diff, path="x.unknownext")
@@ -383,7 +413,7 @@ def test_a_cut_diff_keeps_its_head_and_tail_and_counts_every_line() -> None:
     diff = "@@ -0,0 +1,5 @@\n+a\n+b\n+c\n+d\n+e"
     out = io.StringIO()
     console = Console(file=out, width=40, color_system=None, highlight=False)
-    render_diff(console, diff, row_indent="  ", lines=(1, 2))
+    render_diff(console, diff, row_indent="  ", path="", lines=(1, 2))
     assert [row.rstrip() for row in out.getvalue().splitlines()] == [
         "  1 a",
         "    ⋯ 2 lines ⋯",
@@ -391,6 +421,116 @@ def test_a_cut_diff_keeps_its_head_and_tail_and_counts_every_line() -> None:
         "  5 e",
     ]
     assert _plain(diff) == [f"  {i} {c}" for i, c in enumerate("abcde", 1)]
+
+
+def test_a_diff_of_only_headers_prints_nothing() -> None:
+    assert _plain("--- a\n+++ b\n@@ -1,0 +1,0 @@\n") == []
+
+
+def test_the_margin_widens_with_the_largest_number_on_either_side() -> None:
+    assert _plain("@@ -9 +8 @@\n-a\n+b\n c\n") == [
+        "  9 a",
+        "  8 b",
+        "  9 c",
+    ]
+    assert _plain("@@ -10 +8 @@\n-a\n+b\n") == ["  10 a", "   8 b"]
+    assert _plain("@@ -8 +9 @@\n+a\n b\n") == ["   9 a", "  10 b"]
+
+
+def test_a_lines_cut_that_would_keep_every_line_cuts_none() -> None:
+    out = io.StringIO()
+    console = Console(file=out, width=40, color_system=None, highlight=False)
+    render_diff(
+        console,
+        "@@ -0,0 +1,2 @@\n+a\n+b",
+        row_indent="",
+        path="",
+        lines=(1, 1),
+    )
+    assert [row.rstrip() for row in out.getvalue().splitlines()] == ["1 a", "2 b"]
+
+
+def test_a_fill_widens_to_the_longest_line_less_its_sigil() -> None:
+    rows = _ansi(f"@@ -1 +1 @@\n-a\n+{'b' * 98}\n", width=200)
+    assert [len(_visible(r)) for r in rows] == [102, 102]
+
+
+def test_a_turn_s_earlier_width_is_kept() -> None:
+    out = io.StringIO()
+    console = Console(
+        file=out,
+        width=200,
+        color_system="truecolor",
+        force_terminal=True,
+    )
+    sticky = Sticky()
+    for diff in (f"@@ -1 +1 @@\n+{'b' * 100}\n", "@@ -1 +1 @@\n+a\n"):
+        render_diff(console, diff, row_indent="  ", path="", sticky=sticky)
+    assert [len(_visible(r)) for r in out.getvalue().splitlines()] == [104, 104]
+
+
+def test_the_cut_marker_is_dim() -> None:
+    out = io.StringIO()
+    console = Console(file=out, width=40, color_system="truecolor", force_terminal=True)
+    render_diff(
+        console,
+        "@@ -0,0 +1,3 @@\n+a\n+b\n+c",
+        row_indent="",
+        path="",
+        lines=(1, 1),
+    )
+    assert ("2", "⋯ 1 lines ⋯") in _segments(out.getvalue().splitlines()[1])
+
+
+def test_a_wrapped_changed_line_keeps_its_background_under_the_number() -> None:
+    rows = _ansi(f"@@ -1 +1 @@\n+{'b' * 150}\n", width=200)
+    assert _styled(rows[1], _ADDED).startswith("  ")
+    assert not _styled(rows[1], _ADDED).startswith("    ")
+
+
+def test_a_context_line_is_padded_with_no_background() -> None:
+    (row,) = _ansi("@@ -1 +1 @@\n context\n")
+    assert _visible(row).rstrip() == "  1 context"
+    assert "\x1b[48" not in row
+
+
+def test_a_changed_word_and_the_rest_of_its_line_each_keep_their_own_color() -> None:
+    _, added = _ansi("@@ -1 +1 @@\n-a b c d e\n+a b X d e\n")
+    assert _styled(added, _ADDED_WORD) == "X"
+    assert _styled(added, _ADDED).startswith("1 a b  d e")
+
+
+def test_an_unchanged_twin_prints_as_a_changed_line() -> None:
+    rows = _ansi("@@ -1,2 +1,2 @@\n-same\n-tail b\n+same\n+tail c\n")
+    assert _styled(rows[0], _REMOVED).startswith("1 same")
+    assert _styled(rows[2], _ADDED).startswith("1 same")
+
+
+def test_a_trailing_space_in_a_line_is_kept() -> None:
+    assert _plain("@@ -1 +1 @@\n+a  \n+b\n", path="x.py")[0] == "  1 a"
+    assert highlight_source("x  \n", "python").plain == "x  "
+    assert highlight_source("x\n\n", "python").plain == "x"
+
+
+def _wide(words: int, last: str) -> str:
+    # Its first word differs too, so no run of the alike ones starts both lines.
+    return " ".join([last, *["a"] * words, last])
+
+
+@pytest.mark.parametrize("words", [120])
+def test_a_long_line_s_one_changed_word_is_found_among_many_alike(words: int) -> None:
+    # Two hundred tokens or more is where difflib's autojunk would junk the
+    # common ones and match nothing.
+    rows = _ansi(f"@@ -1 +1 @@\n-{_wide(words, 'b')}\n+{_wide(words, 'c')}\n")
+    assert "".join(_styled(row, _ADDED_WORD) for row in rows) == "cc"
+
+
+def test_a_long_run_of_alike_lines_still_pairs_the_one_that_changed() -> None:
+    # Junking the two hundred alike lines would pair every line off by one.
+    same = "-s\n" * 205
+    diff = f"@@ -1 +1 @@\n{same}-tail value b\n+new\n{same.replace('-', '+')}+tail value c\n"
+    rows = _ansi(diff)
+    assert _styled(rows[-1], _ADDED_WORD) == "c"
 
 
 if __name__ == "__main__":

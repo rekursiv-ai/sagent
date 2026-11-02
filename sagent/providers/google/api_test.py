@@ -22,6 +22,7 @@ from sagent.model.exceptions import (
     UnknownModelError,
 )
 from sagent.model.types import Request, Response, TextChunk
+from sagent.providers import retry
 from sagent.providers.google import api, wire
 from sagent.providers.google.api import Google
 from sagent.providers.google.cli import GoogleCLI
@@ -53,7 +54,7 @@ def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     async def sleep(delay_sec: float) -> None:
         waits.append(delay_sec)
 
-    monkeypatch.setattr(api, "asyncio", SimpleNamespace(sleep=sleep))
+    monkeypatch.setattr(retry, "asyncio", SimpleNamespace(sleep=sleep))
     return waits
 
 

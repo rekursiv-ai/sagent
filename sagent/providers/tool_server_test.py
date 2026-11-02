@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
 import asyncio
 import base64
@@ -23,6 +24,7 @@ import mcp.types as mcp_types
 import pytest
 
 from sagent.providers import tool_server
+from sagent.providers.testing import send
 from sagent.providers.tool_server import McpMount, McpToolServer
 from sagent.session.types import (
     Attachment,
@@ -38,6 +40,27 @@ if TYPE_CHECKING:
 
     from sagent.session.types import AnyToolResult
     from sagent.tools.types import ToolContext
+
+
+@pytest.mark.asyncio
+async def test_a_websocket_upgrade_is_answered_as_plain_http() -> None:
+    """The handler takes no WebSocket scope, so an upgrade is never accepted."""
+    async with McpToolServer() as server:
+        mount = await server.mount()
+        url = urlparse(mount.url)
+        assert url.port is not None
+        status = await send(
+            url.port,
+            (
+                f"GET {url.path} HTTP/1.1\r\nhost: localhost\r\n"
+                "connection: Upgrade\r\nupgrade: websocket\r\n"
+                "sec-websocket-version: 13\r\n"
+                "sec-websocket-key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+            ).encode(),
+        )
+
+    # The MCP handler refuses a GET that does not accept an event stream.
+    assert status == 406
 
 
 @pytest.mark.asyncio

@@ -152,7 +152,7 @@ def winter(year: int) -> tuple[date, ...]:
 def lunar_new_year(year: int) -> tuple[date, ...]:
     """Return the first new moon on or after January 21, in China time."""
     china = timezone(timedelta(hours=8))
-    return (_new_or_full_moon(date(year, 1, 21), full=False, zone=china),)
+    return (_new_or_full_moon(date(year, 1, 21), phase="new", zone=china),)
 
 
 def mid_autumn(year: int) -> tuple[date, ...]:
@@ -171,8 +171,10 @@ def mid_autumn(year: int) -> tuple[date, ...]:
         return (date(2033, 9, 8),)
     china = timezone(timedelta(hours=8))
     equinox = _civil_date(_season(year, 2), zone=china)
-    new_moon = _new_or_full_moon(equinox - timedelta(days=30), full=False, zone=china)
-    following = _new_or_full_moon(new_moon + timedelta(days=1), full=False, zone=china)
+    # pragma: no mutate start -- slack search starts: a day further finds the same moons.
+    new_moon = _new_or_full_moon(equinox - timedelta(days=30), phase="new", zone=china)
+    following = _new_or_full_moon(new_moon + timedelta(days=1), phase="new", zone=china)
+    # pragma: no mutate end
     if following <= equinox:
         new_moon = following
     return (new_moon + timedelta(days=14),)
@@ -182,11 +184,13 @@ def holi(year: int) -> tuple[date, ...]:
     """Return the morning after the bonfire night of the Phalguna full moon."""
     # The full moon ends its lunar day. Ending after 17:00 local time, that day
     # holds the evening bonfire, so Holi is the next day: +7 h rolls over then.
-    return (_new_or_full_moon(date(year, 2, 28), full=True, zone=None, shift_hours=7),)
+    return (
+        _new_or_full_moon(date(year, 2, 28), phase="full", zone=None, shift_hours=7),
+    )
 
 
 def diwali(year: int) -> tuple[date, ...]:
-    """Return the evening of prayers in the Kartika new moon's lunar day.
+    """Return the first evening of prayers in the Kartika new moon's lunar day.
 
     Args:
       year: The Gregorian year.
@@ -195,14 +199,14 @@ def diwali(year: int) -> tuple[date, ...]:
       days: Diwali's date, India time, which US temples keep too.
 
     """
-    # The new moon ends its lunar day. Ending after 18:00 India time, that day
-    # holds the evening prayers; otherwise the evening before does: -18 h.
+    # The first 18:00 India time at or after the lunar day begins: 6 h later, the
+    # date has moved on unless that day's evening falls within it.
+    india = _india()
     return (
-        _new_or_full_moon(
+        _first_phase(
             date(year, 10, 17),
-            full=False,
-            zone=timezone(timedelta(hours=5, minutes=30)),
-            shift_hours=-18,
+            phase="new",
+            day=lambda jde: _civil_date(_tithi_start(jde), zone=india, shift_hours=6),
         ),
     )
 
@@ -212,7 +216,7 @@ def vaisakhi(year: int) -> tuple[date, ...]:
     ayanamsa_deg = 24.22 + 0.013_97 * (year - 2026)
     sun_deg_per_day = 0.985
     jde = _season(year, 0) + ayanamsa_deg / sun_deg_per_day
-    return (_civil_date(jde, zone=timezone(timedelta(hours=5, minutes=30))),)
+    return (_civil_date(jde, zone=_india()),)
 
 
 def hanukkah(year: int) -> tuple[date, ...]:
@@ -364,9 +368,11 @@ def easter(year: int) -> tuple[date, ...]:
     a = year % 19
     b, c = divmod(year, 100)
     d, e = divmod(b, 4)
+    # pragma: no mutate start -- Meeus, "Astronomical Algorithms" ch. 8: f's 8 or 9 give one g to 4099, and 15 is -15 mod 30.
     f = (b + 8) // 25
     g = (b - f + 1) // 3
     h = (19 * a + b - d - g + 15) % 30
+    # pragma: no mutate end
     i, k = divmod(c, 4)
     j = (32 + 2 * e + 2 * i - h - k) % 7
     m = (a + 11 * h + 22 * j) // 451
@@ -393,10 +399,7 @@ def _in_window(holiday: Holiday, today: date) -> bool:
 
 
 def _rule(dates: str) -> Callable[[int], tuple[date, ...]]:
-    """Read ``MM-DD`` as a fixed date, else name one of the computed rules."""
-    if dates[:1].isdigit():
-        month, day = dates.split("-")
-        return partial(_annual, month=int(month), day=int(day))
+    """Read a computed rule's name, else ``MM-DD`` as a fixed date."""
     computed = (
         lunar_new_year,
         holi,
@@ -414,7 +417,11 @@ def _rule(dates: str) -> Callable[[int], tuple[date, ...]]:
         hanukkah,
         winter,
     )
-    return {rule.__name__: rule for rule in computed}[dates]
+    rule = {rule.__name__: rule for rule in computed}.get(dates)
+    if rule is not None:
+        return rule
+    month, day = dates.split("-")
+    return partial(_annual, month=int(month), day=int(day))
 
 
 class _IconEntry(TypedDict):
@@ -436,7 +443,7 @@ def _annual(year: int, *, month: int, day: int) -> tuple[date, ...]:
 
 
 def _vesak_estimate(year: int) -> tuple[date, ...]:
-    return (_new_or_full_moon(date(year, 5, 1), full=True, zone=UTC),)
+    return (_new_or_full_moon(date(year, 5, 1), phase="full", zone=UTC),)
 
 
 def _listed(
@@ -499,19 +506,108 @@ def _season(year: int, index: int) -> float:
 def _new_or_full_moon(
     start: date,
     *,
-    full: bool,
+    phase: Literal["new", "full"],
     zone: tzinfo | None,
     shift_hours: float = 0,
 ) -> date:
-    """Return the first new (or full) moon's date in ``zone`` on or after ``start``."""
+    """Return the first new or full moon's date in ``zone`` on or after ``start``."""
+    return _first_phase(
+        start,
+        phase=phase,
+        day=partial(_civil_date, zone=zone, shift_hours=shift_hours),
+    )
+
+
+def _first_phase(
+    start: date,
+    *,
+    phase: Literal["new", "full"],
+    day: Callable[[float], date],
+) -> date:
+    """Return the first ``day`` of a new or full moon's Julian day on or after ``start``."""
+    # pragma: no mutate start -- an estimate a lunation early only adds steps to the loop below (Meeus ch. 49).
     lunation = 29.530_588_861
     jd = start.toordinal() + 1_721_424.5
-    k = math.floor((jd - 2_451_550.097_66) / lunation) - 1 + (0.5 if full else 0)
-    while (
-        day := _civil_date(_moon_phase(k), zone=zone, shift_hours=shift_hours)
-    ) < start:
+    half = {"new": 0.0, "full": 0.5}[phase]
+    k = math.floor((jd - 2_451_550.097_66) / lunation) - 1 + half
+    # pragma: no mutate end
+    while (found := day(_moon_phase(k))) < start:
         k += 1
-    return day
+    return found
+
+
+# It begins as the moon comes within 12 degrees of the sun, found by Newton's method
+# from the new moon.
+def _tithi_start(new_moon: float) -> float:
+    """Return the Julian day the lunar day ending at ``new_moon`` begins."""
+    jde = new_moon
+    target = 348
+    tolerance = 1e-7
+    # pragma: no mutate start -- Newton's slope (Meeus ch. 49), wrap and ``>`` only set the steps to the one root.
+    rate = 360 / 29.530_588_861
+    while abs(step := math.remainder(_elongation(jde) - target, 360)) > tolerance:
+        jde -= step / rate
+    # pragma: no mutate end
+    return jde
+
+
+# Meeus ch. 25 for the sun and the largest terms of ch. 47 for the moon: within a
+# hundredth of a degree, some minutes of a lunar day. Nutation shifts both alike.
+def _elongation(jde: float) -> float:
+    """Return how far the moon's longitude runs ahead of the sun's, in degrees."""
+    t = (jde - 2_451_545.0) / 36_525
+    sun_mean = 280.466_46 + 36_000.769_83 * t + 0.000_303_2 * t * t
+    m = math.radians(357.529_11 + 35_999.050_29 * t - 0.000_153_7 * t * t)
+    sun = (
+        sun_mean
+        + (1.914_602 - 0.004_817 * t - 0.000_014 * t * t) * math.sin(m)
+        + (0.019_993 - 0.000_101 * t) * math.sin(2 * m)
+        + 0.000_289 * math.sin(3 * m)
+        - 0.005_69
+    )
+    moon_mean = 218.316_447_7 + 481_267.881_234_21 * t - 0.001_578_6 * t * t
+    d = math.radians(297.850_192_1 + 445_267.111_403_4 * t - 0.001_881_9 * t * t)
+    mp = math.radians(134.963_396_4 + 477_198.867_505_5 * t + 0.008_741_4 * t * t)
+    f = math.radians(93.272_095_0 + 483_202.017_523_3 * t - 0.003_653_9 * t * t)
+    e = 1 - 0.002_516 * t - 0.000_007_4 * t * t
+    moon = moon_mean + 1e-6 * sum(
+        coefficient
+        # These terms take M at most once, so E, never E squared.
+        * (e if cm else 1)
+        * math.sin(cd * d + cm * m + cmp * mp + cf * f)
+        for coefficient, cd, cm, cmp, cf in _moon_longitude_terms()
+    )
+    return (moon - sun) % 360
+
+
+def _moon_longitude_terms() -> tuple[tuple[int, int, int, int, int], ...]:
+    """Return Meeus table 47.A's largest terms: millionths of a degree, D, M, M', F."""
+    return (
+        (6_288_774, 0, 0, 1, 0),
+        (1_274_027, 2, 0, -1, 0),
+        (658_314, 2, 0, 0, 0),
+        (213_618, 0, 0, 2, 0),
+        (-185_116, 0, 1, 0, 0),
+        (-114_332, 0, 0, 0, 2),
+        (58_793, 2, 0, -2, 0),
+        (57_066, 2, -1, -1, 0),
+        (53_322, 2, 0, 1, 0),
+        (45_758, 2, -1, 0, 0),
+        (-40_923, 0, 1, -1, 0),
+        (-34_720, 1, 0, 0, 0),
+        (-30_383, 0, 1, 1, 0),
+        (15_327, 2, 0, 0, -2),
+        (-12_528, 0, 0, 1, 2),
+        (10_980, 0, 0, 1, -2),
+        (10_675, 4, 0, -1, 0),
+        (10_034, 0, 0, 3, 0),
+        (8_548, 4, 0, -2, 0),
+        (-7_888, 2, 1, -1, 0),
+        (-6_766, 2, 1, 0, 0),
+        (-5_163, 1, 0, -1, 0),
+        (4_987, 1, 1, 0, 0),
+        (4_036, 2, -1, 1, 0),
+    )
 
 
 # Meeus ch. 49 with every periodic term, good to seconds; seven terms alone stray by
@@ -621,23 +717,34 @@ def _hebrew_new_year(hebrew_year: int) -> int:
 def _hebrew_elapsed_days(hebrew_year: int) -> int:
     """Return days from the epoch to the molad of Tishrei, after postponement."""
     months = (235 * hebrew_year - 234) // 19
+    # The epoch's molad, 12,084 parts, then 13,753 a month.
+    # pragma: no mutate start -- Dershowitz-Reingold "hebrew-calendar-elapsed-days"; one part more moves no new year 3800-9999.
     parts = 12_084 + 13_753 * months
+    # pragma: no mutate end
     days = 29 * months + parts // 25_920
     return days + 1 if (3 * (days + 1)) % 7 < 3 else days
 
 
 def _islamic(year: int, *, month: int, day: int) -> tuple[date, ...]:
     """Return each ``month``/``day`` of the arithmetic Islamic calendar in ``year``."""
+    # pragma: no mutate start -- a wider window of years adds only dates the filter drops.
     first = (year - 622) * 33 // 32
+    hijri_years = range(first - 1, first + 3)
+    # pragma: no mutate end
     days = (
         date.fromordinal(
             day
             + 29 * (month - 1)
-            + (6 * month - 1) // 11
+            + month // 2
             + (hijri - 1) * 354
             + (3 + 11 * hijri) // 30
             + 227_014,
         )
-        for hijri in range(first - 1, first + 3)
+        for hijri in hijri_years
     )
     return tuple(d for d in days if d.year == year)
+
+
+def _india() -> timezone:
+    """Return India Standard Time, UTC+05:30, which both Indian festivals keep."""
+    return timezone(timedelta(hours=5, minutes=30))

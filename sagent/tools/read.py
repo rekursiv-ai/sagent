@@ -436,16 +436,17 @@ def _read_text(
             content=f"[offset {offset} is past the end: {path} has {total} lines]",
         )
     end = total if limit is None else min(start + limit, total)
-    note = f"\n... ({total:,} more lines. Use offset={total + 1} to continue.)"
-    body, kept = context.fit(
-        (f"{start + i + 1}\t{line}" for i, line in enumerate(lines[start:end])),
-        reserve=len(note),
-    )
-    if start + kept < total:
-        body += (
-            f"\n... ({total - start - kept:,} more lines."
-            f" Use offset={start + kept + 1} to continue.)"
-        )
+    numbered = [f"{start + i + 1}\t{line}" for i, line in enumerate(lines[start:end])]
+    body, kept = context.fit(numbered)
+    # While the note does not fit beside what was kept, keep a line fewer, to one.
+    while (
+        kept > 1
+        and len(body) + len(_more(total, start=start, kept=kept))
+        > context.max_result_chars
+    ):
+        kept -= 1
+        body = "".join(numbered[:kept])
+    body += _more(total, start=start, kept=kept)
     context.files.showed(path, lines=lines_asked)
     whole = start == 0 and kept == total
     return FileReadResult(
@@ -454,6 +455,14 @@ def _read_text(
         content=body,
         ranges=() if whole else ((start + 1, kept),),
     )
+
+
+def _more(total: int, *, start: int, kept: int) -> str:
+    """Return how many of ``total`` lines are left past those kept, and where to resume."""
+    left = total - start - kept
+    if not left:
+        return ""
+    return f"\n... ({left:,} more lines. Use offset={start + kept + 1} to continue.)"
 
 
 def _read_notebook(

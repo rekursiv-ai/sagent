@@ -21,6 +21,7 @@ from sagent.providers.catalog import ModelCatalog
 from sagent.providers.login import Logins
 from sagent.providers.table import ModelTable, ModelTags
 from sagent.settings.harvest import harvest
+from sagent.tui.settings import model as model_settings
 from sagent.tui.settings.model import AgentModel
 
 
@@ -123,6 +124,101 @@ def test_the_model_exports_each_choice_under_it_for_the_command_line() -> None:
         "model.manage_context_server_side",
     ]
     assert all(s.cli and s.value is not None for s in settings)
+
+
+def test_each_setting_says_how_it_is_typed_and_what_it_is() -> None:
+    owner, _, _ = _model()
+    assert [
+        (".".join(s.name), s.usage, s.help_short)
+        for s in harvest([(("model",), owner)])
+    ] == [
+        (
+            "model",
+            "[ACCOUNT@][PROVIDER/]MODEL[+TAG...]",
+            "the model, by name, family, or role, with any tags",
+        ),
+        (
+            "model.provider",
+            "NAME",
+            "the provider serving this model; one that cannot is refused",
+        ),
+        (
+            "model.provider.account",
+            "NAME",
+            "the login providers sign in as; default: each one's own",
+        ),
+        (
+            "model.context",
+            "SIZE",
+            "how much the context may fill before it is compacted",
+        ),
+        (
+            "model.thinking",
+            "AXIS=VALUE ...",
+            "the reasoning's effort, budget, and output at once",
+        ),
+        ("model.thinking.effort", "VALUE", "how hard the model reasons"),
+        ("model.thinking.budget", "VALUE", "how its reasoning budget is set"),
+        ("model.thinking.output", "VALUE", "what of its reasoning comes back"),
+        ("model.service_tier", "VALUE", "the serving tier: speed against price"),
+        ("model.cache_ttl_sec", "VALUE", "how long the prompt cache lives"),
+        (
+            "model.manage_context_server_side",
+            "VALUE",
+            "whether the server rolls the history",
+        ),
+    ]
+    assert (
+        _setting(owner, "model").help_long
+        == (
+            "ACCOUNT@ signs providers in as that login. PROVIDER/ names the provider;"
+            " without it, the current one serves the model if it can, else the first"
+            " allowed one that does. Tags follow in any order: a context size"
+            " (smallcontext, midcontext, fullcontext, or a count such as 258k), an"
+            " effort (nothink, lowthink, medthink, highthink, xhighthink, and so on), a"  # codespell:ignore nothink
+            " tier (auto, default, flex, priority or fast, ultrafast). What the name"
+            " leaves out is kept from the model before."
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_switch_keeps_the_account_chosen_before() -> None:
+    owner, _, catalog = _model()
+    assert await _apply(owner, "model.provider.account", "work") == "work"
+    with pytest.raises(UnknownModelError):
+        await _apply(owner, "model", "home@vendor/nope")
+    assert catalog.account == "work"
+    with pytest.raises(ValueError, match="is not a name"):
+        await _apply(owner, "model.provider.account", "../x")
+    assert catalog.account == "work"
+    assert await _apply(owner, "model.provider.account", "default") == "default"
+
+
+@pytest.mark.asyncio
+async def test_each_thinking_axis_is_set_by_its_name() -> None:
+    owner, agent, _ = _model()
+    said = await _apply(owner, "model.thinking", "output=text")
+    assert said == "effort=high budget=none output=text"
+    assert agent.model.settings.thinking_output == "text"
+    with pytest.raises(ValueError, match=r"^effort: "):
+        await _apply(owner, "model.thinking", "effort==high")
+
+
+@pytest.mark.asyncio
+async def test_a_model_switched_back_to_has_its_choices_again() -> None:
+    owner, agent, _ = _model()
+    await _apply(owner, "model.thinking.effort", "low")
+    await _apply(owner, "model", "narrow")
+    await _apply(owner, "model", "wide")
+    assert agent.model.settings.thinking_effort == "low"
+
+
+def test_an_unordered_axis_has_no_closest_value() -> None:
+    capability = _WIDE
+    assert model_settings._closest(capability, "service_tier", "high") is None
+    assert model_settings._closest(capability, "service_tier", "5") is None
+    assert model_settings._closest(capability, "cache_ttl_sec", "1000") == 300.0
 
 
 def test_each_setting_shows_its_value_and_what_it_may_take() -> None:
@@ -381,6 +477,10 @@ async def test_an_account_whose_provider_lacks_the_model_changes_nothing() -> No
         await _apply(owner, "model.provider.account", "spare")
 
     assert (catalog.account, agent.model) == (None, before)
+    await _apply(owner, "model.provider.account", "work")
+    with pytest.raises(ValueError, match="wide"):
+        await _apply(owner, "model.provider.account", "spare")
+    assert catalog.account == "work"
 
 
 @pytest.mark.asyncio

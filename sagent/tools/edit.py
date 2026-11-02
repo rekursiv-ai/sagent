@@ -93,19 +93,18 @@ class Edit:
           arguments: The Edit call making the same change, or ``None``.
 
         """
-        takes_value = frozenset({"-e", "-f", "--expression", "--file"})
         # Bash fills in ``$x`` before sed sees it; Edit would write it as is.
-        if invocation.expands or not replaceable(
-            invocation,
-            exes=frozenset({"sed"}),
-            takes_value=takes_value,
-        ):
+        if invocation.expands or not replaceable(invocation, exes=frozenset({"sed"})):
             return None
         args = invocation.args
+        # Any flag but the one that edits in place, ``-e`` and ``-f`` among them,
+        # refuses the call, so no flag's value is ever taken for an operand.
         flags = [a for a in args if a.startswith("-")]
-        given = operands(args, takes_value=takes_value)
-        script = re.fullmatch(r"s/([^/]*)/([^/]*)/(g?)", given[0]) if given else None
-        if flags not in (["-i"], ["--in-place"]) or len(given) != 2 or script is None:
+        given = operands(args)
+        if flags not in (["-i"], ["--in-place"]) or len(given) != 2:
+            return None
+        script = re.fullmatch(r"s/([^/]*)/([^/]*)/(g?)", given[0])
+        if script is None:
             return None
         files = given[1:]
         # Every group takes part in a match, so none is ``None``.
@@ -160,7 +159,7 @@ def _edit(
             " another agent. Read it again before editing it.",
         )
     try:
-        raw = path.read_bytes().decode("utf-8")
+        raw = path.read_bytes().decode("utf-8")  # pragma: no mutate -- UTF-8 too.
     except UnicodeDecodeError:
         return _error(f"{path} is not UTF-8. Use Bash with an explicit decoder.")
     # Read shows a CRLF file with ``\n``, so the strings the model quotes have
@@ -177,8 +176,8 @@ def _edit(
             f"old_string found {count} times. Set replace_all, or give more"
             " context to make it unique.",
         )
-    replaced = count if a.replace_all else 1
-    edited = text.replace(old, new, replaced)
+    # Every occurrence: without ``replace_all`` there is exactly one.
+    edited = text.replace(old, new)
     write_file(path, (edited.replace("\n", "\r\n") if crlf else edited).encode())
     context.files.saw(path)
     return FileEditResult(
@@ -186,16 +185,16 @@ def _edit(
         path=str(path),
         edits=tuple(
             Splice(before=old, after=new, start=start, count=old.count("\n") + 1)
-            for start in _lines_at(text, old, count=replaced)
+            for start in _lines_at(text, old)
         ),
     )
 
 
-def _lines_at(text: str, needle: str, *, count: int) -> list[int]:
-    """Return the one-based line of each of the first ``count`` ``needle``."""
+def _lines_at(text: str, needle: str) -> list[int]:
+    """Return the one-based line of each ``needle`` in ``text``."""
     lines: list[int] = []
     line, scanned, at = 1, 0, text.find(needle)
-    while at >= 0 and len(lines) < count:
+    while at >= 0:
         line += text.count("\n", scanned, at)
         lines.append(line)
         scanned = at

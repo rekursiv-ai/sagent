@@ -870,8 +870,8 @@ async def _action(argv: Sequence[str]) -> int:
 async def _agent_action(argv: Sequence[str]) -> int:
     """Run the agent's action ``argv`` names, after the setting flags it gives."""
     words = _command_words(argv)
-    named = {a.name for a in Commands.actions() if a.cli}
-    if not any(tuple(words[:n]) in named for n in range(1, len(words) + 1)):
+    named = [a.name for a in Commands.actions() if a.cli]
+    if not any(tuple(words[: len(name)]) == name for name in named):
         return _unknown(argv)
     screen = _Screen()
     allow = argparse.ArgumentParser(add_help=False, allow_abbrev=False)

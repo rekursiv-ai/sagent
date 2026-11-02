@@ -40,7 +40,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, override
+from typing import TYPE_CHECKING, ClassVar, Final, override
 
 import asyncio
 import logging
@@ -52,7 +52,7 @@ from sagent.agent.agent import Agent
 from sagent.model.exceptions import AuthError, RateLimitedError
 from sagent.providers.catalog import successor
 from sagent.providers.login import Spent
-from sagent.providers.types import HasLogin
+from sagent.providers.types import HasLogin, Provider
 from sagent.runtime import types
 from sagent.runtime.exceptions import describe, local_time
 from sagent.session.types import (
@@ -142,7 +142,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         so their idle does not."""
 
         # Whether the user has said anything yet; their first message wakes debtors.
-        self._woken = False
+        self._woken = False  # pragma: no mutate -- read for truth; None is as false.
 
     @override
     def __getitem__(self, label: str) -> Agent:
@@ -196,14 +196,10 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             raise ValueError(f"An agent is already labelled {label!r}.")
         if spec is not None and (parent is None or closing is None):
             raise ValueError("Only a persistent child has a spec to stand.")
-        up = self._members.get(parent) if parent is not None else None
-        depth = 0 if up is None else up.depth + 1
+        above = None if parent is None else self._members[parent].generations
         caps = [
             c
-            for c in (
-                up.max_depth if up is not None else None,
-                depth + max_depth if max_depth is not None else None,
-            )
+            for c in (None if above is None else above - 1, max_depth)
             if c is not None
         ]
         label = label or self.child_label(parent)
@@ -211,8 +207,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         self._members[label] = _Member(
             agent=agent,
             parent=parent,
-            depth=depth,
-            max_depth=min(caps) if caps else None,
+            generations=min(caps) if caps else None,
             closing=closing,
             dun=dun,
         )
@@ -262,10 +257,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             mine.pop(setting, None)
         else:
             mine[setting] = value
-        self._members[label].agent.session.stand(
-            "choices",
-            UncategorizedRecord(kind="choices", payload=dict(mine)) if mine else None,
-        )
+        self._stand(label, "choices", mine)
 
     def inherited(self, label: str) -> dict[str, str]:
         """Return the choices ``label`` takes from its ancestors, nearest winning.
@@ -495,18 +487,10 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             if owed and label != addressed:
                 self._members[label].dun.nudge(owed)
 
-    def _book(self, debtor: str) -> None:
-        """Stand what ``debtor`` owes in its journal, so a resume still owes it."""
-        owed = self._owed.get(debtor, {})
-        self._members[debtor].agent.session.stand(
-            "owed",
-            UncategorizedRecord(kind="owed", payload=dict(owed)) if owed else None,
-        )
-
     def can_spawn(self, label: str) -> bool:
         """Return whether ``label`` may spawn a child under its depth cap."""
-        member = self._members[label]
-        return member.max_depth is None or member.depth < member.max_depth
+        generations = self._members[label].generations
+        return generations is None or generations > 0
 
     def standing(self, label: str) -> list[ChildSpec]:
         """Return the persistent children ``label``'s journal says to start again.
@@ -594,6 +578,17 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         self.choices.pop(label, None)
         self.awaited.discard(label)
 
+    def _book(self, debtor: str) -> None:
+        """Stand what ``debtor`` owes in its journal, so a resume still owes it."""
+        self._stand(debtor, "owed", self._owed.get(debtor) or {})
+
+    def _stand(self, label: str, kind: str, held: dict[str, str]) -> None:
+        """Stand ``held`` in ``label``'s journal under ``kind``; nothing held withdraws it."""
+        self._members[label].agent.session.stand(
+            kind,
+            UncategorizedRecord(kind=kind, payload=dict(held)) if held else None,
+        )
+
     def _check(self, recipient: str) -> None:
         """Raise ``ValueError`` unless ``recipient`` can be reached."""
         if recipient != "user" and recipient not in self._members:
@@ -657,9 +652,7 @@ class _Dun:
                 owed,
             )
         elif isinstance(event, types.AgentIdle) and self._worked:
-            # pragma: no mutate start -- only its truth is read; None is as false.
-            self._worked = False
-            # pragma: no mutate end
+            self._worked = False  # pragma: no mutate -- None is as false.
             last, self._last_call = self._last_call, None
             self._idled(owed, last)
 
@@ -765,9 +758,8 @@ class _Member:
 
     agent: Agent
     parent: str | None
-    depth: int
-    max_depth: int | None
-    """The deepest any descendant may be; ``None`` for no cap."""
+    generations: int | None
+    """How many generations may follow it; ``None`` for no cap."""
 
     closing: AsyncExitStack | None
     """What closes a persistent child; ``None`` for one its spawner closes."""
@@ -792,32 +784,22 @@ class _Precedence:
     Args:
       agent: The agent whose model it moves.
       catalog: Where each login's provider is built.
-      quota_wait_sec: A wait longer than this, its window unnamed, is a spent
-        quota, not a throttle.
-      untold_reset_sec: How long a window that named no reset stays spent.
 
     """
 
-    def __init__(
-        self,
-        agent: Agent,
-        *,
-        catalog: ModelCatalog,
-        quota_wait_sec: float = 300.0,
-        untold_reset_sec: float = 3_600.0,
-    ) -> None:
+    quota_wait_sec: ClassVar[float] = 300.0
+    """A wait longer than this, its window unnamed, is a spent quota, not a throttle."""
+
+    untold_reset_sec: ClassVar[float] = 3_600.0
+    """How long a window that named no reset stays spent."""
+
+    def __init__(self, agent: Agent, *, catalog: ModelCatalog) -> None:
         self._agent = agent
         self._catalog = catalog
-        self._quota_wait_sec = quota_wait_sec
-        self._untold_reset_sec = untold_reset_sec
-        # The login the model signs in as, and what it was taken from: a switch
-        # the user made since, of provider or account, starts it over.
-        self._serving = agent.account or "default"
-        self._chosen = (agent.account, agent.model.provider.name)
-        # Logins whose provider would not serve the model this session.
-        self._unserved: set[str] = set()
+        # ``None`` until the first call takes up the user's choice.
+        self._seat: _Seat | None = None
         # Whether a call has been made: a session's first move is no news.
-        self._started = False
+        self._started = False  # pragma: no mutate -- read for truth; None is as false.
 
     async def before_call(self, turn_start: bool) -> None:
         """Move to the first login with quota left: off a spent one, or at a turn's start.
@@ -826,26 +808,28 @@ class _Precedence:
           turn_start: Whether the call is the turn's first.
 
         """
-        logins = self._logins()
-        if logins is None:
+        taken = self._logins()
+        if taken is None:
             return
+        logins, seat = taken
         # Only a turn's call starts the session: a compaction before it must not
         # spend the start's one quiet move.
         quiet = turn_start and not self._started
         self._started = self._started or turn_start
-        ranked = await asyncio.to_thread(self._ranked, logins, now=time.time())
+        ranked = await asyncio.to_thread(self._ranked, logins, seat, now=time.time())
         # A login in use but signed out is not ranked; its failure moves it on.
-        spent = dict(ranked).get(self._serving)
-        want = next((a for a, s in ranked if s is None), None)
+        spent = dict(ranked).get(seat.serving)
+        want = _first_live(ranked)
         if not turn_start and spent is None:
             return
-        if want is None or want == self._serving:
+        if want is None or want == seat.serving:
             return
         if spent is None:
-            await self._move(logins, quiet=quiet)
+            await self._move(logins, seat, quiet=quiet)
         else:
             await self._move(
                 logins,
+                seat,
                 window=spent.window,
                 until=spent.until,
                 quiet=quiet,
@@ -862,28 +846,29 @@ class _Precedence:
             waits for; else ``None``.
 
         """
-        logins = self._logins()
-        if logins is None:
+        taken = self._logins()
+        if taken is None:
             return None
+        logins, seat = taken
         now = time.time()
-        if isinstance(exc, AuthError) and self._serving != self._chosen_login():
-            await logins.sign_out(self._serving)
+        if isinstance(exc, AuthError) and seat.serving != self._chosen_login():
+            await logins.sign_out(seat.serving)
             window, until = "signed out", 0.0
         elif isinstance(exc, RateLimitedError) and (
-            exc.limit or exc.retry_after_sec > self._quota_wait_sec
+            exc.limit or exc.retry_after_sec > self.quota_wait_sec
         ):
-            until = now + (exc.retry_after_sec or self._untold_reset_sec)
+            until = now + (exc.retry_after_sec or self.untold_reset_sec)
             window = exc.limit
             model = self._agent.model.capability.model_id
             await logins.spend(
-                self._serving,
+                seat.serving,
                 Spent(window=window, model=model, until=until),
             )
         else:
             return None
-        if await self._move(logins, window=window, until=until):
+        if await self._move(logins, seat, window=window, until=until):
             return None
-        resets = await asyncio.to_thread(self._resets, logins, now=now)
+        resets = await asyncio.to_thread(self._resets, logins, seat, now=now)
         if not resets:
             return None
         self._agent.runtime.publish(
@@ -891,17 +876,25 @@ class _Precedence:
         )
         return resets[0][1]
 
-    def _logins(self) -> Logins | None:
-        """Return the provider's logins, the user's switches since taken up; else ``None``."""
+    # A model the user picks is theirs: one from the catalog signs in as their
+    # account, whatever login the one it replaced had moved to.
+    def _logins(self) -> tuple[Logins, _Seat] | None:
+        """Return the provider's logins and seat, a switch since taken up; else ``None``."""
         provider = self._agent.model.provider
         if not isinstance(provider, HasLogin):
             return None
-        chosen = (self._agent.account, provider.name)
-        if chosen != self._chosen:
-            self._chosen = chosen
-            self._serving = self._chosen_login()
-            self._unserved.clear()
-        return provider.logins
+        seat = self._seat
+        if (
+            seat is None
+            or seat.account != self._agent.account
+            or seat.provider is not provider
+        ):
+            seat = self._seat = _Seat(
+                account=self._agent.account,
+                provider=provider,
+                serving=self._chosen_login(),
+            )
+        return provider.logins, seat
 
     def _chosen_login(self) -> str:
         return self._agent.account or "default"
@@ -909,28 +902,36 @@ class _Precedence:
     def _ranked(
         self,
         logins: Logins,
+        seat: _Seat,
         *,
         now: float,
     ) -> tuple[tuple[str, Spent | None], ...]:
         """Return the logins to try, the one chosen first, as one read of the ledger has them."""
         model = self._agent.model.capability.model_id
         ranked = logins.ranked(model, now=now, first=self._agent.account)
-        return tuple((a, s) for a, s in ranked if a not in self._unserved)
+        return tuple((a, s) for a, s in ranked if a not in seat.unserved)
 
-    def _resets(self, logins: Logins, *, now: float) -> tuple[tuple[str, float], ...]:
+    def _resets(
+        self,
+        logins: Logins,
+        seat: _Seat,
+        *,
+        now: float,
+    ) -> tuple[tuple[str, float], ...]:
         """Return each login's reset, soonest first."""
         resets = (
             (account, spent.until)
-            for account, spent in self._ranked(logins, now=now)
+            for account, spent in self._ranked(logins, seat, now=now)
             if spent is not None
         )
         return tuple(sorted(resets, key=lambda reset: reset[1]))
 
-    # The same provider, model and choices; a login that cannot is passed over for the
-    # session.
+    # The same provider, model and choices, so no settings cached for another model
+    # apply; a login that cannot is passed over until the user switches.
     async def _move(
         self,
         logins: Logins,
+        seat: _Seat,
         *,
         window: str = "",
         until: float = 0.0,
@@ -941,18 +942,20 @@ class _Precedence:
         current = agent.model
         provider = current.provider.name
         while True:
-            ranked = await asyncio.to_thread(self._ranked, logins, now=time.time())
-            account = next((a for a, s in ranked if s is None), None)
-            if account is None:
-                return False
-            if account == self._serving:
+            ranked = await asyncio.to_thread(
+                self._ranked,
+                logins,
+                seat,
+                now=time.time(),
+            )
+            account = _first_live(ranked)
+            if account is None or account == seat.serving:
                 return False
             try:
                 agent.model = await successor(
                     self._catalog.signed_in(provider, account=account).__getitem__,
                     current.capability.model_id,
                     current=current,
-                    model_cache=agent.model_cache,
                 )
             except ValueError:
                 logger.warning(
@@ -961,20 +964,41 @@ class _Precedence:
                     account,
                     exc_info=True,
                 )
-                self._unserved.add(account)
+                seat.unserved.add(account)
                 continue
-            if quiet:
-                self._serving = account
-                return True
-            agent.runtime.publish(
-                types.LoginSwitched(
-                    provider=provider,
-                    was=self._serving,
-                    now=account,
-                    window=window,
-                    until=until,
-                    first=ranked[0][0],
-                ),
-            )
-            self._serving = account
+            if not quiet:
+                agent.runtime.publish(
+                    types.LoginSwitched(
+                        provider=provider,
+                        was=seat.serving,
+                        now=account,
+                        window=window,
+                        until=until,
+                        first=ranked[0][0],
+                    ),
+                )
+            seat.serving = account
+            seat.provider = agent.model.provider
             return True
+
+
+@dataclass(slots=True, kw_only=True)
+class _Seat:
+    """The login a model signs in as, for the account the user chose."""
+
+    account: str | None
+    """The account the user chose; ``None`` for the default."""
+
+    provider: Provider
+    """The provider the model is on: the user's pick, or the one a move signed in."""
+
+    serving: str
+    """The login the model signs in as."""
+
+    unserved: set[str] = field(default_factory=set[str])
+    """Logins whose provider would not serve the model, passed over for the seat."""
+
+
+def _first_live(ranked: tuple[tuple[str, Spent | None], ...]) -> str | None:
+    """Return the first login in ``ranked`` with quota left; ``None`` if none has."""
+    return next((a for a, s in ranked if s is None), None)

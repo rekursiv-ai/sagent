@@ -100,6 +100,8 @@ class BorrowedLogin:
             if _access(self._token) == rejected:
                 self._token = await self._lease(rejected=rejected)
 
+    # ``sub._Login.sign_in`` declares ``headless``'s default, so callers may omit it;
+    # this body raises before reading either, so no value is observable.
     async def sign_in(
         self,
         *,

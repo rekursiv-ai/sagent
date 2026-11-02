@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING
 
 import io
@@ -14,7 +14,7 @@ from treekle import mutable
 import pytest
 
 from sagent.model.capability import ModelLimits, ModelSettings, model_setting_names
-from sagent.model.cost import TokenCount
+from sagent.model.cost import PriceCatalog, PriceCondition, TokenCount, TokenPrice
 from sagent.model.exceptions import DisconnectedError, RateLimitedError
 from sagent.model.types import Request, TextChunk
 from sagent.providers.dashscope.api import DashScope
@@ -123,9 +123,11 @@ def test_encode_merges_the_models_records_into_one_assistant_message() -> None:
             content="look",
             attachments=(image, Attachment(mime_descriptor="text/plain", data=b"t")),
         ),
-        Thinking(content="I should "),
+        Thinking(content="I should ", summary="(the gist)"),
         Thinking(summary="read it."),
         AssistantMessage(content="Reading"),
+        # Empty text adds nothing, not even an empty part.
+        AssistantMessage(content=""),
         AssistantMessage(content=" both."),
         ToolCall(call_id="toolu_a", name="Read", arguments={"file_path": "a.py"}),
         ToolCall(call_id="toolu_b", name="Read", arguments={"file_path": "b.py"}),
@@ -143,6 +145,7 @@ def test_encode_merges_the_models_records_into_one_assistant_message() -> None:
         ),
         Thinking(content="hmm"),
         UserMessage(content="next"),
+        AssistantMessage(content=""),
         ToolCall(call_id="toolu_c", name="Read"),
     )
     image_block = {"type": "image_url", "image_url": {"url": url}}
@@ -196,6 +199,11 @@ def test_encode_leaves_reasoning_out_for_a_server_that_reads_none_back() -> None
     assert _encode(Request(records=records), reasoning_field="")["messages"] == [
         {"role": "assistant", "content": "Done."},
         {"role": "user", "content": "ok"},
+    ]
+    # Sealed reasoning that says nothing is sent as nothing.
+    sealed = (UserMessage(content="go"), Thinking(encrypted="sig"))
+    assert _encode(Request(records=sealed))["messages"] == [
+        {"role": "user", "content": "go"},
     ]
     only_image = (
         UserMessage(
@@ -401,6 +409,14 @@ def test_the_stop_reason_is_in_the_shared_vocabulary(
     assert reader.response().stop_reason == stop_reason
 
 
+def test_of_two_finish_reasons_the_last_stands() -> None:
+    reader = _reader()
+    reader.feed(_chunk("length"))
+    reader.feed(_chunk("stop"))
+
+    assert reader.response().stop_reason == "end_turn"
+
+
 def test_calls_under_a_plain_stop_are_tool_use() -> None:
     reader = _reader()
     reader.feed(
@@ -413,19 +429,153 @@ def test_calls_under_a_plain_stop_are_tool_use() -> None:
 def test_a_reply_that_never_finished_is_a_disconnect() -> None:
     reader = _reader()
     reader.feed(_chunk(content="Hal"))
-    with pytest.raises(DisconnectedError):
+    with pytest.raises(
+        DisconnectedError,
+        match=r"^The reply ended before it was finished\.$",
+    ):
         reader.response()
 
 
 def test_an_in_stream_error_raises_what_it_means() -> None:
     with pytest.raises(RateLimitedError, match="Slow"):
         _reader().feed({"error": {"code": "rate_limit_exceeded", "message": "Slow"}})
-    with pytest.raises(RuntimeError, match="broke"):
+    # An event has no HTTP status: it is ``0``.
+    with pytest.raises(RuntimeError, match=r"^The server replied 0 : broke$"):
         _reader().feed({"object": "error", "message": "broke"})
     # A chunk that names no error is not one.
     assert _reader().feed({"error": None, **_chunk(content="ok")}) == TextChunk(
         text="ok",
     )
+
+
+def test_reasoning_streamed_in_pieces_is_one_thought() -> None:
+    reader = _reader()
+    reader.feed(_chunk(reasoning_content="Hm"))
+    reader.feed(_chunk("stop", reasoning_content="m."))
+
+    assert reader.response().records == (Thinking(content="Hmm."),)
+
+
+def test_a_reply_that_reports_no_usage_used_nothing() -> None:
+    reader = _reader()
+    reader.feed(_chunk("stop", content="ok"))
+    reader.feed({"choices": [], "usage": {"prompt_tokens": 10}})
+
+    assert reader.response().tokens == TokenCount(request=10)
+
+
+def test_a_reply_with_no_usage_at_all_used_nothing() -> None:
+    reader = _reader()
+    reader.feed(_chunk("stop", content="ok"))
+
+    assert reader.response().tokens == TokenCount()
+
+
+def test_a_fragment_naming_no_index_is_the_first_call() -> None:
+    reader = _reader()
+    reader.feed(_chunk(tool_calls=[{"id": "c", "function": {"name": "Read"}}]))
+    reader.feed(
+        _chunk(tool_calls=[{"index": 0, "function": {"arguments": '{"a": 1}'}}]),
+    )
+    # A fragment with no arguments adds none.
+    reader.feed(_chunk(tool_calls=[{"index": 0, "function": dict[str, str]()}]))
+    reader.feed(_chunk("tool_calls"))
+
+    assert reader.response().records == (
+        ToolCall(call_id="c", name="Read", arguments={"a": 1}),
+    )
+
+
+class _Evening:
+    """Stands in for ``datetime``: 6 October in the evening here, 7 October in UTC."""
+
+    @classmethod
+    def now(cls, tz: object = None) -> datetime:
+        if tz is UTC:
+            return datetime(2026, 10, 7, 1, tzinfo=UTC)
+        return datetime(2026, 10, 6, 18)  # noqa: DTZ001 -- the local wall clock.
+
+
+def test_a_reply_is_billed_at_the_card_of_its_utc_date(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    capability = replace(
+        capability,
+        prices=PriceCatalog(
+            prices={
+                PriceCondition(): TokenPrice(response=1.0),
+                PriceCondition(effective_date=date(2026, 10, 7)): TokenPrice(
+                    response=2.0,
+                ),
+            },
+            window=capability.prices.window,
+        ),
+    )
+    monkeypatch.setattr(chat, "datetime", _Evening)
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+    )
+    reader.feed(_chunk("stop", content="ok"))
+    reader.feed({"choices": [], "usage": {"completion_tokens": 1_000_000}})
+
+    assert reader.response().spend.response == 2.0
+
+
+def test_a_results_images_follow_its_run_of_results() -> None:
+    png = _png()
+    image = Attachment(mime_descriptor="image/png", data=png)
+    url = wire.image_url(image, limits=_model("qwen-plus-3.7")[0].limits)
+    shown = {
+        "role": "user",
+        "content": [{"type": "image_url", "image_url": {"url": url}}],
+    }
+    records = (
+        ToolCall(call_id="a", name="Read"),
+        UncategorizedToolResult(call_id="a", content="1", attachments=(image,)),
+        AssistantMessage(content="next"),
+        ToolCall(call_id="b", name="Read"),
+        UncategorizedToolResult(call_id="b", content="2", attachments=(image,)),
+        UserMessage(content="and"),
+        # A result whose call this request never made.
+        UncategorizedToolResult(call_id="z", content="3", attachments=(image,)),
+    )
+
+    messages = _encode(Request(records=records))["messages"]
+
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "content": "1"},
+        shown,
+        {
+            "role": "assistant",
+            "content": "next",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "content": "2"},
+        shown,
+        {"role": "user", "content": "and"},
+        {"role": "tool", "tool_call_id": "call_2", "content": "3"},
+        shown,
+    ]
 
 
 def test_a_model_of_unknown_reply_length_is_sent_no_cap() -> None:

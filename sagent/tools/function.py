@@ -29,7 +29,7 @@ from dataclasses import (
     fields,
     make_dataclass,
 )
-from typing import TYPE_CHECKING, cast, get_type_hints, overload
+from typing import TYPE_CHECKING, cast, overload
 
 import asyncio
 import inspect
@@ -86,7 +86,7 @@ class FunctionTool:
         display: ToolDisplay,
     ) -> None:
         self._fn = fn
-        self._arguments = _signature(fn)
+        self._arguments = _signature(fn, name=name)
         self._takes_context = "context" in inspect.signature(fn).parameters
         self.name = name
         self.description = description
@@ -203,20 +203,24 @@ def tool(
     return make if fn is None else make(fn)
 
 
-def _signature(fn: Callable[..., object]) -> type[DataclassInstance]:
-    """Return ``fn``'s parameters, but ``context``, as an ``Arguments`` dataclass."""
-    # A module offering a tool may import `ToolContext` for its checker only.
-    hints = cast(
-        "dict[str, object]",
-        get_type_hints(fn, localns={"ToolContext": ToolContext}, include_extras=True),
+def _signature(fn: Callable[..., object], *, name: str) -> type[DataclassInstance]:
+    """Return ``fn``'s parameters, but ``context``, as the tool ``name``'s arguments."""
+    # The signature, not the function's own annotations, so a ``partial`` keeps the
+    # types of what it wraps. A module offering a tool may import `ToolContext`
+    # for its checker only.
+    signature = inspect.signature(
+        fn,
+        locals={"ToolContext": ToolContext},
+        eval_str=True,
     )
     notes = _notes(inspect.getdoc(fn) or "")
     specs: list[tuple[str, object, object]] = []
-    for param in inspect.signature(fn).parameters.values():
+    for param in signature.parameters.values():
         if param.name == "context":
             continue
         note = {"description": notes.get(param.name, "")}
-        hint = hints.get(param.name, str)
+        annotation = cast("object", param.annotation)
+        hint = str if annotation is inspect.Parameter.empty else annotation
         default = cast("object", param.default)
         if default is inspect.Parameter.empty:
             specs.append((param.name, hint, dataclass_field(metadata=note)))
@@ -224,12 +228,9 @@ def _signature(fn: Callable[..., object]) -> type[DataclassInstance]:
             specs.append(
                 (param.name, hint, dataclass_field(default=default, metadata=note)),
             )
-    made = make_dataclass(
-        f"{getattr(fn, '__name__', 'tool')}_arguments",
-        specs,
-        frozen=True,
-        kw_only=True,
-    )
+    # Keyword-only, as a call names every argument: a required parameter after
+    # one with a default needs no positional slot.
+    made = make_dataclass(name, specs, frozen=True, kw_only=True)
     return cast("type[DataclassInstance]", made)
 
 
