@@ -24,8 +24,8 @@ def _measure(
     fail_under: int,
     measured: dict[str, tuple[int, int]],
     unrun: tuple[str, ...] = (),
-) -> None:
-    """Write ``pyproject.toml``, the sources, and a ``.coverage`` for them."""
+) -> Path:
+    """Write ``pyproject.toml``, the sources, and a data file for them, outside cwd."""
     (root / "pyproject.toml").write_text(
         '[tool.coverage.run]\nomit = ["*/skipped/*"]\n'
         f"[tool.coverage.report]\nfail_under = {fail_under}\n",
@@ -40,9 +40,12 @@ def _measure(
         module = root / name
         module.parent.mkdir(parents=True, exist_ok=True)
         module.write_text("".join(f"x{i} = {i}\n" for i in range(4)))
-    data = coverage.CoverageData(basename=str(root / ".coverage"))
+    path = root / "run" / ".coverage"
+    path.parent.mkdir()
+    data = coverage.CoverageData(basename=str(path))
     data.add_lines(lines)
     data.write()
+    return path
 
 
 def test_only_changed_files_below_the_floor_are_listed(
@@ -50,7 +53,7 @@ def test_only_changed_files_below_the_floor_are_listed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A changed file no test executed counts 0%; an unchanged sibling not at all."""
-    _measure(
+    data = _measure(
         tmp_path,
         fail_under=98,
         measured={"pkg/low.py": (10, 5), "pkg/full.py": (50, 49), "pkg/sib.py": (4, 0)},
@@ -60,6 +63,7 @@ def test_only_changed_files_below_the_floor_are_listed(
 
     assert coverage_summary.shortfall(
         ["pkg/low.py", "pkg/full.py", "pkg/unrun.py"],
+        data=data,
     ) == [
         "pkg/low.py  5/10 missed  6-10",
         "pkg/unrun.py  4/4 missed  1-4",
@@ -84,10 +88,10 @@ def test_the_floor_applies_to_the_changed_sources_together(
     fail_under: int,
     short: bool,
 ) -> None:
-    _measure(tmp_path, fail_under=fail_under, measured=measured)
+    data = _measure(tmp_path, fail_under=fail_under, measured=measured)
     monkeypatch.chdir(tmp_path)
 
-    assert bool(coverage_summary.shortfall(list(measured))) is short
+    assert bool(coverage_summary.shortfall(list(measured), data=data)) is short
 
 
 def test_a_total_exactly_at_the_floor_passes_and_each_file_is_judged_alike(
@@ -95,16 +99,16 @@ def test_a_total_exactly_at_the_floor_passes_and_each_file_is_judged_alike(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """99 of 100 statements at ``fail_under = 99`` is on the floor, not under it."""
-    _measure(
+    data = _measure(
         tmp_path,
         fail_under=99,
         measured={"pkg/a.py": (100, 99), "pkg/b.py": (200, 197)},
     )
     monkeypatch.chdir(tmp_path)
 
-    assert coverage_summary.shortfall(["pkg/a.py"]) == []
+    assert coverage_summary.shortfall(["pkg/a.py"], data=data) == []
     # a.py, on the floor, is not named; b.py, 0.5 under it, is.
-    assert coverage_summary.shortfall(["pkg/a.py", "pkg/b.py"]) == [
+    assert coverage_summary.shortfall(["pkg/a.py", "pkg/b.py"], data=data) == [
         "pkg/b.py  3/200 missed  198-200",
         "Changed files are 98.67% covered, below fail_under=99.",
     ]
@@ -118,10 +122,10 @@ def test_the_data_file_is_closed_when_the_summary_returns(
     fail_under: int,
 ) -> None:
     """An open ``.coverage`` outlives the gate and fails a later test on gc."""
-    _measure(tmp_path, fail_under=fail_under, measured={"pkg/low.py": (10, 5)})
+    data = _measure(tmp_path, fail_under=fail_under, measured={"pkg/low.py": (10, 5)})
     monkeypatch.chdir(tmp_path)
 
-    coverage_summary.shortfall(["pkg/low.py"])
+    coverage_summary.shortfall(["pkg/low.py"], data=data)
     gc.collect()
 
 
@@ -131,11 +135,12 @@ def test_an_unreadable_data_file_fails_and_leaves_nothing_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A connection left open fails whichever later test the collector runs in."""
-    (tmp_path / ".coverage").write_bytes(b"not a database")
+    data = tmp_path / ".coverage"
+    data.write_bytes(b"not a database")
     monkeypatch.chdir(tmp_path)
 
     with pytest.raises(DataError):
-        coverage_summary.shortfall(["a.py"])
+        coverage_summary.shortfall(["a.py"], data=data)
     gc.collect()
 
 

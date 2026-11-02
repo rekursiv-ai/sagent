@@ -65,26 +65,25 @@ def pytest(context: gate.Context, *, dependents: str | None) -> int:
     files = gate.drained("pytest", context=context)
     if files is None:
         return gate.unspooled("pytest")
+    # pragma: no mutate start -- workers uppercases the name.
     count = gate.workers("pytest", environ=context.environ)
-    measured = context.installed("pytest_cov")
-    if measured and (
-        erased := context.run([sys.executable, "-m", "coverage", "erase"])
-    ):
-        return erased
+    # pragma: no mutate end
     tests = _selected(context, files=files, dependents=dependents, workers=count)
     if not tests:
         return 0
     # Files, not nodeids: the threshold was measured in files, and dozens of
     # nodeids from one file paid xdist's ~5s startup for nothing.
+    # pragma: no mutate start -- a junk default is 0, as "" is.
     spread = len({test.partition("::")[0] for test in tests}) >= (
         gate.positive(context.environ.get("SIDECAR_XDIST_MIN", "")) or 16
     )
+    # pragma: no mutate end
     sources = [path for path in files if not _is_test(path)]
     directories = sorted({Path(path).parent.as_posix() for path in sources})
+    measured = context.installed("pytest_cov")
     cov: list[str] = (
         [
             *(f"--cov={directory}" for directory in directories),
-            "--cov-append",
             "--no-cov-on-fail",
             "--cov-fail-under=0",
             "--cov-report=term-missing:skip-covered"
@@ -94,30 +93,33 @@ def pytest(context: gate.Context, *, dependents: str | None) -> int:
         if measured and directories
         else []
     )
-    # An @argfile: thousands of nodeids or one --cov per file overflow ARG_MAX.
-    with tempfile.NamedTemporaryFile(
-        "w",
-        prefix="precommit-",
-        suffix=".args",
-    ) as argfile:
-        argfile.write("".join(f"{arg}\n" for arg in [*cov, *tests]))
-        argfile.flush()
+    # A private data file: `coverage erase` or a combine in the checkout deletes
+    # every `.coverage.*` there, killing a concurrent `pytest --cov`'s workers.
+    with tempfile.TemporaryDirectory(prefix="precommit-") as temp:
+        # pragma: no mutate start -- any name in a private dir.
+        data = Path(temp) / ".coverage"
+        # pragma: no mutate end
+        # An @argfile: thousands of nodeids or one --cov per file overflow ARG_MAX.
+        argfile = Path(temp) / "pytest.args"
+        argfile.write_text("".join(f"{arg}\n" for arg in [*cov, *tests]))
         status = context.run(
             [
+                "env",
+                f"COVERAGE_FILE={data}",
                 sys.executable,
                 "-m",
                 "pytest",
                 *(["-n", str(count)] if spread else []),
                 "-q",
                 "--tb=short",
-                f"@{argfile.name}",
+                f"@{argfile}",
             ],
         )
-    if status not in {0, 5}:
-        return status
-    if not cov or not (context.root / ".coverage").is_file():
-        return 0
-    below = coverage_summary.shortfall(sources)
+        if status not in {0, 5}:
+            return status
+        if not cov or not data.is_file():
+            return 0
+        below = coverage_summary.shortfall(sources, data=data)
     sys.stderr.writelines(f"{line}\n" for line in below)
     return int(bool(below))
 
