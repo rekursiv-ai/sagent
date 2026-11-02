@@ -364,7 +364,7 @@ def _file_blocks(out: bytes, *, query: Query) -> list[tuple[str, list[Row]]]:
         return [(name, [Row(text=name)]) for name in names]
     blocks: list[tuple[str, list[Row]]] = []
     gap = False  # pragma: no mutate -- the first row sets it before any read.
-    previous: tuple[str, int] | None = None
+    previous: tuple[str, int] | None = None  # pragma: no mutate -- "" is no row.
     for line in lines:
         if line == b"--":
             gap = True
