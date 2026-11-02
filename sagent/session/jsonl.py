@@ -25,6 +25,7 @@ import os
 from treekle import json_loads
 
 from sagent.lib.files.owner_only import open_private
+from sagent.lib.posix.pids import lock_holder
 from sagent.session.types import (
     ContextClear,
     IncompleteRecord,
@@ -166,7 +167,9 @@ def _open_locked(path: Path) -> int:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         os.close(fd)
-        raise JournalInUseError(f"Journal {path} is open in another process.") from None
+        holder = lock_holder(path)
+        where = "another process" if holder is None else f"pid {holder}"
+        raise JournalInUseError(f"Journal {path} is open in {where}.") from None
     # A crash mid-write leaves a line without its newline; ending it keeps the
     # next record from joining the torn one into a line nothing can read.
     size = os.fstat(fd).st_size

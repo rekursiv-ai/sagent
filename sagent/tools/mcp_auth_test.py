@@ -8,10 +8,12 @@ from typing import TYPE_CHECKING, cast, override
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import asyncio
+import functools
 import logging
 import re
 import secrets
 import socket
+import threading
 import time
 
 from mcp.client.session_group import StreamableHttpParameters
@@ -42,7 +44,7 @@ from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Callable
 
 
 _WEB = McpServer(
@@ -133,7 +135,9 @@ async def test_sessions_open_at_once_renew_once_and_share_the_renewal(
         server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
         await _sign_in(server, monkeypatch=monkeypatch)
         async with McpSession([server]) as first, McpSession([server]) as second:
-            await asyncio.sleep(1.1)
+            # The token's second runs out on every clock here at once, client and
+            # server alike, with no second spent waiting for it.
+            monkeypatch.setattr(time, "time", functools.partial(_later, time.time, 5))
             for session in (first, second):
                 (greet,) = session.tools()
                 result = await greet.call(
@@ -482,6 +486,11 @@ class _Browser:
             await http.get(url)
 
 
+def _later(clock: Callable[[], float], seconds: float) -> float:
+    """Return ``clock()`` moved ``seconds`` on."""
+    return clock() + seconds
+
+
 @dataclass(slots=True, kw_only=True)
 class _Authority:
     """An OAuth server that approves every request at once, all in memory."""
@@ -632,12 +641,75 @@ class _Authority:
         del token
 
 
+@dataclass(slots=True, kw_only=True)
+class _Switch(_Authority):
+    """The authority of the one server every test shares: whichever test's is current."""
+
+    current: _Authority = field(default_factory=_Authority)
+
+    @override
+    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        return await self.current.get_client(client_id)
+
+    @override
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        await self.current.register_client(client_info)
+
+    @override
+    async def authorize(
+        self,
+        client: OAuthClientInformationFull,
+        params: AuthorizationParams,
+    ) -> str:
+        return await self.current.authorize(client, params)
+
+    @override
+    async def load_authorization_code(
+        self,
+        client: OAuthClientInformationFull,
+        authorization_code: str,
+    ) -> AuthorizationCode | None:
+        return await self.current.load_authorization_code(client, authorization_code)
+
+    @override
+    async def exchange_authorization_code(
+        self,
+        client: OAuthClientInformationFull,
+        authorization_code: AuthorizationCode,
+    ) -> OAuthToken:
+        return await self.current.exchange_authorization_code(
+            client,
+            authorization_code,
+        )
+
+    @override
+    async def load_access_token(self, token: str) -> AccessToken | None:
+        return await self.current.load_access_token(token)
+
+    @override
+    async def load_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: str,
+    ) -> RefreshToken | None:
+        return await self.current.load_refresh_token(client, refresh_token)
+
+    @override
+    async def exchange_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: RefreshToken,
+        scopes: list[str],
+    ) -> OAuthToken:
+        return await self.current.exchange_refresh_token(client, refresh_token, scopes)
+
+
 class _Serving(uvicorn.Server):
     """A uvicorn server that says when it is listening."""
 
     def __init__(self, config: uvicorn.Config) -> None:
         super().__init__(config)
-        self.listening = asyncio.Event()
+        self.listening = threading.Event()
 
     @override
     async def startup(self, sockets: list[socket.socket] | None = None) -> None:
@@ -645,17 +717,20 @@ class _Serving(uvicorn.Server):
         self.listening.set()
 
 
-@asynccontextmanager
-async def _protected(authority: _Authority | None = None) -> AsyncGenerator[str]:
-    """Serve an MCP server that needs a sign-in from ``authority``; yield its URL."""
+# One server for every test in the process, on a thread of its own: starting one
+# cost each test 40ms. Its loop outlives any test's, so every test can reach it.
+@functools.cache
+def _shared() -> tuple[str, _Switch]:
+    """Return the shared server's MCP URL, and the authority switch it signs in with."""
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         # Typeshed types an address as ``Any``; an IPv4 one is ``(host, port)``.
         _, port = cast(tuple[str, int], probe.getsockname())
     base = f"http://127.0.0.1:{port}"
+    switch = _Switch()
     app = MCPServer(
         "web",
-        auth_server_provider=authority if authority is not None else _Authority(),
+        auth_server_provider=switch,
         auth=AuthSettings(
             issuer_url=AnyHttpUrl(base),
             resource_server_url=AnyHttpUrl(f"{base}/mcp"),
@@ -664,7 +739,9 @@ async def _protected(authority: _Authority | None = None) -> AsyncGenerator[str]
         ),
     )
 
-    @app.tool()
+    # Unstructured: an output schema makes the client compile it with jsonschema,
+    # whose first import costs 0.6s, for a sign-in that never reads the output.
+    @app.tool(structured_output=False)
     def greet(name: str) -> str:
         """Say hello."""
         return f"hello {name}"
@@ -678,14 +755,26 @@ async def _protected(authority: _Authority | None = None) -> AsyncGenerator[str]
             lifespan="on",
         ),
     )
-    serving = asyncio.create_task(server.serve())
+    threading.Thread(target=asyncio.run, args=(server.serve(),), daemon=True).start()
+    assert server.listening.wait(timeout=10)
+    return f"{base}/mcp", switch
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _serving() -> None:
+    """Start the shared server once, before the first test that signs in to it."""
+    _ = _shared()
+
+
+@asynccontextmanager
+async def _protected(authority: _Authority | None = None) -> AsyncGenerator[str]:
+    """Serve an MCP server that needs a sign-in from ``authority``; yield its URL."""
+    url, switch = _shared()
+    switch.current = authority if authority is not None else _Authority()
     try:
-        async with asyncio.timeout(10):
-            await server.listening.wait()
-        yield f"{base}/mcp"
+        yield url
     finally:
-        server.should_exit = True
-        await serving
+        switch.current = _Authority()
 
 
 if __name__ == "__main__":

@@ -71,12 +71,20 @@ def pytest(context: gate.Context, *, dependents: str | None) -> int:
         erased := context.run([sys.executable, "-m", "coverage", "erase"])
     ):
         return erased
-    tests = _selected(context, files=files, dependents=dependents, workers=count)
+    # Every tracked file spooled (``--all-files``) selects the whole suite: the
+    # graph walk from each of them took minutes before pytest started, and the
+    # selection it returned was the suite anyway, slower to collect as nodeids.
+    whole = _covers_every_tracked_file(context, files=files)
+    tests = (
+        ["."]
+        if whole
+        else _selected(context, files=files, dependents=dependents, workers=count)
+    )
     if not tests:
         return 0
     # Files, not nodeids: the threshold was measured in files, and dozens of
     # nodeids from one file paid xdist's ~5s startup for nothing.
-    spread = len({test.partition("::")[0] for test in tests}) >= (
+    spread = whole or len({test.partition("::")[0] for test in tests}) >= (
         gate.positive(context.environ.get("SIDECAR_XDIST_MIN", "")) or 16
     )
     sources = [path for path in files if not _is_test(path)]
@@ -257,6 +265,13 @@ def _test(flags: Flags, context: gate.Context) -> int:
 
 def _run_tier(flags: Flags, context: gate.Context) -> int:
     return tier(TIERS[flags.tier], context=context, plugin=flags.plugin)
+
+
+def _covers_every_tracked_file(context: gate.Context, *, files: Sequence[str]) -> bool:
+    """Report whether ``files`` holds every tracked Python file; False when unknown."""
+    listed = context.output(["git", "-C", str(context.root), "ls-files", "--", "*.py"])
+    tracked = set((listed or "").split())
+    return bool(tracked) and tracked <= set(files)
 
 
 def _selected(

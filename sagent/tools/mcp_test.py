@@ -47,6 +47,7 @@ from sagent.tools.mcp import (
     servers,
 )
 from sagent.tools.mcp_auth import McpTokenStorage
+from sagent.tools.testing import SHOUT_SERVER
 from sagent.tools.types import ToolContext
 
 
@@ -837,7 +838,7 @@ async def test_a_session_connects_its_servers_and_skips_one_that_fails(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     script = tmp_path / "server.py"
-    script.write_text(_STDIO_SERVER)
+    script.write_text(SHOUT_SERVER)
     good = McpServer(
         name="good",
         parameters=StdioServerParameters(command=sys.executable, args=[str(script)]),
@@ -981,10 +982,10 @@ async def test_a_server_slower_than_the_timeout_is_skipped(
         ),
     )
     with caplog.at_level(logging.WARNING):
-        async with McpSession([slow], connect_timeout_sec=0.2) as session:
+        async with McpSession([slow], connect_timeout_sec=0.02) as session:
             assert session.tools() == []
-            assert session.status() == {"slow": "failed: no answer within 0.2s"}
-    assert "MCP server 'slow' failed to connect: no answer within 0.2s" in caplog.text
+            assert session.status() == {"slow": "failed: no answer within 0.02s"}
+    assert "MCP server 'slow' failed to connect: no answer within 0.02s" in caplog.text
 
 
 _BACKEND_TOOLS = [
@@ -1001,25 +1002,6 @@ _ECHO_SCHEMA = {
     "properties": {"text": {"type": "string"}},
     "required": ["text"],
 }
-
-
-_STDIO_SERVER = """\
-import sys
-
-from mcp.server.mcpserver import MCPServer
-
-app = MCPServer("good")
-
-
-@app.tool()
-def shout(text: str) -> str:
-    \"\"\"Say the text loudly.\"\"\"
-    return text.upper()
-
-
-print("server started", file=sys.stderr, flush=True)
-app.run()
-"""
 
 
 @dataclass(slots=True, kw_only=True)

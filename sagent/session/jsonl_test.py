@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import fields
-from typing import TYPE_CHECKING
+from pathlib import Path
 
 import os
 
@@ -19,10 +19,6 @@ from sagent.session.types import (
     ToolCall,
     UserMessage,
 )
-
-
-if TYPE_CHECKING:
-    from pathlib import Path
 
 
 @pytest.mark.asyncio
@@ -128,8 +124,9 @@ async def test_the_history_is_every_window_from_the_first(tmp_path: Path) -> Non
 @pytest.mark.asyncio
 async def test_a_second_open_of_the_same_file_fails(tmp_path: Path) -> None:
     path = tmp_path / "s.jsonl"
+    holder = _this_process()
     async with JsonlJournal(path):
-        with pytest.raises(RuntimeError, match="is open in another process"):
+        with pytest.raises(RuntimeError, match=f"is open in {holder}"):
             await JsonlJournal(path).aopen()
     async with JsonlJournal(path) as journal:
         assert list(journal) == []
@@ -290,6 +287,11 @@ async def test_an_existing_journal_is_made_private_on_open(tmp_path: Path) -> No
     async with JsonlJournal(path):
         pass
     assert path.stat().st_mode & 0o777 == 0o600
+
+
+def _this_process() -> str:
+    """Return how a refusal names this process as a lock's holder; only Linux knows."""
+    return f"pid {os.getpid()}" if Path("/proc/locks").exists() else "another process"
 
 
 if __name__ == "__main__":

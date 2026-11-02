@@ -702,10 +702,6 @@ def _transcript(records: Sequence[SessionRecord]) -> list[str]:
                 )
             case ToolResult():
                 lines.append(f"{record.call_id} returned: {record.text()}")
-            # pragma: no mutate start -- the rest say nothing a transcript keeps.
-            case _:
-                pass
-            # pragma: no mutate end
     return lines
 
 

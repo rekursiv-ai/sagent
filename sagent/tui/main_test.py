@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast, override
 
 import argparse
 import asyncio
+import contextlib
 import fcntl
 import functools
 import io
@@ -20,16 +21,16 @@ import re
 import select
 import signal
 import stat
-import subprocess
 import sys
+import threading
 import time
 
 from prompt_toolkit.application.current import create_app_session
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.history import FileHistory
-from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.input import create_input, create_pipe_input
 from prompt_toolkit.keys import Keys
-from prompt_toolkit.output import DummyOutput
+from prompt_toolkit.output import DummyOutput, create_output
 from prompt_toolkit.output.plain_text import PlainTextOutput
 from prompt_toolkit.patch_stdout import StdoutProxy
 from treekle import PlainTree, json_dumps, json_loads
@@ -40,6 +41,10 @@ import pytest
 from sagent.agent.agent import Agent, NoShrinker, default_system_prompt
 from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.team import Team
+from sagent.lib.posix.attach import stop
+from sagent.lib.posix.detached import await_ready
+from sagent.lib.posix.host import serve_command
+from sagent.lib.posix.sockets import accepts
 from sagent.lib.userdirs import config_dir, data_dir, state_dir
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog
@@ -95,6 +100,7 @@ from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.paper_search import PaperSearch
 from sagent.tools.read import Read
 from sagent.tools.session import Session
+from sagent.tools.testing import SHOUT_SERVER
 from sagent.tools.types import ToolContext
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
@@ -108,7 +114,7 @@ from sagent.tui.views import Views
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Callable, Generator, Iterator, Sequence
 
     from rich.console import Console
 
@@ -583,14 +589,7 @@ def test_a_tool_its_server_does_not_give_is_refused_once_it_connects(
     tmp_path: Path,
 ) -> None:
     server = tmp_path / "server.py"
-    server.write_text(
-        "from mcp.server.mcpserver import MCPServer\n"
-        "app = MCPServer('good')\n"
-        "@app.tool()\n"
-        "def shout(text: str) -> str:\n"
-        "    return text.upper()\n"
-        "app.run()\n",
-    )
+    server.write_text(SHOUT_SERVER)
     config = {
         "mcpServers": {"good": {"command": sys.executable, "args": [str(server)]}},
     }
@@ -733,9 +732,9 @@ def test_a_session_open_elsewhere_is_refused_without_a_traceback(
         assert main.main() == 1
     finally:
         os.close(held)
-    assert capsys.readouterr().err == (
-        f"Error: Journal {path} is open in another process.\n"
-    )
+    # Only Linux says who holds a lock.
+    holder = f"pid {os.getpid()}" if Path("/proc/locks").exists() else "another process"
+    assert capsys.readouterr().err == f"Error: Journal {path} is open in {holder}.\n"
     assert script.providers["scripted"].requests == []
 
 
@@ -1083,36 +1082,25 @@ def test_login_to_a_provider_without_one_is_an_error(
     del script
 
 
-# Run as its own process: only a real terminal shows whether the prompt lets go
-# of it while a sign-in asks for the address.
-_PASTING = """
-import asyncio
-import sys
-from pathlib import Path
+class _Pasting(ScriptedProvider):
+    """Signs in by asking the terminal for the address its page landed on."""
 
-from sagent.model.scripted import ScriptedProvider
-from sagent.providers.catalog import ModelCatalog
-from sagent.providers.login import Logins
-from sagent.tui import main
-
-
-class Pasting(ScriptedProvider):
     async def login(self, *, headless: bool = False) -> None:
         pasted = await asyncio.to_thread(input, "Address: ")
-        Path("pasted").write_text(f"{headless} {pasted}")
+        await asyncio.to_thread(Path("pasted").write_text, f"{headless} {pasted}")
 
     @property
     def logins(self) -> Logins:
         return Logins(Path("logins.json"))
 
 
-main.ModelCatalog = lambda account=None: ModelCatalog(
-    factories=lambda account: {"pasting": Pasting},
-    account=account,
-)
-sys.argv = ["sagent", "--ephemeral", "--history", "history"]
-sys.exit(main.main())
-"""
+def _pasting_factories(account: str | None) -> dict[str, ProviderFactory]:
+    del account
+    return {"pasting": _Pasting}
+
+
+def _pasting_catalog(account: str | None = None) -> ModelCatalog:
+    return ModelCatalog(factories=_pasting_factories, account=account)
 
 
 def _until(fd: int, wanted: bytes, *, seen: bytearray, timeout_sec: float = 30) -> None:
@@ -1137,44 +1125,55 @@ def _until(fd: int, wanted: bytes, *, seen: bytearray, timeout_sec: float = 30) 
         seen.extend(read)
 
 
+# On a real terminal, in this process: only a real terminal shows whether the
+# prompt lets go of it while a sign-in asks for the address.
 def test_a_headless_login_at_the_prompt_takes_the_address_pasted(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    (tmp_path / "driver.py").write_text(_PASTING)
-    homes = ("XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME")
-    env = {
-        **{k: v for k, v in os.environ.items() if not k.startswith("SAGENT_")},
-        **{name: str(tmp_path / name) for name in homes},
-        # The driver imports the code under test, not the shared venv's editable
-        # install, which may point at another checkout.
-        "PYTHONPATH": os.pathsep.join(sys.path),
-        "SAGENT_PROVIDER": "pasting",
-        "TERM": "xterm",
-        "PROMPT_TOOLKIT_NO_CPR": "1",
-    }
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "ModelCatalog", _pasting_catalog)
+    for name in [k for k in os.environ if k.startswith("SAGENT_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("SAGENT_PROVIDER", "pasting")
+    monkeypatch.setenv("TERM", "xterm")
+    monkeypatch.setenv("PROMPT_TOOLKIT_NO_CPR", "1")
+    _argv(monkeypatch, "--ephemeral", "--history", "history")
+    _quick_prints(monkeypatch)
     terminal, child = pty.openpty()
     seen = bytearray()
-    with subprocess.Popen(
-        [sys.executable, "driver.py"],
-        cwd=tmp_path,
-        stdin=child,
-        stdout=child,
-        stderr=child,
-        env=env,
-        start_new_session=True,
-    ) as proc:
-        os.close(child)
+
+    def type_at_the_prompt() -> None:
+        _until(terminal, b"[/model]", seen=seen, timeout_sec=5)
+        os.write(terminal, b"/login --headless\r")
+        _until(terminal, b"Address: ", seen=seen, timeout_sec=5)
+        os.write(terminal, b"https://back/?code=c\r")
+        _until(terminal, b"[/login] pasting signed in", seen=seen, timeout_sec=5)
+        os.write(terminal, b"/quit\r")
+
+    typing = threading.Thread(target=type_at_the_prompt, daemon=True)
+    with (
+        os.fdopen(child, "r", closefd=False) as stdin,
+        os.fdopen(child, "w", closefd=False) as stdout,
+    ):
+        monkeypatch.setattr(sys, "stdin", stdin)
+        monkeypatch.setattr(sys, "stdout", stdout)
+        monkeypatch.setattr(sys, "stderr", stdout)
+        typing.start()
         try:
-            _until(terminal, b"[/model]", seen=seen)
-            os.write(terminal, b"/login --headless\r")
-            _until(terminal, b"Address: ", seen=seen)
-            os.write(terminal, b"https://back/?code=c\r")
-            _until(terminal, b"[/login] pasting signed in", seen=seen)
-            os.write(terminal, b"/quit\r")
-            assert proc.wait(timeout=30) == 0
+            # Named, not defaulted: a bare session inherits the input and output
+            # an earlier test's session cached, from a stdin since closed.
+            with create_app_session(
+                input=create_input(stdin),
+                output=create_output(stdout),
+            ):
+                status = main.main()
         finally:
-            proc.kill()
+            typing.join(timeout=5)
+            os.close(child)
             os.close(terminal)
+    assert status == 0
+    assert not typing.is_alive()
     assert (tmp_path / "pasted").read_text() == "True https://back/?code=c"
 
 
@@ -2043,6 +2042,102 @@ def test_session_names_the_journal(tmp_path: Path) -> None:
     )
 
 
+def test_help_without_a_docstring_has_no_description(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Under ``python -OO`` there is no docstring; help still opens."""
+    monkeypatch.setattr(main, "__doc__", None)
+    _argv(monkeypatch, "--help")
+    with pytest.raises(SystemExit):
+        _ = main.main()
+    assert capsys.readouterr().out.split("\n\n", 1)[1].startswith("options:")
+
+
+def test_an_abbreviated_flag_is_a_setting_not_the_flag_it_abbreviates(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """``--resume-l`` never reaches argparse, which would expand it."""
+    _argv(monkeypatch, "--resume-l", "3")
+    assert main.main() == 1
+    assert capsys.readouterr().err == "Error: --resume-l names no setting; see /help\n"
+
+
+def test_a_hosted_session_runs_the_journal_its_terminal_picked(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "picked.jsonl"
+    flags = _flags("--resume", "ab", "--hosted-session", str(path))
+    assert main._journal_path(flags, cwd=tmp_path, interactive=True) == path
+
+
+def test_a_session_at_a_terminal_attaches_to_its_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The terminal picks the journal once; the host's session is told it."""
+    path = tmp_path / "mine.jsonl"
+    attached: list[tuple[Path, list[str]]] = []
+
+    def resume(journal: Path, *, command: list[str]) -> int:
+        attached.append((journal, command))
+        return 7
+
+    monkeypatch.setattr(main, "_resume", resume)
+    _argv(monkeypatch, "--session", str(path), "--effort", "max")
+    leader, follower = pty.openpty()
+    try:
+        with os.fdopen(follower, "r") as terminal:
+            monkeypatch.setattr(sys, "stdin", terminal)
+            assert main.main() == 7
+    finally:
+        os.close(leader)
+    assert attached == [
+        (
+            path,
+            [
+                sys.executable,
+                "-P",
+                "-m",
+                "sagent",
+                "--session",
+                str(path),
+                "--effort",
+                "max",
+                "--hosted-session",
+                str(path),
+            ],
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["--ephemeral"], ["--hosted-session", "s.jsonl"]],
+    ids=["ephemeral", "hosted"],
+)
+def test_a_session_with_nothing_to_attach_to_runs_here(
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+) -> None:
+    """Nothing could resume an ephemeral session; a hosted one is already hosted."""
+    leader, follower = pty.openpty()
+    try:
+        with os.fdopen(follower, "r") as terminal:
+            monkeypatch.setattr(sys, "stdin", terminal)
+            assert main._hosted_journal(_flags(*argv)) is None
+    finally:
+        os.close(leader)
+
+
+def test_a_stand_in_terminal_runs_the_session_here(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stdin(monkeypatch, tty=True)
+    assert main._hosted_journal(_flags()) is None
+
+
 def test_a_fresh_session_gets_a_new_journal_in_the_project(tmp_path: Path) -> None:
     path = main._journal_path(_flags(), cwd=tmp_path, interactive=False)
     assert path is not None
@@ -2641,6 +2736,39 @@ def test_a_detached_call_streams_its_stub_marked_then_its_result() -> None:
         )
         == []
     )
+
+
+@pytest.mark.asyncio
+async def test_run_logs_what_stalls_the_prompt_for_a_frame(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stall longer than a frame shows as a jerk at the prompt."""
+    watched: list[float] = []
+
+    @contextlib.contextmanager
+    def watch_stalls(*, threshold_sec: float) -> Generator[None]:
+        watched.append(threshold_sec)
+        yield
+
+    monkeypatch.setattr(main, "watch_stalls", watch_stalls)
+    provider = ScriptedProvider(replies=[])
+    async with Agent(model=provider["scripted"], journal=RecordingJournal()) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            running = asyncio.create_task(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "history",
+                    print_batch_sec=0,
+                ),
+            )
+            pipe.send_text("/quit\r")
+            await asyncio.wait_for(running, timeout=5)
+    assert watched == [0.05]
 
 
 @pytest.mark.asyncio
@@ -3808,6 +3936,573 @@ async def test_quitting_with_a_message_waiting_says_it_is_discarded(
             await asyncio.wait_for(running, timeout=5)
         slow.release.set()
     assert "[discarding 1 queued message: after the tools]" in screen.getvalue()
+
+
+def test_one_journal_has_one_private_host_however_it_is_spelled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    journal = tmp_path / "a" / "session.jsonl"
+    address = main._host_address(journal)
+    assert main._host_address(Path("a/../a/session.jsonl")) == address
+    assert main._host_address(tmp_path / "b" / "session.jsonl") != address
+    hosts = state_dir() / "rekursiv-ai" / "sagent" / "hosts"
+    assert address.resolve().parent == hosts.resolve()
+    assert stat.S_IMODE(hosts.stat().st_mode) == 0o700
+
+
+@pytest.mark.asyncio
+async def test_a_second_terminal_attaches_to_the_running_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both terminals see it end; only one session ever started."""
+    # The host imports the code under test, not the venv's install of another checkout.
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join(sys.path))
+    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    asked: list[str] = []
+    monkeypatch.setattr(main, "input", partial(_answer, asked, "a"), raising=False)
+    journal = tmp_path / "000000000001" / "session.jsonl"
+    journal.parent.mkdir()
+    starts, attaches = tmp_path / "starts", tmp_path / "attaches"
+    # A host asks for a repaint, SIGWINCH, as each terminal attaches.
+    script = (
+        "import signal, sys;"
+        f"signal.signal(signal.SIGWINCH, lambda *_: open({str(attaches)!r}, 'a')"
+        ".write('a'));"
+        "signal.signal(signal.SIGTERM, lambda *_: sys.exit(3));"
+        "signal.signal(signal.SIGHUP, lambda *_: sys.exit(3));"
+        f"open({str(starts)!r}, 'a').write('s');"
+        "sys.stdin.readline()"
+    )
+    command = [sys.executable, "-I", "-S", "-c", script]
+    # The host in this process: its own interpreter is ``launch``'s to test.
+    monkeypatch.setattr(main, "launch", _launch_here)
+    first = asyncio.create_task(_resume(journal, command=command))
+    await _once(lambda: _text(starts) == "s")
+    second = asyncio.create_task(_resume(journal, command=command))
+    await _once(lambda: "a" in _text(attaches))
+
+    # Ended from outside: a typed line waits out the host's paste-to-Enter delay.
+    assert await stop(main._host_address(journal)) == 3
+
+    assert await asyncio.wait_for(asyncio.gather(first, second), 30) == [3, 3]
+    assert _text(starts) == "s"
+    assert asked == [
+        (
+            "Session 000000000001 is attached in 1 other terminal."
+            " [A]ttach here / [R]ead-only / [Q]uit: "
+        ),
+    ]
+    assert not accepts(main._host_address(journal))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ready", "why"),
+    [(False, "failed to start"), (None, "did not start in time")],
+)
+async def test_a_host_that_does_not_start_says_where_to_look(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    ready: bool | None,
+    why: str,
+) -> None:
+    monkeypatch.setattr(main, "launch", partial(_launched, [], ready=ready))
+    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    journal = tmp_path / "000000000002" / "session.jsonl"
+
+    assert await _resume(journal, command=["unused"]) == 1
+    assert capsys.readouterr().err == (
+        f"Error: the session's host {why}; see {journal.with_suffix('.host.log')}\n"
+    )
+
+
+class _Forked:
+    """A child this test forked: waited on as ``subprocess.Popen`` waits on one."""
+
+    def __init__(self, pid: int) -> None:
+        self.pid = pid
+        self._status: int | None = None
+
+    def poll(self) -> int | None:
+        """Return its exit status, as ``Popen.returncode``; None while it runs."""
+        if self._status is None:
+            pid, status = os.waitpid(self.pid, os.WNOHANG)
+            if pid:
+                self._status = os.waitstatus_to_exitcode(status)
+        return self._status
+
+    def wait(self, timeout: float = 10.0) -> int:
+        """Return its exit status once it ends, failing after ``timeout``."""
+        deadline = time.monotonic() + timeout
+        while (status := self.poll()) is None:
+            assert time.monotonic() < deadline, f"pid {self.pid} still runs"
+            time.sleep(0.001)
+        return status
+
+
+def _hold(journal: Path, *, stubborn: bool, held: int) -> None:
+    """Run in a forked child: hold ``journal`` with one command running, never return."""
+    os.setsid()
+    if stubborn:
+        _ = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    if os.fork() == 0:
+        while True:
+            signal.pause()
+    fd = os.open(journal, os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    _ = os.write(held, b"held")
+    while True:
+        signal.pause()
+
+
+# Forked, not a new interpreter: it stands for an old sagent, and needs none.
+@contextlib.contextmanager
+def _holder(journal: Path, *, stubborn: bool = False) -> Generator[_Forked]:
+    """Yield a process with no terminal that holds ``journal``, running one command."""
+    ready, held = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        try:
+            os.close(ready)
+            _hold(journal, stubborn=stubborn, held=held)
+        finally:
+            os._exit(1)
+    os.close(held)
+    holder = _Forked(pid)
+    try:
+        assert os.read(ready, 4) == b"held"
+        yield holder
+    finally:
+        os.close(ready)
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(pid, signal.SIGKILL)
+        _ = holder.wait()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stubborn", "answer"),
+    [(False, " Kill\n"), (True, "k")],
+    ids=["term", "kill"],
+)
+async def test_kill_ends_the_holder_and_resumes_here(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    stubborn: bool,
+    answer: str,
+) -> None:
+    """A holder that ignores SIGTERM is killed once the wait runs out."""
+    journal = tmp_path / "abc123" / "session.jsonl"
+    journal.parent.mkdir()
+    launched: list[Path] = []
+    asked: list[str] = []
+    monkeypatch.setattr(main, "input", partial(_answer, asked, answer), raising=False)
+    monkeypatch.setattr(main, "launch", partial(_launched, launched))
+    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    monkeypatch.setattr(main, "attach", _exited_7)
+    monkeypatch.setattr(main, "accepts", _never)
+    # A holder that heeds TERM frees the journal at once; one deaf to it waits out
+    # the whole grace, so the deaf one is given a short one.
+    grace = 0.05 if stubborn else 10.0
+    monkeypatch.setattr(main, "_take_over", partial(main._take_over, term_sec=grace))
+    with _holder(journal, stubborn=stubborn) as holder:
+        status = await _resume(journal, command=["sagent"])
+        assert holder.wait(timeout=5) == -(9 if stubborn else 15)
+
+    assert status == 7
+    assert launched == [main._host_address(journal)]
+    assert asked == [
+        (
+            f"Session abc123 is open in pid {holder.pid} (no terminal, 1 command"
+            " running). [K]ill it and resume / [Q]uit: "
+        ),
+    ]
+    assert capsys.readouterr().err == ""
+
+
+@pytest.mark.asyncio
+async def test_quit_leaves_the_holder_running_and_starts_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = tmp_path / "abc123" / "session.jsonl"
+    journal.parent.mkdir()
+    launched: list[Path] = []
+    monkeypatch.setattr(main, "input", partial(_answer, [], "q"), raising=False)
+    monkeypatch.setattr(main, "launch", partial(_launched, launched))
+    with _holder(journal) as holder:
+        status = await _resume(journal, command=["sagent"])
+        assert holder.poll() is None
+
+    assert status == 1
+    assert launched == []
+
+
+def test_a_new_host_gets_half_a_minute_and_a_holder_ten_seconds_a_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float] = []
+
+    def launch(address: Path, command: Sequence[str], **kwargs: object) -> None:
+        del address, command
+        waits.append(cast(float, kwargs["timeout_sec"]))
+
+    def unlocked_within(path: Path, *, seconds: float) -> bool:
+        del path
+        waits.append(seconds)
+        return False
+
+    monkeypatch.setattr(main, "launch", launch)
+    monkeypatch.setattr(main, "terminal_size", _rows_cols)
+    monkeypatch.setattr(main, "input", partial(_answer, [], "k"), raising=False)
+    monkeypatch.setattr(main, "lock_holder", _no_such_pid)
+    monkeypatch.setattr(main, "unlocked_within", unlocked_within)
+    journal = tmp_path / "abc123" / "session.jsonl"
+
+    assert main._resume(journal, command=[]) == 1
+    assert not main._take_over(journal)
+    assert waits == [30.0, 10.0, 10.0]
+
+
+def test_a_holder_that_outlives_its_kill_is_reported(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Another user's process ignores both signals; resume must not start a host."""
+    journal = tmp_path / "abc123" / "session.jsonl"
+    monkeypatch.setattr(main, "input", partial(_answer, [], "k"), raising=False)
+    monkeypatch.setattr(main, "unlocked_within", _never_unlocked)
+    monkeypatch.setattr(main, "lock_holder", _no_such_pid)
+
+    assert not main._take_over(journal, term_sec=0.01, kill_sec=0.01)
+    assert capsys.readouterr().err == (
+        f"Error: pid {_NO_SUCH_PID} still holds session abc123.\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("running", "said"),
+    [([], "0 commands"), ([5], "1 command"), ([5, 6], "2 commands")],
+)
+def test_the_kill_prompt_names_the_holder_s_terminal_and_its_commands(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    running: list[int],
+    said: str,
+) -> None:
+    asked: list[str] = []
+    monkeypatch.setattr(main, "input", partial(_answer, asked, "q"), raising=False)
+    monkeypatch.setattr(main, "lock_holder", _no_such_pid)
+    monkeypatch.setattr(main, "controlling_terminal", _fake_terminal)
+    monkeypatch.setattr(main, "children", partial(_fake_children, running))
+
+    assert not main._take_over(tmp_path / "abc123" / "session.jsonl")
+    assert asked == [
+        (
+            f"Session abc123 is open in pid {_NO_SUCH_PID}"
+            f" (/dev/pts/{_NO_SUCH_PID}, {said} running). [K]ill it and resume /"
+            " [Q]uit: "
+        ),
+    ]
+
+
+def _fake_terminal(pid: int) -> str:
+    return f"/dev/pts/{pid}"
+
+
+def _fake_children(running: list[int], pid: int) -> list[int]:
+    assert pid == _NO_SUCH_PID
+    return running
+
+
+def test_a_holder_the_kernel_does_not_name_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Without ``/proc/locks``, as on macOS, there is no pid to offer to kill."""
+    monkeypatch.setattr(main, "lock_holder", _unnamed)
+
+    assert not main._take_over(tmp_path / "abc123" / "session.jsonl")
+    assert capsys.readouterr().err == (
+        "Error: session abc123 is open in another process,"
+        " which has no host to attach to.\n"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "status", "attached"),
+    [("a", 7, [False]), ("r", 7, [True]), ("q", 1, [])],
+    ids=["attach", "read-only", "quit"],
+)
+async def test_a_session_another_terminal_drives_asks_how_to_join(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+    status: int,
+    attached: list[bool],
+) -> None:
+    asked: list[str] = []
+    joined: list[bool] = []
+    monkeypatch.setattr(main, "input", partial(_answer, asked, answer), raising=False)
+    monkeypatch.setattr(main, "accepts", _always)
+    monkeypatch.setattr(main, "viewers", partial(_viewers, 2))
+    monkeypatch.setattr(main, "attach", partial(_joined, joined))
+
+    assert await _resume(tmp_path / "abc123" / "session.jsonl", command=[]) == status
+    assert asked == [
+        (
+            "Session abc123 is attached in 2 other terminals."
+            " [A]ttach here / [R]ead-only / [Q]uit: "
+        ),
+    ]
+    assert joined == attached
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count", [0, None], ids=["none-attached", "host-gone"])
+async def test_a_session_no_terminal_drives_is_attached_without_asking(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    count: int | None,
+) -> None:
+    joined: list[bool] = []
+    monkeypatch.setattr(main, "input", partial(_answer, [], "q"), raising=False)
+    monkeypatch.setattr(main, "accepts", _always)
+    monkeypatch.setattr(main, "viewers", partial(_viewers, count))
+    monkeypatch.setattr(main, "attach", partial(_joined, joined))
+
+    assert await _resume(tmp_path / "abc123" / "session.jsonl", command=[]) == 7
+    assert joined == [False]
+
+
+@pytest.mark.asyncio
+async def test_detaching_leaves_the_session_running_and_says_how_to_return(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(main, "accepts", _always)
+    monkeypatch.setattr(main, "attach", _detached)
+    monkeypatch.setattr(main, "viewers", partial(_viewers, 0))
+
+    assert await _resume(tmp_path / "abc123" / "session.jsonl", command=[]) == 0
+    assert capsys.readouterr().err == (
+        "\n[sagent] Detached; the session runs on. Attach again with:"
+        " sagent --resume abc123\n"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_session_gone_before_the_attach_says_where_to_look(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(main, "accepts", _always)
+    monkeypatch.setattr(main, "attach", _refused)
+    monkeypatch.setattr(main, "viewers", partial(_viewers, 0))
+    journal = tmp_path / "abc123" / "session.jsonl"
+
+    assert await _resume(journal, command=[]) == 1
+    assert capsys.readouterr().err == (
+        "Error: the session ended before it could attach;"
+        f" see {journal.with_suffix('.host.log')}\n"
+    )
+
+
+class _CtrlC(io.StringIO):
+    """A terminal whose user presses Ctrl+C at the first prompt read from it."""
+
+    def __init__(self, fd: int) -> None:
+        super().__init__()
+        self._fd = fd
+
+    @override
+    def fileno(self) -> int:
+        return self._fd
+
+    @override
+    def isatty(self) -> bool:
+        return True
+
+    @override
+    def readline(self, size: int | None = -1, /) -> str:
+        raise KeyboardInterrupt
+
+
+def _interrupted(*_: object) -> str:
+    raise KeyboardInterrupt
+
+
+@contextlib.contextmanager
+def _at_a_terminal(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Make stdin a real terminal whose user presses Ctrl+C at any prompt."""
+    leader, follower = pty.openpty()
+    try:
+        monkeypatch.setattr(sys, "stdin", _CtrlC(follower))
+        monkeypatch.setattr(main, "input", _interrupted, raising=False)
+        yield
+    finally:
+        os.close(leader)
+        os.close(follower)
+
+
+def test_ctrl_c_at_the_session_picker_quits_quietly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    for i in (1, 2):
+        _journal(project_dir(tmp_path) / f"00000000000{i}", *_said(f"hello {i}"))
+    _argv(monkeypatch, "--resume")
+    with _at_a_terminal(monkeypatch):
+        assert main.main() == 130
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_ctrl_c_at_the_kill_prompt_quits_quietly_and_spares_the_holder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    journal = _journal(project_dir(tmp_path) / "000000000001", *_said("hello"))
+    _argv(monkeypatch, "--resume", "000000000001")
+    with _holder(journal) as holder, _at_a_terminal(monkeypatch):
+        assert main.main() == 130
+        assert holder.poll() is None
+    assert "Traceback" not in capsys.readouterr().err
+
+
+_NO_SUCH_PID = 2**22 + 1
+"""Past Linux's largest pid, so no process has it."""
+
+
+async def _resume(journal: Path, **kwargs: object) -> int:
+    """Run ``main._resume`` off the loop, as ``main`` runs it before any loop."""
+    return await asyncio.to_thread(partial(main._resume, journal, **kwargs))
+
+
+def _launch_here(
+    address: Path,
+    command: Sequence[str],
+    *,
+    log: Path,
+    winsize: tuple[int, int],
+    timeout_sec: float,
+) -> bool | None:
+    """Serve ``command`` as ``launch`` does, from a thread of this process."""
+    del log
+    rows, cols = winsize
+    read_fd, write_fd = os.pipe()
+    argv = [str(address), str(write_fd), str(rows), str(cols), "--", *command]
+    threading.Thread(target=serve_command, args=(argv,), daemon=True).start()
+    return await_ready(read_fd, timeout_sec=timeout_sec)
+
+
+def _no_such_pid(journal: Path) -> int:
+    del journal
+    return _NO_SUCH_PID
+
+
+def _unnamed(journal: Path) -> None:
+    del journal
+
+
+def _never_unlocked(path: Path, *, seconds: float) -> bool:
+    del path, seconds
+    return False
+
+
+def _always(address: Path) -> bool:
+    del address
+    return True
+
+
+def _never(address: Path) -> bool:
+    del address
+    return False
+
+
+def _answer(asked: list[str], answer: str, prompt: str) -> str:
+    asked.append(prompt)
+    return answer
+
+
+def _rows_cols(fd: int) -> tuple[int, int]:
+    del fd
+    return (24, 80)
+
+
+def _launched(
+    launched: list[Path],
+    address: Path,
+    command: Sequence[str],
+    *,
+    log: Path,
+    winsize: tuple[int, int],
+    timeout_sec: float,
+    ready: bool | None = True,
+) -> bool | None:
+    del command, log, winsize, timeout_sec
+    launched.append(address)
+    return ready
+
+
+async def _exited_7(address: Path, *, read_only: bool) -> int | None:
+    del address, read_only
+    return 7
+
+
+async def _detached(address: Path, *, read_only: bool) -> int | None:
+    del address, read_only
+    return None
+
+
+async def _refused(address: Path, *, read_only: bool) -> int | None:
+    del read_only
+    raise ConnectionRefusedError(f"nothing at {address}")
+
+
+async def _viewers(count: int | None, address: Path) -> int | None:
+    del address
+    return count
+
+
+async def _joined(joined: list[bool], address: Path, *, read_only: bool) -> int | None:
+    del address
+    joined.append(read_only)
+    return 7
+
+
+async def _once(ready: Callable[[], bool], *, timeout_sec: float = 30.0) -> None:
+    """Wait until ``ready()`` is true, off the loop the attaches run on."""
+    assert await asyncio.to_thread(_poll, ready, timeout_sec=timeout_sec)
+
+
+def _poll(ready: Callable[[], bool], *, timeout_sec: float) -> bool:
+    """Return once ``ready()`` is true, or False after ``timeout_sec``."""
+    deadline = time.monotonic() + timeout_sec
+    while not ready():
+        if time.monotonic() > deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def _text(path: Path) -> str:
+    """Return ``path``'s text; empty until it is written."""
+    return path.read_text() if path.exists() else ""
 
 
 if __name__ == "__main__":

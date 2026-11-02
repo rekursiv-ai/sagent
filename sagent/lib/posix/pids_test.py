@@ -5,13 +5,28 @@ from __future__ import annotations
 from pathlib import Path
 
 import asyncio
+import fcntl
 import os
+import pty
 import signal
+import subprocess
 import sys
+import threading
+import time
 
 import pytest
 
-from sagent.lib.posix.pids import gone_within, kill_and_reap, running, written_pid
+from sagent.lib.posix.pids import (
+    children,
+    controlling_terminal,
+    gone_within,
+    kill_and_reap,
+    lock_holder,
+    locked,
+    running,
+    unlocked_within,
+    written_pid,
+)
 
 
 @pytest.mark.asyncio
@@ -175,6 +190,137 @@ async def test_a_pid_never_written_is_waited_for_no_longer_than_asked(
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(written_pid(tmp_path / "none", timeout_sec=0.05), 1)
     assert loop.time() - began < 0.5
+
+
+@pytest.mark.skipif(
+    not Path("/proc/locks").exists(),
+    reason="Only Linux lists locks under /proc.",
+)
+def test_the_holder_of_a_lock_is_named_and_an_unlocked_file_has_none(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "held"
+    path.touch()
+    assert lock_holder(path) is None
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        assert lock_holder(path) == os.getpid()
+    finally:
+        os.close(fd)
+    assert lock_holder(path) is None
+
+
+def test_a_waiter_is_not_the_holder_and_another_file_is_not_this_one(
+    tmp_path: Path,
+) -> None:
+    """A blocked waiter is listed under the holder with ``->``."""
+    path = tmp_path / "held"
+    path.touch()
+    info = path.stat()
+    device = f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}"
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    (proc / "locks").write_text(
+        f"1: FLOCK  ADVISORY  WRITE 11 {device}:{info.st_ino + 1} 0 EOF\n"
+        f"2: FLOCK  ADVISORY  WRITE 22 {device}:{info.st_ino} 0 EOF\n"
+        f"2: -> FLOCK  ADVISORY  WRITE 33 {device}:{info.st_ino} 0 EOF\n",
+    )
+    assert lock_holder(path, proc=proc) == 22
+
+
+_SLEEP = "import time; time.sleep(60)"
+
+_LINUX = pytest.mark.skipif(
+    not Path("/proc/self/stat").exists(),
+    reason="Only Linux lists processes under /proc.",
+)
+
+
+@_LINUX
+def test_a_child_is_listed_under_its_parent_until_it_is_gone() -> None:
+    child = subprocess.Popen([sys.executable, "-c", _SLEEP])  # noqa: S603 -- fixed.
+    try:
+        assert child.pid in children(os.getpid())
+        assert children(child.pid) == []
+    finally:
+        child.kill()
+        _ = child.wait()
+    assert child.pid not in children(os.getpid())
+
+
+@_LINUX
+def test_a_process_on_a_terminal_names_it_and_a_daemon_has_none() -> None:
+    daemon = subprocess.Popen(  # noqa: S603 -- fixed interpreter and script.
+        [sys.executable, "-c", _SLEEP],
+        start_new_session=True,
+    )
+    leader, follower = pty.openpty()
+    on_terminal = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import os, time; os.setsid(); open(os.ttyname(0)); time.sleep(60)",
+        ],
+        stdin=follower,
+        stdout=follower,
+        stderr=follower,
+    )
+    try:
+        assert controlling_terminal(daemon.pid) is None
+        deadline = time.monotonic() + 10
+        while controlling_terminal(on_terminal.pid) is None:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        assert controlling_terminal(on_terminal.pid) == os.ttyname(follower)
+    finally:
+        for process in (daemon, on_terminal):
+            process.kill()
+            _ = process.wait()
+        os.close(leader)
+        os.close(follower)
+    assert controlling_terminal(daemon.pid) is None
+
+
+def test_a_terminal_its_input_does_not_name_is_given_by_device_number(
+    tmp_path: Path,
+) -> None:
+    """A process that redirected its input still belongs to its terminal."""
+    (tmp_path / "42").mkdir()
+    tty = os.makedev(136, 5)
+    (tmp_path / "42" / "stat").write_text(f"42 (a) b) S 1 42 42 {tty} 42 0\n")
+    assert controlling_terminal(42, proc=tmp_path) == "tty 136:5"
+
+
+def test_a_held_lock_is_locked_until_its_holder_lets_go(tmp_path: Path) -> None:
+    path = tmp_path / "held"
+    assert not locked(path)
+    path.touch()
+    assert not locked(path)
+    # ``flock`` belongs to an open file, not a process: this one holds the lock
+    # against the file ``locked`` opens, as another process's would.
+    fd = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        assert locked(path)
+        assert not unlocked_within(path, seconds=0.001)
+        release = threading.Timer(0.01, fcntl.flock, (fd, fcntl.LOCK_UN))
+        release.start()
+        assert unlocked_within(path, seconds=10.0)
+        release.join()
+    finally:
+        os.close(fd)
+
+
+def test_without_a_process_table_nothing_is_known(tmp_path: Path) -> None:
+    assert children(os.getpid(), proc=tmp_path) == []
+    assert controlling_terminal(os.getpid(), proc=tmp_path) is None
+
+
+def test_without_a_lock_table_no_holder_is_known(tmp_path: Path) -> None:
+    path = tmp_path / "held"
+    path.touch()
+    assert lock_holder(path, proc=tmp_path / "none") is None
 
 
 if __name__ == "__main__":

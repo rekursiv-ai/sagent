@@ -654,6 +654,8 @@ def test_isolation_does_not_scan_prior_test_directories(
     tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Allocation alone: deleting the previous test's root walks only that root.
+    del request.config.stash[resources._LAST_ROOT]
     with patch("os.scandir", wraps=os.scandir) as scandir:
         root = _allocate(request, tmp_path_factory, monkeypatch)
 
@@ -688,12 +690,27 @@ def test_isolated_roots_are_unique_and_outside_tmp_path(
 
     assert isinstance(second, Path)
     assert first != second
-    assert first.is_dir()
     assert second.is_dir()
-    assert first.is_relative_to(tmp_path_factory.getbasetemp())
     assert second.is_relative_to(tmp_path_factory.getbasetemp())
     assert not (config_dir() / "rekursiv-ai").exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_the_next_tests_setup_removes_the_previous_root(
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Roots kept until exit made one serial delete of 420k dirs after the summary."""
+    first = _allocate(request, tmp_path_factory, monkeypatch)
+    assert isinstance(first, Path)
+    (first / "state" / "rekursiv-ai").mkdir()
+
+    second = _allocate(request, tmp_path_factory, monkeypatch)
+
+    assert isinstance(second, Path)
+    assert not first.exists()
+    assert second.is_dir()
 
 
 @pytest.mark.real_user_dirs

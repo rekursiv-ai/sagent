@@ -18,6 +18,7 @@ from sagent.tools import mcp_settings
 from sagent.tools.mcp import McpServer, servers
 from sagent.tools.mcp_auth import McpTokenStorage
 from sagent.tools.mcp_settings import McpSettings
+from sagent.tools.testing import SHOUT_SERVER
 
 
 if TYPE_CHECKING:
@@ -27,21 +28,6 @@ if TYPE_CHECKING:
 
 
 _VERBS = ["list", "get", "add", "add-json", "remove", "login", "logout"]
-
-_SERVER = """\
-from mcp.server.mcpserver import MCPServer
-
-app = MCPServer("good")
-
-
-@app.tool()
-def shout(text: str) -> str:
-    \"\"\"Say the text loudly.\"\"\"
-    return text.upper()
-
-
-app.run()
-"""
 
 
 def _actions(tmp_path: Path, shown: list[str] | None = None) -> dict[str, Setting]:
@@ -163,7 +149,7 @@ async def test_list_and_get_show_each_server_and_how_it_connected(
 ) -> None:
     assert (await _run(tmp_path, "list")).startswith("No MCP servers. Add one with")
     script = tmp_path / "server.py"
-    script.write_text(_SERVER)
+    script.write_text(SHOUT_SERVER)
     await _run(tmp_path, "add", f"good -- {sys.executable} {script}")
     await _run(
         tmp_path,

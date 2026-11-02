@@ -121,6 +121,16 @@ def test_default_workers_leave_a_performance_core_free(tmp_path: Path) -> None:
     assert default_workers(cpu=few, meminfo=meminfo) == 2
 
 
+def test_the_topology_is_read_once_per_process(tmp_path: Path) -> None:
+    cpu = _topology(tmp_path / "cpu", [(0, c, 1) for c in range(16)])
+    meminfo = _meminfo(tmp_path / "meminfo", 1_000_000)
+    assert default_workers(cpu=cpu, meminfo=meminfo) == 6
+    # A later call reuses the first reading rather than walking sysfs again.
+    for core in cpu.glob("cpu*/topology/core_id"):
+        core.write_text("0\n")
+    assert default_workers(cpu=cpu, meminfo=meminfo) == 6
+
+
 def test_default_workers_are_capped_by_available_memory(tmp_path: Path) -> None:
     cpu = _topology(tmp_path / "cpu", [(0, c, 1) for c in range(32)])
     assert default_workers(cpu=cpu, meminfo=_meminfo(tmp_path / "a", 6 * 1024)) == 3

@@ -1268,7 +1268,7 @@ async def test_a_child_whose_journal_is_held_elsewhere_is_refused(
         )
         held = child_journal(tmp_path / "parent" / "journal.jsonl", "Agent_0")
         async with JsonlJournal(held):
-            with pytest.raises(RuntimeError, match="open in another process"):
+            with pytest.raises(RuntimeError, match="is open in"):
                 _ = await _spawn(setup, tmp_path, {"prompt": "go"})
 
         assert list(setup.team) == ["Agent"]
@@ -1480,7 +1480,7 @@ async def test_a_watcher_that_cannot_open_is_refused_or_skipped_on_resume(
         async with setup.parent, setup.team:
             with caplog.at_level(logging.WARNING):
                 assert await setup.spawn.resume("Agent") == []
-            with pytest.raises(RuntimeError, match="open in another process"):
+            with pytest.raises(RuntimeError, match="is open in"):
                 _ = await setup.spawn.watch("Agent")
             assert list(setup.team) == ["Agent"]
     assert any("not resuming watcher 'watcher'" in m for m in caplog.messages)

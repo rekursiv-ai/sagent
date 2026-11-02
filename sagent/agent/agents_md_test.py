@@ -964,8 +964,8 @@ def test_an_include_is_text_outside_code_and_comments(
 @pytest.mark.parametrize(
     ("raw", "parts"),
     [
-        ("\ufeffbody\n", ({}, "body\n")),
-        ("---\n---\nbody\n", ({}, "body\n")),
+        ("\ufeffbody\n", (dict[str, object](), "body\n")),
+        ("---\n---\nbody\n", (dict[str, object](), "body\n")),
         ("---\na: 1\n---\nbody\n", ({"a": 1}, "body\n")),
     ],
 )

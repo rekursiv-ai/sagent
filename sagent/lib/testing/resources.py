@@ -50,6 +50,7 @@ import ast
 import inspect
 import os
 import re
+import shutil
 import sys
 import tempfile
 import traceback
@@ -72,6 +73,10 @@ _IDENT: Final = re.compile(r"[A-Za-z_][\w:.+-]*")
 
 _KEYWORDS: Final = frozenset(("and", "or", "not", "True", "False"))
 """Words a ``-m`` expression reserves, which name no marker."""
+
+
+_LAST_ROOT: Final = pytest.StashKey[Path]()
+"""The XDG root ``isolate_user_dirs`` made for this process's previous test."""
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -123,7 +128,7 @@ def isolate_user_dirs(
     tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> Path | None:
-    """Point every XDG base directory at a per-test tmp root.
+    """Point every XDG base directory at a per-test tmp root; drop the last one.
 
     Sets the environment rather than patching the ``userdirs`` functions: the
     env var is the seam production reads, so a test exercises the real
@@ -150,6 +155,14 @@ def isolate_user_dirs(
         ``userdirs`` helper instead.
 
     """
+    # Kept until exit, every root joined the basetemp the controller deletes
+    # serially after the summary: 5 dirs per test made that the run's longest
+    # step. Not a teardown: it runs before the test's own monkeypatch undo, so
+    # a test that patched ``os.lstat`` or ``shutil.rmtree`` broke the delete.
+    # A tree a test made undeletable is left to the exit sweep, which can.
+    stale = request.config.stash.get(_LAST_ROOT, None)
+    if stale is not None:
+        shutil.rmtree(stale, ignore_errors=True)
     # FixtureRequest.node is an un-annotated abstract property upstream
     # (_pytest.fixtures); function scope makes it the test Item.
     node = cast(pytest.Item, request.node)
@@ -170,6 +183,7 @@ def isolate_user_dirs(
         (root / leaf).mkdir(mode=0o700)
         variable = f"XDG_{leaf.upper()}_HOME"  # house-ignore[xdg-literal] -- This IS the fixture that repoints userdirs, so it spells the variables.
         monkeypatch.setenv(variable, str(root / leaf))
+    request.config.stash[_LAST_ROOT] = root
     return root
 
 
