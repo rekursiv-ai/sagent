@@ -34,6 +34,7 @@ from sagent.model.exceptions import (
 )
 from sagent.model.scripted import Reply, ScriptedProvider, call, reply
 from sagent.model.types import Request, Response, TextChunk
+from sagent.providers.openai import wire
 from sagent.providers.types import Model
 from sagent.runtime import runtime, types
 from sagent.runtime.context import InvalidContextError, validate_context
@@ -2396,10 +2397,20 @@ async def test_a_rate_limit_is_an_error_unless_persistent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_an_overflowing_request_compacts_and_retries() -> None:
+@pytest.mark.parametrize("tokens", [None, 33_551, 36_121, 32_886])
+async def test_an_overflowing_request_compacts_and_retries(tokens: int | None) -> None:
     summarizer = Summarizer()
+    overflow = (
+        ContextOverflowError("too long")
+        if tokens is None
+        else wire.to_exception(
+            400,
+            body=f"request ({tokens} tokens) exceeds the available context size"
+            " (32768 tokens), try increasing it",
+        )
+    )
     async with Harness(
-        ContextOverflowError("too long"),
+        overflow,
         reply("ok"),
         compactor=summarizer,
     ) as h:
@@ -2412,12 +2423,25 @@ async def test_an_overflowing_request_compacts_and_retries() -> None:
 
 
 @pytest.mark.asyncio
-async def test_overflow_recovery_gives_up_after_two_compactions() -> None:
+@pytest.mark.parametrize("tokens", [None, 33_551, 36_121, 32_886])
+async def test_overflow_recovery_gives_up_after_two_compactions(
+    tokens: int | None,
+) -> None:
     summarizer = Summarizer()
-    overflow = ContextOverflowError("too long")
+    overflow = (
+        ContextOverflowError("too long")
+        if tokens is None
+        else wire.to_exception(
+            400,
+            body=f"request ({tokens} tokens) exceeds the available context size"
+            " (32768 tokens), try increasing it",
+        )
+    )
     async with Harness(overflow, overflow, overflow, compactor=summarizer) as h:
         h.push(_user("go"))
         await h.seen(ModelResponseError)
+        await spin()
+        assert h.runtime.inbox.gate_armed
     assert len(summarizer.instructions) == 2
     assert len(h.requests()) == 3
 
