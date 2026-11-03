@@ -567,11 +567,14 @@ class _Shell:
 
     def close(self) -> None:
         """End the shell and its job, whatever state they are in."""
+        # PermissionError too: macOS answers a group whose members are all zombies with
+        # EPERM where Linux signals it, and either way nothing in it runs (as
+        # ``child.py`` and ``terminal.py`` read it).
         if b"JOB " in self.seen:
-            with contextlib.suppress(ProcessLookupError):
+            with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(self.job, signal.SIGKILL)
         # Its group may not exist yet: the child leads a session once it runs.
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(ProcessLookupError, PermissionError):
             os.killpg(self.pid, signal.SIGKILL)
         with contextlib.suppress(ProcessLookupError):
             os.kill(self.pid, signal.SIGKILL)

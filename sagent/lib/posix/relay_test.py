@@ -20,6 +20,7 @@ import termios
 import textwrap
 import threading
 import time
+import tty
 
 import pytest
 
@@ -913,14 +914,81 @@ class TestRelayBranchEdges:
         self,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # A pipe, not a bare fd number: one that names a regular file, as pytest's
+        # capture files do, is ready without asking the selector at all.
+        read_fd, write_fd = os.pipe()
+        waited: list[tuple[object, tuple[object, ...]]] = []
+
+        async def to_thread(func: object, *args: object) -> bool:
+            waited.append((func, args))
+            return False
+
+        async def run() -> bool:
+            loop = asyncio.get_running_loop()
+            monkeypatch.setattr(loop, "add_reader", _raise_oserror)
+            monkeypatch.setattr(asyncio, "to_thread", to_thread)
+
+            return await _readable(read_fd)
+
+        try:
+            assert asyncio.run(run()) is False
+        finally:
+            os.close(read_fd)
+            os.close(write_fd)
+        assert waited == [(_wait_readable, (read_fd,))]
+
+    def test_a_descriptor_fstat_cannot_read_is_left_to_the_selector(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # -1, not a closed descriptor, whose number the loop's own could take.
         async def run() -> bool:
             loop = asyncio.get_running_loop()
             monkeypatch.setattr(loop, "add_reader", _raise_oserror)
             monkeypatch.setattr(asyncio, "to_thread", _return_false)
-
-            return await _readable(3)
+            return await _readable(-1)
 
         assert asyncio.run(run()) is False
+
+    def test_raw_mode_starts_now_without_draining_pending_output(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Draining first blocks forever on Darwin when nothing reads the terminal."""
+        master, slave = pty.openpty()
+        set_raw: list[tuple[int, int]] = []
+
+        def setraw(fd: int, when: int = termios.TCSAFLUSH) -> None:
+            set_raw.append((fd, when))
+
+        monkeypatch.setattr(tty, "setraw", setraw)
+        try:
+            assert _enter_raw(slave) is not None
+        finally:
+            os.close(master)
+            os.close(slave)
+        assert set_raw == [(slave, termios.TCSANOW)]
+
+    def test_a_regular_file_is_ready_without_a_selector_or_a_thread(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Waiting on it hangs on macOS, whose kqueue never reports a file's end."""
+        typed = tmp_path / "typed"
+        typed.write_bytes(b"")
+        fd = os.open(typed, os.O_RDONLY)
+
+        async def run() -> bool:
+            loop = asyncio.get_running_loop()
+            monkeypatch.setattr(loop, "add_reader", _raise_oserror)
+            monkeypatch.setattr(asyncio, "to_thread", _never_a_thread)
+            return await _readable(fd)
+
+        try:
+            assert asyncio.run(run()) is True
+        finally:
+            os.close(fd)
 
     def test_wait_readable_treats_poll_error_as_ready(
         self,
@@ -1178,7 +1246,8 @@ class TestForwardInput:
         assert cooked_at_stop == [True]
         assert raw_again
         assert b"\x1b[?1049l" in reset
-        assert kept == cooked
+        assert kept is not None
+        assert _modes(kept) == _modes(cooked)
 
 
 class TestRelaySignals:
@@ -1436,6 +1505,16 @@ def _as_stdin(fd: int) -> Generator[None]:
     finally:
         _ = os.dup2(saved, 0)
         os.close(saved)
+
+
+# macOS sets PENDIN whenever a TCSANOW switch restores canonical mode, as the relay's
+# restore does; its termios.h files it as "retype pending input (state)", the kernel's
+# own state, not a mode the shell chose, so it is no difference between two modes.
+def _modes(attr: list[int | list[bytes | int]]) -> list[int | list[bytes | int]]:
+    """Return terminal attributes without the kernel's own PENDIN state bit."""
+    modes = list(attr)
+    modes[3] = cast(int, modes[3]) & ~termios.PENDIN
+    return modes
 
 
 def _reading(monkeypatch: pytest.MonkeyPatch, reads: list[bytes | OSError]) -> None:

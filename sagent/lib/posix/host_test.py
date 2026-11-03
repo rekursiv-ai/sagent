@@ -1047,25 +1047,27 @@ class TestALaunchedHost:
 
     def test_serves_its_command_at_its_size_and_exits_with_its_status(
         self,
-        tmp_path: Path,
+        short_dir: Path,
     ) -> None:
         read_fd, write_fd = os.pipe()
         # Not 24x80, the size a terminal takes when given none.
         script = "import os;raise SystemExit(4 if os.get_terminal_size() == (100, 30) else 5)"
-        argv = [str(tmp_path / "h.sock"), str(write_fd), "30", "100", "--"]
+        argv = [str(short_dir / "h.sock"), str(write_fd), "30", "100", "--"]
 
         assert serve_command([*argv, sys.executable, "-c", script]) == 4
         assert await_ready(read_fd, timeout_sec=1.0) is True
 
     def test_a_command_it_cannot_run_is_logged_and_fails(
         self,
-        tmp_path: Path,
+        short_dir: Path,
         capsys: pytest.CaptureFixture[str],
     ) -> None:
+        # A short directory: under a long tmp_path the bind fails first, with the
+        # same status, and the missing command is never reached.
         read_fd, write_fd = os.pipe()
-        argv = [str(tmp_path / "h.sock"), str(write_fd), "24", "80", "--"]
+        argv = [str(short_dir / "h.sock"), str(write_fd), "24", "80", "--"]
 
-        assert serve_command([*argv, str(tmp_path / "missing")]) == 1
+        assert serve_command([*argv, str(short_dir / "missing")]) == 1
         assert await_ready(read_fd, timeout_sec=1.0) is False
         assert "Traceback" in capsys.readouterr().err
 
