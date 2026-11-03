@@ -260,6 +260,15 @@ filterwarnings = [
     "ignore::pytest.PytestUnraisableExceptionWarning",  # async subprocess cleanup after event loop closes
     "ignore:Can.t initialize NVML:UserWarning",  # Optional torch runtimes may lack GPU drivers.
     "ignore:CUDA initialization. Unexpected error from cudaGetDeviceCount:UserWarning",  # GPU present but unusable (e.g. under -n parallel workers); CPU-only tests probe CUDA during backward and torch warns benignly.
+    "ignore:.*invalid escape sequence:SyntaxWarning",  # torchao 0.17.0 FqnToConfig docstring.
+    "ignore:.*torch\\.jit\\.script_method.*:DeprecationWarning",
+    "ignore:.*should not be instantiated.*:DeprecationWarning:torch._dynamo.side_effects",
+    # Dynamo probes `hasattr(t, "grad")` while TRACING (builder.py:345), which
+    # warns for a non-leaf tensor. Torch already wraps that probe in
+    # `hide_warnings(safe_grad_filter)`, but `error` above outranks the filter
+    # and the warning becomes an InternalTorchDynamoError. The warning is
+    # raised from C++, so no module scope can narrow it further.
+    "ignore:The .grad attribute of a Tensor that is not a leaf Tensor:UserWarning",
     "ignore:Using .httpx. with .starlette.testclient. is deprecated:starlette.exceptions.StarletteDeprecationWarning",
     "ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning",  # starlette 1.6.0 issue.
     "ignore:'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16:DeprecationWarning:zendriver.core.connection",
