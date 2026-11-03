@@ -5,12 +5,14 @@ from __future__ import annotations
 from dataclasses import fields
 from pathlib import Path
 
+import errno
 import os
 
-from treekle import json_loads
+from treekle import MutablePlainTree, json_loads
 
 import pytest
 
+from sagent.session import jsonl
 from sagent.session.jsonl import JsonlJournal, read_record, record_line
 from sagent.session.types import (
     AssistantMessage,
@@ -119,6 +121,113 @@ async def test_the_history_is_every_window_from_the_first(tmp_path: Path) -> Non
         file.write(b"\nnot json\n")
     async with JsonlJournal(path) as journal:
         assert list(journal.history())[3:] == [IncompleteRecord(text="not json")]
+
+
+@pytest.mark.asyncio
+async def test_the_history_from_a_record_is_the_history_after_it(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "s.jsonl"
+    path.write_text("\n \n")
+    journal = JsonlJournal(path)
+    assert len(journal) == 0
+    async with journal:
+        journal.append(UserMessage(content="a"), UserMessage(content="b"))
+    with path.open("ab") as file:
+        file.write(b'\nnot json\n\n{"py/object": "UserMessage", "cont')
+    async with JsonlJournal(path) as journal:
+        journal.append(UserMessage(content="c"))
+        whole = list(journal.history())
+
+        assert len(journal) == len(whole) == 5
+        assert [list(journal.history(start=n)) for n in range(7)] == [
+            whole[n:] for n in range(7)
+        ]
+
+
+@pytest.mark.asyncio
+async def test_the_history_from_a_record_reads_none_before_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A watcher asks for what is new after each idle; the rest is never decoded."""
+    async with JsonlJournal(tmp_path / "s.jsonl") as journal:
+        journal.append(*(UserMessage(content=str(n)) for n in range(5)), ContextClear())
+        read: list[bytes | str] = []
+
+        def counted(line: bytes | str) -> MutablePlainTree:
+            read.append(line)
+            return json_loads(line)
+
+        monkeypatch.setattr(jsonl, "json_loads", counted)
+
+        assert list(journal.history(start=3)) == [
+            UserMessage(content="3"),
+            UserMessage(content="4"),
+            ContextClear(),
+        ]
+        assert len(read) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_read_within_the_last_window_decodes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A watcher's feed reads from the window it last saw; that window is in memory."""
+    path = tmp_path / "s.jsonl"
+    clear = ContextClear(summary="one")
+    async with JsonlJournal(path) as journal:
+        journal.append(UserMessage(content="old"), clear, UserMessage(content="a"))
+    with path.open("ab") as file:
+        file.write(b" \n\t\n")
+    async with JsonlJournal(path) as journal:
+        journal.append(UserMessage(content="b"))
+        whole = list(journal.history())
+        first = len(journal) - len(list(journal))
+        read: list[bytes | str] = []
+
+        def counted(line: bytes | str) -> MutablePlainTree:
+            read.append(line)
+            return json_loads(line)
+
+        monkeypatch.setattr(jsonl, "json_loads", counted)
+
+        assert first == 1
+        assert [list(journal.history(start=n)) for n in range(first, 5)] == [
+            whole[n:] for n in range(first, 5)
+        ]
+        assert read == []
+
+
+@pytest.mark.asyncio
+async def test_the_history_is_read_as_it_is_iterated_up_to_where_it_was_asked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A caller can decode it on a worker thread; what is appended after is not read."""
+    async with JsonlJournal(tmp_path / "s.jsonl") as journal:
+        journal.append(
+            UserMessage(content="a"),
+            ContextClear(),
+            UserMessage(content="b"),
+        )
+        read: list[bytes | str] = []
+
+        def counted(line: bytes | str) -> MutablePlainTree:
+            read.append(line)
+            return json_loads(line)
+
+        monkeypatch.setattr(jsonl, "json_loads", counted)
+        history = journal.history()
+        journal.append(UserMessage(content="later"))
+
+        assert read == []
+        assert list(history) == [
+            UserMessage(content="a"),
+            ContextClear(),
+            UserMessage(content="b"),
+        ]
 
 
 @pytest.mark.asyncio
@@ -261,6 +370,52 @@ async def test_a_short_write_is_finished_not_dropped(
         monkeypatch.undo()
     async with JsonlJournal(path) as journal:
         assert list(journal) == records
+
+
+@pytest.mark.parametrize(
+    ("batch", "kept"),
+    [
+        ([UserMessage(content="torn" * 10)], 1),
+        ([UserMessage(content="x"), UserMessage(content="y" * 200)], 2),
+    ],
+    ids=["torn-line", "whole-line-then-torn"],
+)
+@pytest.mark.asyncio
+async def test_a_write_that_fails_partway_leaves_later_records_numbered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    batch: list[UserMessage],
+    kept: int,
+) -> None:
+    """A full disk can take part of a batch before it raises; the rest still reads."""
+    path = tmp_path / "s.jsonl"
+    write = os.write
+
+    def half_then_full(fd: int, data: bytes | memoryview) -> int:
+        monkeypatch.setattr(os, "write", full)
+        return write(fd, bytes(data[: len(data) // 2]))
+
+    def full(fd: int, data: bytes | memoryview) -> int:
+        del fd, data
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    async with JsonlJournal(path) as journal:
+        journal.append(UserMessage(content="before"))
+        monkeypatch.setattr(os, "write", half_then_full)
+        with pytest.raises(OSError, match="No space"):
+            journal.append(*batch)
+        monkeypatch.setattr(os, "write", write)
+        journal.append(UserMessage(content="a"), UserMessage(content="b"))
+        whole = list(journal.history())
+
+        assert whole[0] == UserMessage(content="before")
+        assert whole[1:kept] == batch[: kept - 1]
+        assert isinstance(whole[kept], IncompleteRecord)
+        assert whole[kept + 1 :] == [UserMessage(content="a"), UserMessage(content="b")]
+        assert len(journal) == len(whole)
+        assert [list(journal.history(start=n)) for n in range(len(whole))] == [
+            whole[n:] for n in range(len(whole))
+        ]
 
 
 @pytest.mark.asyncio

@@ -166,7 +166,7 @@ def _typechecked(
         context,
         files=files,
         dependents=dependents,
-        hops=gate.positive(context.environ.get("PRECOMMIT_CODEGRAPH_TYPECHECK", "")),
+        hops=gate.positive(context.environ.get("PRECOMMIT_CODEGRAPH_TYPECHECK")),
         emit="files",
         workers=workers,
     )

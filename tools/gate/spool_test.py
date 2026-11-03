@@ -53,6 +53,12 @@ def test_the_directory_is_private(tmp_path: Path) -> None:
     assert (tmp_path / "spool").stat().st_mode & 0o777 == 0o700
 
 
+def test_missing_parent_directories_are_made(tmp_path: Path) -> None:
+    spool.append(tmp_path / "a" / "b", gate="ty", key=1, paths=["a.py"])
+
+    assert spool.drain(tmp_path / "a" / "b", gate="ty", key=1) == ["a.py"]
+
+
 _UV = "uv --quiet run --frozen --group pre-commit python -m tools.gate ty"
 
 
@@ -61,9 +67,10 @@ _UV = "uv --quiet run --frozen --group pre-commit python -m tools.gate ty"
     [
         ({6: "python -m x", 5: _UV, 4: "/v/bin/python /v/bin/pre-commit run -a"}, 4),
         ({6: "python -m x", 5: _UV, 4: "python -mpre_commit hook-impl --x"}, 4),
+        ({6: "python -m x", 5: _UV, 4: "/v/bin/pre_commit try-repo ."}, 4),
         ({6: "python -m x", 5: _UV, 4: "bash"}, 1),
     ],
-    ids=["run", "git-hook", "none"],
+    ids=["run", "git-hook", "try-repo", "none"],
 )
 def test_the_key_is_the_pre_commit_process_not_uv(
     commands: dict[int, str],
@@ -79,6 +86,13 @@ def test_the_key_is_the_pre_commit_process_not_uv(
 
 def test_an_unknown_process_ends_the_walk() -> None:
     assert spool.run_key(6, process=lambda _: None) == 1
+
+
+def test_the_walk_checks_every_process_above_init() -> None:
+    """Pid 2 is a real process, so a pre-commit there is found."""
+    commands = {3: "python -m x", 2: "pre-commit run"}
+
+    assert spool.run_key(3, process=lambda pid: (pid - 1, commands[pid])) == 2
 
 
 if __name__ == "__main__":

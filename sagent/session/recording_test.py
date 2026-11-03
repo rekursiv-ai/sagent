@@ -37,6 +37,16 @@ def test_its_history_is_every_window_from_the_first() -> None:
     assert list(seen) == [UserMessage(content="old"), clear, UserMessage(content="new")]
 
 
+def test_its_history_from_a_record_is_the_history_after_it() -> None:
+    journal = RecordingJournal()
+    records = [UserMessage(content=c) for c in "abc"]
+    journal.append(*records)
+    assert len(journal) == 3
+    assert [list(journal.history(start=n)) for n in range(5)] == [
+        records[n:] for n in range(5)
+    ]
+
+
 def test_iteration_is_a_snapshot() -> None:
     journal = RecordingJournal()
     journal.append(UserMessage(content="a"))

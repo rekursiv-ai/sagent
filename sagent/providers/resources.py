@@ -125,8 +125,7 @@ class SubprocessPool(AsyncResource):
             env=env,
             # Claude's stream-json lines carry whole tool inputs and outputs;
             # asyncio's 64 KiB default raises mid-turn on the first large one.
-            # A floor, not a contract: any larger serves as well.
-            limit=16 * 1024 * 1024,  # pragma: no mutate
+            limit=16 * 1024 * 1024,  # pragma: no mutate -- a floor; larger serves too.
         )
         self._live.add(child.process)
         return child.process

@@ -258,7 +258,7 @@ class ReadOnly:
 
         """
         asset = files(__package__) / "assets" / "bash.yaml"
-        text = asset.read_text(encoding="utf-8")  # pragma: no mutate -- UTF-8 too.
+        text = asset.read_bytes().decode()
         return from_plain(parse(text, aliases=True, source=str(asset)), cls)
 
     def reads(self, command: str) -> bool:

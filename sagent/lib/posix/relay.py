@@ -172,7 +172,7 @@ def terminal_size(fd: int) -> tuple[int, int]:
         packed = fcntl.ioctl(
             fd,
             termios.TIOCGWINSZ,
-            struct.pack("HHHH", 0, 0, 0, 0),  # pragma: no mutate -- ioctl overwrites it
+            bytes(8),  # A ``struct winsize``: four unsigned shorts.
         )
     except (OSError, ValueError, AttributeError):
         return (24, 80)
@@ -230,11 +230,8 @@ class Relay:
         self._suspend_key = suspend_key
         self._on_resume = on_resume
         self._interrupted: int | None = None
-        # pragma: no mutate start -- the task is held, never read.
-        self._teardown: asyncio.Task[None] | None = None
-        # pragma: no mutate end
+        self._teardowns: set[asyncio.Task[None]] = set()
         self._old_attr: list[int | list[bytes | int]] | None = None
-        self._out_fd = -1  # pragma: no mutate -- any negative fd is none.
 
     async def serve(self) -> int:
         """Spawn the child, relay until it exits, and restore the terminal.
@@ -249,7 +246,7 @@ class Relay:
 
         """
         stdin_fd = real_fd(self._stdin if self._stdin is not None else sys.stdin)
-        out_fd = self._out_fd = real_fd(
+        out_fd = real_fd(
             self._stdout if self._stdout is not None else sys.stdout,
         )
         await self._terminal.start()
@@ -270,10 +267,7 @@ class Relay:
                 await self._pump(stdin_fd, out_fd)
             finally:
                 for sig in handlers:
-                    with contextlib.suppress(
-                        NotImplementedError,  # pragma: no mutate -- a RuntimeError too.
-                        RuntimeError,
-                    ):
+                    with contextlib.suppress(RuntimeError):
                         asyncio.get_running_loop().remove_signal_handler(sig)
                 # While the child is provably gone and raw mode still stands:
                 # these are emulator modes, so ``tcsetattr`` below cannot undo
@@ -316,8 +310,8 @@ class Relay:
     def _interrupt(self, signum: int) -> None:
         """Record a relay-level signal and tear the child down for it."""
         self._interrupted = signum
-        self._teardown = asyncio.get_running_loop().create_task(
-            self._terminal.terminate(),
+        self._teardowns.add(
+            asyncio.get_running_loop().create_task(self._terminal.terminate()),
         )
 
     # The child's output ends the relay: on a pty the master reads EIO when the slave
@@ -327,7 +321,7 @@ class Relay:
     async def _pump(self, stdin_fd: int, out_fd: int) -> None:
         """Copy keystrokes down and the child's painting up, until it exits."""
         keystrokes = (
-            asyncio.create_task(self._forward_input(stdin_fd))
+            asyncio.create_task(self._forward_input(stdin_fd, out_fd))
             if stdin_fd >= 0
             else None
         )
@@ -346,7 +340,7 @@ class Relay:
                 with contextlib.suppress(asyncio.CancelledError):
                     await keystrokes
 
-    async def _forward_input(self, stdin_fd: int) -> None:
+    async def _forward_input(self, stdin_fd: int, out_fd: int) -> None:
         """Copy this terminal's keystrokes to the child until stdin closes."""
         while True:
             if not await _readable(stdin_fd):
@@ -363,7 +357,7 @@ class Relay:
                 typed, _, data = data.partition(self._suspend_key)
                 if typed and not await self._send(typed):
                     return
-                self._suspend(stdin_fd)
+                self._suspend(stdin_fd, out_fd)
             if data and not await self._send(data):
                 return
 
@@ -380,9 +374,9 @@ class Relay:
     # A job stopped from its own terminal is stopped with its whole group, as the
     # line discipline would stop it; signalling only this pid would leave a shell
     # pipeline's other members running.
-    def _suspend(self, stdin_fd: int) -> None:
+    def _suspend(self, stdin_fd: int, out_fd: int) -> None:
         """Hand the terminal back and stop this job; take it back on ``fg``."""
-        _ = reset_terminal_modes(self._out_fd)
+        _ = reset_terminal_modes(out_fd)
         _restore(stdin_fd, self._old_attr)
         os.killpg(os.getpgrp(), signal.SIGTSTP)
         # Continued: ``fg`` gave the terminal back to this job.

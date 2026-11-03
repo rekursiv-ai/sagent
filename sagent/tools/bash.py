@@ -175,7 +175,7 @@ class Bash:
         # A wrapped shell's directory may be invisible here; ``_guard`` falls back.
         if not self.exec_prefix:
             context.cwd = await asyncio.to_thread(_existing, context.cwd)
-        sentinel = f"__SAGENT_CWD_{secrets.token_hex(4)}__"  # pragma: no mutate -- any length is unique.
+        sentinel = f"__SAGENT_CWD_{secrets.token_hex()}__"
         script = _script(sentinel)
         held = _HeldPipe() if self.exec_prefix else None
         argv = (
@@ -333,18 +333,17 @@ def _script(sentinel: str) -> str:
     """Return the script that runs the command ``$1`` and reports where it ended."""
     # The leading newline keeps output without a final one off the report.
     report = f'printf "\\n%s=%s\\n" "{sentinel}" "$(pwd)"'
-    # Bash reads a signal name in any case, so a lowercase ``exit`` is ``EXIT``.
     return (
         f"__sagent_report() {{ local rc=$?; {report}; return $rc; }}\n"
-        "builtin trap __sagent_report EXIT\n"  # pragma: no mutate -- see above.
+        "builtin trap __sagent_report EXIT\n"  # pragma: no mutate -- bash reads trap signal names case-insensitively.
         "trap() {\n"
         '  builtin trap "$@" || return\n'
         '  [ "$BASH_SUBSHELL" = 0 ] || return 0\n'
         "  local line\n"
-        "  line=$(builtin trap -p EXIT)\n"  # pragma: no mutate -- see above.
+        "  line=$(builtin trap -p EXIT)\n"  # pragma: no mutate -- bash reads trap signal names case-insensitively.
         '  case "$line" in *__sagent_report*) return 0 ;; esac\n'
         '  eval "set -- $line"\n'
-        '  builtin trap -- "__sagent_report; ${3:-}" EXIT\n'  # pragma: no mutate -- see above.
+        '  builtin trap -- "__sagent_report; ${3:-}" EXIT\n'  # pragma: no mutate -- bash reads trap signal names case-insensitively.
         "}\n"
         'eval "$1"\n'
         "__rc=$?\n"

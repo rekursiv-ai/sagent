@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from functools import partial
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import asyncio
+import threading
 
 import pytest
 
@@ -36,11 +37,13 @@ from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
     from treekle import PlainTree
 
     from sagent.agent.types import Factory, Shrinker
+    from sagent.session.types import SessionRecord
 
 
 # Anthropic's shape: a read is a tenth of input, a five-minute write a quarter more.
@@ -280,18 +283,19 @@ async def test_a_record_with_no_words_matches_nothing(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_search_without_a_journal_reads_what_the_model_sees(
+async def test_search_without_a_journal_reads_the_session_kept_in_memory(
     tmp_path: Path,
 ) -> None:
+    """Numbered as a journal's: each model turn is followed by its usage."""
     _, tool = _setup(tmp_path)
 
     found = await _ask(tool, tmp_path, {"action": "search", "text": "PEER"})
     settings = await _ask(tool, tmp_path, {"action": "search", "text": "/w"})
     result = await _ask(tool, tmp_path, {"action": "search", "text": "bbbb"})
 
-    assert found == "record 6, AgentToAgentMessage: ...peer says..."
-    assert settings == "record 8, TurnContext: ...Working directory: /w..."
-    assert result.startswith("record 4, UncategorizedToolResult: ...bbbb")
+    assert found == "record 9, AgentToAgentMessage: ...peer says..."
+    assert settings == "record 11, TurnContext: ...Working directory: /w..."
+    assert result.startswith("record 6, UncategorizedToolResult: ...bbbb")
 
 
 @pytest.mark.asyncio
@@ -448,13 +452,48 @@ async def test_read_by_record_finds_a_call_with_its_result_in_another_s_session(
     assert first == "record 0, UserMessage:\ngo"
 
 
+class _Threaded(RecordingJournal):
+    """A journal that notes where each read of its history starts, and if on the loop."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads: list[tuple[int, bool]] = []
+
+    @override
+    def history(self, start: int = 0) -> Iterator[SessionRecord]:
+        records = super().history(start)
+
+        def read() -> Iterator[SessionRecord]:
+            on_loop = threading.current_thread() is threading.main_thread()
+            self.reads.append((start, on_loop))
+            yield from records
+
+        return read()
+
+
+@pytest.mark.asyncio
+async def test_a_read_by_record_or_a_search_decodes_off_the_loop_from_the_first_asked(
+    tmp_path: Path,
+) -> None:
+    """A long session's journal takes seconds to read; the screen must not wait."""
+    journal = _Threaded()
+    _, tool = _setup(tmp_path, journal=journal)
+
+    read = await _ask(tool, tmp_path, {"action": "read", "records": [5, 3]})
+    found = await _ask(tool, tmp_path, {"action": "search", "text": "peer"})
+
+    assert read.startswith("record 3, UncategorizedToolResult:\naaaa")
+    assert found.startswith("record 9, AgentToAgentMessage")
+    assert journal.reads == [(3, False), (0, False)]
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("arguments", "match"),
     [
         ({"action": "read", "records": [99]}, "No record 99; the session has"),
-        ({"action": "read", "records": [9]}, r"^No record 9; the session has 9\.$"),
-        ({"action": "read", "records": [-1]}, r"^No record -1; the session has 9\.$"),
+        ({"action": "read", "records": [14]}, r"^No record 14; the session has 14\.$"),
+        ({"action": "read", "records": [-1]}, r"^No record -1; the session has 14\.$"),
         (
             {"action": "list", "agent": "children"},
             r"^'children' names 0 agents; name one\. Agents: Agent, watcher$",

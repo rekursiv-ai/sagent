@@ -541,7 +541,6 @@ class _Stopped:
         return torch.full(
             (input_ids.shape[0],),
             self._event.is_set(),
-            dtype=torch.bool,  # pragma: no mutate -- a bool fill is bool anyway.
             device=input_ids.device,
         )
 

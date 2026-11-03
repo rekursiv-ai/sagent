@@ -59,12 +59,14 @@ def test_isolate_records_every_process_and_priority_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     recorded = fakes.isolate(tmp_path, monkeypatch=monkeypatch)
+
+    first = subprocess.run(["tool", "a"], check=False)  # noqa: S607 -- recorded, never run.
     recorded.stdout = "out"
+    done = subprocess.run(["tool", "b"], check=False)  # noqa: S607 -- recorded, never run.
 
-    done = subprocess.run(["tool", "a"], check=False)  # noqa: S607 -- recorded, never run.
-
+    assert (first.returncode, first.stdout) == (4, "")
     assert (done.returncode, done.stdout) == (4, "out")
-    assert recorded.calls == [["tool", "a"]]
+    assert recorded.calls == [["tool", "a"], ["tool", "b"]]
     assert os.nice(19) == 0
     assert recorded.niceness == [19]
     assert tempfile.gettempdir() == str(tmp_path)
@@ -94,9 +96,35 @@ def test_a_context_runs_through_its_recorder_in_a_project_root(tmp_path: Path) -
 
     assert dict(context.environ) == {"WORKERS_DEFAULT": "3", "EXTRA": "1"}
     assert (context.directory, context.key) == (tmp_path / "spool", 9)
-    assert (context.root / "pyproject.toml").read_text().count("[tool.pyrefly]") == 1
+    assert context.root == tmp_path / "repo"
+    # The project's own table is kept; the excludes table is added once.
+    assert (context.root / "pyproject.toml").read_text() == (
+        '[project]\nname = "x"\n'
+        '[tool.pyrefly]\nproject-excludes = ["**/third_party/"]\n'
+    )
     assert context.run(["tool"]) == 0
     assert not context.installed("pytest_cov")
+    tools.output = "listed\n"
+    assert context.output(["walk"]) == "listed\n"
+    assert context.which("tool") == "/bin/tool"
+
+
+def test_a_context_writes_the_excludes_into_a_new_project(tmp_path: Path) -> None:
+    context = fakes.context(tmp_path, fakes.Recorder())
+
+    assert (context.root / "pyproject.toml").read_text() == (
+        '[tool.pyrefly]\nproject-excludes = ["**/third_party/"]\n'
+    )
+
+
+def test_touch_makes_each_file_under_the_context_root(tmp_path: Path) -> None:
+    fakes.touch(tmp_path, ["a.py", "pkg/deep/b.py"])
+
+    assert sorted(
+        str(path.relative_to(tmp_path / "repo"))
+        for path in (tmp_path / "repo").rglob("*")
+        if path.is_file()
+    ) == ["a.py", "pkg/deep/b.py"]
 
 
 if __name__ == "__main__":

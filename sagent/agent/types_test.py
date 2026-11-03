@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from sagent.agent.agent import Agent, NoJournal, NoShrinker, RuntimeSession
+from sagent.agent.agent import Agent, NoShrinker, RuntimeSession
 from sagent.agent.agents_md import AgentsMdConfig
 from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.pruner import Pruner
@@ -123,7 +123,7 @@ async def test_each_shrinker_is_one_and_a_class_builds_it(tmp_path: Path) -> Non
     [
         (AgentProtocol, (Agent,)),
         (Session, (RuntimeSession,)),
-        (Journal, (RecordingJournal, JsonlJournal, NoJournal)),
+        (Journal, (RecordingJournal, JsonlJournal)),
         (Shrinker, (SummaryCompactor, Pruner, NoShrinker)),
     ],
 )
@@ -137,7 +137,6 @@ def test_each_implementation_has_every_member_its_protocol_names(
         Agent: agent,
         RuntimeSession: agent.session,
         RecordingJournal: RecordingJournal(),
-        NoJournal: NoJournal(),
         JsonlJournal: JsonlJournal(tmp_path / "j.jsonl"),
         SummaryCompactor: SummaryCompactor(agent),
         Pruner: Pruner(agent),

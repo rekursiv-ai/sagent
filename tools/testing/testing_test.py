@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
 
+import argparse
 import os
 import subprocess
 import sys
@@ -12,9 +13,10 @@ import sys
 import coverage
 import pytest
 
+from sagent.lib.testing.checks import assert_help_without_docstring
 from tools.gate import fakes, gate, spool
-from tools.testing import coverage_summary, testing
-from tools.testing.tiers import TIERS
+from tools.testing import coverage_summary, listing, testing
+from tools.testing.tiers import TIERS, Tier
 from tools.typecheck import typecheck
 
 
@@ -305,8 +307,12 @@ def test_pytest_reads_its_selection_from_an_argfile(tmp_path: Path) -> None:
         PRECOMMIT_CODEGRAPH_PYTEST="1",
     )
 
-    *head, argfile = tools.calls[-1]
-    assert head[3:] == ["-m", "pytest", "-n", "3", "-q", "--tb=short"]
+    *head, test_files, argfile = tools.calls[-1]
+    assert head[3:] == [
+        *("-m", "pytest", "-n", "3", "-q", "--tb=short"),
+        *("-p", listing.__name__),
+    ]
+    assert Path(test_files.removeprefix("--test-files=")).name == "selected.txt"
     path = Path(argfile.removeprefix("@"))
     assert path.name == "pytest.args"
     assert path.parent.name.startswith("precommit-")
@@ -369,7 +375,8 @@ def test_pytest_prefers_the_graphs_tests_to_the_pairs(tmp_path: Path) -> None:
 
     [walk] = [call for call in tools.calls if "--emit" in call]
     assert walk[3:8] == ["--emit", "nodeids", "--depth", "1", "--workers"]
-    assert tools.argfiles == [["b_test.py::t"]]
+    assert tools.argfiles == [["b_test.py"]]
+    assert tools.listings == [["b_test.py::t"]]
 
 
 @pytest.mark.parametrize("output", [None, ""])
@@ -390,6 +397,97 @@ def test_pytest_falls_back_to_the_pairs_when_the_graph_names_nothing(
     )
 
     assert tools.argfiles == [["a_test.py"]]
+
+
+class _Runs(fakes.Recorder):
+    """Records each command, then runs it for real in ``root``."""
+
+    def __init__(self, root: Path, *, output: str) -> None:
+        super().__init__(output=output, installed=False)
+        self.root = root
+        self.returned: list[int] = []
+
+    @override
+    def run(self, argv: Sequence[str]) -> int:
+        _ = super().run(argv)
+        self.returned.append(
+            subprocess.run(  # noqa: S603 -- the gate's own pytest argv.
+                argv,
+                cwd=self.root,
+                env={
+                    **os.environ,
+                    "PYTHONPATH": str(Path(testing.__file__).parents[3]),
+                },
+                capture_output=True,
+                check=False,
+            ).returncode,
+        )
+        return self.returned[-1]
+
+
+def _skipped_module(root: Path) -> None:
+    root.mkdir()
+    (root / "skip_test.py").write_text(
+        "import pytest\n\n"
+        'pytest.skip("off", allow_module_level=True)\n\n\n'
+        "def test_a():\n    pass\n",
+    )
+
+
+def test_a_module_skipped_test_does_not_drop_the_rest_of_the_walk(
+    tmp_path: Path,
+) -> None:
+    """Pytest 9 runs nothing else once one nodeid points into a skipped module.
+
+    Each walked test runs, and no unwalked test beside it does.
+    """
+    root = tmp_path / "repo"
+    _skipped_module(root)
+    for module in ("b", "c"):
+        (root / f"{module}_test.py").write_text(
+            "from pathlib import Path\n"
+            + "".join(
+                f'\n\ndef test_{name}():\n    Path("ran_{name}").touch()\n'
+                for name in (module, f"{module}_unwalked")
+            ),
+        )
+    tools = _Runs(
+        root,
+        output="b_test.py::test_b\nskip_test.py::test_a\nc_test.py::test_c\n",
+    )
+
+    status = _pytest(
+        tmp_path,
+        tools,
+        ["a.py"],
+        dependents="pkg.affected",
+        PRECOMMIT_CODEGRAPH_PYTEST="1",
+    )
+
+    assert sorted(path.name for path in root.glob("ran_*")) == ["ran_b", "ran_c"]
+    assert status == 0
+
+
+def test_a_walk_reaching_only_a_skipped_module_passes(tmp_path: Path) -> None:
+    """Pytest exits 5 when its every test skips at module level: nothing failed.
+
+    A live-acceptance module skips unless its variable is set, and a change
+    may reach no other test.
+    """
+    root = tmp_path / "repo"
+    _skipped_module(root)
+    tools = _Runs(root, output="skip_test.py::test_a\n")
+
+    status = _pytest(
+        tmp_path,
+        tools,
+        ["a.py"],
+        dependents="pkg.affected",
+        PRECOMMIT_CODEGRAPH_PYTEST="1",
+    )
+
+    assert tools.returned == [5]
+    assert status == 0
 
 
 def test_pytest_asks_for_missed_lines_on_request(tmp_path: Path) -> None:
@@ -663,6 +761,263 @@ def test_a_tier_without_its_capability_runs_nothing(tmp_path: Path) -> None:
         == 0
     )
     assert tools.calls == []
+
+
+@pytest.mark.parametrize(
+    ("name", "test"),
+    [
+        ("conftest.py", True),
+        ("a_test.py", True),
+        ("test_a.py", True),
+        ("a.py", False),
+        ("test.py", False),
+        ("pytest_a.py", False),
+    ],
+)
+def test_a_test_file_is_named_as_pytest_collects_one(name: str, test: bool) -> None:
+    assert testing._is_test(f"pkg/{name}") is test
+
+
+def test_a_spooled_test_file_named_test_first_runs_itself(tmp_path: Path) -> None:
+    tools = fakes.Recorder()
+
+    _pytest(tmp_path, tools, ["pkg/test_c.py"])
+
+    assert tools.argfiles == [["pkg/test_c.py"]]
+
+
+@pytest.mark.parametrize(
+    ("argv", "shown"),
+    [
+        (
+            ["--help"],
+            [
+                "Run the tests paired with the spool.",
+                "Run one whole-suite pytest tier.",
+            ],
+        ),
+        (
+            ["tier", "--help"],
+            ["The tier.", "--plugin MODULE", "pytest-global"],
+        ),
+    ],
+    ids=["commands", "tier"],
+)
+def test_each_command_explains_itself(
+    processes: fakes.Processes,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    shown: list[str],
+) -> None:
+    del processes
+    monkeypatch.setattr(sys, "argv", ["testing", *argv])
+    with pytest.raises(SystemExit, match=r"^0$"):
+        testing.main()
+    out = " ".join(capsys.readouterr().out.split())
+    assert [text for text in shown if text not in out] == []
+
+
+def test_the_help_opens_with_the_module_docstring(
+    processes: fakes.Processes,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    del processes
+    monkeypatch.setattr(sys, "argv", ["testing", "--help"])
+    with pytest.raises(SystemExit):
+        testing.main()
+    assert (
+        capsys.readouterr().out.split("\n\n")[1]
+        == (testing.__doc__ or "").split(
+            "\n\n",
+        )[0]
+    )
+
+
+def test_without_a_docstring_the_help_has_no_description(
+    processes: fakes.Processes,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    del processes
+    assert_help_without_docstring(monkeypatch, testing, testing.main)
+    assert capsys.readouterr().out.split("\n\n")[1].startswith("positional arguments")
+
+
+@pytest.mark.parametrize(
+    ("argv", "error"),
+    [
+        ([], "the following arguments are required: command"),
+        (["tier", "nosuch"], "invalid choice: 'nosuch'"),
+    ],
+    ids=["no-command", "unknown-tier"],
+)
+def test_a_bad_command_line_is_a_usage_error(
+    capsys: pytest.CaptureFixture[str],
+    argv: list[str],
+    error: str,
+) -> None:
+    with pytest.raises(SystemExit, match=r"^2$"):
+        testing._parse_args(argparse.ArgumentParser(), argv)
+    assert error in capsys.readouterr().err
+
+
+def test_parse_args_reads_the_argv_it_is_given(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["testing", "pytest"])
+    flags = testing._parse_args(
+        argparse.ArgumentParser(),
+        ["tier", "pytest-global", "--plugin", "pkg.p"],
+    )
+    assert (flags.tier, flags.plugin) == ("pytest-global", "pkg.p")
+
+
+def test_the_cli_passes_its_plugin_to_a_tier_collection(
+    processes: fakes.Processes,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYTEST_COLLECT_SELECTED", "selected.txt")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["testing", "tier", "pytest-ci-smoke-global", "--plugin", "argparse"],
+    )
+
+    testing.main()
+
+    assert processes.calls[-1][processes.calls[-1].index("-p") + 1] == "argparse"
+
+
+def test_the_cli_walks_the_graph_with_its_dependents_module(
+    processes: fakes.Processes,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "a.py").write_text("")
+    monkeypatch.setenv("PRECOMMIT_CODEGRAPH_PYTEST", "1")
+    monkeypatch.setattr(sys, "argv", ["gate", "spool", "pytest", "a.py"])
+    gate.main()
+    monkeypatch.setattr(sys, "argv", ["testing", "pytest", "--dependents", "pkg.deps"])
+
+    testing.main()
+
+    walked = [call for call in processes.calls if "pkg.deps" in call]
+    assert [call[1:3] for call in walked] == [["-m", "pkg.deps"]]
+
+
+def test_a_tier_s_full_run_and_collection_are_exact(tmp_path: Path) -> None:
+    tools = _Tiers()
+    context = fakes.context(
+        tmp_path,
+        tools,
+        PYTEST_FORCE_ALL="1",
+        PYTEST_TESTMON_ARGS="--t",
+        PYTEST_PROGRESS_ARGS="--p",
+    )
+    testing.tier(TIERS["pytest-ci-smoke-global"], context=context, plugin=None)
+    collecting = fakes.context(tmp_path, tools, PYTEST_COLLECT_SELECTED="s.txt")
+    testing.tier(TIERS["pytest-ci-smoke-global"], context=collecting, plugin=None)
+
+    head = ["env", "PYTHONUNBUFFERED=1", "COVERAGE_CORE=ctrace"]
+    pytest_argv = [*head, sys.executable, "-m", "pytest", "-n=3"]
+    assert tools.calls == [
+        [
+            *pytest_argv,
+            "--t",
+            "-q",
+            "--tb=short",
+            "--durations=20",
+            "--p",
+            "-m",
+            "ci_smoke",
+        ],
+        [
+            *pytest_argv,
+            "--testmon-forceselect",
+            "-q",
+            "--tb=short",
+            "--durations=20",
+            "--collect-only",
+            "-m",
+            "ci_smoke",
+        ],
+    ]
+
+
+def test_a_full_run_without_testmon_or_progress_args_adds_none(
+    tmp_path: Path,
+) -> None:
+    tools = _Tiers()
+
+    testing.tier(
+        TIERS["pytest-ci-smoke-global"],
+        context=fakes.context(tmp_path, tools, PYTEST_FORCE_ALL="1"),
+        plugin=None,
+    )
+
+    head = ["env", "PYTHONUNBUFFERED=1", "COVERAGE_CORE=ctrace"]
+    assert tools.calls == [
+        [
+            *(*head, sys.executable, "-m", "pytest", "-n=3"),
+            *("--no-cov", "-q", "--tb=short", "--durations=20", "-m", "ci_smoke"),
+        ],
+    ]
+
+
+def test_a_tier_with_no_markers_passes_no_marker(tmp_path: Path) -> None:
+    tools = _Tiers()
+
+    testing.tier(
+        Tier(name="bare"),
+        context=fakes.context(tmp_path, tools, PYTEST_FORCE_ALL="1"),
+        plugin=None,
+    )
+
+    [argv] = tools.calls
+    assert argv.count("-m") == 1
+
+
+def test_a_collection_that_fails_reports_its_status(tmp_path: Path) -> None:
+    tools = _Tiers()
+    tools.status = 1
+
+    code = testing.tier(
+        TIERS["pytest-global"],
+        context=fakes.context(tmp_path, tools, PYTEST_COLLECT_SELECTED="s.txt"),
+        plugin=None,
+    )
+
+    assert code == 1
+
+
+def test_a_full_run_without_pytest_cov_passes_no_cov_flag(tmp_path: Path) -> None:
+    tools = _Tiers(missing=frozenset({"pytest_cov"}))
+
+    flags = _tier(tmp_path, "pytest-global", tools, PYTEST_FORCE_ALL="1")
+
+    assert "--no-cov" not in flags
+
+
+class _Locates(_Tiers):
+    """A recorder that finds only ``pg_config`` on PATH."""
+
+    @override
+    def which(self, name: str) -> str | None:
+        return f"/bin/{name}" if name == "pg_config" else None
+
+
+def test_a_tier_runs_where_its_capability_is_on_path(tmp_path: Path) -> None:
+    tools = _Locates()
+
+    testing.tier(
+        TIERS["pytest-integration-global"],
+        context=fakes.context(tmp_path, tools, PYTEST_FORCE_ALL="1"),
+        plugin=None,
+    )
+
+    assert len(tools.calls) == 1
 
 
 if __name__ == "__main__":

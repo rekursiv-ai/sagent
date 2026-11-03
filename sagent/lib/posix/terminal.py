@@ -232,7 +232,8 @@ class Terminal:
         self._winsize = winsize
         self._bracketed_paste = bracketed_paste
         self._master_fd = -1
-        self._pid = -1
+        # None, never a number: a numeric "no child" is one slip from kill(-1).
+        self._pid: int | None = None
         self._proc: subprocess.Popen[bytes] | None = None
         self._status: int | None = None
         self._submitted = 0
@@ -272,7 +273,7 @@ class Terminal:
     @property
     def pid(self) -> int | None:
         """Return the child process ID while it is owned by this terminal."""
-        return self._pid if self._pid > 0 else None
+        return self._pid
 
     @property
     def submitted(self) -> int:
@@ -509,7 +510,7 @@ class Terminal:
         a zombie keeps it anchoring the group id, so the final KILL cannot land
         on a recycled, unrelated group. :meth:`wait` reaps it afterwards.
         """
-        if self._pid <= 0:
+        if self._pid is None:
             return
         if not self._signal(signal.SIGTERM):
             return
@@ -556,7 +557,7 @@ class Terminal:
     def _signal(self, sig: int) -> bool:
         """Signal the child's process group; False once it is gone."""
         pid = self._pid
-        if pid <= 0:
+        if pid is None:
             return False
         try:
             os.killpg(pid, sig)
@@ -571,23 +572,23 @@ class Terminal:
 
     def _exited(self) -> bool:
         """Whether the child has exited, WITHOUT reaping it."""
-        return self._pid <= 0 or _exit_seen(self._pid, block=False)
+        return self._pid is None or _exit_seen(self._pid, block=False)
 
     def _wait_until_exited(self) -> None:
         """Wait for child exit without consuming the status used by wait()."""
         pid = self._pid
-        if pid > 0:
+        if pid is not None:
             _ = _exit_seen(pid, block=True)
 
     def _reap(self) -> int:
         """Block until the child exits; return its status."""
-        if self._pid <= 0:
+        if self._pid is None:
             return 0
         try:
             _, status = os.waitpid(self._pid, 0)
         except ChildProcessError:
             status = 0
-        self._pid = -1
+        self._pid = None
         if os.WIFSIGNALED(status):
             code = 128 + os.WTERMSIG(status)
         else:

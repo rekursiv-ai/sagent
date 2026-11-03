@@ -159,7 +159,7 @@ def _edit(
             " another agent. Read it again before editing it.",
         )
     try:
-        raw = path.read_bytes().decode("utf-8")  # pragma: no mutate -- UTF-8 too.
+        raw = path.read_bytes().decode()
     except UnicodeDecodeError:
         return _error(f"{path} is not UTF-8. Use Bash with an explicit decoder.")
     # Read shows a CRLF file with ``\n``, so the strings the model quotes have

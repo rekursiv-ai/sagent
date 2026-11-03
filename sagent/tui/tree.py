@@ -124,10 +124,7 @@ def render(shown: list[Row], *, cursor: int, note: str = "") -> FormattedText:
       text: One line per row, then a blank line and the key help.
 
     """
-    # pragma: no mutate start -- with no rows the width is 32 and nothing reads it.
-    width = max((len(r.branch) + len(r.text) for r in shown), default=0)
-    # pragma: no mutate end
-    width = min(max(width, 32), 72)
+    width = min(max([32, *(len(r.branch) + len(r.text) for r in shown)]), 72)
     out: list[tuple[str, str]] = []
     for i, row in enumerate(shown):
         head = f"{row.branch}{row.text}"

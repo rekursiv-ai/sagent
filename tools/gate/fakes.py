@@ -38,9 +38,10 @@ class Recorder:
         self.on_path = on_path
         self.calls: list[list[str]] = []
         self.argfiles: list[list[str]] = []
+        self.listings: list[list[str]] = []
 
     def run(self, argv: Sequence[str]) -> int:
-        """Record ``argv`` and each ``@argfile`` it names; return the next status.
+        """Record ``argv`` and each ``@argfile`` and ``--test-files`` it names.
 
         Args:
           argv: The command a gate ran.
@@ -54,6 +55,11 @@ class Recorder:
             Path(arg[1:]).read_text().splitlines()
             for arg in argv
             if arg.startswith("@")
+        )
+        self.listings.extend(
+            Path(arg.removeprefix("--test-files=")).read_text().splitlines()
+            for arg in argv
+            if arg.startswith("--test-files=")
         )
         return self.statuses.pop(0) if self.statuses else self.status
 

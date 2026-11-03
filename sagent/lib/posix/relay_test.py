@@ -708,7 +708,7 @@ class TestRelayBranchEdges:
         child = _FakeChild()
         relay = Relay(child)
         monkeypatch.setattr("sagent.lib.posix.relay._readable", _false_async)
-        asyncio.run(relay._forward_input(3))
+        asyncio.run(relay._forward_input(3, -1))
         assert child.written == []
 
     @pytest.mark.parametrize("failure", [BlockingIOError(), OSError("closed")])
@@ -731,7 +731,7 @@ class TestRelayBranchEdges:
 
         monkeypatch.setattr("sagent.lib.posix.relay._readable", readable)
         monkeypatch.setattr(os, "read", read)
-        asyncio.run(relay._forward_input(3))
+        asyncio.run(relay._forward_input(3, -1))
         assert child.written == []
 
     def test_forward_input_stops_on_empty_read(
@@ -747,7 +747,7 @@ class TestRelayBranchEdges:
 
         monkeypatch.setattr("sagent.lib.posix.relay._readable", _true_async)
         monkeypatch.setattr(os, "read", read)
-        asyncio.run(relay._forward_input(3))
+        asyncio.run(relay._forward_input(3, -1))
         assert child.written == []
 
     def test_forward_input_stops_when_the_child_refuses_keystrokes(
@@ -765,7 +765,7 @@ class TestRelayBranchEdges:
 
         monkeypatch.setattr("sagent.lib.posix.relay._readable", _true_async)
         monkeypatch.setattr(os, "read", read)
-        asyncio.run(relay._forward_input(3))
+        asyncio.run(relay._forward_input(3, -1))
         assert child.written == [b"keys"]
         assert observed == []
 
@@ -794,7 +794,7 @@ class TestRelayBranchEdges:
         monkeypatch.setattr("sagent.lib.posix.relay._readable", _true_async)
         monkeypatch.setattr(os, "read", read)
         monkeypatch.setattr(os, "killpg", killpg)
-        asyncio.run(relay._forward_input(3))
+        asyncio.run(relay._forward_input(3, -1))
         assert child.written == [b"a", b"b"]
         assert steps == ["SIGTSTP", "redraw"]
         assert child.calls == ["set_winsize"]
@@ -819,7 +819,7 @@ class TestRelayBranchEdges:
         monkeypatch.setattr("sagent.lib.posix.relay._readable", _true_async)
         monkeypatch.setattr(os, "read", read)
         monkeypatch.setattr(os, "killpg", killpg)
-        asyncio.run(relay._forward_input(3))
+        asyncio.run(relay._forward_input(3, -1))
         assert child.written == [b"a"]
         assert stopped == []
 
@@ -1057,7 +1057,7 @@ class TestForwardInput:
     ) -> None:
         child = _FakeChild()
         _reading(monkeypatch, [BlockingIOError(), b"keys", b""])
-        asyncio.run(Relay(child)._forward_input(3))
+        asyncio.run(Relay(child)._forward_input(3, -1))
         assert child.written == [b"keys"]
 
     def test_keystrokes_are_read_64_kib_at_a_time(self, tmp_path: Path) -> None:
@@ -1067,13 +1067,13 @@ class TestForwardInput:
         child = _FakeChild()
         fd = os.open(typed, os.O_RDONLY)
         try:
-            asyncio.run(Relay(child)._forward_input(fd))
+            asyncio.run(Relay(child)._forward_input(fd, -1))
         finally:
             os.close(fd)
         assert [len(chunk) for chunk in child.written] == [65_536, 70_000 - 65_536]
 
-    def test_a_relay_not_serving_writes_no_reset_anywhere(self) -> None:
-        """Before ``serve`` there is no output descriptor, not descriptor 1."""
+    def test_a_relay_without_an_output_writes_no_reset_anywhere(self) -> None:
+        """A negative output descriptor is none, not descriptor 1."""
         master, slave = pty.openpty()
         os.set_blocking(master, False)
         saved = os.dup(1)
@@ -1081,7 +1081,7 @@ class TestForwardInput:
         try:
             _ = os.dup2(slave, 1)
             with mock.patch.object(os, "killpg"):
-                relay._suspend(-1)
+                relay._suspend(-1, -1)
             _ = os.dup2(saved, 1)
             with contextlib.suppress(BlockingIOError):
                 assert os.read(master, 65_536) == b""
@@ -1096,7 +1096,7 @@ class TestForwardInput:
     ) -> None:
         child = _FakeChild()
         _reading(monkeypatch, [b"a", b"b", b""])
-        asyncio.run(Relay(child)._forward_input(3))
+        asyncio.run(Relay(child)._forward_input(3, -1))
         assert child.written == [b"a", b"b"]
 
     def test_each_suspend_key_in_a_chunk_splits_it_in_order(
@@ -1112,7 +1112,7 @@ class TestForwardInput:
             stops.append(signum)
 
         monkeypatch.setattr(os, "killpg", killpg)
-        asyncio.run(Relay(child, suspend_key=b"\x1a")._forward_input(3))
+        asyncio.run(Relay(child, suspend_key=b"\x1a")._forward_input(3, -1))
         assert child.written == [b"a", b"b", b"c"]
         assert stops == [signal.SIGTSTP, signal.SIGTSTP]
 
@@ -1136,8 +1136,7 @@ class TestForwardInput:
             cooked = termios.tcgetattr(slave)
             relay._old_attr = _enter_raw(slave)
             # The reset goes only to a real terminal, which this pty is.
-            relay._out_fd = slave
-            relay._suspend(slave)
+            relay._suspend(slave, slave)
             raw_again = not cast(int, termios.tcgetattr(slave)[3]) & termios.ICANON
             reset = os.read(master, 65_536)
             kept = relay._old_attr

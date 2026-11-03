@@ -367,10 +367,19 @@ class AgentSpawn:
             watched,
             journal=str(journal) if journal is not None else None,
         )
-        feed = Feed(team=self.team, watched=watched, watcher=label)
-        if resumed:
-            feed.sent = len(list(target.session.history()))
+        # A new watcher is sent the window its root sees: a long session's earlier
+        # windows would not fit one message, and Session reads them by number.
+        kept = target.session.journal
+        feed = Feed(
+            team=self.team,
+            watched=watched,
+            watcher=label,
+            sent=len(kept) if resumed else len(kept) - len(list(kept)),
+        )
         target.runtime.observers.append(feed)
+        # The feed is the watcher's: once it stops, a watcher started under its
+        # label would be sent each update twice.
+        stack.callback(target.runtime.observers.remove, feed)
         feed.send(before)
         return label
 
@@ -428,7 +437,7 @@ class AgentSpawn:
                 model = (
                     self.team.catalog.model(
                         spec.model,
-                        current=parent.model.provider.name,  # pragma: no mutate -- a P/M name never reads it.
+                        current=parent.model.provider.name,
                     )
                     if spec.model
                     else await self._model(

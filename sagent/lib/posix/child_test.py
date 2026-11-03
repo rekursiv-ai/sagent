@@ -425,6 +425,24 @@ async def test_an_exit_is_noticed_promptly(started: list[int]) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_group_that_ends_at_term_is_noticed_promptly(
+    tmp_path: Path,
+    started: list[int],
+) -> None:
+    """Far within the grace; the stop polls, no event marking the group's end."""
+    child = await Child.start(
+        "/bin/sh",
+        "-c",
+        "sleep 60 & echo $! > job.pid; wait",
+        group=True,
+        grace_sec=60,
+        cwd=tmp_path,
+    )
+    started.extend([child.process.pid, await written_pid(tmp_path / "job.pid")])
+    assert await asyncio.wait_for(child.stop(), timeout=0.5) == -signal.SIGTERM
+
+
+@pytest.mark.asyncio
 async def test_a_child_has_exited_while_a_job_still_holds_its_pipe(
     tmp_path: Path,
     started: list[int],

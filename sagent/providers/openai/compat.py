@@ -235,12 +235,16 @@ class OpenAICompatible(HasModels, AsyncResource):
         """
 
         async def attempt() -> AsyncIterator[dict[str, object]]:
-            async with self._reply(
-                self.path,
-                body=body,
-                # HTTP header names and media types are case-insensitive.
-                headers={**headers, "accept": "text/event-stream"},  # pragma: no mutate
-            ) as response:
+            async with (
+                self._reply(
+                    self.path,
+                    body=body,
+                    headers={
+                        **headers,
+                        "accept": "text/event-stream",  # pragma: no mutate -- HTTP ignores case.
+                    },
+                ) as response
+            ):
                 async for event in wire.events(response.aiter_lines()):
                     yield event
 

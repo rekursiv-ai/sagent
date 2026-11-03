@@ -1,7 +1,7 @@
 """A journal that keeps every record in a list, to be read back without a file.
 
-For tests, and for a caller that inspects a session or resumes one it built;
-an agent that keeps no session uses ``agent.agent.NoJournal``.
+An agent given no journal keeps its session in one, which nothing resumes; a
+caller can also inspect a session in one, or resume one it built.
 
 Typical usage example:
 
@@ -52,9 +52,13 @@ class RecordingJournal:
         """Yield the records from the last ``ContextClear`` on."""
         return iter(tuple(self._records[self._start :]))
 
-    def history(self) -> Iterator[SessionRecord]:
-        """Yield every record kept, from the first."""
-        return iter(tuple(self._records))
+    def __len__(self) -> int:
+        """Return how many records ``history`` yields."""
+        return len(self._records)
+
+    def history(self, start: int = 0) -> Iterator[SessionRecord]:
+        """Yield every record kept, from record ``start``."""
+        return iter(tuple(self._records[start:]))
 
     def flush(self) -> None:
         """Do nothing; nothing is buffered."""

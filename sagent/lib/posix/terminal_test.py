@@ -531,8 +531,10 @@ class TestLifecycle:
                 terminate_grace_sec=0.05,
             ) as term:
                 assert b"DEAF" in await _read_until(term, b"DEAF", 5.0)
+                pid = term.pid
+                assert pid is not None
                 await term.terminate()
-                alive = _still_running(term._pid)
+                alive = _still_running(pid)
                 return await term.wait(), alive
 
         status, survived = asyncio.run(run())
@@ -590,7 +592,8 @@ class TestLifecycle:
         async def run() -> tuple[int, bool]:
             term = Terminal(["cat"], terminate_grace_sec=0.1)
             await term.start()
-            pid = term._pid
+            pid = term.pid
+            assert pid is not None
             with pytest.MonkeyPatch.context() as patch:
                 patch.setattr(os, "killpg", failing_first)
                 await term.terminate()
@@ -619,7 +622,8 @@ class TestLifecycle:
             for _ in range(25):
                 term = Terminal(["cat"], terminate_grace_sec=0.1)
                 await term.start()
-                pid = term._pid
+                pid = term.pid
+                assert pid is not None
                 await term.terminate()
                 if _still_running(pid):
                     survivors += 1
@@ -651,12 +655,32 @@ class TestLifecycle:
             term = Terminal(["true"])
             await term.start()
             status = await term.wait()
-            assert term._pid == -1
+            # No number at all: a sentinel like -1 is one slip from kill(-1).
+            assert term._pid is None
             await term.terminate()
             await term.close()
             return status
 
         assert asyncio.run(run()) == 0
+
+    def test_an_unstarted_terminal_has_no_pid_and_signals_nothing(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        sent: list[tuple[int, int]] = []
+
+        def recorded(pid: int, sig: int) -> None:
+            sent.append((pid, sig))
+
+        monkeypatch.setattr(os, "killpg", recorded)
+        monkeypatch.setattr(os, "kill", recorded)
+        term = Terminal(["true"])
+
+        assert term._pid is None
+        assert term.pid is None
+        term.redraw()
+        asyncio.run(term.terminate())
+        assert sent == []
 
     def test_close_is_idempotent(self) -> None:
         async def run() -> None:
