@@ -196,7 +196,6 @@ markers = [
     "network_searxng: reaches a SearXNG service over the network",
     "network_gpu_cloud: reaches a GPU cloud provider over the network",
     "network_slack: reaches Slack over the network",
-    "network_together: reaches Together over the network",
     "network_wandb: reaches Weights & Biases over the network",
 ]
 # `-p no:py_pglite`: its auto-loaded plugin marks any test whose PATH contains

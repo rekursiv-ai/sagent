@@ -539,7 +539,6 @@ def resource_marker_aliases(
         ("network_searxng", ("integration",)),
         ("network_gpu_cloud", ("cluster",)),
         ("network_slack", ("integration",)),
-        ("network_together", ("cluster",)),
         ("network_wandb", ("integration",)),
     ),
 ) -> tuple[str, ...]:
@@ -595,7 +594,6 @@ def resource_marker_timeout(
         ("compute_torch_compile", 900),
         ("db_pglite", 180),
         ("network_gpu_cloud", 300),
-        ("network_together", 4800),
     ),
 ) -> int:
     """Return a marker's specific timeout, falling back to its category.
@@ -635,7 +633,6 @@ def apply_resource_markers(
         "gpu_torch_cuda",
         "gpu_triton",
         "network_gpu_cloud",
-        "network_together",
     ),
     live_llm_marks: tuple[str, ...] = ("cli_real_llm",),
     live_llm_env_var: str = "RUN_REAL_LLM",
