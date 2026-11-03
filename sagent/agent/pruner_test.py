@@ -44,9 +44,9 @@ from sagent.runtime.tape import ContextSplice
 from sagent.runtime.types import Markers
 from sagent.session.types import (
     AssistantMessage,
-    FileEditResult,
-    FileReadResult,
-    ShellCommandResult,
+    BashResult,
+    EditResult,
+    ReadResult,
     ToolCall,
     ToolResult,
     UncategorizedToolResult,
@@ -143,14 +143,14 @@ def _read(
     """Return a Read of ``ranges`` of ``path``, 1000 tokens long; all of it when none."""
     return [
         ToolCall(call_id=call_id, name="Read", arguments={"file_path": path}),
-        FileReadResult(call_id=call_id, path=path, content="x" * 4000, ranges=ranges),
+        ReadResult(call_id=call_id, path=path, content="x" * 4000, ranges=ranges),
     ]
 
 
 def _shell(call_id: str, command: str) -> list[SessionRecord]:
     return [
         ToolCall(call_id=call_id, name="Bash", arguments={"command": command}),
-        ShellCommandResult(
+        BashResult(
             call_id=call_id,
             command=("bash", "-c", command),
             stdout="o" * 4000,
@@ -318,7 +318,7 @@ def test_a_result_is_idle_since_its_file_was_last_named(tmp_path: Path) -> None:
         UncategorizedToolResult(call_id="s", content="line"),
         *_turns(requests=3),
         ToolCall(call_id="e", name="Edit", arguments={"file_path": "/repo/y.py"}),
-        FileEditResult(call_id="e", path="/repo/y.py"),
+        EditResult(call_id="e", path="/repo/y.py"),
         *_turns(requests=1),
     )
     at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
@@ -408,13 +408,13 @@ def test_a_file_result_naming_no_file_is_idle_since_it_came(tmp_path: Path) -> N
     context = _context(
         tmp_path,
         ToolCall(call_id="e", name="Edit"),
-        FileEditResult(call_id="e", path=None),
+        EditResult(call_id="e", path=None),
         *_turns(requests=2),
         ToolCall(call_id="g", name="Grep", arguments={"pattern": "None"}),
         UncategorizedToolResult(call_id="g", content="hit"),
         *_turns(requests=1),
     )
-    (at,) = (i for i, e in enumerate(context) if isinstance(e, FileEditResult))
+    (at,) = (i for i, e in enumerate(context) if isinstance(e, EditResult))
 
     assert idle(context)[at] == reads(context)[at]
 
@@ -428,7 +428,7 @@ def test_a_file_named_only_before_its_result_is_idle_since_it_came(
         UncategorizedToolResult(call_id="g", content="hit"),
         *_turns(requests=2),
         ToolCall(call_id="e", name="Edit"),
-        FileEditResult(call_id="e", path=_P),
+        EditResult(call_id="e", path=_P),
         *_turns(requests=1),
     )
     at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
@@ -442,7 +442,7 @@ def test_a_file_result_after_one_naming_no_file_is_still_followed(
     context = _context(
         tmp_path,
         ToolCall(call_id="e", name="Edit"),
-        FileEditResult(call_id="e", path=None),
+        EditResult(call_id="e", path=None),
         *_read("a", _P),
         *_turns(requests=2),
         ToolCall(call_id="g", name="Grep", arguments={"path": _P}),

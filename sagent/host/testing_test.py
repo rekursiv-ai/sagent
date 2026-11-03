@@ -10,7 +10,7 @@ import pytest
 
 from sagent.host.testing import Gate, LocalHost
 from sagent.host.wire import Call, Result, Tools, encoded, received
-from sagent.session.types import FileReadResult
+from sagent.session.types import ReadResult
 from sagent.tools.read import Read
 from sagent.tools.types import ToolContext
 from sagent.tools.write import Write
@@ -44,7 +44,7 @@ async def test_a_host_serves_the_tools_named_at_home_in_its_directory(
     )
     result = await asyncio.wait_for(received(host.reader), 5)
     assert isinstance(result, Result)
-    assert isinstance(result.record, FileReadResult)
+    assert isinstance(result.record, ReadResult)
     assert "home" in (result.record.content or "")
     await host.stop()
     assert host.task.done()

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 import asyncio
 import time
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import ListResult
 from sagent.tools.command_analyzer import (
     Invocation,
     bounding_sink,
@@ -162,7 +162,7 @@ class List:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> ListResult:
         """List a directory's entries, directories marked with ``/``.
 
         Args:
@@ -210,7 +210,7 @@ def ls_row(path: Path, *, name: str) -> str:
     return f"{_stat(path, 'size'):>10}  {when}  {name}"
 
 
-def _list(context: ToolContext, a: List.Arguments) -> UncategorizedToolResult:
+def _list(context: ToolContext, a: List.Arguments) -> ListResult:
     """List the directory ``a`` names."""
     directory = context.path(a.path or ".")
     if not directory.exists():
@@ -239,7 +239,7 @@ def _list(context: ToolContext, a: List.Arguments) -> UncategorizedToolResult:
     out = "\n".join(rows) or "(empty directory)"
     if total > len(entries):
         out += f"\n... ({total - len(entries):,} more)"
-    return UncategorizedToolResult(call_id="", content=out)
+    return ListResult(call_id="", path=str(directory), content=out)
 
 
 def _stat(path: Path, key: str) -> float:
@@ -251,5 +251,5 @@ def _stat(path: Path, key: str) -> float:
     return stat.st_mtime if key == "mtime" else stat.st_size
 
 
-def _error(message: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=message, is_error=True)
+def _error(message: str) -> ListResult:
+    return ListResult(call_id="", shown=message, is_error=True)

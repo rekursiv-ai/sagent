@@ -137,6 +137,32 @@ def test_the_projects_root_is_the_users_by_default(
     assert log.read_text().startswith('{"py/object": "ContextClear"')
 
 
+def test_a_journal_storing_a_former_name_is_renamed_unless_open(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    old = '{"py/object": "FileReadResult", "call_id": "c", "path": "a"}\n'
+    closed = _old(tmp_path / "a", {"py/object": "ContextClear"})
+    _ = closed.write_text(closed.read_text() + old)
+    held = _old(tmp_path / "b", {"py/object": "ContextClear"})
+    _ = held.write_text(held.read_text() + old)
+
+    async def run() -> None:
+        async with JsonlJournal(held):
+            assert main([str(tmp_path), "--dry-run"]) == 0
+            assert main([str(tmp_path)]) == 0
+
+    asyncio.run(run())
+
+    out = capsys.readouterr().out.splitlines()
+    assert out[0] == f"would rename: {closed} (1 records)"
+    assert out[1] == f"skipped: open: {held}"
+    assert out[3] == f"renamed: {closed} (1 records)"
+    assert out[-1] == "1 renamed, 2 skipped: not old, 1 skipped: open"
+    assert '"py/object": "ReadResult"' in closed.read_text()
+    assert "FileReadResult" in held.read_text()
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 

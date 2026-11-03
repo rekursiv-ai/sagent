@@ -47,7 +47,7 @@ from sagent.runtime.exceptions import describe
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.projects import child_journal, session_file
 from sagent.session.types import (
-    AgentStatusResult,
+    AgentSpawnResult,
     AgentToAgentMessage,
     ToolCall,
     ToolResult,
@@ -206,7 +206,7 @@ class AgentSpawn:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> AgentStatusResult:
+    ) -> AgentSpawnResult:
         """Build the child, join it to the team, and run or start it.
 
         Args:
@@ -234,7 +234,7 @@ class AgentSpawn:
                 raise ValueError("A watcher needs a policy in prompt.")
             label = await self.start_watcher(parent_label)
             self.team.send(parent_label, recipient=label, content=a.prompt)
-            return AgentStatusResult(
+            return AgentSpawnResult(
                 call_id="",
                 agent_id=label,
                 agent_kind="watcher",
@@ -571,7 +571,7 @@ class AgentSpawn:
         label: str,
         parent: Agent,
         a: AgentSpawn.Arguments,
-    ) -> AgentStatusResult:
+    ) -> AgentSpawnResult:
         """Run ``child`` on the prompt to idle; it stays, its inbox open."""
         started = time.monotonic()
         tally = _Tally()
@@ -596,7 +596,7 @@ class AgentSpawn:
                     cost=tally.cost,
                 ),
             )
-        return AgentStatusResult(
+        return AgentSpawnResult(
             call_id="",
             is_error=state != "completed",
             agent_id=label,

@@ -15,7 +15,7 @@ import sys
 import pytest
 
 from sagent.lib.userdirs import data_dir
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import SkillResult
 from sagent.tools import skill
 from sagent.tools.skill import Skill, SkillInfo
 from sagent.tools.types import ToolContext, json_schema
@@ -522,8 +522,9 @@ async def test_call_returns_the_escaped_body_in_a_skill_block(tmp_path: Path) ->
         ToolContext(cwd=tmp_path),
         {"skill": "alpha"},
     )
-    assert result == UncategorizedToolResult(
+    assert result == SkillResult(
         call_id="",
+        skill="alpha",
         content="<skill name='alpha' source='project'>\n"
         "hello &lt;world&gt; &amp; &lt;/skill&gt;\n</skill>",
     )

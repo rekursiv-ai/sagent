@@ -23,7 +23,7 @@ from wesearch.paper.fetch import batch_oa_urls, download, looks_like_pdf
 from wesearch.paper.ids import id_slug, normalize_id, s2_wire_id
 
 from sagent.lib.userdirs import cache_dir
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import PaperFetchResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import paper_ids, summary_ids
 from sagent.tools.types import json_schema, parse
@@ -95,7 +95,7 @@ class PaperFetch:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> PaperFetchResult:
         """Download each paper ``ids`` names, or find it in the cache.
 
         Args:
@@ -144,7 +144,7 @@ class PaperFetch:
                 )
             ),
         )
-        return UncategorizedToolResult(
+        return PaperFetchResult(
             call_id="",
             content="\n".join(text for text, _ in lines),
             is_error=any(failed for _, failed in lines),

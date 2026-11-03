@@ -516,6 +516,7 @@ def test_a_test_named_without_parameters_keeps_every_parametrization(
         for nodeid in (
             "s_test.py::p[1]",
             "s_test.py::p[2]",
+            "s_test.py::p[a[1]]",
             "s_test.py::pp",
             "s_test.py::q[1]",
             "s_test.py::q[2]",
@@ -529,6 +530,7 @@ def test_a_test_named_without_parameters_keeps_every_parametrization(
     assert [item.nodeid for item in items] == [
         "s_test.py::p[1]",
         "s_test.py::p[2]",
+        "s_test.py::p[a[1]]",
         "s_test.py::q[1]",
         "t_test.py::rest",
     ]

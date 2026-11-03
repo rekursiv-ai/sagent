@@ -25,8 +25,7 @@ from treekle import PlainTree, ReadError, from_plain, json_loads
 from sagent.model.image import PDFIUM
 from sagent.session.types import (
     Attachment,
-    FileReadResult,
-    UncategorizedToolResult,
+    ReadResult,
 )
 from sagent.tools.command_analyzer import (
     Invocation,
@@ -191,7 +190,7 @@ class Read:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> FileReadResult | UncategorizedToolResult:
+    ) -> ReadResult:
         """Read ``file_path``.
 
         Args:
@@ -212,7 +211,7 @@ class Read:
         self,
         context: ToolContext,
         a: Read.Arguments,
-    ) -> FileReadResult | UncategorizedToolResult:
+    ) -> ReadResult:
         """Read the file ``a`` names, by its kind."""
         path = context.path(a.file_path)
         if not path.exists():
@@ -233,7 +232,7 @@ class Read:
                     " a read takes. Shrink it with Bash first.",
                 )
             context.files.saw(path)
-            return FileReadResult(
+            return ReadResult(
                 call_id="",
                 path=str(path),
                 content=f"[image: {path}]",
@@ -253,7 +252,7 @@ class Read:
         path: Path,
         *,
         pages: str,
-    ) -> FileReadResult | UncategorizedToolResult:
+    ) -> ReadResult:
         """Render a PDF's pages as JPEGs, as many as fit the byte budget."""
         with path.open("rb") as f:
             if f.read(5) != b"%PDF-":
@@ -302,7 +301,7 @@ class Read:
         note = f"[PDF: {path.name}, pages {first}-{end} of {total}]"
         if end < last:
             note += f' Pass pages="{end + 1}-{last}" for the rest.'
-        return FileReadResult(
+        return ReadResult(
             call_id="",
             path=str(path),
             content=note,
@@ -399,41 +398,51 @@ def _read_text(
     offset: int,
     limit: int | None,
     last_lines: int | None,
-) -> FileReadResult | UncategorizedToolResult:
+) -> ReadResult:
     """Read ``path`` as numbered lines, windowed and bounded."""
     lines_asked = (offset, limit, last_lines)
     if context.files.shown(path, lines=lines_asked):
-        return UncategorizedToolResult(
+        return ReadResult(
             call_id="",
-            content=f"[File unchanged since last read: {path}]",
+            path=str(path),
+            status="unchanged",
+            shown=f"[File unchanged since last read: {path}]",
         )
     with path.open("rb") as f:
         if b"\x00" in f.read(8192):
-            return UncategorizedToolResult(
+            return ReadResult(
                 call_id="",
-                content=f"[Binary file: {path} ({path.stat().st_size:,} bytes).]",
+                path=str(path),
+                status="binary",
+                shown=f"[Binary file: {path} ({path.stat().st_size:,} bytes).]",
             )
     # Seen before read, so a write in between shows as a change.
     context.files.saw(path)
     try:
         text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        return UncategorizedToolResult(
+        return ReadResult(
             call_id="",
-            content=f"[{path} is not UTF-8. Use Bash with an explicit decoder.]",
+            path=str(path),
+            status="undecodable",
+            shown=f"[{path} is not UTF-8. Use Bash with an explicit decoder.]",
         )
     if not text:
-        return UncategorizedToolResult(
+        return ReadResult(
             call_id="",
-            content=f"[File exists but is empty: {path}]",
+            path=str(path),
+            status="empty",
+            shown=f"[File exists but is empty: {path}]",
         )
     lines = text.splitlines(keepends=True)
     total = len(lines)
     start = offset - 1 if last_lines is None else max(0, total - last_lines)
     if start >= total:
-        return UncategorizedToolResult(
+        return ReadResult(
             call_id="",
-            content=f"[offset {offset} is past the end: {path} has {total} lines]",
+            path=str(path),
+            status="past_end",
+            shown=f"[offset {offset} is past the end: {path} has {total} lines]",
         )
     end = total if limit is None else min(start + limit, total)
     numbered = [f"{start + i + 1}\t{line}" for i, line in enumerate(lines[start:end])]
@@ -449,7 +458,7 @@ def _read_text(
     body += _more(total, start=start, kept=kept)
     context.files.showed(path, lines=lines_asked)
     whole = start == 0 and kept == total
-    return FileReadResult(
+    return ReadResult(
         call_id="",
         path=str(path),
         content=body,
@@ -468,7 +477,7 @@ def _more(total: int, *, start: int, kept: int) -> str:
 def _read_notebook(
     context: ToolContext,
     path: Path,
-) -> FileReadResult | UncategorizedToolResult:
+) -> ReadResult:
     """Render a notebook's cells and their outputs as text."""
     try:
         notebook = json_loads(path.read_text(encoding="utf-8"), dict[str, object])
@@ -492,7 +501,7 @@ def _read_notebook(
     body, kept = context.fit(parts, reserve=len(note))
     if kept < len(parts):
         body += f"\n... ({len(parts) - kept:,} more notebook sections omitted.)"
-    return FileReadResult(
+    return ReadResult(
         call_id="",
         path=str(path),
         content=body or "(empty notebook)",
@@ -549,5 +558,5 @@ def _render(
     return jpegs
 
 
-def _error(message: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=message, is_error=True)
+def _error(message: str) -> ReadResult:
+    return ReadResult(call_id="", shown=message, is_error=True)

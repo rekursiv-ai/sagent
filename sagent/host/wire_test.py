@@ -37,8 +37,8 @@ from sagent.host.wire import (
 )
 from sagent.session.types import (
     Attachment,
-    FileReadResult,
-    ShellCommandResult,
+    BashResult,
+    ReadResult,
     UserMessage,
     stored_plain,
 )
@@ -98,11 +98,11 @@ _TOKEN = secrets.token_urlsafe(16)
         Peers(labels=("a_0", "a_1")),
         Result(
             id="1",
-            record=ShellCommandResult(call_id="", stdout="hi\n", exit_code=0),
+            record=BashResult(call_id="", stdout="hi\n", exit_code=0),
         ),
         Result(
             id="2",
-            record=FileReadResult(
+            record=ReadResult(
                 call_id="",
                 path="/a.png",
                 attachments=(
@@ -133,7 +133,7 @@ async def test_each_message_reads_back_as_it_was_sent(message: Message) -> None:
 
 @pytest.mark.asyncio
 async def test_a_message_is_one_line() -> None:
-    line = encoded(Result(id="1", record=ShellCommandResult(call_id="", stdout="a\nb")))
+    line = encoded(Result(id="1", record=BashResult(call_id="", stdout="a\nb")))
     assert line.endswith(b"\n")
     assert line.count(b"\n") == 1
 

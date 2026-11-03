@@ -27,7 +27,7 @@ from wesearch.paper.render import (
 
 import cachetools
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import PaperAuthorResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import error, paper_ids, summary_ids
 from sagent.tools.types import Arg, json_schema, parse
@@ -145,7 +145,7 @@ class PaperAuthor:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> PaperAuthorResult:
         """Search authors, look up ``ids``, or list one author's papers.
 
         Args:
@@ -193,7 +193,7 @@ class PaperAuthor:
         )
         cached = self.cache.get(key)
         if cached is not None:
-            return UncategorizedToolResult(call_id="", content=cached)
+            return PaperAuthorResult(call_id="", operation=a.operation, content=cached)
         try:
             if query:
                 text = await self._search(query, limit=a.limit, session=session)
@@ -210,11 +210,15 @@ class PaperAuthor:
                     for label, r in zip(ids, records, strict=True)
                 )
                 if any(r is None for r in records):
-                    return UncategorizedToolResult(call_id="", content=text)
+                    return PaperAuthorResult(
+                        call_id="",
+                        operation=a.operation,
+                        content=text,
+                    )
         except PaperError as e:
-            return error(str(e))
+            return error(PaperAuthorResult, str(e))
         self.cache[key] = text
-        return UncategorizedToolResult(call_id="", content=text)
+        return PaperAuthorResult(call_id="", operation=a.operation, content=text)
 
     async def _search(
         self,

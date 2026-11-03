@@ -13,7 +13,7 @@ from wesearch.web import FetchResult
 
 import pytest
 
-from sagent.session.types import UncategorizedToolResult, WebFetchResult
+from sagent.session.types import WebFetchResult
 from sagent.tools import web_fetch
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.types import ToolContext
@@ -70,8 +70,8 @@ def fetches(monkeypatch: pytest.MonkeyPatch) -> Fetches:
 _CONTEXT = ToolContext(cwd=Path("/"), fetch_session=FetchSession())
 
 
-def _error(text: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=text, is_error=True)
+def _error(text: str) -> WebFetchResult:
+    return WebFetchResult(call_id="", shown=text, is_error=True)
 
 
 @pytest.mark.parametrize(
@@ -154,7 +154,6 @@ def test_anything_else_stays_a_shell_command(command: str) -> None:
 async def test_a_get_returns_the_pages_text(fetches: Fetches) -> None:
     tool = WebFetch()
     result = await tool.call(_CONTEXT, {"url": "https://example.com"})
-    assert isinstance(result, WebFetchResult)
     assert (result.url, result.content, result.size) == (
         "https://example.com",
         "page text\n",
@@ -178,11 +177,10 @@ async def test_a_get_returns_the_pages_text(fetches: Fetches) -> None:
 
 @pytest.mark.asyncio
 async def test_a_lowercase_method_is_accepted(fetches: Fetches) -> None:
-    result = await WebFetch().call(
+    await WebFetch().call(
         _CONTEXT,
         {"url": "https://e.com", "method": "post"},
     )
-    assert isinstance(result, WebFetchResult)
     assert fetches.seen[0]["method"] == "POST"
 
 
@@ -268,7 +266,6 @@ async def test_a_get_is_cached_by_url_transport_and_extractor(fetches: Fetches) 
         {"url": "https://e.com/other"},
     ):
         result = await tool.call(_CONTEXT, arguments)
-        assert isinstance(result, WebFetchResult)
         assert result.content == "page text\n"
     assert len(fetches.seen) == 4
 
@@ -292,7 +289,6 @@ async def test_a_long_page_is_cut_with_a_note(fetches: Fetches) -> None:
         context,
         {"url": "https://e.com"},
     )
-    assert isinstance(result, WebFetchResult)
     assert result.content is not None
     body, note = result.content.rsplit("\n... ", 1)
     kept = body.splitlines()
@@ -327,8 +323,7 @@ async def test_a_failed_fetch_says_why(fetches: Fetches, error: Exception) -> No
     result = await tool.call(_CONTEXT, {"url": "https://e.com"})
     assert result == _error(f"Fetch failed: {error}")
     fetches.error = None
-    second = await tool.call(_CONTEXT, {"url": "https://e.com"})
-    assert isinstance(second, WebFetchResult)
+    await tool.call(_CONTEXT, {"url": "https://e.com"})
     assert len(fetches.seen) == 2
 
 

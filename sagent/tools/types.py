@@ -1,7 +1,7 @@
 """What a tool is: something the model calls by name, which says what it did.
 
-A tool returns a session record typed by what it did -- a ``FileEditResult``
-names its edits, a ``ShellCommandResult`` its exit code -- so the session keeps
+A tool returns a session record typed by what it did -- a ``EditResult``
+names its edits, a ``BashResult`` its exit code -- so the session keeps
 the act itself, not a description of it. The runtime fills in ``call_id``.
 
 A tool holds no agent's state; each call gets that agent's ``ToolContext``, so
@@ -33,9 +33,9 @@ Typical usage example:
       def serialize_key(self, context, arguments) -> str | None:
           return None
 
-      async def call(self, context, arguments) -> UncategorizedToolResult:
+      async def call(self, context, arguments) -> EchoResult:
           a = parse(arguments, Echo.Arguments)
-          return UncategorizedToolResult(call_id="", content=a.text)
+          return EchoResult(call_id="", content=a.text)  # Echo's own result type
 """
 
 from __future__ import annotations

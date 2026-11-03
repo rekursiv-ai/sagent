@@ -14,9 +14,8 @@ from wesearch.types.errors import BotDetectionError, CooldownError
 import pytest
 
 from sagent.session.types import (
-    UncategorizedToolResult,
+    WebSearchHit,
     WebSearchResult,
-    WebSearchResults,
 )
 from sagent.tools import web_search
 from sagent.tools.types import ToolContext
@@ -73,8 +72,8 @@ def searches(monkeypatch: pytest.MonkeyPatch) -> Searches:
 _CONTEXT = ToolContext(cwd=Path("/"), fetch_session=FetchSession())
 
 
-def _error(text: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=text, is_error=True)
+def _error(text: str) -> WebSearchResult:
+    return WebSearchResult(call_id="", shown=text, is_error=True)
 
 
 def test_websearch_describes_itself() -> None:
@@ -91,11 +90,10 @@ def test_websearch_describes_itself() -> None:
 async def test_a_search_returns_each_hit(searches: Searches) -> None:
     tool = WebSearch()
     result = await tool.call(_CONTEXT, {"query": "python"})
-    assert isinstance(result, WebSearchResults)
     assert result.query == "python"
     assert result.content == (
-        WebSearchResult(url="https://a.example", title="A", snippet="about a"),
-        WebSearchResult(url="https://b.example", title="B", snippet=""),
+        WebSearchHit(url="https://a.example", title="A", snippet="about a"),
+        WebSearchHit(url="https://b.example", title="B", snippet=""),
     )
     assert result.duration_sec is not None
     assert result.duration_sec < 1
@@ -125,7 +123,6 @@ async def test_a_hits_snippet_carries_its_category_fields(searches: Searches) ->
         _CONTEXT,
         {"query": "q", "categories": "science"},
     )
-    assert isinstance(result, WebSearchResults)
     (hit,) = result.content
     assert hit.snippet is not None
     assert hit.snippet.startswith("abstract\n")
@@ -184,8 +181,7 @@ async def test_a_domain_that_is_not_a_hostname_is_refused(
 async def test_no_hits_says_so(searches: Searches) -> None:
     searches.hits = ()
     result = await WebSearch().call(_CONTEXT, {"query": "q"})
-    assert isinstance(result, UncategorizedToolResult)
-    assert result == UncategorizedToolResult(call_id="", content="(no results)")
+    assert result == WebSearchResult(call_id="", query="q", shown="(no results)")
 
 
 @pytest.mark.asyncio
@@ -196,7 +192,6 @@ async def test_hits_are_kept_while_they_fit(searches: Searches) -> None:
     )
     context = ToolContext(cwd=Path("/"), max_result_chars=200)
     result = await WebSearch().call(context, {"query": "q"})
-    assert isinstance(result, WebSearchResults)
     assert [hit.title for hit in result.content] == ["T0", "T1"]
 
 

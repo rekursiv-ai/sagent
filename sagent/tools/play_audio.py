@@ -22,7 +22,7 @@ import platform
 import shutil
 import subprocess
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import PlayAudioResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
 
@@ -81,7 +81,7 @@ class PlayAudio:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> PlayAudioResult:
         """Play the file at ``path``.
 
         Args:
@@ -103,11 +103,16 @@ class PlayAudio:
         failure = await asyncio.to_thread(self._play, path)
         if failure:
             logger.warning("PlayAudio: %s", failure)
-            return UncategorizedToolResult(
+            return PlayAudioResult(
                 call_id="",
+                path=str(path),
                 content=f"Played {path.name} (best effort): {failure}",
             )
-        return UncategorizedToolResult(call_id="", content=f"Played {path.name}.")
+        return PlayAudioResult(
+            call_id="",
+            path=str(path),
+            content=f"Played {path.name}.",
+        )
 
     def _play(self, path: Path) -> str:
         """Play ``path``; return why it did not play, ``""`` when it did."""
@@ -152,5 +157,5 @@ class PlayAudio:
         return "no audio backend worked: " + "; ".join(tried)
 
 
-def _error(message: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=message, is_error=True)
+def _error(message: str) -> PlayAudioResult:
+    return PlayAudioResult(call_id="", shown=message, is_error=True)

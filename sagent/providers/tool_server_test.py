@@ -28,7 +28,7 @@ from sagent.providers.testing import send
 from sagent.providers.tool_server import McpMount, McpToolServer
 from sagent.session.types import (
     Attachment,
-    ShellCommandResult,
+    BashResult,
     ToolCall,
     UncategorizedToolResult,
 )
@@ -198,7 +198,7 @@ async def test_a_result_reaches_the_cli_with_its_images_and_error_flag() -> None
     pdf = Attachment(mime_descriptor="application/pdf", data=b"%PDF")
     holding = asyncio.ensure_future(mount.hold("Bash", arguments={}))
     call = await mount.called()
-    result = ShellCommandResult(
+    result = BashResult(
         call_id=call.call_id,
         stdout="out",
         exit_code=1,

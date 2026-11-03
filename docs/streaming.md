@@ -51,7 +51,7 @@ Common events in `sagent.runtime.types`:
 | `Halt` | Someone halted the turn. |
 | `AgentIdle` | The agent has no more work and waits for input. |
 
-Tool results arrive as the session records they are, such as `ShellCommandResult`.
+Tool results arrive as the session records they are, such as `BashResult`.
 
 ## CLI output formats
 

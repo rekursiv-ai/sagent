@@ -22,7 +22,7 @@ import pytest
 
 from sagent.lib.posix.child import Child
 from sagent.lib.posix.pids import gone_within, running
-from sagent.session.types import ShellCommandResult
+from sagent.session.types import BashResult
 from sagent.tools import bash
 from sagent.tools.bash import Bash, _drain, _guard, _HeldPipe, _spill, _stop
 from sagent.tools.command_analyzer import Rewrite
@@ -1139,7 +1139,7 @@ async def test_a_call_returns_the_command_and_what_the_shell_named_itself(
     tmp_path: Path,
 ) -> None:
     command = 'echo "$0"'
-    assert await _run(tmp_path, command) == ShellCommandResult(
+    assert await _run(tmp_path, command) == BashResult(
         call_id="",
         command=("bash", "-c", command),
         stdout="bash\n",
@@ -1250,7 +1250,7 @@ async def _run(
     *,
     limit_ms: float = 10_000,
     tool: Bash | None = None,
-) -> ShellCommandResult:
+) -> BashResult:
     """Run ``command`` with ``tool`` in a fresh context at ``cwd``."""
     return await (tool or Bash()).call(
         ToolContext(cwd=cwd),

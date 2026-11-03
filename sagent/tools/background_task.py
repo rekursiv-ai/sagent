@@ -25,7 +25,7 @@ import time
 
 from treekle import PlainTree
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import BackgroundTaskResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import Tool, json_schema, parse
 
@@ -102,7 +102,7 @@ class BackgroundTask:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> BackgroundTaskResult:
         """Refuse: the jobs are the runtime's, which calls :meth:`manage` instead."""
         del context, arguments
         return _error("BackgroundTask runs only inside an agent's runtime.")
@@ -140,8 +140,10 @@ class BackgroundTask:
             if job is None:
                 return unknown
             job.cancel()
-            return UncategorizedToolResult(
+            return BackgroundTaskResult(
                 call_id="",
+                operation="cancel",
+                job_id=a.id,
                 content=f"Cancelling {job.call.name} ({a.id}).",
             )
         # A job already done may still be asked for: its result is given again.
@@ -270,10 +272,14 @@ def without_controls(arguments: Mapping[str, PlainTree]) -> dict[str, PlainTree]
     return {k: v for k, v in arguments.items() if k not in ("background", "delay")}
 
 
-def _listing(jobs: Mapping[str, Job]) -> UncategorizedToolResult:
+def _listing(jobs: Mapping[str, Job]) -> BackgroundTaskResult:
     """Return one row per job: id, tool, phase, and seconds since it was asked for."""
     if not jobs:
-        return UncategorizedToolResult(call_id="", content="No background jobs.")
+        return BackgroundTaskResult(
+            call_id="",
+            operation="list",
+            content="No background jobs.",
+        )
     width = max(len(cid) for cid in jobs)
     now = time.time()
     rows = [
@@ -281,7 +287,11 @@ def _listing(jobs: Mapping[str, Job]) -> UncategorizedToolResult:
         for cid, job in jobs.items()
     ]
     header = f"{'ID':<{width}}  {'TOOL':<20}  {'PHASE':<8}  ELAPSED"
-    return UncategorizedToolResult(call_id="", content="\n".join((header, *rows)))
+    return BackgroundTaskResult(
+        call_id="",
+        operation="list",
+        content="\n".join((header, *rows)),
+    )
 
 
 def _phase(job: Job) -> str:
@@ -289,5 +299,5 @@ def _phase(job: Job) -> str:
     return "sleeping" if job.state == "sleeping" else "running"
 
 
-def _error(text: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=text, is_error=True)
+def _error(text: str) -> BackgroundTaskResult:
+    return BackgroundTaskResult(call_id="", shown=text, is_error=True)

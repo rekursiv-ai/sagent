@@ -32,7 +32,7 @@ from sagent.lib.yaml import (
     parse as yaml_parse,
     split_frontmatter,
 )
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import MemoryResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
 
@@ -135,7 +135,7 @@ class Memory:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> MemoryResult:
         """Save or forget the memory ``name``, and its index line.
 
         Args:
@@ -151,8 +151,14 @@ class Memory:
         try:
             text = await asyncio.to_thread(self._apply, a)
         except ValueError as e:
-            return UncategorizedToolResult(call_id="", content=str(e), is_error=True)
-        return UncategorizedToolResult(call_id="", content=text)
+            return MemoryResult(
+                call_id="",
+                action=a.action,
+                name=a.name,
+                shown=str(e),
+                is_error=True,
+            )
+        return MemoryResult(call_id="", action=a.action, name=a.name, content=text)
 
     def _apply(self, a: Memory.Arguments) -> str:
         """Apply the action to the directory; raise ``ValueError`` for a bad call."""

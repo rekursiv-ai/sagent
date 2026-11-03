@@ -9,7 +9,7 @@ from rich.console import Console
 
 import pytest
 
-from sagent.session.types import FileEditResult, FileWriteResult, Splice
+from sagent.session.types import EditResult, Splice, WriteResult
 from sagent.tui.diff import (
     DiffStyle,
     highlight_source,
@@ -374,7 +374,7 @@ def test_highlight_source_is_plain_for_an_unknown_language_or_no_code() -> None:
 
 
 def test_splice_diff_numbers_each_hunk_for_the_file_after_the_edit() -> None:
-    result = FileEditResult(
+    result = EditResult(
         call_id="1",
         path="a.py",
         edits=(
@@ -400,13 +400,13 @@ def test_splice_diff_numbers_each_hunk_for_the_file_after_the_edit() -> None:
 
 
 def test_an_edit_with_no_splices_is_an_empty_diff() -> None:
-    assert splice_diff(FileEditResult(call_id="1", path="a.py")) == ""
+    assert splice_diff(EditResult(call_id="1", path="a.py")) == ""
 
 
 def test_a_write_is_a_diff_adding_every_line_from_one() -> None:
-    write = FileWriteResult(call_id="1", path="a.py", content="a\nb\n")
+    write = WriteResult(call_id="1", path="a.py", content="a\nb\n")
     assert write_diff(write) == "@@ -0,0 +1,2 @@\n+a\n+b"
-    assert write_diff(FileWriteResult(call_id="2")) == "@@ -0,0 +1,0 @@"
+    assert write_diff(WriteResult(call_id="2")) == "@@ -0,0 +1,0 @@"
 
 
 def test_a_cut_diff_keeps_its_head_and_tail_and_counts_every_line() -> None:

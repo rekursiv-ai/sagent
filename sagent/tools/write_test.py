@@ -10,7 +10,7 @@ import stat
 
 import pytest
 
-from sagent.session.types import FileWriteResult, UncategorizedToolResult
+from sagent.session.types import UncategorizedToolResult, WriteResult
 from sagent.tools.read import Read
 from sagent.tools.types import ToolContext
 from sagent.tools.write import Write, write_file
@@ -53,7 +53,7 @@ async def test_a_new_file_is_made_with_its_directories(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     result = await _write(context, "deep/er/notes.md", "hello\n")
     target = tmp_path / "deep" / "er" / "notes.md"
-    assert result == FileWriteResult(call_id="", path=str(target), content="hello\n")
+    assert result == WriteResult(call_id="", path=str(target), content="hello\n")
     assert result.text() == f"Wrote {target}."
     assert target.read_text() == "hello\n"
     assert target in context.files
@@ -65,7 +65,7 @@ async def test_a_file_just_written_may_be_written_again(tmp_path: Path) -> None:
     context = ToolContext(cwd=tmp_path)
     await _write(context, "a.md", "one")
     again = await _write(context, "a.md", "two")
-    assert isinstance(again, FileWriteResult)
+    assert isinstance(again, WriteResult)
     assert (tmp_path / "a.md").read_text() == "two"
 
 
@@ -243,7 +243,7 @@ async def _write(
     context: ToolContext,
     file_path: str,
     content: str,
-) -> FileWriteResult | UncategorizedToolResult:
+) -> WriteResult | UncategorizedToolResult:
     """Write ``content`` to ``file_path``; the runtime names the call."""
     result = await Write().call(context, {"file_path": file_path, "content": content})
     assert result.call_id == ""

@@ -43,7 +43,7 @@ from sagent.host.wire import (
     encoded,
     received,
 )
-from sagent.session.types import FileReadResult, UncategorizedToolResult
+from sagent.session.types import FunctionResult, ReadResult
 from sagent.tools.read import Read
 
 
@@ -139,8 +139,9 @@ async def test_a_holder_of_a_string_is_welcomed_and_runs_a_tool(tmp_path: Path) 
         writer.write(encoded(_call("1")))
         result = await _next(reader)
         assert isinstance(result, Result)
-        assert result.record == UncategorizedToolResult(
+        assert result.record == FunctionResult(
             call_id="",
+            name="Gate",
             content="open for Agent",
         )
         writer.close()
@@ -154,7 +155,7 @@ async def test_a_result_crosses_typed(tmp_path: Path) -> None:
         writer.write(encoded(_call("1", "Read", file_path=str(tmp_path / "a.txt"))))
         result = await _next(reader)
         assert isinstance(result, Result)
-        assert isinstance(result.record, FileReadResult)
+        assert isinstance(result.record, ReadResult)
         assert "hello" in (result.record.content or "")
         writer.close()
 

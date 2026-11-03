@@ -23,9 +23,8 @@ from wesearch.search.types import SearchBackends, SearxngCategory
 from wesearch.types.errors import BotDetectionError
 
 from sagent.session.types import (
-    UncategorizedToolResult,
+    WebSearchHit,
     WebSearchResult,
-    WebSearchResults,
 )
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
@@ -102,7 +101,7 @@ class WebSearch:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> WebSearchResults | UncategorizedToolResult:
+    ) -> WebSearchResult:
         """Search for ``query``, scoped to the domains given.
 
         Args:
@@ -145,9 +144,9 @@ class WebSearch:
         except (RuntimeError, ValueError) as e:
             return _error(str(e))
         if not hits:
-            return UncategorizedToolResult(call_id="", content="(no results)")
+            return WebSearchResult(call_id="", query=a.query, shown="(no results)")
         results = tuple(
-            WebSearchResult(
+            WebSearchHit(
                 url=hit.url,
                 title=hit.title,
                 # The snippet plus the fields its category adds: a paper's
@@ -157,7 +156,7 @@ class WebSearch:
             for hit in hits
         )
         _, kept = context.fit(f"{r.title}\n{r.url}\n{r.snippet}\n\n" for r in results)
-        return WebSearchResults(
+        return WebSearchResult(
             call_id="",
             query=a.query,
             duration_sec=time.monotonic() - started,
@@ -165,5 +164,5 @@ class WebSearch:
         )
 
 
-def _error(message: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=message, is_error=True)
+def _error(message: str) -> WebSearchResult:
+    return WebSearchResult(call_id="", shown=message, is_error=True)

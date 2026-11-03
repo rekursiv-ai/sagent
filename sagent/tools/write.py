@@ -15,7 +15,7 @@ import asyncio
 import os
 import uuid
 
-from sagent.session.types import FileWriteResult, UncategorizedToolResult
+from sagent.session.types import WriteResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
 
@@ -70,7 +70,7 @@ class Write:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> FileWriteResult | UncategorizedToolResult:
+    ) -> WriteResult:
         """Write ``content`` to ``file_path``, keeping an existing file's mode.
 
         An existing file must have been read first, and not changed since, so
@@ -135,7 +135,7 @@ def _write(
     context: ToolContext,
     path: Path,
     content: str,
-) -> FileWriteResult | UncategorizedToolResult:
+) -> WriteResult:
     """Write ``content`` to ``path`` if the model has seen what it replaces."""
     if path.is_dir():
         return _error(f"{path} is a directory, not a file.")
@@ -148,8 +148,8 @@ def _write(
         )
     write_file(path, content.encode())
     context.files.saw(path)
-    return FileWriteResult(call_id="", path=str(path), content=content)
+    return WriteResult(call_id="", path=str(path), content=content)
 
 
-def _error(message: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=message, is_error=True)
+def _error(message: str) -> WriteResult:
+    return WriteResult(call_id="", shown=message, is_error=True)

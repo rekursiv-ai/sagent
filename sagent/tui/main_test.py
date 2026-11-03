@@ -74,8 +74,8 @@ from sagent.session.types import (
     AgentToAgentMessage,
     AnyToolResult,
     AssistantMessage,
+    BashResult,
     SessionRecord,
-    ShellCommandResult,
     Thinking,
     UncategorizedRecord,
     UncategorizedToolResult,
@@ -3146,7 +3146,7 @@ def test_records_streams_each_kind_of_event_and_drops_the_rest() -> None:
     ((notice,),) = [main._records(spent, tools=tools)]
     assert notice["descriptor"] == "text/x-notice"
     assert str(notice["content"]).startswith("[no acli login has quota: work ")
-    result = ShellCommandResult(call_id="1", stdout="out", exit_code=2, is_error=True)
+    result = BashResult(call_id="1", stdout="out", exit_code=2, is_error=True)
     assert main._records(result, tools=tools) == [
         {
             "descriptor": "application/x-tool-result",

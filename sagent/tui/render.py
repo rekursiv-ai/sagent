@@ -42,20 +42,14 @@ from sagent.model.exceptions import (
 from sagent.runtime import types
 from sagent.runtime.exceptions import UserFacingError, describe, local_time
 from sagent.session.types import (
-    AgentStatusResult,
     AgentToAgentMessage,
     AssistantMessage,
-    FileEditResult,
-    FileReadResult,
-    FileWriteResult,
-    ShellCommandResult,
+    EditResult,
     Thinking,
     ToolCall,
     ToolResult,
-    UncategorizedToolResult,
     UserMessage,
-    WebFetchResult,
-    WebSearchResults,
+    WriteResult,
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tui.diff import splice_diff, write_diff
@@ -159,14 +153,7 @@ class Scrollback:
                 case (
                     UserMessage()
                     | AgentToAgentMessage()
-                    | AgentStatusResult()
-                    | FileEditResult()
-                    | FileReadResult()
-                    | FileWriteResult()
-                    | ShellCommandResult()
-                    | UncategorizedToolResult()
-                    | WebFetchResult()
-                    | WebSearchResults()
+                    | ToolResult()
                     | types.ModelResponsePartial()
                     | types.ModelResponseThinking()
                     | types.ModelResponseComplete()
@@ -547,9 +534,9 @@ def show_result(
     if result.stub == "pending":
         return
     match result:
-        case FileEditResult(path=path, edits=edits) if edits:
+        case EditResult(path=path, edits=edits) if edits:
             printer.diff(splice_diff(result), path=path or "", header=header)
-        case FileWriteResult(path=path, content=content) if content not in (
+        case WriteResult(path=path, content=content) if content not in (
             None,
             "",
         ) and display.output.lines != (0, 0):

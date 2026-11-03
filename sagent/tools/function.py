@@ -28,13 +28,14 @@ from dataclasses import (
     field as dataclass_field,
     fields,
     make_dataclass,
+    replace,
 )
 from typing import TYPE_CHECKING, cast, overload
 
 import asyncio
 import inspect
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import FunctionResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import ToolContext, json_schema, parse
 
@@ -137,8 +138,12 @@ class FunctionTool:
             done = await asyncio.to_thread(self._fn, **kwargs)
         if isinstance(done, str):
             text, _ = context.fit([done])
-            return UncategorizedToolResult(call_id="", content=text)
-        return cast("AnyToolResult", done)
+            return FunctionResult(call_id="", name=self.name, content=text)
+        record = cast("AnyToolResult", done)
+        # A function returning its result whole need not know the name it runs under.
+        if isinstance(record, FunctionResult) and not record.name:
+            return replace(record, name=self.name)
+        return record
 
 
 @overload

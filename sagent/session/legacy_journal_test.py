@@ -30,6 +30,7 @@ from sagent.session.types import (
     SystemMessage,
     Thinking,
     ToolCall,
+    ToolResult,
     UncategorizedToolResult,
     UserMessage,
 )
@@ -112,7 +113,7 @@ def _texts(path: Path) -> list[str]:
             UserMessage | AssistantMessage | AgentToAgentMessage | SystemMessage,
         )
         else r.text()
-        if isinstance(r, UncategorizedToolResult)
+        if isinstance(r, ToolResult)
         else f"call {r.call_id}"
         if isinstance(r, ToolCall)
         else type(r).__name__

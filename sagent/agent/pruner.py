@@ -33,13 +33,12 @@ from sagent.model.types import Response
 from sagent.runtime import types
 from sagent.runtime.tape import full_tape_mask, unpaired_call_ids
 from sagent.session.types import (
-    FileEditResult,
-    FileReadResult,
-    FileWriteResult,
-    ShellCommandResult,
+    BashResult,
+    EditResult,
+    ReadResult,
     ToolCall,
     ToolResult,
-    UncategorizedToolResult,
+    WriteResult,
 )
 
 
@@ -265,13 +264,13 @@ def superseded(context: Sequence[ModelContextEvent]) -> set[int]:
     commands: set[tuple[str, ...]] = set()
     for i in reversed(range(len(context))):
         entry = context[i]
-        if isinstance(entry, FileReadResult) and entry.path is not None:
+        if isinstance(entry, ReadResult) and entry.path is not None:
             shown = later.setdefault(entry.path, [])
             spans = _spans(entry.ranges)
             if all(_covered(span, shown) for span in spans):
                 gone.add(i)
             shown.extend(spans)
-        elif isinstance(entry, ShellCommandResult) and entry.command is not None:
+        elif isinstance(entry, BashResult) and entry.command is not None:
             if entry.command in commands:
                 gone.add(i)
             commands.add(entry.command)
@@ -305,7 +304,7 @@ def idle(context: Sequence[ModelContextEvent]) -> list[int]:
         for _, reply in replies
     ]
     for i, entry in enumerate(context):
-        if not isinstance(entry, (FileReadResult, FileEditResult, FileWriteResult)):
+        if not isinstance(entry, (ReadResult, EditResult, WriteResult)):
             continue
         if entry.path is None:
             continue
@@ -474,11 +473,7 @@ def drop(runtime: Runtime, indices: Sequence[int], *, stub: str) -> None:
         stubbed = isinstance(result, ToolResult)
         if not stubbed:
             raise ValueError(f"Entry {i} is no tool result.")
-        context[i] = UncategorizedToolResult(
-            call_id=result.call_id,
-            content=stub,
-            is_error=result.is_error,
-        )
+        context[i] = result.restated(stub)
     runtime.append_splice(
         mask=full_tape_mask(runtime.tape),
         payload=tuple(context),

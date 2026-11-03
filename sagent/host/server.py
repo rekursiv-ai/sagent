@@ -75,7 +75,7 @@ from sagent.host.wire import (
 )
 from sagent.lib.files.owner_only import open_private, write_private
 from sagent.lib.posix.child import Child
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import ToolErrorResult
 from sagent.types import AsyncResource
 
 
@@ -666,5 +666,5 @@ def _locked_pid(path: Path) -> int:
     return fd
 
 
-def _error(text: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=text, is_error=True)
+def _error(text: str) -> ToolErrorResult:
+    return ToolErrorResult(call_id="", content=text, is_error=True)

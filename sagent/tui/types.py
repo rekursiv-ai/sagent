@@ -467,8 +467,8 @@ class ScrollbackPane(Protocol):
         every Record. A ChildEvent recurses on its inner event, in brief,
         under the child's label.
 
-        Each ToolResult subclass draws by its own fields: FileEditResult's
-        Splices and FileWriteResult as diffs, ShellCommandResult as output
+        Each ToolResult subclass draws by its own fields: EditResult's
+        Splices and WriteResult as diffs, BashResult as output
         and exit code, the rest as their content cut to the tool's display.
         Dispatch ends in assert_never: a new Shown member without a case fails
         type-checking.

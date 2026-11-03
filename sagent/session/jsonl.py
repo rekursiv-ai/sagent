@@ -17,18 +17,20 @@ Typical usage example:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Final, override
 
 import fcntl
 import itertools
 import json
 import os
+import re
 
 from treekle import json_loads
 
 from sagent.lib.files.owner_only import open_private
 from sagent.lib.posix.pids import lock_holder
 from sagent.session.types import (
+    RENAMED,
     ContextClear,
     IncompleteRecord,
     SessionRecord,
@@ -48,6 +50,7 @@ __all__ = [
     "JsonlJournal",
     "read_record",
     "record_line",
+    "rename_records",
 ]
 
 
@@ -199,6 +202,56 @@ def record_line(record: SessionRecord) -> bytes:
     # ``projects.py`` finds a session's title and model by each line's first bytes,
     # ``{"py/object": "UserMessage"``: ``json.dumps``'s default separators.
     return (json.dumps(stored_plain(record)) + "\n").encode()
+
+
+def rename_records(path: Path, *, dry_run: bool = False) -> int:
+    """Rewrite each record ``path`` stores under a former type name, under its name now.
+
+    Every other byte is kept, a torn last line included (ended, as opening any
+    journal ends it), and the file as it was is kept beside it as
+    ``<name>.renamed-from``. The journal is locked while it is
+    rewritten, so a session open elsewhere is refused rather than rewritten.
+
+    Args:
+      path: A journal no process has open.
+      dry_run: Count the records to rename; write nothing.
+
+    Returns:
+      renamed: How many records were rewritten, or would be.
+
+    Raises:
+      JournalInUseError: Another process has the journal open.
+
+    """
+    fd = _open_locked(path)
+    try:
+        before = path.read_bytes()
+        lines = before.splitlines(keepends=True)
+        renamed = 0
+        for n, line in enumerate(lines):
+            if not _FORMER.search(line):
+                continue
+            record = _record(line)
+            if isinstance(record, IncompleteRecord):
+                continue
+            lines[n] = record_line(record)
+            renamed += 1
+        if renamed and not dry_run:
+            path.with_name(f"{path.name}.renamed-from").write_bytes(before)
+            temp = path.with_name(f".{path.name}.renaming")
+            temp.write_bytes(b"".join(lines))
+            _ = temp.replace(path)
+        return renamed
+    finally:
+        os.close(fd)
+
+
+# A ``py/object`` tag naming a record type by a name it no longer has.
+_FORMER: Final = re.compile(
+    rb'"py/object":\s*"(?:'
+    + b"|".join(re.escape(name.encode()) for name in (*RENAMED, "WebSearchResults"))
+    + rb')"',
+)
 
 
 def _open_locked(path: Path) -> int:

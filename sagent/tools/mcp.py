@@ -82,7 +82,7 @@ from sagent.lib.files.owner_only import open_private, write_private
 from sagent.lib.userdirs import data_dir, state_dir
 from sagent.providers.login import SIGN_IN_ERRORS, file_lock
 from sagent.session.projects import project_dir
-from sagent.session.types import Attachment, UncategorizedToolResult
+from sagent.session.types import Attachment, McpResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.mcp_auth import (
     McpTokenStorage,
@@ -473,7 +473,7 @@ class McpConnection:
         arguments: Mapping[str, PlainTree],
         *,
         context: ToolContext,
-    ) -> UncategorizedToolResult:
+    ) -> McpResult:
         """Run the server's ``tool``; return its result, cut to fit ``context``.
 
         Args:
@@ -491,13 +491,36 @@ class McpConnection:
         structured = cast("PlainTree | None", done.structured_content)
         if not done.content and structured is not None:
             texts.append(json_dumps(structured))
-        return _result(texts, attachments, context=context, is_error=done.is_error)
+        return _result(
+            texts,
+            attachments,
+            server=self.server.name,
+            tool=tool,
+            context=context,
+            is_error=done.is_error,
+        )
 
-    async def read(self, uri: str, *, context: ToolContext) -> UncategorizedToolResult:
-        """Read the resource at ``uri``; return it, cut to fit ``context``."""
+    async def read(self, uri: str, *, context: ToolContext) -> McpResult:
+        """Read the resource at ``uri``; return it, cut to fit ``context``.
+
+        Args:
+          uri: The resource's address on the server.
+          context: How much of the result fits.
+
+        Returns:
+          result: Its text and media, naming the server and no tool.
+
+        """
         done = await self._open().read_resource(uri)
         texts, attachments = _contents(done.contents)
-        return _result(texts, attachments, context=context, is_error=False)
+        return _result(
+            texts,
+            attachments,
+            server=self.server.name,
+            tool="",
+            context=context,
+            is_error=False,
+        )
 
     def _open(self) -> Client:
         if self._client is None:
@@ -567,7 +590,7 @@ class McpTool:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> McpResult:
         """Run the tool with ``arguments``, which the server checks."""
         return await self._connection.call(self._tool, arguments, context=context)
 
@@ -659,7 +682,7 @@ class McpServerTool:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> McpResult:
         """List, describe, or run a tool, or read a resource, as ``arguments`` ask.
 
         Args:
@@ -682,7 +705,14 @@ class McpServerTool:
         if b.resource:
             return await connection.read(b.resource, context=context)
         if not b.tool:
-            return _result([self.description], [], context=context, is_error=False)
+            return _result(
+                [self.description],
+                [],
+                server=connection.server.name,
+                tool="",
+                context=context,
+                is_error=False,
+            )
         tool = connection.offered.get(b.tool)
         if tool is None:
             raise ValueError(
@@ -695,7 +725,14 @@ class McpServerTool:
                 "description": tool.description or "",
                 "input_schema": cast(PlainTree, tool.input_schema),
             }
-            return _result([json_dumps(described)], [], context=context, is_error=False)
+            return _result(
+                [json_dumps(described)],
+                [],
+                server=connection.server.name,
+                tool=tool.name,
+                context=context,
+                is_error=False,
+            )
         return await connection.call(tool.name, b.arguments, context=context)
 
 
@@ -953,12 +990,16 @@ def _result(
     texts: Sequence[str],
     attachments: Sequence[Attachment],
     *,
+    server: str,
+    tool: str,
     context: ToolContext,
     is_error: bool | None,
-) -> UncategorizedToolResult:
+) -> McpResult:
     text, _ = context.fit(["\n".join(texts)])
-    return UncategorizedToolResult(
+    return McpResult(
         call_id="",
+        server=server,
+        tool=tool,
         content=text,
         attachments=tuple(attachments),
         is_error=True if is_error is True else None,
