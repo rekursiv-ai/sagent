@@ -461,17 +461,18 @@ def test_a_journal_s_former_record_names_are_renamed_and_the_rest_kept_byte_for_
     path = tmp_path / "session.jsonl"
     kept = record_line(UserMessage(content="hi"))
     old = b'{"py/object": "ShellCommandResult", "call_id": "c", "stdout": "x"}\n'
-    path.write_bytes(kept + old + b"torn")
+    path.write_bytes(kept + old + b'{"py/object": "FileReadResult", "cut\n' + b"torn")
 
     assert jsonl.rename_records(path, dry_run=True) == 1
     assert b"ShellCommandResult" in path.read_bytes()
     assert jsonl.rename_records(path) == 1
 
+    unread = b'{"py/object": "FileReadResult", "cut\n'
     assert path.read_bytes() == (
-        kept + record_line(BashResult(call_id="c", stdout="x")) + b"torn\n"
+        kept + record_line(BashResult(call_id="c", stdout="x")) + unread + b"torn\n"
     )
     assert path.with_name("session.jsonl.renamed-from").read_bytes() == (
-        kept + old + b"torn\n"
+        kept + old + unread + b"torn\n"
     )
     assert jsonl.rename_records(path) == 0
 
