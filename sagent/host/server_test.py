@@ -28,11 +28,16 @@ from sagent.host.wire import (
     Bye,
     Call,
     Cancel,
+    Describe,
+    Described,
     Hello,
+    Note,
+    Peers,
     Ping,
     Refused,
     Result,
     Tools,
+    ToolsChanged,
     ToolSpec,
     Welcome,
     encoded,
@@ -126,7 +131,10 @@ async def test_a_holder_of_a_string_is_welcomed_and_runs_a_tool(tmp_path: Path) 
         reader, writer, welcome = await served.connect()
         assert isinstance(welcome, Welcome)
         assert (welcome.name, welcome.resumed, welcome.calls) == ("gpu1", False, ())
-        assert list(welcome.tools) == ["Gate", "Read"]
+        assert welcome.tools == {
+            "Gate": ToolSpec.from_tool(served.gate).digest,
+            "Read": ToolSpec.from_tool(Read()).digest,
+        }
         served.gate.opened.set()
         writer.write(encoded(_call("1")))
         result = await _next(reader)
@@ -287,8 +295,23 @@ async def test_editing_a_string_tells_its_clients(tmp_path: Path) -> None:
         (grant,) = strings.listing(served.dirs).grants
         await strings.edit(served.dirs, grant.id, tools=("Read",))
         told = await _next(reader)
-        assert isinstance(told, Tools)
-        assert list(told.tools) == ["Read"]
+        assert told == ToolsChanged(tools={"Read": ToolSpec.from_tool(Read()).digest})
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_a_client_is_described_only_the_tools_it_is_granted(
+    tmp_path: Path,
+) -> None:
+    async with _serving(tmp_path) as served:
+        reader, writer, _ = await served.connect(tools=("Read",))
+        writer.write(encoded(Describe(id="d1", tool="Read")))
+        writer.write(encoded(Describe(id="d2", tool="Gate")))
+        assert await _next(reader) == Described(
+            id="d1",
+            spec=ToolSpec.from_tool(Read()),
+        )
+        assert await _next(reader) == Described(id="d2", spec=None)
         writer.close()
 
 
@@ -550,6 +573,59 @@ async def _broken(
         ),
     )
     return hosts[-1]
+
+
+@pytest.mark.asyncio
+async def test_a_call_and_a_note_reach_the_host_with_what_is_granted(
+    tmp_path: Path,
+) -> None:
+    hosts: list[_BrokenHost] = []
+    async with _serving(tmp_path, start_host=partial(_broken, hosts)) as served:
+        reader, writer, _ = await served.connect()
+        note = Note(
+            id="n1",
+            sender="Agent",
+            recipient="Agent_0",
+            content="hi",
+            kind="ask",
+        )
+        writer.write(encoded(_call("1")) + encoded(note))
+        relayed = await _next(hosts[0].sent)
+        assert isinstance(relayed, Call)
+        assert relayed.granted == ("Gate",)
+        assert await _next(hosts[0].sent) == note
+        assert await _next(reader) == Ack(id="n1")
+        hosts[0].reader.feed_eof()
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_a_hosts_notes_and_peers_reach_the_client_until_acked(
+    tmp_path: Path,
+) -> None:
+    hosts: list[_BrokenHost] = []
+    async with _serving(tmp_path, start_host=partial(_broken, hosts)) as served:
+        first, writer, _ = await served.connect()
+        note = Note(
+            id="n1",
+            sender="Agent_0",
+            recipient="Agent",
+            content="hi",
+            kind="reply",
+        )
+        said = (Peers(labels=("Agent_0",)), Peers(labels=("Agent_0", "Agent_1")), note)
+        hosts[0].reader.feed_data(b"".join(encoded(m) for m in said))
+        assert (await _next(first), await _next(first), await _next(first)) == said
+        writer.close()
+        reader, again, _ = await served.connect()
+        assert await _next(reader) == note
+        assert await _next(reader) == Peers(labels=("Agent_0", "Agent_1"))
+        again.write(encoded(Ack(id="n1")))
+        again.close()
+        last_reader, last, _ = await served.connect()
+        assert await _next(last_reader) == Peers(labels=("Agent_0", "Agent_1"))
+        hosts[0].reader.feed_eof()
+        last.close()
 
 
 def _events(served: _Served) -> list[dict[str, str]]:

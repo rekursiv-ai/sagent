@@ -58,10 +58,15 @@ from sagent.host.wire import (
     Bye,
     Call,
     Cancel,
+    Describe,
+    Described,
     Hello,
+    Note,
+    Peers,
     Refused,
     Result,
     Tools,
+    ToolsChanged,
     ToolSpec,
     Welcome,
     encoded,
@@ -323,11 +328,11 @@ class Server(AsyncResource):
                     name=self._name,
                     resumed=resumed,
                     calls=(*session.running, *session.unacked),
-                    tools={n: session.specs[n] for n in session.granted},
+                    tools=session.digests(),
                 ),
             ),
         )
-        for line in session.unacked.values():
+        for line in (*session.unacked.values(), session.peers):
             writer.write(line)
         self._log("connect", session=session, detail="resumed" if resumed else "")
         self._write_sessions()
@@ -423,26 +428,44 @@ class Server(AsyncResource):
             )
         elif isinstance(message, Call):
             session.running.add(message.id)
+            session.host.writer.write(
+                encoded(replace(message, granted=session.granted)),
+            )
+        elif (
+            isinstance(message, Note)
+            and not session.reason
+            and session.writer is not None
+        ):
             session.host.writer.write(encoded(message))
+            session.writer.write(encoded(Ack(id=message.id)))
         elif isinstance(message, Cancel) and message.id in session.running:
             if not session.reason:
                 session.host.writer.write(encoded(message))
         elif isinstance(message, Ack):
             session.unacked.pop(message.id, None)
+        elif isinstance(message, Describe) and session.writer is not None:
+            spec = (
+                session.specs[message.tool] if message.tool in session.granted else None
+            )
+            session.writer.write(encoded(Described(id=message.id, spec=spec)))
 
-    def _deliver(self, session: _Session, result: Result) -> None:
-        """Keep ``result`` until it is acked, and send it if the client is here."""
-        session.running.discard(result.id)
-        line = session.unacked[result.id] = encoded(result)
+    def _deliver(self, session: _Session, message: Result | Note) -> None:
+        """Keep ``message`` until it is acked, and send it if the client is here."""
+        session.running.discard(message.id)
+        line = session.unacked[message.id] = encoded(message)
         if session.writer is not None:
             session.writer.write(line)
 
     async def _pump(self, session: _Session) -> None:
-        """Pass each result the host writes to the client; once it stops, end the session."""
+        """Pass what the host writes to the client; once it stops, end the session."""
         with contextlib.suppress(OSError, ValueError):
             while (message := await received(session.host.reader)) is not None:
-                if isinstance(message, Result):
+                if isinstance(message, (Result, Note)):
                     self._deliver(session, message)
+                elif isinstance(message, Peers):
+                    session.peers = encoded(message)
+                    if session.writer is not None:
+                        session.writer.write(session.peers)
         session.reason = session.reason or "host stopped"
         for call_id in list(session.running):
             self._deliver(
@@ -488,7 +511,7 @@ class Server(AsyncResource):
                 session.granted = granted
                 if session.writer is not None:
                     session.writer.write(
-                        encoded(Tools(tools={n: session.specs[n] for n in granted})),
+                        encoded(ToolsChanged(tools=session.digests())),
                     )
 
     def _mtime(self) -> float:
@@ -557,11 +580,20 @@ class _Session:
     writer: asyncio.StreamWriter | None = None
     running: set[str] = field(default_factory=set[str])
     unacked: dict[str, bytes] = field(default_factory=dict[str, bytes])
+    """Each result and note the client has not acked, by id: sent again on resume."""
+
+    peers: bytes = b""
+    """The host's last ``Peers``, sent again on resume; ``b""`` until it says one."""
+
     reason: str = ""
     """Why it is ending; ``""`` until something ends it, or for a host that stopped."""
 
     pump: asyncio.Task[None] = field(init=False)
     """The task reading the host, which ``_open`` starts."""
+
+    def digests(self) -> dict[str, str]:
+        """Return each tool granted, by name, as its ``ToolSpec.digest``."""
+        return {name: self.specs[name].digest for name in self.granted}
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

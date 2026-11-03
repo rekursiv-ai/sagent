@@ -33,6 +33,7 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
+    from sagent.agent.team import MessageKind
     from sagent.tools.types import ToolContext
 
 
@@ -104,7 +105,9 @@ class AgentSend:
 
         """
         me = context.label
-        others = sorted(label for label in self.team if label != me)
+        others = sorted(
+            label for label in (*self.team, *self.team.outside) if label != me
+        )
         parent = self.team.above(me) if me in self.team else None
         owed = self.team.owes(me)
         parts = [
@@ -154,13 +157,14 @@ class AgentSend:
         if a.delay:
             # Booked now: a reply settles its debt as sent, or the sender is
             # nudged before it lands and replies again.
-            self.team.book(sender, recipient=a.to, content=a.content)
+            kind = self.team.book(sender, recipient=a.to, content=a.content)
             asyncio.get_running_loop().call_later(
                 a.delay,
                 self._deliver,
                 a.to,
                 sender,
                 f"[delayed {a.delay}s] {a.content}",
+                kind,
             )
             return UncategorizedToolResult(
                 call_id="",
@@ -195,9 +199,9 @@ class AgentSend:
         return await spawn.start_watcher(label)
 
     # Looked up at delivery: an agent stopped meanwhile gets nothing, not a dead inbox.
-    def _deliver(self, to: str, sender: str, content: str) -> None:
+    def _deliver(self, to: str, sender: str, content: str, kind: MessageKind) -> None:
         """Deliver the message booked when it was sent, if ``to`` is still there."""
         try:
-            self.team.deliver(sender, recipient=to, content=content)
+            self.team.deliver(sender, recipient=to, content=content, kind=kind)
         except ValueError:
             logger.warning("message from %s to %r, which has left", sender, to)

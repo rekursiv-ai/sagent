@@ -8,7 +8,7 @@ Typical usage example:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from sagent.host.wire import ToolSpec
 from sagent.session.projects import project_dir
@@ -46,8 +46,36 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "TOOLS",
     "builders",
 ]
+
+
+TOOLS: Final = (
+    "Bash",
+    "Read",
+    "Write",
+    "Edit",
+    "Grep",
+    "Glob",
+    "List",
+    "WebSearch",
+    "WebFetch",
+    "PaperSearch",
+    "PaperDetails",
+    "PaperAuthor",
+    "PaperFetch",
+    "Memory",
+    "PlayAudio",
+    "AgentSpawn",
+    "AgentSend",
+    "AgentSelf",
+    "Session",
+    "Skill",
+    "BackgroundTask",
+    "RemoteTool",
+)
+"""Each built-in tool's name, in their default order: the keys of ``builders``."""
 
 
 def builders(

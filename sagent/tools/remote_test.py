@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, cast
 
 import asyncio
 import contextlib
+import logging
+import re
 
 from treekle import json_dumps
 
 import pytest
 
+from sagent.agent.agent import Agent
+from sagent.agent.team import Team
 from sagent.host import strings
 from sagent.host.server import Server
 from sagent.host.strings import Address, ConnectionString, ServeDirs
@@ -19,10 +24,17 @@ from sagent.host.testing import Gate, LocalHost
 from sagent.host.tls import fingerprint, server_context
 from sagent.host.wire import (
     MAX_LINE_BYTES,
+    Ack,
     Call,
     Cancel,
+    Describe,
+    Described,
+    Hello,
+    Note,
+    Peers,
     Ping,
-    Tools,
+    Result,
+    ToolsChanged,
     ToolSpec,
     Welcome,
     encoded,
@@ -30,7 +42,16 @@ from sagent.host.wire import (
 )
 from sagent.lib.files.owner_only import write_private
 from sagent.lib.userdirs import config_dir
-from sagent.session.types import AnyToolResult, FileReadResult
+from sagent.model.scripted import ScriptedProvider, call, reply
+from sagent.providers.catalog import ModelCatalog
+from sagent.session.types import (
+    AgentStatusResult,
+    AgentToAgentMessage,
+    AnyToolResult,
+    FileReadResult,
+)
+from sagent.tools.agent_send import AgentSend
+from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.edit import Edit
 from sagent.tools.read import Read
 from sagent.tools.remote import (
@@ -45,7 +66,7 @@ from sagent.tools.write import Write
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Callable
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
     from pathlib import Path
 
     from sagent.host.wire import Message
@@ -67,15 +88,17 @@ async def _remote(
     *,
     pin: str = "",
     tools: tuple[str, ...] | None = None,
+    host: LocalHost | None = None,
+    team: Team | None = None,
 ) -> AsyncGenerator[_Remote]:
     dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    host = LocalHost(
+    host = host or LocalHost(
         tools={"Read": Read(), "Write": Write(), "Edit": Edit(), "Gate": Gate()},
     )
     async with Server(
         dirs,
         listen=[Address(host="127.0.0.1", port=0)],
-        tools=("Read", "Write", "Edit", "Gate"),
+        tools=tuple(host.tools),
         name="gpu1",
         poll_sec=0.01,
         start_host=host,
@@ -89,6 +112,7 @@ async def _remote(
         )
         async with RemoteSession(
             [SavedRemote(url=string.url, tools=tools)],
+            team=team,
             client="laptop",
             retry_sec=0.01,
         ) as session:
@@ -277,12 +301,18 @@ type _Script = Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[
 async def _scripted(
     tmp_path: Path,
     *scripts: _Script,
+    hellos: list[Message | None] | None = None,
+    journal: Path | None = None,
+    team: Team | None = None,
+    ping_sec: float = 30.0,
 ) -> AsyncGenerator[RemoteSession]:
     """Yield a session reaching a server that runs one script per connection."""
     left = list(scripts)
 
     async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        _ = await received(reader)
+        hello = await received(reader)
+        if hellos is not None:
+            hellos.append(hello)
         try:
             await left.pop(0)(reader, writer)
         finally:
@@ -297,12 +327,149 @@ async def _scripted(
     )
     port = cast(tuple[str, int], server.sockets[0].getsockname())[1]
     url = f"sagent://127.0.0.1:{port}/{fingerprint(tmp_path)}/t"
-    async with server, RemoteSession([SavedRemote(url=url)], retry_sec=0) as session:
+    async with (
+        server,
+        RemoteSession(
+            [SavedRemote(url=url)],
+            journal=journal,
+            team=team,
+            client="laptop",
+            retry_sec=0,
+            ping_sec=ping_sec,
+        ) as session,
+    ):
         yield session
 
 
-def _welcome(*calls: str) -> bytes:
-    return encoded(Welcome(name="gpu1", resumed=False, calls=calls, tools={}))
+def _welcome(*calls: str, tools: Mapping[str, str] | None = None) -> bytes:
+    return encoded(
+        Welcome(name="gpu1", resumed=False, calls=calls, tools=tools or {}),
+    )
+
+
+_READ = ToolSpec.from_tool(Read())
+_TRAIN = ToolSpec(description="Train a model.", schema={"type": "object"})
+
+
+@pytest.mark.asyncio
+async def test_a_spec_is_fetched_once_and_only_when_unknown_here(
+    tmp_path: Path,
+) -> None:
+    asked: list[Message | None] = []
+
+    async def describe(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        writer.write(_welcome(tools={"Read": _READ.digest, "Train": _TRAIN.digest}))
+        while (message := await received(reader)) is not None:
+            asked.append(message)
+            if isinstance(message, Describe):
+                writer.write(encoded(Described(id=message.id, spec=_TRAIN)))
+
+    async with _scripted(tmp_path, describe) as session:
+        _ = await _until(session, lambda e: e.up)
+        tool = RemoteTool(remote=session, local={"Read": _READ})
+        context = ToolContext(cwd=tmp_path)
+        for name in ("Read", "Train", "Train"):
+            shown = await tool.call(context, {"endpoint": "gpu1", "tool": name})
+            spec = _READ if name == "Read" else _TRAIN
+            assert shown.text().startswith(spec.description)
+    assert [m.tool for m in asked if isinstance(m, Describe)] == ["Train"]
+
+
+@pytest.mark.asyncio
+async def test_a_tool_the_server_will_not_describe_is_not_offered(
+    tmp_path: Path,
+) -> None:
+    async def refuse(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        writer.write(_welcome(tools={"Train": _TRAIN.digest}))
+        while (message := await received(reader)) is not None:
+            if isinstance(message, Describe):
+                writer.write(encoded(Described(id=message.id, spec=None)))
+
+    async with _scripted(tmp_path, refuse) as session:
+        _ = await _until(session, lambda e: e.up)
+        with pytest.raises(ValueError, match="gpu1 does not offer Train"):
+            _ = await RemoteTool(remote=session).call(
+                ToolContext(cwd=tmp_path),
+                {"endpoint": "gpu1", "tool": "Train"},
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_spec_asked_of_a_server_that_goes_is_refused(tmp_path: Path) -> None:
+    async def drop(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(_welcome(tools={"Train": _TRAIN.digest}))
+        while not isinstance(await received(reader), Describe):
+            pass
+
+    async def refuse(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        del reader
+        writer.write(encoded(Ping()))
+
+    async with _scripted(tmp_path, drop, refuse, refuse) as session:
+        endpoint = await _until(session, lambda e: e.up)
+        with pytest.raises(ValueError, match="gpu1 went down while asked"):
+            _ = await endpoint.spec("Train")
+        _ = await _until(session, lambda e: not e.up)
+        with pytest.raises(ValueError, match="gpu1 is down: "):
+            _ = await endpoint.spec("Train")
+        assert RemoteTool(remote=session).reminder(ToolContext()) == (
+            "remote: gpu1 (down)"
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_session_names_itself_to_the_server(tmp_path: Path) -> None:
+    hellos: list[Message | None] = []
+
+    async def hold(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(_welcome())
+        _ = await reader.read()
+
+    async with _scripted(
+        tmp_path,
+        hold,
+        hellos=hellos,
+        journal=tmp_path / "3f2a0c91e42b" / "session.jsonl",
+    ) as session:
+        _ = await _until(session, lambda e: e.up)
+    (hello,) = hellos
+    assert isinstance(hello, Hello)
+    assert hello.session_id == "3f2a0c91e42b"
+    assert re.fullmatch(r"[0-9a-f]{32}", RemoteSession([]).session_id)
+
+
+@pytest.mark.asyncio
+async def test_the_reminder_says_once_that_tools_changed(tmp_path: Path) -> None:
+    pushed = asyncio.Event()
+    push_now = asyncio.Event()
+
+    async def push(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(_welcome(tools={"Read": _READ.digest}))
+        _ = await push_now.wait()
+        writer.write(encoded(ToolsChanged(tools={"Train": _TRAIN.digest})))
+        pushed.set()
+        _ = await reader.read()
+
+    async with _scripted(tmp_path, push) as session:
+        _ = await _until(session, lambda e: e.up)
+        tool = RemoteTool(remote=session)
+        a, b = ToolContext(label="a"), ToolContext(label="b")
+        assert tool.reminder(a) == "remote: gpu1 (up: Read)"
+        push_now.set()
+        _ = await _until(session, lambda e: "Train" in e.tools)
+        assert tool.reminder(a) == "remote: gpu1 (up: Train; tools changed)"
+        assert tool.reminder(a) == "remote: gpu1 (up: Train)"
+        assert tool.reminder(b) == "remote: gpu1 (up: Train)"
+        assert pushed.is_set()
 
 
 @pytest.mark.asyncio
@@ -329,12 +496,12 @@ async def test_a_server_that_says_no_welcome_leaves_the_endpoint_down(
 async def test_tools_the_server_pushes_replace_the_ones_known(tmp_path: Path) -> None:
     async def push(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         writer.write(_welcome())
-        writer.write(encoded(Tools(tools={"Read": ToolSpec.from_tool(Read())})))
+        writer.write(encoded(ToolsChanged(tools={"Read": _READ.digest})))
         _ = await reader.read()
 
     async with _scripted(tmp_path, push) as session:
         endpoint = await _until(session, lambda e: "Read" in e.tools)
-        assert list(endpoint.tools) == ["Read"]
+        assert endpoint.tools == {"Read": _READ.digest}
 
 
 @pytest.mark.asyncio
@@ -359,7 +526,7 @@ async def test_a_call_the_server_lost_fails_and_a_cancel_waits_for_it(
 
     async with _scripted(tmp_path, drop, forget) as session:
         endpoint = await _until(session, lambda e: e.up)
-        endpoint.tools = {"Gate": ToolSpec(description="d", schema={})}
+        endpoint.tools = {"Gate": "d"}
         calls = [
             asyncio.create_task(
                 endpoint.call(agent="a", window="w", tool="Gate", arguments={}),
@@ -375,6 +542,224 @@ async def test_a_call_the_server_lost_fails_and_a_cancel_waits_for_it(
     assert isinstance(first, Call)
     assert isinstance(second, Call)
     assert cancel == Cancel(id=first.id)
+
+
+def _team(tmp_path: Path) -> Team:
+    """Return a team of ``Agent``, who has not started."""
+    team = Team(catalog=ModelCatalog(factories={}))
+    _ = team.join(
+        Agent(
+            model=ScriptedProvider()["scripted"],
+            tool_context=ToolContext(cwd=tmp_path),
+        ),
+    )
+    return team
+
+
+def _told(team: Team, label: str) -> list[tuple[str | None, str | None]]:
+    return [
+        (m.sender, m.content)
+        for m in team[label].runtime.inbox.drain_nowait()
+        if isinstance(m, AgentToAgentMessage)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_notes_cross_both_ways_and_one_unacked_is_sent_again(
+    tmp_path: Path,
+) -> None:
+    team = _team(tmp_path)
+    notes: list[Message | None] = []
+    acked = asyncio.Event()
+
+    async def drop(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(_welcome() + encoded(Peers(labels=("w",))))
+        notes.append(await received(reader))
+
+    async def answer(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        writer.write(_welcome())
+        note = await received(reader)
+        notes.append(note)
+        assert isinstance(note, Note)
+        writer.write(
+            encoded(Ack(id=note.id))
+            + encoded(
+                Note(
+                    id="n9",
+                    sender="w",
+                    recipient="Agent@laptop",
+                    content="seen",
+                    kind="reply",
+                ),
+            ),
+        )
+        notes.append(await received(reader))
+        acked.set()
+
+    async def last(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(_welcome())
+        notes.append(await received(reader))
+        heard.set()
+        _ = await reader.read()
+
+    heard = asyncio.Event()
+    async with _scripted(tmp_path, drop, answer, last, team=team) as session:
+        _ = await _until(session, lambda _: "w@gpu1" in team.outside)
+        team.send("Agent", "w@gpu1", "look")
+        async with asyncio.timeout(5):
+            _ = await acked.wait()
+            assert team.owes("w@gpu1") == {}
+            team.send("Agent", "w@gpu1", "more")
+            _ = await heard.wait()
+    first, again, ack, after = notes
+    assert isinstance(after, Note)
+    assert after.content == "more"
+    assert isinstance(first, Note)
+    assert (first.sender, first.recipient, first.content, first.kind) == (
+        "Agent@laptop",
+        "w",
+        "look",
+        "ask",
+    )
+    assert again == first
+    assert ack == Ack(id="n9")
+    assert _told(team, "Agent") == [("w@gpu1", "seen")]
+
+
+@pytest.mark.asyncio
+async def test_the_agents_there_come_and_go_as_the_host_says(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    team = _team(tmp_path)
+    _ = team.join(
+        Agent(model=ScriptedProvider()["scripted"], tool_context=ToolContext()),
+        label="u@gpu1",
+    )
+    say = asyncio.Queue[bytes]()
+
+    async def peers(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        del reader
+        writer.write(_welcome())
+        while True:
+            writer.write(await say.get())
+
+    async with _scripted(tmp_path, peers, team=team) as session:
+        endpoint = await _until(session, lambda e: e.up)
+        with caplog.at_level(logging.WARNING, logger="sagent.tools.remote"):
+            say.put_nowait(encoded(Peers(labels=("Agent", "user", "u", "v"))))
+            _ = await _until(
+                session,
+                lambda _: team.outside == ["Agent@gpu1", "user@gpu1", "v@gpu1"],
+            )
+        say.put_nowait(encoded(Peers(labels=("v",))))
+        _ = await _until(session, lambda _: team.outside == ["v@gpu1"])
+        assert endpoint.up
+    assert caplog.messages == ["gpu1 has an agent 'u@gpu1', a label taken here"]
+
+
+@pytest.mark.asyncio
+async def test_what_the_server_sends_is_acked_by_its_id_whoever_it_is_for(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    seen: list[Message | None] = []
+    acked = asyncio.Event()
+
+    async def send(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(
+            _welcome()
+            + encoded(Ack(id="never sent"))
+            + encoded(Result(id="r1", record=FileReadResult(call_id="", path="/a")))
+            + encoded(
+                Note(id="n1", sender="v", recipient="gone", content="hi", kind="ask"),
+            ),
+        )
+        seen.extend([await received(reader), await received(reader)])
+        acked.set()
+        _ = await reader.read()
+
+    with caplog.at_level(logging.WARNING, logger="sagent.tools.remote"):
+        async with _scripted(tmp_path, send) as session:
+            async with asyncio.timeout(5):
+                _ = await acked.wait()
+            assert session.endpoints()["gpu1"].up
+    assert seen == [Ack(id="r1"), Ack(id="n1")]
+    assert caplog.messages == ["note from v@gpu1 to 'gone', who is not here"]
+
+
+@pytest.mark.asyncio
+async def test_a_server_silent_for_three_pings_is_taken_for_gone(
+    tmp_path: Path,
+) -> None:
+    async def hush(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        writer.write(_welcome())
+        _ = await reader.read()
+
+    async def refuse(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        del reader
+        writer.write(encoded(Ping()))
+
+    async with _scripted(tmp_path, hush, refuse, refuse, ping_sec=0.005) as session:
+        _ = await _until(session, lambda e: e.error == "TimeoutError")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_spawned_there_and_its_parent_here_message_each_other(
+    tmp_path: Path,
+) -> None:
+    script = [
+        reply("done"),
+        reply(calls=[call("AgentSend", to="parent", content="here")]),
+        reply("ok"),
+    ]
+    there = Team(
+        catalog=ModelCatalog(
+            factories={"scripted": partial(ScriptedProvider, replies=script)},
+        ),
+    )
+    host = LocalHost(
+        tools={
+            "AgentSpawn": AgentSpawn(team=there),
+            "AgentSend": AgentSend(team=there),
+        },
+        team=there,
+    )
+    team = _team(tmp_path)
+    _ = team.join(
+        Agent(model=ScriptedProvider()["scripted"], tool_context=ToolContext()),
+        parent="Agent",
+    )
+    async with there, _remote(tmp_path, host=host, team=team) as remote:
+        await _up(remote.session)
+        spawned = await remote.tool.call(
+            ToolContext(cwd=tmp_path, label="Agent"),
+            {"endpoint": "gpu1", "tool": "AgentSpawn", "arguments": {"prompt": "go"}},
+        )
+        assert isinstance(spawned, AgentStatusResult)
+        assert (spawned.agent_id, spawned.content) == ("Agent_0", "done")
+        assert list(team) == ["Agent", "Agent_0"]
+        assert team.outside == ["Agent_0@gpu1"]
+        assert there.outside == ["Agent@laptop", "Agent_0@laptop"]
+        team.send("Agent", "Agent_0", "near")
+        team.send("Agent", "Agent_0@gpu1", "more?")
+        async with asyncio.timeout(5):
+            told = await team["Agent"].runtime.inbox.drain()
+    assert [
+        (m.sender, m.content) for m in told if isinstance(m, AgentToAgentMessage)
+    ] == [("Agent_0@gpu1", "here")]
+    assert _told(team, "Agent_0") == [("Agent", "near")]
+    assert team.owes("Agent_0@gpu1") == {}
+    assert there.owes("Agent_0") == {}
 
 
 def test_two_servers_of_one_name_are_told_apart() -> None:

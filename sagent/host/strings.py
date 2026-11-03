@@ -30,7 +30,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
 from urllib import parse
 
 import hashlib
@@ -361,14 +361,29 @@ def _sessions(dirs: ServeDirs) -> list[SessionRow]:
 
 
 # A wildcard is no address a client can dial: the machine's name, then each
-# address it resolves to, stands in for it.
+# address it resolves to, and the address its route out leaves by, stand in for
+# it. The name alone may resolve to loopback, as Debian maps it to 127.0.1.1.
 def _advertised(address: Address) -> list[str]:
     """Return what a client dials to reach ``address``."""
     if not ipaddress.ip_address(address.host).is_unspecified:
         return [address.host]
     name = socket.gethostname()
     found = {str(info[4][0]) for info in socket.getaddrinfo(name, None, socket.AF_INET)}
+    found |= _routed_out()
     return [
         name,
         *sorted(ip for ip in found if not ipaddress.ip_address(ip).is_loopback),
     ]
+
+
+# Connecting a UDP socket picks the route and sends nothing; 192.0.2.1 is a
+# documentation address and 9 the discard port, so no packet could reach anyone
+# if one were sent.
+def _routed_out() -> set[str]:
+    """Return the address this machine's route out leaves by; none with no route."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        try:
+            probe.connect(("192.0.2.1", 9))
+        except OSError:
+            return set()
+        return {cast(tuple[str, int], probe.getsockname())[0]}

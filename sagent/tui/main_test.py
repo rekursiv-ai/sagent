@@ -100,7 +100,7 @@ from sagent.tools.paper_details import PaperDetails
 from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.paper_search import PaperSearch
 from sagent.tools.read import Read
-from sagent.tools.remote import RemoteSession, RemoteTool
+from sagent.tools.remote import RemoteSession, RemoteTool, SavedRemote
 from sagent.tools.session import Session
 from sagent.tools.testing import SHOUT_SERVER
 from sagent.tools.types import ToolContext
@@ -1989,6 +1989,91 @@ def test_strict_mcp_config_leaves_out_the_project_s_servers(
     _stdin(monkeypatch, "hi")
     assert main.main() == 0
     assert opened == [connected]
+    del script
+
+
+@pytest.mark.parametrize("ephemeral", [False, True])
+def test_a_session_is_named_to_remote_servers_by_its_journal(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    ephemeral: bool,
+) -> None:
+    opened: list[RemoteSession] = []
+    teams: list[Team | None] = []
+
+    class _Opened(RemoteSession):
+        def __init__(
+            self,
+            remotes: Sequence[SavedRemote],
+            *,
+            journal: Path | None = None,
+            team: Team | None = None,
+        ) -> None:
+            teams.append(team)
+            super().__init__(remotes, journal=journal, team=team)
+
+        @override
+        async def aopen(self) -> None:
+            opened.append(self)
+            await super().aopen()
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "RemoteSession", _Opened)
+    monkeypatch.setattr(main, "_tools", _no_tools)
+    monkeypatch.setattr(main, "_headless", _note_model([]))
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        *(["--ephemeral"] if ephemeral else []),
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    (remote,) = opened
+    journals = [p.parent.name for p in project_dir(tmp_path).glob("*/session.jsonl")]
+    assert (remote.session_id in journals) is not ephemeral
+    (team,) = teams
+    assert team is not None
+    assert list(team) == ["Agent"]
+    del script
+
+
+def test_the_agent_has_its_servers_tools_where_sagent_started(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "away").mkdir()
+    seen: list[object] = []
+
+    class _Moving(McpSession):
+        def __init__(self, servers: Sequence[McpServer]) -> None:
+            del servers
+            super().__init__([])
+
+        @override
+        async def aopen(self) -> None:
+            os.chdir(tmp_path / "away")
+
+        @override
+        def tools(self) -> list[Tool]:
+            return [tool(lambda: "x", name="mcp__srv__echo")]
+
+    async def headless(agent: Agent, flags: main.Flags) -> int:
+        del flags
+        seen.extend(
+            ["mcp__srv__echo" in agent.runtime.tools, agent.runtime.tool_context.cwd],
+        )
+        return 0
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "McpSession", _Moving)
+    monkeypatch.setattr(main, "_headless", headless)
+    _argv(monkeypatch, "--provider", "scripted", "--ephemeral")
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
+    assert seen == [True, tmp_path]
     del script
 
 

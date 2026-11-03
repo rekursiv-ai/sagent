@@ -11,7 +11,7 @@ Typical usage example:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
@@ -22,15 +22,18 @@ import socket
 
 from treekle import PlainTree
 
+from sagent.agent.agent import Agent
+from sagent.agent.team import Team
 from sagent.host.session import serve
 from sagent.host.wire import MAX_LINE_BYTES
+from sagent.model.scripted import ScriptedProvider
+from sagent.providers.catalog import ModelCatalog
 from sagent.session.types import UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import Tool, ToolContext
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
     from pathlib import Path
 
 
@@ -115,6 +118,14 @@ class LocalHost:
     """Start each session's host in this process, serving ``tools``."""
 
     tools: Mapping[str, Tool]
+    team: Team = field(default_factory=lambda: Team(catalog=ModelCatalog(factories={})))
+    """The team of every host started: the one its agent tools were built with."""
+
+    stand_in: Callable[[Sequence[Tool]], Agent] = field(
+        default=lambda tools: Agent(model=ScriptedProvider()["scripted"], tools=tools),
+    )
+    """This machine's agent, with the tools given: what a caller's child takes after."""
+
     started: list[_Running] = field(default_factory=list[_Running])
     """Each host started, oldest first."""
 
@@ -130,7 +141,7 @@ class LocalHost:
             limit=MAX_LINE_BYTES,
         )
         task = asyncio.create_task(
-            _served(
+            self._served(
                 host_reader,
                 host_writer,
                 tools={n: self.tools[n] for n in names if n in self.tools},
@@ -141,23 +152,25 @@ class LocalHost:
         self.started.append(running)
         return running
 
-
-async def _served(
-    reader: asyncio.StreamReader,
-    writer: asyncio.StreamWriter,
-    *,
-    tools: Mapping[str, Tool],
-    directory: Path,
-) -> None:
-    try:
-        await serve(
-            reader,
-            writer,
-            tools=tools,
-            new_context=partial(_context, home=directory),
-        )
-    finally:
-        writer.close()
+    async def _served(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        *,
+        tools: Mapping[str, Tool],
+        directory: Path,
+    ) -> None:
+        try:
+            await serve(
+                reader,
+                writer,
+                tools=tools,
+                new_context=partial(_context, home=directory),
+                team=self.team,
+                stand_in=self.stand_in,
+            )
+        finally:
+            writer.close()
 
 
 def _context(label: str, *, home: Path) -> ToolContext:
