@@ -171,7 +171,9 @@ def test_a_listener_with_a_full_backlog_is_refused_not_waited_on(
     tmp_path: Path,
 ) -> None:
     """The probe never blocks, so a listener that never accepts cannot hang it."""
-    address = tmp_path / "s"
+    # Through socket_address, as every caller binds: tmp_path alone passes sun_path's
+    # 104 bytes on a Mac, and the bind fails before the probe is reached.
+    address = socket_address(tmp_path / "s")
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     queued: list[socket.socket] = []
     answers: list[bool] = []
@@ -182,9 +184,11 @@ def test_a_listener_with_a_full_backlog_is_refused_not_waited_on(
             waiting = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             waiting.setblocking(False)
             queued.append(waiting)
+            # A full backlog answers a non-blocking connect with EAGAIN on Linux and
+            # with ECONNREFUSED on macOS.
             try:
                 waiting.connect(str(address))
-            except BlockingIOError:
+            except (BlockingIOError, ConnectionRefusedError):
                 break
         started = time.monotonic()
         probing = threading.Thread(target=lambda: answers.append(accepts(address)))
@@ -219,7 +223,7 @@ def test_the_probe_waits_half_a_second_by_default(
 def test_a_listening_socket_accepts_and_a_missing_one_does_not(
     tmp_path: Path,
 ) -> None:
-    address = tmp_path / "s"
+    address = socket_address(tmp_path / "s")
     assert not accepts(address)
     listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     try:

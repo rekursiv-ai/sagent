@@ -35,6 +35,7 @@ import logging
 import os
 import select
 import signal
+import stat
 import struct
 import sys
 import termios
@@ -567,7 +568,10 @@ def _enter_raw(fd: int) -> list[int | list[bytes | int]] | None:
         old = cast(list[int | list[bytes | int]], termios.tcgetattr(fd))
     except termios.error:
         return None
-    tty.setraw(fd)
+    # ``TCSANOW``, not setraw's default ``TCSAFLUSH``: that drains pending output first,
+    # and blocks forever on Darwin when nothing reads it, as ``TCSADRAIN`` does (see
+    # ``_restore``). After a suspend the mode reset is just such output.
+    tty.setraw(fd, termios.TCSANOW)
     return old
 
 
@@ -587,13 +591,18 @@ def _restore(fd: int, old_attr: list[int | list[bytes | int]] | None) -> None:
         termios.tcsetattr(fd, termios.TCSANOW, old_attr)
 
 
-# A selector is the cheap path, but it rejects a regular file outright (``EPERM`` from
-# ``epoll``), and stdin is a redirected file whenever the caller was invoked with ``<
-# file`` or driven by a harness. Such a file is always ready anyway, so falling back to
-# a thread read is not a busy loop -- it is one blocking read per chunk, off the event
-# loop.
+# `stdin` is a regular file whenever the caller was invoked with ``< file`` or driven by a
+# harness, and a regular file is always ready: a read returns bytes, or b"" at its end.
+# So it is never waited on. Asking the selector instead hangs on macOS: kqueue takes the
+# file but reports it readable only while bytes remain, so the read that would find the
+# end never comes (epoll refuses it outright, EPERM). For any other descriptor a selector
+# refuses, a thread's blocking poll waits instead -- one per chunk, off the event loop.
 async def _readable(fd: int) -> bool:
     """Wait until ``fd`` has bytes; False once it is unreadable."""
+    # A descriptor fstat cannot read is the selector's to refuse, as before.
+    with contextlib.suppress(OSError):
+        if stat.S_ISREG(os.fstat(fd).st_mode):
+            return True
     loop = asyncio.get_running_loop()
     ready = cast(asyncio.Future[None], loop.create_future())
     try:
