@@ -293,6 +293,66 @@ def test_every_spelling_of_a_limit_names_its_kind(
     assert type(wire.to_exception(400, body=_error(message))) is expected
 
 
+@pytest.mark.parametrize("tokens", [33_551, 36_121, 32_886])
+@pytest.mark.parametrize("structured", [True, False])
+def test_llama_context_rejections_keep_the_overflow_recovery_path(
+    tokens: int,
+    structured: bool,
+) -> None:
+    message = (
+        f"request ({tokens} tokens) exceeds the available context size"
+        " (32768 tokens), try increasing it"
+    )
+    body = _error(message, code="400") if structured else message
+
+    error = wire.to_exception(400, body=body)
+
+    assert type(error) is ContextOverflowError
+    assert str(error) == message
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "The available context size field is unknown",
+        "The available context size exceeds the schema's maximum",
+        (
+            "Invalid tool name: request (33551 tokens) exceeds the available"
+            " context size (32768 tokens)"
+        ),
+    ],
+)
+def test_schema_errors_mentioning_context_size_are_not_overflows(message: str) -> None:
+    assert type(wire.to_exception(400, body=_error(message))) is RuntimeError
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Context input rejected",
+        (
+            "input (33551 tokens) is larger than the max context size (32768 tokens)."
+            " skipping"
+        ),
+    ],
+)
+def test_llama_structured_overflow_kind_does_not_depend_on_its_message(
+    message: str,
+) -> None:
+    body = {
+        "error": {
+            "code": 400,
+            "type": "exceed_context_size_error",
+            "message": message,
+        },
+    }
+
+    error = wire.to_exception(400, body=body)
+
+    assert type(error) is ContextOverflowError
+    assert str(error) == message
+
+
 @pytest.mark.parametrize(
     ("status", "message", "code"),
     [

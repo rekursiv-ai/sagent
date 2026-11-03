@@ -228,8 +228,10 @@ def to_exception(
     lower = text.lower()
     if _too_large(status, lower=lower):
         return RequestTooLargeError(text)
-    if code in ("context_length_exceeded", "string_above_max_length") or _overflowed(
-        lower,
+    if (
+        code in ("context_length_exceeded", "string_above_max_length")
+        or kind == "exceed_context_size_error"
+        or _overflowed(lower)
     ):
         return ContextOverflowError(text)
     if code in ("content_policy_violation", "content_filter") or (
@@ -362,6 +364,11 @@ def _overflowed(lower: str) -> bool:
 # The spellings of every OpenAI-compatible server, pooled: a spelling only one
 # server's code knew once reached the runtime raw, and every retry repeated it.
 def _names_overflow(lower: str) -> bool:
+    if re.match(
+        r"request \(\d+ tokens\) exceeds the available context size \(\d+ tokens\)",
+        lower,
+    ):
+        return True
     phrases = (
         "context_length_exceeded",
         "maximum context length",
