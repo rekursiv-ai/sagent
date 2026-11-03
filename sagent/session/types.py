@@ -633,6 +633,16 @@ def stored_record[R](
 ) -> R: ...
 
 
+# A union alias is no ``type``: its reader narrows the result to its members.
+@overload
+def stored_record(
+    plain: object,
+    target: object,
+    *,
+    classes: Classes = ...,
+) -> object: ...
+
+
 def stored_record(
     plain: object,
     target: object = SessionRecord,

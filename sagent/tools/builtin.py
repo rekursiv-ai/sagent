@@ -1,0 +1,102 @@
+"""The built-in tools, by name: what a session offers, and what a tool server serves.
+
+Typical usage example:
+
+  built = builders(cwd=Path.cwd(), team=team, remote=remote)
+  tools = [built[name]() for name in ("Bash", "Read")]
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from sagent.host.wire import ToolSpec
+from sagent.session.projects import project_dir
+from sagent.tools.agent_self import AgentSelf
+from sagent.tools.agent_send import AgentSend
+from sagent.tools.agent_spawn import AgentSpawn
+from sagent.tools.background_task import BackgroundTask
+from sagent.tools.bash import Bash
+from sagent.tools.edit import Edit
+from sagent.tools.glob_tool import Glob
+from sagent.tools.grep import Grep
+from sagent.tools.list import List
+from sagent.tools.memory import Memory
+from sagent.tools.paper_author import PaperAuthor
+from sagent.tools.paper_details import PaperDetails
+from sagent.tools.paper_fetch import PaperFetch
+from sagent.tools.paper_search import PaperSearch
+from sagent.tools.play_audio import PlayAudio
+from sagent.tools.read import Read
+from sagent.tools.remote import RemoteTool
+from sagent.tools.session import Session
+from sagent.tools.skill import Skill
+from sagent.tools.web_fetch import WebFetch
+from sagent.tools.web_search import WebSearch
+from sagent.tools.write import Write
+
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+    from sagent.agent.team import Team
+    from sagent.tools.remote import RemoteSession
+    from sagent.tools.types import Tool
+
+
+__all__ = [
+    "builders",
+]
+
+
+def builders(
+    *,
+    cwd: Path,
+    team: Team,
+    remote: RemoteSession,
+) -> dict[str, Callable[[], Tool]]:
+    """Return how to build each built-in tool, by its name, in their default order.
+
+    Args:
+      cwd: The working directory, whose project keeps the memories.
+      team: The agents the agent tools reach.
+      remote: The servers ``RemoteTool`` reaches.
+
+    Returns:
+      builders: One per tool; Read, Edit, Grep, Glob, List and WebFetch are
+        shared, so Bash hands a command to the same tool the model would call.
+
+    """
+    read, edit, grep, glob, ls = Read(), Edit(), Grep(), Glob(), List()
+    fetch = WebFetch()
+    local: dict[str, Callable[[], Tool]] = {
+        "Bash": lambda: Bash(peers=(read, edit, grep, glob, ls, fetch)),
+        "Read": lambda: read,
+        "Write": Write,
+        "Edit": lambda: edit,
+        "Grep": lambda: grep,
+        "Glob": lambda: glob,
+        "List": lambda: ls,
+        "WebSearch": WebSearch,
+        "WebFetch": lambda: fetch,
+        "PaperSearch": PaperSearch,
+        "PaperDetails": PaperDetails,
+        "PaperAuthor": PaperAuthor,
+        "PaperFetch": PaperFetch,
+        "Memory": lambda: Memory(directory=project_dir(cwd) / "memory"),
+        "PlayAudio": PlayAudio,
+        "AgentSpawn": lambda: AgentSpawn(team=team),
+        "AgentSend": lambda: AgentSend(team=team),
+        "AgentSelf": lambda: AgentSelf(team=team),
+        "Session": lambda: Session(team=team),
+        "Skill": Skill,
+        "BackgroundTask": BackgroundTask,
+    }
+    return {
+        **local,
+        "RemoteTool": lambda: RemoteTool(
+            remote=remote,
+            local={name: ToolSpec.from_tool(build()) for name, build in local.items()},
+        ),
+    }

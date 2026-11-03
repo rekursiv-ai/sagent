@@ -16,7 +16,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
 
@@ -28,7 +27,6 @@ from treekle import PlainTree, json_loads
 from sagent.providers.login import headless_wanted
 from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import ActionParser
-from sagent.settings.types import Setting
 from sagent.tools.mcp import (
     McpServer,
     McpSession,
@@ -43,6 +41,7 @@ from sagent.tools.mcp import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Mapping, Sequence
 
+    from sagent.settings.types import Setting
     from sagent.tools.mcp import McpScope
 
 
@@ -111,21 +110,14 @@ class McpSettings:
             ("login", "sign in to a remote MCP server with OAuth", self._login),
             ("logout", "forget a remote MCP server's sign-in", self._logout),
         )
-        settings: list[Setting] = []
-        for verb, described, run in verbs:
-            parser = _parser(verb, description=described)
-            settings.append(
-                Setting(
-                    name=(verb,),
-                    help_short=described,
-                    help_long=parser.format_help(),
-                    usage=parser.format_usage().partition(verb)[2].strip(),
-                    apply=partial(_run, parser, run),
-                    cli=True,
-                    flags=parser.options,
-                ),
+        return [
+            _parser(verb, description=described).setting(
+                run,
+                name=(verb,),
+                help_short=described,
             )
-        return settings
+            for verb, described, run in verbs
+        ]
 
     async def _list(self, parsed: argparse.Namespace) -> str:
         found = self._servers(cast(_Configured, parsed))
@@ -229,14 +221,6 @@ class _Removed(Protocol):
 
     name: str
     scope: McpScope | None
-
-
-async def _run(parser: ActionParser, run: _Handler, args: str) -> str:
-    """Read ``args`` with ``parser``, then run; return its help when asked."""
-    parsed = parser.read(args)
-    if parsed is None:
-        return parser.format_help()
-    return await run(parsed)
 
 
 def _parser(verb: str, *, description: str) -> ActionParser:

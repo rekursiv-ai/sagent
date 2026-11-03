@@ -54,6 +54,8 @@ dependencies = [
     "wesearch>=0.1.15",
     # grep (rg fallback needs gitignore-aware tree walks)
     "rignore>=0.8.1",
+    # remote tools: the tool server's self-signed certificate
+    "cryptography>=50.0.2",
 ]
 
 [project.optional-dependencies]
