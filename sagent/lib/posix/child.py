@@ -205,14 +205,14 @@ async def finish[T](work: Awaitable[T]) -> T:
 
     """
     running = asyncio.ensure_future(work)
-    cancels = 0
+    cancelled = False
     # Each cancel is held off, however many arrive, until the work is done.
     while not running.done():
         try:
             _ = await asyncio.wait((running,))
         except asyncio.CancelledError:
-            cancels += 1
+            cancelled = True
     result = running.result()
-    if cancels:
+    if cancelled:
         raise asyncio.CancelledError
     return result

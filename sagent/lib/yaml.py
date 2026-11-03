@@ -139,7 +139,7 @@ def _validate(
                 keys.add(read)
             children += (key, value)
     elif isinstance(node, yaml.SequenceNode):
-        children += node.value
+        children = node.value
     for child in children:
         _validate(
             child,

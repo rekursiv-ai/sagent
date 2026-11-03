@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 import yaml
@@ -62,6 +62,24 @@ def test_an_alias_is_refused_at_its_use_unless_allowed(text: str, line: int) -> 
     with pytest.raises(ValueError, match=rf"^line {line}: YAML aliases are not"):
         parse(text)
     assert parse(text, aliases=True) == yaml.safe_load(text)
+
+
+def test_a_repeated_key_in_any_value_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"^f\.yaml, line 1: the key 'x' is given"):
+        parse("a: {x: 1, x: 2}\nb: 1\n", source="f.yaml")
+
+
+def test_a_nested_key_that_is_no_string_is_refused() -> None:
+    with pytest.raises(ValueError, match=r"^line 2: YAML mapping keys must be strings"):
+        parse("a:\n  1: x\n")
+
+
+def test_an_allowed_alias_to_its_own_container_ends() -> None:
+    document = parse("a: &x [*x]\n", aliases=True)
+
+    assert isinstance(document, dict)
+    looped = cast(dict[str, object], document)["a"]
+    assert looped == [looped]
 
 
 def test_a_refusal_is_a_yaml_error_too() -> None:
@@ -140,6 +158,32 @@ def test_only_a_document_holding_a_star_is_read_twice(
     monkeypatch.setattr(yaml, "parse", counted)
     parse(text)
     assert len(calls) == passes
+
+
+@pytest.mark.skipif(not yaml.__with_libyaml__, reason="PyYAML built without libyaml")
+@pytest.mark.parametrize(
+    ("libyaml", "expected"),
+    [(True, yaml.CSafeLoader), (False, yaml.SafeLoader)],
+)
+def test_the_c_parser_is_used_when_pyyaml_has_it(
+    monkeypatch: pytest.MonkeyPatch,
+    libyaml: bool,
+    expected: type[yaml.SafeLoader | yaml.CSafeLoader],
+) -> None:
+    events = yaml.parse
+    loaders: list[type[yaml.SafeLoader | yaml.CSafeLoader]] = []
+
+    def recorded(
+        stream: str,
+        Loader: type[yaml.SafeLoader | yaml.CSafeLoader],  # noqa: N803 -- PyYAML's name.
+    ) -> Iterator[yaml.Event]:
+        loaders.append(Loader)
+        return events(stream, Loader=Loader)
+
+    monkeypatch.setattr(yaml, "__with_libyaml__", libyaml)
+    monkeypatch.setattr(yaml, "parse", recorded)
+    assert parse("a: '*'\n") == {"a": "*"}
+    assert loaders == [expected]
 
 
 if __name__ == "__main__":

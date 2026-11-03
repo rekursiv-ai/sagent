@@ -281,11 +281,13 @@ def test_a_format_with_no_media_type_is_octet_stream() -> None:
         (1000, 1, 10, (10, 1)),
         (10, 5, 1, (1, 1)),
         (10, 5, 0, (10, 5)),
+        # Already at the limit: kept as given, not shrunk to at least a pixel.
+        (100, 0.5, 100, (100, 0)),
     ],
 )
 def test_a_fit_keeps_each_edge_a_whole_pixel_at_least(
-    width: int,
-    height: int,
+    width: float,
+    height: float,
     max_edge_px: int,
     fitted: tuple[int, int],
 ) -> None:

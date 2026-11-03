@@ -27,6 +27,9 @@ if TYPE_CHECKING:
         ("pkg/a.pyi", True),
         ("pkg/gen_1.py", False),
         ("pkg/gen_10.py", True),
+        ("pkg/v1/old.py", False),
+        ("pkg/v1/new/old.py", True),
+        ("pkg/v1.py", True),
     ],
 )
 def test_excluded_paths_never_reach_a_checker(path: str, kept: bool) -> None:
@@ -37,6 +40,8 @@ def test_excluded_paths_never_reach_a_checker(path: str, kept: bool) -> None:
         "**/.export/typings/",
         "site/build/",
         "pkg/gen_?.py",
+        # ``*`` stays within one directory.
+        "pkg/*/old.py",
     )
 
     assert scope.kept([path], excludes=patterns) == ([path] if kept else [])

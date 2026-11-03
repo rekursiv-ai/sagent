@@ -22,7 +22,7 @@ import sys
 import tempfile
 
 from tools.gate import gate
-from tools.testing import coverage_summary
+from tools.testing import coverage_summary, listing
 from tools.testing.tiers import TIERS, Tier
 
 
@@ -62,22 +62,19 @@ def pytest(context: gate.Context, *, dependents: str | None) -> int:
         1 when the spool was never written.
 
     """
-    files = gate.drained("pytest", context=context)
+    name = "pytest"
+    files = gate.drained(name, context=context)
     if files is None:
-        return gate.unspooled("pytest")
-    # pragma: no mutate start -- workers uppercases the name.
-    count = gate.workers("pytest", environ=context.environ)
-    # pragma: no mutate end
+        return gate.unspooled(name)
+    count = gate.workers(name, environ=context.environ)
     tests = _selected(context, files=files, dependents=dependents, workers=count)
     if not tests:
         return 0
     # Files, not nodeids: the threshold was measured in files, and dozens of
     # nodeids from one file paid xdist's ~5s startup for nothing.
-    # pragma: no mutate start -- a junk default is 0, as "" is.
     spread = len({test.partition("::")[0] for test in tests}) >= (
-        gate.positive(context.environ.get("SIDECAR_XDIST_MIN", "")) or 16
+        gate.positive(context.environ.get("SIDECAR_XDIST_MIN")) or 16
     )
-    # pragma: no mutate end
     sources = [path for path in files if not _is_test(path)]
     directories = sorted({Path(path).parent.as_posix() for path in sources})
     measured = context.installed("pytest_cov")
@@ -99,9 +96,15 @@ def pytest(context: gate.Context, *, dependents: str | None) -> int:
         # pragma: no mutate start -- any name in a private dir.
         data = Path(temp) / ".coverage"
         # pragma: no mutate end
-        # An @argfile: thousands of nodeids or one --cov per file overflow ARG_MAX.
+        # Files as arguments and the nodeids as a listing: once one nodeid
+        # argument points into a module that skips at module level, pytest
+        # drops every other argument and the gate passes on "1 skipped".
+        selection = Path(temp) / "selected.txt"
+        selection.write_text("".join(f"{test}\n" for test in tests))
+        files_run = sorted({test.partition("::")[0] for test in tests})
+        # An @argfile: thousands of files or one --cov per file overflow ARG_MAX.
         argfile = Path(temp) / "pytest.args"
-        argfile.write_text("".join(f"{arg}\n" for arg in [*cov, *tests]))
+        argfile.write_text("".join(f"{arg}\n" for arg in [*cov, *files_run]))
         status = context.run(
             [
                 "env",
@@ -112,6 +115,9 @@ def pytest(context: gate.Context, *, dependents: str | None) -> int:
                 *(["-n", str(count)] if spread else []),
                 "-q",
                 "--tb=short",
+                "-p",
+                listing.__name__,
+                f"--test-files={selection}",
                 f"@{argfile}",
             ],
         )
@@ -154,30 +160,29 @@ def tier(spec: Tier, *, context: gate.Context, plugin: str | None) -> int:
     if spec.requires is not None and context.which(spec.requires) is None:
         return 0
     nodeids: list[str] = []
-    if listing := environ.get("PYTEST_NODEIDS_FILE", ""):
-        nodeids = [
-            line for line in Path(listing).read_text().splitlines() if "::" in line
-        ]
+    if gate.flagged(environ, "PYTEST_NODEIDS_FILE"):
+        listed = Path(environ["PYTEST_NODEIDS_FILE"]).read_text().splitlines()
+        nodeids = [line for line in listed if "::" in line]
         if not nodeids:
             return 0
     split = shlex.split(environ.get("PYTEST_SPLIT_ARGS", ""))
     selects = (
-        not environ.get("PYTEST_FORCE_ALL", "")
+        not gate.flagged(environ, "PYTEST_FORCE_ALL")
         and not split
         and (
             spec.ci_testmon
-            or bool(environ.get("PYTEST_COLLECT_SELECTED", ""))
-            or not environ.get("GITHUB_ACTIONS", "")
+            or gate.flagged(environ, "PYTEST_COLLECT_SELECTED")
+            or not gate.flagged(environ, "GITHUB_ACTIONS")
         )
         and context.installed("testmon")
     )
     select = ["--testmon-forceselect"] if selects else []
     measured = context.installed("pytest_cov")
     cov: list[str] = []
-    if not selects and not environ.get("PYTEST_TESTMON_ARGS", "") and measured:
+    if not selects and not gate.flagged(environ, "PYTEST_TESTMON_ARGS") and measured:
         cov = ["--no-cov"]
     # Bare `--cov` measures the project, as `[tool.coverage.run]` scopes it.
-    if environ.get("PYTEST_COVERAGE_REPORT", "") and measured:
+    if gate.flagged(environ, "PYTEST_COVERAGE_REPORT") and measured:
         cov = ["--cov", "--cov-report=term:skip-covered"]
     marker = ["-m", spec.marker] if spec.marker else []
     pytest_argv = [
@@ -189,7 +194,7 @@ def tier(spec: Tier, *, context: gate.Context, plugin: str | None) -> int:
         "pytest",
         f"-n={gate.workers(spec.name, environ=environ)}",
     ]
-    if environ.get("PYTEST_COLLECT_SELECTED", ""):
+    if gate.flagged(environ, "PYTEST_COLLECT_SELECTED"):
         loaded = (
             ["-p", plugin] if plugin is not None and context.installed(plugin) else []
         )
@@ -273,7 +278,7 @@ def _selected(
         context,
         files=files,
         dependents=dependents,
-        hops=gate.positive(context.environ.get("PRECOMMIT_CODEGRAPH_PYTEST", "")),
+        hops=gate.positive(context.environ.get("PRECOMMIT_CODEGRAPH_PYTEST")),
         emit="nodeids",
         workers=workers,
     )

@@ -225,8 +225,8 @@ class Session(Protocol):
         """Yield what the model sees: the last clear onward."""
         ...
 
-    def history(self) -> Iterator[SessionRecord]:
-        """Yield the whole session from its first record: every window, compacted ones too."""
+    def history(self, start: int = 0) -> Iterator[SessionRecord]:
+        """Yield the session from record ``start``: every window, compacted ones too."""
         ...
 
     def append(self, *records: SessionRecord) -> None:
@@ -262,8 +262,23 @@ class Journal(Protocol):
         """Yield the records from the last ``ContextClear`` on, as a resume reads them."""
         ...
 
-    def history(self) -> Iterator[SessionRecord]:
-        """Yield every record, from the first: each window, compacted ones included."""
+    def __len__(self) -> int:
+        """Return how many records ``history`` yields."""
+        ...
+
+    def history(self, start: int = 0) -> Iterator[SessionRecord]:
+        """Yield every record from record ``start``: each window, compacted ones included.
+
+        Args:
+          start: The number of the first record; those before it are not read,
+            so a caller following the journal pays only for what is new.
+
+        Returns:
+          records: The records from ``start`` as of this call, oldest first.
+            They may be read as they are iterated, so a long journal can be
+            iterated on a worker thread.
+
+        """
         ...
 
     def flush(self) -> None:

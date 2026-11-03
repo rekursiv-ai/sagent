@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import time
 
@@ -36,6 +36,9 @@ from sagent.tools.watch import Feed, lines
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from sagent.session.types import SessionRecord
     from sagent.tools.types import ToolContext
 
 
@@ -152,12 +155,14 @@ def test_a_clear_after_the_first_record_is_shown() -> None:
     assert lines([ContextClear()], start=1, label="Agent", tools={}) == ["r1 [clear]"]
 
 
-def _watched() -> tuple[Team, Agent, Agent]:
+def _watched(
+    journal: RecordingJournal | None = None,
+) -> tuple[Team, Agent, Agent]:
     """Return a team of ``Agent``, journaled, and its ``watcher``, both unopened."""
     team = Team(catalog=ModelCatalog(factories={}))
     agent = Agent(
         model=ScriptedProvider()["scripted"],
-        journal=RecordingJournal(),
+        journal=journal if journal is not None else RecordingJournal(),
         tools=[_Bash()],
     )
     watcher = Agent(model=ScriptedProvider()["scripted"])
@@ -193,6 +198,35 @@ def test_each_send_carries_only_what_is_new() -> None:
         "how to watch\n\n[watch]\n> user: go",
         "[watch]\nAgent: done",
     ]
+
+
+class _Asked(RecordingJournal):
+    """A journal that notes where each read of its history starts."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.starts: list[int] = []
+
+    @override
+    def history(self, start: int = 0) -> Iterator[SessionRecord]:
+        self.starts.append(start)
+        return super().history(start)
+
+
+def test_each_send_reads_only_the_records_not_yet_sent() -> None:
+    """A long session's journal is not read whole at every idle."""
+    journal = _Asked()
+    team, agent, watcher = _watched(journal)
+    feed = Feed(team=team, watched="Agent", watcher="watcher")
+
+    agent.session.append(UserMessage(content="go"))
+    feed.send()
+    sent = len(journal)
+    agent.session.append(AssistantMessage(content="done"))
+    feed.send()
+
+    assert journal.starts == [0, sent]
+    assert _told(watcher) == ["[watch]\n> user: go", "[watch]\nAgent: done"]
 
 
 @pytest.mark.parametrize(

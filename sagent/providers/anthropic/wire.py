@@ -299,8 +299,7 @@ class StreamReader:
         elif kind == "content_block_start":
             start = _object(event.get("content_block"))
             self._blocks[from_plain(event.get("index"), int, default=0)] = _Block(
-                # Any kind a block cannot name makes no record, as none does.
-                kind=str(start.get("type") or ""),  # pragma: no mutate -- see above.
+                kind=start.get("type"),
                 call_id=str(start.get("id") or ""),
                 name=str(start.get("name") or ""),
                 sealed=str(start.get("data") or ""),
@@ -647,7 +646,7 @@ def _upload(
 class _Block:
     """One content block of a reply, as its fragments arrive."""
 
-    kind: str
+    kind: object
     parts: list[str] = field(default_factory=list[str])
     """Text, thinking, or a tool call's argument JSON, in arrival order."""
 

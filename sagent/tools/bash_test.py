@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import signal
+import subprocess
 import sys
 import time
 
@@ -68,6 +69,48 @@ asyncio.run(
     ),
 )
 """
+
+
+# Times out a wrapped call beside a process of the caller's own group, then says
+# whether that process outlived the guard's ``kill 0``.
+_BYSTANDER: Final = """\
+import asyncio
+import subprocess
+from pathlib import Path
+
+from sagent.tools.bash import Bash
+from sagent.tools.types import ToolContext
+
+bystander = subprocess.Popen(["sleep", "60"])
+asyncio.run(
+    Bash(exec_prefix=("/usr/bin/env",)).call(
+        ToolContext(cwd=Path.cwd()),
+        {"command": "sleep 60", "description": "Sleep", "timeout": 100},
+    ),
+)
+print("alive" if bystander.poll() is None else "killed", flush=True)
+bystander.kill()
+"""
+
+
+@pytest.mark.cli_python_subprocess
+def test_the_guard_ends_only_the_shells_own_group(tmp_path: Path) -> None:
+    """``kill 0`` reaches the caller's group unless the shell leads one of its own."""
+    script = tmp_path / "caller.py"
+    script.write_text(_BYSTANDER)
+    # In a session of its own, so a guard that reached the caller ends that, not pytest.
+    done = subprocess.run(  # noqa: S603 -- this interpreter, and a script of the test's.
+        [sys.executable, str(script)],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(sys.path)},
+        capture_output=True,
+        text=True,
+        timeout=60,
+        start_new_session=True,
+        check=False,
+    )
+
+    assert (done.returncode, done.stdout) == (0, "alive\n")
 
 
 @pytest.fixture

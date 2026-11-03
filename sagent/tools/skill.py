@@ -306,7 +306,7 @@ def _load(directory: Path, source: Source, skipped: list[str]) -> SkillInfo | No
     """Return the skill ``directory/SKILL.md`` holds; ``None`` for none or a bad one."""
     path = directory / "SKILL.md"
     try:
-        raw = path.read_text(encoding="utf-8")  # pragma: no mutate -- a UTF-8 host.
+        raw = path.read_bytes().decode()
     except FileNotFoundError:
         return None
     except (OSError, UnicodeDecodeError):
@@ -320,10 +320,8 @@ def _load(directory: Path, source: Source, skipped: list[str]) -> SkillInfo | No
         skipped.append(why)
         return None
     try:
-        # pragma: no mutate start -- each is read for truth, where None is as "".
-        name = from_plain(meta.get("name"), str, default="") or directory.name
-        description = from_plain(meta.get("description"), str, default="")
-        # pragma: no mutate end
+        name = from_plain(meta.get("name"), str, default=None) or directory.name
+        description = from_plain(meta.get("description"), str, default=None) or ""
     except ReadError:
         logger.warning(
             "Skipping skill with a non-text name or description at %s.",

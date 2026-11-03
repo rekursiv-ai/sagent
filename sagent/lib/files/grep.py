@@ -363,11 +363,9 @@ def _file_blocks(out: bytes, *, query: Query) -> list[tuple[str, list[Row]]]:
         names = (line.decode(errors="replace") for line in lines)
         return [(name, [Row(text=name)]) for name in names]
     blocks: list[tuple[str, list[Row]]] = []
-    gap = False  # pragma: no mutate -- the first row sets it before any read.
     previous: tuple[str, int] | None = None  # pragma: no mutate -- "" is no row.
-    for line in lines:
+    for before, line in zip([b"", *lines][:-1], lines, strict=True):
         if line == b"--":
-            gap = True
             continue
         cut = min(
             (i for i in (line.find(_MATCH), line.find(_CONTEXT)) if i != -1),
@@ -386,11 +384,10 @@ def _file_blocks(out: bytes, *, query: Query) -> list[tuple[str, list[Row]]]:
             previous = (name, number) if matched else None
         if not blocks or blocks[-1][0] != name:
             blocks.append((name, []))
-        elif gap:
+        elif before == b"--":
             # A gap between groups of one file stays; between files it is
             # re-added after sorting.
             blocks[-1][1].append(Row(text="--"))
-        gap = False  # pragma: no mutate -- None is as false.
         blocks[-1][1].append(row)
     return blocks
 
@@ -590,9 +587,7 @@ def _walked(named: Path, query: Query) -> Iterator[tuple[str, Path]]:
         named,
         ignore_hidden=False,
         read_ignore_files=ignores,
-        read_parents_ignores=ignores,  # pragma: no mutate -- None is on; off is moot.
         read_git_ignore=ignores,
-        read_global_git_ignore=ignores,  # pragma: no mutate -- None is on; off is moot.
         read_git_exclude=ignores,
         overrides=_globs(query),
         max_depth=query.max_depth or None,
@@ -698,8 +693,7 @@ def _line_hits(pattern: re.Pattern[str], text: str) -> dict[int, int | None]:
     counted = 0  # pragma: no mutate -- ``str.count`` reads a None start as 0.
     pos = 0
     size = len(text)
-    # At ``size`` a match lies on a line already searched alone, so ``<`` would do.
-    while pos <= size:  # pragma: no mutate -- see above.
+    while pos <= size:  # pragma: no mutate -- at ``size`` the line was searched.
         match = pattern.search(text, pos)
         if match is None:
             break
@@ -811,7 +805,7 @@ def _matches(pattern: re.Pattern[str], line: str) -> list[re.Match[str]]:
     """Return each match in ``line``, in the order ripgrep reports them."""
     found: list[re.Match[str]] = []
     pos = 0
-    last = -1  # pragma: no mutate -- no match starts before 0.
+    last: int | None = None
     while pos <= len(line) and (match := pattern.search(line, pos)) is not None:
         empty = match.start() == match.end()
         if not (empty and match.start() == last):

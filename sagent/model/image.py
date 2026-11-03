@@ -170,5 +170,8 @@ def _webp(image: Image.Image, *, edge: int) -> bytes:
     # Pillow returns a copy, not a resample, when the size is unchanged.
     size = (max(1, width * edge // longest), max(1, height * edge // longest))
     out = io.BytesIO()
-    image.resize(size, Image.Resampling.LANCZOS).save(out, format="WEBP", quality=85)
+    resized = image.resize(size, Image.Resampling.LANCZOS)
+    # pragma: no mutate start -- Pillow reads format names in any case.
+    resized.save(out, format="WEBP", quality=85)
+    # pragma: no mutate end
     return out.getvalue()

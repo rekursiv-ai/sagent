@@ -161,17 +161,17 @@ class Feed:
         ):
             return
         agent = team[self.watched]
-        records = list(agent.session.history())
+        records = list(agent.session.history(self.sent))
         new = [
             *lines(
-                records[self.sent :],
+                records,
                 start=self.sent,
                 label=self.watched,
                 tools=agent.tools,
             ),
             *self.pending,
         ]
-        self.sent = len(records)
+        self.sent += len(records)
         self.pending.clear()
         if not new and not before:
             return

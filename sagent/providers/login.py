@@ -423,14 +423,12 @@ def open_browser(url: str) -> None:
                 browser.name,
                 *(arg.replace("%s", url) for arg in browser.args),
             ],
-            # A shell gives a job it puts in the background ``/dev/null`` as
-            # stdin whatever its own, so this keeps only the shell off it.
-            stdin=subprocess.DEVNULL,  # pragma: no mutate -- see above.
+            # No stdin: the script never reads it, and a background job gets
+            # ``/dev/null`` from the shell whatever the shell's own is.
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,
-            # The shell exits 0 once it has put the browser in the background.
-            check=False,  # pragma: no mutate -- see above.
+            check=False,  # pragma: no mutate -- the shell exits 0 once the job starts.
         )
 
 

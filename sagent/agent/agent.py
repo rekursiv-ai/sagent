@@ -37,6 +37,7 @@ from sagent.runtime.context import resolve_context
 from sagent.runtime.exceptions import BudgetExhaustedError, RoundLimitError
 from sagent.runtime.runtime import Compactor, Pruning, Runtime, Sizing
 from sagent.runtime.tape import ContextSplice, ReferrableTapeEvent
+from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
@@ -81,36 +82,11 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Agent",
-    "NoJournal",
     "NoShrinker",
     "RuntimeSession",
     "default_system_prompt",
     "spent",
 ]
-
-
-class NoJournal:
-    """A journal that keeps nothing: the default, for an agent nothing resumes."""
-
-    @property
-    def path(self) -> None:
-        """No file."""
-        return
-
-    def append(self, *records: SessionRecord) -> None:
-        """Drop ``records``."""
-        del records
-
-    def __iter__(self) -> Iterator[SessionRecord]:
-        """Yield nothing: nothing was kept."""
-        return iter(())
-
-    def history(self) -> Iterator[SessionRecord]:
-        """Yield nothing: nothing was kept."""
-        return iter(())
-
-    def flush(self) -> None:
-        """Do nothing; nothing is kept."""
 
 
 class NoShrinker:
@@ -151,8 +127,9 @@ class Agent(AsyncResource):
       model: What answers; assign ``agent.model`` to switch.
       tools: What the model may call; names must differ.
       system_prompt: What the model is told it is; ``None`` uses the default.
-      journal: Where the session is written; nowhere when omitted. A
-        journal that opens, such as ``JsonlJournal``, is opened by the caller.
+      journal: Where the session is written; in memory when omitted, so
+        nothing resumes it. A journal that opens, such as ``JsonlJournal``,
+        is opened by the caller.
       compactor: Builds what starts the session over from a summary.
       pruner: Builds what drops old tool results.
       tool_context: What the tools start with: where they work, where the session
@@ -227,7 +204,7 @@ class Agent(AsyncResource):
         self._system_prompt = system_prompt
         self._session = RuntimeSession(
             self,
-            journal=journal if journal is not None else NoJournal(),
+            journal=journal if journal is not None else RecordingJournal(),
             compactor=compactor,
             pruner=pruner,
         )
@@ -371,7 +348,7 @@ class Agent(AsyncResource):
     @override
     async def aopen(self) -> None:
         self._session.frame()
-        self._session.resume()
+        await self._session.aresume()
         self.runtime.observers.append(self._observe)
         self._loop = asyncio.create_task(self.runtime.run_forever())
         if self._retired:
@@ -674,21 +651,21 @@ class RuntimeSession:
         """Yield what the model sees: the last clear onward."""
         return iter(_records(self._agent.runtime.context().messages))
 
-    def history(self) -> Iterator[SessionRecord]:
-        """Yield the whole session from its first record: every window, compacted ones too.
+    def history(self, start: int = 0) -> Iterator[SessionRecord]:
+        """Yield the session from record ``start``: every window, compacted ones too.
 
-        What the runtime added since the last write is written first; a session
-        whose journal keeps nothing yields what the model sees.
+        What the runtime added since the last write is written first.
+
+        Args:
+          start: The number of the first record; those before it are not read.
 
         Returns:
-          records: The session's records, oldest first.
+          records: The session's records from ``start``, oldest first, read as
+            they are iterated.
 
         """
         self.persist()
-        records: list[SessionRecord] = list(self.journal.history())
-        if not records:
-            records = list(self)
-        return iter(records)
+        return self.journal.history(start)
 
     def append(self, *records: SessionRecord) -> None:
         """Add ``records`` to the end; the journal writes them after the loop's pass."""
@@ -745,6 +722,17 @@ class RuntimeSession:
             for r in self._standing.values()
         ]
 
+    # Turn and window ids are counts, so a resume goes on counting from the journal
+    # or would reuse an earlier turn's. The whole journal is read for them, on a
+    # worker thread: a long session's takes seconds.
+    async def aresume(self) -> None:
+        """Resume, then go on counting turns and windows from what the journal held."""
+        held = self.journal.history()
+        self.resume()
+        turns, compactions = await asyncio.to_thread(_counted, held)
+        self._agent.runtime.turns += turns
+        self._agent.runtime.compactions += compactions
+
     def resume(self) -> None:
         """Load the journal's last window into the runtime, or start one."""
         window = list(self.journal)
@@ -759,14 +747,6 @@ class RuntimeSession:
                 self._prompt = from_plain(stood["system_prompt"], _Prompt).text
             self._agent.spend_usd = spent(window)
             self._lines = list(self)
-            # Turn and window ids are counts, so a resume goes on counting from
-            # the journal or would reuse an earlier turn's.
-            runtime = self._agent.runtime
-            for record in self.journal.history():
-                if isinstance(record, (UserMessage, AgentToAgentMessage)):
-                    runtime.turns += 1
-                elif isinstance(record, ContextClear) and record.history:
-                    runtime.compactions += 1
         else:
             self._start()
         self._written = len(self._agent.runtime.tape)
@@ -1195,6 +1175,17 @@ def _flatten(records: Iterable[SessionRecord]) -> Iterator[SessionRecord]:
             yield from _flatten(record.history)
         else:
             yield record
+
+
+def _counted(records: Iterable[SessionRecord]) -> tuple[int, int]:
+    """Return how many turns ``records`` hold, and how many compactions."""
+    turns = compactions = 0
+    for record in records:
+        if isinstance(record, (UserMessage, AgentToAgentMessage)):
+            turns += 1
+        elif isinstance(record, ContextClear) and record.history:
+            compactions += 1
+    return turns, compactions
 
 
 def _apply_standing(

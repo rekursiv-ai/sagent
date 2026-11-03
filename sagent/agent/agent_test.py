@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, override
 
 import asyncio
 import contextlib
+import threading
 import uuid
 
 from treekle import PlainTree
@@ -20,7 +21,6 @@ import pytest
 from sagent.agent import agent as agent_module
 from sagent.agent.agent import (
     Agent,
-    NoJournal,
     NoShrinker,
     RuntimeSession,
     default_system_prompt,
@@ -69,6 +69,8 @@ from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from sagent.agent.types import (
         Agent as AgentProtocol,
         Journal,
@@ -662,18 +664,20 @@ async def test_a_charge_past_the_cap_halts_and_refuses_the_next_turn(
 
 
 @pytest.mark.asyncio
-async def test_a_session_with_no_journal_s_history_is_what_the_model_sees(
+async def test_a_session_with_no_journal_keeps_its_history_numbered_past_a_clear(
     tmp_path: Path,
 ) -> None:
+    """A watcher numbers what it was sent by the history; a clear must not renumber it."""
     _, agent = _agent(tmp_path, reply("hi"))
     async with agent:
         assert await agent.send("go") == "hi"
-        assert list(agent.session.history()) == list(agent.session)
-    assert [
-        r.content for r in agent.session.history() if isinstance(r, UserMessage)
-    ] == [
-        "go",
-    ]
+        before = list(agent.session.history())
+        await agent.session.clear()
+        after = list(agent.session.history())
+
+    assert after[: len(before)] == before
+    assert "go" in [r.content for r in after if isinstance(r, UserMessage)]
+    assert list(agent.session.history(start=1)) == list(agent.session.history())[1:]
 
 
 @pytest.mark.asyncio
@@ -854,17 +858,18 @@ async def test_an_overflow_without_a_compactor_is_raised(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
-async def test_an_agent_given_no_journal_keeps_nothing(tmp_path: Path) -> None:
+async def test_an_agent_given_no_journal_keeps_its_records_in_memory(
+    tmp_path: Path,
+) -> None:
     _, agent = _agent(tmp_path, reply("hi"))
     async with agent:
         assert await agent.send("go") == "hi"
 
     journal = agent.session.journal
-    assert isinstance(journal, NoJournal)
+    assert isinstance(journal, RecordingJournal)
     assert journal.path is None
-    assert list(journal) == []
-    assert list(journal.history()) == []
-    journal.flush()
+    assert list(journal.history()) == list(agent.session.history())
+    assert len(journal) == len(list(journal.history()))
 
 
 @pytest.mark.asyncio
@@ -2486,15 +2491,47 @@ async def test_a_resume_goes_on_counting_turns_and_windows(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_a_resume_counts_its_turns_off_the_loop(tmp_path: Path) -> None:
+    """A long session's journal takes seconds to read; the loop must not wait on it."""
+    journal = _Threaded()
+    journal.append(ContextClear(system_prompt="S"), UserMessage(content="one"))
+    _, agent = _agent(tmp_path, journal=journal)
+    async with agent:
+        assert agent.runtime.turns == 1
+
+    assert journal.on_loop == [False]
+
+
+class _Threaded(RecordingJournal):
+    """A journal that notes whether each read of its history ran on the loop."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_loop: list[bool] = []
+
+    @override
+    def history(self, start: int = 0) -> Iterator[SessionRecord]:
+        records = super().history(start)
+
+        def read() -> Iterator[SessionRecord]:
+            self.on_loop.append(threading.current_thread() is threading.main_thread())
+            yield from records
+
+        return read()
+
+
+@pytest.mark.asyncio
 async def test_a_journaled_session_s_history_is_its_journal_s(tmp_path: Path) -> None:
     journal = RecordingJournal()
     _, agent = _agent(tmp_path, reply("hi"), journal=journal)
     async with agent:
         _ = await agent.send("go")
         history = list(agent.session.history())
+        later = list(agent.session.history(start=2))
 
     assert isinstance(history[0], ContextClear)
     assert history == list(journal.history())
+    assert later == history[2:]
 
 
 def test_a_window_s_directives_are_looked_for_once_until_something_moves(

@@ -265,14 +265,14 @@ def _vm_stat_mib() -> int | None:
         ).stdout
     except (OSError, subprocess.CalledProcessError):
         return None
-    page = 0
+    page: int | None = None
     pages = 0
     for line in text.splitlines():
         if "page size of" in line:
             page = int(line.split()[7])
         elif line.startswith(("Pages free:", "Pages purgeable:", "File-backed pages:")):
-            pages += int(line.split()[-1].rstrip("."))
-    return pages * page // 1_048_576 if page else None
+            pages += int(line.split()[-1].removesuffix("."))
+    return None if page is None else pages * page // 1_048_576
 
 
 def _read_int(path: Path) -> int | None:

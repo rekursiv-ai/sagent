@@ -500,7 +500,8 @@ class SummaryCompactor:
         instructions: str,
     ) -> tuple[tuple[ModelContextEvent, ...], str, str, int]:
         """Return the new window from an audit of the whole session, and how it went."""
-        lines = _extract(self._agent.session.history())
+        # A long session's journal takes seconds to read: a worker thread reads it.
+        lines = await asyncio.to_thread(_extract, self._agent.session.history())
         _, to_keep = _kept_tail(history, _trailing_user_tail_len(history))
         body = _asset("compactor_session_audit")
         if guidance := instructions.strip():
@@ -1323,7 +1324,7 @@ def _extract(records: Iterable[SessionRecord]) -> list[str]:
 def _asset(name: str) -> str:
     """Return the text of ``assets/<name>.md``."""
     asset = files(__package__) / "assets" / f"{name}.md"
-    return asset.read_text(encoding="utf-8")  # pragma: no mutate -- UTF-8 too.
+    return asset.read_bytes().decode()
 
 
 def _filled(name: str, **slots: str) -> str:

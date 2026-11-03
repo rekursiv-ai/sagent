@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Final
+from typing import Final, cast
 
+import argparse
 import os
 import subprocess
 import sys
@@ -121,6 +122,20 @@ def test_default_workers_leave_a_performance_core_free(tmp_path: Path) -> None:
     assert default_workers(cpu=few, meminfo=meminfo) == 2
 
 
+def test_a_spare_performance_core_is_one_not_two(tmp_path: Path) -> None:
+    # 5 performance of 16 cores: min(5 - 1, 6) is 4.
+    cores = [(0, c, 5) for c in range(5)] + [(0, c, 1) for c in range(5, 16)]
+    cpu = _topology(tmp_path / "cpu", cores)
+    assert default_workers(cpu=cpu, meminfo=_meminfo(tmp_path / "m", 1_000_000)) == 4
+
+
+def test_cores_are_counted_per_socket(tmp_path: Path) -> None:
+    """Core ids restart at 0 on each socket, so a socket is part of a core's name."""
+    cores = [(package, c, 1) for package in (0, 1) for c in range(16)]
+    cpu = _topology(tmp_path / "cpu", cores)
+    assert default_workers(cpu=cpu, meminfo=_meminfo(tmp_path / "m", 1_000_000)) == 12
+
+
 def test_the_topology_is_read_once_per_process(tmp_path: Path) -> None:
     cpu = _topology(tmp_path / "cpu", [(0, c, 1) for c in range(16)])
     meminfo = _meminfo(tmp_path / "meminfo", 1_000_000)
@@ -191,6 +206,21 @@ def test_a_job_size_caps_the_machine_count(
     assert got == expected
 
 
+def test_a_job_size_alone_takes_one_unit_per_worker(tmp_path: Path) -> None:
+    cpu = _topology(tmp_path / "cpu", [(0, c, 1) for c in range(32)])
+    meminfo = _meminfo(tmp_path / "m", 1_000_000)
+    assert default_workers(units=3, cpu=cpu, meminfo=meminfo) == 3
+
+
+def test_the_flags_default_to_no_job_size_and_one_unit_per_worker() -> None:
+    parser = argparse.ArgumentParser()
+    worker_count_module._add_arguments(parser)
+
+    flags = cast(worker_count_module.Flags, parser.parse_args([]))
+
+    assert (flags.units, flags.per_worker) == (None, 1)
+
+
 def test_workers_default_overrides_a_job_size(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -219,6 +249,8 @@ def test_a_per_worker_below_one_is_refused(tmp_path: Path) -> None:
         (8, 50, 10, 5),
         (8, 1_000, 16, 8),
         (0, 5, 1, 1),
+        # Whole workers only: 5 units at 2 each is 2, not 2.5.
+        (8, 5, 2, 2),
     ],
 )
 def test_capped_workers_is_one_per_per_worker_units_within_the_budget(
@@ -277,6 +309,42 @@ def test_an_unusable_vm_stat_leaves_the_formula_uncapped(
     assert default_workers(cpu=cpu, meminfo=tmp_path / "absent") == 12
 
 
+def test_vm_stat_counts_purgeable_pages_in_whole_mebibytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    # 16 KiB pages, 64 to the MiB: 32 + 31 + 64 purgeable pages is 1 MiB and 63 pages.
+    _fake_tool(
+        bin_dir,
+        "vm_stat",
+        'echo "Mach Virtual Memory Statistics: (page size of 16384 bytes)"\n'
+        'echo "Pages free:                     32."\n'
+        'echo "Pages purgeable:                64."\n'
+        'echo "File-backed pages:              31."',
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    assert worker_count_module._vm_stat_mib() == 1
+
+
+def test_a_failing_vm_stat_is_not_read_for_what_it_printed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    _fake_tool(
+        bin_dir,
+        "vm_stat",
+        'echo "Mach Virtual Memory Statistics: (page size of 16384 bytes)"\n'
+        'echo "Pages free:                     64."\n'
+        "exit 1",
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    assert worker_count_module._vm_stat_mib() is None
+
+
 def test_available_memory_is_whole_mebibytes(tmp_path: Path) -> None:
     meminfo = tmp_path / "meminfo"
     meminfo.write_text("MemTotal: 1 kB\nMemAvailable: 4097 kB\n")
@@ -308,6 +376,37 @@ def test_macos_cores_come_from_sysctl_skipping_efficiency_cores(
     meminfo = _meminfo(tmp_path / "meminfo", 1_000_000)
     # round(12 * 3/8) = 5 (4.5 rounds up), under 8 - 1 performance cores.
     assert default_workers(cpu=tmp_path / "no-sysfs", meminfo=meminfo) == 5
+
+
+def test_sysctl_is_asked_for_bare_values_and_a_failure_is_not_trusted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bin_dir = tmp_path / "bin"
+    # 16 cores in three levels. Level 1's name query fails yet prints a name: a
+    # failure is no answer, so its 4 cores count as performance cores, and the
+    # named Efficiency level's 8 do not.
+    _fake_tool(
+        bin_dir,
+        "sysctl",
+        '[ "$1" = "-n" ] || exit 2\n'
+        'case "$2" in\n'
+        "  hw.physicalcpu) echo 16 ;;\n"
+        "  hw.nperflevels) echo 3 ;;\n"
+        "  hw.perflevel0.name) echo Performance ;;\n"
+        "  hw.perflevel0.physicalcpu) echo 4 ;;\n"
+        "  hw.perflevel1.name) echo Efficiency; exit 1 ;;\n"
+        "  hw.perflevel1.physicalcpu) echo 4 ;;\n"
+        "  hw.perflevel2.name) echo Efficiency ;;\n"
+        "  hw.perflevel2.physicalcpu) echo 8 ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac",
+    )
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    meminfo = _meminfo(tmp_path / "meminfo", 1_000_000)
+    # 8 performance cores leave 7; round(16 * 3/8) is 6.
+    assert default_workers(cpu=tmp_path / "no-sysfs", meminfo=meminfo) == 6
+    assert worker_count_module._sysctl_text("hw.perflevel2.name") == "Efficiency"
 
 
 def test_without_sysctl_or_sysfs_the_cpu_count_stands_in(

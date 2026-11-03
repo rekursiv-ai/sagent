@@ -16,6 +16,7 @@ import time
 
 import pytest
 
+from sagent.lib.posix import pids
 from sagent.lib.posix.pids import (
     children,
     controlling_terminal,
@@ -109,8 +110,15 @@ def test_a_process_reaped_while_its_state_is_read_has_exited(
     assert not running(os.getpid())
 
 
-def test_a_process_this_user_cannot_signal_still_runs() -> None:
-    assert running(1, proc=Path("/nonexistent/proc"))
+def test_a_process_this_user_cannot_signal_still_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied(pid: int, sig: int) -> None:
+        del pid, sig
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(os, "kill", denied)
+    assert running(os.getpid(), proc=Path("/nonexistent/proc"))
 
 
 @pytest.mark.asyncio
@@ -148,17 +156,34 @@ def test_a_killed_child_is_reaped_so_no_one_else_collects_it() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_process_not_ours_is_killed_and_not_waited_for(tmp_path: Path) -> None:
-    grandchild = tmp_path / "grandchild.pid"
+async def test_a_process_not_ours_is_killed_and_not_waited_for(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One this user may not signal is passed over; the rest are still killed."""
+    first, second = tmp_path / "first.pid", tmp_path / "second.pid"
     child = await asyncio.create_subprocess_exec(
         "/bin/sh",
         "-c",
-        f"sleep 60 & echo $! > {grandchild}",
+        f"sleep 60 & echo $! > {first}; sleep 60 & echo $! > {second}",
     )
     _ = await child.wait()
-    pid = await written_pid(grandchild)
-    kill_and_reap([pid, 1])
-    assert await gone_within([pid])
+    denied, killed = await written_pid(first), await written_pid(second)
+    kill = os.kill
+
+    def guarded(pid: int, sig: int) -> None:
+        if pid == denied:
+            raise PermissionError(1, "Operation not permitted")
+        kill(pid, sig)
+
+    try:
+        with monkeypatch.context() as patched:
+            patched.setattr(os, "kill", guarded)
+            kill_and_reap([denied, killed])
+        assert await gone_within([killed])
+        assert running(denied)
+    finally:
+        os.kill(denied, signal.SIGKILL)
 
 
 def test_a_process_long_gone_is_passed_over() -> None:
@@ -321,6 +346,108 @@ def test_without_a_lock_table_no_holder_is_known(tmp_path: Path) -> None:
     path = tmp_path / "held"
     path.touch()
     assert lock_holder(path, proc=tmp_path / "none") is None
+
+
+class _Clock:
+    """Stands in for ``pids``'s ``time``: each read returns the next of ``reads``.
+
+    Only ``pids`` sees it: the event loop running the test keeps the real clock.
+    """
+
+    def __init__(self, *reads: float) -> None:
+        self._reads = list(reads)
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self._reads.pop(0)
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+
+
+class _Asyncio:
+    """Stands in for ``pids``'s ``asyncio``: its sleeps return at once, recorded."""
+
+    def __init__(self, clock: _Clock) -> None:
+        self._clock = clock
+
+    async def sleep(self, seconds: float) -> None:
+        self._clock.slept.append(seconds)
+
+
+@pytest.mark.asyncio
+async def test_gone_within_waits_three_seconds_by_default_then_gives_up(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """At the deadline itself it looks once more; only past it does it give up."""
+    clock = _Clock(10.0, 13.0, 13.5)
+
+    def running_7(pid: int) -> bool:
+        return pid == 7
+
+    monkeypatch.setattr(pids, "running", running_7)
+    monkeypatch.setattr(pids, "time", clock)
+    monkeypatch.setattr(pids, "asyncio", _Asyncio(clock))
+
+    assert not await gone_within([7])
+    assert clock.slept == [0.01]
+
+
+def test_unlocked_within_polls_every_five_milliseconds_until_past_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    clock = _Clock(10.0, 11.0, 11.5)
+
+    def held(path: Path) -> bool:
+        return path == tmp_path
+
+    monkeypatch.setattr(pids, "locked", held)
+    monkeypatch.setattr(pids, "time", clock)
+
+    assert not unlocked_within(tmp_path, seconds=1.0)
+    assert clock.slept == [0.005]
+
+
+@pytest.mark.asyncio
+async def test_a_pid_is_waited_for_five_seconds_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    limits: list[float | None] = []
+    timeout = asyncio.timeout
+
+    def recorded(delay: float | None) -> asyncio.Timeout:
+        limits.append(delay)
+        return timeout(delay)
+
+    monkeypatch.setattr(asyncio, "timeout", recorded)
+    path = tmp_path / "job.pid"
+    path.write_text("7\n")
+
+    assert await written_pid(path) == 7
+    assert limits == [5.0]
+
+
+def test_children_gathers_every_thread_s_and_skips_one_gone_mid_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for task, listed in (("1", "5 6"), ("2", "7"), ("3", "8"), ("4", "9")):
+        (tmp_path / "42" / "task" / task).mkdir(parents=True)
+        (tmp_path / "42" / "task" / task / "children").write_text(listed)
+    read = Path.read_text
+
+    def racing(self: Path) -> str:
+        if self.parent.name == "3":
+            raise FileNotFoundError(self)
+        if self.parent.name == "4":
+            raise ProcessLookupError(3, "No such process")
+        return read(self)
+
+    monkeypatch.setattr(Path, "read_text", racing)
+
+    assert sorted(children(42, proc=tmp_path)) == [5, 6, 7]
 
 
 if __name__ == "__main__":

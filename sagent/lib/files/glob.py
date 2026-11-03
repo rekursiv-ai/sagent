@@ -229,12 +229,13 @@ def _translate(pattern: str) -> str:
             if end == -1:
                 raise GlobError(f"unclosed character class in glob: {pattern!r}")
             body = pattern[i + 1 : end].replace("\\", "\\\\")
-            negated = body[:1] in {"!", "^"}  # pragma: no mutate -- re negates [^ too.
+            # Glob negates with ``!`` or ``^``; ``re`` with ``^`` alone.
+            if body.startswith("!"):
+                body = "^" + body[1:]
             # No escaping for a leading ``]``: Python ``re`` reads it as a
             # member exactly as globset does, so ``[]]`` carries through whole.
-            members = body[1:] if negated else body
-            members = re.sub(r"([\[&~|])", r"\\\1", members)
-            out.append(f"[^{members}]" if negated else f"[{members}]")
+            body = re.sub(r"([\[&~|])", r"\\\1", body)
+            out.append(f"[{body}]")
             i = end + 1
         elif c == "{":
             end = pattern.find("}", i)

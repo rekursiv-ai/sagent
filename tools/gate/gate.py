@@ -125,7 +125,7 @@ def run(
 
     """
     files = drained(name, context=context)
-    if when is not None and not positive(context.environ.get(when, "")):
+    if when is not None and not positive(context.environ.get(when)):
         return 0
     if files is None:
         return unspooled(name)
@@ -188,11 +188,13 @@ def workers(name: str, *, environ: Mapping[str, str]) -> int:
       workers: At least 1.
 
     """
-    override = environ.get(f"WORKERS_{name.replace('-', '_').upper()}", "")
-    return worker_count(override) if override else default_workers(environ=environ)
+    override = f"WORKERS_{name.replace('-', '_').upper()}"
+    if flagged(environ, override):
+        return worker_count(environ[override])
+    return default_workers(environ=environ)
 
 
-def positive(value: str) -> int:
+def positive(value: str | None) -> int:
     """Return ``value`` as a positive integer, or 0 for anything else.
 
     An allowlist: only a positive integer without a leading zero counts. The
@@ -200,19 +202,49 @@ def positive(value: str) -> int:
     as on.
 
     Args:
-      value: The variable's value.
+      value: The variable's value; None when it is unset.
 
     Returns:
       count: The value, or 0.
 
     """
-    return int(value) if re.fullmatch(r"[1-9][0-9]*", value) else 0
+    if value is None or not re.fullmatch(r"[1-9][0-9]*", value):
+        return 0
+    return int(value)
+
+
+def flagged(environ: Mapping[str, str], name: str) -> bool:
+    """Return whether variable ``name`` is set to anything but the empty string.
+
+    Any non-empty value is on, ``0`` included; unset and empty are off. A
+    switch that must not turn on by mistake reads :func:`positive` instead.
+
+    Args:
+      environ: The environment.
+      name: The variable.
+
+    Returns:
+      on: Whether it holds a non-empty value.
+
+    """
+    return environ.get(name, "") != ""
 
 
 def run_argv(argv: Sequence[str]) -> int:
-    """Run ``argv``; return its exit code, or 127 and a message when not installed."""
+    """Run ``argv``; return its exit code, or 127 and a message when not installed.
+
+    Args:
+      argv: The command.
+
+    Returns:
+      exit_code: The command's, or 127.
+
+    """
     try:
-        return subprocess.run(argv, check=False).returncode  # noqa: S603 -- gate argv.
+        return subprocess.run(  # noqa: S603 -- gate argv.
+            argv,
+            check=False,  # pragma: no mutate -- the default, stated for ruff.
+        ).returncode
     except FileNotFoundError:
         return _missing(argv[0])
 
@@ -307,7 +339,7 @@ def output_argv(argv: Sequence[str]) -> str | None:
             argv,
             stdout=subprocess.PIPE,
             text=True,
-            check=False,
+            check=False,  # pragma: no mutate -- the default, stated for ruff.
         )
     except FileNotFoundError:
         _missing(argv[0])
@@ -334,7 +366,7 @@ def _process(pid: int) -> tuple[int, str] | None:
         ["ps", "-o", "ppid=,command=", "-p", str(pid)],  # noqa: S607 -- system ps.
         capture_output=True,
         text=True,
-        check=False,
+        check=False,  # pragma: no mutate -- the default, stated for ruff.
     )
     parent, _, command = done.stdout.strip().partition(" ")
     return (int(parent), command) if parent.isdigit() else None
@@ -347,10 +379,9 @@ def _parse_args(
     """Register the commands and parse ``argv``; a command follows ``--``."""
     _add_arguments(parser)
     flags = cast(Flags, parser.parse_args(argv))
-    if flags.command in {"run", "threaded"}:
-        flags.argv = flags.argv[flags.argv[:1] == ["--"] :]
-        if not flags.argv:
-            parser.error(f"{flags.command}: name the command after --")
+    # Argparse drops the ``--`` itself, so ``argv`` is the command alone.
+    if flags.command in {"run", "threaded"} and not flags.argv:
+        parser.error(f"{flags.command}: name the command after --")
     return flags
 
 

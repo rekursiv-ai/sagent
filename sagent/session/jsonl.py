@@ -7,6 +7,7 @@ Typical usage example:
 
   async with JsonlJournal(path) as journal:     # A second open fails.
       list(journal)                              # The last ContextClear onward.
+      list(journal.history(start=n))             # Record n onward; none before read.
       journal.append(UserMessage(content="hi"))
       journal.flush()                            # On disk, even after a power cut.
 
@@ -19,6 +20,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, override
 
 import fcntl
+import itertools
 import json
 import os
 
@@ -37,7 +39,7 @@ from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Iterable, Iterator, Sequence
     from pathlib import Path
 
 
@@ -65,6 +67,10 @@ class JsonlJournal(AsyncResource):
         self._path = path
         self._fd: int | None = None
         self._window: list[SessionRecord] = []
+        # Where each record's line starts in the file, so a read from record n
+        # decodes none before it; the lock keeps any other writer out.
+        self._starts: list[int] = []
+        self._size = 0
 
     @property
     def path(self) -> Path:
@@ -75,6 +81,7 @@ class JsonlJournal(AsyncResource):
     async def aopen(self) -> None:
         self._fd = _open_locked(self._path)
         self._window = _last_window(self._path)
+        self._starts, self._size = _line_starts(self._path)
 
     @override
     async def aclose(self) -> None:
@@ -86,20 +93,27 @@ class JsonlJournal(AsyncResource):
     def append(self, *records: SessionRecord) -> None:
         """Write ``records`` after the last; a ``ContextClear`` starts a new window."""
         self._write(records)
-        for record in records:
-            if isinstance(record, ContextClear):
-                self._window = []
-            self._window.append(record)
+        self._keep(records)
 
     def __iter__(self) -> Iterator[SessionRecord]:
         """Yield the records from the last ``ContextClear`` on."""
         return iter(tuple(self._window))
 
-    def history(self) -> Iterator[SessionRecord]:
-        """Yield every record in the file, from the first; a torn line as incomplete.
+    def __len__(self) -> int:
+        """Return how many records ``history`` yields."""
+        return len(self._starts)
+
+    def history(self, start: int = 0) -> Iterator[SessionRecord]:
+        """Yield the file's records from record ``start``; a torn line as incomplete.
+
+        The last window is held in memory; earlier records are read from the file
+        as they are iterated, so a caller may iterate on a worker thread.
+
+        Args:
+          start: The number of the first record; those before it are not read.
 
         Returns:
-          records: The file's records, oldest first.
+          records: The file's records from ``start`` as of this call, oldest first.
 
         Raises:
           RuntimeError: The journal is not open.
@@ -107,9 +121,12 @@ class JsonlJournal(AsyncResource):
         """
         if self._fd is None:
             raise RuntimeError(f"Journal {self._path} is not open.")
-        with self._path.open("rb") as file:
-            records = [_record(line) for line in file if line.strip()]
-        return iter(records)
+        first = len(self._starts) - len(self._window)
+        window = tuple(self._window[max(0, start - first) :])
+        if start >= first:
+            return iter(window)
+        end = self._starts[first] if first < len(self._starts) else self._size
+        return itertools.chain(_read(self._path, self._starts[start], end), window)
 
     def flush(self) -> None:
         """Make what was written survive a power cut."""
@@ -119,10 +136,21 @@ class JsonlJournal(AsyncResource):
     def _write(self, records: Sequence[SessionRecord]) -> None:
         if self._fd is None:
             raise RuntimeError(f"Journal {self._path} is not open.")
-        lines = b"".join(record_line(record) for record in records)
+        each = [record_line(record) for record in records]
+        # A write that raised partway, on a full disk, left lines ``_starts`` does
+        # not hold, the last perhaps torn: they are indexed, and a torn one ended,
+        # or the next record would join it and later ones start before their index.
+        ending = b""
+        if os.fstat(self._fd).st_size != self._size:
+            starts, end = _line_starts(self._path, offset=self._size)
+            self._keep(list(_read(self._path, self._size, end)))
+            self._starts.extend(starts)
+            self._size = end
+            if os.pread(self._fd, 1, self._size - 1) != b"\n":
+                ending = b"\n"
         # ``os.write`` may stop short, on a full disk or a signal; the rest of
         # the line must follow, or the next record joins a torn one.
-        rest = memoryview(lines)
+        rest = memoryview(ending + b"".join(each))
         while rest:
             written = os.write(self._fd, rest)
             if not written:
@@ -130,6 +158,19 @@ class JsonlJournal(AsyncResource):
                     f"Journal {self._path} wrote nothing; the disk may be full.",
                 )
             rest = rest[written:]
+        self._size += len(ending)
+        for line in each:
+            self._starts.append(self._size)
+            self._size += len(line)
+
+    # ``history`` serves record n from the window when n is in it, so the window
+    # holds exactly the records ``_starts`` counts from the last ``ContextClear``.
+    def _keep(self, records: Iterable[SessionRecord]) -> None:
+        """Add ``records`` to the window; a ``ContextClear`` starts a new one."""
+        for record in records:
+            if isinstance(record, ContextClear):
+                self._window = []
+            self._window.append(record)
 
 
 def read_record(line: bytes) -> SessionRecord:
@@ -178,6 +219,30 @@ def _open_locked(path: Path) -> int:
     return fd
 
 
+# Blank lines are skipped as ``history`` skips them, or record numbers would shift.
+def _line_starts(path: Path, *, offset: int = 0) -> tuple[list[int], int]:
+    """Return where each record's line from ``offset`` starts in ``path``, and its size."""
+    starts: list[int] = []
+    size = offset
+    with path.open("rb") as file:
+        _ = file.seek(offset)
+        for line in file:
+            if line.strip():
+                starts.append(size)
+            size += len(line)
+    return starts, size
+
+
+def _read(path: Path, begin: int, end: int) -> Iterator[SessionRecord]:
+    """Yield the records of ``path``'s lines from byte ``begin`` to ``end``, when asked."""
+    with path.open("rb") as file:
+        _ = file.seek(begin)
+        data = file.read(end - begin)
+    for line in data.split(b"\n"):
+        if line.strip():
+            yield _record(line)
+
+
 def _last_window(path: Path) -> list[SessionRecord]:
     """Return the records from the last ``ContextClear`` on, reading backward."""
     window: list[SessionRecord] = []
@@ -209,6 +274,6 @@ def _reversed_lines(path: Path) -> Iterator[bytes]:
             file.seek(position)
             lines = (file.read(step) + tail).split(b"\n")
             tail = lines.pop(0)
-            yield from (line for line in reversed(lines) if line)
-        if tail:
+            yield from (line for line in reversed(lines) if line.strip())
+        if tail.strip():
             yield tail

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, override
 import asyncio
 import logging
 import math
+import threading
 import time
 
 from treekle import PlainTree
@@ -62,7 +63,7 @@ from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
     from sagent.model.capability import ThinkingEffort
     from sagent.runtime.tape import ContextSplice
@@ -2040,6 +2041,38 @@ async def test_an_audit_reads_every_window_and_says_who_said_what(
     # The message not yet answered is kept, to be answered.
     assert splice.preserved_tail_count == 1
     assert _lead(splice).endswith("\n\nnow this")
+
+
+class _Threaded(RecordingJournal):
+    """A journal that notes whether each read of its history ran on the loop."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_loop: list[bool] = []
+
+    @override
+    def history(self, start: int = 0) -> Iterator[SessionRecord]:
+        records = super().history(start)
+
+        def read() -> Iterator[SessionRecord]:
+            self.on_loop.append(threading.current_thread() is threading.main_thread())
+            yield from records
+
+        return read()
+
+
+@pytest.mark.asyncio
+async def test_an_audit_reads_the_journal_off_the_loop(tmp_path: Path) -> None:
+    """A long session's journal takes seconds to read; the screen must not wait."""
+    journal = _Threaded()
+    journal.append(ContextClear(system_prompt="S"), UserMessage(content="first ask"))
+    provider, agent, compactor = _auditing(tmp_path, _AUDIT, journal=journal)
+    _hold(agent, (_user("now this"),))
+
+    _ = await _compact(compactor, agent, agent.runtime.context().messages)
+
+    assert "L1 USER: first ask" in _instruction(provider.requests[0])
+    assert journal.on_loop == [False]
 
 
 @pytest.mark.asyncio

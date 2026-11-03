@@ -41,6 +41,7 @@ from sagent.session.projects import child_journal
 from sagent.session.types import (
     AgentStatusResult,
     AgentToAgentMessage,
+    ContextClear,
     SystemMessage,
     UncategorizedRecord,
     UncategorizedToolResult,
@@ -1116,6 +1117,35 @@ async def test_a_child_stood_before_its_journal_kept_its_model_resumes_on_it(
 
 
 @pytest.mark.asyncio
+async def test_a_child_stood_on_a_provider_no_longer_offered_asks_its_parent_s_first(
+    tmp_path: Path,
+) -> None:
+    """``gone/x`` then names no provider, so it is a model name, asked of each."""
+    child = tmp_path / "parent" / "helper" / "session.jsonl"
+    child.parent.mkdir(parents=True)
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        setup.parent.model = setup.team.catalog["other"]["other"]
+        _session(setup.parent).resume()
+        setup.parent.session.stand(
+            "agent:helper",
+            UncategorizedRecord(
+                kind="persistent_agent",
+                payload={
+                    "label": "helper",
+                    "journal": str(child),
+                    "tools": [],
+                    "provider": "gone",
+                    "model": "x",
+                },
+            ),
+        )
+        async with setup.parent, setup.team:
+            assert await setup.spawn.resume("Agent") == ["helper"]
+            assert setup.team["helper"].model.provider.name == "other"
+
+
+@pytest.mark.asyncio
 async def test_a_child_stood_with_no_model_anywhere_resumes_on_its_parent_s(
     tmp_path: Path,
 ) -> None:
@@ -1578,6 +1608,8 @@ async def test_a_watcher_of_a_journaled_root_keeps_its_journal_beside_it(
             setup.parent.session.append(UserMessage(content="hi"))
 
             assert await setup.spawn.watch("Agent", before="how") == "watcher"
+            # Taken before the next start yields, or the watcher reads it first.
+            (first,) = setup.team["watcher"].runtime.inbox.drain_nowait()
             assert await setup.spawn.watch("other") == "watcher_0"
             with pytest.raises(ValueError, match="'Agent' is no unwatched root"):
                 _ = await setup.spawn.watch("Agent")
@@ -1591,7 +1623,6 @@ async def test_a_watcher_of_a_journaled_root_keeps_its_journal_beside_it(
             )
             assert setup.team.resolve("parent", by="Agent") == ["watcher"]
             assert watcher.system_prompt == "the parent's prompt"
-            (first,) = watcher.runtime.inbox.drain_nowait()
             assert isinstance(first, AgentToAgentMessage)
             assert first.content == "how\n\n[watch]\n> user: hi"
 
@@ -1625,6 +1656,55 @@ async def test_a_watcher_comes_back_on_resume_and_is_sent_only_what_is_new(
 
             await setup.team.stop("watcher")
             assert await setup.spawn.resume("Agent") == []
+
+
+@pytest.mark.asyncio
+async def test_a_new_watcher_is_sent_the_window_its_root_sees_not_earlier_ones(
+    tmp_path: Path,
+) -> None:
+    """A long session's earlier windows would not fit one message; Session reads them."""
+    root = tmp_path / "parent" / "journal.jsonl"
+    async with JsonlJournal(root) as journal:
+        journal.append(
+            ContextClear(system_prompt="S"),
+            UserMessage(content="old"),
+            ContextClear(system_prompt="S", summary="gist"),
+            UserMessage(content="new"),
+        )
+    async with JsonlJournal(root) as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            _ = await setup.spawn.watch("Agent", before="how")
+
+            (first,) = setup.team["watcher"].runtime.inbox.drain_nowait()
+            assert isinstance(first, AgentToAgentMessage)
+            assert first.content is not None
+            assert "> user: new" in first.content
+            assert "old" not in first.content
+
+
+@pytest.mark.asyncio
+async def test_a_watcher_stopped_and_started_again_is_sent_each_update_once(
+    tmp_path: Path,
+) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, journal=journal)
+        async with setup.parent, setup.team:
+            _ = await setup.spawn.watch("Agent")
+            await setup.team.stop("watcher")
+            assert await setup.spawn.watch("Agent") == "watcher"
+            watcher = setup.team["watcher"]
+            _ = watcher.runtime.inbox.drain_nowait()
+
+            setup.parent.session.append(UserMessage(content="after"))
+            setup.parent.runtime.publish(types.AgentIdle())
+
+            told = [
+                m.content
+                for m in watcher.runtime.inbox.drain_nowait()
+                if isinstance(m, AgentToAgentMessage)
+            ]
+            assert told == ["[watch]\n> user: after"]
 
 
 async def _watched_once(tmp_path: Path, *, second: bool) -> Path:

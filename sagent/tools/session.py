@@ -167,8 +167,20 @@ class Session:
         if a.action == "list":
             body = "\n".join(_line(i, e, entries) for i, e in enumerate(entries))
             return _said(context, body or "The context is empty.")
+        # A long session's journal takes seconds to read, so it is read on a worker
+        # thread, and a read by record from the first record asked.
         if a.action == "read" and a.records:
-            return _said(context, _records(list(agent.session.history()), a.records))
+            start = max(0, min(a.records))
+            records = await asyncio.to_thread(_listed, agent.session.history(start))
+            return _said(
+                context,
+                _records(
+                    records,
+                    a.records,
+                    start=start,
+                    total=len(agent.session.journal),
+                ),
+            )
         if a.action == "read":
             picked = _picked(entries, a.ids)
             return _said(
@@ -179,7 +191,8 @@ class Session:
                 ),
             )
         if a.action == "search":
-            return _said(context, _search(agent.session.history(), a.text))
+            found = await asyncio.to_thread(_search, agent.session.history(), a.text)
+            return _said(context, found)
         if a.action in ("estimate", "prune"):
             return self._prune(agent, entries, a)
         loop = asyncio.get_running_loop()
@@ -329,18 +342,30 @@ def _kind(entry: ModelContextEvent, entries: Sequence[ModelContextEvent]) -> str
     return "user message"
 
 
-def _records(records: Sequence[SessionRecord], wanted: Sequence[int]) -> str:
+def _listed(records: Iterable[SessionRecord]) -> list[SessionRecord]:
+    """Return ``records`` read into a list, as a worker thread reads a long journal."""
+    return list(records)
+
+
+# ``records`` are the session's from record ``start``, of ``total``.
+def _records(
+    records: Sequence[SessionRecord],
+    wanted: Sequence[int],
+    *,
+    start: int,
+    total: int,
+) -> str:
     """Return each record numbered in ``wanted``, whole; a call with its result."""
     out: list[str] = []
     for n in sorted(set(wanted)):
-        if n < 0 or n >= len(records):
-            raise ValueError(f"No record {n}; the session has {len(records)}.")
-        record = records[n]
+        if n < 0 or n >= total:
+            raise ValueError(f"No record {n}; the session has {total}.")
+        record = records[n - start]
         out.append(f"record {n}, {type(record).__name__}:\n{_record_text(record)}")
         if isinstance(record, ToolCall):
             out.extend(
                 f"its result, record {m}:\n{_record_text(r)}"
-                for m, r in enumerate(records[n + 1 :], n + 1)
+                for m, r in enumerate(records[n - start + 1 :], n + 1)
                 if isinstance(r, ToolResult) and r.call_id == record.call_id
             )
     return "\n\n".join(out)

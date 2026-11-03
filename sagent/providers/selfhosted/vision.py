@@ -222,14 +222,8 @@ class VisionModel(nn.Module):
                 " heads of an even width.",
             )
         kernel = (temporal_patch_size, patch_size, patch_size)
-        # Each patch is convolved alone, an input the kernel's own size, so no
-        # stride moves the kernel.
-        self.patch_embed = nn.Conv3d(
-            in_channels,
-            hidden_size,
-            kernel_size=kernel,
-            stride=kernel,  # pragma: no mutate -- see above.
-        )
+        # No stride: each patch is convolved alone, an input the kernel's size.
+        self.patch_embed = nn.Conv3d(in_channels, hidden_size, kernel_size=kernel)
         self.pos_embed = nn.Embedding(num_position_embeddings, hidden_size)
         self.num_grid_per_side = math.isqrt(num_position_embeddings)
         self.rotary_pos_emb = VisionRotaryEmbedding(rotary)

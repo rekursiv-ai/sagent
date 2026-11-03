@@ -463,9 +463,10 @@ class _Claude:
     def __init__(self, process: Process, *, started_with: tuple[str, ...]) -> None:
         self.process = process
         self.started_with = started_with
-        # The first turn's ``saw`` sets both before anything reads them.
-        self.seen: tuple[SessionRecord, ...] = ()  # pragma: no mutate -- see above.
-        self.held: tuple[ToolCall, ...] = ()  # pragma: no mutate -- see above.
+        # pragma: no mutate start -- ``saw`` sets both before ``unseen`` reads them.
+        self.seen: tuple[SessionRecord, ...] = ()
+        self.held: tuple[ToolCall, ...] = ()
+        # pragma: no mutate end
         self.waiting: tuple[SessionRecord, ...] = ()
         """Notes that came with tool results, for the next user line to carry."""
 
@@ -593,7 +594,7 @@ class _Claude:
         if stdout is None:
             raise ValueError("claude was started without stdout")
         # The window last reported, and when it resets, as the API's headers say.
-        unified: dict[str, str] = {}  # pragma: no mutate -- None: no headers too.
+        unified: dict[str, str] | None = None
         while True:
             # A model that goes quiet this long has dropped the turn.
             raw = await asyncio.wait_for(stdout.readline(), timeout=600.0)
@@ -723,7 +724,7 @@ def _unified_headers(event: dict[str, object]) -> dict[str, str]:
     return headers
 
 
-def _failure(event: dict[str, object], *, headers: dict[str, str]) -> Exception:
+def _failure(event: dict[str, object], *, headers: dict[str, str] | None) -> Exception:
     """Return the exception a failed ``result`` event means."""
     text = str(event.get("result") or event.get("errors") or event)
     reason = event.get("terminal_reason")

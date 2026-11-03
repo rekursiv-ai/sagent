@@ -77,7 +77,7 @@ The journal is one JSON line per session record, in order:
 - compactions and clears, each starting a new window;
 - standing records: the model, its settings, the account, and the system prompt.
 
-A compaction or clear starts a new window; the journal keeps every earlier one. `journal.history()` yields every record, and iterating the journal yields the last window.
+A compaction or clear starts a new window; the journal keeps every earlier one. `journal.history()` yields every record, `journal.history(start=n)` those from record `n` without reading any before it, and iterating the journal yields the last window.
 
 ## Loading sessions
 

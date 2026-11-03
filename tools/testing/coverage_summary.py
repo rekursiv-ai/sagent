@@ -47,7 +47,7 @@ def shortfall(sources: Sequence[str], *, data: Path) -> list[str]:
         measured.load()
         return _shortfall(measured, sources=sources)
     finally:
-        measured.get_data().close(force=True)
+        measured.get_data().close()
 
 
 def _shortfall(measured: coverage.Coverage, *, sources: Sequence[str]) -> list[str]:
