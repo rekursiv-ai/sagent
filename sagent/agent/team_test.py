@@ -1335,36 +1335,40 @@ async def test_every_login_spent_waits_for_the_earliest_reset_and_takes_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    clock = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
     logins = _saved("personal")
     accounts = _Accounts()
     accounts.script("default", _spent("weekly", wait_sec=86_400.0))
     accounts.script("personal", reply("from personal"))
     _, agent, seen = await _session(accounts, tmp_path, persistent_retry=True)
-    # The wall clock stands still until the call is suspended, then jumps to the
-    # reset it waits for: ``personal`` reads as spent on the move off ``default``,
-    # and as reset on the call after, however long either takes. The loop's own
-    # timer holds the call the 10 ms between.
-    now = [time.time()]
-    soon = now[0] + 0.01
-    monkeypatch.setattr(time, "time", lambda: now[0])
-    agent.runtime.observers.append(
-        lambda event: (
-            now.__setitem__(0, event.until)
-            if isinstance(event, types.ModelCallSuspended)
-            else None
-        ),
-    )
+    waiting = asyncio.Event()
+
+    def suspended(event: types.RuntimeEvent) -> None:
+        if isinstance(event, types.ModelCallSuspended):
+            waiting.set()
+
+    agent.runtime.observers.append(suspended)
+    soon = clock[0] + 60.0
     await logins.spend(
         "personal",
         Spent(window="5-hour", model="scripted", until=soon),
     )
+    sending = asyncio.create_task(agent.send("hi"))
     try:
-        assert await asyncio.wait_for(agent.send("hi"), timeout=10) == "from personal"
+        await asyncio.wait_for(waiting.wait(), timeout=10)
+        assert not sending.done()
+        assert accounts.served == ["default"]
+        clock[0] = soon
+        agent.runtime.push(types.SaveSession())
+        assert await asyncio.wait_for(sending, timeout=10) == "from personal"
     finally:
+        sending.cancel()
+        await asyncio.gather(sending, return_exceptions=True)
         await agent.aclose()
     assert accounts.served == ["default", "personal"]
-    (suspended,) = [e for e in seen if isinstance(e, types.ModelCallSuspended)]
-    assert suspended.until == soon
+    (wait,) = [e for e in seen if isinstance(e, types.ModelCallSuspended)]
+    assert wait.until == soon
     assert _switches(seen) == [("default", "personal")]
 
 

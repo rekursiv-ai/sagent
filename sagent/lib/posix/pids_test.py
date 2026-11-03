@@ -67,15 +67,15 @@ async def test_a_process_runs_until_it_has_exited(proc: Path) -> None:
     ],
     ids=["proc", "kill"],
 )
+@pytest.mark.skipif(
+    sys.platform == "darwin" and sys.version_info < (3, 13),
+    reason="macOS has os.waitid only from Python 3.13",
+)
 def test_an_unreaped_zombie_runs_only_where_its_state_is_unreadable(
     proc: Path,
     counted: bool,
 ) -> None:
     """It only waits for its parent to collect it, which ``kill(pid, 0)`` cannot tell."""
-    # The exported floor is 3.12, and macOS has no os.waitid before 3.13: nothing else
-    # waits for a child to exit without collecting it.
-    if sys.platform == "darwin" and sys.version_info < (3, 13):
-        pytest.skip("macOS has os.waitid only from Python 3.13")
     pid = os.fork()
     if pid == 0:
         os._exit(0)
