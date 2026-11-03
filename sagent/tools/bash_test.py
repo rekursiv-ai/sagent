@@ -784,10 +784,12 @@ async def test_a_wrapped_call_keeps_both_streams_and_the_status(
 @pytest.mark.asyncio
 async def test_a_wrapped_command_cannot_reach_the_held_pipe(tmp_path: Path) -> None:
     """Input from the pipe, or a copy of it, would let the command free the guard."""
+    # A dup, not `[ -e /dev/fd/9 ]`: macOS fails that stat with EBADF while any
+    # other process looks up fd 9, which printed "closed" for a leaked pipe.
     result = await _run(
         tmp_path,
         'read -r line; echo "stdin_status=$?";'
-        " [ -e /dev/fd/9 ] && echo open || echo closed",
+        " { true >&9; } 2>/dev/null && echo open || echo closed",
         limit_ms=3_000,
         tool=Bash(exec_prefix=_OTHER_GROUP),
     )
