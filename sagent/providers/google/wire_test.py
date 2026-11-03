@@ -35,8 +35,8 @@ from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
     Attachment,
+    BashResult,
     ContextClear,
-    ShellCommandResult,
     SystemMessage,
     Thinking,
     TokenUsage,
@@ -157,7 +157,7 @@ def test_a_conversation_with_calls_results_and_signatures() -> None:
             content="a.py",
             attachments=(Attachment(mime_descriptor="image/png", data=png),),
         ),
-        ShellCommandResult(call_id="c2", stdout="denied", is_error=True),
+        BashResult(call_id="c2", stdout="denied", is_error=True),
         TokenUsage(),
         UserMessage(content="and?"),
     )

@@ -14,7 +14,12 @@ from treekle import PlainTree, from_plain
 
 import pytest
 
-from sagent.session.types import AnyToolResult, ToolCall, UncategorizedToolResult
+from sagent.session.types import (
+    AnyToolResult,
+    BackgroundTaskResult,
+    ToolCall,
+    UncategorizedToolResult,
+)
 from sagent.tools.background_task import (
     BackgroundTask,
     Offered,
@@ -251,7 +256,11 @@ async def test_background_task_alone_has_no_jobs_to_manage() -> None:
 async def test_list_without_jobs() -> None:
     table = FakeTable(listed={"c1": _job("Bash", "running", 0)})
     result = await BackgroundTask().manage(table, {"operation": "list"})
-    assert result == UncategorizedToolResult(call_id="", content="No background jobs.")
+    assert result == BackgroundTaskResult(
+        call_id="",
+        operation="list",
+        content="No background jobs.",
+    )
 
 
 @pytest.mark.asyncio
@@ -277,8 +286,10 @@ async def test_cancel_cancels_the_job() -> None:
     job = _job("Bash", "detached", 0)
     table = FakeTable(listed={"c1": job})
     result = await BackgroundTask().manage(table, {"operation": "cancel", "id": "c1"})
-    assert result == UncategorizedToolResult(
+    assert result == BackgroundTaskResult(
         call_id="",
+        operation="cancel",
+        job_id="c1",
         content="Cancelling Bash (c1).",
     )
     assert job.cancelled == [True]
@@ -331,8 +342,8 @@ async def test_an_unknown_operation_is_an_argument_error() -> None:
         _ = await BackgroundTask().manage(FakeTable(), {"operation": "fg"})
 
 
-def _error(text: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=text, is_error=True)
+def _error(text: str) -> BackgroundTaskResult:
+    return BackgroundTaskResult(call_id="", shown=text, is_error=True)
 
 
 def _properties(tool: Tool) -> Mapping[str, PlainTree]:

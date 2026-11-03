@@ -28,7 +28,7 @@ from wesearch.paper.render import format_block
 
 import cachetools
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import PaperDetailsResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import (
     error,
@@ -151,7 +151,7 @@ class PaperDetails:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> PaperDetailsResult:
         """Look up the papers ``ids`` names, or one paper's references or citations.
 
         Args:
@@ -196,7 +196,7 @@ class PaperDetails:
             )
             cached = self.cache.get(key)
             if cached is not None:
-                return UncategorizedToolResult(call_id="", content=cached)
+                return PaperDetailsResult(call_id="", content=cached)
             source = "openalex" if a.source == "openalex" else "s2"
             listing = await (
                 asyncio.to_thread(
@@ -220,10 +220,10 @@ class PaperDetails:
                 )
             )
         except PaperError as e:
-            return error(str(e))
+            return error(PaperDetailsResult, str(e))
         text = listed(listing, a.abstract_chars, more="exist")
         self.cache[key] = text
-        return UncategorizedToolResult(call_id="", content=text)
+        return PaperDetailsResult(call_id="", content=text)
 
     async def _metadata(
         self,
@@ -231,13 +231,13 @@ class PaperDetails:
         abstract_chars: int | None,
         *,
         session: FetchSession,
-    ) -> UncategorizedToolResult:
+    ) -> PaperDetailsResult:
         """Look up every id in one batched request, in input order."""
         wire = [s2_wire_id(*normalize_id(raw)) for raw in raw_ids]
         key = ("metadata", abstract_chars, tuple(wire))
         cached = self.cache.get(key)
         if cached is not None:
-            return UncategorizedToolResult(call_id="", content=cached)
+            return PaperDetailsResult(call_id="", content=cached)
         if len(wire) == 1:
             records = [
                 await asyncio.to_thread(
@@ -260,4 +260,4 @@ class PaperDetails:
         )
         if all(r is not None for r in records):
             self.cache[key] = text
-        return UncategorizedToolResult(call_id="", content=text)
+        return PaperDetailsResult(call_id="", content=text)

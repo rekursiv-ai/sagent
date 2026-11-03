@@ -29,8 +29,8 @@ from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
 from sagent.session.types import (
     AgentToAgentMessage,
-    FileReadResult,
-    ShellCommandResult,
+    BashResult,
+    ReadResult,
 )
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.bash import Bash
@@ -157,8 +157,8 @@ async def test_each_agent_keeps_its_own_directory(tmp_path: Path) -> None:
             ),
         )
         stayed = await _result(reader)
-        assert isinstance(moved.record, ShellCommandResult)
-        assert isinstance(stayed.record, ShellCommandResult)
+        assert isinstance(moved.record, BashResult)
+        assert isinstance(stayed.record, BashResult)
         assert moved.record.stdout.strip() == str(tmp_path / "sub")
         assert stayed.record.stdout.strip() == str(tmp_path)
 
@@ -358,7 +358,7 @@ async def test_main_serves_on_the_socket_it_is_given(
     assert list(tools.tools) == ["Read"]
     writer.write(_call("1", agent="a", window="w", tool="Read", file_path="a.txt"))
     result = await _result(reader)
-    assert isinstance(result.record, FileReadResult)
+    assert isinstance(result.record, ReadResult)
     assert "from main" in (result.record.content or "")
     writer.write_eof()
     assert await asyncio.wait_for(running, 5) == 0

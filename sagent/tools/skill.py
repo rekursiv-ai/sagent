@@ -34,7 +34,7 @@ import yaml
 
 from sagent.agent.agents_md import frontmatter
 from sagent.lib.userdirs import data_dir
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import SkillResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
 
@@ -235,7 +235,7 @@ class Skill:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> SkillResult:
         """Return the named skill's body, and ``args``, in a ``<skill>`` block.
 
         Args:
@@ -255,7 +255,7 @@ class Skill:
         if match is None:
             names = ", ".join(s.name for s in skills) or "(none)"
             raise ValueError(f"Unknown skill {a.skill!r}. Available: {names}.")
-        return UncategorizedToolResult(call_id="", content=match.block(a.args))
+        return SkillResult(call_id="", skill=match.name, content=match.block(a.args))
 
 
 # Each directory is entered once by its resolved path, so a link back up the

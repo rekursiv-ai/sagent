@@ -62,7 +62,7 @@ from sagent.host.wire import (
 )
 from sagent.lib.userdirs import config_dir
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.types import AnyToolResult, UncategorizedToolResult
+from sagent.session.types import AnyToolResult, RemoteToolResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
 from sagent.types import AsyncResource
@@ -666,7 +666,7 @@ class RemoteTool:
                 f"No endpoint {a.endpoint!r}; endpoints: {', '.join(named) or 'none'}.",
             )
         if not a.tool:
-            return _said(self._listing(a.endpoint, endpoint))
+            return _said(self._listing(a.endpoint, endpoint), a.endpoint)
         if a.arguments is None:
             here = self.local.get(a.tool)
             known = here is not None and here.digest == endpoint.tools.get(a.tool)
@@ -675,6 +675,7 @@ class RemoteTool:
                 raise ValueError(f"{a.endpoint} does not offer {a.tool}.")
             return _said(
                 f"{spec.description}\n\nSchema:\n{json_dumps(spec.schema, indent=2)}",
+                a.endpoint,
             )
         return await endpoint.call(
             agent=context.label,
@@ -721,5 +722,5 @@ class RemoteTool:
         return f"{name} (up: {', '.join(endpoint.tools) or 'no tools'}{changed})"
 
 
-def _said(text: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=text)
+def _said(text: str, endpoint: str = "") -> RemoteToolResult:
+    return RemoteToolResult(call_id="", endpoint=endpoint, content=text)

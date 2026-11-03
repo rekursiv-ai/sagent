@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass, replace
+from pathlib import Path
 from types import MappingProxyType
-from typing import cast
+from typing import Final, cast, get_args
 
 import json
 import re
@@ -17,36 +18,40 @@ import pytest
 
 from sagent.session import types
 from sagent.session.types import (
-    AgentStatusResult,
+    AgentSpawnResult,
     AgentToAgentMessage,
     AssistantMessage,
     Attachment,
+    BashResult,
     ContextClear,
     ContextCompaction,
     ContextState,
-    FileEditResult,
-    FileReadResult,
-    FileWriteResult,
+    EditResult,
     IncompleteRecord,
+    ReadResult,
     SessionRecord,
-    ShellCommandResult,
     Splice,
     SystemMessage,
     Thinking,
     TokenUsage,
     ToolCall,
+    ToolErrorResult,
     ToolResult,
     TurnContext,
     UncategorizedRecord,
     UncategorizedToolResult,
     UserMessage,
     WebFetchResult,
+    WebSearchHit,
     WebSearchResult,
-    WebSearchResults,
+    WriteResult,
     record_classes,
     stored_plain,
     stored_record,
 )
+
+
+_CWD: Final = Path(__file__).resolve().parent
 
 
 def _json() -> dict[str, PlainTree]:
@@ -84,10 +89,10 @@ def _every_record() -> list[SessionRecord]:
             stub="pending",
             extra=_json(),
         ),
-        ShellCommandResult(call_id="2", command=("ls", "-la"), stdout="o", exit_code=0),
-        FileReadResult(call_id="3", path="a.py", content="c", ranges=((1, None),)),
-        FileWriteResult(call_id="4", path="b.py", content="w"),
-        FileEditResult(
+        BashResult(call_id="2", command=("ls", "-la"), stdout="o", exit_code=0),
+        ReadResult(call_id="3", path="a.py", content="c", ranges=((1, None),)),
+        WriteResult(call_id="4", path="b.py", content="w"),
+        EditResult(
             call_id="5",
             path="c.py",
             edits=(
@@ -100,13 +105,32 @@ def _every_record() -> list[SessionRecord]:
                 ),
             ),
         ),
-        WebSearchResults(
+        WebSearchResult(
             call_id="6",
             query="q",
-            content=(WebSearchResult(url="u", title="t", snippet="s"),),
+            content=(WebSearchHit(url="u", title="t", snippet="s"),),
         ),
         WebFetchResult(call_id="7", url="u", content="page", code=200),
-        AgentStatusResult(call_id="8", agent_id="a", content="done", tokens=5),
+        AgentSpawnResult(call_id="8", agent_id="a", content="done", tokens=5),
+        ToolErrorResult(call_id="9", content="ValueError: no", shown="[pruned]"),
+        ToolResult(call_id="10", stub="pending", shown="[running]", is_error=True),
+        types.GrepResult(call_id="11", pattern="p", path="src", content="a.py"),
+        types.GlobResult(call_id="12", pattern="*.py", content="a.py"),
+        types.ListResult(call_id="13", path="src", content="a.py"),
+        types.SkillResult(call_id="14", skill="tdd", content="body"),
+        types.AgentSendResult(call_id="15", to="parent", delay_sec=5, content="ok"),
+        types.BackgroundTaskResult(call_id="16", operation="list", content="none"),
+        types.AgentSelfResult(call_id="17", content="model: x"),
+        types.SessionResult(call_id="18", action="read", agent="a", content="r"),
+        types.MemoryResult(call_id="19", action="save", name="n", content="saved"),
+        types.PlayAudioResult(call_id="20", path="a.wav", content="Played"),
+        types.PaperSearchResult(call_id="21", query="q", source="s2", content="p"),
+        types.PaperDetailsResult(call_id="22", operation="references", content="p"),
+        types.PaperAuthorResult(call_id="23", operation="papers", content="p"),
+        types.PaperFetchResult(call_id="24", content="a.pdf"),
+        types.RemoteToolResult(call_id="25", endpoint="e", content="ok"),
+        types.McpResult(call_id="26", server="s", tool="t", content="ok"),
+        types.FunctionResult(call_id="27", name="act", content="acted"),
         SystemMessage(content="reminder", subtype="rules", extra=_json()),
         TokenUsage(info={"request": 1}, rate_limits={"5h": 0.5}, extra=_json()),
         ContextState(kind="k", content="c", extra={"full": [True]}),
@@ -208,6 +232,100 @@ def test_a_bare_tool_result_reads_as_nothing() -> None:
     assert UncategorizedToolResult(call_id="1", content="out").text() == "out"
 
 
+def test_what_a_result_shows_stands_in_for_its_body_its_fields_kept() -> None:
+    """A prune or a stand-in sets ``shown``; the type and its fields stay."""
+    read = ReadResult(call_id="1", path="a.py", content="body")
+    pruned = replace(read, shown="[pruned]")
+
+    assert (read.text(), pruned.text()) == ("body", "[pruned]")
+    assert (pruned.path, pruned.content) == ("a.py", "body")
+    assert ToolResult(call_id="2", stub="pending", shown="[running]").text() == (
+        "[running]"
+    )
+    assert ToolResult(call_id="3", shown="").text() == ""
+
+
+def test_an_error_no_tool_answered_reads_as_its_content() -> None:
+    assert ToolErrorResult(call_id="1", content="ValueError: no").text() == (
+        "ValueError: no"
+    )
+
+
+def _tool_result_classes() -> set[type]:
+    """Return ``ToolResult`` and every subclass of it the module defines."""
+    members = dict[str, object](vars(types))
+    return {
+        kind
+        for name in types.__all__
+        if isinstance(kind := members[name], type) and issubclass(kind, ToolResult)
+    }
+
+
+@pytest.mark.parametrize(
+    "kind",
+    sorted(_tool_result_classes(), key=lambda k: k.__name__),
+    ids=lambda k: k.__name__,
+)
+def test_a_restated_result_keeps_its_type_and_fields_and_drops_attachments(
+    kind: type[ToolResult],
+) -> None:
+    image = Attachment(mime_descriptor="image/png", data=b"png")
+    result = kind(call_id="1", is_error=True, attachments=(image,))
+
+    restated = result.restated("[pruned]")
+
+    assert type(restated) is kind
+    assert restated == replace(result, shown="[pruned]", attachments=())
+    assert restated.text() == "[pruned]"
+
+
+@pytest.mark.parametrize(
+    ("old", "kind"),
+    [
+        ("BashResult", types.BashResult),
+        ("ReadResult", types.ReadResult),
+        ("WriteResult", types.WriteResult),
+        ("EditResult", types.EditResult),
+        ("AgentSpawnResult", types.AgentSpawnResult),
+    ],
+)
+def test_a_record_stored_under_its_old_name_reads_as_the_renamed_type(
+    old: str,
+    kind: type[ToolResult],
+) -> None:
+    assert stored_record({"py/object": old, "call_id": "1"}) == kind(call_id="1")
+    assert json.dumps(stored_plain(kind(call_id="1"))).startswith(
+        f'{{"py/object": "{kind.__name__}"',
+    )
+
+
+def test_an_old_web_search_reads_as_one_result_of_hits() -> None:
+    """Its old name for the results is the name of one hit now; hits nest only there."""
+    old = {
+        "py/object": "WebSearchResults",
+        "call_id": "1",
+        "content": {
+            "py/tuple": [
+                {"py/object": "WebSearchResult", "title": "t", "url": "u"},
+            ],
+        },
+    }
+
+    assert stored_record(old) == types.WebSearchResult(
+        call_id="1",
+        content=(types.WebSearchHit(title="t", url="u"),),
+    )
+
+
+def test_every_tool_result_type_is_in_the_union_and_stored_by_name() -> None:
+    """A type left out of either is one a match or a journal silently misses."""
+    union = set(get_args(types.AnyToolResult.__value__))
+    classes = record_classes()
+
+    assert _tool_result_classes() == union
+    assert all(classes[kind.__name__] is kind for kind in union)
+
+
 @pytest.mark.parametrize(
     ("exit_code", "status"),
     [(None, ""), (0, ""), (2, "\n[exit 2]")],
@@ -216,7 +334,7 @@ def test_a_shell_result_reads_its_streams_and_a_failing_exit(
     exit_code: int | None,
     status: str,
 ) -> None:
-    result = ShellCommandResult(
+    result = BashResult(
         call_id="1",
         stdout="out\n",
         stderr="err",
@@ -226,41 +344,39 @@ def test_a_shell_result_reads_its_streams_and_a_failing_exit(
 
 
 def test_file_results_read_as_what_was_done() -> None:
-    assert FileReadResult(call_id="1", content="body").text() == "body"
-    assert FileReadResult(call_id="1").text() == ""
-    assert (
-        FileWriteResult(call_id="1", path="a.py", content="x").text() == "Wrote a.py."
-    )
-    assert FileEditResult(call_id="1", path="a.py").text() == "Edited a.py."
+    assert ReadResult(call_id="1", content="body").text() == "body"
+    assert ReadResult(call_id="1").text() == ""
+    assert WriteResult(call_id="1", path="a.py", content="x").text() == "Wrote a.py."
+    assert EditResult(call_id="1", path="a.py").text() == "Edited a.py."
 
 
 def test_search_hits_read_as_title_url_snippet_blocks() -> None:
-    results = WebSearchResults(
+    results = WebSearchResult(
         call_id="1",
         content=(
-            WebSearchResult(url="u1", title="t1", snippet="s1"),
-            WebSearchResult(url="u2", title="t2", snippet="s2"),
+            WebSearchHit(url="u1", title="t1", snippet="s1"),
+            WebSearchHit(url="u2", title="t2", snippet="s2"),
         ),
     )
     assert results.text() == "t1\nu1\ns1\n\nt2\nu2\ns2"
-    assert WebSearchResults(call_id="1").text() == ""
+    assert WebSearchResult(call_id="1").text() == ""
 
 
 def test_no_result_reads_none_for_what_its_source_did_not_say() -> None:
-    hits = WebSearchResults(
+    hits = WebSearchResult(
         call_id="1",
-        content=(WebSearchResult(url="u1"), WebSearchResult(title="t2", snippet="s2")),
+        content=(WebSearchHit(url="u1"), WebSearchHit(title="t2", snippet="s2")),
     )
     assert hits.text() == "u1\n\nt2\ns2"
-    assert FileWriteResult(call_id="1").text() == "Wrote the file."
-    assert FileEditResult(call_id="1").text() == "Edited the file."
+    assert WriteResult(call_id="1").text() == "Wrote the file."
+    assert EditResult(call_id="1").text() == "Edited the file."
 
 
 def test_fetch_and_agent_results_read_as_their_content() -> None:
     assert WebFetchResult(call_id="1", content="page").text() == "page"
     assert WebFetchResult(call_id="1").text() == ""
-    assert AgentStatusResult(call_id="1", content="done").text() == "done"
-    assert AgentStatusResult(call_id="1").text() == ""
+    assert AgentSpawnResult(call_id="1", content="done").text() == "done"
+    assert AgentSpawnResult(call_id="1").text() == ""
 
 
 def test_record_classes_names_every_dataclass_the_module_defines() -> None:
@@ -339,14 +455,14 @@ def test_a_stored_record_names_every_class_it_holds_alone() -> None:
         history=(
             UserMessage(content="u"),
             AssistantMessage(content="a"),
-            FileEditResult(call_id="c", edits=(Splice(after="y"),)),
+            EditResult(call_id="c", edits=(Splice(after="y"),)),
         ),
     )
 
     stored = stored_plain(record)
 
     tags = re.findall(r'"py/object": "([^"]+)"', json.dumps(stored))
-    assert tags == ["ContextClear", "AssistantMessage", "FileEditResult"]
+    assert tags == ["ContextClear", "AssistantMessage", "EditResult"]
     assert stored_record(stored) == record
 
 
@@ -369,7 +485,7 @@ def test_a_class_outside_the_vocabulary_stores_only_where_classes_name_it() -> N
 
 def test_the_round_trip_cases_cover_every_record_kind() -> None:
     covered = {type(r).__name__ for r in _every_record()}
-    containers = {"Attachment", "Splice", "WebSearchResult", "ToolResult"}
+    containers = {"Attachment", "Splice", "WebSearchHit"}
     assert covered | containers == set(record_classes())
 
 
@@ -385,8 +501,8 @@ def test_a_session_preserves_interleaved_tool_lifecycles() -> None:
         ),
         UserMessage(content="Also check B."),
         ToolCall(call_id="b", name="Read", arguments={"path": "/b"}),
-        FileReadResult(call_id="b", content="B"),
-        FileReadResult(call_id="a", content="A"),
+        ReadResult(call_id="b", content="B"),
+        ReadResult(call_id="a", content="A"),
     )
 
     assert [item.call_id for item in records if isinstance(item, ToolResult)] == [

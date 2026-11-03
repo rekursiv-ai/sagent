@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Annotated, cast
 import asyncio
 import re
 
-from sagent.session.types import FileEditResult, Splice, UncategorizedToolResult
+from sagent.session.types import EditResult, Splice
 from sagent.tools.command_analyzer import (
     Invocation,
     operands,
@@ -126,7 +126,7 @@ class Edit:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> FileEditResult | UncategorizedToolResult:
+    ) -> EditResult:
         """Replace ``old_string`` with ``new_string`` in ``file_path``.
 
         ``old_string`` must occur once, unless ``replace_all``.
@@ -145,7 +145,7 @@ class Edit:
 def _edit(
     context: ToolContext,
     a: Edit.Arguments,
-) -> FileEditResult | UncategorizedToolResult:
+) -> EditResult:
     """Make the replacement ``a`` asks for."""
     path = context.path(a.file_path)
     # ``str.replace("", ...)`` inserts between every character.
@@ -180,7 +180,7 @@ def _edit(
     edited = text.replace(old, new)
     write_file(path, (edited.replace("\n", "\r\n") if crlf else edited).encode())
     context.files.saw(path)
-    return FileEditResult(
+    return EditResult(
         call_id="",
         path=str(path),
         edits=tuple(
@@ -202,5 +202,5 @@ def _lines_at(text: str, needle: str) -> list[int]:
     return lines
 
 
-def _error(message: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=message, is_error=True)
+def _error(message: str) -> EditResult:
+    return EditResult(call_id="", shown=message, is_error=True)

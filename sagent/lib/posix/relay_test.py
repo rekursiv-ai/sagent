@@ -701,6 +701,38 @@ class TestRelayBranchEdges:
         asyncio.run(relay._pump(-1, 3))
         assert mirrored == [b"output"]
 
+    def test_a_suspend_while_pumping_resets_the_relay_s_own_output(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        reset: list[int] = []
+
+        def reset_terminal_modes(fd: int) -> bool:
+            reset.append(fd)
+            return True
+
+        def killpg(group: int, signum: int) -> None:
+            del group, signum
+
+        monkeypatch.setattr(
+            "sagent.lib.posix.relay.reset_terminal_modes",
+            reset_terminal_modes,
+        )
+        monkeypatch.setattr(os, "killpg", killpg)
+        _reading(monkeypatch, [b"\x1a", b""])
+
+        async def run() -> None:
+            resumed = asyncio.Event()
+            relay = Relay(
+                _ResumedChild(resumed),
+                suspend_key=b"\x1a",
+                on_resume=resumed.set,
+            )
+            await relay._pump(3, 7)
+
+        asyncio.run(run())
+        assert reset == [7]
+
     def test_forward_input_returns_when_not_readable(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -1470,6 +1502,20 @@ class _FakeChild:
 
     async def close(self) -> None:
         self.calls.append("close")
+
+
+class _ResumedChild(_FakeChild):
+    """Paints nothing, and stays running until the relay over it has resumed."""
+
+    def __init__(self, resumed: asyncio.Event) -> None:
+        super().__init__()
+        self._resumed = resumed
+
+    @override
+    async def output(self) -> AsyncIterator[bytes]:
+        _ = await asyncio.wait_for(self._resumed.wait(), 5.0)
+        async for chunk in super().output():
+            yield chunk
 
 
 class _TypedChild(_FakeChild):

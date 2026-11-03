@@ -56,6 +56,7 @@ from sagent.session.types import (
     SystemMessage,
     TokenUsage,
     ToolCall,
+    ToolErrorResult,
     ToolResult,
     TurnContext,
     UncategorizedRecord,
@@ -302,7 +303,7 @@ async def test_send_returns_what_the_model_said_last(tmp_path: Path) -> None:
         assert await agent.send("go") == "done"
 
     second = provider.requests[1].records
-    results = [r for r in second if isinstance(r, UncategorizedToolResult)]
+    results = [r for r in second if isinstance(r, ToolErrorResult)]
     assert [r.text() for r in results] == ["Unknown tool: Nope"]
 
 
@@ -940,14 +941,13 @@ async def test_a_call_still_running_when_its_session_ended_resumes_killed(
         _ = await agent.send("and?")
 
     killed = [
-        (r.content, r.stub)
+        (r.text(), r.stub)
         for r in journal
-        if isinstance(r, UncategorizedToolResult)
-        and r.call_id == f"c1{markers.arrival}"
+        if isinstance(r, ToolResult) and r.call_id == f"c1{markers.arrival}"
     ]
     assert killed == [(markers.cancelled, "cancelled")]
     assert any(
-        isinstance(r, UncategorizedToolResult) and r.content == markers.cancelled
+        isinstance(r, ToolResult) and r.text() == markers.cancelled
         for r in provider.requests[0].records
     )
 
@@ -2146,8 +2146,9 @@ def test_a_pruned_result_is_journaled_as_itself_and_resumes_pruned(
     assert list(_session(resumed)) == list(session)
     assert UncategorizedToolResult(
         call_id="c1",
-        content="[pruned]",
+        content="long output",
         is_error=True,
+        shown="[pruned]",
     ) in list(session)
 
 

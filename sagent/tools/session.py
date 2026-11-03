@@ -42,12 +42,12 @@ from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
     ContextClear,
+    SessionResult,
     SystemMessage,
     Thinking,
     ToolCall,
     ToolResult,
     TurnContext,
-    UncategorizedToolResult,
     UserMessage,
 )
 from sagent.tools.display import ToolDisplay
@@ -144,7 +144,7 @@ class Session:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> SessionResult:
         """Do the action on the caller's session; say what it found or will change.
 
         Args:
@@ -166,7 +166,7 @@ class Session:
         entries = agent.runtime.context().messages
         if a.action == "list":
             body = "\n".join(_line(i, e, entries) for i, e in enumerate(entries))
-            return _said(context, body or "The context is empty.")
+            return _said(context, a.action, body or "The context is empty.")
         # A long session's journal takes seconds to read, so it is read on a worker
         # thread, and a read by record from the first record asked.
         if a.action == "read" and a.records:
@@ -174,6 +174,7 @@ class Session:
             records = await asyncio.to_thread(_listed, agent.session.history(start))
             return _said(
                 context,
+                a.action,
                 _records(
                     records,
                     a.records,
@@ -185,6 +186,7 @@ class Session:
             picked = _picked(entries, a.ids)
             return _said(
                 context,
+                a.action,
                 "\n\n".join(
                     f"{_line(i, entries[i], entries)}\n{text(entries[i])}"
                     for i in picked
@@ -192,13 +194,13 @@ class Session:
             )
         if a.action == "search":
             found = await asyncio.to_thread(_search, agent.session.history(), a.text)
-            return _said(context, found)
+            return _said(context, a.action, found)
         if a.action in ("estimate", "prune"):
             return self._prune(agent, entries, a)
         loop = asyncio.get_running_loop()
         if a.action == "clear":
             loop.call_soon(agent.runtime.push, types.Clear())
-            return UncategorizedToolResult(call_id="", content="Clear queued.")
+            return SessionResult(call_id="", action=a.action, content="Clear queued.")
         compactor = agent.session.compactor
         summarizes = isinstance(compactor, SummaryCompactor)
         if not summarizes:
@@ -208,8 +210,9 @@ class Session:
         # Pushed now, the compaction would reach the runtime ahead of this call's
         # result, and detach the call.
         loop.call_soon(agent.runtime.push, types.Compact(args=a.prompt))
-        return UncategorizedToolResult(
+        return SessionResult(
             call_id="",
+            action=a.action,
             content=f"Compaction queued ({compactor.style}).",
         )
 
@@ -233,7 +236,7 @@ class Session:
         agent: Agent,
         entries: Sequence[ModelContextEvent],
         a: Session.Arguments,
-    ) -> UncategorizedToolResult:
+    ) -> SessionResult:
         """Weigh dropping the results ``a.ids``; for ``prune``, queue the drop."""
         picked = _picked(entries, a.ids)
         kept = [
@@ -269,7 +272,7 @@ class Session:
                 f" about ${dollars:.4f} over the requests left before compaction.",
             )
         if a.action == "estimate":
-            return UncategorizedToolResult(call_id="", content="\n".join(lines))
+            return SessionResult(call_id="", action=a.action, content="\n".join(lines))
         # By call id, since positions may move before the drop runs.
         ids = {r.call_id for i in picked if isinstance(r := entries[i], ToolResult)}
         runtime = agent.runtime
@@ -291,8 +294,9 @@ class Session:
             runtime.push,
             types.Scheduled(work=work, done=loop.create_future()),
         )
-        return UncategorizedToolResult(
+        return SessionResult(
             call_id="",
+            action=a.action,
             content="\n".join([f"Prune queued: {a.reason.strip()}", *lines]),
         )
 
@@ -403,7 +407,7 @@ def _record_text(record: SessionRecord) -> str:
     return ""
 
 
-def _said(context: ToolContext, body: str) -> UncategorizedToolResult:
+def _said(context: ToolContext, action: str, body: str) -> SessionResult:
     """Return ``body`` as the result, cut at a line to what one result may hold."""
     fitted, _ = context.fit(body.splitlines(keepends=True))
-    return UncategorizedToolResult(call_id="", content=fitted)
+    return SessionResult(call_id="", action=action, content=fitted)

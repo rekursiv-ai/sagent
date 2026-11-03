@@ -31,14 +31,14 @@ from sagent.session.types import (
     AgentToAgentMessage,
     AnyToolResult,
     AssistantMessage,
-    FileEditResult,
-    FileWriteResult,
-    ShellCommandResult,
+    BashResult,
+    EditResult,
     Splice,
     Thinking,
     ToolCall,
     UncategorizedToolResult,
     UserMessage,
+    WriteResult,
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.edit import Edit
@@ -801,12 +801,12 @@ def test_a_user_message_that_merely_mentions_a_delivery_still_shows() -> None:
 def test_a_write_shows_as_a_diff_cut_like_its_tool_s_output() -> None:
     printer = RecordingPrinter()
     printer.call(_ECHO)
-    write = FileWriteResult(call_id="1", path="a.py", content="x\ny\n")
+    write = WriteResult(call_id="1", path="a.py", content="x\ny\n")
     cut = ToolDisplay(output=DisplaySpec(lines=(1, 1)))
     show_result(printer, write, header=replace(_ECHO, display=cut))
     show_result(printer, write, header=_ECHO)
     show_result(printer, write, header=replace(_ECHO, display=ToolDisplay()))
-    show_result(printer, FileWriteResult(call_id="2", path="b.py"), header=_ECHO)
+    show_result(printer, WriteResult(call_id="2", path="b.py"), header=_ECHO)
     assert printer.said == [
         ("call", "Echo"),
         ("diff", "a.py\n@@ -0,0 +1,2 @@\n+x\n+y"),
@@ -1161,20 +1161,20 @@ def test_show_result_shows_a_failure_whatever_the_display() -> None:
 
 def test_show_result_shows_an_edit_as_a_diff() -> None:
     printer = RecordingPrinter()
-    edit = FileEditResult(
+    edit = EditResult(
         call_id="1",
         path="a.py",
         edits=(Splice(before="x", after="y", start=2),),
     )
     printer.call(_ECHO)
     show_result(printer, edit, header=_ECHO)
-    show_result(printer, FileEditResult(call_id="2", path="b.py"), header=_ECHO)
+    show_result(printer, EditResult(call_id="2", path="b.py"), header=_ECHO)
     assert printer.said == [
         ("call", "Echo"),
         ("diff", "a.py\n@@ -2,1 +2,1 @@\n-x\n+y"),
         ("output", "Edited b.py."),
     ]
-    show_result(printer, FileEditResult(call_id="3", edits=edit.edits), header=_ECHO)
+    show_result(printer, EditResult(call_id="3", edits=edit.edits), header=_ECHO)
     assert printer.said[-1] == ("diff", "\n@@ -2,1 +2,1 @@\n-x\n+y")
 
 
@@ -1205,7 +1205,7 @@ def test_show_result_skips_a_pending_stub_but_not_a_cancelled_one() -> None:
 def test_show_result_drops_reminders_meant_for_the_model(text: str, shown: str) -> None:
     printer = RecordingPrinter()
     printer.call(_ECHO)
-    show_result(printer, ShellCommandResult(call_id="1", stdout=text), header=_ECHO)
+    show_result(printer, BashResult(call_id="1", stdout=text), header=_ECHO)
     assert printer.said == [("call", "Echo"), ("output", shown)]
 
 
@@ -1248,10 +1248,10 @@ def test_an_empty_write_says_it_wrote_and_a_pathless_one_still_diffs() -> None:
     printer.call(_ECHO)
     show_result(
         printer,
-        FileWriteResult(call_id="1", path="c.py", content=""),
+        WriteResult(call_id="1", path="c.py", content=""),
         header=_ECHO,
     )
-    show_result(printer, FileWriteResult(call_id="2", content="x\n"), header=_ECHO)
+    show_result(printer, WriteResult(call_id="2", content="x\n"), header=_ECHO)
     assert printer.said == [
         ("call", "Echo"),
         ("output", "Wrote c.py."),

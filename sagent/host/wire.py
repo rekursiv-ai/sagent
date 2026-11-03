@@ -1,7 +1,7 @@
 """What a client, a tool server and a tool host say to each other: one JSON line each.
 
 A message is a dataclass, written as a session record is (``stored_plain``), so
-a tool's result crosses whole and typed: a ``ShellCommandResult`` arrives as
+a tool's result crosses whole and typed: a ``BashResult`` arrives as
 one, its attachments' bytes included.
 
 ::

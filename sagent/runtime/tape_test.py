@@ -43,6 +43,7 @@ from sagent.session.types import (
     SystemMessage,
     Thinking,
     ToolCall,
+    ToolErrorResult,
     ToolResult,
     TurnContext,
     UncategorizedToolResult,
@@ -124,7 +125,7 @@ def _texts(
             )
         elif isinstance(entry, (UserMessage, AgentToAgentMessage, SystemMessage)):
             out.append(entry.content or "")
-        elif isinstance(entry, UncategorizedToolResult):
+        elif isinstance(entry, ToolResult):
             out.append(entry.text())
     return out
 
@@ -395,14 +396,14 @@ def test_repair_answers_unanswered_calls_in_sorted_order() -> None:
     )
     assert _texts(out) == ["", "ok", "[interrupted]", "[interrupted]", "done"]
     synthesized = [
-        e for e in out if isinstance(e, UncategorizedToolResult) and e.is_error is True
+        e for e in out if isinstance(e, ToolErrorResult) and e.is_error is True
     ]
     assert [e.call_id for e in synthesized] == ["c1", "c2"]
 
 
 def test_repair_answers_calls_left_open_at_the_end() -> None:
     out = tape._pair_and_dedup_tool_calls([_calling("c1")])
-    assert [e.call_id for e in out if isinstance(e, UncategorizedToolResult)] == ["c1"]
+    assert [e.call_id for e in out if isinstance(e, ToolErrorResult)] == ["c1"]
 
 
 def test_repair_drops_orphan_and_duplicate_results() -> None:
@@ -497,7 +498,7 @@ def test_splice_safe_repair_of_a_turn_merged_across_a_note_is_a_fixed_point() ->
     assert splice_safe_repair(once) == once
     assert [type(e).__name__ for e in once] == [
         "Response",
-        "UncategorizedToolResult",
+        "ToolErrorResult",
         "SystemMessage",
     ]
 
@@ -888,7 +889,7 @@ def test_repair_leaves_external_calls_open_and_declares_only_them(
     interrupted = {
         e.call_id
         for e in payload
-        if isinstance(e, UncategorizedToolResult)
+        if isinstance(e, ToolErrorResult)
         and e.is_error is True
         and e.content == "[interrupted]"
     }

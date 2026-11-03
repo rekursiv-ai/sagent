@@ -14,7 +14,7 @@ from PIL import Image
 import pypdfium2 as pdfium
 import pytest
 
-from sagent.session.types import FileReadResult, UncategorizedToolResult
+from sagent.session.types import ReadResult, UncategorizedToolResult
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.read import Read
 from sagent.tools.types import ToolContext, parse
@@ -85,7 +85,6 @@ async def test_text_comes_back_numbered(tmp_path: Path) -> None:
     (tmp_path / "f.txt").write_text("alpha\nbeta\n")
     context = ToolContext(cwd=tmp_path)
     result = await Read().call(context, {"file_path": "f.txt"})
-    assert isinstance(result, FileReadResult)
     assert result.content == "1\talpha\n2\tbeta\n"
     assert result.path == str(tmp_path / "f.txt")
     assert result.ranges == ()
@@ -97,7 +96,7 @@ async def test_text_comes_back_numbered(tmp_path: Path) -> None:
 async def test_a_window_reads_from_offset_for_limit_lines(tmp_path: Path) -> None:
     (tmp_path / "f.txt").write_text("".join(f"line{i}\n" for i in range(1, 11)))
     result = await _read(tmp_path, file_path="f.txt", offset=3, limit=2)
-    assert isinstance(result, FileReadResult)
+    assert isinstance(result, ReadResult)
     assert result.content == (
         "3\tline3\n4\tline4\n\n... (6 more lines. Use offset=5 to continue.)"
     )
@@ -111,7 +110,7 @@ async def test_last_lines_reads_the_tail_and_composes_with_limit(
     (tmp_path / "f.txt").write_text("".join(f"line{i}\n" for i in range(1, 11)))
     tail = await _read(tmp_path, file_path="f.txt", last_lines=2, offset=1)
     assert tail.text() == "9\tline9\n10\tline10\n"
-    assert isinstance(tail, FileReadResult)
+    assert isinstance(tail, ReadResult)
     assert tail.ranges == ((9, 2),)
     head_of_tail = await _read(tmp_path, file_path="f.txt", last_lines=4, limit=1)
     assert head_of_tail.text() == (
@@ -119,7 +118,7 @@ async def test_last_lines_reads_the_tail_and_composes_with_limit(
     )
     whole = await _read(tmp_path, file_path="f.txt", last_lines=99)
     assert whole.text().startswith("1\tline1\n")
-    assert isinstance(whole, FileReadResult)
+    assert isinstance(whole, ReadResult)
     assert whole.ranges == ()
 
 
@@ -128,7 +127,6 @@ async def test_a_full_result_says_where_to_resume(tmp_path: Path) -> None:
     (tmp_path / "f.txt").write_text("".join(f"line{i}\n" for i in range(1, 101)))
     context = ToolContext(cwd=tmp_path, max_result_chars=100)
     result = await Read().call(context, {"file_path": "f.txt"})
-    assert isinstance(result, FileReadResult)
     kept = result.text().count("\tline")
     assert 0 < kept < 100
     assert result.text().endswith(
@@ -167,7 +165,8 @@ async def test_a_file_with_nothing_to_number_says_why(
 ) -> None:
     (tmp_path / name).write_bytes(content)
     result = await _read(tmp_path, file_path=name, **arguments)
-    assert isinstance(result, UncategorizedToolResult)
+    assert isinstance(result, ReadResult)
+    assert result.status is not None
     assert result.text() == message.format(tmp_path / name)
     assert result.is_error is None
 
@@ -275,7 +274,6 @@ async def test_an_image_comes_back_as_itself(
     (tmp_path / name).write_bytes(image)
     context = ToolContext(cwd=tmp_path)
     result = await Read().call(context, {"file_path": name})
-    assert isinstance(result, FileReadResult)
     assert result.call_id == ""
     assert result.content == f"[image: {tmp_path / name}]"
     assert result.path == str(tmp_path / name)
@@ -339,7 +337,6 @@ async def test_a_notebook_reads_as_cells_and_their_outputs(tmp_path: Path) -> No
     (tmp_path / "n.ipynb").write_text(json.dumps(notebook))
     context = ToolContext(cwd=tmp_path)
     result = await Read().call(context, {"file_path": "n.ipynb"})
-    assert isinstance(result, FileReadResult)
     assert result.path == str(tmp_path / "n.ipynb")
     assert result.content == (
         "--- Cell 1 (code) ---\nprint('hi')\n1 / 0\n"
@@ -407,7 +404,6 @@ async def test_a_pdf_comes_back_as_a_jpeg_per_page(tmp_path: Path) -> None:
     _pdf(tmp_path / "doc.pdf", pages=3)
     context = ToolContext(cwd=tmp_path)
     result = await Read().call(context, {"file_path": "doc.pdf"})
-    assert isinstance(result, FileReadResult)
     assert result.call_id == ""
     assert result.content == "[PDF: doc.pdf, pages 1-3 of 3]"
     assert result.path == str(tmp_path / "doc.pdf")
@@ -830,7 +826,7 @@ async def test_a_page_is_rendered_at_twice_72_dpi_as_a_quality_85_jpeg(
 async def _read(
     cwd: Path,
     **arguments: PlainTree,
-) -> FileReadResult | UncategorizedToolResult:
+) -> ReadResult | UncategorizedToolResult:
     """Read with ``arguments`` in a fresh context at ``cwd``; the runtime names the call."""
     result = await Read().call(ToolContext(cwd=cwd), arguments)
     assert result.call_id == ""

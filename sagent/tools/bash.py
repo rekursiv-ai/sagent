@@ -29,7 +29,7 @@ import signal
 import time
 
 from sagent.lib.posix.child import Child, finish
-from sagent.session.types import ShellCommandResult
+from sagent.session.types import BashResult
 from sagent.tools.command_analyzer import ReadOnly, Rewrite, ShellTool, rewrite
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.types import Arg, json_schema, parse
@@ -160,7 +160,7 @@ class Bash:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> ShellCommandResult:
+    ) -> BashResult:
         """Run ``command`` in ``context.cwd``, and move it where the shell ends.
 
         Args:
@@ -273,7 +273,7 @@ class Bash:
             shown = f"{body}{_omitted(len(stdout) - kept, note=note)}"
         else:
             shown = f"{body}\n" if body else ""
-        return ShellCommandResult(
+        return BashResult(
             call_id="",
             command=("bash", "-c", a.command),
             stdout=shown,

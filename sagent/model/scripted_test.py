@@ -21,7 +21,7 @@ from sagent.providers.table import ModelTable
 from sagent.session.types import (
     AssistantMessage,
     Attachment,
-    FileReadResult,
+    ReadResult,
     ToolCall,
     UserMessage,
 )
@@ -48,7 +48,7 @@ async def test_agent_runs_a_tool_round_from_the_script(tmp_path: Path) -> None:
     assert len(provider.requests) == 2
     second = provider.requests[1].records
     assert any(isinstance(r, ToolCall) and r.name == "Read" for r in second)
-    results = [r for r in second if isinstance(r, FileReadResult)]
+    results = [r for r in second if isinstance(r, ReadResult)]
     assert len(results) == 1
     assert "alpha" in results[0].text()
 

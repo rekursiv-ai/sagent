@@ -28,7 +28,7 @@ from sagent.host.session import serve
 from sagent.host.wire import MAX_LINE_BYTES
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import FunctionResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import Tool, ToolContext
 
@@ -78,7 +78,7 @@ class Gate:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> FunctionResult:
         """Wait for the gate; return who called.
 
         Args:
@@ -96,7 +96,11 @@ class Gate:
         except asyncio.CancelledError:
             self.stopped.set()
             raise
-        return UncategorizedToolResult(call_id="", content=f"open for {context.label}")
+        return FunctionResult(
+            call_id="",
+            name="Gate",
+            content=f"open for {context.label}",
+        )
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

@@ -32,9 +32,9 @@ from sagent.session.types import (
     SystemMessage,
     Thinking,
     ToolCall,
+    ToolErrorResult,
     ToolResult,
     TurnContext,
-    UncategorizedToolResult,
     UserMessage,
 )
 
@@ -551,7 +551,7 @@ def _flush_interrupted(
 ) -> None:
     """Emit interrupted results and deferred peers."""
     out.extend(
-        UncategorizedToolResult(call_id=cid, content="[interrupted]", is_error=True)
+        ToolErrorResult(call_id=cid, content="[interrupted]", is_error=True)
         for cid in sorted(pending - paired_externally)
     )
     pending.clear()

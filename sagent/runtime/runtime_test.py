@@ -8,13 +8,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal, Self, override
+from typing import Literal, Self, cast, get_args, override
 
 import asyncio
 import contextlib
 import logging
 import shlex
-import sys
 import time
 
 from hypothesis import (
@@ -95,23 +94,19 @@ from sagent.runtime.types import (
     labeled_agent_send_text,
 )
 from sagent.session.types import (
-    AgentStatusResult,
     AgentToAgentMessage,
     AnyToolResult,
     AssistantMessage,
     Attachment,
-    FileEditResult,
-    FileReadResult,
-    FileWriteResult,
-    ShellCommandResult,
+    BashResult,
+    ReadResult,
     SystemMessage,
     ToolCall,
+    ToolErrorResult,
     ToolResult,
     TurnContext,
     UncategorizedToolResult,
     UserMessage,
-    WebFetchResult,
-    WebSearchResults,
 )
 from sagent.tools.background_task import BackgroundTask
 from sagent.tools.bash import Bash
@@ -820,26 +815,114 @@ async def test_a_preempted_cohort_never_completes(stop: RuntimeEvent) -> None:
     assert h.count(CohortComplete) == 0
 
 
-_RESULT_KINDS: tuple[type[AnyToolResult], ...] = (
-    AgentStatusResult,
-    FileEditResult,
-    FileReadResult,
-    FileWriteResult,
-    ShellCommandResult,
-    UncategorizedToolResult,
-    WebFetchResult,
-    WebSearchResults,
+_RESULT_KINDS = cast(
+    "tuple[type[AnyToolResult], ...]",
+    get_args(AnyToolResult.__value__),
 )
 
 
-# ``dataclass(slots=True)`` leaves the class it replaced among the subclasses.
-def test_every_kind_of_result_is_tested() -> None:
-    named = {
-        kind
-        for kind in ToolResult.__subclasses__()
-        if vars(sys.modules[kind.__module__]).get(kind.__qualname__) is kind
-    }
-    assert set(_RESULT_KINDS) == named
+@pytest.mark.asyncio
+async def test_a_call_no_tool_answered_is_an_error_result_and_a_stand_in_a_bare_one() -> (
+    None
+):
+    """A crash or an unknown tool says so as an error; a stub has no tool's type."""
+    async with Harness(
+        reply(calls=[call("nope", "u1"), call("echo", "f1")]),
+        reply(calls=[call("echo", "b1", background=True)]),
+        reply("done"),
+        tools=[Gated(fail=True)],
+    ) as h:
+        h.push(_user("go"))
+        await h.seen(ModelIdle, 1)
+    (unknown,) = h.results("u1")
+    (failed,) = h.results("f1")
+    stub = h.results("b1")[0]
+    assert unknown == ToolErrorResult(
+        call_id="u1",
+        content="Unknown tool: nope",
+        is_error=True,
+    )
+    assert failed == ToolErrorResult(
+        call_id="f1",
+        content="RuntimeError: boom",
+        is_error=True,
+    )
+    assert type(stub) is ToolResult
+    assert (stub.stub, stub.text()) == (
+        "pending",
+        "[Running in background: echo as job b1]",
+    )
+    assert stub in h.events
+
+
+def test_a_resume_cancels_each_pending_call_left_unanswered_past_an_answered_one() -> (
+    None
+):
+    rt = Runtime(model=ScriptedProvider()["scripted"], session_id="s")
+    for record in (
+        _user("go"),
+        reply(calls=[call("echo", "a"), call("echo", "b")]),
+        ToolResult(call_id="a", stub="pending", shown="[running]"),
+        ToolResult(call_id="b", stub="pending", shown="[running]"),
+        ToolErrorResult(call_id=f"a{rt.markers.arrival}", content="done"),
+    ):
+        _ = rt.append_history(record)
+
+    rt.settle_detached()
+
+    cancelled = [
+        e.call_id
+        for e in rt.context().messages
+        if isinstance(e, ToolResult) and e.stub == "cancelled"
+    ]
+    assert cancelled == [f"b{rt.markers.arrival}"]
+
+
+@pytest.mark.asyncio
+async def test_a_background_task_that_crashes_is_logged_by_its_tool(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def crash(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("inner")
+
+    async with Harness(
+        reply(calls=[call("echo", "b1", background=True)]),
+        reply("done"),
+        tools=[Gated()],
+    ) as h:
+        monkeypatch.setattr(h.runtime, "_run_tool_group_and_post", crash)
+        with caplog.at_level(logging.ERROR, logger=runtime.__name__):
+            h.push(_user("go"))
+            await h.seen(ModelIdle)
+            await spin()
+    assert "background tool 'echo' crashed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_an_advisory_hook_that_raises_is_logged_and_the_turn_goes_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def before(turn_start: bool) -> None:
+        del turn_start
+        raise RuntimeError("before broke")
+
+    async def after(exc: BaseException) -> float | None:
+        del exc
+        raise RuntimeError("after broke")
+
+    async with Harness(AuthError("signed out"), reply("ok")) as h:
+        h.runtime.before_call = before
+        h.runtime.after_failure = after
+        with caplog.at_level(logging.WARNING, logger=runtime.__name__):
+            h.push(_user("go"))
+            await h.seen(ModelResponseError)
+            h.runtime.retry()
+            await h.seen(ModelIdle)
+    assert "before_call raised" in caplog.text
+    assert "after_failure raised" in caplog.text
+    assert h.answers() == ["ok"]
 
 
 @pytest.mark.parametrize("kind", _RESULT_KINDS)
@@ -3263,7 +3346,7 @@ async def test_a_bash_read_is_recorded_and_run_as_read(tmp_path: Path) -> None:
         {"file_path": "a.txt"},
     )
     (result,) = h.results("b1")
-    assert isinstance(result, FileReadResult)
+    assert isinstance(result, ReadResult)
     assert "alpha" in result.text()
     complete = next(e for e in h.events if isinstance(e, ModelResponseComplete))
     assert complete.response == turn
@@ -3418,7 +3501,7 @@ async def test_a_bash_command_that_is_several_reads_is_refused(tmp_path: Path) -
     (result,) = h.results("b1")
     assert result.is_error is True
     assert "Read" in result.text()
-    assert not isinstance(result, FileReadResult)
+    assert not isinstance(result, ReadResult)
 
 
 @pytest.mark.asyncio
@@ -4246,7 +4329,7 @@ async def test_a_bash_command_no_tool_owns_runs_as_bash(tmp_path: Path) -> None:
         h.push(_user("say hi"))
         await h.seen(ModelIdle)
     (result,) = h.results("b1")
-    assert isinstance(result, ShellCommandResult)
+    assert isinstance(result, BashResult)
     assert (result.stdout, result.exit_code) == ("hi\n", 0)
 
 
@@ -5130,7 +5213,7 @@ async def test_forged_ids_keep_counting_across_replies() -> None:
         for c in calls(e.records)
     ]
     assert forged == [f"{Markers().mimic}{i}" for i in range(3)]
-    published = [e.call_id for e in h.events if isinstance(e, UncategorizedToolResult)]
+    published = [e.call_id for e in h.events if isinstance(e, ToolErrorResult)]
     assert published == forged
 
 

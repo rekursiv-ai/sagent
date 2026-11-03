@@ -9,7 +9,7 @@ Typical usage example:
   records: list[SessionRecord] = [
       UserMessage(content="fix the bug"),
       ToolCall(call_id="1", name="Read", arguments={"path": "a.py"}),
-      FileReadResult(call_id="1", path="a.py", content="..."),
+      ReadResult(call_id="1", path="a.py", content="..."),
       AssistantMessage(content="fixed"),
   ]
 """
@@ -17,10 +17,10 @@ Typical usage example:
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal, cast, overload, override
+from typing import TYPE_CHECKING, Final, Literal, Self, cast, overload, override
 
 from treekle import PlainTree, from_plain, immutable, to_plain
 
@@ -33,25 +33,44 @@ if TYPE_CHECKING:
 
 __all__ = [
     "CONCRETE_TYPES",
-    "AgentStatusResult",
+    "RENAMED",
+    "RENAMED_KINDS",
+    "AgentSelfResult",
+    "AgentSendResult",
+    "AgentSpawnResult",
     "AgentToAgentMessage",
     "AnyToolResult",
     "AssistantMessage",
     "Attachment",
+    "BackgroundTaskResult",
+    "BashResult",
     "ContextClear",
     "ContextCompaction",
     "ContextState",
-    "FileEditResult",
-    "FileReadResult",
-    "FileWriteResult",
+    "EditResult",
+    "FunctionResult",
+    "GlobResult",
+    "GrepResult",
     "IncompleteRecord",
+    "ListResult",
+    "McpResult",
+    "MemoryResult",
+    "PaperAuthorResult",
+    "PaperDetailsResult",
+    "PaperFetchResult",
+    "PaperSearchResult",
+    "PlayAudioResult",
+    "ReadResult",
+    "RemoteToolResult",
     "SessionRecord",
-    "ShellCommandResult",
+    "SessionResult",
+    "SkillResult",
     "Splice",
     "SystemMessage",
     "Thinking",
     "TokenUsage",
     "ToolCall",
+    "ToolErrorResult",
     "ToolResult",
     "TranscriptItem",
     "TurnContext",
@@ -59,8 +78,9 @@ __all__ = [
     "UncategorizedToolResult",
     "UserMessage",
     "WebFetchResult",
+    "WebSearchHit",
     "WebSearchResult",
-    "WebSearchResults",
+    "WriteResult",
     "record_classes",
     "stored_plain",
     "stored_record",
@@ -242,6 +262,11 @@ class ToolResult:
     ) = None
     """What a stand-in result stands for: a call still running, or killed; ``None`` for a real one."""
 
+    shown: str | None = None
+    """What the model reads in place of :meth:`body`: a failure's message, a
+    stand-in's note, or what a prune, compaction, or restatement left; the type
+    and its fields stay."""
+
     attachments: tuple[Attachment, ...] = ()
     extra: Mapping[str, PlainTree] = field(default_factory=_no_json)
 
@@ -249,23 +274,50 @@ class ToolResult:
         _freeze(self, "extra")
 
     def text(self) -> str:
-        """Return what the model reads for this result."""
+        """Return what the model reads for this result: :attr:`shown`, else :meth:`body`."""
+        return self.shown if self.shown is not None else self.body()
+
+    def body(self) -> str:
+        """Return what the model reads of this result's own fields."""
         return ""
+
+    def restated(self, text: str) -> Self:
+        """Return this result reading ``text``, as a prune or compaction leaves it.
+
+        Args:
+          text: What the model reads instead; its attachments go with the rest.
+
+        Returns:
+          result: Of this type, with these fields, showing ``text``.
+
+        """
+        return replace(self, shown=text, attachments=())
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class UncategorizedToolResult(ToolResult):
-    """A tool result no other type describes."""
+    """A vendor tool's result that no sagent tool's type describes."""
 
     content: str | None = None
 
     @override
-    def text(self) -> str:
+    def body(self) -> str:
         return self.content or ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class ShellCommandResult(ToolResult):
+class ToolErrorResult(ToolResult):
+    """A call no tool answered: it raised, named no tool, or was refused."""
+
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BashResult(ToolResult):
     """A finished shell command."""
 
     command: tuple[str, ...] | None = None
@@ -274,13 +326,13 @@ class ShellCommandResult(ToolResult):
     exit_code: int | None = None
 
     @override
-    def text(self) -> str:
+    def body(self) -> str:
         status = f"\n[exit {self.exit_code}]" if self.exit_code not in (None, 0) else ""
         return f"{self.stdout}{self.stderr}{status}"
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class FileReadResult(ToolResult):
+class ReadResult(ToolResult):
     """Content read from a file."""
 
     path: str | None = None
@@ -288,20 +340,25 @@ class FileReadResult(ToolResult):
     ranges: tuple[tuple[int | None, int | None], ...] = ()
     """Lines returned as one-based ``(start, count)``; ``None`` is open-ended; empty is all."""
 
+    status: (
+        Literal["unchanged", "binary", "undecodable", "empty", "past_end"] | None
+    ) = None
+    """Why no lines came back, which :attr:`shown` says; ``None`` when they did."""
+
     @override
-    def text(self) -> str:
+    def body(self) -> str:
         return self.content or ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class FileWriteResult(ToolResult):
+class WriteResult(ToolResult):
     """Content written to a file."""
 
     path: str | None = None
     content: str | None = None
 
     @override
-    def text(self) -> str:
+    def body(self) -> str:
         return f"Wrote {self.path or 'the file'}."
 
 
@@ -331,19 +388,19 @@ class Splice:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class FileEditResult(ToolResult):
+class EditResult(ToolResult):
     """Replacements made in a file; empty when only the path is known."""
 
     path: str | None = None
     edits: tuple[Splice, ...] = ()
 
     @override
-    def text(self) -> str:
+    def body(self) -> str:
         return f"Edited {self.path or 'the file'}."
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class WebSearchResult:
+class WebSearchHit:
     """One web search hit."""
 
     url: str | None = None
@@ -352,15 +409,15 @@ class WebSearchResult:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class WebSearchResults(ToolResult):
+class WebSearchResult(ToolResult):
     """The hits a web search returned."""
 
     query: str | None = None
     duration_sec: float | None = None
-    content: tuple[WebSearchResult, ...] = ()
+    content: tuple[WebSearchHit, ...] = ()
 
     @override
-    def text(self) -> str:
+    def body(self) -> str:
         return "\n\n".join(
             "\n".join(
                 part for part in (hit.title, hit.url, hit.snippet) if part is not None
@@ -380,12 +437,12 @@ class WebFetchResult(ToolResult):
     size: int | None = None
 
     @override
-    def text(self) -> str:
+    def body(self) -> str:
         return self.content or ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class AgentStatusResult(ToolResult):
+class AgentSpawnResult(ToolResult):
     """State or final output of a subagent."""
 
     agent_id: str | None = None
@@ -400,8 +457,219 @@ class AgentStatusResult(ToolResult):
     output_file: str | None = None
 
     @override
-    def text(self) -> str:
+    def body(self) -> str:
         return self.content or ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GrepResult(ToolResult):
+    """A Grep: the pattern searched for, and what it found."""
+
+    pattern: str = ""
+    path: str | None = None
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GlobResult(ToolResult):
+    """A Glob: the pattern matched, and the paths it found."""
+
+    pattern: str = ""
+    path: str | None = None
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ListResult(ToolResult):
+    """A List: the directory listed, and its entries."""
+
+    path: str = ""
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SkillResult(ToolResult):
+    """A Skill: the skill loaded, and its body."""
+
+    skill: str = ""
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentSendResult(ToolResult):
+    """An AgentSend: whom it was sent to, and how it went."""
+
+    to: str = ""
+    delay_sec: float | None = None
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BackgroundTaskResult(ToolResult):
+    """A BackgroundTask: the operation on a job, and what it said."""
+
+    operation: str = ""
+    job_id: str | None = None
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class AgentSelfResult(ToolResult):
+    """An AgentSelf: what it changed or reported of the agent."""
+
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SessionResult(ToolResult):
+    """A Session: the action on a session, and what it read or did."""
+
+    action: str = ""
+    agent: str | None = None
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MemoryResult(ToolResult):
+    """A Memory: the memory saved or forgotten."""
+
+    action: str = ""
+    name: str = ""
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PlayAudioResult(ToolResult):
+    """A PlayAudio: the sound played."""
+
+    path: str = ""
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PaperSearchResult(ToolResult):
+    """A PaperSearch: the query, and the papers it found."""
+
+    query: str = ""
+    source: str | None = None
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PaperDetailsResult(ToolResult):
+    """A PaperDetails: papers' metadata, or one paper's references or citations."""
+
+    operation: str | None = None
+    source: str | None = None
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PaperAuthorResult(ToolResult):
+    """A PaperAuthor: authors found, their metadata, or their papers."""
+
+    operation: str | None = None
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PaperFetchResult(ToolResult):
+    """A PaperFetch: where each paper was saved."""
+
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RemoteToolResult(ToolResult):
+    """A RemoteTool: the endpoint asked, and what it said."""
+
+    endpoint: str = ""
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class McpResult(ToolResult):
+    """An MCP server's tool: the server and tool, and what it returned."""
+
+    server: str = ""
+    tool: str = ""
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class FunctionResult(ToolResult):
+    """A function tool: its name, and what it returned."""
+
+    name: str = ""
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -521,14 +789,34 @@ class IncompleteRecord:
 
 
 type AnyToolResult = (
-    ShellCommandResult
-    | FileReadResult
-    | FileWriteResult
-    | FileEditResult
-    | WebSearchResults
+    BashResult
+    | ReadResult
+    | WriteResult
+    | EditResult
+    | WebSearchResult
     | WebFetchResult
-    | AgentStatusResult
+    | AgentSpawnResult
+    | GrepResult
+    | GlobResult
+    | ListResult
+    | SkillResult
+    | AgentSendResult
+    | BackgroundTaskResult
+    | AgentSelfResult
+    | SessionResult
+    | MemoryResult
+    | PlayAudioResult
+    | PaperSearchResult
+    | PaperDetailsResult
+    | PaperAuthorResult
+    | PaperFetchResult
+    | RemoteToolResult
+    | McpResult
+    | FunctionResult
     | UncategorizedToolResult
+    | ToolErrorResult
+    # A runtime stand-in: a call still running, or killed, says only ``shown``.
+    | ToolResult
 )
 type TranscriptItem = (
     UserMessage | AssistantMessage | Thinking | ToolCall | AnyToolResult
@@ -564,16 +852,34 @@ def record_classes() -> dict[str, type]:
             Thinking,
             ToolCall,
             ToolResult,
+            GrepResult,
+            GlobResult,
+            ListResult,
+            SkillResult,
+            AgentSendResult,
+            BackgroundTaskResult,
+            AgentSelfResult,
+            SessionResult,
+            MemoryResult,
+            PlayAudioResult,
+            PaperSearchResult,
+            PaperDetailsResult,
+            PaperAuthorResult,
+            PaperFetchResult,
+            RemoteToolResult,
+            McpResult,
+            FunctionResult,
             UncategorizedToolResult,
-            ShellCommandResult,
-            FileReadResult,
-            FileWriteResult,
+            ToolErrorResult,
+            BashResult,
+            ReadResult,
+            WriteResult,
             Splice,
-            FileEditResult,
+            EditResult,
+            WebSearchHit,
             WebSearchResult,
-            WebSearchResults,
             WebFetchResult,
-            AgentStatusResult,
+            AgentSpawnResult,
             SystemMessage,
             TokenUsage,
             ContextState,
@@ -584,6 +890,26 @@ def record_classes() -> dict[str, type]:
             IncompleteRecord,
         )
     }
+
+
+# Read only: treekle names each class once, so an old tag is renamed in the plain
+# tree before it decodes. Kept until no stored record carries an old name.
+RENAMED: Final = MappingProxyType[str, str](
+    {
+        "ShellCommandResult": "BashResult",
+        "FileReadResult": "ReadResult",
+        "FileWriteResult": "WriteResult",
+        "FileEditResult": "EditResult",
+        "AgentStatusResult": "AgentSpawnResult",
+    },
+)
+"""Each record type's former stored name, to its name now."""
+
+RENAMED_KINDS: Final = MappingProxyType[str, str](
+    {**RENAMED, "WebSearchResults": "WebSearchResult"},
+)
+"""Each top-level record's former name, to its name now: as :data:`RENAMED`, and the
+web search, whose old name nested only inside it means a hit now."""
 
 
 # Every journal, row, and document stores a record through this pair, so each
@@ -665,8 +991,29 @@ def stored_record(
 
     """
     return from_plain(
-        plain,
+        _renamed(plain),
         target,
         classes=classes or record_classes(),
         default_concrete_types=CONCRETE_TYPES,
     )
+
+
+# ``WebSearchResults`` is now ``WebSearchResult``, which named one of its hits; a hit is
+# renamed only under an old ``WebSearchResults``, the one place it nested.
+def _renamed(plain: object, names: Mapping[str, str] = RENAMED) -> object:
+    """Return ``plain`` with each former ``py/object`` name read as its name now."""
+    if isinstance(plain, Mapping):
+        fields = cast("Mapping[str, object]", plain)
+        tag = fields.get("py/object")
+        inner = names
+        if tag == "WebSearchResults":
+            tag, inner = "WebSearchResult", {**names, "WebSearchResult": "WebSearchHit"}
+        elif isinstance(tag, str):
+            tag = names.get(tag, tag)
+        return {
+            key: tag if key == "py/object" else _renamed(value, inner)
+            for key, value in fields.items()
+        }
+    if isinstance(plain, list):
+        return [_renamed(value, names) for value in cast("list[object]", plain)]
+    return plain

@@ -10,7 +10,7 @@ import stat
 
 import pytest
 
-from sagent.session.types import FileEditResult, Splice, UncategorizedToolResult
+from sagent.session.types import EditResult, Splice, UncategorizedToolResult
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.edit import Edit
 from sagent.tools.types import ToolContext, parse
@@ -42,7 +42,7 @@ async def test_a_unique_string_is_replaced_and_the_splice_says_where(
     (tmp_path / "a.py").write_text("one\nx = 1\nthree\n")
     context = ToolContext(cwd=tmp_path)
     result = await _edit(context, "a.py", "x = 1", "x = 2")
-    assert result == FileEditResult(
+    assert result == EditResult(
         call_id="",
         path=str(tmp_path / "a.py"),
         edits=(Splice(before="x = 1", after="x = 2", start=2, count=1),),
@@ -61,7 +61,7 @@ async def test_replace_all_replaces_each_and_records_each_line(tmp_path: Path) -
         "baz",
         replace_all=True,
     )
-    assert isinstance(result, FileEditResult)
+    assert isinstance(result, EditResult)
     assert [(s.start, s.count) for s in result.edits] == [
         (1, 1),
         (3, 1),
@@ -75,7 +75,7 @@ async def test_replace_all_replaces_each_and_records_each_line(tmp_path: Path) -
 async def test_a_leading_blank_line_is_counted(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("\nx\n")
     result = await _edit(ToolContext(cwd=tmp_path), "a.py", "x", "y")
-    assert isinstance(result, FileEditResult)
+    assert isinstance(result, EditResult)
     assert [s.start for s in result.edits] == [2]
 
 
@@ -89,7 +89,7 @@ async def test_a_string_across_lines_counts_each_line_it_spans(tmp_path: Path) -
         "",
         replace_all=True,
     )
-    assert isinstance(result, FileEditResult)
+    assert isinstance(result, EditResult)
     assert [(s.start, s.count) for s in result.edits] == [(2, 3), (5, 3)]
     assert (tmp_path / "a.py").read_text() == "a\nd\n"
 
@@ -364,7 +364,7 @@ async def _edit(
     new: str,
     *,
     replace_all: bool = False,
-) -> FileEditResult | UncategorizedToolResult:
+) -> EditResult | UncategorizedToolResult:
     """Replace ``old`` with ``new`` in ``file_path``; the runtime names the call."""
     result = await Edit().call(
         context,

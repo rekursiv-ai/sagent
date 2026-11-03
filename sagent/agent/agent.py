@@ -49,7 +49,6 @@ from sagent.session.types import (
     ToolResult,
     TurnContext,
     UncategorizedRecord,
-    UncategorizedToolResult,
     UserMessage,
 )
 from sagent.tools.types import Briefing, Reminding, Skipping, ToolContext
@@ -1223,7 +1222,7 @@ def _grown(
         if not (
             isinstance(old, ToolResult)
             and isinstance(new, ToolResult)
-            and new == _restate(old, new.text())
+            and new == old.restated(new.text())
         ):
             return None
         restated[old.call_id] = new.text()
@@ -1239,18 +1238,9 @@ def _restated(records: Iterable[SessionRecord]) -> list[SessionRecord]:
             continue
         texts = from_plain(record.payload.get("results"), dict[str, str])
         out = [
-            _restate(r, texts[r.call_id])
+            r.restated(texts[r.call_id])
             if isinstance(r, ToolResult) and r.call_id in texts
             else r
             for r in out
         ]
     return out
-
-
-def _restate(result: ToolResult, text: str) -> UncategorizedToolResult:
-    """Return ``result`` reading ``text``, as a prune leaves it."""
-    return UncategorizedToolResult(
-        call_id=result.call_id,
-        content=text,
-        is_error=result.is_error,
-    )

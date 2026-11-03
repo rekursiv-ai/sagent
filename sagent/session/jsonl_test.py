@@ -13,9 +13,15 @@ from treekle import MutablePlainTree, json_loads
 import pytest
 
 from sagent.session import jsonl
-from sagent.session.jsonl import JsonlJournal, read_record, record_line
+from sagent.session.jsonl import (
+    JournalInUseError,
+    JsonlJournal,
+    read_record,
+    record_line,
+)
 from sagent.session.types import (
     AssistantMessage,
+    BashResult,
     ContextClear,
     IncompleteRecord,
     ToolCall,
@@ -447,6 +453,37 @@ async def test_an_existing_journal_is_made_private_on_open(tmp_path: Path) -> No
 def _this_process() -> str:
     """Return how a refusal names this process as a lock's holder; only Linux knows."""
     return f"pid {os.getpid()}" if Path("/proc/locks").exists() else "another process"
+
+
+def test_a_journal_s_former_record_names_are_renamed_and_the_rest_kept_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "session.jsonl"
+    kept = record_line(UserMessage(content="hi"))
+    old = b'{"py/object": "ShellCommandResult", "call_id": "c", "stdout": "x"}\n'
+    path.write_bytes(kept + old + b"torn")
+
+    assert jsonl.rename_records(path, dry_run=True) == 1
+    assert b"ShellCommandResult" in path.read_bytes()
+    assert jsonl.rename_records(path) == 1
+
+    assert path.read_bytes() == (
+        kept + record_line(BashResult(call_id="c", stdout="x")) + b"torn\n"
+    )
+    assert path.with_name("session.jsonl.renamed-from").read_bytes() == (
+        kept + old + b"torn\n"
+    )
+    assert jsonl.rename_records(path) == 0
+
+
+@pytest.mark.asyncio
+async def test_an_open_journal_is_not_renamed(tmp_path: Path) -> None:
+    path = tmp_path / "session.jsonl"
+    path.write_bytes(b'{"py/object": "FileReadResult", "call_id": "c"}\n')
+    async with JsonlJournal(path):
+        with pytest.raises(JournalInUseError):
+            _ = jsonl.rename_records(path)
+    assert b"FileReadResult" in path.read_bytes()
 
 
 if __name__ == "__main__":

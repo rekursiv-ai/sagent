@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import PaperSearchResult
 from sagent.tools.paper_common import error, paper_ids, summary_ids
 
 
@@ -79,9 +79,9 @@ def test_summary_ids_labels_whatever_was_passed(
 
 
 def test_error_is_an_error_result() -> None:
-    assert error("boom") == UncategorizedToolResult(
+    assert error(PaperSearchResult, "boom") == PaperSearchResult(
         call_id="",
-        content="boom",
+        shown="boom",
         is_error=True,
     )
 

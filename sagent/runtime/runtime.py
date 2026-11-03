@@ -122,23 +122,16 @@ from sagent.runtime.types import (
     UserQueuedMessage,
 )
 from sagent.session.types import (
-    AgentStatusResult,
     AgentToAgentMessage,
     AnyToolResult,
     AssistantMessage,
-    FileEditResult,
-    FileReadResult,
-    FileWriteResult,
-    ShellCommandResult,
     SystemMessage,
     Thinking,
     ToolCall,
+    ToolErrorResult,
     ToolResult,
     TurnContext,
-    UncategorizedToolResult,
     UserMessage,
-    WebFetchResult,
-    WebSearchResults,
 )
 from sagent.tools.background_task import (
     BackgroundTask,
@@ -804,14 +797,7 @@ class Runtime:
         for cid in pending:
             if cid in answered or cid in self.detached or cid in self.running_tools:
                 continue
-            self._append_detached_arrival(
-                UncategorizedToolResult(
-                    call_id=cid,
-                    content=self.markers.cancelled,
-                    is_error=True,
-                    stub="cancelled",
-                ),
-            )
+            self._append_detached_arrival(self._cancelled(cid))
 
     # A resumed window may end with something the last process never answered: a
     # message, a result, a job it left running. That is as stale as a halted turn's,
@@ -1672,32 +1658,14 @@ class Runtime:
                             self.model_call = None
                             self.publish(item)
 
-                        case (
-                            ShellCommandResult()
-                            | FileReadResult()
-                            | FileWriteResult()
-                            | FileEditResult()
-                            | WebSearchResults()
-                            | WebFetchResult()
-                            | AgentStatusResult()
-                            | UncategorizedToolResult()
-                        ) if item.call_id in self.cohort:
+                        case ToolResult() if item.call_id in self.cohort:
                             cid = item.call_id
                             self.cohort.discard(cid)
                             self.running_tools.pop(cid, None)
                             self.append_history(item)
                             self.publish(item)
 
-                        case (
-                            ShellCommandResult()
-                            | FileReadResult()
-                            | FileWriteResult()
-                            | FileEditResult()
-                            | WebSearchResults()
-                            | WebFetchResult()
-                            | AgentStatusResult()
-                            | UncategorizedToolResult()
-                        ) if item.call_id in self.detached:
+                        case ToolResult() if item.call_id in self.detached:
                             cid = item.call_id
                             # Posted before its call was detached, or refused:
                             # its call is answered by a stub, so it goes forward.
@@ -1973,7 +1941,7 @@ class Runtime:
             if anchor is None:
                 continue
             payload = tuple(
-                UncategorizedToolResult(
+                ToolErrorResult(
                     call_id=cid,
                     content="[interrupted]",
                     is_error=True,
@@ -2023,18 +1991,9 @@ class Runtime:
     ) -> None:
         """Answer a cohort call ``[detached]`` and let it run, or ``[cancelled]`` and cancel it."""
         stub = (
-            UncategorizedToolResult(
-                call_id=cid,
-                content=self.markers.cancelled,
-                is_error=True,
-                stub="cancelled",
-            )
+            self._cancelled(cid)
             if mode == "kill"
-            else UncategorizedToolResult(
-                call_id=cid,
-                content=self.markers.detached,
-                stub="pending",
-            )
+            else ToolResult(call_id=cid, stub="pending", shown=self.markers.detached)
         )
         self.append_history(stub)
         self.publish(stub)
@@ -2261,10 +2220,10 @@ class Runtime:
             if delay is None:
                 foreground.append(tc)
                 continue
-            stub = UncategorizedToolResult(
+            stub = ToolResult(
                 call_id=tc.call_id,
-                content=f"{self.markers.running}{tc.name} as job {tc.call_id}]",
                 stub="pending",
+                shown=f"{self.markers.running}{tc.name} as job {tc.call_id}]",
             )
             self.append_history(stub)
             self.publish(stub)
@@ -2302,12 +2261,7 @@ class Runtime:
             return
         _ = task.cancel()
         self._deliver_detached(
-            UncategorizedToolResult(
-                call_id=cid,
-                content=self.markers.cancelled,
-                is_error=True,
-                stub="cancelled",
-            ),
+            self._cancelled(cid),
         )
 
     # A finished task removes itself; one cancelled before it ran a step does not.
@@ -2530,16 +2484,20 @@ class Runtime:
             return False
         return True
 
+    def _cancelled(self, call_id: str) -> ToolResult:
+        """Return the stand-in that answers a call killed before it finished."""
+        return ToolResult(
+            call_id=call_id,
+            is_error=True,
+            stub="cancelled",
+            shown=self.markers.cancelled,
+        )
+
     def _post_cancelled(self, call: ToolCall) -> None:
         """Post a ``[cancelled]`` result for a call that never ran."""
         logger.debug("runtime group skipped after cancel: call_id=%s", call.call_id)
         self.inbox.push_back(
-            UncategorizedToolResult(
-                call_id=call.call_id,
-                content=self.markers.cancelled,
-                is_error=True,
-                stub="cancelled",
-            ),
+            self._cancelled(call.call_id),
         )
 
     # A failure or a cancellation is still a result, so every call is answered; a call
@@ -2557,7 +2515,7 @@ class Runtime:
             logger.debug("runtime detached-arrived mimic: call_id=%s", call.call_id)
             self.inbox.push_back(
                 LazyEvent(
-                    payload=UncategorizedToolResult(
+                    payload=ToolErrorResult(
                         call_id=call.call_id,
                         content=f"{self.markers.arrived} is not callable; detached "
                         "results arrive automatically.",
@@ -2576,7 +2534,7 @@ class Runtime:
                 refused is not None,
             )
             self.inbox.push_back(
-                UncategorizedToolResult(
+                ToolErrorResult(
                     call_id=call.call_id,
                     content=refused
                     if refused is not None
@@ -2621,12 +2579,7 @@ class Runtime:
                 call.name,
             )
             completed = False
-            result = UncategorizedToolResult(
-                call_id=call.call_id,
-                content=self.markers.cancelled,
-                is_error=True,
-                stub="cancelled",
-            )
+            result = self._cancelled(call.call_id)
         except Exception as exc:  # noqa: BLE001 -- Tool failures must be recorded without stopping the dispatch engine.
             logger.debug(
                 "runtime tool failed: call_id=%s tool=%s error=%s",
@@ -2634,7 +2587,7 @@ class Runtime:
                 call.name,
                 type(exc).__name__,
             )
-            result = UncategorizedToolResult(
+            result = ToolErrorResult(
                 call_id=call.call_id,
                 content=describe(exc),
                 is_error=True,

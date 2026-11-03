@@ -10,6 +10,9 @@ as today's journal, holding what its model last saw. A log of today's records
 and a log with nothing to resume are skipped. A resume by id converts its one
 session itself.
 
+Each journal storing a record under a former type name has it renamed, the
+file as it was kept beside it; a session open in another process is skipped.
+
 Examples:
   sh sagent/scripts/convert_sessions.py --dry-run
   sh sagent/scripts/convert_sessions.py ~/.local/share/rekursiv-ai/sagent/projects/_home_me_repo
@@ -26,6 +29,7 @@ from typing import TYPE_CHECKING, Protocol, cast
 import argparse
 
 from sagent.lib.userdirs import data_dir
+from sagent.session.jsonl import JournalInUseError, rename_records
 from sagent.session.legacy_journal import convert, is_legacy, upgrade
 
 
@@ -56,6 +60,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         done[outcome] += 1
         if outcome in ("converted", "would convert"):
             print(f"{outcome}: {path}")
+        renamed, records = _rename(path, dry_run=flags.dry_run)
+        if renamed:
+            done[renamed] += 1
+            print(f"{renamed}: {path}" + (f" ({records} records)" if records else ""))
     print(
         ", ".join(f"{n} {outcome}" for outcome, n in sorted(done.items())) or "no logs",
     )
@@ -102,6 +110,17 @@ def _convert(path: Path, *, dry_run: bool) -> str:
             "would convert" if len(convert(path)) > 1 else "skipped: nothing to resume"
         )
     return "converted" if upgrade(path) else "skipped: nothing to resume"
+
+
+def _rename(path: Path, *, dry_run: bool) -> tuple[str, int]:
+    """Rename one journal's former record names; return what was done, and to how many."""
+    try:
+        records = rename_records(path, dry_run=dry_run)
+    except JournalInUseError:
+        return "skipped: open", 0
+    if not records:
+        return "", 0
+    return ("would rename" if dry_run else "renamed"), records
 
 
 if __name__ == "__main__":

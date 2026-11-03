@@ -28,7 +28,7 @@ from sagent.session.types import (
     AnyToolResult,
     AssistantMessage,
     ContextClear,
-    FileEditResult,
+    EditResult,
     SessionRecord,
     Splice,
     SystemMessage,
@@ -315,7 +315,7 @@ class _Fix:
     ) -> AnyToolResult:
         del context, arguments
         splice = Splice(before="x = 1", after="x = 2", start=3)
-        return FileEditResult(call_id="", path="a.py", edits=(splice,))
+        return EditResult(call_id="", path="a.py", edits=(splice,))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

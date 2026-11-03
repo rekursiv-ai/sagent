@@ -39,7 +39,7 @@ from sagent.runtime.types import RuntimeEvent
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.projects import child_journal
 from sagent.session.types import (
-    AgentStatusResult,
+    AgentSpawnResult,
     AgentToAgentMessage,
     ContextClear,
     SystemMessage,
@@ -245,7 +245,7 @@ async def _spawn(
     arguments: dict[str, PlainTree],
     *,
     label: str = "Agent",
-) -> AgentStatusResult:
+) -> AgentSpawnResult:
     return await setup.spawn.call(ToolContext(cwd=tmp_path, label=label), arguments)
 
 
@@ -1573,7 +1573,7 @@ async def test_watch_starts_the_callers_watcher_its_prompt_the_first_request(
             _ = await spawn.call(context, {"prompt": " ", "watch": True})
         started = await spawn.call(context, {"prompt": "keep me honest", "watch": True})
 
-        assert started == AgentStatusResult(
+        assert started == AgentSpawnResult(
             call_id="",
             agent_id="watcher",
             agent_kind="watcher",

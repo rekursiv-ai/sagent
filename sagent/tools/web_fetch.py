@@ -29,7 +29,7 @@ from wesearch.web import fetch_web
 
 import cachetools
 
-from sagent.session.types import UncategorizedToolResult, WebFetchResult
+from sagent.session.types import WebFetchResult
 from sagent.tools.command_analyzer import Invocation, replaceable
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
@@ -155,7 +155,7 @@ class WebFetch:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> WebFetchResult | UncategorizedToolResult:
+    ) -> WebFetchResult:
         """Fetch ``url`` and extract its text.
 
         A POST carries ``json`` or ``form``, never both; a GET carries neither.
@@ -220,5 +220,5 @@ class WebFetch:
         )
 
 
-def _error(message: str) -> UncategorizedToolResult:
-    return UncategorizedToolResult(call_id="", content=message, is_error=True)
+def _error(message: str) -> WebFetchResult:
+    return WebFetchResult(call_id="", shown=message, is_error=True)

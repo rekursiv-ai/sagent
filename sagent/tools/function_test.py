@@ -10,7 +10,7 @@ from treekle import PlainTree, from_plain
 
 import pytest
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import FunctionResult, UncategorizedToolResult
 from sagent.tools import types
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.function import tool
@@ -76,7 +76,11 @@ async def test_a_call_passes_the_arguments_and_returns_the_text() -> None:
 
     result = await made.call(_context(), {"name": "ann", "times": 2})
 
-    assert result == UncategorizedToolResult(call_id="", content="hello ann hello ann")
+    assert result == FunctionResult(
+        call_id="",
+        name="Greet",
+        content="hello ann hello ann",
+    )
     assert made.summary({"name": "ann"}) == "Greet"
     assert made.serialize_key(_context(), {"name": "ann"}) is None
 
@@ -94,7 +98,7 @@ async def test_an_async_function_is_awaited() -> None:
 
     result = await tool(shout).call(_context(), {"word": "yo"})
 
-    assert result == UncategorizedToolResult(call_id="", content="YO")
+    assert result == FunctionResult(call_id="", name="shout", content="YO")
 
 
 @pytest.mark.asyncio
@@ -116,8 +120,9 @@ async def test_a_function_taking_the_context_gets_the_callers() -> None:
     context = _context()
 
     assert "context" not in from_plain(made.schema["properties"], dict[str, object])
-    assert await made.call(context, {"path": "a"}) == UncategorizedToolResult(
+    assert await made.call(context, {"path": "a"}) == FunctionResult(
         call_id="",
+        name="where",
         content="/a",
     )
     assert seen == [context]
@@ -131,7 +136,7 @@ async def test_a_long_text_is_cut_to_what_one_result_holds() -> None:
 
     result = await tool(long).call(_context(max_result_chars=10), {})
 
-    assert isinstance(result, UncategorizedToolResult)
+    assert isinstance(result, FunctionResult)
     assert result.content == "x" * 10 + "\n... (40 chars omitted)"
 
 
@@ -191,7 +196,7 @@ def test_tool_as_a_decorator_takes_the_same_settings() -> None:
 async def test_an_omitted_argument_takes_its_default() -> None:
     result = await tool(greet).call(_context(), {"name": "ann"})
 
-    assert result == UncategorizedToolResult(call_id="", content="hello ann")
+    assert result == FunctionResult(call_id="", name="greet", content="hello ann")
 
 
 def test_an_annotated_description_and_bound_outrank_the_docstring() -> None:
@@ -271,7 +276,11 @@ async def test_a_partial_keeps_the_types_and_defaults_of_what_it_wraps() -> None
         == "integer"
     )
     result = await made.call(_context(), {"name": "ann"})
-    assert result == UncategorizedToolResult(call_id="", content="hello ann hello ann")
+    assert result == FunctionResult(
+        call_id="",
+        name="tool",
+        content="hello ann hello ann",
+    )
 
 
 def test_a_display_shows_as_given_and_hides_the_output_by_default() -> None:

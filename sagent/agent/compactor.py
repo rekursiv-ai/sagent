@@ -60,7 +60,6 @@ from sagent.session.types import (
     ToolCall,
     ToolResult,
     TurnContext,
-    UncategorizedToolResult,
     UserMessage,
 )
 from sagent.tools.skill import Skill
@@ -1003,14 +1002,7 @@ def _strip_attachments(history: list[ModelContextEvent]) -> list[ModelContextEve
             marked = _markers(entry.content or "", entry.attachments)
             out.append(replace(entry, content=marked, attachments=()))
         elif isinstance(entry, ToolResult) and entry.attachments:
-            out.append(
-                UncategorizedToolResult(
-                    call_id=entry.call_id,
-                    content=_markers(entry.text(), entry.attachments),
-                    is_error=entry.is_error,
-                    stub=entry.stub,
-                ),
-            )
+            out.append(entry.restated(_markers(entry.text(), entry.attachments)))
         else:
             out.append(entry)
     return out
@@ -1079,10 +1071,8 @@ def _request_entries(
     ]
     entries = _drop_orphan_tool_results(_elide_skill_results(entries))
     entries = [
-        UncategorizedToolResult(
-            call_id=entry.call_id,
-            content=f"[tool result truncated for compaction]\n{entry.text()[:cap_chars]}",
-            is_error=entry.is_error,
+        entry.restated(
+            f"[tool result truncated for compaction]\n{entry.text()[:cap_chars]}",
         )
         if isinstance(entry, ToolResult) and _exceeds_cap(entry, cap_chars)
         else entry
@@ -1109,10 +1099,7 @@ def _elide_skill_results(entries: list[ModelContextEvent]) -> list[ModelContextE
         if r.name == "Skill"
     }
     return [
-        UncategorizedToolResult(
-            call_id=entry.call_id,
-            content=_asset("compactor_skill_elided").strip(),
-        )
+        entry.restated(_asset("compactor_skill_elided").strip())
         if isinstance(entry, ToolResult) and entry.call_id in skill_ids
         else entry
         for entry in entries

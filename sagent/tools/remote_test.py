@@ -45,10 +45,10 @@ from sagent.lib.userdirs import config_dir
 from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.session.types import (
-    AgentStatusResult,
+    AgentSpawnResult,
     AgentToAgentMessage,
     AnyToolResult,
-    FileReadResult,
+    ReadResult,
 )
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
@@ -182,7 +182,7 @@ async def test_a_call_returns_the_tool_s_own_result(tmp_path: Path) -> None:
                 "arguments": {"file_path": str(tmp_path / "a.txt")},
             },
         )
-        assert isinstance(result, FileReadResult)
+        assert isinstance(result, ReadResult)
         assert "there" in (result.content or "")
 
 
@@ -676,7 +676,7 @@ async def test_what_the_server_sends_is_acked_by_its_id_whoever_it_is_for(
         writer.write(
             _welcome()
             + encoded(Ack(id="never sent"))
-            + encoded(Result(id="r1", record=FileReadResult(call_id="", path="/a")))
+            + encoded(Result(id="r1", record=ReadResult(call_id="", path="/a")))
             + encoded(
                 Note(id="n1", sender="v", recipient="gone", content="hi", kind="ask"),
             ),
@@ -745,7 +745,7 @@ async def test_an_agent_spawned_there_and_its_parent_here_message_each_other(
             ToolContext(cwd=tmp_path, label="Agent"),
             {"endpoint": "gpu1", "tool": "AgentSpawn", "arguments": {"prompt": "go"}},
         )
-        assert isinstance(spawned, AgentStatusResult)
+        assert isinstance(spawned, AgentSpawnResult)
         assert (spawned.agent_id, spawned.content) == ("Agent_0", "done")
         assert list(team) == ["Agent", "Agent_0"]
         assert team.outside == ["Agent_0@gpu1"]

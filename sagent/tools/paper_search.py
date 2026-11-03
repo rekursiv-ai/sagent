@@ -23,7 +23,7 @@ from wesearch.types.errors import BotDetectionError
 
 import cachetools
 
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import PaperSearchResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.paper_common import error
 from sagent.tools.types import Arg, json_schema, parse
@@ -129,7 +129,7 @@ class PaperSearch:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> PaperSearchResult:
         """Search for ``query`` with the filters given.
 
         Args:
@@ -166,7 +166,7 @@ class PaperSearch:
         )
         cached = self.cache.get(key)
         if cached is not None:
-            return UncategorizedToolResult(call_id="", content=cached)
+            return PaperSearchResult(call_id="", query=a.query, content=cached)
         try:
             found = await asyncio.to_thread(
                 search,
@@ -180,11 +180,12 @@ class PaperSearch:
             )
         except BotDetectionError as e:
             return error(
+                PaperSearchResult,
                 f"{_named(a.source)} returned a CAPTCHA: {e}. The scraping IP is"
                 " rate-limited; retry later, change egress IP, or use another source.",
             )
         except PaperError as e:
-            return error(str(e))
+            return error(PaperSearchResult, str(e))
         shown = found.records if a.limit is None else found.records[: a.limit]
         text = (
             "\n".join(format_record(r, abstract_chars=a.abstract_chars) for r in shown)
@@ -194,7 +195,7 @@ class PaperSearch:
         )
         if found.complete:
             self.cache[key] = text
-        return UncategorizedToolResult(call_id="", content=text)
+        return PaperSearchResult(call_id="", query=a.query, content=text)
 
 
 # A source with no name here is named by its words: ``some_source`` is ``Some Source``.

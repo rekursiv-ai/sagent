@@ -22,7 +22,7 @@ import asyncio
 import logging
 
 from sagent.agent.team import Team
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import AgentSendResult
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.types import Arg, json_schema, parse
@@ -126,7 +126,7 @@ class AgentSend:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> AgentSendResult:
         """Deliver ``content`` to ``to``, from the caller, after ``delay`` seconds.
 
         Args:
@@ -166,20 +166,24 @@ class AgentSend:
                 f"[delayed {a.delay}s] {a.content}",
                 kind,
             )
-            return UncategorizedToolResult(
+            return AgentSendResult(
                 call_id="",
+                to=a.to,
+                delay_sec=a.delay,
                 content=f"{started}Scheduled for {a.to} in {a.delay}s.",
             )
         self.team.send(sender, recipient=a.to, content=a.content)
         # A reminder to oneself carries a delay; one without is likely a loop.
         if a.to == context.label:
-            return UncategorizedToolResult(
+            return AgentSendResult(
                 call_id="",
+                to=a.to,
                 content=f"Delivered to {a.to}. Note: you sent yourself a message"
                 " without a delay; this is likely not intentional.",
             )
-        return UncategorizedToolResult(
+        return AgentSendResult(
             call_id="",
+            to=a.to,
             content=f"{started}Delivered to {a.to}.",
         )
 

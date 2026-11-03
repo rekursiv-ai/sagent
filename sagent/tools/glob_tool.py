@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Annotated
 import asyncio
 
 from sagent.lib.files.glob import GlobError, glob
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import GlobResult
 from sagent.tools.command_analyzer import (
     Invocation,
     bounding_sink,
@@ -153,7 +153,7 @@ class Glob:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> GlobResult:
         """Find files under ``path`` matching ``pattern``.
 
         An absolute ``pattern`` ignores ``path``.
@@ -169,14 +169,25 @@ class Glob:
         return await asyncio.to_thread(_glob, context, parse(arguments, Glob.Arguments))
 
 
-def _glob(context: ToolContext, a: Glob.Arguments) -> UncategorizedToolResult:
+def _glob(context: ToolContext, a: Glob.Arguments) -> GlobResult:
     """Find the files ``a`` asks for."""
     try:
         matches = glob(context.path(a.path or "."), a.pattern)
     except GlobError as e:
-        return UncategorizedToolResult(call_id="", content=str(e), is_error=True)
+        return GlobResult(
+            call_id="",
+            pattern=a.pattern,
+            path=a.path,
+            shown=str(e),
+            is_error=True,
+        )
     if not matches:
-        return UncategorizedToolResult(call_id="", content="(no matches)")
+        return GlobResult(
+            call_id="",
+            pattern=a.pattern,
+            path=a.path,
+            content="(no matches)",
+        )
     sort_paths(matches, a.sort)
     end = a.offset + a.max_results if a.max_results else None
     # ``absolute``, not ``resolve``: a link is listed under its own path.
@@ -192,4 +203,4 @@ def _glob(context: ToolContext, a: Glob.Arguments) -> UncategorizedToolResult:
             f"\n... ({len(matches) - a.offset - kept:,} more;"
             f" pass offset={a.offset + kept} to continue)"
         )
-    return UncategorizedToolResult(call_id="", content=body)
+    return GlobResult(call_id="", pattern=a.pattern, path=a.path, content=body)

@@ -59,7 +59,7 @@ from sagent.host.wire import (
 from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.runtime.exceptions import describe
 from sagent.runtime.types import Markers
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import ToolErrorResult, ToolResult
 from sagent.tools.builtin import builders
 from sagent.tools.remote import RemoteSession, saved
 from sagent.tools.types import ToolContext
@@ -307,7 +307,7 @@ async def _result(
 ) -> AnyToolResult:
     """Return what ``tool`` did, a failure or a cancel as the runtime records it."""
     if tool is None:
-        return UncategorizedToolResult(
+        return ToolErrorResult(
             call_id="",
             content=f"Unknown tool: {call.tool}",
             is_error=True,
@@ -317,16 +317,16 @@ async def _result(
     except asyncio.CancelledError:
         return _cancelled()
     except Exception as exc:  # noqa: BLE001 -- A tool's failure is its call's result, as the runtime records it.
-        return UncategorizedToolResult(call_id="", content=describe(exc), is_error=True)
+        return ToolErrorResult(call_id="", content=describe(exc), is_error=True)
 
 
-def _cancelled() -> UncategorizedToolResult:
+def _cancelled() -> ToolResult:
     """Return a cancelled call's result, as the runtime records one."""
-    return UncategorizedToolResult(
+    return ToolResult(
         call_id="",
-        content=Markers().cancelled,
         is_error=True,
         stub="cancelled",
+        shown=Markers().cancelled,
     )
 
 

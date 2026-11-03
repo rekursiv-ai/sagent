@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from pygments.token import _TokenType
     from rich.console import Console
 
-    from sagent.session.types import FileEditResult, FileWriteResult
+    from sagent.session.types import EditResult, WriteResult
 
 
 __all__ = [
@@ -165,7 +165,7 @@ def render_diff(
         index += 1
 
 
-def splice_diff(result: FileEditResult) -> str:
+def splice_diff(result: EditResult) -> str:
     """Return an edit's replacements as a unified diff.
 
     Args:
@@ -188,7 +188,7 @@ def splice_diff(result: FileEditResult) -> str:
     return "\n".join(hunks)
 
 
-def write_diff(result: FileWriteResult) -> str:
+def write_diff(result: WriteResult) -> str:
     """Return a write's content as a unified diff adding every line.
 
     Args:

@@ -136,7 +136,7 @@ model.settings = replace(model.settings, thinking_effort="high")
 
 ## Session records
 
-A session is a sequence of frozen dataclasses from `sagent.session.types`: `UserMessage`, `AssistantMessage`, `Thinking`, `ToolCall`, tool results such as `ShellCommandResult` and `UncategorizedToolResult`, `SystemMessage`, and more. `JsonlJournal` writes one record per JSON line.
+A session is a sequence of frozen dataclasses from `sagent.session.types`: `UserMessage`, `AssistantMessage`, `Thinking`, `ToolCall`, tool results such as `BashResult` and `UncategorizedToolResult`, `SystemMessage`, and more. `JsonlJournal` writes one record per JSON line.
 
 ## Tools
 

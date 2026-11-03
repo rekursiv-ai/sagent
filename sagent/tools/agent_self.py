@@ -22,7 +22,7 @@ from sagent.model.cost import ServiceTier
 from sagent.providers.catalog import successor
 from sagent.providers.table import ModelTags
 from sagent.runtime import types
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import AgentSelfResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
 
@@ -111,7 +111,7 @@ class AgentSelf:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> AgentSelfResult:
         """Plan the patch, apply it whole, and say what changed.
 
         Args:
@@ -176,7 +176,7 @@ class AgentSelf:
             lines.append(
                 f"{provider} models: " + ", ".join(self.team.catalog[provider]),
             )
-        return UncategorizedToolResult(
+        return AgentSelfResult(
             call_id="",
             content="\n".join(lines) or "No change.",
         )

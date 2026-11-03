@@ -21,7 +21,7 @@ import re
 from treekle import PlainTree
 
 from sagent.lib.files.grep import GrepError, OutputMode, Query, Row, grep_rows
-from sagent.session.types import UncategorizedToolResult
+from sagent.session.types import GrepResult
 from sagent.tools.command_analyzer import (
     Invocation,
     bounding_sink,
@@ -312,7 +312,7 @@ class Grep:
         self,
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
+    ) -> GrepResult:
         """Search the files under ``path`` for ``pattern``.
 
         Args:
@@ -356,7 +356,12 @@ class Grep:
                 query,
             )
         except GrepError as e:
-            return UncategorizedToolResult(call_id="", content=str(e), is_error=True)
+            return GrepResult(
+                call_id="",
+                pattern=a.pattern,
+                shown=str(e),
+                is_error=True,
+            )
         # ``keep_last`` starts the window at the tail; the resume note names it.
         start = max(0, len(rows) - a.keep_last) if a.keep_last else a.offset
         end = start + a.keep_first if a.keep_first and not a.keep_last else None
@@ -364,7 +369,7 @@ class Grep:
         if not window:
             # Past the last entry, saying none matched would be false.
             content = "(no matches in this window)" if rows else "(no matches)"
-            return UncategorizedToolResult(call_id="", content=content)
+            return GrepResult(call_id="", pattern=a.pattern, content=content)
         # Room for the longest note, one naming every entry and the last offset,
         # less the newline the body ends with, which the note stands in for.
         note = _more(len(window), offset=start + len(window))
@@ -376,7 +381,7 @@ class Grep:
         body = body.removesuffix("\n")
         if kept < len(window):
             body += _more(len(window) - kept, offset=start + kept)
-        return UncategorizedToolResult(call_id="", content=body)
+        return GrepResult(call_id="", pattern=a.pattern, content=body)
 
     # The ``path:line:`` prefix is kept whole: it is how the row is found.
     def _clip(self, row: Row) -> str:
