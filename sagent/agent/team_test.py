@@ -18,7 +18,7 @@ import time
 import pytest
 
 from sagent.agent.agent import Agent
-from sagent.agent.team import ChildSpec, Team
+from sagent.agent.team import ChildSpec, MessageKind, Team
 from sagent.lib.userdirs import config_dir
 from sagent.model.exceptions import (
     AuthError,
@@ -546,14 +546,17 @@ def test_a_message_booked_apart_is_delivered_unbooked_again(tmp_path: Path) -> N
     shown: list[tuple[str, str]] = []
     team.to_user = lambda sender, text: shown.append((sender, text))
 
-    team.book("Agent", "a", "do x")
-    team.deliver("Agent", "a", "do x")
-    team.deliver("a", "user", "fyi")
+    assert team.book("Agent", "a", "do x") == "ask"
+    team.deliver("Agent", "a", "do x", kind="ask")
+    assert team.book("a", "user", "fyi") == "tell"
+    team.deliver("a", "user", "fyi", kind="tell")
 
     assert team.owes("a") == {"Agent": "do x"}
+    assert team.book("a", "Agent", "done") == "reply"
+    assert team.owes("a") == {}
     assert shown == [("a", "fyi")]
     with pytest.raises(ValueError, match="Unknown agent 'nobody'"):
-        team.deliver("a", "nobody", "hi")
+        team.deliver("a", "nobody", "hi", kind="ask")
 
 
 def test_whom_a_leaver_owed_and_was_owed_is_forgotten(tmp_path: Path) -> None:
@@ -1877,6 +1880,115 @@ async def test_a_provider_without_logins_is_left_alone(tmp_path: Path) -> None:
             await agent.send("hi")
     finally:
         await agent.aclose()
+
+
+@dataclass(slots=True, kw_only=True)
+class _Relayed:
+    """A relay to another machine that keeps what it was given."""
+
+    sent: list[tuple[str, str, str, MessageKind]] = field(
+        default_factory=list[tuple[str, str, str, "MessageKind"]],
+    )
+
+    def send(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        content: str,
+        kind: MessageKind,
+    ) -> None:
+        self.sent.append((sender, recipient, content, kind))
+
+
+def _reaching(tmp_path: Path, *far: str) -> tuple[Team, _Relayed]:
+    """Return a team of ``Agent``, reaching ``far`` on another machine."""
+    team, relay = _team(), _Relayed()
+    _ = team.join(_agent(tmp_path, team))
+    for label in far:
+        team.reach(label, relay=relay)
+    return team, relay
+
+
+def test_a_message_to_an_outside_member_is_relayed_and_booked(tmp_path: Path) -> None:
+    team, relay = _reaching(tmp_path, "far")
+    team.send("Agent", recipient="far", content="look at a.py")
+    assert relay.sent == [("Agent", "far", "look at a.py", "ask")]
+    assert team.owes("far") == {"Agent": "look at a.py"}
+    assert team.owes("Agent") == {}
+    team.receive(sender="far", recipient="Agent", content="a.py is fine", kind="reply")
+    assert team.owes("far") == {}
+    assert team.owes("Agent") == {}
+
+
+def test_a_note_from_outside_is_a_request_its_reply_settles(tmp_path: Path) -> None:
+    team, relay = _reaching(tmp_path, "far")
+    team.receive(sender="far", recipient="Agent", content="what changed?", kind="ask")
+    assert _told(team["Agent"]) == [("far", "what changed?")]
+    assert team.owes("Agent") == {"far": "what changed?"}
+    team.send("Agent", recipient="far", content="nothing")
+    assert team.owes("Agent") == {}
+    assert team.owes("far") == {}
+    assert relay.sent == [("Agent", "far", "nothing", "reply")]
+
+
+# A request made through the far team's own tool was booked there only.
+@pytest.mark.parametrize("kind", ["reply", "tell"])
+def test_a_reply_or_news_from_outside_is_owed_nothing(
+    tmp_path: Path,
+    kind: MessageKind,
+) -> None:
+    team, _ = _reaching(tmp_path, "far")
+    team.receive(sender="far", recipient="Agent", content="[far is idle]", kind=kind)
+    assert _told(team["Agent"]) == [("far", "[far is idle]")]
+    assert team.owes("Agent") == {}
+
+
+def test_a_note_for_no_member_is_refused(tmp_path: Path) -> None:
+    team, _ = _reaching(tmp_path, "far")
+    with pytest.raises(ValueError, match="Unknown agent 'gone'"):
+        team.receive(sender="far", recipient="gone", content="hi", kind="ask")
+
+
+def test_a_child_of_an_outside_member_tells_it_over_the_relay(tmp_path: Path) -> None:
+    team, relay = _reaching(tmp_path, "far@laptop")
+    child = _agent(tmp_path, team)
+    label = team.join(child, parent="far@laptop")
+    assert label == "far_0"
+    assert team.child_label("far@laptop") == "far_1"
+    team.reach("far@gpu1@laptop", relay=relay)
+    assert team.child_label("far@gpu1@laptop") == "far@gpu1_0"
+    _ = team.join(_agent(tmp_path, team), label="near@x")
+    assert team.child_label("near@x") == "near@x_0"
+    assert team.resolve("parent", by=label) == ["far@laptop"]
+    assert team.can_spawn(label)
+    assert team.can_spawn("far@laptop")
+    _idle(child, "done")
+    assert relay.sent == [(label, "far@laptop", f"[{label} is idle] done", "tell")]
+
+
+def test_outside_members_are_reached_by_name_and_never_taken(tmp_path: Path) -> None:
+    team, _ = _reaching(tmp_path, "far", "Agent_0")
+    assert team.outside == ["far", "Agent_0"]
+    assert team.resolve("far", by="Agent") == ["far"]
+    assert team.resolve("near", by="Agent") == []
+    assert team.child_label("Agent") == "Agent_1"
+    with pytest.raises(ValueError, match="already labelled 'far'"):
+        _ = team.join(_agent(tmp_path, team), label="far", parent="Agent")
+    with pytest.raises(ValueError, match="'Agent' is a member's label"):
+        team.reach("Agent", relay=_Relayed())
+    with pytest.raises(ValueError, match="'parent' is a member's label"):
+        team.reach("parent", relay=_Relayed())
+    team.unreach("far")
+    assert team.outside == ["Agent_0"]
+    assert team.resolve("far", by="Agent") == []
+
+
+def test_the_user_s_first_word_nudges_no_outside_debtor(tmp_path: Path) -> None:
+    team, _ = _reaching(tmp_path, "far")
+    team.send("Agent", recipient="far", content="look")
+    team.wake("Agent")
+    assert team.owes("far") == {"Agent": "look"}
 
 
 if __name__ == "__main__":

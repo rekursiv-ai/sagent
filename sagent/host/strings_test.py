@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 import fcntl
 import os
@@ -173,12 +173,74 @@ async def test_a_wildcard_address_is_advertised_by_this_machine(
             (family, 0, 0, "", (ip, 0)) for ip in ("10.0.0.5", "127.0.1.1", "10.0.0.5")
         ]
 
+    class _Routed:
+        """A UDP socket whose route out leaves by ``192.168.1.175``."""
+
+        def __init__(
+            self,
+            family: socket.AddressFamily,
+            kind: socket.SocketKind,
+        ) -> None:
+            assert (family, kind) == (socket.AF_INET, socket.SOCK_DGRAM)
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            del exc
+
+        def connect(self, address: tuple[str, int]) -> None:
+            assert address == ("192.0.2.1", 9)
+
+        def getsockname(self) -> tuple[str, int]:
+            return ("192.168.1.175", 40_000)
+
     monkeypatch.setattr(socket, "gethostname", lambda: "gpu1")
     monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    monkeypatch.setattr(socket, "socket", _Routed)
     dirs = _dirs(tmp_path)
     _served(dirs, "0.0.0.0:7777")
     made = await strings.add(dirs)
-    assert [(s.host, s.port) for s in made] == [("gpu1", 7777), ("10.0.0.5", 7777)]
+    assert [(s.host, s.port) for s in made] == [
+        ("gpu1", 7777),
+        ("10.0.0.5", 7777),
+        ("192.168.1.175", 7777),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_machine_with_no_route_out_advertises_what_its_name_resolves_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Unrouted:
+        def __init__(
+            self,
+            family: socket.AddressFamily,
+            kind: socket.SocketKind,
+        ) -> None:
+            del family, kind
+
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            del exc
+
+        def connect(self, address: tuple[str, int]) -> None:
+            del address
+            raise OSError("Network is unreachable")
+
+    def unresolved(*args: object) -> list[object]:
+        del args
+        return []
+
+    monkeypatch.setattr(socket, "gethostname", lambda: "gpu1")
+    monkeypatch.setattr(socket, "getaddrinfo", unresolved)
+    monkeypatch.setattr(socket, "socket", _Unrouted)
+    dirs = _dirs(tmp_path)
+    _served(dirs, "0.0.0.0:7777")
+    assert [s.host for s in await strings.add(dirs)] == ["gpu1"]
 
 
 @pytest.mark.asyncio

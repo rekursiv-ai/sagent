@@ -96,7 +96,7 @@ from sagent.settings.flags import flags
 from sagent.settings.harvest import harvest
 from sagent.settings.match import match
 from sagent.tools.agent_spawn import AgentSpawn
-from sagent.tools.builtin import builders
+from sagent.tools.builtin import TOOLS, builders
 from sagent.tools.mcp import McpServer, McpSession, servers
 from sagent.tools.mcp_settings import add_config_arguments
 from sagent.tools.remote import RemoteSession, saved
@@ -727,13 +727,13 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
                 servers(cwd, flags=flags.mcp_config, strict=flags.strict_mcp_config),
                 tools=flags.tools,
             )
-            remote = RemoteSession(saved())
+            remotes = saved()
             # Checked before the journal is made, so a mistyped name leaves no
             # session behind; a server's own tools are known only once it connects.
             _chosen_tools(
                 flags,
                 known=[
-                    *builders(cwd=cwd, team=team, remote=remote),
+                    *TOOLS,
                     *(n for n in flags.tools or () if any(s.names(n) for s in wanted)),
                 ],
             )
@@ -741,6 +741,7 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
             sys.stderr.write(f"Error: {error_text(e)}\n")
             return 1
         path = _session_path(flags, cwd=cwd, interactive=interactive)
+        remote = RemoteSession(remotes, journal=path, team=team)
         # Before the servers connect: at a terminal, what they log must reach the
         # session's file, not overlay the screen.
         _logging(flags.log_level, path=path, interactive=interactive)

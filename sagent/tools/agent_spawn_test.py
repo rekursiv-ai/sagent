@@ -21,7 +21,7 @@ import pytest
 from sagent.agent.agent import Agent, NoShrinker, RuntimeSession, spent
 from sagent.agent.agents_md import AgentsMdConfig
 from sagent.agent.compactor import SummaryCompactor
-from sagent.agent.team import ChildSpec, Team
+from sagent.agent.team import ChildSpec, MessageKind, Team
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog, TokenCost, TokenCount
 from sagent.model.scripted import (
@@ -1899,6 +1899,82 @@ class _Asked:
         del errors, newline
         self.encodings[path.name] = encoding
         return path.read_bytes().decode()
+
+
+@dataclass(slots=True, kw_only=True)
+class _Relayed:
+    """A relay to another machine that keeps what it was given."""
+
+    sent: list[tuple[str, str, str, MessageKind]] = field(
+        default_factory=list[tuple[str, str, str, "MessageKind"]],
+    )
+
+    def send(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        content: str,
+        kind: MessageKind,
+    ) -> None:
+        self.sent.append((sender, recipient, content, kind))
+
+
+def _here(tmp_path: Path) -> Agent:
+    """Return this machine's default agent, which a far caller's child takes after."""
+    return Agent(
+        model=ScriptedProvider(capability=_capability("scripted"))["scripted"],
+        tools=[_Tool(name="Read")],
+        system_prompt="this machine's prompt",
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_agent_on_another_machine_spawns_a_child_here(tmp_path: Path) -> None:
+    setup = _setup(tmp_path, reply(text="done"))
+    relay = _Relayed()
+    setup.team.reach("far", relay=relay)
+    setup.team.stand_in = partial(_here, tmp_path)
+    result = await _spawn(setup, tmp_path, {"prompt": "go"}, label="far")
+    assert (result.agent_id, result.content, result.state) == (
+        "far_0",
+        "done",
+        "completed",
+    )
+    child = setup.team["far_0"]
+    assert setup.team.parent("far_0") == "far"
+    assert list(child.tools) == ["Read"]
+    assert child.system_prompt == "this machine's prompt"
+    assert relay.sent == []
+    setup.team.receive(sender="far", recipient="far_0", content="more?", kind="ask")
+    await setup.team.stop("far_0")
+    assert relay.sent == [("far_0", "far", "[far_0 stopped]", "reply")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("arguments", "match"),
+    [
+        ({"prompt": "go"}, r"^AgentSpawn needs a calling agent in the team\.$"),
+        (
+            {"prompt": "watch", "watch": True},
+            r"^A watcher watches an agent of this machine\.$",
+        ),
+    ],
+)
+async def test_a_far_caller_needs_this_machine_s_agent_and_no_watcher(
+    tmp_path: Path,
+    arguments: dict[str, PlainTree],
+    match: str,
+) -> None:
+    setup = _setup(tmp_path)
+    setup.team.reach("far", relay=_Relayed())
+    if arguments.get("watch") is True:
+        setup.team.stand_in = partial(_here, tmp_path)
+    with pytest.raises(ValueError, match=match):
+        _ = await _spawn(setup, tmp_path, arguments, label="far")
+    assert list(setup.team) == ["Agent"]
 
 
 if __name__ == "__main__":

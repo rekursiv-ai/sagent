@@ -6,9 +6,14 @@ agent's ``RemoteTool`` shares, as ``McpSession`` is shared. A call in flight
 when a connection drops waits for it to come back, and the server keeps the
 call, and its result, until then.
 
+An agent a call spawns there joins this session's team as an outside member,
+so ``AgentSend`` reaches it, and it them, as it would an agent here. Each
+machine knows the other's agents by label and machine: ``Agent_0@gpu1`` here,
+``Agent@laptop`` there, so neither takes a label of the other's.
+
 Typical usage example:
 
-  async with RemoteSession(saved()) as remote:
+  async with RemoteSession(saved(), team=team) as remote:
       tool = RemoteTool(remote=remote)
       await tool.call(context, {"endpoint": "gpu1", "tool": "Bash",
                                 "arguments": {"command": "nvidia-smi", ...}})
@@ -29,6 +34,7 @@ import uuid
 
 from treekle import PlainTree, json_dumps, json_loads
 
+from sagent.agent.team import Team
 from sagent.host.strings import ConnectionString
 from sagent.host.tls import client_context, peer_fingerprint
 from sagent.host.wire import (
@@ -40,10 +46,14 @@ from sagent.host.wire import (
     Bye,
     Call,
     Cancel,
+    Describe,
+    Described,
     Hello,
+    Note,
+    Peers,
     Refused,
     Result,
-    Tools,
+    ToolsChanged,
     ToolSpec,
     Welcome,
     encoded,
@@ -51,6 +61,7 @@ from sagent.host.wire import (
     received,
 )
 from sagent.lib.userdirs import config_dir
+from sagent.providers.catalog import ModelCatalog
 from sagent.session.types import AnyToolResult, UncategorizedToolResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
@@ -58,8 +69,10 @@ from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
+    from pathlib import Path
 
+    from sagent.agent.team import MessageKind
     from sagent.host.wire import Message
     from sagent.tools.types import ToolContext
 
@@ -94,10 +107,15 @@ def saved() -> list[SavedRemote]:
 class Endpoint:
     """One server, reached by one string: up or down, and the tools it grants.
 
+    It is also the relay to the agents there: each the host names joins
+    ``team`` as an outside member, and a message to one is a ``Note``, kept
+    until the server acks it.
+
     Args:
       remote: The string and the tools to ask for.
       session_id: This process's session, which a reconnect names.
       client: This machine, as the server lists it.
+      team: The agents here, whom the agents there may message.
       retry_sec: How long to wait between attempts to connect.
       ping_sec: How often to say something; a server silent three times as long
         is gone.
@@ -110,6 +128,7 @@ class Endpoint:
         *,
         session_id: str,
         client: str,
+        team: Team,
         retry_sec: float,
         ping_sec: float,
     ) -> None:
@@ -117,16 +136,28 @@ class Endpoint:
         self.name = self.string.host
         """The server's machine once it has said so; until then the string's host."""
 
-        self.tools: Mapping[str, ToolSpec] = {}
+        self.tools: Mapping[str, str] = {}
+        """The tools granted: each name's ``ToolSpec.digest``."""
+
+        self.changes = 0
+        """How often the tools granted changed once first known."""
+
         self.error = "not yet connected"
         """Why it is down; ``""`` while up."""
 
         self.tried = False
         """Whether it has tried to connect: up, or down with a reason."""
 
+        self._told = False
+        self._specs: dict[str, ToolSpec] = {}
+        self._describing: dict[str, asyncio.Future[ToolSpec | None]] = {}
+
         self._requested = remote.tools
         self._session_id = session_id
         self._client = client
+        self._team = team
+        self._peers: tuple[str, ...] = ()
+        self._notes: dict[str, Note] = {}
         self._retry_sec = retry_sec
         self._ping_sec = ping_sec
         self._silence_sec = SILENT_PINGS * ping_sec
@@ -198,10 +229,14 @@ class Endpoint:
             encoded(
                 Call(
                     id=call_id,
-                    agent=agent,
+                    agent=self._here(agent),
                     window=window,
                     tool=tool,
                     arguments=arguments,
+                    address_book=tuple(
+                        self._here(a)
+                        for a in (agent, *(a for a in self._team if a != agent))
+                    ),
                 ),
             ),
         )
@@ -211,6 +246,65 @@ class Endpoint:
             self._pending.pop(call_id, None)
             self._send(Cancel(id=call_id))
             raise
+
+    async def spec(self, tool: str) -> ToolSpec | None:
+        """Return how ``tool`` is shown to the model there, asked once per digest.
+
+        Args:
+          tool: The tool's name there.
+
+        Returns:
+          spec: Its description and schema; ``None`` for a tool not granted.
+
+        Raises:
+          ValueError: The endpoint is down, or went down while asked.
+
+        """
+        digest = self.tools.get(tool)
+        if digest is None:
+            return None
+        if digest in self._specs:
+            return self._specs[digest]
+        if self._writer is None:
+            raise ValueError(f"{self.name} is down: {self.error}.")
+        asked = uuid.uuid4().hex
+        answer = self._describing[asked] = asyncio.Future[ToolSpec | None]()
+        self._writer.write(encoded(Describe(id=asked, tool=tool)))
+        try:
+            spec = await answer
+        finally:
+            self._describing.pop(asked, None)
+        if spec is not None:
+            self._specs[spec.digest] = spec
+        return spec
+
+    def send(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        content: str,
+        kind: MessageKind,
+    ) -> None:
+        """Take a message to an agent there: now, or once connected again.
+
+        Args:
+          sender: The agent here.
+          recipient: The agent there.
+          content: What it says.
+          kind: How the team here booked it.
+
+        """
+        note = Note(
+            id=uuid.uuid4().hex,
+            sender=self._here(sender),
+            recipient=recipient.removesuffix(f"@{self.name}"),
+            content=content,
+            kind=kind,
+        )
+        self._notes[note.id] = note
+        if self._writer is not None:
+            self._writer.write(encoded(note))
 
     def bye(self) -> None:
         """Tell the server this session ends, and fail every call still waiting."""
@@ -251,7 +345,7 @@ class Endpoint:
             )
             self._welcome(await asyncio.wait_for(received(reader), self._silence_sec))
             self._writer, self.tried = writer, True
-            for message in self._queued:
+            for message in (*self._notes.values(), *self._queued):
                 writer.write(encoded(message))
             self._queued.clear()
             await self._note()
@@ -263,6 +357,9 @@ class Endpoint:
         finally:
             self._writer = None
             writer.close()
+            # A server keeps no question across a drop, as it keeps a call.
+            for answer in self._describing.values():
+                answer.set_exception(ValueError(f"{self.name} went down while asked."))
 
     def _welcome(self, answer: Message | None) -> None:
         """Take what the server said to the hello; fail each call it no longer holds."""
@@ -270,7 +367,11 @@ class Endpoint:
             raise ConnectionRefusedError(f"{self.string.host} refused: {answer.reason}")
         if not isinstance(answer, Welcome):
             raise ConnectionError(f"{self.string.host} did not welcome this client.")
-        self.name, self.tools, self.error = answer.name, answer.tools, ""
+        self.name, self.error = answer.name, ""
+        self._granted(answer.tools)
+        # A new session's host has no agents yet.
+        if not answer.resumed:
+            self._peered(())
         for call_id in [c for c in self._pending if c not in answer.calls]:
             self._pending.pop(call_id).set_exception(
                 ValueError(f"{self.name} lost this call while disconnected."),
@@ -290,9 +391,72 @@ class Endpoint:
                 if result is not None and not result.done():
                     result.set_result(message.record)
                 writer.write(encoded(Ack(id=message.id)))
-            elif isinstance(message, Tools):
-                self.tools = message.tools
+            elif isinstance(message, ToolsChanged):
+                self._granted(message.tools)
                 await self._note()
+            elif isinstance(message, Described) and message.id in self._describing:
+                self._describing[message.id].set_result(message.spec)
+            elif isinstance(message, Ack):
+                self._notes.pop(message.id, None)
+            elif isinstance(message, Note):
+                self._received(message)
+                writer.write(encoded(Ack(id=message.id)))
+            elif isinstance(message, Peers):
+                self._peered(message.labels)
+                await self._note()
+
+    def _received(self, note: Note) -> None:
+        """Put ``note`` before the agent here it names; log one for no agent."""
+        sender = self._there(note.sender)
+        self._reach([sender])
+        try:
+            self._team.receive(
+                sender=sender,
+                recipient=note.recipient.removesuffix(f"@{self._client}"),
+                content=note.content,
+                kind=note.kind,
+            )
+        except ValueError:
+            logger.warning(
+                "note from %s to %r, who is not here",
+                sender,
+                note.recipient,
+            )
+
+    def _peered(self, labels: tuple[str, ...]) -> None:
+        """Take ``labels``, as the host names them, for the agents there."""
+        there = tuple(self._there(label) for label in labels)
+        for label in self._peers:
+            if label not in there:
+                self._team.unreach(label)
+        self._peers = there
+        self._reach(there)
+
+    def _reach(self, labels: Iterable[str]) -> None:
+        """Make each agent there an outside member; log one labelled as one here."""
+        for label in labels:
+            if label in self._team:
+                logger.warning(
+                    "%s has an agent %r, a label taken here",
+                    self.name,
+                    label,
+                )
+            else:
+                self._team.reach(label, relay=self)
+
+    def _here(self, label: str) -> str:
+        """Return the label of an agent here, as the host knows it."""
+        return f"{label}@{self._client}"
+
+    def _there(self, label: str) -> str:
+        """Return the label of an agent there, as the team here knows it."""
+        return f"{label}@{self.name}"
+
+    def _granted(self, tools: Mapping[str, str]) -> None:
+        """Take ``tools`` as the tools granted; count it a change once first known."""
+        if self._told and tools != self.tools:
+            self.changes += 1
+        self.tools, self._told = tools, True
 
     async def _note(self) -> None:
         """Wake each ``until`` to look again."""
@@ -312,6 +476,11 @@ class RemoteSession(AsyncResource):
 
     Args:
       remotes: The strings, each one endpoint.
+      journal: The sagent session's journal, whose directory names the session
+        to each server, so a resumed session takes up its calls there again;
+        ``None``, for a session with none, names it as no other.
+      team: The agents here, whom the agents there may message; ``None`` for
+        none, as ``sagent remote list`` has.
       client: This machine, as servers list it.
       retry_sec: How long each endpoint waits between attempts to connect.
       ping_sec: How often each endpoint says something to its server.
@@ -322,18 +491,22 @@ class RemoteSession(AsyncResource):
         self,
         remotes: Sequence[SavedRemote],
         *,
+        journal: Path | None = None,
+        team: Team | None = None,
         client: str = "",
         retry_sec: float = 2.0,
         ping_sec: float = PING_SEC,
     ) -> None:
-        # A reconnect from this process takes up its calls; a new process, as
-        # after a quit, starts afresh.
-        session_id = uuid.uuid4().hex
+        self.session_id = uuid.uuid4().hex if journal is None else journal.parent.name
+        """What each server knows this session by."""
+
+        here = team if team is not None else Team(catalog=ModelCatalog(factories={}))
         self._endpoints = [
             Endpoint(
                 r,
-                session_id=session_id,
+                session_id=self.session_id,
                 client=client or socket.gethostname(),
+                team=here,
                 retry_sec=retry_sec,
                 ping_sec=ping_sec,
             )
@@ -404,9 +577,16 @@ class RemoteTool:
         default_factory=dict[str, "ToolSpec"],
         repr=False,
     )
-    """The tools here, which an endpoint's tool of the same spec need not show."""
+    """The tools here, which an endpoint's tool of the same digest need not show."""
 
     display: ToolDisplay = field(default=ToolDisplay())
+
+    _reminded: dict[tuple[str, str], int] = field(
+        default_factory=dict[tuple[str, str], int],
+        repr=False,
+    )
+    """Each agent's last reminder of each endpoint, by label and endpoint, as the
+    endpoint's ``changes`` stood."""
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
         """Return ``RemoteTool``, the endpoint, and the tool, such as ``RemoteTool gpu1 Bash``."""
@@ -437,24 +617,21 @@ class RemoteTool:
         )
 
     def reminder(self, context: ToolContext) -> str:
-        """Return each endpoint and whether it is up.
+        """Return each endpoint, whether it is up, and, once, that its tools changed.
 
         Args:
-          context: The calling agent's state; unused.
+          context: The calling agent's state; its label says what it was told.
 
         Returns:
-          text: Such as ``remote: gpu1 (up: Bash, Read)``; ``""`` for none.
+          text: Such as ``remote: gpu1 (up: Bash, Read; tools changed)``; ``""``
+            for no endpoint.
 
         """
-        del context
         named = self.remote.endpoints()
         if not named:
             return ""
         return "remote: " + ", ".join(
-            f"{name} (up: {', '.join(e.tools) or 'no tools'})"
-            if e.up
-            else f"{name} (down)"
-            for name, e in named.items()
+            self._reminder(context.label, name, e) for name, e in named.items()
         )
 
     async def call(
@@ -491,7 +668,9 @@ class RemoteTool:
         if not a.tool:
             return _said(self._listing(a.endpoint, endpoint))
         if a.arguments is None:
-            spec = endpoint.tools.get(a.tool)
+            here = self.local.get(a.tool)
+            known = here is not None and here.digest == endpoint.tools.get(a.tool)
+            spec = here if known else await endpoint.spec(a.tool)
             if spec is None:
                 raise ValueError(f"{a.endpoint} does not offer {a.tool}.")
             return _said(
@@ -514,9 +693,11 @@ class RemoteTool:
             "only there, ask its schema": [],
         }
         same, differs, only = kinds.values()
-        for tool, spec in endpoint.tools.items():
+        for tool, digest in endpoint.tools.items():
             here = self.local.get(tool)
-            (only if here is None else same if here.same(spec) else differs).append(
+            (
+                only if here is None else same if here.digest == digest else differs
+            ).append(
                 tool,
             )
         return "\n".join(
@@ -529,6 +710,15 @@ class RemoteTool:
                 ),
             ],
         )
+
+    def _reminder(self, label: str, name: str, endpoint: Endpoint) -> str:
+        """Return one endpoint's part of the reminder ``label`` is given now."""
+        told = self._reminded.get((label, name))
+        self._reminded[label, name] = endpoint.changes
+        if not endpoint.up:
+            return f"{name} (down)"
+        changed = "; tools changed" if told not in (None, endpoint.changes) else ""
+        return f"{name} (up: {', '.join(endpoint.tools) or 'no tools'}{changed})"
 
 
 def _said(text: str) -> UncategorizedToolResult:

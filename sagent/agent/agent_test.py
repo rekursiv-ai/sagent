@@ -1498,6 +1498,7 @@ async def test_a_new_window_returns_to_where_the_session_started(
     _, agent = _agent(tmp_path)
     async with agent:
         agent.runtime.tool_context.cwd = tmp_path / "elsewhere"
+        window = agent.runtime.tool_context.files.window
         if ends == "clear":
             await agent.session.clear()
         else:
@@ -1508,6 +1509,7 @@ async def test_a_new_window_returns_to_where_the_session_started(
             if isinstance(r, SystemMessage) and r.subtype == "moved"
         ]
 
+    assert agent.runtime.tool_context.files.window != window
     assert agent.runtime.tool_context.cwd == tmp_path
     assert [n.content for n in notes] == [
         f"Working directory reset to {tmp_path}; it was {tmp_path / 'elsewhere'}.",

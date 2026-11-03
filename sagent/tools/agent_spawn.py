@@ -226,9 +226,10 @@ class AgentSpawn:
         """
         a = parse(arguments, AgentSpawn.Arguments)
         parent_label = context.label
-        if parent_label not in self.team:
-            raise ValueError("AgentSpawn needs a calling agent in the team.")
+        parent = self._parent(parent_label)
         if a.watch:
+            if parent_label not in self.team:
+                raise ValueError("A watcher watches an agent of this machine.")
             if not a.prompt.strip():
                 raise ValueError("A watcher needs a policy in prompt.")
             label = await self.start_watcher(parent_label)
@@ -251,7 +252,6 @@ class AgentSpawn:
                 f"{a.label!r} is reserved: {', '.join(sorted(_TAKEN))}.",
             )
         label = a.label or self.team.child_label(parent_label)
-        parent = self.team[parent_label]
         allowed = _allowed(parent, a.tools)
         model = await self._model(
             parent,
@@ -272,7 +272,8 @@ class AgentSpawn:
                 max_rounds=a.max_tool_call_rounds,
                 max_depth=a.max_depth,
             )
-            if journal is not None
+            # A far caller's journal is on its own machine: nothing stands there.
+            if journal is not None and parent_label in self.team
             else None
         )
         told = a.account if a.account is not None else self.team.catalog.account
@@ -612,11 +613,21 @@ class AgentSpawn:
             else None,
         )
 
+    # A member's own; for an outside member, this machine's, as sagent here would run.
+    def _parent(self, label: str) -> Agent:
+        """Return the agent a child of ``label`` takes after."""
+        if label in self.team:
+            return self.team[label]
+        if label in self.team.outside and self.team.stand_in is not None:
+            return self.team.stand_in()
+        raise ValueError("AgentSpawn needs a calling agent in the team.")
+
+    # An outside member's caps are kept on its own machine, as its spending is.
     def _payers(self, label: str) -> tuple[Agent, ...]:
         """Return ``label``'s agent and each above it, whose caps a child spends against."""
         payers: list[Agent] = []
         above: str | None = label
-        while above is not None:
+        while above is not None and above in self.team:
             payers.append(self.team[above])
             above = self.team.parent(above)
         return tuple(payers)

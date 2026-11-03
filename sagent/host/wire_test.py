@@ -5,10 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import asyncio
+import re
 import secrets
 import socket
 
-from treekle import json_dumps
+from treekle import PlainTree, json_dumps, json_loads
 
 import pytest
 
@@ -18,11 +19,16 @@ from sagent.host.wire import (
     Bye,
     Call,
     Cancel,
+    Describe,
+    Described,
     Hello,
+    Note,
+    Peers,
     Ping,
     Refused,
     Result,
     Tools,
+    ToolsChanged,
     ToolSpec,
     Welcome,
     encoded,
@@ -58,7 +64,12 @@ _TOKEN = secrets.token_urlsafe(16)
             client="c",
             tools=("Read",),
         ),
-        Welcome(name="gpu1", resumed=True, calls=("1", "2"), tools={"Bash": _SPEC}),
+        Welcome(
+            name="gpu1",
+            resumed=True,
+            calls=("1", "2"),
+            tools={"Bash": _SPEC.digest},
+        ),
         Refused(reason="no"),
         Call(
             id="1",
@@ -67,6 +78,24 @@ _TOKEN = secrets.token_urlsafe(16)
             tool="Bash",
             arguments={"command": "ls", "n": [1, 2]},
         ),
+        Call(
+            id="2",
+            agent="a",
+            window="w",
+            tool="AgentSpawn",
+            arguments={"prompt": "go"},
+            address_book=("a", "reviewer"),
+            granted=("AgentSpawn", "Read"),
+        ),
+        Note(id="n1", sender="a", recipient="a_0", content="more?", kind="ask"),
+        Note(
+            id="n2",
+            sender="a_0",
+            recipient="a",
+            content="[a_0 is idle]",
+            kind="tell",
+        ),
+        Peers(labels=("a_0", "a_1")),
         Result(
             id="1",
             record=ShellCommandResult(call_id="", stdout="hi\n", exit_code=0),
@@ -86,6 +115,10 @@ _TOKEN = secrets.token_urlsafe(16)
         Bye(),
         Ping(),
         Tools(tools={"Read": _SPEC}),
+        ToolsChanged(tools={"Read": _SPEC.digest}),
+        Describe(id="d1", tool="Read"),
+        Described(id="d1", spec=_SPEC),
+        Described(id="d2", spec=None),
     ],
 )
 @pytest.mark.asyncio
@@ -126,9 +159,11 @@ async def test_a_line_that_is_no_json_is_refused() -> None:
 def test_a_spec_is_the_same_however_its_schema_was_read() -> None:
     read = Read()
     local = ToolSpec.from_tool(read)
-    assert local.same(ToolSpec(description=read.description, schema=dict(read.schema)))
-    assert not local.same(ToolSpec(description="other", schema=read.schema))
-    assert not local.same(ToolSpec(description=read.description, schema={}))
+    reread = json_loads(json_dumps(read.schema), dict[str, PlainTree])
+    assert local.digest == ToolSpec(description=read.description, schema=reread).digest
+    assert local.digest != ToolSpec(description="other", schema=read.schema).digest
+    assert local.digest != ToolSpec(description=read.description, schema={}).digest
+    assert re.fullmatch(r"[0-9a-f]{64}", local.digest)
 
 
 @pytest.mark.asyncio

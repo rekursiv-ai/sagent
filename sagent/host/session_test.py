@@ -5,36 +5,74 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import asyncio
+import logging
 import socket
 
 import pytest
 
+from sagent.agent.agent import Agent
+from sagent.agent.team import Team
+from sagent.host import session
 from sagent.host.session import main, serve
 from sagent.host.wire import (
     MAX_LINE_BYTES,
     Call,
     Cancel,
+    Note,
+    Peers,
     Result,
     Tools,
     encoded,
     received,
 )
-from sagent.session.types import FileReadResult, ShellCommandResult
+from sagent.model.scripted import ScriptedProvider
+from sagent.providers.catalog import ModelCatalog
+from sagent.session.types import (
+    AgentToAgentMessage,
+    FileReadResult,
+    ShellCommandResult,
+)
+from sagent.tools.agent_send import AgentSend
 from sagent.tools.bash import Bash
 from sagent.tools.read import Read
 from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, Sequence
     from pathlib import Path
 
     from treekle import PlainTree
 
+    from sagent.host.wire import Message
+    from sagent.tools.types import Tool
+
+
+def _team() -> Team:
+    return Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider}))
+
+
+def _agent(tmp_path: Path, tools: Sequence[Tool] = ()) -> Agent:
+    return Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=tools,
+        tool_context=ToolContext(cwd=tmp_path),
+    )
+
 
 async def _host(
     tmp_path: Path,
+    team: Team | None = None,
+    stood: list[list[str]] | None = None,
 ) -> AsyncGenerator[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
+    """Serve Read, Bash and AgentSend for ``team``; ``stood`` gets each stand-in's tools."""
+    team = team if team is not None else _team()
+
+    def stand_in(tools: Sequence[Tool]) -> Agent:
+        if stood is not None:
+            stood.append([t.name for t in tools])
+        return _agent(tmp_path, tools)
+
     theirs, ours = socket.socketpair()
     reader, writer = await asyncio.open_unix_connection(sock=ours, limit=MAX_LINE_BYTES)
     host_reader, host_writer = await asyncio.open_unix_connection(sock=theirs)
@@ -42,8 +80,10 @@ async def _host(
         serve(
             host_reader,
             host_writer,
-            tools={"Read": Read(), "Bash": Bash()},
+            tools={"Read": Read(), "Bash": Bash(), "AgentSend": AgentSend(team=team)},
             new_context=lambda label: ToolContext(cwd=tmp_path, label=label),
+            team=team,
+            stand_in=stand_in,
         ),
     )
     yield reader, writer
@@ -75,7 +115,7 @@ async def test_the_host_says_its_tools_first(tmp_path: Path) -> None:
     async for reader, _ in _host(tmp_path):
         tools = await received(reader)
         assert isinstance(tools, Tools)
-        assert list(tools.tools) == ["Read", "Bash"]
+        assert list(tools.tools) == ["Read", "Bash", "AgentSend"]
         assert tools.tools["Read"].description == Read().description
 
 
@@ -188,6 +228,118 @@ async def test_a_call_cancelled_before_it_starts_is_answered(tmp_path: Path) -> 
         writer.write(call + encoded(Cancel(id="1")))
         cancelled = await _result(reader)
         assert (cancelled.id, cancelled.record.stub) == ("1", "cancelled")
+
+
+async def _said(reader: asyncio.StreamReader) -> Message | None:
+    return await asyncio.wait_for(received(reader), 5)
+
+
+@pytest.mark.asyncio
+async def test_an_agent_here_and_the_caller_message_each_other(tmp_path: Path) -> None:
+    team = _team()
+    _ = team.join(_agent(tmp_path), label="w")
+    async for reader, writer in _host(tmp_path, team):
+        _ = await received(reader)
+        writer.write(
+            encoded(
+                Call(
+                    id="1",
+                    agent="a",
+                    window="w1",
+                    tool="AgentSend",
+                    arguments={"to": "w", "content": "look"},
+                    address_book=("a", "w", "b", "user"),
+                ),
+            ),
+        )
+        assert await _said(reader) == Peers(labels=("w",))
+        assert (await _result(reader)).record.text() == "Delivered to w."
+        assert team.outside == ["a", "b"]
+        assert team.owes("w") == {"a": "look"}
+        _ = team.join(_agent(tmp_path), label="v")
+        team.send("w", "a", "seen")
+        assert await _said(reader) == Peers(labels=("w", "v"))
+        note = await _said(reader)
+        assert isinstance(note, Note)
+        assert (note.sender, note.recipient, note.content, note.kind) == (
+            "w",
+            "a",
+            "seen",
+            "reply",
+        )
+        team.send("v", "b", "hi")
+        again = await _said(reader)
+        assert isinstance(again, Note)
+        assert again.kind == "ask"
+
+
+@pytest.mark.asyncio
+async def test_a_note_from_the_caller_reaches_an_agent_here(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    team = _team()
+    _ = team.join(_agent(tmp_path), label="w")
+    async for reader, writer in _host(tmp_path, team):
+        _ = await received(reader)
+        writer.write(
+            encoded(Note(id="n1", sender="x", recipient="w", content="go", kind="ask"))
+            + encoded(
+                Note(id="n2", sender="x", recipient="gone", content="hi", kind="tell"),
+            )
+            + _call("1", agent="x", window="w1", tool="Train"),
+        )
+        with caplog.at_level(logging.WARNING, logger="sagent.host.session"):
+            assert await _said(reader) == Peers(labels=("w",))
+            _ = await _result(reader)
+        assert team.outside == ["x"]
+        assert team.owes("w") == {"x": "go"}
+        assert [
+            (m.sender, m.content)
+            for m in team["w"].runtime.inbox.drain_nowait()
+            if isinstance(m, AgentToAgentMessage)
+        ] == [("x", "go")]
+        assert caplog.messages == ["note from x to 'gone', who is not here"]
+
+
+@pytest.mark.asyncio
+async def test_a_child_of_the_caller_takes_only_the_tools_granted(
+    tmp_path: Path,
+) -> None:
+    team, stood = _team(), list[list[str]]()
+    async for reader, writer in _host(tmp_path, team, stood):
+        _ = await received(reader)
+        writer.write(
+            encoded(
+                Call(
+                    id="1",
+                    agent="a",
+                    window="w1",
+                    tool="Train",
+                    arguments={},
+                    granted=("Read", "AgentSend", "Train"),
+                ),
+            ),
+        )
+        _ = await _result(reader)
+        assert team.stand_in is not None
+        _ = team.stand_in()
+        assert stood == [["Read", "AgentSend"]]
+
+
+def test_a_child_of_a_caller_takes_after_this_machine_s_default_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(session, "default_provider", lambda: "scripted")
+    agent = session._stand_in(
+        [Read()],
+        catalog=ModelCatalog(factories={"scripted": ScriptedProvider}),
+        new_context=lambda label: ToolContext(cwd=tmp_path, label=label),
+    )
+    assert list(agent.tools) == ["Read"]
+    assert agent.model.provider.name == "scripted"
+    assert agent.runtime.tool_context.cwd == tmp_path
 
 
 @pytest.mark.asyncio

@@ -29,10 +29,19 @@ agent still owing.
 A watcher is a root that watches another agent: it is that agent's ``parent``
 by name, though the team never closes the one for the other.
 
+An outside member is an agent of another machine's team, reached through a
+``Relay`` and labelled ``<label there>@<machine>``, so it never takes a label
+of this team: it is addressed, owed, and parent to a child as a member is, but each
+team stands the debts of its own agents only. A message it is sent leaves by
+the relay, and one it sends arrives by ``receive``, each with its ``MessageKind``
+as the sending team booked it: a request made through the far team's own tool
+was booked there alone.
+
 Typical usage example:
 
   async with Team(catalog=catalog) as team, Agent(model=opus, tools=tools) as root:
       team.join(root, label="Agent")
+      team.reach("worker", relay=endpoint)     # An agent on another machine.
 """
 
 from __future__ import annotations
@@ -40,7 +49,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, ClassVar, Final, override
+from typing import TYPE_CHECKING, ClassVar, Final, Literal, Protocol, override
 
 import asyncio
 import logging
@@ -77,6 +86,8 @@ if TYPE_CHECKING:
 __all__ = [
     "RESERVED",
     "ChildSpec",
+    "MessageKind",
+    "Relay",
     "Team",
 ]
 
@@ -112,6 +123,34 @@ class ChildSpec:
     model: a resume starts there, and what the journal stood wins. ``""`` since."""
 
 
+type MessageKind = Literal["ask", "reply", "tell"]
+"""How a message was booked: a request, owed a reply; a reply, which settles one;
+or news, owed nothing."""
+
+
+class Relay(Protocol):
+    """Carries a message to an outside member, on another machine."""
+
+    def send(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        content: str,
+        kind: MessageKind,
+    ) -> None:
+        """Take ``content`` to ``recipient``, booked here as ``kind``.
+
+        Args:
+          sender: Who sends.
+          recipient: The outside member.
+          content: What it says.
+          kind: How the sending team booked it.
+
+        """
+        ...
+
+
 class Team(Mapping[str, "Agent"], AsyncResource):
     """The live agents of one session, by label.
 
@@ -125,7 +164,12 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         self.to_user: Callable[[str, str], None] | None = None
         """Shows the user what an agent sent ``user``: its label, then the text."""
 
+        self.stand_in: Callable[[], Agent] | None = None
+        """Makes this machine's own agent, unopened, whose model, tools and prompt a
+        child of an outside member takes after; ``None`` spawns no such child."""
+
         self._members: dict[str, _Member] = {}
+        self._outside: dict[str, Relay] = {}
         # Debtor, then creditor, then the first words of what was asked.
         self._owed: dict[str, dict[str, str]] = {}
         # Who watches whom: the watched agent, then its watcher.
@@ -156,6 +200,60 @@ class Team(Mapping[str, "Agent"], AsyncResource):
     def __len__(self) -> int:
         return len(self._members)
 
+    @property
+    def outside(self) -> list[str]:
+        """Return the outside members' labels, in the order they were reached."""
+        return list(self._outside)
+
+    def reach(self, label: str, *, relay: Relay) -> None:
+        """Make ``label``, an agent on another machine, an outside member.
+
+        Args:
+          label: Its label there; reaching it again changes only its relay.
+          relay: What carries a message to it.
+
+        Raises:
+          ValueError: ``label`` is a member's, or names a relation.
+
+        """
+        if label in RESERVED or label in self._members:
+            raise ValueError(f"{label!r} is a member's label, or names a relation.")
+        self._outside[label] = relay
+
+    def unreach(self, label: str) -> None:
+        """Forget the outside member ``label``, and what it owed or was owed."""
+        if self._outside.pop(label, None) is not None:
+            self._forget(label)
+
+    def receive(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        content: str,
+        kind: MessageKind,
+    ) -> None:
+        """Take a message an outside member sent ``recipient``, booked as it was sent.
+
+        Args:
+          sender: The outside member.
+          recipient: A member.
+          content: What it says.
+          kind: How the sending team booked it: a request ``recipient`` now owes
+            a reply; a reply, which settles what ``sender`` owed it; or news.
+
+        Raises:
+          ValueError: ``recipient`` is no member.
+
+        """
+        if recipient not in self._members:
+            raise ValueError(f"Unknown agent {recipient!r}. Active: {sorted(self)}")
+        if kind == "ask":
+            self._request(recipient, creditor=sender, content=content)
+        elif kind == "reply":
+            self._owed.get(sender, {}).pop(recipient, None)
+        self._deliver(sender, recipient=recipient, content=content, kind=kind)
+
     def join(
         self,
         agent: Agent,
@@ -171,7 +269,8 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         Args:
           agent: The agent.
           label: What to call it; ``""`` is ``<parent>_<n>``, or ``Agent`` for a root.
-          parent: Who spawned it; ``None`` for the root.
+          parent: Who spawned it, a member or an outside member; ``None`` for the
+            root.
           max_depth: How many generations may follow it; ``None`` inherits the
             parent's cap.
           closing: For a persistent child, what closes it and its journal when it
@@ -185,18 +284,18 @@ class Team(Mapping[str, "Agent"], AsyncResource):
 
         Raises:
           ValueError: ``label`` is taken, ``parent`` is no member, or a ``spec``
-            is given for no persistent child.
+            is given for no persistent child of a member.
 
         """
-        if parent is not None and parent not in self._members:
+        if parent is not None and not self._reachable(parent):
             raise ValueError(f"No agent {parent!r} to spawn from.")
         if label in RESERVED:
             raise ValueError(f"{label!r} names a relation; pick another label.")
-        if label in self._members:
+        if self._reachable(label):
             raise ValueError(f"An agent is already labelled {label!r}.")
-        if spec is not None and (parent is None or closing is None):
+        if spec is not None and (parent not in self._members or closing is None):
             raise ValueError("Only a persistent child has a spec to stand.")
-        above = None if parent is None else self._members[parent].generations
+        above = self._members[parent].generations if parent in self._members else None
         caps = [
             c
             for c in (None if above is None else above - 1, max_depth)
@@ -284,15 +383,19 @@ class Team(Mapping[str, "Agent"], AsyncResource):
           parent: Who spawns; ``None`` for a root.
 
         Returns:
-          label: ``<parent>_<n>`` for the least free ``n``, or ``Agent``.
+          label: ``<parent>_<n>`` for the least free ``n``, or ``Agent``; an
+            outside parent is named by its label there, without its machine.
 
         """
         if parent is None:
             return "Agent"
+        base = (
+            (parent.rpartition("@")[0] or parent) if parent in self._outside else parent
+        )
         n = 0
-        while f"{parent}_{n}" in self._members:
+        while self._reachable(f"{base}_{n}"):
             n += 1
-        return f"{parent}_{n}"
+        return f"{base}_{n}"
 
     def leave(self, label: str) -> Agent:
         """Remove ``label`` from the team; return its agent, still open.
@@ -356,7 +459,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             for child in self.children(by):
                 below.extend([child, *self.resolve("descendants", by=child)])
             return below
-        return [name] if name in self._members else []
+        return [name] if self._reachable(name) else []
 
     def watch(self, watcher: str, watched: str, *, journal: str | None = None) -> None:
         """Make ``watcher`` the ``parent``, by name, of the root ``watched``.
@@ -395,17 +498,17 @@ class Team(Mapping[str, "Agent"], AsyncResource):
 
         Args:
           sender: Who sends.
-          recipient: A member, or ``user``.
+          recipient: A member, an outside member, or ``user``.
           content: What it says.
 
         Raises:
           ValueError: ``recipient`` is no member, or ``user`` when no one shows it.
 
         """
-        self.book(sender, recipient=recipient, content=content)
-        self._deliver(sender, recipient=recipient, content=content)
+        kind = self.book(sender, recipient=recipient, content=content)
+        self._deliver(sender, recipient=recipient, content=content, kind=kind)
 
-    def book(self, sender: str, recipient: str, content: str) -> None:
+    def book(self, sender: str, recipient: str, content: str) -> MessageKind:
         """Keep the books for ``content``, sent but not yet delivered.
 
         A message to one the sender owes a reply is that reply, and settles it;
@@ -414,8 +517,11 @@ class Team(Mapping[str, "Agent"], AsyncResource):
 
         Args:
           sender: Who sends.
-          recipient: A member, or ``user``.
+          recipient: A member, an outside member, or ``user``.
           content: What it says.
+
+        Returns:
+          kind: How it was booked; ``tell`` for one to ``user`` or oneself.
 
         Raises:
           ValueError: ``recipient`` is no member, or ``user`` when no one shows it.
@@ -426,29 +532,38 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         if recipient in owed:
             del owed[recipient]
             self._book(sender)
-        elif recipient not in ("user", sender):
-            self._owed.setdefault(recipient, {})[sender] = _head(content)
-            self._book(recipient)
+            return "reply"
+        if recipient in ("user", sender):
+            return "tell"
+        self._request(recipient, creditor=sender, content=content)
+        return "ask"
 
-    def deliver(self, sender: str, recipient: str, content: str) -> None:
+    def deliver(
+        self,
+        sender: str,
+        recipient: str,
+        content: str,
+        *,
+        kind: MessageKind,
+    ) -> None:
         """Put ``content``, already booked, before ``recipient``.
 
         Args:
           sender: Who sent it.
-          recipient: A member, or ``user``.
+          recipient: A member, an outside member, or ``user``.
           content: What it says.
+          kind: How ``book`` booked it.
 
         Raises:
           ValueError: ``recipient`` is no member, or ``user`` when no one shows it.
 
         """
         self._check(recipient)
-        self._deliver(sender, recipient=recipient, content=content)
+        self._deliver(sender, recipient=recipient, content=content, kind=kind)
 
     def ask(self, debtor: str, content: str) -> None:
         """Note that the user asked ``debtor`` ``content``: it owes ``user`` a reply."""
-        self._owed.setdefault(debtor, {})["user"] = _head(content)
-        self._book(debtor)
+        self._request(debtor, creditor="user", content=content)
 
     def owes(self, label: str) -> dict[str, str]:
         """Return whom ``label`` owes a reply, each with the first words asked."""
@@ -460,18 +575,18 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         if owed:
             self._book(label)
         for creditor in owed:
-            self._deliver(label, creditor, content)
+            self._deliver(label, creditor, content, kind="reply")
 
     def tell(self, sender: str, recipient: str, content: str) -> None:
         """Deliver ``content`` as news: no request, so no one owes a reply.
 
         Args:
           sender: Who it is about.
-          recipient: A member.
+          recipient: A member, or an outside member.
           content: What it says.
 
         """
-        self._deliver(sender, recipient, content)
+        self._deliver(sender, recipient, content, kind="tell")
 
     def wake(self, addressed: str) -> None:
         """Nudge each agent still owing, the first time the user says anything.
@@ -484,11 +599,25 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             return
         self._woken = True
         for label, owed in list(self._owed.items()):
-            if owed and label != addressed:
+            if owed and label != addressed and label in self._members:
                 self._members[label].dun.nudge(owed)
 
     def can_spawn(self, label: str) -> bool:
-        """Return whether ``label`` may spawn a child under its depth cap."""
+        """Return whether ``label`` may spawn a child under its depth cap.
+
+        Args:
+          label: A member, or an outside member, whose own team's cap allowed
+            the call.
+
+        Returns:
+          allowed: Whether a child may join under it.
+
+        Raises:
+          KeyError: ``label`` is neither a member nor an outside member.
+
+        """
+        if label in self._outside:
+            return True
         generations = self._members[label].generations
         return generations is None or generations > 0
 
@@ -561,7 +690,8 @@ class Team(Mapping[str, "Agent"], AsyncResource):
                 self._members[watched].agent.session.stand(_watch_key(label), None)
         member = self._members.pop(label)
         self._forget(label)
-        if withdraw and member.closing is not None and member.parent is not None:
+        # An outside parent's journal, on its own machine, stands nothing for it.
+        if withdraw and member.closing is not None and member.parent in self._members:
             self._members[member.parent].agent.session.stand(_key(label), None)
         if member.closing is not None:
             await member.closing.aclose()
@@ -578,9 +708,16 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         self.choices.pop(label, None)
         self.awaited.discard(label)
 
+    def _request(self, debtor: str, *, creditor: str, content: str) -> None:
+        """Book that ``debtor`` owes ``creditor`` a reply to ``content``."""
+        self._owed.setdefault(debtor, {})[creditor] = _head(content)
+        self._book(debtor)
+
+    # An outside member's debts stand in its own team's journals.
     def _book(self, debtor: str) -> None:
         """Stand what ``debtor`` owes in its journal, so a resume still owes it."""
-        self._stand(debtor, "owed", self._owed.get(debtor) or {})
+        if debtor in self._members:
+            self._stand(debtor, "owed", self._owed.get(debtor) or {})
 
     def _stand(self, label: str, kind: str, held: dict[str, str]) -> None:
         """Stand ``held`` in ``label``'s journal under ``kind``; nothing held withdraws it."""
@@ -589,18 +726,38 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             UncategorizedRecord(kind=kind, payload=dict(held)) if held else None,
         )
 
+    def _reachable(self, label: str) -> bool:
+        """Return whether ``label`` is a member, or an outside member."""
+        return label in self._members or label in self._outside
+
     def _check(self, recipient: str) -> None:
         """Raise ``ValueError`` unless ``recipient`` can be reached."""
-        if recipient != "user" and recipient not in self._members:
-            raise ValueError(f"Unknown agent {recipient!r}. Active: {sorted(self)}")
+        if recipient != "user" and not self._reachable(recipient):
+            active = sorted([*self, *self._outside])
+            raise ValueError(f"Unknown agent {recipient!r}. Active: {active}")
         if recipient == "user" and self.to_user is None:
             raise ValueError("No user is watching; there is no one to tell.")
 
-    def _deliver(self, sender: str, recipient: str, content: str) -> None:
-        """Put ``content`` before ``recipient``: the user, or a member's inbox."""
+    def _deliver(
+        self,
+        sender: str,
+        recipient: str,
+        content: str,
+        *,
+        kind: MessageKind,
+    ) -> None:
+        """Put ``content`` before ``recipient``: the user, a member's inbox, or a relay."""
         if recipient == "user":
             if self.to_user is not None:
                 self.to_user(sender, content)
+            return
+        if recipient in self._outside:
+            self._outside[recipient].send(
+                sender=sender,
+                recipient=recipient,
+                content=content,
+                kind=kind,
+            )
             return
         # Only members are owed or sent to: one that leaves is forgotten as it goes.
         self._members[recipient].agent.runtime.push(

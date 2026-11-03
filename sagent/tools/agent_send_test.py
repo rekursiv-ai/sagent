@@ -15,7 +15,7 @@ import re
 import pytest
 
 from sagent.agent.agent import Agent
-from sagent.agent.team import Team
+from sagent.agent.team import MessageKind, Team
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
 from sagent.session.types import AgentToAgentMessage
@@ -91,6 +91,64 @@ def test_the_reminder_names_the_caller_and_who_it_can_reach(tmp_path: Path) -> N
     assert AgentSend(team=_team(tmp_path)).reminder(_context(tmp_path)) == (
         "Your agent label is 'Agent'."
     )
+
+
+@dataclass(slots=True, kw_only=True)
+class _Relayed:
+    """A relay to another machine that keeps what it was given."""
+
+    sent: list[tuple[str, str, str, MessageKind]] = field(
+        default_factory=list[tuple[str, str, str, "MessageKind"]],
+    )
+
+    def send(
+        self,
+        *,
+        sender: str,
+        recipient: str,
+        content: str,
+        kind: MessageKind,
+    ) -> None:
+        self.sent.append((sender, recipient, content, kind))
+
+
+@pytest.mark.asyncio
+async def test_an_agent_on_another_machine_is_listed_and_sent_to(
+    tmp_path: Path,
+) -> None:
+    team, relay = _team(tmp_path, "bob"), _Relayed()
+    team.reach("worker", relay=relay)
+    send = AgentSend(team=team)
+    assert send.reminder(_context(tmp_path)) == (
+        "Your agent label is 'Agent'. Active agents you can message: bob, worker."
+    )
+    said = await send.call(_context(tmp_path), {"to": "worker", "content": "go"})
+    assert said.text() == "Delivered to worker."
+    assert relay.sent == [("Agent", "worker", "go", "ask")]
+
+
+@pytest.mark.asyncio
+async def test_a_delayed_reply_crosses_to_another_machine_as_a_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled: list[tuple[Callable[..., object], tuple[object, ...]]] = []
+
+    def later(delay: float, callback: Callable[..., object], *args: object) -> None:
+        del delay
+        scheduled.append((callback, args))
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_later", later)
+    team, relay = _team(tmp_path), _Relayed()
+    team.reach("worker", relay=relay)
+    team.receive(sender="worker", recipient="Agent", content="ok?", kind="ask")
+    _ = await AgentSend(team=team).call(
+        _context(tmp_path),
+        {"to": "worker", "content": "yes", "delay": 1},
+    )
+    ((deliver, args),) = scheduled
+    deliver(*args)
+    assert relay.sent == [("Agent", "worker", "[delayed 1s] yes", "reply")]
 
 
 def test_a_child_is_told_its_parent_and_whom_it_owes(tmp_path: Path) -> None:
@@ -438,7 +496,7 @@ def test_a_message_for_one_who_left_is_logged_with_both_names(
 ) -> None:
     team = _team(tmp_path)
     with caplog.at_level(logging.WARNING, logger=agent_send.__name__):
-        AgentSend(team=team)._deliver("gone", "Agent", "hi")
+        AgentSend(team=team)._deliver("gone", "Agent", "hi", "ask")
     assert caplog.messages == ["message from Agent to 'gone', which has left"]
 
 

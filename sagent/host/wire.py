@@ -7,15 +7,25 @@ one, its attachments' bytes included.
 ::
 
     client                    server                    host (one per session)
+                                                   ◀──  Tools (specs, on start)
       Hello    ──────────▶      checks token, version
-               ◀──────────    Welcome | Refused
+               ◀──────────    Welcome (digests) | Refused
+      Describe ──────────▶      answers from the specs
+               ◀──────────    Described
       Call     ──────────▶      ────────────────▶         runs the tool
                ◀──────────      ◀────────────────       Result
       Cancel   ──────────▶      ────────────────▶
       Ack      ──────────▶      forgets the result
-               ◀──────────    Tools                ◀──  Tools (on start)
+               ◀──────────    ToolsChanged (digests, as grants change)
+      Note     ──────────▶      ────────────────▶         to a hosted agent
+               ◀──────────      ◀────────────────       Note (to a client agent)
+               ◀──────────      ◀────────────────       Peers (its agents' labels)
       Ping     ◀─────────▶    Ping                      (each way, to stay alive)
       Bye      ──────────▶      ends the session
+
+A client is sent a tool's digest, never its schema; it asks ``Describe`` only
+for a tool whose digest matches none of its own. A ``Note`` is acked as a
+``Result`` is, and kept until then by whoever sent it, across a drop.
 
 Typical usage example:
 
@@ -30,10 +40,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
 import asyncio
+import hashlib
 import json
 
 from treekle import PlainTree, json_loads, mutable
 
+from sagent.agent.team import MessageKind
 from sagent.session.types import (
     AnyToolResult,
     record_classes,
@@ -55,13 +67,18 @@ __all__ = [
     "Bye",
     "Call",
     "Cancel",
+    "Describe",
+    "Described",
     "Hello",
     "Message",
+    "Note",
+    "Peers",
     "Ping",
     "Refused",
     "Result",
     "ToolSpec",
     "Tools",
+    "ToolsChanged",
     "Welcome",
     "encoded",
     "ping",
@@ -94,11 +111,15 @@ class ToolSpec:
         """Return how ``tool`` is shown to the model."""
         return cls(description=tool.description, schema=tool.schema)
 
-    def same(self, other: ToolSpec) -> bool:
-        """Return whether both show the model one tool, however each was read."""
-        return self.description == other.description and mutable(
-            self.schema,
-        ) == mutable(other.schema)
+    @property
+    def digest(self) -> str:
+        """Return the hex SHA-256 of the spec, however its schema was read.
+
+        Two machines whose digests of a tool match show the model one tool, so
+        a client sends no schema it already has.
+        """
+        shown = {"description": self.description, "schema": mutable(self.schema)}
+        return hashlib.sha256(json.dumps(shown, sort_keys=True).encode()).hexdigest()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -128,10 +149,10 @@ class Welcome:
     """Whether the session was already running."""
 
     calls: tuple[str, ...]
-    """The calls it still holds: running, or done and not acked."""
+    """What it still holds: calls running, and results and notes not acked."""
 
-    tools: Mapping[str, ToolSpec]
-    """The tools granted, by name."""
+    tools: Mapping[str, str]
+    """The tools granted: each name's ``ToolSpec.digest``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -155,6 +176,32 @@ class Call:
 
     tool: str
     arguments: Mapping[str, PlainTree]
+    address_book: tuple[str, ...] = ()
+    """The labels of the calling agent's team, its own first: whom an agent spawned
+    there may message."""
+
+    granted: tuple[str, ...] = ()
+    """The tools the client is granted, which the server sets: all an agent spawned
+    there may have."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Note:
+    """A message between agents of the two machines; acked by ``Ack`` ``id``."""
+
+    id: str
+    sender: str
+    recipient: str
+    content: str
+    kind: MessageKind
+    """How the sending team booked it, as the receiving team books it too."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Peers:
+    """The agents the host's team holds now, by label: whom a client may message."""
+
+    labels: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -191,16 +238,69 @@ class Ping:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Tools:
-    """The tools served, by name: a host's on starting, a client's when they change."""
+    """The tools a host serves, by name: its first line to the server."""
 
     tools: Mapping[str, ToolSpec]
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolsChanged:
+    """The tools a client is granted now: each name's ``ToolSpec.digest``."""
+
+    tools: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Describe:
+    """Send the spec of ``tool``, whose digest the client does not know."""
+
+    id: str
+    tool: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Described:
+    """The answer to ``Describe`` ``id``: the spec; ``None`` for a tool not granted."""
+
+    id: str
+    spec: ToolSpec | None
+
+
 type Message = (
-    Hello | Welcome | Refused | Call | Result | Ack | Cancel | Bye | Ping | Tools
+    Hello
+    | Welcome
+    | Refused
+    | Call
+    | Result
+    | Ack
+    | Cancel
+    | Bye
+    | Ping
+    | Tools
+    | ToolsChanged
+    | Describe
+    | Described
+    | Note
+    | Peers
 )
 
-_KINDS: Final = (Hello, Welcome, Refused, Call, Result, Ack, Cancel, Bye, Ping, Tools)
+_KINDS: Final = (
+    Hello,
+    Welcome,
+    Refused,
+    Call,
+    Result,
+    Ack,
+    Cancel,
+    Bye,
+    Ping,
+    Tools,
+    ToolsChanged,
+    Describe,
+    Described,
+    Note,
+    Peers,
+)
 
 
 async def ping(writer: asyncio.StreamWriter, *, every_sec: float) -> None:
