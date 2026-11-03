@@ -85,6 +85,7 @@ __all__ = [
     "RuntimeSession",
     "default_system_prompt",
     "spent",
+    "spent_by_model",
 ]
 
 
@@ -1026,13 +1027,45 @@ def spent(records: Iterable[SessionRecord]) -> float:
       usd: What the agent had spent by the last record.
 
     """
+    return _tallied(records)[0]
+
+
+def spent_by_model(records: Iterable[SessionRecord]) -> dict[str, float]:
+    """Return what an agent's journal says it spent on each model, from its start.
+
+    Each ``TokenUsage`` counts toward the model the last ``TurnContext`` stated. A
+    ``ContextClear`` states what was spent before it: what it states past the sum so
+    far counts toward the model then in force, so read from the start the sums add up
+    to :func:`spent`'s total.
+
+    Args:
+      records: The journal's records, oldest first, from its start.
+
+    Returns:
+      usd: Per model, as its ``TurnContext`` names it (``sol-6.1+fullcontext``), what
+        was spent; ``""`` for spend before any model was stated.
+
+    """
+    return _tallied(records)[1]
+
+
+def _tallied(records: Iterable[SessionRecord]) -> tuple[float, dict[str, float]]:
+    """Return what a journal says was spent, as :func:`spent` reads it, and per model."""
     usd = 0.0
+    by_model: dict[str, float] = {}
+    model = ""
     for record in records:
-        if isinstance(record, ContextClear):
+        if isinstance(record, TurnContext) and record.model is not None:
+            model = record.model
+        elif isinstance(record, ContextClear):
             usd = from_plain(record.extra.get("spend_usd"), float, default=0.0)
+            if (missing := usd - sum(by_model.values())) > 0:
+                by_model[model] = by_model.get(model, 0.0) + missing
         elif isinstance(record, TokenUsage):
-            usd += from_plain(record.info.get("spend_usd"), float, default=0.0)
-    return usd
+            turn = from_plain(record.info.get("spend_usd"), float, default=0.0)
+            usd += turn
+            by_model[model] = by_model.get(model, 0.0) + turn
+    return usd, by_model
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

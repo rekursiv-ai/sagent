@@ -1333,15 +1333,27 @@ async def test_a_short_throttle_is_waited_as_ever(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_every_login_spent_waits_for_the_earliest_reset_and_takes_it(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     logins = _saved("personal")
     accounts = _Accounts()
     accounts.script("default", _spent("weekly", wait_sec=86_400.0))
     accounts.script("personal", reply("from personal"))
     _, agent, seen = await _session(accounts, tmp_path, persistent_retry=True)
-    # A real wait, kept short and taken after the setup: the call is held by the
-    # loop's own timer.
-    soon = time.time() + 0.02
+    # The wall clock stands still until the call is suspended, then jumps to the
+    # reset it waits for: ``personal`` reads as spent on the move off ``default``,
+    # and as reset on the call after, however long either takes. The loop's own
+    # timer holds the call the 10 ms between.
+    now = [time.time()]
+    soon = now[0] + 0.01
+    monkeypatch.setattr(time, "time", lambda: now[0])
+    agent.runtime.observers.append(
+        lambda event: (
+            now.__setitem__(0, event.until)
+            if isinstance(event, types.ModelCallSuspended)
+            else None
+        ),
+    )
     await logins.spend(
         "personal",
         Spent(window="5-hour", model="scripted", until=soon),
@@ -1352,7 +1364,7 @@ async def test_every_login_spent_waits_for_the_earliest_reset_and_takes_it(
         await agent.aclose()
     assert accounts.served == ["default", "personal"]
     (suspended,) = [e for e in seen if isinstance(e, types.ModelCallSuspended)]
-    assert suspended.until == pytest.approx(soon, abs=0.005)
+    assert suspended.until == soon
     assert _switches(seen) == [("default", "personal")]
 
 

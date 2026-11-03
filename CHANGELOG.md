@@ -34,6 +34,11 @@ All notable sagent changes are documented here. This project follows
   process-wide session.
 - `ProviderSharedResources` is `ProviderResources`.
 
+### Added
+
+- `sagent.agent.agent.spent_by_model` reads what a journal says its agent spent
+  on each model, as each `TurnContext` names it; its sums add up to `spent`'s.
+
 ## 0.2.1 - 2026-10-30
 
 ### Added
