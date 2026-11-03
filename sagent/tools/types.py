@@ -59,6 +59,7 @@ from typing import (
 
 import difflib
 import hashlib
+import uuid
 
 from treekle import PlainTree
 from wesearch.fetch import FetchSession
@@ -281,6 +282,10 @@ class FileTracker:
     """
 
     _seen: dict[Path, _Snapshot] = field(default_factory=dict[Path, "_Snapshot"])
+    window: str = field(default_factory=lambda: uuid.uuid4().hex)
+    """Which context window knows these files; ``forget`` starts another. A tool
+    that keeps the model's knowledge elsewhere, as on another machine, keys it by
+    this, so a new window, or a new agent, starts with none."""
 
     def __contains__(self, path: object) -> bool:
         """Return whether the model has seen ``path``."""
@@ -342,6 +347,7 @@ class FileTracker:
     def forget(self) -> None:
         """Forget every file; call after compacting, pruning, or a server's clearing."""
         self._seen.clear()
+        self.window = uuid.uuid4().hex
 
     def changed(self, path: Path) -> bool:
         """Return whether ``path`` on disk differs from what the model last saw.

@@ -17,20 +17,23 @@ Typical usage example:
   parser = ActionParser(("mcp", "remove"), description="Remove an MCP server.")
   parser.add_argument("name")
   parsed = parser.read(args)              # ``None`` when help was asked for.
+  remove = parser.setting(run, name=("remove",), help_short="remove an MCP server")
 """
 
 from __future__ import annotations
 
+from functools import partial
 from typing import TYPE_CHECKING, NoReturn, override
 
 import argparse
 import shlex
 
 from sagent.settings.exceptions import HelpRequestedError, SettingError
+from sagent.settings.types import Setting
 
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Sequence
 
     from _typeshed import SupportsWrite
 
@@ -60,6 +63,43 @@ class ActionParser(argparse.ArgumentParser):
             formatter_class=argparse.RawDescriptionHelpFormatter,
             allow_abbrev=False,
         )
+
+    def setting(
+        self,
+        run: Callable[[argparse.Namespace], Awaitable[str]],
+        *,
+        name: tuple[str, ...],
+        help_short: str,
+    ) -> Setting:
+        """Return the action this parser reads for: ``run`` on what it parsed.
+
+        Args:
+          run: The action's work, given what was parsed; returns what to print.
+          name: Its name where its owner is mounted, such as ``("add",)``.
+          help_short: One line saying what it does.
+
+        Returns:
+          setting: Reached at the prompt and the shell; ``--help`` returns this
+            parser's help instead of running.
+
+        """
+        return Setting(
+            name=name,
+            help_short=help_short,
+            help_long=self.format_help(),
+            usage=self.format_usage().partition(self.prog)[2].strip(),
+            apply=partial(self._apply, run),
+            cli=True,
+            flags=self.options,
+        )
+
+    async def _apply(
+        self,
+        run: Callable[[argparse.Namespace], Awaitable[str]],
+        args: str,
+    ) -> str:
+        parsed = self.read(args)
+        return self.format_help() if parsed is None else await run(parsed)
 
     @property
     def options(self) -> frozenset[str]:

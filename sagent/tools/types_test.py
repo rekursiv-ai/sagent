@@ -351,6 +351,14 @@ def test_recent_orders_files_by_last_sight_and_forget_clears(tmp_path: Path) -> 
     assert a not in files
 
 
+def test_forgetting_starts_a_window_no_other_tracker_shares() -> None:
+    files, other = FileTracker(), FileTracker()
+    assert files.window != other.window
+    before = files.window
+    files.forget()
+    assert files.window not in (before, other.window)
+
+
 def test_changes_yields_a_diff_and_sees_the_file_anew(tmp_path: Path) -> None:
     f = tmp_path / "a.txt"
     f.write_text("alpha\n")

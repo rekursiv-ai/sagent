@@ -3346,6 +3346,7 @@ source = { editable = "." }
 dependencies = [
     { name = "bashlex" },
     { name = "cachetools" },
+    { name = "cryptography" },
     { name = "httpx2" },
     { name = "markdown-it-py" },
     { name = "mcp" },
@@ -3446,6 +3447,7 @@ requires-dist = [
     { name = "bashlex", specifier = ">=0.18" },
     { name = "cachetools", specifier = ">=7.2.7" },
     { name = "compressed-tensors", marker = "extra == 'selfhosted'", specifier = ">=0.20.1" },
+    { name = "cryptography", specifier = ">=50.0.2" },
     { name = "httpx2", specifier = ">=2.16.0" },
     { name = "kernels", marker = "extra == 'selfhosted'", specifier = ">=0.18.0" },
     { name = "markdown-it-py", specifier = ">=4.2" },

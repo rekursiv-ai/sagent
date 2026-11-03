@@ -95,30 +95,12 @@ from sagent.settings.exceptions import SettingError
 from sagent.settings.flags import flags
 from sagent.settings.harvest import harvest
 from sagent.settings.match import match
-from sagent.tools.agent_self import AgentSelf
-from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
-from sagent.tools.background_task import BackgroundTask
-from sagent.tools.bash import Bash
-from sagent.tools.edit import Edit
-from sagent.tools.glob_tool import Glob
-from sagent.tools.grep import Grep
-from sagent.tools.list import List
+from sagent.tools.builtin import builders
 from sagent.tools.mcp import McpServer, McpSession, servers
 from sagent.tools.mcp_settings import add_config_arguments
-from sagent.tools.memory import Memory
-from sagent.tools.paper_author import PaperAuthor
-from sagent.tools.paper_details import PaperDetails
-from sagent.tools.paper_fetch import PaperFetch
-from sagent.tools.paper_search import PaperSearch
-from sagent.tools.play_audio import PlayAudio
-from sagent.tools.read import Read
-from sagent.tools.session import Session
-from sagent.tools.skill import Skill
+from sagent.tools.remote import RemoteSession, saved
 from sagent.tools.types import ToolContext
-from sagent.tools.web_fetch import WebFetch
-from sagent.tools.web_search import WebSearch
-from sagent.tools.write import Write
 from sagent.tui.console import ConsolePrinter, Screen
 from sagent.tui.prompt import (
     OPEN_TREE,
@@ -745,12 +727,13 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
                 servers(cwd, flags=flags.mcp_config, strict=flags.strict_mcp_config),
                 tools=flags.tools,
             )
+            remote = RemoteSession(saved())
             # Checked before the journal is made, so a mistyped name leaves no
             # session behind; a server's own tools are known only once it connects.
             _chosen_tools(
                 flags,
                 known=[
-                    *_builders(cwd=cwd, team=team),
+                    *builders(cwd=cwd, team=team, remote=remote),
                     *(n for n in flags.tools or () if any(s.names(n) for s in wanted)),
                 ],
             )
@@ -763,7 +746,8 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
         _logging(flags.log_level, path=path, interactive=interactive)
         try:
             mcp = await servers_stack.enter_async_context(McpSession(wanted))
-            tools = _tools(flags, cwd=cwd, team=team, mcp=mcp.tools())
+            _ = await servers_stack.enter_async_context(remote)
+            tools = _tools(flags, cwd=cwd, team=team, remote=remote, mcp=mcp.tools())
         except ValueError as e:
             sys.stderr.write(f"Error: {error_text(e)}\n")
             return 1
@@ -1106,49 +1090,15 @@ def _tools(
     *,
     cwd: Path,
     team: Team,
+    remote: RemoteSession,
     mcp: Sequence[Tool] = (),
 ) -> list[Tool]:
     """Return the tools ``--tools`` names, MCP servers' among them."""
-    builders = _builders(cwd=cwd, team=team)
+    built = builders(cwd=cwd, team=team, remote=remote)
     served = {t.name: t for t in mcp}
-    names = _chosen_tools(flags, known=[*builders, *served])
-    tools = {
-        name: served[name] if name in served else builders[name]() for name in names
-    }
+    names = _chosen_tools(flags, known=[*built, *served])
+    tools = {name: served[name] if name in served else built[name]() for name in names}
     return list(tools.values())
-
-
-def _builders(
-    *,
-    cwd: Path,
-    team: Team,
-) -> dict[str, Callable[[], Tool]]:
-    """Return how to build each built-in tool, by its name, in their default order."""
-    read, edit, grep, glob, ls = Read(), Edit(), Grep(), Glob(), List()
-    fetch = WebFetch()
-    return {
-        "Bash": lambda: Bash(peers=(read, edit, grep, glob, ls, fetch)),
-        "Read": lambda: read,
-        "Write": Write,
-        "Edit": lambda: edit,
-        "Grep": lambda: grep,
-        "Glob": lambda: glob,
-        "List": lambda: ls,
-        "WebSearch": WebSearch,
-        "WebFetch": lambda: fetch,
-        "PaperSearch": PaperSearch,
-        "PaperDetails": PaperDetails,
-        "PaperAuthor": PaperAuthor,
-        "PaperFetch": PaperFetch,
-        "Memory": lambda: Memory(directory=project_dir(cwd) / "memory"),
-        "PlayAudio": PlayAudio,
-        "AgentSpawn": lambda: AgentSpawn(team=team),
-        "AgentSend": lambda: AgentSend(team=team),
-        "AgentSelf": lambda: AgentSelf(team=team),
-        "Session": lambda: Session(team=team),
-        "Skill": Skill,
-        "BackgroundTask": BackgroundTask,
-    }
 
 
 def _chosen_tools(flags: Flags, *, known: Sequence[str]) -> list[str]:

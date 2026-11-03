@@ -100,6 +100,7 @@ from sagent.tools.paper_details import PaperDetails
 from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.paper_search import PaperSearch
 from sagent.tools.read import Read
+from sagent.tools.remote import RemoteSession, RemoteTool
 from sagent.tools.session import Session
 from sagent.tools.testing import SHOUT_SERVER
 from sagent.tools.types import ToolContext
@@ -1597,6 +1598,14 @@ def test_every_shell_command_runs_as_its_prompt_command_does(
         "mcp remove",
         "mcp login",
         "mcp logout",
+        "host",
+        "host add",
+        "host edit",
+        "host del",
+        "host list",
+        "remote add",
+        "remote del",
+        "remote list",
     ]
     for action in actions:
         dotted = ".".join(action.name)
@@ -2238,6 +2247,7 @@ def _tools(*argv: str, cwd: Path = Path("/w")) -> dict[str, object]:
         _flags(*argv),
         cwd=cwd,
         team=team,
+        remote=RemoteSession([]),
         mcp=(),
     )
     return {tool.name: tool for tool in tools}
@@ -2265,6 +2275,7 @@ _DEFAULT_TOOLS = [
     "Session",
     "Skill",
     "BackgroundTask",
+    "RemoteTool",
 ]
 
 
@@ -2291,15 +2302,21 @@ def test_an_unknown_tool_lists_the_known_ones() -> None:
         match=r"^unknown tools Nope, Zed; known: Bash, Read, ",
     ) as error:
         _tools("--tools", "Zed", "Read", "Nope")
-    assert str(error.value).endswith(", Skill, BackgroundTask")
+    assert str(error.value).endswith(", Skill, BackgroundTask, RemoteTool")
 
 
 def test_the_team_s_tools_share_the_team_and_bash_knows_its_peers() -> None:
     catalog = _Script().catalog()
     team = Team(catalog=catalog)
+    remote = RemoteSession([])
     tools = {
-        t.name: t for t in main._tools(_flags(), cwd=Path("/w"), team=team, mcp=())
+        t.name: t
+        for t in main._tools(_flags(), cwd=Path("/w"), team=team, remote=remote, mcp=())
     }
+    remote_tool = tools["RemoteTool"]
+    assert isinstance(remote_tool, RemoteTool)
+    assert remote_tool.remote is remote
+    assert "Bash" in remote_tool.local
     web = [WebFetch, WebSearch, PaperSearch, PaperDetails, PaperAuthor, PaperFetch]
     for kind in web:
         assert isinstance(tools[kind.__name__], kind)
@@ -2332,6 +2349,7 @@ def test_mcp_tools_join_the_built_in_ones_and_tools_can_name_them() -> None:
                 _flags(*argv),
                 cwd=Path("/w"),
                 team=team,
+                remote=RemoteSession([]),
                 mcp=extra,
             )
         ]

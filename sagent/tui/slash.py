@@ -14,6 +14,8 @@ several match picks from:
     runtime.*        when a call detaches, how a rate limit waits: RuntimeSettings
     screen.*         whether reasoning shows: ScreenSettings
     mcp.*            the MCP servers, added, removed, signed in: McpSettings
+    host, host.*     this machine's tool server, and its strings: HostSettings
+    remote.*         other machines' tool servers, saved and forgotten: RemoteSettings
 
 A compaction or a clear runs as a task, so the prompt stays live: ``/halt``
 still reaches a long one.
@@ -48,6 +50,9 @@ import os
 import re
 import time
 
+from sagent.host.settings import HostSettings
+from sagent.host.strings import ServeDirs
+from sagent.lib.userdirs import config_dir, state_dir
 from sagent.providers.login import SIGN_IN_ERRORS, headless_wanted
 from sagent.providers.types import HasLogin
 from sagent.runtime import types
@@ -59,6 +64,7 @@ from sagent.settings.match import match
 from sagent.settings.types import Setting
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.mcp_settings import McpSettings
+from sagent.tools.remote_settings import RemoteSettings
 from sagent.tui.prompt import Panes
 from sagent.tui.render import error_text
 from sagent.tui.settings.model import AgentModel
@@ -694,7 +700,16 @@ def owners_without_agent(
       owners: Each owner, after where it is mounted.
 
     """
-    return [(("mcp",), McpSettings(cwd=cwd, show=partial(_say_note, say)))]
+    show = partial(_say_note, say)
+    serve = ServeDirs(
+        secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
+        state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
+    )
+    return [
+        (("mcp",), McpSettings(cwd=cwd, show=show)),
+        (("host",), HostSettings(dirs=serve, show=show)),
+        (("remote",), RemoteSettings()),
+    ]
 
 
 async def apply_setting(

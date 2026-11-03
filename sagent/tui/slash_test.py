@@ -18,6 +18,7 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import Team
+from sagent.host.settings import HostSettings
 from sagent.lib.userdirs import config_dir
 from sagent.model.capability import (
     ModelCapability,
@@ -326,7 +327,7 @@ def test_actions_come_first_then_the_model_the_tools_the_screen_and_mcp() -> Non
     assert names.index("tool.Echo.display.command.lines") < names.index(
         "tool.Plain.display.command.lines",
     )
-    assert names[-8:] == [
+    assert names[-16:] == [
         "screen.thinking",
         "mcp.list",
         "mcp.get",
@@ -335,6 +336,14 @@ def test_actions_come_first_then_the_model_the_tools_the_screen_and_mcp() -> Non
         "mcp.remove",
         "mcp.login",
         "mcp.logout",
+        "host",
+        "host.add",
+        "host.edit",
+        "host.del",
+        "host.list",
+        "remote.add",
+        "remote.del",
+        "remote.list",
     ]
 
 
@@ -486,7 +495,7 @@ def test_the_runtime_and_mcp_settings_act_on_this_agent(tmp_path: Path) -> None:
     assert mcp.cwd == desk.agent.runtime.tool_context.origin
     _ = mcp.show("hi")
     assert desk.printer.said == [("note", "hi")]
-    ((_, alone),) = owners_without_agent(cwd=tmp_path, say=desk.commands.say)
+    (_, alone), *_ = owners_without_agent(cwd=tmp_path, say=desk.commands.say)
     assert isinstance(alone, McpSettings)
     assert alone.cwd == tmp_path
 
@@ -528,11 +537,17 @@ async def test_help_on_one_setting_says_all_it_knows() -> None:
 
 def test_what_an_owner_with_no_agent_shows_is_said_as_a_note(tmp_path: Path) -> None:
     said: list[CommandOutput] = []
-    ((mount, owner),) = owners_without_agent(cwd=tmp_path, say=said.append)
-    assert mount == ("mcp",)
-    assert isinstance(owner, McpSettings)
-    owner.show("Open https://sign.in")
-    assert said == [CommandOutput(text="Open https://sign.in", tone="note")]
+    owners = dict(owners_without_agent(cwd=tmp_path, say=said.append))
+    assert list(owners) == [("mcp",), ("host",), ("remote",)]
+    mcp, host = owners[("mcp",)], owners[("host",)]
+    assert isinstance(mcp, McpSettings)
+    assert isinstance(host, HostSettings)
+    mcp.show("Open https://sign.in")
+    host.show("Serving")
+    assert said == [
+        CommandOutput(text="Open https://sign.in", tone="note"),
+        CommandOutput(text="Serving", tone="note"),
+    ]
 
 
 @pytest.mark.asyncio
