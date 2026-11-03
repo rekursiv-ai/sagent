@@ -8,8 +8,10 @@ banner or summary line is not a cosmetic flaw, it is a silent empty run.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol
+from typing import TYPE_CHECKING, Final, Protocol, cast
+from unittest.mock import Mock
 
+import os
 import re
 import subprocess
 import sys
@@ -25,6 +27,27 @@ if TYPE_CHECKING:
 
 
 _CWD: Final = Path(__file__).resolve().parent
+
+
+@pytest.mark.parametrize("collect", [True, False])
+def test_subprocesses_keep_their_import_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    collect: bool,
+) -> None:
+    run = Mock(return_value=subprocess.CompletedProcess([], 0))
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    if collect:
+        result = _collect(tmp_path, tmp_path / "selected.txt", noisy=False)
+    else:
+        result = _narrowed_pytest(tmp_path)
+
+    assert result.returncode == 0
+    path = cast(dict[str, str], run.call_args.kwargs["env"])["PYTHONPATH"]
+    assert path == os.pathsep.join([str(_CWD), *sys.path])
 
 
 def _collect(
@@ -78,7 +101,7 @@ def _collect(
         cwd=tree,
         env={
             "PATH": "/usr/bin:/bin",
-            "PYTHONPATH": str(_CWD),
+            "PYTHONPATH": os.pathsep.join([str(_CWD), *sys.path]),
             "PYTEST_COLLECT_SELECTED": str(destination),
         },
         text=True,
@@ -203,7 +226,7 @@ def test_one_collection_writes_each_pr_pytest_tier(tmp_path: Path) -> None:
         cwd=tmp_path,
         env={
             "PATH": "/usr/bin:/bin",
-            "PYTHONPATH": str(_CWD),
+            "PYTHONPATH": os.pathsep.join([str(_CWD), *sys.path]),
             "PYTEST_COLLECT_SELECTED_DIR": str(destination),
         },
         text=True,
@@ -261,7 +284,7 @@ def test_no_destination_writes_nothing(tmp_path: Path) -> None:
         env={
             "PATH": "/usr/bin:/bin",
             "PYTHONDONTWRITEBYTECODE": "1",
-            "PYTHONPATH": str(_CWD),
+            "PYTHONPATH": os.pathsep.join([str(_CWD), *sys.path]),
         },
         text=True,
     )
@@ -627,7 +650,10 @@ def _narrowed_pytest(cwd: Path) -> subprocess.CompletedProcess[str]:
         capture_output=True,
         check=False,
         cwd=cwd,
-        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(_CWD)},
+        env={
+            "PATH": "/usr/bin:/bin",
+            "PYTHONPATH": os.pathsep.join([str(_CWD), *sys.path]),
+        },
         text=True,
     )
 

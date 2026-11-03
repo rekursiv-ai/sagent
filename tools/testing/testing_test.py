@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
+from unittest.mock import Mock
 
 import argparse
 import os
@@ -416,13 +417,26 @@ class _Runs(fakes.Recorder):
                 cwd=self.root,
                 env={
                     **os.environ,
-                    "PYTHONPATH": str(Path(testing.__file__).parents[3]),
+                    "PYTHONPATH": os.pathsep.join(sys.path),
                 },
                 capture_output=True,
                 check=False,
             ).returncode,
         )
         return self.returned[-1]
+
+
+def test_a_subprocess_keeps_its_import_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = Mock(return_value=subprocess.CompletedProcess([], 0))
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    assert _Runs(tmp_path, output="").run(["pytest"]) == 0
+    path = cast(dict[str, str], run.call_args.kwargs["env"])["PYTHONPATH"]
+    assert path == os.pathsep.join(sys.path)
 
 
 def _skipped_module(root: Path) -> None:
