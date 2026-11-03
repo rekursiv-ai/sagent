@@ -290,6 +290,16 @@ def test_a_display_shows_as_given_and_hides_the_output_by_default() -> None:
     assert tool(greet, display=shown).display is shown
 
 
+@pytest.mark.asyncio
+async def test_a_function_returning_its_result_unnamed_is_named_as_its_tool() -> None:
+    def found(pattern: str) -> FunctionResult:
+        return FunctionResult(call_id="", content=pattern)
+
+    result = await tool(found, name="Find").call(_context(), {"pattern": "x"})
+
+    assert result == FunctionResult(call_id="", name="Find", content="x")
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Literal, Self, cast, get_args, override
+from typing import Literal, Self, override
 
 import asyncio
 import contextlib
@@ -107,6 +107,7 @@ from sagent.session.types import (
     TurnContext,
     UncategorizedToolResult,
     UserMessage,
+    tool_result_classes,
 )
 from sagent.tools.background_task import BackgroundTask
 from sagent.tools.bash import Bash
@@ -815,10 +816,7 @@ async def test_a_preempted_cohort_never_completes(stop: RuntimeEvent) -> None:
     assert h.count(CohortComplete) == 0
 
 
-_RESULT_KINDS = cast(
-    "tuple[type[AnyToolResult], ...]",
-    get_args(AnyToolResult.__value__),
-)
+_RESULT_KINDS = tool_result_classes()
 
 
 @pytest.mark.asyncio

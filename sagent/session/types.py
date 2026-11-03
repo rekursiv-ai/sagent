@@ -20,7 +20,16 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Final, Literal, Self, cast, overload, override
+from typing import (
+    TYPE_CHECKING,
+    Final,
+    Literal,
+    Self,
+    cast,
+    get_args,
+    overload,
+    override,
+)
 
 from treekle import PlainTree, from_plain, immutable, to_plain
 
@@ -84,6 +93,7 @@ __all__ = [
     "record_classes",
     "stored_plain",
     "stored_record",
+    "tool_result_classes",
 ]
 
 
@@ -833,6 +843,17 @@ type SessionRecord = (
     | UncategorizedRecord
     | IncompleteRecord
 )
+
+
+def tool_result_classes() -> tuple[type[AnyToolResult], ...]:
+    """Return each class :data:`AnyToolResult` names, in its order.
+
+    Returns:
+      classes: Every tool result type, the bare runtime stand-in included.
+
+    """
+    union = AnyToolResult.__value__  # pyright: ignore[reportAny] -- Typeshed types an alias's value as Any.
+    return cast("tuple[type[AnyToolResult], ...]", get_args(union))
 
 
 def record_classes() -> dict[str, type]:

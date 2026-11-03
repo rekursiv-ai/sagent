@@ -6,7 +6,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import Final, cast, get_args
+from typing import Final, cast
 
 import json
 import re
@@ -251,7 +251,7 @@ def test_an_error_no_tool_answered_reads_as_its_content() -> None:
     )
 
 
-def _tool_result_classes() -> set[type]:
+def _tool_result_classes() -> set[type[ToolResult]]:
     """Return ``ToolResult`` and every subclass of it the module defines."""
     members = dict[str, object](vars(types))
     return {
@@ -263,8 +263,8 @@ def _tool_result_classes() -> set[type]:
 
 @pytest.mark.parametrize(
     "kind",
-    sorted(_tool_result_classes(), key=lambda k: k.__name__),
-    ids=lambda k: k.__name__,
+    types.tool_result_classes(),
+    ids=[kind.__name__ for kind in types.tool_result_classes()],
 )
 def test_a_restated_result_keeps_its_type_and_fields_and_drops_attachments(
     kind: type[ToolResult],
@@ -317,9 +317,32 @@ def test_an_old_web_search_reads_as_one_result_of_hits() -> None:
     )
 
 
+# Each tool's result whose only reading is the text it holds.
+_TEXT_RESULTS = tuple(
+    kind
+    for kind in types.tool_result_classes()
+    if any(f.name == "content" and f.default == "" for f in fields(kind))
+)
+
+
+@pytest.mark.parametrize(
+    "kind",
+    _TEXT_RESULTS,
+    ids=[kind.__name__ for kind in _TEXT_RESULTS],
+)
+def test_a_text_result_reads_as_the_text_it_holds(kind: type[ToolResult]) -> None:
+    result = stored_record(
+        {"py/object": kind.__name__, "call_id": "1", "content": "what the model read"},
+    )
+
+    assert isinstance(result, ToolResult)
+    assert type(result) is kind
+    assert result.text() == "what the model read"
+
+
 def test_every_tool_result_type_is_in_the_union_and_stored_by_name() -> None:
     """A type left out of either is one a match or a journal silently misses."""
-    union = set(get_args(types.AnyToolResult.__value__))
+    union = set[type[ToolResult]](types.tool_result_classes())
     classes = record_classes()
 
     assert _tool_result_classes() == union
