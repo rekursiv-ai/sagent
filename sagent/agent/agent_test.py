@@ -25,6 +25,7 @@ from sagent.agent.agent import (
     RuntimeSession,
     default_system_prompt,
     spent,
+    spent_by_model,
 )
 from sagent.agent.agents_md import AgentsMdConfig, Directives, directives
 from sagent.agent.compactor import SummaryCompactor
@@ -1813,6 +1814,47 @@ def test_what_a_journal_says_was_spent(
 ) -> None:
     got = spent(records)
     assert got == usd
+
+
+@pytest.mark.parametrize(
+    ("records", "usd"),
+    [
+        pytest.param((), {}, id="nothing"),
+        pytest.param(
+            (TokenUsage(info={"spend_usd": 0.5}),),
+            {"": 0.5},
+            id="before-any-model",
+        ),
+        pytest.param(
+            (
+                TurnContext(model="sol-6.1"),
+                TokenUsage(info={"spend_usd": 0.5}),
+                TurnContext(cwd="/work"),
+                TokenUsage(info={"spend_usd": 0.25}),
+                TurnContext(model="luna-6.0"),
+                TokenUsage(info={"spend_usd": 1.0}),
+            ),
+            {"sol-6.1": 0.75, "luna-6.0": 1.0},
+            id="each-turn-on-the-model-in-force",
+        ),
+        pytest.param(
+            (
+                TurnContext(model="sol-6.1"),
+                TokenUsage(info={"spend_usd": 0.5}),
+                ContextClear(extra={"spend_usd": 2.0}),
+                TokenUsage(info={"spend_usd": 0.5}),
+            ),
+            {"sol-6.1": 2.5},
+            id="a-compactions-spend-on-the-model-in-force",
+        ),
+    ],
+)
+def test_what_a_journal_says_was_spent_on_each_model(
+    records: tuple[SessionRecord, ...],
+    usd: dict[str, float],
+) -> None:
+    assert spent_by_model(records) == usd
+    assert sum(usd.values()) == spent(records)
 
 
 @pytest.mark.asyncio
