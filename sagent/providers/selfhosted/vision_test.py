@@ -293,10 +293,14 @@ def test_every_tensor_is_made_on_the_models_device() -> None:
 @pytest.mark.gpu_torch_cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_the_encoder_on_cuda_computes_what_it_does_on_the_cpu() -> None:
-    """``meta`` takes a CPU index for a lookup; CUDA does not."""
-    model = _model(depth=1).eval()
+    """``meta`` takes a CPU index for a lookup; CUDA does not.
+
+    In float64: float32 rounds differently on the two devices, by more than the
+    tolerance, and that says nothing about the lookup.
+    """
+    model = _model(depth=1).double().eval()
     grid = torch.tensor([[2, 4, 6]])
-    pixels = _pixels(grid)
+    pixels = _pixels(grid).double()
     with torch.no_grad():
         want = model(pixels, grid)
         got = model.to("cuda")(pixels.to("cuda"), grid)
