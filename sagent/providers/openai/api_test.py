@@ -208,6 +208,69 @@ def test_a_1m_window_takes_input_only_up_to_the_room_its_reply_needs() -> None:
         ), model
 
 
+def _granted(token: str) -> httpx2.Response:
+    answer = json_dumps({"access_token": token, "expires_in": 300}).encode()
+    return httpx2.Response(200, content=answer)
+
+
+@pytest.fixture
+def workload_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY")
+    monkeypatch.setenv("OPENAI_IDENTITY_TOKEN_COMMAND", "/bin/echo aws-jwt")
+    monkeypatch.setenv("OPENAI_IDENTITY_PROVIDER_ID", "idp_x")
+    monkeypatch.setenv("OPENAI_SERVICE_ACCOUNT_ID", "user-x")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("workload_identity")
+async def test_with_no_key_the_identity_command_supplies_a_bearer_token() -> None:
+    server = _Server(replies=[_granted("short-lived")])
+    async with _Served(server) as shared:
+        headers = await OpenAI(resources=shared).credentials()
+
+    assert headers == {"authorization": "Bearer short-lived"}
+    (sent,) = server.requests
+    assert str(sent.url) == "https://auth.openai.com/oauth/token"
+    assert json_loads(sent.content, dict[str, object]) == {
+        "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+        "subject_token_type": "urn:ietf:params:oauth:token-type:jwt",
+        "subject_token": "aws-jwt",
+        "identity_provider_id": "idp_x",
+        "service_account_id": "user-x",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("workload_identity")
+async def test_a_stored_key_wins_over_the_identity_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    server = _Server(replies=[])
+    async with _Served(server) as shared:
+        headers = await OpenAI(resources=shared).credentials()
+
+    assert headers == {"authorization": "Bearer sk-openai"}
+    assert server.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("workload_identity")
+async def test_a_401_renews_a_workload_identity_token() -> None:
+    server = _Server(replies=[_granted("old"), _granted("new")])
+    async with _Served(server) as shared:
+        openai = OpenAI(resources=shared)
+        await openai.credentials()
+
+        assert await openai.reauthenticate()
+        assert await openai.credentials() == {"authorization": "Bearer new"}
+
+
+@pytest.mark.asyncio
+async def test_a_401_cannot_renew_a_stored_key() -> None:
+    assert not await OpenAI().reauthenticate()
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 

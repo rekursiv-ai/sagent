@@ -170,9 +170,9 @@ Sagent supports all subscriptions and API KEYs.
 
 | Provider       | Env variable / Command         |
 | -------------- | ------------------------------ |
-| `Anthropic`    | `ANTHROPIC_API_KEY`            |
+| `Anthropic`    | `ANTHROPIC_API_KEY`, or workload identity |
 | `AnthropicCLI` | `sagent login --provider acli` |
-| `OpenAI`       | `OPENAI_API_KEY`               |
+| `OpenAI`       | `OPENAI_API_KEY`, or workload identity |
 | `Google`       | `GOOGLE_API_KEY`               |
 | `GoogleCLI`    | `sagent login --provider gcli` |
 | `Moonshot`     | `MOONSHOT_API_KEY`             |
