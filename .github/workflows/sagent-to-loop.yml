@@ -277,7 +277,7 @@ jobs:
             --report "$IMPORT_REPORT" \
             --record-on-validation-failure "${{ github.event_name == 'push' }}" \
             --refresh-public-lockfile \
-            --validation-command 'uv sync --frozen --all-groups' \
+            --validation-command 'uv sync --frozen --all-groups --compile-bytecode' \
             --validation-command 'SKIP=superseded-at-pre-push uv run pre-commit run --all-files --hook-stage pre-commit' \
             --validation-command 'uv run pre-commit run --all-files --hook-stage pre-push' \
             --open-pr false
