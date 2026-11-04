@@ -102,25 +102,23 @@ def pytest(context: gate.Context, *, dependents: str | None) -> int:
         selection = Path(temp) / "selected.txt"
         selection.write_text("".join(f"{test}\n" for test in tests))
         files_run = sorted({test.partition("::")[0] for test in tests})
-        # An @argfile: thousands of files or one --cov per file overflow ARG_MAX.
-        argfile = Path(temp) / "pytest.args"
-        argfile.write_text("".join(f"{arg}\n" for arg in [*cov, *files_run]))
-        status = context.run(
-            [
-                "env",
-                f"COVERAGE_FILE={data}",
-                sys.executable,
-                "-m",
-                "pytest",
-                *(["-n", str(count)] if spread else []),
-                "-q",
-                "--tb=short",
-                "-p",
-                listing.__name__,
-                f"--test-files={selection}",
-                f"@{argfile}",
-            ],
-        )
+        with gate.argfile([*cov, *files_run]) as named:
+            status = context.run(
+                [
+                    "env",
+                    f"COVERAGE_FILE={data}",
+                    sys.executable,
+                    "-m",
+                    "pytest",
+                    *(["-n", str(count)] if spread else []),
+                    "-q",
+                    "--tb=short",
+                    "-p",
+                    listing.__name__,
+                    f"--test-files={selection}",
+                    named,
+                ],
+            )
         if status not in {0, 5}:
             return status
         if not cov or not data.is_file():

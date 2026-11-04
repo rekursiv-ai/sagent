@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -119,16 +120,38 @@ def test_run_hands_a_module_the_spool_at_its_worker_count(tmp_path: Path) -> Non
     tools = fakes.Recorder(status=3)
 
     assert _run_gate(tmp_path, tools, ["a b.py", "c.py"], WORKERS_LEAKS="2") == 3
-    assert tools.calls[0][1:] == [
-        "-m",
-        "pkg.leaks",
-        "--strict",
-        "--workers",
-        "2",
-        "--",
-        "a b.py",
-        "c.py",
-    ]
+    *head, named = tools.calls[0][1:]
+    assert head == ["-m", "pkg.leaks", "--strict", "--workers", "2", "--"]
+    assert named.startswith("@")
+    assert tools.argfiles == [["a b.py", "c.py"]]
+    assert not Path(named[1:]).exists()
+
+
+@pytest.mark.cli_python_subprocess
+def test_run_hands_the_spool_past_the_command_line_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--all-files`` once overflowed macOS's 1 MiB ``ARG_MAX`` (Errno 7).
+
+    12,000 paths of 205 bytes are 2.4 MB: past Linux's 2 MiB limit too.
+    """
+    context = replace(fakes.context(tmp_path, fakes.Recorder()), run=gate.run_argv)
+    fakes.touch(tmp_path, ["a.py"])
+    # One file, named 12,000 ways: each path must exist to survive the drain.
+    files = [f"{'./' * 100}a.py" for _ in range(12_000)]
+    spool.append(context.directory, gate="leaks", key=9, paths=files)
+    (context.root / "reader.py").write_text(
+        "import argparse, pathlib\n"
+        "parser = argparse.ArgumentParser(fromfile_prefix_chars='@')\n"
+        "parser.add_argument('--workers')\n"
+        "parser.add_argument('paths', nargs='*')\n"
+        "pathlib.Path('read').write_text(str(len(parser.parse_args().paths)))\n",
+    )
+    monkeypatch.chdir(context.root)
+
+    assert gate.run("leaks", context=context, when=None, command=["reader"]) == 0
+    assert (context.root / "read").read_text() == str(len(files))
 
 
 def test_run_with_nothing_spooled_runs_nothing(tmp_path: Path) -> None:
@@ -226,16 +249,9 @@ def test_the_cli_spools_then_runs_one_module(
     )
 
     assert gate.main() == 4
-    assert processes.calls[-1][1:] == [
-        "-m",
-        "pkg.tool",
-        "--flag",
-        "--workers",
-        "1",
-        "--",
-        "a.py",
-        "b.py",
-    ]
+    *head, named = processes.calls[-1][1:]
+    assert head == ["-m", "pkg.tool", "--flag", "--workers", "1", "--"]
+    assert named.startswith("@")
 
 
 def test_the_cli_runs_a_threaded_tool(
@@ -452,6 +468,10 @@ def test_the_context_runs_real_tools_from_here(
     )
 
 
+@pytest.mark.skipif(
+    not Path("/proc/self").exists(),
+    reason="Reads the real title from /proc, which only Linux has.",
+)
 def test_a_real_process_is_its_parent_and_command() -> None:
     found = gate._process(os.getpid())
 
@@ -534,22 +554,21 @@ def test_a_walk_asks_the_module_for_what_lies_hops_away(
         )
         == found
     )
-    assert tools.calls == [
-        [
-            sys.executable,
-            "-m",
-            "pkg.deps",
-            "--emit",
-            "nodeids",
-            "--depth",
-            "2",
-            "--workers",
-            "3",
-            "--",
-            "a.py",
-            "b.py",
-        ],
+    [[*head, named]] = tools.calls
+    assert head == [
+        sys.executable,
+        "-m",
+        "pkg.deps",
+        "--emit",
+        "nodeids",
+        "--depth",
+        "2",
+        "--workers",
+        "3",
+        "--",
     ]
+    assert named.startswith("@")
+    assert tools.argfiles == [["a.py", "b.py"]]
 
 
 class _Dependents(argparse.Namespace):

@@ -313,10 +313,12 @@ def test_pytest_reads_its_selection_from_an_argfile(tmp_path: Path) -> None:
         *("-m", "pytest", "-n", "3", "-q", "--tb=short"),
         *("-p", listing.__name__),
     ]
-    assert Path(test_files.removeprefix("--test-files=")).name == "selected.txt"
+    selection = Path(test_files.removeprefix("--test-files="))
+    assert selection.name == "selected.txt"
+    assert selection.parent.name.startswith("precommit-")
     path = Path(argfile.removeprefix("@"))
-    assert path.name == "pytest.args"
-    assert path.parent.name.startswith("precommit-")
+    assert path.name == "args"
+    assert path.parent.name.startswith("gate-")
 
 
 def test_an_unmeasured_run_ignores_a_stale_coverage_file(
@@ -376,7 +378,7 @@ def test_pytest_prefers_the_graphs_tests_to_the_pairs(tmp_path: Path) -> None:
 
     [walk] = [call for call in tools.calls if "--emit" in call]
     assert walk[3:8] == ["--emit", "nodeids", "--depth", "1", "--workers"]
-    assert tools.argfiles == [["b_test.py"]]
+    assert tools.argfiles == [["a.py"], ["b_test.py"]]
     assert tools.listings == [["b_test.py::t"]]
 
 
@@ -397,7 +399,8 @@ def test_pytest_falls_back_to_the_pairs_when_the_graph_names_nothing(
         PRECOMMIT_CODEGRAPH_PYTEST="1",
     )
 
-    assert tools.argfiles == [["a_test.py"]]
+    # The walk's own argfile, then pytest's.
+    assert tools.argfiles == [["a.py"], ["a_test.py"]]
 
 
 class _Runs(fakes.Recorder):
