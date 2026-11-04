@@ -11,9 +11,10 @@ Typical usage example:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, ClassVar, override
+from typing import TYPE_CHECKING, ClassVar, Final, override
 
 import contextlib
+import functools
 import os
 import time
 
@@ -25,6 +26,7 @@ from sagent.providers.anthropic import wire
 from sagent.providers.resources import SharedResources
 from sagent.providers.retry import retried
 from sagent.providers.table import HasModels
+from sagent.providers.workload_identity import WorkloadIdentity
 from sagent.types import AsyncResource
 
 
@@ -51,13 +53,22 @@ else:
 
 
 __all__ = [
+    "EXCHANGE_URL",
     "Anthropic",
     "AnthropicModel",
+    "exchange",
 ]
+
+EXCHANGE_URL: Final = "https://api.anthropic.com/v1/oauth/token"
 
 
 class Anthropic(HasModels, AsyncResource):
     """Claude models, billed to the API key in ``ANTHROPIC_API_KEY``.
+
+    With no key, ``ANTHROPIC_IDENTITY_TOKEN_COMMAND`` turns on workload identity,
+    with ``ANTHROPIC_FEDERATION_RULE_ID``, ``ANTHROPIC_ORGANIZATION_ID``,
+    ``ANTHROPIC_SERVICE_ACCOUNT_ID`` and ``ANTHROPIC_WORKSPACE_ID``. A key wins, as in
+    Anthropic's own SDK.
 
     Args:
       name: The name the catalog knows this provider by; the section by default.
@@ -83,6 +94,7 @@ class Anthropic(HasModels, AsyncResource):
         self._owns_resources = resources is None
         self._resources = SharedResources() if resources is None else resources
         self._usage: tuple[UsageWindow, ...] = ()
+        self._identity: WorkloadIdentity | None = None
 
     @property
     def name(self) -> str:
@@ -112,15 +124,42 @@ class Anthropic(HasModels, AsyncResource):
             await self._resources.aclose()
 
     async def credentials(self) -> dict[str, str]:
-        """Return the headers that authenticate a request."""
+        """Return the headers that authenticate a request.
+
+        Returns:
+          headers: The stored key, or a workload identity bearer token.
+
+        Raises:
+          AuthError: Neither a key nor an identity command is set.
+
+        """
         key = os.environ.get("ANTHROPIC_API_KEY") or ""
-        if not key:
+        if key:
+            return {"x-api-key": key}
+        command = os.environ.get("ANTHROPIC_IDENTITY_TOKEN_COMMAND", "")
+        if not command:
             raise AuthError("ANTHROPIC_API_KEY is not set.")
-        return {"x-api-key": key}
+        if self._identity is None:
+            self._identity = WorkloadIdentity(
+                resources=self._resources,
+                url=EXCHANGE_URL,
+                command=command,
+                request=functools.partial(
+                    exchange,
+                    rule=os.environ.get("ANTHROPIC_FEDERATION_RULE_ID", ""),
+                    organization=os.environ.get("ANTHROPIC_ORGANIZATION_ID", ""),
+                    service_account=os.environ.get("ANTHROPIC_SERVICE_ACCOUNT_ID", ""),
+                    workspace=os.environ.get("ANTHROPIC_WORKSPACE_ID", ""),
+                ),
+            )
+        return {"authorization": f"Bearer {await self._identity.token()}"}
 
     async def reauthenticate(self) -> bool:
-        """Renew credentials after a 401; ``False`` when there are none to renew."""
-        return False
+        """Renew a workload identity token after a 401; ``False`` for an API key."""
+        if self._identity is None:
+            return False
+        self._identity.forget()
+        return True
 
     def system(
         self,
@@ -350,6 +389,37 @@ class AnthropicModel(AsyncResource):
             cache_expired=answered_at is not None
             and time.time() - answered_at > self.settings.cache_ttl_sec,
         )
+
+
+def exchange(
+    subject: str,
+    *,
+    rule: str,
+    organization: str,
+    service_account: str,
+    workspace: str,
+) -> dict[str, object]:
+    """Build Anthropic's token exchange request for an identity token.
+
+    Args:
+      subject: The identity token.
+      rule: The federation rule's ID.
+      organization: The organization's ID.
+      service_account: The service account to act as.
+      workspace: The workspace to act in.
+
+    Returns:
+      request: The JSON body of the exchange.
+
+    """
+    return {
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": subject,
+        "federation_rule_id": rule,
+        "organization_id": organization,
+        "service_account_id": service_account,
+        "workspace_id": workspace,
+    }
 
 
 def _error_body(text: str) -> object:

@@ -790,6 +790,72 @@ def test_an_attachment_is_billed_by_the_vendor_s_formula() -> None:
     )
 
 
+def _granted(token: str) -> httpx2.Response:
+    answer = json_dumps({"access_token": token, "expires_in": 600}).encode()
+    return httpx2.Response(200, content=answer)
+
+
+@pytest.fixture
+def workload_identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY")
+    monkeypatch.setenv("ANTHROPIC_IDENTITY_TOKEN_COMMAND", "/bin/echo aws-jwt")
+    monkeypatch.setenv("ANTHROPIC_FEDERATION_RULE_ID", "fdrl_x")
+    monkeypatch.setenv("ANTHROPIC_ORGANIZATION_ID", "org")
+    monkeypatch.setenv("ANTHROPIC_SERVICE_ACCOUNT_ID", "svac_x")
+    monkeypatch.setenv("ANTHROPIC_WORKSPACE_ID", "wrkspc_x")
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("workload_identity")
+async def test_with_no_key_the_identity_command_supplies_a_bearer_token() -> None:
+    server = _Server(replies=[_granted("short-lived")])
+    async with _Served(server) as shared:
+        headers = await Anthropic(resources=shared).credentials()
+
+    assert headers == {"authorization": "Bearer short-lived"}
+    (sent,) = server.requests
+    assert str(sent.url) == "https://api.anthropic.com/v1/oauth/token"
+    assert json_loads(sent.content, dict[str, object]) == {
+        "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+        "assertion": "aws-jwt",
+        "federation_rule_id": "fdrl_x",
+        "organization_id": "org",
+        "service_account_id": "svac_x",
+        "workspace_id": "wrkspc_x",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("workload_identity")
+async def test_a_stored_key_wins_over_the_identity_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
+    server = _Server(replies=[])
+    async with _Served(server) as shared:
+        headers = await Anthropic(resources=shared).credentials()
+
+    assert headers == {"x-api-key": "sk-ant"}
+    assert server.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("workload_identity")
+async def test_a_401_renews_a_workload_identity_token() -> None:
+    server = _Server(replies=[_granted("old"), _granted("new")])
+    async with _Served(server) as shared:
+        anthropic = Anthropic(resources=shared)
+        await anthropic.credentials()
+
+        assert await anthropic.reauthenticate()
+        assert await anthropic.credentials() == {"authorization": "Bearer new"}
+
+
+@pytest.mark.asyncio
+async def test_a_401_cannot_renew_a_stored_key() -> None:
+    assert not await Anthropic().reauthenticate()
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 

@@ -6,8 +6,8 @@ Sagent separates providers from models. A provider owns authentication and creat
 
 | Provider class | Environment variable | Default model | Utility model | Notes |
 | --- | --- | --- | --- | --- |
-| `Anthropic` | `ANTHROPIC_API_KEY` | `opus-5.5` | `haiku-5.5` | Anthropic API-key provider; `best` resolves to `fable-5.1`. |
-| `OpenAI` | `OPENAI_API_KEY` | `sol-6.1` | `luna-6.0` | OpenAI API provider; `best` resolves to `astra-6.0`. |
+| `Anthropic` | `ANTHROPIC_API_KEY`, or workload identity | `opus-5.5` | `haiku-5.5` | Anthropic API-key provider; `best` resolves to `fable-5.1`. |
+| `OpenAI` | `OPENAI_API_KEY`, or workload identity | `sol-6.1` | `luna-6.0` | OpenAI API provider; `best` resolves to `astra-6.0`. |
 | `Google` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` | `gemini-argon-4.0` | `gemini-flash-lite-3.5` | Google Gemini provider. |
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-3.0` | `kimi-2.6` | OpenAI-compatible Kimi provider. |
 | `DashScope` | `DASHSCOPE_API_KEY` | `qwen-plus-3.7` | `qwen-flash-3.8` | Alibaba DashScope provider. |
@@ -15,7 +15,12 @@ Sagent separates providers from models. A provider owns authentication and creat
 | `SelfHosted` | none | `Qwen/Qwen3.6-27B` | same as default | Local HF transformers provider; `SelfHosted(model=...)` names what every role means. |
 | `OpenAICompatible` | subclass-defined | subclass-defined | subclass-defined | Base class for chat-completions-compatible APIs. |
 
-The public package is designed around API-key providers.
+The public package is designed around API-key providers. With no key, `OpenAI` and `Anthropic`
+also sign in by workload identity: set `OPENAI_IDENTITY_TOKEN_COMMAND`, a command
+that prints an identity token, with `OPENAI_IDENTITY_PROVIDER_ID` and
+`OPENAI_SERVICE_ACCOUNT_ID`; or `ANTHROPIC_IDENTITY_TOKEN_COMMAND` with
+`ANTHROPIC_FEDERATION_RULE_ID`, `ANTHROPIC_ORGANIZATION_ID`, `ANTHROPIC_SERVICE_ACCOUNT_ID` and
+`ANTHROPIC_WORKSPACE_ID`. A key wins when both are set.
 
 ## Basic usage
 
