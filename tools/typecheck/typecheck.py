@@ -94,21 +94,23 @@ def typecheck(
     if not files:
         return 0
     if fixer is not None:
-        checker = name.removesuffix("-check")
-        return context.run(
-            [
-                sys.executable,
-                "-m",
-                fixer,
-                "--checker",
-                checker,
-                "--fix",
-                "--threads",
-                str(count),
-                "--",
-                *files,
-            ],
-        )
+        with gate.argfile(files) as named:
+            return context.run(
+                [
+                    sys.executable,
+                    "-m",
+                    fixer,
+                    "--checker",
+                    name.removesuffix("-check"),
+                    "--fix",
+                    "--threads",
+                    str(count),
+                    "--",
+                    named,
+                ],
+            )
+    # The checkers read no @argfile; they take Python files alone, ~360 KB of
+    # paths at --all-files, well inside every ARG_MAX.
     tool, *flags = {
         "ty-check": ["ty", "check", "--force-exclude"],
         "pyrefly-check": ["pyrefly", "check", f"--threads={count}"],

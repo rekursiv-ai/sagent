@@ -114,7 +114,8 @@ def test_the_fixer_runs_the_checker_in_its_place(
 
     _typecheck(name, tmp_path, tools, fixer="pkg.fixer")
 
-    assert tools.calls[0][1:] == [
+    [[_, *head, named]] = tools.calls
+    assert head == [
         "-m",
         "pkg.fixer",
         "--checker",
@@ -123,8 +124,9 @@ def test_the_fixer_runs_the_checker_in_its_place(
         "--threads",
         "3",
         "--",
-        "a.py",
     ]
+    assert named.startswith("@")
+    assert tools.argfiles == [["a.py"]]
 
 
 @pytest.mark.parametrize("name", ["ty-check", "pyrefly-check", "basedpyright"])
@@ -180,7 +182,7 @@ def test_dependents_widen_the_files_then_excludes_apply(tmp_path: Path) -> None:
     )
 
     walk, check = tools.calls
-    assert walk[1:] == [
+    assert walk[1:-1] == [
         "-m",
         "pkg.affected",
         "--emit",
@@ -190,8 +192,8 @@ def test_dependents_widen_the_files_then_excludes_apply(tmp_path: Path) -> None:
         "--workers",
         "3",
         "--",
-        "a.py",
     ]
+    assert tools.argfiles == [["a.py"]]
     assert check[-2:] == ["a.py", "b.py"]
 
 

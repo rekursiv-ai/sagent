@@ -7,10 +7,14 @@ gate's id, so ``pre-commit run GATE`` selects both; a gate whose spool was never
 written fails rather than check nothing. The type checkers and the pytest gates
 are their own commands; these are the generic ones.
 
+A module a gate runs gets the files as one ``@argfile``, never on its command
+line: ``--all-files`` is ~1 MB of paths, past macOS's 1 MiB ``ARG_MAX``. Its
+parser takes ``fromfile_prefix_chars="@"``.
+
 Commands:
   spool GATE     Add pre-commit's files to GATE's spool.
   run GATE       A module once over GATE's files: ``-m MODULE ... --workers N
-                 -- FILES``.
+                 -- @FILES``.
   threaded NAME  A command, each ``{workers}`` in it set to the count.
 
 Examples:
@@ -22,7 +26,8 @@ Examples:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Generator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from importlib import util
 from pathlib import Path
@@ -132,9 +137,29 @@ def run(
     if not files:
         return 0
     count = workers(name, environ=context.environ)
-    return context.run(
-        [sys.executable, "-m", *command, "--workers", str(count), "--", *files],
-    )
+    with argfile(files) as named:
+        return context.run(
+            [sys.executable, "-m", *command, "--workers", str(count), "--", named],
+        )
+
+
+@contextmanager
+def argfile(args: Sequence[str]) -> Generator[str]:
+    """Yield ``@PATH``, a file holding ``args`` one per line, removed afterwards.
+
+    Args:
+      args: The arguments, as argparse's and pytest's ``@`` prefix reads them.
+
+    Yields:
+      argument: ``@PATH``, which the tool expands back into ``args``.
+
+    """
+    with tempfile.TemporaryDirectory(
+        prefix="gate-",  # pragma: no mutate -- any name serves.
+    ) as temp:
+        path = Path(temp) / "args"
+        path.write_text("".join(f"{arg}\n" for arg in args))
+        yield f"@{path}"
 
 
 def drained(name: str, *, context: Context) -> list[str] | None:
@@ -283,21 +308,22 @@ def walk(
     """
     if not files or not hops or dependents is None:
         return []
-    found = context.output(
-        [
-            sys.executable,
-            "-m",
-            dependents,
-            "--emit",
-            emit,
-            "--depth",
-            str(hops),
-            "--workers",
-            str(workers),
-            "--",
-            *files,
-        ],
-    )
+    with argfile(files) as named:
+        found = context.output(
+            [
+                sys.executable,
+                "-m",
+                dependents,
+                "--emit",
+                emit,
+                "--depth",
+                str(hops),
+                "--workers",
+                str(workers),
+                "--",
+                named,
+            ],
+        )
     return [] if found is None else found.splitlines()
 
 
