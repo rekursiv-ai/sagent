@@ -37,7 +37,6 @@ from sagent.runtime import types
 from sagent.runtime.exceptions import BudgetExhaustedError
 from sagent.runtime.types import RuntimeEvent
 from sagent.session.jsonl import JsonlJournal
-from sagent.session.projects import child_journal
 from sagent.session.types import (
     AgentSpawnResult,
     AgentToAgentMessage,
@@ -249,6 +248,11 @@ async def _spawn(
     label: str = "Agent",
 ) -> AgentSpawnResult:
     return await setup.spawn.call(ToolContext(cwd=tmp_path, label=label), arguments)
+
+
+def _kept(journal: Path) -> str:
+    """Return what ``journal`` holds, off the event loop's checks."""
+    return journal.read_text()
 
 
 def _session(agent: Agent) -> RuntimeSession:
@@ -1008,10 +1012,76 @@ async def test_a_child_of_a_journaled_parent_keeps_its_own_journal(
 
         result = await _spawn(setup, tmp_path, {"prompt": "go"})
 
-    path = child_journal(tmp_path / "parent" / "journal.jsonl", "Agent_0")
+    (spec,) = setup.team.standing("Agent")
+    path = Path(spec.journal)
     assert result.output_file == str(path)
-    assert "done" in path.read_text()
-    assert [s.label for s in setup.team.standing("Agent")] == ["Agent_0"]
+    assert path.parent.parent == tmp_path / "parent"
+    assert "done" in _kept(path)
+    assert spec.label == "Agent_0"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "label",
+    [
+        "/etc/cron.d/x",
+        "../other/session",
+        "a/b",
+        "a\\b",
+        "..",
+        ".",
+        "a.b",
+        "a b",
+        "a\x00b",
+        "é",
+        "x" * 65,
+    ],
+)
+async def test_a_label_of_anything_but_plain_characters_starts_no_child(
+    tmp_path: Path,
+    label: str,
+) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("done"), journal=journal)
+
+        with pytest.raises(ValueError, match=r"^A label is 1 to 64 letters, digits"):
+            _ = await _spawn(setup, tmp_path, {"prompt": "go", "label": label})
+
+    assert list(setup.team) == ["Agent"]
+    assert [p.name for p in (tmp_path / "parent").iterdir()] == ["journal.jsonl"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("label", ["reviewer", "Agent_12", "re-view", "x" * 64])
+async def test_a_plain_label_names_the_child_and_never_its_folder(
+    tmp_path: Path,
+    label: str,
+) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("done"), journal=journal)
+
+        result = await _spawn(setup, tmp_path, {"prompt": "go", "label": label})
+
+    assert result.agent_id == label
+    (spec,) = setup.team.standing("Agent")
+    assert spec.label == label
+    folder = Path(spec.journal).parent.name
+    assert str(uuid.UUID(folder)) == folder
+
+
+@pytest.mark.asyncio
+async def test_a_label_used_again_keeps_a_journal_of_its_own(tmp_path: Path) -> None:
+    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
+        setup = _setup(tmp_path, reply("first"), reply("second"), journal=journal)
+        async with setup.team:
+            spawned = {"prompt": "go", "label": "helper"}
+            first = await _spawn(setup, tmp_path, dict(spawned))
+            await setup.team.stop("helper")
+            second = await _spawn(setup, tmp_path, dict(spawned))
+
+    assert first.output_file != second.output_file
+    assert second.output_file is not None
+    assert "first" not in _kept(Path(second.output_file))
 
 
 @pytest.mark.asyncio
@@ -1046,7 +1116,7 @@ async def test_a_persistent_child_stands_in_its_parents_journal_until_stopped(
             assert setup.team.standing("Agent") == []
     assert spec == ChildSpec(
         label="helper",
-        journal=str(child_journal(tmp_path / "parent" / "journal.jsonl", "helper")),
+        journal=spec.journal,
         tools=("Grep",),
         max_rounds=3,
         max_depth=1,
@@ -1143,6 +1213,8 @@ async def test_a_resumed_parent_starts_its_running_children_again(
         async with setup.parent, setup.team:
             assert await setup.spawn.resume("Agent") == ["helper"]
             helper = setup.team["helper"]
+            kept = helper.session.journal.path
+            assert kept is not None
             assert (helper.allowed, helper.max_rounds) == (
                 frozenset({"Grep", "AgentSend"}),
                 3,
@@ -1160,7 +1232,7 @@ async def test_a_resumed_parent_starts_its_running_children_again(
     assert setup.children.requests[0].agent == str(
         uuid.uuid5(
             uuid.NAMESPACE_URL,
-            (tmp_path / "parent" / "helper" / "session.jsonl").resolve().as_uri(),
+            kept.resolve().as_uri(),
         ),
     )
 
@@ -1319,7 +1391,7 @@ async def test_a_child_journaled_under_the_old_name_resumes_renamed(
         tmp_path,
         {"prompt": "remember 7", "label": "helper"},
     )
-    written = tmp_path / "parent" / "helper" / "session.jsonl"
+    (written,) = (tmp_path / "parent").glob("*/session.jsonl")
     old = written.rename(written.with_name("journal.jsonl"))
     parent = tmp_path / "parent" / "journal.jsonl"
     parent.write_text(parent.read_text().replace(str(written), str(old)))
@@ -1459,7 +1531,11 @@ async def test_a_child_that_cannot_be_rebuilt_is_skipped(
         setup = _setup(tmp_path, journal=journal)
         setup.team.catalog = ModelCatalog(factories=factories)
         _session(setup.parent).resume()
-        held = child_journal(tmp_path / "parent" / "journal.jsonl", "locked")
+        held = next(
+            Path(spec.journal)
+            for spec in setup.team.standing("Agent")
+            if spec.label == "locked"
+        )
         async with JsonlJournal(held), setup.team:
             with caplog.at_level(logging.WARNING, logger=agent_spawn.__name__):
                 assert await setup.spawn.resume("Agent") == ["kept"]
@@ -1551,6 +1627,7 @@ async def test_a_child_closes_the_model_it_ran_on(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_a_child_whose_journal_is_held_elsewhere_is_refused(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     models: list[_CountingModel] = []
     async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
@@ -1558,8 +1635,12 @@ async def test_a_child_whose_journal_is_held_elsewhere_is_refused(
         setup.team.catalog = ModelCatalog(
             factories={"scripted": partial(_Counting, models=models)},
         )
-        held = child_journal(tmp_path / "parent" / "journal.jsonl", "Agent_0")
-        async with JsonlJournal(held):
+
+        def held(journal: Path) -> Path:
+            return journal.parent / "held" / "session.jsonl"
+
+        monkeypatch.setattr(agent_spawn, "child_journal", held)
+        async with JsonlJournal(held(tmp_path / "parent" / "journal.jsonl")):
             with pytest.raises(RuntimeError, match="is open in"):
                 _ = await _spawn(setup, tmp_path, {"prompt": "go"})
 
@@ -1729,10 +1810,9 @@ async def test_a_watcher_of_a_journaled_root_keeps_its_journal_beside_it(
             assert watcher.runtime.persistent_retry is True
             assert setup.team["watcher_0"].runtime.persistent_retry is False
 
-            assert watcher.session.journal.path == child_journal(
-                tmp_path / "parent" / "journal.jsonl",
-                "watcher",
-            )
+            kept = watcher.session.journal.path
+            assert kept is not None
+            assert kept.parent.parent == tmp_path / "parent"
             assert setup.team.resolve("parent", by="Agent") == ["watcher"]
             assert watcher.system_prompt == "the parent's prompt"
             assert isinstance(first, AgentToAgentMessage)
@@ -1851,10 +1931,9 @@ async def test_a_watcher_stood_without_a_journal_resumes_on_one_beside_its_root(
         async with setup.parent, setup.team:
             assert await setup.spawn.resume("Agent") == ["watcher"]
 
-            assert setup.team["watcher"].session.journal.path == child_journal(
-                root,
-                "watcher",
-            )
+            kept = setup.team["watcher"].session.journal.path
+            assert kept is not None
+            assert kept.parent.parent == root.parent
 
 
 @pytest.mark.asyncio
@@ -1872,6 +1951,7 @@ async def test_a_watcher_whose_label_is_taken_resumes_its_own_journal(
     tmp_path: Path,
 ) -> None:
     root = await _watched_once(tmp_path, second=False)
+    (held,) = root.parent.glob("*/session.jsonl")
 
     async with JsonlJournal(root) as journal:
         setup = _setup(tmp_path, journal=journal)
@@ -1885,10 +1965,7 @@ async def test_a_watcher_whose_label_is_taken_resumes_its_own_journal(
             )
             assert await setup.spawn.resume("Agent") == ["watcher_0"]
 
-            assert setup.team["watcher_0"].session.journal.path == child_journal(
-                root,
-                "watcher",
-            )
+            assert setup.team["watcher_0"].session.journal.path == held
 
 
 @pytest.mark.asyncio
@@ -1901,6 +1978,8 @@ async def test_a_watcher_that_cannot_open_is_refused_or_skipped_on_resume(
         setup = _setup(tmp_path, journal=journal)
         async with setup.parent, setup.team:
             _ = await setup.spawn.watch("Agent")
+            held = setup.team["watcher"].session.journal.path
+            assert held is not None
             setup.parent.session.stand(
                 "watcher:odd",
                 UncategorizedRecord(kind="watcher", payload={"label": 7}),
@@ -1908,21 +1987,18 @@ async def test_a_watcher_that_cannot_open_is_refused_or_skipped_on_resume(
 
     async with (
         JsonlJournal(root) as journal,
-        JsonlJournal(child_journal(root, "watcher")),
+        JsonlJournal(held),
     ):
         setup = _setup(tmp_path, journal=journal)
         async with setup.parent, setup.team:
             with caplog.at_level(logging.WARNING, logger=agent_spawn.__name__):
                 assert await setup.spawn.resume("Agent") == []
-            with pytest.raises(RuntimeError, match="is open in"):
-                _ = await setup.spawn.watch("Agent")
             assert list(setup.team) == ["Agent"]
     (skipped,) = (
         r.getMessage() for r in caplog.records if r.name == agent_spawn.__name__
     )
     assert skipped == (
-        f"not resuming watcher 'watcher': Journal {child_journal(root, 'watcher')}"
-        f" is open in pid {os.getpid()}."
+        f"not resuming watcher 'watcher': Journal {held} is open in pid {os.getpid()}."
     )
 
 

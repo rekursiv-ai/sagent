@@ -10,7 +10,7 @@ The CLI stores sessions under a project-scoped directory derived from the curren
 <data-dir>/rekursiv-ai/sagent/projects/<cwd-slug>/<session-id>/session.jsonl
 ```
 
-`<data-dir>` is the user's data directory, such as `~/.local/share` on Linux. The slug is based on the resolved working directory. Long slugs are shortened with a hash. Each spawned child keeps its own session under `<session-id>/<label>/`.
+`<data-dir>` is the user's data directory, such as `~/.local/share` on Linux. The slug is based on the resolved working directory. Long slugs are shortened with a hash. Each spawned child keeps its own session under `<session-id>/<uuid>/`. Its label names it in the team and in the parent's journal, never on disk.
 
 ## Explicit sessions
 
