@@ -8,7 +8,8 @@ Typical usage example:
   body = encode(request, capability=c, settings=s)   # POST to /responses
   reader = StreamReader(capability=c, settings=s)
   async for event in wire.events(response.aiter_lines()):
-      chunk = reader.feed(event)                      # New text, to show at once.
+      for chunk in reader.feed(event):                # New text, to show at once.
+          ...
   reader.response()                                   # The records and their cost.
 """
 
@@ -126,14 +127,14 @@ class StreamReader:
         self._refused = False
         self._final: dict[str, object] | None = None
 
-    def feed(self, event: Mapping[str, object]) -> TextChunk | None:
-        """Take one event, and return the text it adds, if any.
+    def feed(self, event: Mapping[str, object]) -> tuple[TextChunk, ...]:
+        """Take one event and return the text or reasoning it adds.
 
         Args:
           event: One server-sent event.
 
         Returns:
-          chunk: The text or reasoning the event adds; ``None`` for the rest.
+          chunks: The event's text or reasoning; empty for structural events.
 
         Raises:
           Exception: The ``wire.to_exception`` of an error or failed reply.
@@ -145,19 +146,19 @@ class StreamReader:
         at = from_plain(event.get("output_index"), int, default=len(self._records))
         record = sum(1 for i in self._records if i < at)
         if kind == "response.output_text.delta":
-            return TextChunk(text=delta, record=record)
+            return (TextChunk(text=delta, record=record),)
         if kind in (
             "response.reasoning_summary_text.delta",
             "response.reasoning_text.delta",
         ):
-            return TextChunk(text=delta, thinking=True, record=record)
+            return (TextChunk(text=delta, thinking=True, record=record),)
         if kind == "response.refusal.delta":
             self._refusing.add(str(event.get("item_id") or ""))
-            return TextChunk(text=delta, record=record)
+            return (TextChunk(text=delta, record=record),)
         if kind == "response.refusal.done":
             # A refusal sent whole, with no deltas, is shown whole.
             if str(event.get("item_id") or "") not in self._refusing:
-                return TextChunk(text=str(event.get("refusal") or ""), record=record)
+                return (TextChunk(text=str(event.get("refusal") or ""), record=record),)
         elif kind == "response.output_item.done":
             self._done(
                 from_plain(event.get("output_index"), int, default=len(self._records)),
@@ -170,7 +171,7 @@ class StreamReader:
             raise wire.to_exception(0, body=_object(event.get("response")))
         elif kind == "error":
             raise wire.to_exception(0, body=event)
-        return None
+        return ()
 
     def response(self) -> Response:
         """Return the finished reply.

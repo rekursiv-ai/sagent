@@ -1,0 +1,8 @@
+sources:
+  api: https://learn.microsoft.com/en-us/azure/ai-foundry/openai/how-to/responses
+# Deployment identifiers and contract-specific rates must come from the caller.
+models: []
+providers:
+  azure:
+    sends: [thinking_effort, thinking_output, service_tier]
+    models: {}

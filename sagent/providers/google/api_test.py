@@ -27,6 +27,7 @@ from sagent.providers.google import api, wire
 from sagent.providers.google.api import Google
 from sagent.providers.google.cli import GoogleCLI
 from sagent.providers.resources import SharedResources
+from sagent.providers.table import ModelTable
 from sagent.session.types import AssistantMessage, Attachment, UserMessage
 
 
@@ -638,6 +639,36 @@ def test_an_attachment_is_billed_by_the_vendor_s_formula() -> None:
         attached,
         limits=model.capability.limits,
     )
+
+
+@pytest.mark.asyncio
+async def test_explicit_catalog_credentials_and_endpoint_reach_the_transport() -> None:
+    row = replace(
+        Google.models()["default"],
+        model_id="custom-1.0",
+        wire_model_id="deployed",
+    )
+    table = ModelTable(rows=(row,), roles={"default": row.model_id})
+    server = _Server(replies=[_ok("Hi")])
+    async with _Served(server) as shared:
+        provider = Google(
+            resources=shared,
+            api_key="given",
+            base_url="https://gateway.test/v1/",
+            models=table,
+        )
+        assert list(provider) == ["custom-1.0"]
+        assert provider["default"].capability is row
+        assert provider["deployed"].provider is provider
+        await _stream(provider["default"].stream(_REQUEST))
+    (sent,) = server.requests
+    assert (
+        str(sent.url)
+        == "https://gateway.test/v1/models/deployed:streamGenerateContent?alt=sse"
+    )
+    assert sent.headers["x-goog-api-key"] == "given"
+    assert "custom-1.0" not in Google.models()
+    assert list(Google()) == list(Google.models())
 
 
 if __name__ == "__main__":

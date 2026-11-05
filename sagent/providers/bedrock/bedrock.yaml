@@ -1,0 +1,10 @@
+sources:
+  api: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions.html
+  model: https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-oss-120b.html
+  pricing: https://aws.amazon.com/bedrock/pricing/
+# Regional model rates must be supplied explicitly by the caller.
+models: []
+providers:
+  bedrock:
+    sends: [thinking_effort]
+    models: {}

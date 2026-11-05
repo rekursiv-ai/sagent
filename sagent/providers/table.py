@@ -27,6 +27,7 @@ import re
 
 from treekle import from_plain
 
+from sagent.lib.userdirs import config_dir
 from sagent.lib.yaml import parse
 from sagent.model.capability import (
     ModelCapability,
@@ -46,6 +47,7 @@ from sagent.model.exceptions import UnknownModelError, UnsupportedTagError
 
 if TYPE_CHECKING:
     from importlib.resources.abc import Traversable
+    from pathlib import Path
 
 
 __all__ = [
@@ -436,7 +438,12 @@ class ModelTags:
 
 
 def models(package: ModuleType, *, section: str) -> ModelTable:
-    """Return the models one section of a vendor package's catalog serves.
+    """Return a provider's user catalog, or its shipped catalog when none exists.
+
+    ``config_dir()/rekursiv-ai/sagent/providers/<section>.yaml`` replaces the
+    shipped document, using the same schema and named provider section. Invalid
+    overrides raise rather than falling back. Catalogs are read once per user
+    path and section; restart the process to reload an edited document.
 
     Args:
       package: The vendor's package, which holds its catalog as
@@ -448,7 +455,15 @@ def models(package: ModuleType, *, section: str) -> ModelTable:
         the vendor does.
 
     """
-    return _read(package.__name__, section=section)
+    return _read(
+        package.__name__,
+        section=section,
+        user_path=config_dir()
+        / "rekursiv-ai"
+        / "sagent"
+        / "providers"
+        / f"{section}.yaml",
+    )
 
 
 class HasModels:
@@ -471,10 +486,11 @@ class HasModels:
 
 # Keyed by name: pyrefly rejects a module as a cache key, though it hashes.
 @cache
-def _read(package: str, *, section: str) -> ModelTable:
-    """Return one section of the catalog ``package`` holds, read once."""
+def _read(package: str, *, section: str, user_path: Path) -> ModelTable:
+    """Read one section, preferring the user's document over the shipped one."""
     leaf = package.rpartition(".")[2]
-    return ModelTable.from_yaml(files(package) / f"{leaf}.yaml", section=section)
+    path = user_path if user_path.exists() else files(package) / f"{leaf}.yaml"
+    return ModelTable.from_yaml(path, section=section)
 
 
 def _choices() -> tuple[ModelSettingName, ...]:
@@ -548,6 +564,7 @@ class _CapabilityProfile:
     """Model facts several rows share; no identity, prices, or profile of its own."""
 
     knowledge_cutoff: str | None = None
+    tokenizer: str | None = None
     approx_chars_per_token: float = 4.0
     limits: ModelLimits = field(default_factory=ModelLimits)
     thinking: _Thinking = field(default_factory=_Thinking)
@@ -631,6 +648,7 @@ def _model(
         model_id=row.model_id,
         wire_model_id=row.wire_model_id,
         knowledge_cutoff=row.knowledge_cutoff,
+        tokenizer=row.tokenizer,
         approx_chars_per_token=row.approx_chars_per_token,
         limits=row.limits,
         thinking_effort=row.thinking.effort,

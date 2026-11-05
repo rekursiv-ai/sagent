@@ -19,8 +19,7 @@ import os
 from treekle import from_plain
 
 from sagent.providers import openai
-from sagent.providers.openai import responses
-from sagent.providers.openai.compat import OpenAICompatible
+from sagent.providers.openai.compat import ResponsesCompatible
 from sagent.providers.workload_identity import WorkloadIdentity
 
 
@@ -28,7 +27,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from sagent.model.types import Request
-    from sagent.providers.openai.compat import OpenAIModel, Reader
+    from sagent.providers.openai.compat import OpenAIModel
 
 
 __all__ = [
@@ -40,7 +39,7 @@ __all__ = [
 EXCHANGE_URL: Final = "https://auth.openai.com/oauth/token"
 
 
-class OpenAI(OpenAICompatible):
+class OpenAI(ResponsesCompatible):
     """OpenAI's models, billed to the API key in ``OPENAI_API_KEY``.
 
     With no key, ``OPENAI_IDENTITY_TOKEN_COMMAND`` turns on workload identity,
@@ -60,7 +59,6 @@ class OpenAI(OpenAICompatible):
     package: ClassVar[ModuleType] = openai
     url: ClassVar[str] = "https://api.openai.com/v1"
     key_variable: ClassVar[str] = "OPENAI_API_KEY"
-    path: ClassVar[str] = "/responses"
 
     _identity: WorkloadIdentity | None = None
 
@@ -90,22 +88,6 @@ class OpenAI(OpenAICompatible):
             return False
         self._identity.forget()
         return True
-
-    @override
-    def encode(self, request: Request, *, model: OpenAIModel) -> dict[str, object]:
-        return responses.encode(
-            request,
-            capability=model.capability,
-            settings=model.settings,
-            temperature=self.temperature,
-        )
-
-    @override
-    def reader(self, *, model: OpenAIModel) -> Reader:
-        return responses.StreamReader(
-            capability=model.capability,
-            settings=model.settings,
-        )
 
     @override
     async def count(self, request: Request, *, model: OpenAIModel) -> int:

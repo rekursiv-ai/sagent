@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Literal, override
 
 import asyncio
 import logging
@@ -50,6 +50,7 @@ from sagent.session.types import (
     ContextClear,
     SystemMessage,
     Thinking,
+    TokenUsage,
     ToolCall,
     ToolResult,
     TurnContext,
@@ -73,7 +74,6 @@ if TYPE_CHECKING:
 
 _SUMMARY_TEXT = "<analysis>scratch notes</analysis>\n<summary>the gist</summary>"
 _SUMMARY = reply(_SUMMARY_TEXT)
-_FAILED = "Compaction failed. Earlier context was dropped without a summary."
 
 
 def _capability(
@@ -375,9 +375,9 @@ def test_a_one_token_size_is_a_size(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("window", "context", "truncates", "room"),
     [
-        (100_000, 0, None, 100_000 - 1_000 - 10),
-        (100_000, 0, False, 100_000 - 1_000 - 10),
-        (100_000, 400_000, None, 400_000 - 1_000 - 10),
+        (100_000, 0, None, 95_000 - 1_000 - 10),
+        (100_000, 0, False, 95_000 - 1_000 - 10),
+        (100_000, 400_000, None, 380_000 - 1_000 - 10),
         (100_000, 0, True, 0),
         (0, 0, None, 0),
         (1, 0, None, 1),
@@ -418,6 +418,21 @@ def test_the_reply_may_hold_what_the_window_leaves(
     _ = agent.runtime.append_history(_user("y" * 40))
 
     assert compactor.reply_room() == room
+
+
+def test_reply_budget_leaves_room_for_token_estimation_error(tmp_path: Path) -> None:
+    _, agent = _agent(
+        tmp_path,
+        capability=_capability(window=262_144, response=262_144),
+    )
+    agent.runtime.tools.clear()
+    agent.runtime.system = ()
+    agent.session.append(_user("x" * (7_554 * 4)))
+
+    room = SummaryCompactor(agent).reply_room()
+
+    assert 7_690 + room <= 262_144
+    assert room == 249_036 - 7_554
 
 
 @pytest.mark.parametrize(("image_mib", "due"), [(20, True), (18, False)])
@@ -525,7 +540,11 @@ def test_a_billed_size_counts_the_system_prompt_once(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_what_a_summary_costs_the_agent_spends(tmp_path: Path) -> None:
     """Charged as a child's calls are: counted, told to its observers, journaled."""
-    summary = reply(_SUMMARY_TEXT, spend=TokenCost(response=0.25))
+    summary = reply(
+        _SUMMARY_TEXT,
+        tokens=TokenCount(request=100, cache_read=40, response=7),
+        spend=TokenCost(response=0.25),
+    )
     journal = RecordingJournal()
     provider = ScriptedProvider(replies=[summary], capability=_capability())
     agent = Agent(
@@ -543,6 +562,18 @@ async def test_what_a_summary_costs_the_agent_spends(tmp_path: Path) -> None:
         types.Charged(usd=0.25, by=""),
     ]
     assert spent(journal) == 0.25
+    (usage,) = (
+        record for record in journal.history() if isinstance(record, TokenUsage)
+    )
+    assert usage.measurement is not None
+    assert usage.measurement.prompt == summary.tokens.prompt == 140
+    assert usage.measurement.records == len(provider.requests[0].records) == 3
+    snapshot = agent.runtime.token_accounting.capture(
+        provider.requests[0],
+        model=agent.model,
+    )
+    assert usage.measurement.frame == snapshot.frame
+    assert usage.measurement.tokenizer == snapshot.tokenizer
 
 
 @pytest.mark.parametrize(
@@ -603,10 +634,11 @@ async def test_the_summary_replaces_the_history_without_its_analysis(
     assert lead.startswith("Another language model was working on this task")
     assert "Summary:\nthe gist\nResume work immediately without preamble." in lead
     assert "scratch notes" not in lead
-    assert "compacted 4 entries to a 17-character summary, kept 0" in caplog.messages
+    assert "compacted 4 entries, kept 0" in caplog.messages
     (request,) = provider.requests
-    assert request.system[0].startswith("Your role is to condense and summarize")
-    assert request.tools == ()
+    original = agent.runtime.request()
+    assert request.system == original.system
+    assert request.tools == original.tools
     assert _texts(_sent(request)) == _texts(_records(_HISTORY))
     assert _instruction(request).startswith("CRITICAL: Produce plain text exclusively.")
     assert _instruction(request).rstrip().endswith("causing task failure.")
@@ -661,31 +693,30 @@ async def test_a_custom_partial_prompt_is_used_when_a_tail_is_kept(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("answer", "reason"),
+    "answer",
     [
-        (reply("I summarized nothing."), "missing <summary>"),
-        (reply("<summary>   </summary>"), "missing <summary>"),
-        (
-            reply("<analysis>still thinking", stop_reason="max_tokens"),
-            "missing <summary>",
-        ),
-        (reply(""), "empty summary"),
-        (reply("I will not.", stop_reason="refusal"), "summary refused"),
+        reply("I summarized nothing."),
+        reply("<summary>   </summary>"),
+        reply("<analysis>still thinking", stop_reason="max_tokens"),
+        reply(""),
+        reply("I will not.", stop_reason="refusal"),
     ],
     ids=["no-tag", "empty-tag", "cut-off-before-it", "empty", "refused"],
 )
-async def test_a_reply_that_is_no_summary_falls_back(
+async def test_a_reply_that_is_no_summary_preserves_history(
     tmp_path: Path,
     answer: Response,
-    reason: str,
 ) -> None:
-    _, agent = _agent(tmp_path, answer)
+    provider, agent = _agent(tmp_path, answer, answer, answer)
+    _hold(agent, _HISTORY)
+    before = agent.runtime.context().messages
 
-    splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
+    with pytest.raises(ContextOverflowError, match="summary failed after 3 attempts"):
+        _ = await _live(agent, SummaryCompactor(agent))
 
-    assert splice.strategy == "summary_fallback"
-    assert splice.fallback_reason == reason
-    assert _lead(splice) == _FAILED
+    assert len(provider.requests) == 3
+    assert all(r.records == provider.requests[0].records for r in provider.requests)
+    assert agent.runtime.context().messages == before
 
 
 @pytest.mark.asyncio
@@ -740,8 +771,11 @@ async def test_the_summary_call_asks_for_no_more_than_the_window_leaves(
     assert short - long == 4_000 // 4
     assert provider.requests == []
     for asked in other.requests:
-        sent = len(asked.system[0]) + sum(map(len, _texts(asked.records)))
-        assert asked.max_response_tokens + sent // 4 == 10_000
+        sent = agent.runtime.token_accounting.estimate_request(
+            asked,
+            model=other["scripted"],
+        )
+        assert asked.max_response_tokens + sent == 9_500
 
 
 @pytest.mark.asyncio
@@ -813,6 +847,9 @@ async def test_up_to_keeps_the_head_and_summarizes_the_rest(tmp_path: Path) -> N
     assert "the EARLIER messages are preserved verbatim" in _instruction(
         provider.requests[0],
     )
+    assert "The first 4 entries are already retained." in _instruction(
+        provider.requests[0],
+    )
 
 
 @pytest.mark.asyncio
@@ -850,11 +887,11 @@ async def test_a_tail_an_open_call_spans_is_summarized_with_the_rest(
         " boundary; summarizing everything."
     ) in caplog.messages
     sent = _sent(provider.requests[0])
-    assert sent[0] == UserMessage(content="[earlier messages elided]")
+    assert sent == _records(history)
 
 
 @pytest.mark.asyncio
-async def test_attachments_are_sent_as_markers_and_kept_in_the_tail(
+async def test_attachments_are_sent_unchanged_and_kept_in_the_tail(
     tmp_path: Path,
 ) -> None:
     provider, agent = _agent(tmp_path, _SUMMARY)
@@ -880,15 +917,9 @@ async def test_attachments_are_sent_as_markers_and_kept_in_the_tail(
     splice = await _compact(SummaryCompactor(agent), agent, history)
 
     sent = _sent(provider.requests[0])
-    assert _texts(sent) == [
-        "look [image] [document]",
-        "shot [image]",
-        "[attachment]",
-        "seen",
-    ]
-    assert not any(
-        r.attachments for r in sent if isinstance(r, (UserMessage, ToolResult))
-    )
+    assert _texts(sent) == ["look", "shot", "", "seen"]
+    assert sent == _records(history[:-1])
+    assert any(r.attachments for r in sent if isinstance(r, (UserMessage, ToolResult)))
     marked = next(r for r in sent if isinstance(r, ToolResult))
     assert (marked.call_id, marked.is_error, marked.stub) == ("c1", True, "pending")
     first = splice.payload[0]
@@ -897,79 +928,60 @@ async def test_attachments_are_sent_as_markers_and_kept_in_the_tail(
 
 
 @pytest.mark.asyncio
-async def test_the_summary_request_drops_what_cannot_be_sent(tmp_path: Path) -> None:
+async def test_the_summary_request_preserves_notes_peers_and_skill_bodies(
+    tmp_path: Path,
+) -> None:
     provider, agent = _agent(tmp_path, _SUMMARY)
     history = (
         _user("go"),
         TurnContext(cwd=str(tmp_path)),
         _turn("", call("Read", "c1"), call("Read", "c2")),
-        _result("c1", "half-answered"),
-        _user("then"),
+        _result("c1", "first result"),
+        _result("c2", "second result"),
         AgentToAgentMessage(content="status", sender="reviewer"),
-        _result("zz", "orphan"),
         _turn("", call("Skill", "s1")),
         AgentToAgentMessage(content="peer note", sender="reviewer"),
         _result("s1", "the whole skill body"),
-        _result("s1", "duplicate"),
         SystemMessage(content="a reminder"),
         _turn("done"),
     )
 
     _ = await _compact(SummaryCompactor(agent), agent, history)
 
-    sent = _sent(provider.requests[0])
-    assert not any(isinstance(r, (TurnContext, SystemMessage)) for r in sent)
-    texts = _texts(sent)
-    assert texts[0] == "go"
-    for dropped in (
-        "half-answered",
-        "orphan",
-        "the whole skill body",
-        "duplicate",
-        "a reminder",
-    ):
-        assert dropped not in texts
-    assert texts[:3] == ["go", "then", "status"]
-    assert texts.index("peer note") > next(
-        i for i, t in enumerate(texts) if t.startswith("[Skill body elided")
-    )
+    assert _sent(provider.requests[0]) == _records(history)
 
 
 @pytest.mark.asyncio
-async def test_an_overflow_halves_the_result_cap_before_dropping_rounds(
+@pytest.mark.parametrize("direction", ["from", "up_to"])
+async def test_an_overflow_keeps_results_whole_and_preserves_the_unselected_suffix(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
+    direction: Literal["from", "up_to"],
 ) -> None:
-    provider, agent = _agent(
-        tmp_path,
-        ContextOverflowError("too long"),
-        _SUMMARY,
-    )
+    provider, agent = _agent(tmp_path, ContextOverflowError("too long"), _SUMMARY)
     history = (
         _user("go"),
         _turn("", call("Read", "c1")),
-        _result("c1", "r" * 1_000),
+        _result("c1", "r" * 20_000),
         _turn("ok"),
     )
 
-    with caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"):
-        splice = await _compact(
-            SummaryCompactor(agent, retry_tool_result_cap_chars=100),
-            agent,
-            history,
-        )
+    splice = await _compact(
+        SummaryCompactor(agent, direction=direction),
+        agent,
+        history,
+    )
 
-    assert splice.strategy == "summary"
-    assert caplog.messages == [
-        "summary too long (attempt 1/3); capping tool results at 50.",
-    ]
-    first, second = (_texts(_sent(r))[1] for r in provider.requests)
-    assert first == "[tool result truncated for compaction]\n" + "r" * 100
-    assert second == "[tool result truncated for compaction]\n" + "r" * 50
+    first, second = provider.requests
+    assert _sent(first) == _records(history)
+    assert _sent(second) == _records(history[:-1])
+    assert first.system == second.system == agent.runtime.system
+    assert first.tools == second.tools != ()
+    assert splice.payload[-1] == history[-1]
+    assert splice.payload.count(history[-1]) == 1
 
 
 @pytest.mark.asyncio
-async def test_an_overflow_with_small_results_drops_the_oldest_rounds(
+async def test_an_overflow_with_small_results_retains_the_oldest_prefix(
     tmp_path: Path,
 ) -> None:
     provider, agent = _agent(tmp_path, ContextOverflowError("too long"), _SUMMARY)
@@ -981,22 +993,24 @@ async def test_an_overflow_with_small_results_drops_the_oldest_rounds(
 
     first, second = (_texts(_sent(r)) for r in provider.requests)
     assert first[0] == "ask 0"
-    assert second[0] == "ask 1"
+    assert second == first[:-1]
 
 
 @pytest.mark.asyncio
-async def test_every_round_dropped_falls_back(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path, ContextOverflowError("too long"))
+async def test_an_overflowing_indivisible_pair_is_not_discarded(tmp_path: Path) -> None:
+    provider, agent = _agent(tmp_path, ContextOverflowError("too long"))
+    history = (_turn("", call("Read", "c1")), _result("c1"))
 
-    splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
+    with pytest.raises(ContextOverflowError, match="no nonempty prefix"):
+        _ = await _compact(SummaryCompactor(agent), agent, history)
 
-    assert splice.fallback_reason == "every round dropped on overflow"
-    assert _lead(splice) == _FAILED
+    assert len(provider.requests) == 1
+    assert _sent(provider.requests[0]) == _records(history)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("attempts", [1, 2, None], ids=["one", "two", "default"])
-async def test_a_summary_that_overflows_every_attempt_falls_back(
+async def test_a_summary_that_overflows_every_attempt_errors_with_bounded_calls(
     tmp_path: Path,
     attempts: int | None,
 ) -> None:
@@ -1013,13 +1027,16 @@ async def test_a_summary_that_overflows_every_attempt_falls_back(
         else SummaryCompactor(agent, max_attempts=attempts)
     )
 
-    splice = await _compact(compactor, agent, history)
-
     expected = 3 if attempts is None else attempts
-    assert splice.fallback_reason == f"summary failed after {expected} attempts"
+    with pytest.raises(
+        ContextOverflowError,
+        match=f"summary failed after {expected} attempts",
+    ):
+        _ = await _compact(compactor, agent, history)
+
     assert len(provider.requests) == expected
     first = _texts(_sent(provider.requests[0]))[1]
-    assert first == "[tool result truncated for compaction]\n" + "r" * 8_000
+    assert first == "r" * 20_000
 
 
 @pytest.mark.asyncio
@@ -1042,6 +1059,38 @@ async def test_a_transient_failure_is_retried(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("attempts", [1, 3])
+async def test_repeated_transient_failures_sleep_only_between_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    attempts: int,
+) -> None:
+    waited: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        waited.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    provider, agent = _agent(
+        tmp_path,
+        *[OverloadedError("busy", retry_after_sec=0.25)] * attempts,
+    )
+
+    with pytest.raises(
+        ContextOverflowError,
+        match=f"summary failed after {attempts} attempts",
+    ):
+        _ = await _compact(
+            SummaryCompactor(agent, max_attempts=attempts),
+            agent,
+            _HISTORY,
+        )
+
+    assert len(provider.requests) == attempts
+    assert waited == [0.25] * (attempts - 1)
+
+
+@pytest.mark.asyncio
 async def test_any_other_failure_propagates(tmp_path: Path) -> None:
     _, agent = _agent(tmp_path, ValueError("bad request"))
 
@@ -1050,16 +1099,23 @@ async def test_any_other_failure_propagates(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["from", "up_to"])
 async def test_nothing_to_summarize_keeps_the_tail_and_calls_no_model(
     tmp_path: Path,
+    direction: Literal["from", "up_to"],
 ) -> None:
     provider, agent = _agent(tmp_path)
 
-    splice = await _compact(SummaryCompactor(agent), agent, [_user("only this")])
+    splice = await _compact(
+        SummaryCompactor(agent, direction=direction),
+        agent,
+        [_user("only this")],
+    )
 
     assert splice.payload == (_user("only this"),)
     assert splice.strategy == "summary_fallback"
     assert splice.fallback_reason == "nothing to summarize"
+    assert splice.preserved_tail_count == 1
     assert provider.requests == []
 
 
@@ -1374,6 +1430,8 @@ async def test_the_effort_is_restored_after_a_failure(tmp_path: Path) -> None:
         (reply("<summary>better but cut", stop_reason="max_tokens"), "the gist"),
         (ValueError("verifier down"), "the gist"),
         (ContextOverflowError("too long"), "the gist"),
+        (reply("<summary>refused</summary>", stop_reason="refusal"), "the gist"),
+        (reply("<summary>tool call</summary>", calls=[call("Read", "c9")]), "the gist"),
     ],
     ids=[
         "improved",
@@ -1383,6 +1441,8 @@ async def test_the_effort_is_restored_after_a_failure(tmp_path: Path) -> None:
         "cut-off",
         "failed",
         "overflowed",
+        "refused",
+        "tool-call",
     ],
 )
 async def test_a_verified_summary_is_replaced_only_by_a_better_one(
@@ -1400,7 +1460,11 @@ async def test_a_verified_summary_is_replaced_only_by_a_better_one(
 
     assert f"Summary:\n{kept}" in _lead(splice)
     assert len(provider.requests) == 2
-    probe = _instruction(provider.requests[1])
+    first, verification = provider.requests
+    assert _sent(verification) == _sent(first)
+    assert verification.system == first.system
+    assert verification.tools == first.tools
+    probe = _instruction(verification)
     assert f"<previous_summary>\n{_SUMMARY_TEXT}\n</previous_summary>" in probe
 
 
@@ -1447,16 +1511,17 @@ async def test_thinking_counts_toward_the_token_estimate(tmp_path: Path) -> None
 
 @dataclass(slots=True, kw_only=True)
 class _Answer:
-    """Answer fold calls with a short note and summary calls with ``summary``."""
+    """Answer summary requests with ``summary`` and record their cost."""
 
     summary: str = "the gist"
-    fold: str = "folded"
-    fold_usd: float = 0.0
+    usd: float = 0.0
 
     def __call__(self, request: Request) -> Response:
-        if _instruction(request).startswith("Summarize the content between"):
-            return reply(self.fold, spend=TokenCost(response=self.fold_usd))
-        return reply(f"<summary>{self.summary}</summary>")
+        del request
+        return reply(
+            f"<summary>{self.summary}</summary>",
+            spend=TokenCost(response=self.usd),
+        )
 
 
 _TAIL: tuple[ModelContextEvent, ...] = (
@@ -1495,93 +1560,89 @@ def _tiny(
 
 
 @pytest.mark.asyncio
-async def test_a_kept_message_larger_than_the_window_is_folded_to_fit(
+async def test_a_kept_message_larger_than_the_window_errors_without_folding(
     tmp_path: Path,
 ) -> None:
-    _, agent = _tiny(tmp_path, _Answer())
-    huge = "HEAD line\n" + "".join(f"line {i} {'d' * 90}\n" for i in range(200))
+    provider, agent = _tiny(tmp_path, _Answer())
+    huge = _user("HEAD line\n" + "".join(f"line {i} {'d' * 90}\n" for i in range(200)))
+    _hold(agent, (*_HISTORY, huge))
+    before = agent.runtime.context().messages
 
-    splice = await _compact(_unreserved(agent), agent, (*_HISTORY, _user(huge)))
+    with pytest.raises(ContextOverflowError):
+        _ = await _live(agent, _unreserved(agent))
 
-    lead = _lead(splice)
-    assert len(lead) // 4 <= 1_900
-    assert lead.startswith("Another language model was working on this task")
-    assert "Summary:\nthe gist" in lead
-    assert "[summary of the omitted middle of this message]\nfolded" in lead
-    assert lead.endswith(f"line 199 {'d' * 90}\n")
+    assert agent.runtime.context().messages == before
+    assert all(huge not in request.records for request in provider.requests)
+    assert len(provider.requests) <= 3
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("target", "budget"), [(10, 5), (1, 1)])
-async def test_a_message_that_cannot_be_folded_overflows(
+@pytest.mark.parametrize("target", [10, 1])
+async def test_a_frame_leaving_no_nonempty_prefix_errors_without_sending(
     tmp_path: Path,
     target: int,
-    budget: int,
 ) -> None:
-    """A 10-token target leaves a 5-token fold, which its markers alone outgrow."""
     _, sizing = _agent(tmp_path, capability=_capability(window=10_000, response=100))
     fixed = _unreserved(sizing)._system_tokens() + _unreserved(sizing)._prompt_tokens()
-    _, agent = _agent(
+    provider, agent = _agent(
         tmp_path,
-        _SUMMARY,
         capability=_capability(window=fixed + target, response=100),
     )
-    assert _unreserved(agent).trigger_tokens() == target
-    huge = "".join(f"line {i} {'d' * 90}\n" for i in range(200))
+    huge = _user("".join(f"line {i} {'d' * 90}\n" for i in range(200)))
+    _hold(agent, (*_HISTORY, huge))
+    before = agent.runtime.context().messages
 
-    with pytest.raises(
-        ContextOverflowError,
-        match=rf"^no room for a summary in a {budget}-token fold budget$",
-    ):
-        _ = await _compact(_unreserved(agent), agent, (*_HISTORY, _user(huge)))
+    with pytest.raises(ContextOverflowError, match="no nonempty prefix"):
+        _ = await _live(agent, _unreserved(agent))
+
+    assert provider.requests == []
+    assert agent.runtime.context().messages == before
 
 
 @pytest.mark.asyncio
-async def test_a_tail_too_large_together_is_scrunched_to_fit(tmp_path: Path) -> None:
+async def test_a_tail_too_large_together_errors_without_summarizing_it(
+    tmp_path: Path,
+) -> None:
     provider, agent = _tiny(tmp_path, _Answer())
-    splice = await _compact(
-        _unreserved(agent, keep_recent=4),
-        agent,
-        (*_HISTORY, *_TAIL),
+    _hold(agent, (*_HISTORY, *_TAIL))
+    before = agent.runtime.context().messages
+
+    with pytest.raises(ContextOverflowError):
+        _ = await _live(agent, _unreserved(agent, keep_recent=4))
+
+    assert agent.runtime.context().messages == before
+    assert all(
+        record not in request.records
+        for record in _records(_TAIL)
+        for request in provider.requests
     )
 
-    assert sum(len(t) for t in _texts(_records(splice.payload))) // 4 <= 1_900
-    assert splice.payload[-1] == _TAIL[-1]
-    assert "c" * 2_800 in _lead(splice)
-    assert "a" * 2_800 not in _lead(splice)
-    # The oldest partition is summarized whole, with no emphasis the user never gave.
-    partition = _instruction(provider.requests[1])
-    assert "b" * 2_800 in _texts(_sent(provider.requests[1]))
-    assert "<user_guidance>" not in partition
-
 
 @pytest.mark.asyncio
-async def test_a_tail_the_summaries_cannot_shrink_overflows(tmp_path: Path) -> None:
+async def test_a_completed_pass_that_grows_errors_without_replacing_history(
+    tmp_path: Path,
+) -> None:
     bloated = reply(f"<summary>{'s' * 8_000}</summary>")
     provider, agent = _agent(
         tmp_path,
-        reply("<summary>the gist</summary>"),
-        *[bloated] * 5,
+        bloated,
         capability=_capability(window=2_000, response=100),
     )
+    _hold(agent, _HISTORY)
+    before = agent.runtime.context().messages
 
-    compactor = _unreserved(agent, keep_recent=4)
-    target = int(compactor.trigger_tokens())
+    with pytest.raises(ContextOverflowError, match="did not shrink"):
+        _ = await _live(agent, _unreserved(agent))
 
-    with pytest.raises(ContextOverflowError, match=f"over the {target}-token target"):
-        _ = await _compact(compactor, agent, (*_HISTORY, *_TAIL))
-
-    assert len(provider.requests) == 4
+    assert len(provider.requests) == 1
+    assert agent.runtime.context().messages == before
 
 
 @pytest.mark.asyncio
 async def test_a_system_prompt_that_fills_the_window_overflows(tmp_path: Path) -> None:
     _, agent = _tiny(tmp_path, _Answer(), system_prompt="p" * 8_000)
 
-    with pytest.raises(
-        ContextOverflowError,
-        match=r"^the system prompt alone fills the 2000-token request\.$",
-    ):
+    with pytest.raises(ContextOverflowError, match="no nonempty prefix"):
         _ = await _compact(_unreserved(agent), agent, _HISTORY)
 
 
@@ -1688,10 +1749,14 @@ async def test_a_due_compaction_runs_before_the_model_call(tmp_path: Path) -> No
         tmp_path,
         _SUMMARY,
         reply("answered"),
-        capability=_capability(window=3_000, response=100),
+        capability=_capability(window=4_000, response=100),
     )
     async with agent:
-        agent.session.append(_user("x" * 6_000), AssistantMessage(content="noted"))
+        for letter in "xyz":
+            agent.session.append(
+                _user(letter * 3_000),
+                AssistantMessage(content="noted"),
+            )
 
         assert await agent.send("go on") == "answered"
 
@@ -1701,12 +1766,12 @@ async def test_a_due_compaction_runs_before_the_model_call(tmp_path: Path) -> No
     assert (compaction.window, answer.window) == (0, 1)
     # The summary is asked as the agent's own next request, so it reads its cache.
     assert compaction.system == answer.system
-    assert compaction.records[0] == _user("x" * 6_000)
+    assert compaction.records[0] == _user("x" * 3_000)
     assert _instruction(compaction).startswith("CRITICAL: Produce plain text")
     first = answer.records[0]
     assert isinstance(first, UserMessage)
     assert "Summary:\nthe gist" in (first.content or "")
-    assert "x" * 6_000 not in _texts(answer.records)
+    assert "x" * 3_000 not in _texts(answer.records)
 
 
 @pytest.mark.asyncio
@@ -1716,7 +1781,7 @@ async def test_a_reply_the_summary_keeps_does_not_make_it_due_again(
     """A kept reply was billed for the history the summary replaced."""
     provider = ScriptedProvider(
         replies=(_SUMMARY, reply("answered")),
-        capability=_capability(window=2_000, response=100),
+        capability=_capability(window=4_000, response=100),
     )
     agent = Agent(
         model=provider["scripted"],
@@ -1727,7 +1792,14 @@ async def test_a_reply_the_summary_keeps_does_not_make_it_due_again(
     async with agent:
         _hold(
             agent,
-            [_user("x" * 6_000), reply("noted", tokens=TokenCount(request=1_900))],
+            [
+                _user("x" * 3_000),
+                reply("first"),
+                _user("y" * 3_000),
+                reply("second"),
+                _user("z" * 3_000),
+                reply("noted", tokens=TokenCount(request=3_900)),
+            ],
         )
 
         assert await agent.send("go on") == "answered"
@@ -1770,44 +1842,38 @@ async def test_a_summary_of_the_live_context_is_its_next_request_and_more(
 
 
 @pytest.mark.parametrize(
-    ("first", "why"),
+    "first",
     [
-        (
-            reply(calls=[call("Read", "c9", file_path="a.py")]),
-            "the cached summary request called a tool; rebuilding it",
-        ),
-        (
-            ContextOverflowError("too long"),
-            "the cached summary request failed (too long); rebuilding it",
-        ),
-        (
-            RateLimitedError("busy", retry_after_sec=0.0),
-            "the cached summary request failed (busy); rebuilding it",
-        ),
+        reply(calls=[call("Read", "c9", file_path="a.py")]),
+        reply("<summary>invalid with tools</summary>", calls=[call("Read", "c9")]),
+        ContextOverflowError("too long"),
+        RateLimitedError("busy", retry_after_sec=0.0),
     ],
-    ids=["calls-a-tool", "overflows", "rate-limited"],
+    ids=["calls-a-tool", "summary-and-tool", "overflows", "rate-limited"],
 )
 @pytest.mark.asyncio
-async def test_a_live_summary_that_fails_as_the_next_request_is_asked_alone(
+async def test_a_live_summary_retry_keeps_the_original_frame(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
     first: Reply,
-    why: str,
 ) -> None:
     provider, agent = _agent(tmp_path, first, _SUMMARY, system_prompt="S")
     _hold(agent, _HISTORY)
+    original = agent.runtime.request()
 
-    with caplog.at_level(logging.INFO, logger="sagent.agent.compactor"):
-        splice = await _live(agent, SummaryCompactor(agent))
+    splice = await _live(agent, SummaryCompactor(agent))
 
-    assert why in caplog.messages
-
-    cached, rebuilt = provider.requests
-    assert cached.purpose == rebuilt.purpose == "compaction"
-    assert cached.tools
-    assert rebuilt.tools == ()
-    assert rebuilt.system[0].startswith("Your role is to condense")
+    initial, retried = provider.requests
+    assert initial.purpose == retried.purpose == "compaction"
+    assert initial.tools == retried.tools == original.tools
+    assert initial.system == retried.system == original.system
+    assert initial.allowed == retried.allowed == original.allowed
+    assert _instruction(initial) == _instruction(retried)
+    if isinstance(first, ContextOverflowError):
+        assert _sent(retried) == _sent(initial)[:-1]
+    else:
+        assert retried.records == initial.records
     assert splice.strategy == "summary"
+    assert "invalid with tools" not in _lead(splice)
 
 
 @pytest.mark.parametrize(
@@ -1816,11 +1882,10 @@ async def test_a_live_summary_that_fails_as_the_next_request_is_asked_alone(
     ids=["own-effort", "head-kept", "own-model"],
 )
 @pytest.mark.asyncio
-async def test_a_summary_unlike_the_next_request_is_asked_alone(
+async def test_a_custom_model_effort_or_direction_keeps_the_original_frame(
     tmp_path: Path,
     options: Mapping[str, object],
 ) -> None:
-    """A different model or effort reads none of the agent's cache."""
     provider, agent = _agent(tmp_path, _SUMMARY, _SUMMARY, system_prompt="S")
     _hold(agent, _HISTORY)
     own = ScriptedProvider(replies=[_SUMMARY])
@@ -1835,8 +1900,11 @@ async def test_a_summary_unlike_the_next_request_is_asked_alone(
     _ = await _live(agent, compactor)
 
     (asked,) = provider.requests or own.requests
-    assert asked.tools == ()
-    assert asked.system[0].startswith("Your role is to condense")
+    original = agent.runtime.request()
+    assert asked.tools == original.tools
+    assert asked.system == original.system
+    assert asked.allowed == original.allowed
+    assert _sent(asked) == original.records
 
 
 @dataclass(slots=True, kw_only=True)
@@ -1985,9 +2053,19 @@ def _auditing(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mime", "marker"),
+    [
+        ("image/png", "[image]"),
+        ("application/pdf", "[document]"),
+        ("audio/wav", "[attachment]"),
+    ],
+)
 async def test_an_audit_reads_every_window_and_says_who_said_what(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    mime: str,
+    marker: str,
 ) -> None:
     """Earlier windows come from the journal; their summaries and results do not."""
     journal = RecordingJournal()
@@ -2005,7 +2083,7 @@ async def test_an_audit_reads_every_window_and_says_who_said_what(
         AgentToAgentMessage(content="peer says", sender="Agent_0", recipient="Agent"),
         UserMessage(
             content="",
-            attachments=(Attachment(mime_descriptor="image/png", data=b"x"),),
+            attachments=(Attachment(mime_descriptor=mime, data=b"x"),),
         ),
         SystemMessage(content="a note"),
         AssistantMessage(content=""),
@@ -2032,7 +2110,7 @@ async def test_an_audit_reads_every_window_and_says_who_said_what(
         'L2 TOOL Read {"file_path": "a.py"}',
         "L3 AGENT: read it",
         "L4 Agent_0 to Agent: peer says",
-        "L5 USER: [image]",
+        f"L5 USER: {marker}",
         "L6 USER: now this",
     ]
     assert "<user_guidance>\nkeep X\n</user_guidance>" in _instruction(asked)
@@ -2117,30 +2195,38 @@ async def test_an_audit_too_long_for_one_request_summarizes_its_older_half(
         (RateLimitedError("busy"),),
         (reply("no summary here"),),
         (reply("<summary>x</summary>", stop_reason="refusal"),),
+        (reply("<summary>x</summary>", calls=[call("Read", "c9")]),),
     ],
-    ids=["overflows", "rate-limited", "no-summary", "refused"],
+    ids=["overflows", "rate-limited", "no-summary", "refused", "tool-call"],
 )
 @pytest.mark.asyncio
-async def test_an_audit_that_cannot_be_had_falls_back(
+async def test_an_audit_that_cannot_be_had_preserves_history(
     tmp_path: Path,
     replies: tuple[Reply, ...],
 ) -> None:
-    _, agent, compactor = _auditing(tmp_path, *replies)
+    provider, agent, compactor = _auditing(tmp_path, *replies)
     _hold(agent, _HISTORY)
+    before = agent.runtime.context().messages
 
-    splice = await _compact(compactor, agent, agent.runtime.context().messages)
+    with pytest.raises(ContextOverflowError, match="the session audit failed"):
+        _ = await _live(agent, compactor)
 
-    assert splice.strategy == "summary_fallback"
-    assert splice.fallback_reason == "the session audit failed"
+    assert agent.runtime.context().messages == before
+    assert len(provider.requests) == 1
 
 
 @pytest.mark.parametrize(
     "digest",
-    [reply("no summary here"), reply("<summary>" + "z" * 80_000 + "</summary>")],
-    ids=["no-summary", "no-shorter"],
+    [
+        reply("no summary here"),
+        reply("<summary>" + "z" * 80_000 + "</summary>"),
+        reply("<summary>x</summary>", stop_reason="refusal"),
+        reply("<summary>x</summary>", calls=[call("Read", "c9")]),
+    ],
+    ids=["no-summary", "no-shorter", "refused", "tool-call"],
 )
 @pytest.mark.asyncio
-async def test_an_audit_that_will_not_shrink_falls_back(
+async def test_an_audit_that_will_not_shrink_preserves_history(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     digest: Reply,
@@ -2148,11 +2234,15 @@ async def test_an_audit_that_will_not_shrink_falls_back(
     provider, agent, compactor = _auditing(tmp_path, digest, _AUDIT, window=14_000)
     _hold(agent, (_user("a" * 30_000), _turn("ok"), _user("b" * 30_000)))
 
-    with caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"):
-        splice = await _compact(compactor, agent, agent.runtime.context().messages)
+    before = agent.runtime.context().messages
+    with (
+        caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"),
+        pytest.raises(ContextOverflowError, match="the session audit failed"),
+    ):
+        _ = await _live(agent, compactor)
 
     assert len(provider.requests) == 1
-    assert splice.strategy == "summary_fallback"
+    assert agent.runtime.context().messages == before
     assert "the session audit could not be cut to fit" in caplog.messages
 
 
@@ -2248,6 +2338,25 @@ def test_the_system_prompt_and_words_count_toward_the_byte_ceiling(
     assert SummaryCompactor(agent).should_run() is due
 
 
+def test_measured_reply_room_counts_the_prompt_without_response_tokens(
+    tmp_path: Path,
+) -> None:
+    _, agent = _agent(
+        tmp_path,
+        capability=_capability(window=100_000),
+        system_prompt="s" * 4_000,
+    )
+    _hold(agent, (_user("hi"),))
+    accounting = agent.runtime.token_accounting
+    snapshot = accounting.capture(
+        agent.runtime.request(max_response_tokens=0),
+        model=agent.model,
+    )
+    _ = accounting.observe(snapshot, tokens=TokenCount(request=5_000, response=700))
+
+    assert SummaryCompactor(agent).reply_room() == 95_000 - 5_000
+
+
 def test_the_reply_room_counts_the_system_prompt_once(tmp_path: Path) -> None:
     _, agent = _agent(
         tmp_path,
@@ -2259,7 +2368,7 @@ def test_the_reply_room_counts_the_system_prompt_once(tmp_path: Path) -> None:
     _ = agent.runtime.append_history(reply("ok", tokens=TokenCount(request=5_000)))
     _ = agent.runtime.append_history(_user("y" * 40))
 
-    assert compactor.reply_room() == 100_000 - 5_000 - 40 // 4
+    assert compactor.reply_room() == 95_000 - 5_000 - 40 // 4
 
 
 def test_a_bill_of_the_system_prompt_alone_holds_nothing_past_it(
@@ -2352,11 +2461,13 @@ async def test_a_turn_before_the_users_message_is_summarized(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
-async def test_a_kept_head_is_its_count_whatever_the_user_left_unanswered(
+async def test_a_kept_head_also_preserves_the_unanswered_tail(
     tmp_path: Path,
 ) -> None:
-    _, agent = _agent(tmp_path, _SUMMARY)
-    history = (*_HISTORY, _user("now"), SystemMessage(content="a note"))
+    provider, agent = _agent(tmp_path, _SUMMARY)
+    note = SystemMessage(content="a note")
+    image = Attachment(mime_descriptor="image/png", data=b"png")
+    history = (*_HISTORY, _user("now", image), note)
 
     splice = await _compact(
         SummaryCompactor(agent, keep_recent=1, direction="up_to"),
@@ -2364,7 +2475,14 @@ async def test_a_kept_head_is_its_count_whatever_the_user_left_unanswered(
         history,
     )
 
-    assert splice.preserved_tail_count == 1
+    assert splice.preserved_tail_count == 3
+    assert splice.payload[-1] == note
+    assert "now" not in _texts(_sent(provider.requests[0]))
+    assert note not in _sent(provider.requests[0])
+    assert _lead(splice).endswith("\n\nnow")
+    first = splice.payload[0]
+    assert isinstance(first, UserMessage)
+    assert first.attachments == (image,)
 
 
 @pytest.mark.asyncio
@@ -2377,34 +2495,43 @@ async def test_a_kept_head_is_its_count_whatever_the_user_left_unanswered(
     ],
     ids=["refused", "no-summary", "every-round-dropped"],
 )
-async def test_a_fallback_note_leads_a_kept_tail(
+async def test_a_failed_summary_preserves_the_history_and_kept_tail(
     tmp_path: Path,
     answer: Reply,
 ) -> None:
-    _, agent = _agent(tmp_path, answer)
+    provider, agent = _agent(tmp_path, *[answer] * 3)
+    _hold(agent, (*_HISTORY, _user("next")))
+    before = agent.runtime.context().messages
 
-    splice = await _compact(
-        SummaryCompactor(agent, keep_recent=1),
-        agent,
-        (*_HISTORY, _user("next")),
-    )
+    with pytest.raises(ContextOverflowError):
+        _ = await _live(agent, SummaryCompactor(agent, keep_recent=1))
 
-    assert splice.preserved_tail_count == 1
-    assert _lead(splice) == f"{_FAILED}\n\nnext"
+    assert agent.runtime.context().messages == before
+    assert len(provider.requests) == 3
+    assert all("next" not in _texts(_sent(r)) for r in provider.requests)
 
 
 @pytest.mark.asyncio
-async def test_a_fallback_note_follows_a_kept_head(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path, reply("I will not.", stop_reason="refusal"))
-    history = (_user("head"), _turn("kept"), _user("more"), _turn("done"))
-
-    splice = await _compact(
-        SummaryCompactor(agent, keep_recent=2, direction="up_to"),
-        agent,
-        history,
+async def test_a_failed_summary_preserves_the_history_and_kept_head(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        *[reply("I will not.", stop_reason="refusal")] * 3,
     )
+    history = (_user("head"), _turn("kept"), _user("more"), _turn("done"))
+    _hold(agent, history)
+    before = agent.runtime.context().messages
 
-    assert splice.payload == (*history[:2], UserMessage(content=_FAILED))
+    with pytest.raises(ContextOverflowError, match="summary failed after 3 attempts"):
+        _ = await _live(
+            agent,
+            SummaryCompactor(agent, keep_recent=2, direction="up_to"),
+        )
+
+    assert agent.runtime.context().messages == before
+    assert len(provider.requests) == 3
+    assert all(_sent(r) == _records(history) for r in provider.requests)
 
 
 @pytest.mark.asyncio
@@ -2468,8 +2595,11 @@ async def test_a_reply_with_no_summary_says_how_long_it_was(
 ) -> None:
     _, agent = _agent(tmp_path, reply("I summarized nothing."))
 
-    with caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"):
-        _ = await _compact(SummaryCompactor(agent), agent, _HISTORY)
+    with (
+        caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"),
+        pytest.raises(ContextOverflowError, match="summary failed after 1 attempts"),
+    ):
+        _ = await _compact(SummaryCompactor(agent, max_attempts=1), agent, _HISTORY)
 
     assert caplog.messages == [
         "compactor output has no usable <summary> (21 chars)",
@@ -2521,56 +2651,40 @@ async def test_a_calls_arguments_and_sealed_thinking_count_as_the_model_reads_th
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("cap", "result", "sent"),
-    [
-        (1, "ab", "[tool result truncated for compaction]\na"),
-        (100, "r" * 100, "r" * 100),
-    ],
-    ids=["one-char-cap", "at-the-cap"],
-)
-async def test_a_result_is_capped_only_past_the_cap(
+@pytest.mark.parametrize("result", ["ab", "r" * 100, "r" * 20_000])
+async def test_error_results_are_sent_whole_regardless_of_length(
     tmp_path: Path,
-    cap: int,
     result: str,
-    sent: str,
 ) -> None:
     provider, agent = _agent(tmp_path, _SUMMARY)
-    history = (
-        _user("go"),
-        _turn("", call("Read", "c1")),
-        UncategorizedToolResult(call_id="c1", content=result, is_error=True),
-        _turn("ok"),
-    )
+    returned = UncategorizedToolResult(call_id="c1", content=result, is_error=True)
+    history = (_user("go"), _turn("", call("Read", "c1")), returned, _turn("ok"))
 
-    _ = await _compact(
-        SummaryCompactor(agent, retry_tool_result_cap_chars=cap),
-        agent,
-        history,
-    )
+    _ = await _compact(SummaryCompactor(agent), agent, history)
 
-    capped = _sent(provider.requests[0])[2]
-    assert isinstance(capped, ToolResult)
-    assert (capped.call_id, capped.is_error, capped.text()) == ("c1", True, sent)
+    assert _sent(provider.requests[0])[2] == returned
 
 
 @pytest.mark.asyncio
-async def test_an_overflow_drops_a_fifth_of_the_rounds(
+async def test_an_overflow_shortens_to_the_previous_safe_tool_boundary(
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     provider, agent = _agent(tmp_path, ContextOverflowError("too long"), _SUMMARY)
-    history = tuple(
-        e for i in range(10) for e in (_user(f"ask {i}"), _turn(f"answer {i}"))
+    history = (
+        *_HISTORY,
+        _user("last ask"),
+        _turn("", call("Read", "c2"), call("Read", "c3")),
+        _result("c2", "first"),
+        _result("c3", "second"),
     )
 
-    with caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"):
-        _ = await _compact(SummaryCompactor(agent), agent, history)
+    splice = await _compact(SummaryCompactor(agent), agent, history)
 
-    assert _texts(_sent(provider.requests[1]))[0] == "ask 2"
-    assert caplog.messages == [
-        "summary too long (attempt 1/3); dropping 2 rounds.",
-    ]
+    first, retry = provider.requests
+    assert _sent(first) == _records(history)
+    assert _sent(retry) == _records(history[:-3])
+    assert splice.payload[-3:] == history[-3:]
+    assert splice.paired_externally == frozenset()
 
 
 @pytest.mark.asyncio
@@ -2582,7 +2696,7 @@ async def test_an_overflow_drops_a_fifth_of_the_rounds(
         (reply(""), []),
         (
             reply("no tags at all"),
-            ["verifier returned no <summary>; keeping the original"],
+            ["verifier returned no usable summary; keeping the original"],
         ),
         (
             reply("<summary>better but cut", stop_reason="max_tokens"),
@@ -2594,12 +2708,7 @@ async def test_an_overflow_drops_a_fifth_of_the_rounds(
         ),
         (
             ContextOverflowError("too long"),
-            [
-                (
-                    "summary verification failed; using the original: summary"
-                    " verification: every round dropped on overflow"
-                ),
-            ],
+            ["summary verification failed; using the original: too long"],
         ),
     ],
     ids=[
@@ -2638,13 +2747,13 @@ async def test_a_live_summary_asks_for_no_more_than_the_window_leaves(
     provider, agent = _agent(tmp_path, _SUMMARY, system_prompt="S" * 400)
     _hold(agent, _HISTORY)
     compactor = SummaryCompactor(agent)
-    room = compactor.reply_room()
 
     _ = await _live(agent, compactor)
 
     (asked,) = provider.requests
     assert asked.tools
-    assert asked.max_response_tokens == room - len(_instruction(asked)) // 4
+    held = agent.runtime.token_accounting.estimate_request(asked, model=agent.model)
+    assert asked.max_response_tokens + held == 190_000
 
 
 @pytest.mark.asyncio
@@ -2753,65 +2862,75 @@ async def test_without_the_skill_tool_no_skill_is_restored(tmp_path: Path) -> No
 
 @pytest.mark.asyncio
 async def test_a_payload_exactly_the_target_is_left_whole(tmp_path: Path) -> None:
-    _, probe = _tiny(tmp_path / "probe", _Answer(summary="q"))
-    frame = len(_lead(await _compact(_unreserved(probe), probe, _HISTORY))) - 1
-    target = int(_unreserved(probe).trigger_tokens())
-    provider, agent = _tiny(
-        tmp_path / "exact",
-        _Answer(summary="q" * (4 * target - frame)),
+    provider, agent = _tiny(tmp_path, _Answer(summary="q"))
+    compactor = _unreserved(agent)
+    probe = await _compact(compactor, agent, _HISTORY)
+    request = replace(
+        agent.runtime.request(max_response_tokens=0),
+        records=_records(probe.payload),
     )
+    fixed = agent.runtime.token_accounting.estimate_request(request, model=agent.model)
+    extra = 2_000 - fixed - compactor._prompt_tokens()
+    provider.replies.clear()
+    provider.replies.append(_Answer(summary="q" * (1 + extra * 4)))
+    provider.requests.clear()
 
-    splice = await _compact(_unreserved(agent), agent, _HISTORY)
+    splice = await _compact(compactor, agent, _HISTORY)
 
-    assert splice.token_after == target
+    request = replace(request, records=_records(splice.payload))
+    held = agent.runtime.token_accounting.estimate_request(request, model=agent.model)
+    assert held + compactor._prompt_tokens() == 2_000
     assert len(provider.requests) == 1
 
 
 @pytest.mark.asyncio
-async def test_a_message_of_exactly_half_the_target_is_not_folded(
+@pytest.mark.parametrize("direction", ["from", "up_to"])
+async def test_a_pending_message_over_half_the_window_is_kept_whole(
     tmp_path: Path,
+    direction: Literal["from", "up_to"],
 ) -> None:
-    """Only the message past half is folded, and the summary is left whole."""
-    huge = "".join(f"line {i} {'d' * 90}\n" for i in range(200))
-    history = (*_HISTORY, _user("ask"), _turn("answer"), _user(huge))
-    _, odd = _tiny(tmp_path, _Answer())
-    # Each token of window is one of trigger here, so this window's is even.
-    window = 2_000 + int(_unreserved(odd).trigger_tokens()) % 2
-    _, probe = _tiny(tmp_path, _Answer(summary="q"), window=window)
-    compactor = _unreserved(probe, keep_recent=2)
-    frame = len(_lead(await _compact(compactor, probe, history))) - 1
-    target = int(compactor.trigger_tokens())
-    assert target % 2 == 0
-    summary = "q" * (2 * target - frame)
-    _, agent = _tiny(tmp_path, _Answer(summary=summary), window=window)
+    provider, agent = _tiny(tmp_path, _Answer(), window=4_000)
+    image = Attachment(mime_descriptor="image/png", data=b"png")
+    pending = _user("pending:" + "p" * 10_000, image)
 
-    splice = await _compact(_unreserved(agent, keep_recent=2), agent, history)
+    splice = await _compact(
+        SummaryCompactor(agent, direction=direction),
+        agent,
+        (*_HISTORY, pending),
+    )
 
-    assert summary in _lead(splice)
-    assert len(_lead(splice)) // 4 == target // 2
+    assert _lead(splice).endswith(pending.content or "")
+    first = splice.payload[0]
+    assert isinstance(first, UserMessage)
+    assert first.attachments == pending.attachments
+    assert len(provider.requests) == 1
+    assert _sent(provider.requests[0]) == _records(_HISTORY)
 
 
 @pytest.mark.asyncio
-async def test_a_fold_call_leaves_room_for_its_reply_and_is_the_agents(
+async def test_every_prefix_call_reserves_reply_room_and_charges_the_agent(
     tmp_path: Path,
 ) -> None:
-    provider, agent = _tiny(
-        tmp_path,
-        _Answer(fold_usd=0.01),
-        response=1_500,
+    provider, agent = _tiny(tmp_path, _Answer(usd=0.01), window=4_000)
+    history = tuple(
+        entry
+        for i in range(5)
+        for entry in (_user(f"ask {i}" + "u" * 4_000), _turn("a" * 4_000))
     )
-    huge = "".join(f"line {i} {'d' * 90}\n" for i in range(200))
 
-    _ = await _compact(_unreserved(agent), agent, (*_HISTORY, _user(huge)))
+    _ = await _compact(_unreserved(agent), agent, history)
 
-    summary, *folds = provider.requests
-    assert folds
-    assert all(
-        len(_instruction(r)) // 4 + 1_500 <= 2_000
-        and r.session == summary.session != ""
-        for r in folds
-    )
-    assert agent.spend_usd == pytest.approx(0.01 * len(folds))
+    assert len(provider.requests) > 1
+    for request in provider.requests:
+        held = agent.runtime.token_accounting.estimate_request(
+            request,
+            model=agent.model,
+        )
+        assert held + request.max_response_tokens == 3_800
+        assert request.session == agent.runtime.request().session != ""
+        assert request.system == agent.runtime.system
+        assert request.tools == agent.runtime.request().tools
+    assert agent.spend_usd == pytest.approx(0.01 * len(provider.requests))
 
 
 @pytest.mark.asyncio
@@ -2879,11 +2998,15 @@ async def test_an_audit_request_that_fails_says_why(
     _, agent, compactor = _auditing(tmp_path, failure)
     _hold(agent, (*_HISTORY, _user("now this")))
 
-    with caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"):
-        splice = await _compact(compactor, agent, agent.runtime.context().messages)
+    before = agent.runtime.context().messages
+    with (
+        caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"),
+        pytest.raises(ContextOverflowError, match="the session audit failed"),
+    ):
+        _ = await _live(agent, compactor)
 
     assert f"the session audit request failed: {logged}" in caplog.messages
-    assert _lead(splice) == f"{_FAILED}\n\nnow this"
+    assert agent.runtime.context().messages == before
 
 
 @pytest.mark.asyncio
@@ -2944,6 +3067,333 @@ async def test_an_audit_line_holds_200_characters_of_arguments_and_no_silent_pee
         f"L2 TOOL Read {arguments}",
         "L3 USER: now",
     ]
+
+
+@pytest.mark.asyncio
+async def test_overflow_shortens_the_suffix_without_discarding_any_block(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(tmp_path, ContextOverflowError("too long"), _SUMMARY)
+    history = tuple(
+        entry for i in range(4) for entry in (_user(f"ask {i}"), _turn(f"answer {i}"))
+    )
+    _hold(agent, history)
+    original = agent.runtime.request()
+
+    splice = await _live(agent, SummaryCompactor(agent))
+
+    first, retry = provider.requests
+    assert first.system == retry.system == original.system
+    assert first.tools == retry.tools == original.tools
+    assert first.records[:-1] == original.records
+    assert retry.records[:-1] == original.records[: len(retry.records) - 1]
+    assert 0 < len(retry.records) < len(first.records)
+    retained = _texts(_records(splice.payload))
+    assert "answer 3" in retained
+    assert "Summary:\nthe gist" in "\n".join(retained)
+
+
+@pytest.mark.asyncio
+async def test_prefix_summary_keeps_the_tool_result_and_attachment_unchanged(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(tmp_path, _SUMMARY)
+    image = Attachment(mime_descriptor="image/png", data=b"image")
+    history = (
+        _user("go", image),
+        _turn("", call("Read", "c1")),
+        _result("c1", "body" * 10_000),
+        _turn("done"),
+    )
+    _hold(agent, history)
+    original = agent.runtime.request()
+
+    _ = await _live(agent, SummaryCompactor(agent))
+
+    assert provider.requests[0].records[:-1] == original.records
+    result = next(r for r in original.records if isinstance(r, ToolResult))
+    assert result.text() == "body" * 10_000
+    assert original.records[0] == _user("go", image)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("answer", [reply("no summary"), ContextOverflowError("full")])
+async def test_failed_compaction_leaves_history_intact(
+    tmp_path: Path,
+    answer: Reply,
+) -> None:
+    _, agent = _agent(tmp_path, *[answer] * 3)
+    _hold(agent, _HISTORY)
+    before = agent.runtime.context().messages
+
+    with pytest.raises(ContextOverflowError):
+        _ = await _live(agent, SummaryCompactor(agent))
+
+    assert agent.runtime.context().messages == before
+
+
+@pytest.mark.asyncio
+async def test_no_nonempty_prefix_that_fits_errors_without_a_model_call(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(tmp_path, capability=_capability(window=2_000))
+    agent.runtime.system = ()
+    agent.runtime.tools.clear()
+    history = (_user("x" * 100_000), _turn("done"))
+
+    with pytest.raises(ContextOverflowError, match="prefix"):
+        _ = await _compact(_unreserved(agent), agent, history)
+
+    assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_completed_prefix_summaries_keep_their_separator_and_order(
+    tmp_path: Path,
+) -> None:
+    originals = tuple(
+        entry
+        for i in range(2)
+        for entry in (_user(f"U{i}:" + "u" * 5_997), _turn(f"A{i}:" + "a" * 5_997))
+    )
+    first = "D1:" + "s" * 3_997
+    second = "D2:" + "t" * 3_997
+    provider, agent = _agent(
+        tmp_path,
+        reply(f"<summary>{first}</summary>"),
+        reply(f"<summary>{second}</summary>"),
+        capability=_capability(window=4_000),
+    )
+    agent.runtime.system = ()
+    agent.runtime.tools.clear()
+
+    splice = await _compact(_unreserved(agent), agent, originals)
+
+    assert len(provider.requests) == 2
+    assert _sent(provider.requests[0]) == _records(originals[:2])
+    assert _sent(provider.requests[1])[1:] == _records(originals[2:3])
+    assert f"Summary:\n{first}\n\nSummary:\n{second}" in _lead(splice)
+    assert splice.payload[-1] == originals[-1]
+
+
+@pytest.mark.asyncio
+async def test_original_prefixes_are_consumed_before_summaries_are_revisited(
+    tmp_path: Path,
+) -> None:
+    originals = tuple(
+        entry
+        for i in range(3)
+        for entry in (_user(f"U{i}:" + "u" * 5_997), _turn(f"A{i}:" + "a" * 5_997))
+    )
+    pending = _user("PENDING:" + "p" * 9_992)
+    provider, agent = _agent(
+        tmp_path,
+        reply("<summary>D1:" + "s" * 7_197 + "</summary>"),
+        reply("<summary>D2:" + "s" * 7_197 + "</summary>"),
+        reply("<summary>D3:" + "s" * 7_197 + "</summary>"),
+        reply("<summary>FINAL</summary>"),
+        capability=_capability(window=6_000),
+    )
+    agent.runtime.system = ()
+    agent.runtime.tools.clear()
+    compactor = _unreserved(agent)
+
+    splice = await _compact(compactor, agent, (*originals, pending))
+
+    assert len(provider.requests) == 4
+    consumed: list[str] = []
+    for index, request in enumerate(provider.requests[:3]):
+        sent = _texts(_sent(request))
+        consumed.extend(s for s in sent if s.startswith(("U", "A")))
+        if index:
+            assert sent[:index] == [
+                f"Summary:\nD{i}:" + "s" * 7_197 for i in range(1, index + 1)
+            ]
+            assert (
+                f"The first {index} entries are already retained."
+                " Use them only as context; summarize only the newly selected"
+                " entries after them. Do not repeat the retained summaries."
+            ) in _instruction(request)
+    assert consumed == _texts(_records(originals))
+    assert all(
+        record in [r for request in provider.requests[:3] for r in _sent(request)]
+        for record in _records(originals)
+    )
+    last = "\n".join(_texts(_sent(provider.requests[-1])))
+    assert all(f"D{i}:" in last for i in (1, 2, 3))
+    assert "U0:" not in last
+    assert all(pending not in request.records for request in provider.requests)
+    assert "Summary:\nFINAL" in _lead(splice)
+    assert _lead(splice).endswith(pending.content or "")
+
+
+@pytest.mark.asyncio
+async def test_audit_replacement_fitting_never_summarizes_pending_input(
+    tmp_path: Path,
+) -> None:
+    provider, agent, compactor = _auditing(
+        tmp_path,
+        reply("<summary>" + "s" * 12_000 + "</summary>"),
+        _SUMMARY,
+        window=6_000,
+    )
+    image = Attachment(mime_descriptor="image/png", data=b"png")
+    pending = _user("PENDING:" + "p" * 11_992, image)
+    _hold(agent, (*_HISTORY, pending))
+
+    splice = await _live(agent, compactor)
+
+    assert len(provider.requests) == 2
+    assert "PENDING:" not in "\n".join(_texts(_sent(provider.requests[1])))
+    assert provider.requests[1].system == agent.runtime.system
+    assert provider.requests[1].tools == agent.runtime.request().tools
+    assert _lead(splice).endswith(pending.content or "")
+    assert "Summary:\nthe gist" in _lead(splice)
+    first = splice.payload[0]
+    assert isinstance(first, UserMessage)
+    assert first.attachments == pending.attachments
+    assert splice.preserved_tail_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("direction", ["from", "up_to"])
+async def test_only_oversized_pending_input_errors_without_sending(
+    tmp_path: Path,
+    direction: str,
+) -> None:
+    provider, agent = _agent(tmp_path, capability=_capability(window=2_000))
+    pending = _user("p" * 12_000)
+    _hold(agent, (pending,))
+    before = agent.runtime.context().messages
+    compactor = SummaryCompactor(
+        agent,
+        direction="up_to" if direction == "up_to" else "from",
+    )
+
+    with pytest.raises(ContextOverflowError, match="no nonempty prefix"):
+        _ = await _live(agent, compactor)
+
+    assert provider.requests == []
+    assert agent.runtime.context().messages == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reserve", [0, 1_000])
+async def test_the_largest_fitting_prefix_reserves_summary_output(
+    tmp_path: Path,
+    reserve: int,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        *[_SUMMARY] * 10,
+        capability=_capability(window=4_000),
+    )
+    history = tuple(
+        entry
+        for i in range(3)
+        for entry in (_user(f"U{i}:" + "u" * 2_997), _turn(f"A{i}:" + "a" * 2_997))
+    )
+    compactor = SummaryCompactor(agent, summary_tokens=lambda _: float(reserve))
+
+    _ = await _compact(compactor, agent, history)
+
+    first = provider.requests[0]
+    selected = len(_sent(first))
+    assert 0 < selected < len(history)
+    assert _sent(first) == _records(history[:selected])
+    larger = replace(
+        first,
+        records=[*_records(history[: selected + 1]), first.records[-1]],
+    )
+    accounting = agent.runtime.token_accounting
+    assert accounting.estimate_request(first, model=agent.model) + reserve <= 4_000
+    assert accounting.estimate_request(larger, model=agent.model) + reserve > 4_000
+    assert all(
+        accounting.estimate_request(r, model=agent.model) + reserve <= 4_000
+        for r in provider.requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_failure_after_a_successful_prefix_leaves_all_history_intact(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        _SUMMARY,
+        *[reply("invalid")] * 3,
+        capability=_capability(window=4_000),
+    )
+    history = tuple(
+        entry
+        for i in range(5)
+        for entry in (_user(f"ask {i}" + "u" * 4_000), _turn("a" * 4_000))
+    )
+    _hold(agent, history)
+    before = agent.runtime.context().messages
+
+    with pytest.raises(ContextOverflowError, match="summary failed after 3 attempts"):
+        _ = await _live(agent, _unreserved(agent))
+
+    assert len(provider.requests) == 4
+    assert all(r.records == provider.requests[1].records for r in provider.requests[1:])
+    assert agent.runtime.context().messages == before
+
+
+@pytest.mark.asyncio
+async def test_an_oversized_kept_head_is_never_summarized_or_dropped(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(tmp_path, capability=_capability(window=4_000))
+    history = (_user("h" * 20_000), _turn("kept"), *_HISTORY)
+    _hold(agent, history)
+    before = agent.runtime.context().messages
+
+    with pytest.raises(ContextOverflowError, match="no nonempty prefix"):
+        _ = await _live(
+            agent,
+            SummaryCompactor(agent, keep_recent=2, direction="up_to"),
+        )
+
+    assert provider.requests == []
+    assert agent.runtime.context().messages == before
+
+
+@pytest.mark.asyncio
+async def test_adjacent_original_users_preserve_the_live_request_prefix(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(tmp_path, _SUMMARY)
+    history = (_user("first"), _user("second"), _turn("done"))
+    _hold(agent, history)
+    original = agent.runtime.request()
+
+    _ = await _live(agent, SummaryCompactor(agent))
+
+    assert provider.requests[0].records[:-1] == original.records
+
+
+@pytest.mark.asyncio
+async def test_verification_preserves_the_retained_head_summary_boundary(
+    tmp_path: Path,
+) -> None:
+    provider, agent = _agent(tmp_path, _SUMMARY, reply("IDENTICAL"))
+
+    splice = await _compact(
+        SummaryCompactor(agent, keep_recent=3, direction="up_to", verify_summary=True),
+        agent,
+        _HISTORY,
+    )
+
+    assert splice.payload[:3] == _HISTORY[:3]
+    assert len(provider.requests) == 2
+    assert all(_sent(r) == _records(_HISTORY) for r in provider.requests)
+    for request in provider.requests:
+        assert (
+            "The first 4 entries are already retained."
+            " Use them only as context; summarize only the newly selected"
+            " entries after them. Do not repeat the retained summaries."
+        ) in _instruction(request)
 
 
 if __name__ == "__main__":

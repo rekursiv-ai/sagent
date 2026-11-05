@@ -1,0 +1,41 @@
+sources:
+  model: https://docs.z.ai/guides/llm/glm-5.3
+  pricing: https://docs.z.ai/guides/overview/pricing
+  chat: https://docs.z.ai/api-reference/llm/chat-completion
+  context: https://docs.z.ai/guides/overview/concept-param
+
+roles:
+  default: glm-5.3
+  utility: glm-5.3
+  best: glm-5.3
+  everyday: glm-5.3
+
+reference:
+  effort_as_level: true
+  thinking_effort_default: max
+  limits:
+    max_request_tokens: 1_048_576
+    max_response_tokens: 131_072
+    truncates_at_context: false
+  thinking:
+    effort: [low, high, max]
+    budget: [none]
+    output: [text]
+
+models:
+- model_id: glm-5.3
+  wire_model_id: glm-5.3
+  prices:
+  - service_tier: auto
+    request: 1.4
+    response: 4.4
+    cache_read: 0.26
+
+providers:
+  zai:
+    sends: [thinking_effort]
+    retries_internally: true
+    service_tier: [auto]
+    manage_context_server_side: [false]
+    models:
+      glm-5.3:

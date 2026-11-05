@@ -1,0 +1,25 @@
+sources:
+  api: https://developers.cloudflare.com/workers-ai/configuration/open-ai-compatibility/
+  pricing: https://developers.cloudflare.com/workers-ai/models/llama-3.2-3b-instruct/
+  context: https://developers.cloudflare.com/workers-ai/changelog/
+roles:
+  default: llama-small
+reference:
+  limits:
+    truncates_at_context: false
+    max_request_tokens: 80000
+  thinking:
+    effort: [none]
+    budget: [none]
+    output: [none]
+models:
+- model_id: llama-small-3.2
+  wire_model_id: '@cf/meta/llama-3.2-3b-instruct'
+  prices:
+  - request: 0.0509
+    response: 0.335
+providers:
+  cloudflare:
+    sends: []
+    models:
+      llama-small-3.2:

@@ -31,6 +31,7 @@ from sagent.tools.play_audio import PlayAudio
 from sagent.tools.read import Read
 from sagent.tools.remote import RemoteTool
 from sagent.tools.skill import Skill
+from sagent.tools.web_browser import WebBrowser
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
 from sagent.tools.write import Write
@@ -61,6 +62,7 @@ TOOLS: Final = (
     "List",
     "WebSearch",
     "WebFetch",
+    "WebBrowser",
     "PaperSearch",
     "PaperDetails",
     "PaperAuthor",
@@ -108,6 +110,7 @@ def builders(
         "List": lambda: ls,
         "WebSearch": WebSearch,
         "WebFetch": lambda: fetch,
+        "WebBrowser": WebBrowser,
         "PaperSearch": PaperSearch,
         "PaperDetails": PaperDetails,
         "PaperAuthor": PaperAuthor,

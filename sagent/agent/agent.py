@@ -42,6 +42,7 @@ from sagent.session.types import (
     AgentToAgentMessage,
     AssistantMessage,
     ContextClear,
+    RequestMeasurement,
     SystemMessage,
     Thinking,
     TokenUsage,
@@ -73,6 +74,7 @@ if TYPE_CHECKING:
         Session,
         Shrinker,
     )
+    from sagent.model.token_accounting import TokenAccounting
     from sagent.providers.types import Model, ModelCatalog
     from sagent.runtime.tape import TapeRecord
     from sagent.session.types import Attachment, SessionRecord
@@ -298,7 +300,13 @@ class Agent(AsyncResource):
         self._allowed = names
         self._gate_tools()
 
-    def charge(self, usd: float, *, by: str) -> None:
+    def charge(
+        self,
+        usd: float,
+        *,
+        by: str,
+        measurement: RequestMeasurement | None = None,
+    ) -> None:
         """Count spend no reply of this agent's own brought; halt the turn past the cap.
 
         The spend is journaled, so a resumed session counts it too, and told to the
@@ -308,11 +316,16 @@ class Agent(AsyncResource):
           usd: What one model call cost.
           by: The label of the agent that spent it: one below this one, or this
             one's own for a compaction.
+          measurement: The exact request's measurement for a side call, if captured.
 
         """
         self.spend_usd += usd
         self._session.journal.append(
-            TokenUsage(timestamp=_now(), info={"spend_usd": usd, "agent": by}),
+            TokenUsage(
+                timestamp=_now(),
+                info={"spend_usd": usd, "agent": by},
+                measurement=measurement,
+            ),
         )
         self.runtime.publish(types.Charged(usd=usd, by=by))
         if (over := self._over_budget()) is not None:
@@ -732,7 +745,10 @@ class RuntimeSession:
         """Resume, then go on counting turns and windows from what the journal held."""
         held = self.journal.history()
         self.resume()
-        turns, compactions = await asyncio.to_thread(_counted, held)
+        turns, compactions = await asyncio.to_thread(
+            _counted,
+            _restored(held, accounting=self._agent.runtime.token_accounting),
+        )
         self._agent.runtime.turns += turns
         self._agent.runtime.compactions += compactions
 
@@ -741,7 +757,10 @@ class RuntimeSession:
         window = list(self.journal)
         if window:
             self.append(*_restated(window))
-            for record in window:
+            for record in _restored(
+                window,
+                accounting=self._agent.runtime.token_accounting,
+            ):
                 _apply_standing(self._standing, record)
             stood = {r.kind: r.payload for r in self.standing()}
             if "model" in stood:
@@ -1167,6 +1186,7 @@ def _journaled(entries: Iterable[types.ModelContextEvent]) -> list[SessionRecord
                     "cache_read": tokens.cache_read,
                     "spend_usd": spend.total,
                 },
+                measurement=entry.measurement,
             ),
         )
     return records
@@ -1181,7 +1201,12 @@ def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
             turn.append(record)
             continue
         if turn:
-            entries.append(_response(turn))
+            entries.append(
+                _response(
+                    turn,
+                    usage=record if isinstance(record, TokenUsage) else None,
+                ),
+            )
             turn = []
         if isinstance(
             record,
@@ -1193,13 +1218,32 @@ def _entries(records: Iterable[SessionRecord]) -> list[types.ModelContextEvent]:
     return entries
 
 
-def _response(records: Sequence[AssistantMessage | Thinking | ToolCall]) -> Response:
+def _response(
+    records: Sequence[AssistantMessage | Thinking | ToolCall],
+    *,
+    usage: TokenUsage | None = None,
+) -> Response:
     """Return a stored model turn as the ``Response`` it came in."""
+    info = usage.info if usage is not None else {}
     return Response(
         records=tuple(records),
-        tokens=TokenCount(),
-        spend=TokenCost(),
+        tokens=from_plain(
+            {
+                key: info[key]
+                for key in (
+                    "request",
+                    "response",
+                    "cache_write",
+                    "cache_write_1h",
+                    "cache_read",
+                )
+                if key in info
+            },
+            TokenCount,
+        ),
+        spend=TokenCost(request=from_plain(info.get("spend_usd"), float, default=0.0)),
         stop_reason="",
+        measurement=usage.measurement if usage is not None else None,
     )
 
 
@@ -1214,8 +1258,20 @@ def _flatten(records: Iterable[SessionRecord]) -> Iterator[SessionRecord]:
             yield record
 
 
+def _restored(
+    records: Iterable[SessionRecord],
+    *,
+    accounting: TokenAccounting,
+) -> Iterator[SessionRecord]:
+    """Yield journal records while restoring their request measurements."""
+    for record in records:
+        if isinstance(record, TokenUsage) and record.measurement is not None:
+            accounting.restore(record.measurement)
+        yield record
+
+
 def _counted(records: Iterable[SessionRecord]) -> tuple[int, int]:
-    """Return how many turns ``records`` hold, and how many compactions."""
+    """Return turn and compaction counts from the journal."""
     turns = compactions = 0
     for record in records:
         if isinstance(record, (UserMessage, AgentToAgentMessage)):

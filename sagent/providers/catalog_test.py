@@ -12,6 +12,8 @@ import re
 
 import pytest
 
+from sagent.agent.agent import Agent
+from sagent.agent.compactor import SummaryCompactor
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
@@ -20,12 +22,14 @@ from sagent.model.capability import (
     model_setting_names,
     typed_text,
 )
-from sagent.model.cost import PriceCatalog
+from sagent.model.cost import PriceCatalog, TokenCount
 from sagent.model.exceptions import UnknownModelError, UnknownProviderError
-from sagent.model.scripted import ScriptedModel, ScriptedProvider
+from sagent.model.scripted import ScriptedModel, ScriptedProvider, reply
 from sagent.model.types import Request
 from sagent.providers.anthropic.api import Anthropic, AnthropicModel
 from sagent.providers.anthropic.cli import AnthropicCLI, AnthropicCLIModel
+from sagent.providers.azure.api import Azure
+from sagent.providers.bedrock.api import Bedrock
 from sagent.providers.catalog import (
     CachedModel,
     ModelCatalog,
@@ -37,12 +41,15 @@ from sagent.providers.catalog import (
 )
 from sagent.providers.google.api import GoogleModel
 from sagent.providers.google.cli import GoogleCLIModel
-from sagent.providers.openai.compat import OpenAIModel
+from sagent.providers.nvidia.api import NVIDIA
+from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel
+from sagent.providers.replicate.api import Replicate
 from sagent.providers.selfhosted import server
 from sagent.providers.selfhosted.server import SelfHostedModel
 from sagent.providers.table import ModelTable, ModelTags
 from sagent.providers.types import HasLogin
 from sagent.session.types import UserMessage
+from sagent.tools.types import ToolContext
 from sagent.types import AsyncResource
 
 
@@ -61,6 +68,33 @@ def test_every_registered_provider_is_built_under_its_name() -> None:
         provider = catalog[name]
         assert provider.name == name
         assert provider.resources is catalog
+
+
+def test_all_vendor_adapters_are_registered() -> None:
+    expected = {
+        "openrouter",
+        "deepseek",
+        "zai",
+        "xai",
+        "mistral",
+        "groq",
+        "cerebras",
+        "together",
+        "fireworks",
+        "deepinfra",
+        "cohere",
+        "perplexity",
+        "nvidia",
+        "huggingface",
+        "bedrock",
+        "azure",
+        "vertex",
+        "cloudflare",
+        "replicate",
+        "ollama",
+        "lmstudio",
+    }
+    assert expected <= ModelCatalog().factories.keys()
 
 
 @pytest.fixture
@@ -113,16 +147,29 @@ def test_every_row_starts_at_the_size_its_prices_name(
     assert unresolved == {}
 
 
-def test_every_row_says_what_a_reply_past_its_window_does(
+def test_every_row_budgets_replies_with_its_documented_context_limits(
+    tmp_path: Path,
     rows: list[tuple[str, ModelCapability]],
 ) -> None:
-    """Truncated, or the request rejected: unknown caps every reply needlessly."""
-    unknown = sorted(
-        row
-        for row, capability in rows
-        if capability.limits.truncates_at_context is None
-    )
-    assert unknown == []
+    """Cap replies in known windows unless server-side truncation is verified."""
+    for row, capability in rows:
+        limits = capability.limits
+        used = max(1, limits.max_request_tokens - 1)
+        model = ScriptedProvider(capability=capability)["scripted"]
+        agent = Agent(
+            model=model,
+            system_prompt="",
+            tool_context=ToolContext(cwd=tmp_path),
+        )
+        agent.runtime.append_history(reply(tokens=TokenCount(request=used)))
+        room = SummaryCompactor(agent).reply_room()
+        if limits.truncates_at_context is True or limits.max_request_tokens <= 0:
+            assert room == 0, row
+        else:
+            remaining = max(1, limits.context_tokens * 95 // 100 - used)
+            assert room == remaining, row
+            response = Request(max_response_tokens=room).response_tokens(limits)
+            assert 0 < response <= remaining, row
 
 
 @pytest.mark.asyncio
@@ -181,8 +228,42 @@ def test_a_section_name_builds_its_provider_class(name: str, kind: type) -> None
 
 
 @pytest.mark.parametrize("section", [listed.section for listed in listings()])
-def test_every_listed_provider_names_the_models_it_serves(section: str) -> None:
-    assert list(ModelCatalog()[section])
+def test_every_listed_provider_names_models_or_requires_deployment_configuration(
+    section: str,
+) -> None:
+    provider = ModelCatalog()[section]
+    if section in {"azure", "bedrock", "nvidia", "replicate"}:
+        assert list(provider) == []
+        with pytest.raises(UnknownModelError, match="models=ModelTable"):
+            provider["default"]
+    else:
+        assert list(provider)
+
+
+@pytest.mark.parametrize("kind", [Azure, Bedrock, NVIDIA, Replicate])
+@pytest.mark.asyncio
+async def test_deployment_catalogs_integrate_through_the_public_factory_api(
+    kind: type[OpenAICompatible],
+) -> None:
+    prices = PriceCatalog(window=8192)
+    row = ModelCapability(
+        model_id="private-1.0",
+        wire_model_id="deployment",
+        limits=ModelLimits(max_request_tokens=8192, max_response_tokens=1024),
+        prices=prices,
+        default=ModelSettings(context_size=prices["fullcontext"]),
+    )
+    table = ModelTable(rows=(row,), roles={"default": row.model_id})
+    async with ModelCatalog(
+        factories={kind.section: partial(kind, models=table)},
+    ) as catalog:
+        provider = catalog[kind.section]
+        assert list(provider) == [row.model_id]
+        model = catalog.model(f"{kind.section}/default", current=kind.section)
+        assert model.provider is provider
+        assert provider.resources is catalog
+        assert model.capability is row
+        assert model.settings == row.default
 
 
 def test_the_default_provider_is_the_first_listed() -> None:

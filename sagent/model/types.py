@@ -16,7 +16,7 @@ Typical usage example:
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 import uuid
@@ -24,6 +24,7 @@ import uuid
 from sagent.model.cost import TokenCost, TokenCount
 from sagent.session.types import (
     AssistantMessage,
+    RequestMeasurement,
     SessionRecord,
     Thinking,
     ToolCall,
@@ -140,3 +141,6 @@ class Response:
     spend: TokenCost
     stop_reason: str
     """Why the model stopped: ``end_turn``, ``tool_use``, ``max_tokens``, or ``refusal``; another vendor reason as spelled."""
+
+    measurement: RequestMeasurement | None = field(default=None, compare=False)
+    """The exact request's measured prompt, captured by the caller before streaming."""

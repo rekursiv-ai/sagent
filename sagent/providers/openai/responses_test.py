@@ -299,31 +299,30 @@ def test_feed_returns_the_text_and_reasoning_as_they_arrive() -> None:
     reader = _reader()
     assert reader.feed(
         {"type": "response.output_text.delta", "delta": "Hi"},
-    ) == TextChunk(text="Hi")
+    ) == (TextChunk(text="Hi"),)
     for kind in (
         "response.reasoning_summary_text.delta",
         "response.reasoning_text.delta",
     ):
-        assert reader.feed({"type": kind, "delta": "hmm"}) == TextChunk(
-            text="hmm",
-            thinking=True,
+        assert reader.feed({"type": kind, "delta": "hmm"}) == (
+            TextChunk(text="hmm", thinking=True),
         )
-    assert reader.feed({"type": "response.created"}) is None
-    assert reader.feed({"type": "response.output_text.done", "text": "Hi"}) is None
+    assert reader.feed({"type": "response.created"}) == ()
+    assert reader.feed({"type": "response.output_text.done", "text": "Hi"}) == ()
 
 
 def test_a_refusal_is_shown_once_whether_streamed_or_sent_whole() -> None:
     reader = _reader()
     streamed = {"type": "response.refusal.delta", "item_id": "msg_1", "delta": "No."}
-    assert reader.feed(streamed) == TextChunk(text="No.")
+    assert reader.feed(streamed) == (TextChunk(text="No."),)
     assert (
         reader.feed(
             {"type": "response.refusal.done", "item_id": "msg_1", "refusal": "No."},
         )
-        is None
+        == ()
     )
     whole = {"type": "response.refusal.done", "item_id": "msg_2", "refusal": "Never."}
-    assert reader.feed(whole) == TextChunk(text="Never.")
+    assert reader.feed(whole) == (TextChunk(text="Never."),)
 
 
 def test_the_response_holds_each_finished_item_in_output_order() -> None:
@@ -639,7 +638,7 @@ def test_each_delta_names_the_record_its_item_becomes() -> None:
         {"type": "response.output_text.delta", "output_index": 2, "delta": "c"},
     ]
 
-    assert [reader.feed(event) for event in events] == [
+    assert [chunk for event in events for chunk in reader.feed(event)] == [
         TextChunk(text="b", record=1),
         TextChunk(text="b", thinking=True, record=1),
         TextChunk(text="b", record=1),
@@ -652,13 +651,13 @@ def test_each_delta_names_the_record_its_item_becomes() -> None:
 def test_a_refusal_with_no_item_id_is_shown_once() -> None:
     reader = _reader()
 
-    assert reader.feed({"type": "response.refusal.delta", "delta": "No."}) == TextChunk(
-        text="No.",
+    assert reader.feed({"type": "response.refusal.delta", "delta": "No."}) == (
+        TextChunk(text="No."),
     )
-    assert reader.feed({"type": "response.refusal.done", "refusal": "No."}) is None
+    assert reader.feed({"type": "response.refusal.done", "refusal": "No."}) == ()
     assert reader.feed(
         {"type": "response.refusal.done", "item_id": "other"},
-    ) == TextChunk(text="")
+    ) == (TextChunk(text=""),)
 
 
 def test_an_item_with_no_index_follows_those_before_it() -> None:

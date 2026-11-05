@@ -27,18 +27,39 @@ from sagent.model.capability import (
 from sagent.model.exceptions import UnknownModelError, UnknownProviderError
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import AnthropicCLI
+from sagent.providers.azure.api import Azure
+from sagent.providers.bedrock.api import Bedrock
+from sagent.providers.cerebras.api import Cerebras
+from sagent.providers.cloudflare.api import Cloudflare
+from sagent.providers.cohere.api import Cohere
 from sagent.providers.dashscope.api import DashScope
+from sagent.providers.deepinfra.api import DeepInfra
+from sagent.providers.deepseek.api import DeepSeek
+from sagent.providers.fireworks.api import Fireworks
 from sagent.providers.google.api import Google
 from sagent.providers.google.cli import GoogleCLI
+from sagent.providers.groq.api import Groq
+from sagent.providers.huggingface.api import HuggingFace
 from sagent.providers.llamacpp.server import LlamaCpp
+from sagent.providers.lmstudio.api import LMStudio
 from sagent.providers.login import Logins, check_account
 from sagent.providers.minimax.api import MiniMax
+from sagent.providers.mistral.api import Mistral
 from sagent.providers.moonshot.api import Moonshot
+from sagent.providers.nvidia.api import NVIDIA
+from sagent.providers.ollama.api import Ollama
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.sub import OpenAISub
+from sagent.providers.openrouter.api import OpenRouter
+from sagent.providers.perplexity.api import Perplexity
+from sagent.providers.replicate.api import Replicate
 from sagent.providers.resources import SharedResources, close_all
 from sagent.providers.selfhosted.server import SelfHosted
 from sagent.providers.table import ModelTags
+from sagent.providers.together.api import Together
+from sagent.providers.vertex.api import Vertex
+from sagent.providers.xai.api import XAI
+from sagent.providers.zai.api import ZAI
 
 
 if TYPE_CHECKING:
@@ -107,6 +128,27 @@ def listings() -> tuple[Listed, ...]:
         DashScope,
         MiniMax,
         Moonshot,
+        OpenRouter,
+        DeepSeek,
+        ZAI,
+        XAI,
+        Mistral,
+        Groq,
+        Cerebras,
+        Together,
+        Fireworks,
+        DeepInfra,
+        Cohere,
+        Perplexity,
+        NVIDIA,
+        HuggingFace,
+        Bedrock,
+        Azure,
+        Vertex,
+        Cloudflare,
+        Replicate,
+        Ollama,
+        LMStudio,
         LlamaCpp,
         SelfHosted,
     )

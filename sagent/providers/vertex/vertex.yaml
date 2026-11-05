@@ -1,0 +1,33 @@
+sources:
+  models: https://docs.cloud.google.com/vertex-ai/generative-ai/docs/models/gemini/3-8-flash
+  pricing: https://cloud.google.com/model-garden/pricing
+roles:
+  default: gemini-flash
+reference:
+  limits:
+    truncates_at_context: true
+    max_request_tokens: 1048576
+    max_response_tokens: 65536
+  effort_as_level: true
+  thinking_effort_default: medium
+  thinking_budget_default: auto
+  thinking:
+    effort: [low, medium, high]
+    budget: [auto]
+    output: [none, text]
+models:
+- model_id: gemini-flash-3.8
+  wire_model_id: gemini-3.8-flash
+  prices:
+  - request: 0.75
+    response: 3.75
+    cache_read: 0.075
+  - effective_date: '2027-01-01'
+    request: 1.5
+    response: 7.5
+    cache_read: 0.15
+providers:
+  vertex:
+    sends: [thinking_effort, thinking_budget, thinking_output]
+    models:
+      gemini-flash-3.8:

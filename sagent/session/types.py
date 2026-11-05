@@ -71,6 +71,7 @@ __all__ = [
     "PlayAudioResult",
     "ReadResult",
     "RemoteToolResult",
+    "RequestMeasurement",
     "SessionRecord",
     "SessionResult",
     "SkillResult",
@@ -86,6 +87,7 @@ __all__ = [
     "UncategorizedRecord",
     "UncategorizedToolResult",
     "UserMessage",
+    "WebBrowserResult",
     "WebFetchResult",
     "WebSearchHit",
     "WebSearchResult",
@@ -452,6 +454,18 @@ class WebFetchResult(ToolResult):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class WebBrowserResult(ToolResult):
+    """A browser action and its inspection or interaction output."""
+
+    action: str = ""
+    content: str = ""
+
+    @override
+    def body(self) -> str:
+        return self.content
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class AgentSpawnResult(ToolResult):
     """State or final output of a subagent."""
 
@@ -698,6 +712,21 @@ class SystemMessage:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class RequestMeasurement:
+    """A measured prompt and optional appended group, identified without storing text."""
+
+    tokenizer: str
+    model: str
+    frame: str
+    prefix: str
+    records: int
+    prompt: int
+    block: str = ""
+    block_records: int = 0
+    block_tokens: int | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class TokenUsage:
     """Token accounting and rate limits a provider reported."""
 
@@ -706,6 +735,7 @@ class TokenUsage:
     info: Mapping[str, PlainTree] = field(default_factory=_no_json)
     rate_limits: Mapping[str, PlainTree] = field(default_factory=_no_json)
     extra: Mapping[str, PlainTree] = field(default_factory=_no_json)
+    measurement: RequestMeasurement | None = None
 
     def __post_init__(self) -> None:
         _freeze(self, "info", "rate_limits", "extra")
@@ -805,6 +835,7 @@ type AnyToolResult = (
     | EditResult
     | WebSearchResult
     | WebFetchResult
+    | WebBrowserResult
     | AgentSpawnResult
     | GrepResult
     | GlobResult
@@ -900,8 +931,10 @@ def record_classes() -> dict[str, type]:
             WebSearchHit,
             WebSearchResult,
             WebFetchResult,
+            WebBrowserResult,
             AgentSpawnResult,
             SystemMessage,
+            RequestMeasurement,
             TokenUsage,
             ContextState,
             ContextCompaction,

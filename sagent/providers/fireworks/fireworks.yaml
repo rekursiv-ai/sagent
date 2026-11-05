@@ -1,0 +1,41 @@
+sources:
+  model: https://fireworks.ai/models/fireworks/gpt-oss-120b
+  pricing: https://docs.fireworks.ai/serverless/pricing.md
+  reasoning: https://docs.fireworks.ai/guides/reasoning.md
+  context: https://docs.fireworks.ai/api-reference/post-chatcompletions.md
+
+roles:
+  default: gpt-oss-120b-1.0
+  utility: gpt-oss-120b-1.0
+  best: gpt-oss-120b-1.0
+  everyday: gpt-oss-120b-1.0
+
+reference:
+  effort_as_level: true
+  thinking_effort_default: medium
+  limits:
+    max_request_tokens: 131_072
+    max_response_tokens: 0
+    truncates_at_context: true
+  thinking:
+    effort: [low, medium, high]
+    budget: [none]
+    output: [text]
+
+models:
+- model_id: gpt-oss-120b-1.0
+  wire_model_id: accounts/fireworks/models/gpt-oss-120b
+  prices:
+  - service_tier: auto
+    request: 0.15
+    response: 0.6
+    cache_read: 0.015
+
+providers:
+  fireworks:
+    sends: [thinking_effort]
+    retries_internally: true
+    service_tier: [auto]
+    manage_context_server_side: [false]
+    models:
+      gpt-oss-120b-1.0:

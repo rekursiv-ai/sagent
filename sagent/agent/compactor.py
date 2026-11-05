@@ -26,6 +26,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from contextlib import contextmanager
 from dataclasses import replace
+from functools import partial
 from importlib.resources import files
 from itertools import accumulate
 from typing import TYPE_CHECKING, Literal, cast
@@ -39,8 +40,7 @@ import time
 
 from treekle import PlainTree, from_plain, json_dumps, mutable
 
-from sagent.agent.fold import FoldError, fold
-from sagent.agent.scrunch import safe_boundaries, scrunch
+from sagent.agent.scrunch import safe_boundaries
 from sagent.model.capability import ThinkingEffort, literal_members
 from sagent.model.exceptions import ContextOverflowError, RetryableError
 from sagent.model.types import Request, Response
@@ -148,15 +148,12 @@ class SummaryCompactor:
       summary_tokens: ``S(B)``, the room held for the summary of a ``B``-token
         body; see :func:`summary_tokens`. ``B + S(B)`` must never fall as
         ``B`` grows: :meth:`trigger_tokens` bisects it.
-      max_attempts: Summary calls before giving up, shrinking the input on
-        each overflow.
+      max_attempts: Attempts per selected prefix; an overflow shortens its suffix.
       keep_recent: Entries kept verbatim beside the summary.
       direction: ``"from"`` keeps the tail after the summary; ``"up_to"``
         keeps the head before it.
       proactive: Whether the continuation tells the model to carry on alone.
       verify_summary: Whether a second call checks the summary and fills gaps.
-      retry_tool_result_cap_chars: Longest tool result sent to the
-        summarizer; halved on each overflow. ``0`` for no cap.
       model: What writes the summary; ``None`` uses the agent's model.
       effort: Thinking effort for the summary; ``None`` keeps the model's.
       style: ``summary`` condenses the context; ``session-audit`` audits the
@@ -179,7 +176,6 @@ class SummaryCompactor:
         direction: Literal["from", "up_to"] = "from",
         proactive: bool = False,
         verify_summary: bool = False,
-        retry_tool_result_cap_chars: int = 8_000,
         model: Model | None = None,
         effort: ThinkingEffort | None = None,
         style: Style = "summary",
@@ -195,7 +191,6 @@ class SummaryCompactor:
         self._direction: Literal["from", "up_to"] = direction
         self._proactive = proactive
         self._verify_summary = verify_summary
-        self._retry_tool_result_cap_chars = retry_tool_result_cap_chars
         self._model = model
         self._effort: ThinkingEffort | None = effort
         self.style: Style = style
@@ -235,10 +230,10 @@ class SummaryCompactor:
         """Return the most the next reply may hold, as the window leaves room.
 
         A vendor that stops a reply at the window needs no cap; one that may
-        reject a request whose reply could pass it gets what is left.
+        reject a request gets the remainder after a 5% estimation reserve.
 
         Returns:
-          tokens: The window less the request, at least one; ``0`` for no cap.
+          tokens: The reserved window less the request, at least one; ``0`` uncapped.
 
         """
         return _room(self._agent.model, self._held() + self._system_tokens())
@@ -246,6 +241,12 @@ class SummaryCompactor:
     def _held(self) -> int:
         """Return the next request's size past its system prompt: billed, plus since."""
         runtime = self._agent.runtime
+        if runtime.token_accounting.has_measurements:
+            request = runtime.request(max_response_tokens=0)
+            return max(
+                0,
+                self._request_size(self._agent.model, request) - self._system_tokens(),
+            )
         resolved = runtime.context()
         spliced = {r.ref for r in runtime.tape if isinstance(r, ContextSplice)}
         return _request_tokens(
@@ -367,18 +368,19 @@ class SummaryCompactor:
         summarizer = self._model if self._model is not None else model
         instructions = custom_instructions or ""
         with _at_effort(summarizer, self._effort):
-            payload, strategy, reason, kept = await (
-                self._audit(summarizer, list(context), instructions)
-                if self.style == "session-audit"
-                else self._summarize(
+            if self.style == "session-audit":
+                payload, strategy, reason, kept = await self._audit(
+                    summarizer,
+                    list(context),
+                    instructions,
+                )
+            else:
+                payload, strategy, reason, kept = await self._summarize(
                     summarizer,
                     list(context),
                     instructions,
                     keep=self._tail_len(context),
                 )
-            )
-        payload = self._enrich(payload, history=context)
-        payload = await self._fit(summarizer, payload)
         return ContextSplice(
             ref=mint_ref(),
             mask=full_tape_mask(tape),
@@ -406,73 +408,81 @@ class SummaryCompactor:
         *,
         keep: int,
     ) -> tuple[tuple[ModelContextEvent, ...], str, str, int]:
-        """Return the new window's payload, its strategy, why it fell back, and the tail kept."""
+        """Return the fitted replacement, its strategy, any truncation note, and kept count."""
         direction = self._direction
         to_keep: list[ModelContextEvent] = []
+        pending: list[ModelContextEvent] = []
         to_summarize = history
+        if direction == "up_to":
+            unanswered = _trailing_user_tail_len(history)
+            if unanswered:
+                to_summarize, pending = _kept_tail(history, unanswered)
         if keep > 0:
             if direction == "from":
                 to_summarize, to_keep = _kept_tail(history, keep)
             else:
-                to_keep, to_summarize = _kept_head(history, keep)
+                to_keep, to_summarize = _kept_head(to_summarize, keep)
             if not to_keep:
                 logger.warning(
                     "compaction keep_recent=%d kept no tail: an unanswered tool"
                     " call spans the boundary; summarizing everything.",
                     keep,
                 )
-        to_summarize = _strip_attachments(to_summarize)
         body = self._body(to_keep=bool(to_keep), direction=direction)
         if guidance := instructions.strip():
             body = _append_user_guidance(body, guidance)
-        prompt = _summary_prompt(body)
-        groups = _group_history_by_round(to_summarize)
-        if not groups:
+        if not to_summarize:
+            payload = self._enrich(
+                coalesce_roles([*to_keep, *pending]),
+                history=history,
+            )
+            if not self._fits_payload(payload, [*to_keep, *pending]):
+                raise ContextOverflowError("no nonempty prefix fits a summary call")
             return (
-                coalesce_roles(to_keep),
+                payload,
                 "summary_fallback",
                 "nothing to summarize",
-                len(to_keep),
+                len(to_keep) + len(pending),
             )
-        response = await self._ask_cached(prompt) if self._caches(history) else None
-        if response is None:
-            sent = await self._send_shrinking(model, groups, instruction=prompt)
-            if isinstance(sent, str):
-                return _fallback(sent, direction=direction, to_keep=to_keep)
-            response, groups = sent
-        text = _reply(response)
-        if response.stop_reason == "refusal" or not text.strip():
-            reason = "summary refused" if text.strip() else "empty summary"
-            return _fallback(reason, direction=direction, to_keep=to_keep)
-        finished = _finished(response)
-        if self._verify_summary:
-            try:
-                text, finished = await self._verify(
-                    model,
-                    groups,
-                    text,
-                    finished=finished,
-                )
-            except Exception as exc:  # noqa: BLE001 -- Verification is best-effort; the first summary stands.
-                logger.warning(
-                    "summary verification failed; using the original: %s",
-                    exc,
-                )
-        summary = _format_summary(text, finished=finished)
-        if summary is None:
-            return _fallback("missing <summary>", direction=direction, to_keep=to_keep)
-        logger.info(
-            "compacted %d entries to a %d-character summary, kept %d",
-            len(to_summarize),
-            len(summary),
-            len(to_keep),
+
+        payload, reason = await self._prefixes(
+            model,
+            to_summarize,
+            instruction=_summary_prompt(body),
+            render=partial(
+                self._render_summary,
+                direction=direction,
+                to_keep=to_keep,
+                pending=pending,
+                history=history,
+            ),
+            fixed=to_keep if direction == "up_to" else (),
+            pending=to_keep if direction == "from" else pending,
+            force=True,
         )
-        return (
-            self._resumed(summary, direction=direction, to_keep=to_keep),
-            "summary",
-            "" if finished else "summary cut off",
-            len(to_keep),
+        kept = len(to_keep) + len(pending)
+        logger.info("compacted %d entries, kept %d", len(to_summarize), kept)
+        return payload, "summary", reason, kept
+
+    def _render_summary(
+        self,
+        summaries: list[UserMessage],
+        remaining: list[ModelContextEvent],
+        *,
+        direction: Literal["from", "up_to"],
+        to_keep: list[ModelContextEvent],
+        pending: list[ModelContextEvent],
+        history: list[ModelContextEvent],
+    ) -> tuple[ModelContextEvent, ...]:
+        summary = "\n\n".join(s.content or "" for s in summaries)
+        payload = self._resumed(
+            summary,
+            direction=direction,
+            to_keep=[*remaining, *to_keep] if direction == "from" else to_keep,
         )
+        if direction == "up_to":
+            payload = coalesce_roles([*payload, *remaining, *pending])
+        return self._enrich(payload, history=history)
 
     def _resumed(
         self,
@@ -506,24 +516,30 @@ class SummaryCompactor:
         if guidance := instructions.strip():
             body = _append_user_guidance(body, guidance)
         response = await self._audited(model, lines, body)
-        summary = (
-            _summary(response)
-            if response is not None and response.stop_reason != "refusal"
-            else None
-        )
+        summary = _summary(response) if response is not None else None
         if summary is None:
-            return _fallback(
-                "the session audit failed",
-                direction="from",
-                to_keep=to_keep,
-            )
-        logger.info("audited %d session lines, kept %d", len(lines), len(to_keep))
-        return (
-            self._resumed(summary, direction="from", to_keep=to_keep),
-            "session_audit",
-            "",
-            len(to_keep),
+            raise ContextOverflowError("the session audit failed")
+        payload, reason = await self._prefixes(
+            model,
+            [UserMessage(content=summary)],
+            instruction=_summary_prompt(self._body(to_keep=False, direction="from")),
+            render=partial(self._render_audit, to_keep=to_keep, history=history),
+            pending=to_keep,
         )
+        logger.info("audited %d session lines, kept %d", len(lines), len(to_keep))
+        return payload, "session_audit", reason, len(to_keep)
+
+    def _render_audit(
+        self,
+        summaries: list[UserMessage],
+        remaining: list[ModelContextEvent],
+        *,
+        to_keep: list[ModelContextEvent],
+        history: list[ModelContextEvent],
+    ) -> tuple[ModelContextEvent, ...]:
+        content = "\n\n".join(text(entry) for entry in [*summaries, *remaining])
+        payload = self._resumed(content, direction="from", to_keep=to_keep)
+        return self._enrich(payload, history=history)
 
     # An audit too long for one request has its older half summarized first, as a
     # compaction would, until the rest fits; each round must shrink it, or it fails.
@@ -567,80 +583,200 @@ class SummaryCompactor:
         )
         return _summary(response)
 
-    # Scrunch replaces whole entries, so one user message bigger than a summary call
-    # never shrinks through it: each such message is folded to an even share first.
-    async def _fit(
+    async def _prefixes(
         self,
         model: Model,
-        payload: tuple[ModelContextEvent, ...],
-    ) -> tuple[ModelContextEvent, ...]:
-        """Return ``payload`` shrunk below the trigger, folding and scrunching it."""
-        trigger = self.trigger_tokens()
-        if math.isinf(trigger):
-            return payload
-        target = int(trigger)
-        if _tokens(model, payload) <= target:
-            return payload
-        limits = model.capability.limits
-        if target <= 0:
-            raise ContextOverflowError(
-                "the system prompt alone fills the"
-                f" {limits.max_request_tokens}-token request.",
-            )
-        call_tokens = min(
-            limits.max_request_tokens,
-            limits.context_tokens - limits.max_response_tokens,
-        )
-        oversized = {
-            i
-            for i, entry in enumerate(payload)
-            if isinstance(entry, (UserMessage, AgentToAgentMessage))
-            and 2 * _tokens(model, [entry]) > target
-        }
-        entries = list(payload)
-        if oversized:
-            share = max(1, target // (2 * len(oversized)))
-            for i in oversized:
-                entry = entries[i]
-                assert isinstance(entry, (UserMessage, AgentToAgentMessage))
-                try:
-                    folded = await fold(
-                        text(entry),
-                        model=model,
-                        max_tokens=share,
-                        call_tokens=call_tokens,
-                        spent=self._spent,
-                        tag=self._agent.runtime.sending,
+        history: list[ModelContextEvent],
+        *,
+        instruction: str,
+        render: Callable[
+            [list[UserMessage], list[ModelContextEvent]],
+            tuple[ModelContextEvent, ...],
+        ],
+        fixed: Sequence[ModelContextEvent] = (),
+        pending: Sequence[ModelContextEvent] = (),
+        force: bool = False,
+    ) -> tuple[tuple[ModelContextEvent, ...], str]:
+        """Consume fitting prefixes; revisit summaries only after each pass ends."""
+        summaries: list[UserMessage] = []
+        remaining: list[ModelContextEvent] = list(coalesce_roles(history))
+        pass_size = self._size(model, remaining)
+        reason = ""
+        while force or not self._fits_payload(render(summaries, remaining), pending):
+            if not remaining:
+                size = self._size(model, summaries)
+                if not summaries or size >= pass_size:
+                    raise ContextOverflowError(
+                        "the compaction pass did not shrink the context",
                     )
-                except FoldError as exc:
-                    raise ContextOverflowError(str(exc)) from exc
-                entries[i] = replace(entry, content=folded)
-
-        # A partition is the oldest history, summarized whole: keeping its tail
-        # verbatim, as the window's compaction does, would keep it all and
-        # shrink nothing.
-        async def summarize(
-            part: list[ModelContextEvent],
-        ) -> tuple[tuple[ModelContextEvent, ...], str]:
-            summary, _, dropped, _ = await self._summarize(model, part, "", keep=0)
-            return summary, dropped
-
-        # Measured as sent, coalesced, so the view scrunch calls fitting is the one
-        # returned.
-        view, stopped = await scrunch(
-            entries,
-            summarize=summarize,
-            tokens=lambda e: _tokens(model, coalesce_roles(e)),
-            target_tokens=target,
-            max_partition_tokens=target,
-        )
-        fitted = coalesce_roles(view)
-        if stopped:
-            raise ContextOverflowError(
-                f"the compacted context is {_tokens(model, fitted)} tokens, over the"
-                f" {target}-token target: {stopped}.",
+                remaining = list(summaries)
+                summaries = []
+                pass_size = size
+            prefix = [*fixed, *summaries]
+            response, summary, taken = await self._prefix_summary(
+                model,
+                remaining,
+                instruction=instruction,
+                retained=prefix,
             )
-        return fitted
+            finished = _finished(response)
+            if self._verify_summary:
+                try:
+                    summary, finished = await self._verify(
+                        model,
+                        [*prefix, *remaining[:taken]],
+                        _reply(response),
+                        summary=summary,
+                        finished=finished,
+                        retained=prefix,
+                    )
+                except Exception as exc:  # noqa: BLE001 -- The usable first summary stands if verification fails.
+                    logger.warning(
+                        "summary verification failed; using the original: %s",
+                        exc,
+                    )
+            summaries.append(UserMessage(content=summary))
+            remaining = remaining[taken:]
+            if not finished:
+                reason = "summary cut off"
+            force = False
+        return render(summaries, remaining), reason
+
+    async def _prefix_summary(
+        self,
+        model: Model,
+        remaining: list[ModelContextEvent],
+        *,
+        instruction: str,
+        retained: Sequence[ModelContextEvent],
+    ) -> tuple[Response, str, int]:
+        """Send the largest fitting safe prefix, returning only a validated summary."""
+        safe = safe_boundaries(remaining)
+        stops = [i for i in range(1, len(remaining) + 1) if safe[i]]
+        for attempt in range(self._max_attempts):
+            while True:
+                if not stops:
+                    raise ContextOverflowError("no nonempty prefix fits a summary call")
+                taken = stops[-1]
+                request = self._prefix_request(
+                    model,
+                    [*retained, *remaining[:taken]],
+                    instruction,
+                    retained=retained,
+                )
+                if self._fits_request(model, request):
+                    break
+                stops.pop()
+            try:
+                response = await self._stream(model, request)
+            except ContextOverflowError:
+                stops.pop()
+                continue
+            except RetryableError as exc:
+                logger.warning(
+                    "summary call failed (%s); waiting %ss",
+                    exc,
+                    exc.retry_after_sec,
+                )
+                if attempt + 1 < self._max_attempts:
+                    await asyncio.sleep(exc.retry_after_sec)
+                continue
+            summary = _summary(response)
+            if summary is not None:
+                return response, summary, taken
+        raise ContextOverflowError(
+            f"summary failed after {self._max_attempts} attempts",
+        )
+
+    def _prefix_request(
+        self,
+        model: Model,
+        entries: Sequence[ModelContextEvent],
+        instruction: str,
+        *,
+        retained: Sequence[ModelContextEvent] = (),
+    ) -> Request:
+        """Keep the original frame and entries; distinguish retained context from input."""
+        if retained:
+            count = sum(
+                len(entry.records) if isinstance(entry, Response) else 1
+                for entry in retained
+            )
+            instruction += (
+                f"\n\nThe first {count} entries are already retained."
+                " Use them only as context; summarize only the newly selected"
+                " entries after them. Do not repeat the retained summaries."
+            )
+        request = replace(
+            self._agent.runtime.request(max_response_tokens=0),
+            records=[
+                record
+                for entry in entries
+                for record in (
+                    entry.records if isinstance(entry, Response) else (entry,)
+                )
+            ]
+            + [UserMessage(content=instruction)],
+            purpose="compaction",
+        )
+        return replace(
+            request,
+            max_response_tokens=_room(model, self._request_size(model, request)),
+        )
+
+    def _request_size(self, model: Model, request: Request) -> int:
+        """Measure unchanged blocks when available, otherwise estimate their size."""
+        return self._agent.runtime.token_accounting.estimate_request(
+            request,
+            model=model,
+        )
+
+    def _size(self, model: Model, entries: Sequence[ModelContextEvent]) -> int:
+        """Return a block's recorded size, or the best estimate available."""
+        return self._agent.runtime.token_accounting.estimate_block(entries, model=model)
+
+    def _fits_request(self, model: Model, request: Request) -> bool:
+        """Reserve room for both a summary request and its predicted answer."""
+        limits = model.capability.limits
+        if limits.max_request_tokens <= 0:
+            return True
+        held = self._request_size(model, request)
+        size = model.settings.context_size.tokens
+        return (
+            held <= min(size, limits.max_request_tokens)
+            and held + self._summary_tokens(held)
+            <= size + limits.context_tokens - limits.max_request_tokens
+        )
+
+    def _fits_payload(
+        self,
+        payload: Sequence[ModelContextEvent],
+        pending: Sequence[ModelContextEvent],
+    ) -> bool:
+        """Leave room for the pending input or the next compaction, whichever is larger."""
+        model = self._agent.model
+        limits = model.capability.limits
+        if limits.max_request_tokens <= 0:
+            return True
+        request = replace(
+            self._agent.runtime.request(max_response_tokens=0),
+            records=[
+                record
+                for entry in payload
+                for record in (
+                    entry.records if isinstance(entry, Response) else (entry,)
+                )
+            ],
+        )
+        held = self._request_size(model, request)
+        body = max(0, held - self._size(model, pending))
+        prompt = self._prompt_tokens()
+        size = model.settings.context_size.tokens
+        return (
+            max(held, body + prompt) <= min(size, limits.max_request_tokens)
+            and max(held, body + prompt + self._summary_tokens(body))
+            <= size + limits.context_tokens - limits.max_request_tokens
+        )
 
     def _body(self, *, to_keep: bool, direction: Literal["from", "up_to"]) -> str:
         """Return the summary prompt for a full or a partial compaction."""
@@ -655,133 +791,41 @@ class SummaryCompactor:
             body = _filled("compactor_partial_up_to", body=body.rstrip())
         return body
 
-    # The prompt cache keeps the last request's prefix, byte for byte, under its
-    # tools, system prompt, model, thinking, and effort; any of them changed rewrites
-    # it all. The same request with the summary prompt appended reads that cache, and
-    # pays only for what is new.
-    def _caches(self, history: Sequence[ModelContextEvent]) -> bool:
-        """Return whether a summary of ``history`` may be asked as the agent's next request."""
-        return (
-            self._model is None
-            and self._effort is None
-            and self._direction == "from"
-            and list(history) == self._agent.runtime.context().messages
-        )
-
-    # ``None`` if that fails.
-    #
-    # The request offers the agent's tools, as the cached prefix does, so a reply that
-    # calls one is no summary; nor is an overflow or a refusal to serve. Each sends the
-    # caller to the request built for summarizing.
-    async def _ask_cached(self, instruction: str) -> Response | None:
-        """Ask the agent's next request with ``instruction`` after it."""
-        runtime = self._agent.runtime
-        asked = UserMessage(content=instruction)
-        request = replace(
-            runtime.request(after=(asked,)),
-            purpose="compaction",
-            max_response_tokens=_room(
-                runtime.model,
-                self._held() + self._system_tokens() + _tokens(runtime.model, [asked]),
-            ),
-        )
-        try:
-            response = await self._stream(runtime.model, request)
-        except (ContextOverflowError, RetryableError) as exc:
-            logger.info("the cached summary request failed (%s); rebuilding it", exc)
-            return None
-        if any(isinstance(r, ToolCall) for r in response.records):
-            logger.info("the cached summary request called a tool; rebuilding it")
-            return None
-        return response
-
-    # The one owner of tool-result truncation: each request caps results at ``cap``,
-    # and each overflow either halves ``cap`` (when that changes the request) or drops
-    # leading rounds. ``groups`` is never mutated, so a halved cap re-truncates from the
-    # original bodies. Returns the reply and the rounds it read, or why there is none.
-    async def _send_shrinking(
-        self,
-        model: Model,
-        groups: list[list[ModelContextEvent]],
-        *,
-        instruction: str,
-    ) -> tuple[Response, list[list[ModelContextEvent]]] | str:
-        """Send ``groups`` and ``instruction``, shrinking on overflow."""
-        cap = self._retry_tool_result_cap_chars
-        for attempt in range(self._max_attempts):
-            entries = _request_entries(groups, cap_chars=cap)
-            try:
-                return (
-                    await self._ask(
-                        model,
-                        [*entries, UserMessage(content=instruction)],
-                    ),
-                    groups,
-                )
-            except ContextOverflowError:
-                half = cap // 2
-                if any(
-                    isinstance(entry, ToolResult) and _exceeds_cap(entry, half)
-                    for entry in _request_entries(groups)
-                ):
-                    cap = half
-                    logger.warning(
-                        "summary too long (attempt %d/%d); capping tool results at %d.",
-                        attempt + 1,
-                        self._max_attempts,
-                        cap,
-                    )
-                    continue
-                drop = max(1, len(groups) // 5)
-                logger.warning(
-                    "summary too long (attempt %d/%d); dropping %d rounds.",
-                    attempt + 1,
-                    self._max_attempts,
-                    drop,
-                )
-                groups = groups[drop:]
-                if not groups:
-                    return "every round dropped on overflow"
-            except RetryableError as exc:
-                logger.warning(
-                    "summary call failed (%s); waiting %ss",
-                    exc,
-                    exc.retry_after_sec,
-                )
-                await asyncio.sleep(exc.retry_after_sec)
-        return f"summary failed after {self._max_attempts} attempts"
-
     # Re-runs the model on the same entries plus its summary, asking it to fill gaps.
     # A replacement is taken only when it still meets the contract the original met:
     # verification may not turn a success into a failure.
     async def _verify(
         self,
         model: Model,
-        groups: list[list[ModelContextEvent]],
-        summary: str,
+        entries: list[ModelContextEvent],
+        raw: str,
         *,
+        summary: str,
         finished: bool,
+        retained: Sequence[ModelContextEvent] = (),
     ) -> tuple[str, bool]:
-        """Ask the model to check its summary; return the better one."""
-        sent = await self._send_shrinking(
+        """Ask the model to check the complete selected prefix without dropping input."""
+        response = await self._stream(
             model,
-            groups,
-            instruction=_filled("compactor_verify", summary=summary),
+            self._prefix_request(
+                model,
+                entries,
+                _filled("compactor_verify", summary=raw),
+                retained=retained,
+            ),
         )
-        if isinstance(sent, str):
-            raise ContextOverflowError(f"summary verification: {sent}")
-        response, _ = sent
         improved = _reply(response).strip()
         if not improved or improved.upper() == "IDENTICAL":
             return summary, finished
         improved_finished = _finished(response)
-        if _summary_match(improved) is None:
-            logger.warning("verifier returned no <summary>; keeping the original")
+        formatted = _summary(response)
+        if formatted is None:
+            logger.warning("verifier returned no usable summary; keeping the original")
             return summary, finished
         if finished and not improved_finished:
             logger.warning("verifier's summary was cut off; keeping the original")
             return summary, finished
-        return improved, improved_finished
+        return formatted, improved_finished
 
     async def _ask(
         self,
@@ -808,18 +852,22 @@ class SummaryCompactor:
     # Every call a compaction makes is the agent's, whichever model answers it.
     async def _stream(self, model: Model, request: Request) -> Response:
         """Ask ``model`` ``request``; return its reply, its cost spent by the agent."""
+        runtime = self._agent.runtime
+        request = runtime.sending(request)
+        snapshot = runtime.token_accounting.capture(request, model=model)
         reply = None
-        async for event in model.stream(self._agent.runtime.sending(request)):
+        async for event in model.stream(request):
             if isinstance(event, Response):
                 reply = event
         if reply is None:
             raise RuntimeError("The model ended its stream without a reply.")
-        self._spent(reply.spend.total)
-        return reply
-
-    def _spent(self, usd: float) -> None:
-        """Charge ``usd`` to the agent, as its children's calls are charged to it."""
-        self._agent.charge(usd, by=self._agent.runtime.tool_context.label)
+        measurement = runtime.token_accounting.observe(snapshot, tokens=reply.tokens)
+        self._agent.charge(
+            reply.spend.total,
+            by=runtime.tool_context.label,
+            measurement=measurement,
+        )
+        return replace(reply, measurement=measurement)
 
     def _enrich(
         self,
@@ -928,25 +976,6 @@ def text(entry: ModelContextEvent) -> str:
     return entry.content or ""
 
 
-# A round starts at each user message; a turn and its results stay together, so
-# dropping leading rounds never orphans a result.
-def _group_history_by_round(
-    history: list[ModelContextEvent],
-) -> list[list[ModelContextEvent]]:
-    """Group ``history`` into rounds, each starting at a user message."""
-    groups: list[list[ModelContextEvent]] = []
-    current: list[ModelContextEvent] = []
-    for entry in history:
-        if isinstance(entry, (UserMessage, AgentToAgentMessage)) and current:
-            groups.append(current)
-            current = [entry]
-        else:
-            current.append(entry)
-    if current:
-        groups.append(current)
-    return groups
-
-
 def _trailing_user_tail_len(history: Sequence[ModelContextEvent]) -> int:
     """Count the user messages, and the notes among them, ending ``history``."""
     count = 0
@@ -991,23 +1020,6 @@ def _safe_cut(history: list[ModelContextEvent], cut: int) -> int:
     return cut
 
 
-# Each attachment becomes a ``[image]`` / ``[document]`` marker, so the model knows media
-# was there without paying for it again. A marker per attachment means no entry is left
-# empty, which Anthropic would reject.
-def _strip_attachments(history: list[ModelContextEvent]) -> list[ModelContextEvent]:
-    """Return ``history`` with attachments replaced by markers."""
-    out: list[ModelContextEvent] = []
-    for entry in history:
-        if isinstance(entry, (UserMessage, AgentToAgentMessage)) and entry.attachments:
-            marked = _markers(entry.content or "", entry.attachments)
-            out.append(replace(entry, content=marked, attachments=()))
-        elif isinstance(entry, ToolResult) and entry.attachments:
-            out.append(entry.restated(_markers(entry.text(), entry.attachments)))
-        else:
-            out.append(entry)
-    return out
-
-
 def _markers(content: str, attachments: Sequence[Attachment]) -> str:
     """Return ``content`` followed by one marker per attachment."""
     marks = [_marker(a.mime_descriptor) for a in attachments]
@@ -1023,25 +1035,6 @@ def _marker(mime: str) -> str:
     return "[attachment]"
 
 
-def _fallback(
-    reason: str,
-    *,
-    direction: Literal["from", "up_to"],
-    to_keep: list[ModelContextEvent],
-) -> tuple[tuple[ModelContextEvent, ...], str, str, int]:
-    """Return a compaction that could not summarize: the kept entries and a note."""
-    return (
-        _beside(
-            "Compaction failed. Earlier context was dropped without a summary.",
-            direction=direction,
-            to_keep=to_keep,
-        ),
-        "summary_fallback",
-        reason,
-        len(to_keep),
-    )
-
-
 def _beside(
     content: str,
     *,
@@ -1053,111 +1046,6 @@ def _beside(
     return coalesce_roles(
         (message, *to_keep) if direction == "from" else (*to_keep, message),
     )
-
-
-# Oversized results are capped in the request, never in history: compaction is what
-# should shed them, so a result too big to send fails every retry and later turn.
-def _request_entries(
-    groups: list[list[ModelContextEvent]],
-    *,
-    cap_chars: int = 0,
-) -> list[ModelContextEvent]:
-    """Return the rounds as one request: notes dropped, orphans dropped, results capped."""
-    entries: list[ModelContextEvent] = [
-        entry
-        for group in groups
-        for entry in group
-        if not isinstance(entry, (SystemMessage, TurnContext))
-    ]
-    entries = _drop_orphan_tool_results(_elide_skill_results(entries))
-    entries = [
-        entry.restated(
-            f"[tool result truncated for compaction]\n{entry.text()[:cap_chars]}",
-        )
-        if isinstance(entry, ToolResult) and _exceeds_cap(entry, cap_chars)
-        else entry
-        for entry in entries
-    ]
-    if entries and not isinstance(entries[0], (UserMessage, AgentToAgentMessage)):
-        return [UserMessage(content="[earlier messages elided]"), *entries]
-    return entries
-
-
-def _exceeds_cap(entry: ToolResult, cap_chars: int) -> bool:
-    """Return whether ``entry`` is longer than ``cap_chars``."""
-    return cap_chars > 0 and len(entry.text()) > cap_chars
-
-
-# A Skill body is a lookup's expansion; summarizing it summarizes the catalog.
-def _elide_skill_results(entries: list[ModelContextEvent]) -> list[ModelContextEvent]:
-    """Replace ``Skill`` results with a notice."""
-    skill_ids = {
-        r.call_id
-        for entry in entries
-        if isinstance(entry, Response)
-        for r in calls(entry.records)
-        if r.name == "Skill"
-    }
-    return [
-        entry.restated(_asset("compactor_skill_elided").strip())
-        if isinstance(entry, ToolResult) and entry.call_id in skill_ids
-        else entry
-        for entry in entries
-    ]
-
-
-# A turn with calls waits for every result before it is kept; only a user message
-# interrupts the wait. An agent message interleaves instead, so it is held until the
-# turn closes. Unlike ``tape._pair_and_dedup_tool_calls``, an unanswered turn is dropped
-# here, not answered ``[interrupted]``: the summary must not report a cancellation that
-# never happened. ``turn`` is the open model turn, ``results`` what answered it so far.
-def _drop_orphan_tool_results(
-    entries: list[ModelContextEvent],
-) -> list[ModelContextEvent]:
-    """Return ``entries`` with unanswered turns and orphan results dropped."""
-    seen: set[str] = set()
-    out: list[ModelContextEvent] = []
-    turn: Response | None = None
-    results: list[ModelContextEvent] = []
-    deferred: list[ModelContextEvent] = []
-    for entry in entries:
-        if isinstance(entry, Response):
-            _flush_turn(out, turn, results, deferred)
-            turn = entry
-        elif isinstance(entry, UserMessage):
-            _flush_turn(out, turn, results, deferred)
-            turn = None
-            out.append(entry)
-        elif isinstance(entry, ToolResult):
-            asked = (
-                {c.call_id for c in calls(turn.records)}
-                if turn is not None
-                else set[str]()
-            )
-            if entry.call_id in asked - seen:
-                results.append(entry)
-                seen.add(entry.call_id)
-        elif turn is not None:
-            deferred.append(entry)
-        else:
-            out.append(entry)
-    _flush_turn(out, turn, results, deferred)
-    return out
-
-
-def _flush_turn(
-    out: list[ModelContextEvent],
-    turn: Response | None,
-    results: list[ModelContextEvent],
-    deferred: list[ModelContextEvent],
-) -> None:
-    """Keep ``turn`` only when every call has its result; then what it held back."""
-    if turn is not None and len(results) == len(calls(turn.records)):
-        out.append(turn)
-        out.extend(results)
-    out.extend(deferred)
-    results.clear()
-    deferred.clear()
 
 
 def _append_user_guidance(body: str, guidance: str) -> str:
@@ -1175,13 +1063,13 @@ def _finished(response: Response) -> bool:
 
 
 def _summary(response: Response) -> str | None:
-    """Return the summary ``response`` holds, formatted; ``None`` if it holds none."""
+    """Return a valid text-only summary, formatted; ``None`` if unusable."""
+    if response.stop_reason == "refusal" or calls(response.records):
+        return None
     return _format_summary(_reply(response), finished=_finished(response))
 
 
-# Without a ``<summary>`` block the text is no summary: it may be the model's scratch
-# reasoning. ``None`` sends the caller to the fallback, recorded as such. A summary
-# its limit cut off is kept, ending in a note that says so: half a summary beats none.
+# A summary its limit cut off is kept, ending in a note that says so.
 def _format_summary(raw: str, *, finished: bool) -> str | None:
     """Return the ``<summary>`` content, the ``<analysis>`` stripped."""
     match = _summary_match(raw)
@@ -1361,11 +1249,11 @@ def _continuation(
 # A vendor that stops a reply at the window needs no cap; one that may reject a request
 # whose reply could pass it, or is not known not to, gets what is left, at least one.
 def _room(model: Model, request: int) -> int:
-    """Return the most a reply to a ``request``-token request may hold; ``0`` uncapped."""
+    """Return a reply cap with 5% of the window held for estimation error; ``0`` uncapped."""
     limits = model.capability.limits
     if limits.truncates_at_context is True or limits.max_request_tokens <= 0:
         return 0
-    return max(1, limits.context_tokens - request)
+    return max(1, limits.context_tokens * 95 // 100 - request)
 
 
 def _tokens(model: Model, entries: Sequence[ModelContextEvent]) -> int:

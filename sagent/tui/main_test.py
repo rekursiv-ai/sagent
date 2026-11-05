@@ -2406,6 +2406,7 @@ _DEFAULT_TOOLS = [
     "List",
     "WebSearch",
     "WebFetch",
+    "WebBrowser",
     "PaperSearch",
     "PaperDetails",
     "PaperAuthor",

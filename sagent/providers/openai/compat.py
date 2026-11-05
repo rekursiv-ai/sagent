@@ -27,11 +27,11 @@ import os
 
 from treekle import json_dumps, json_loads
 
-from sagent.model.exceptions import AuthError, DisconnectedError
-from sagent.providers.openai import chat, token_count, wire
+from sagent.model.exceptions import AuthError, DisconnectedError, UnknownModelError
+from sagent.providers.openai import chat, responses, token_count, wire
 from sagent.providers.resources import SharedResources
 from sagent.providers.retry import retried
-from sagent.providers.table import HasModels
+from sagent.providers.table import HasModels, ModelTable
 from sagent.types import AsyncResource
 
 
@@ -57,14 +57,15 @@ __all__ = [
     "OpenAICompatible",
     "OpenAIModel",
     "Reader",
+    "ResponsesCompatible",
 ]
 
 
 class Reader(Protocol):
     """Collects a streamed reply's events into a ``Response``."""
 
-    def feed(self, event: Mapping[str, object]) -> TextChunk | None:
-        """Take one event, and return the text it adds, if any."""
+    def feed(self, event: Mapping[str, object]) -> tuple[TextChunk, ...]:
+        """Take one event and return its text and reasoning chunks."""
         ...
 
     def response(self) -> Response:
@@ -80,8 +81,8 @@ class OpenAICompatible(HasModels, AsyncResource):
       resources: What this shares with other providers; ``None`` makes and
         closes its own.
       api_key: The key; empty reads ``key_variable``.
-      base_url: The endpoint; empty uses ``url``, as for a self-hosted server
-        that serves a vendor's models.
+      base_url: The endpoint; empty reads ``base_url_variable``, then ``url``.
+      models: A caller's priced model catalog; ``None`` uses the shipped catalog.
 
     """
 
@@ -93,6 +94,21 @@ class OpenAICompatible(HasModels, AsyncResource):
 
     path: ClassVar[str] = "/chat/completions"
     """Where under ``url`` a reply is streamed from."""
+
+    base_url_variable: ClassVar[str] = ""
+    """The environment variable overriding the endpoint, if any."""
+
+    key_header: ClassVar[str] = "authorization"
+    key_prefix: ClassVar[str] = "Bearer "
+
+    max_tokens_field: ClassVar[str] = ""
+    """The token cap's spelling; empty uses the model's OpenAI spelling."""
+
+    reasoning_details_field: ClassVar[str] = ""
+    """The field holding opaque reasoning blocks that must be replayed."""
+
+    reasoning_content_blocks: ClassVar[bool] = False
+    """Whether thinking blocks are replayed inside assistant content."""
 
     reasoning_field: ClassVar[str] = ""
     """The message field reasoning streams in and is replayed in; empty for none."""
@@ -107,7 +123,9 @@ class OpenAICompatible(HasModels, AsyncResource):
         resources: ProviderResources | None = None,
         api_key: str = "",
         base_url: str = "",
+        models: ModelTable | None = None,
     ) -> None:
+        self._models = models
         self._name = name or self.section
         self._owns_resources = resources is None
         self._resources = SharedResources() if resources is None else resources
@@ -131,11 +149,16 @@ class OpenAICompatible(HasModels, AsyncResource):
         return self._usage
 
     def __getitem__(self, model: str) -> OpenAIModel:
-        capability, settings = self.models().resolve(model)
+        table = self.models() if self._models is None else self._models
+        if not table:
+            raise UnknownModelError(
+                f"{self.name} requires models=ModelTable(...) with deployment IDs, limits, and prices.",
+            )
+        capability, settings = table.resolve(model)
         return OpenAIModel(provider=self, capability=capability, settings=settings)
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self.models())
+        return iter(self.models() if self._models is None else self._models)
 
     @override
     async def aclose(self) -> None:
@@ -144,7 +167,7 @@ class OpenAICompatible(HasModels, AsyncResource):
 
     async def endpoint(self) -> str:
         """Return the endpoint to reach, up to and including its version."""
-        return self._base_url or self.url
+        return self._base_url or os.environ.get(self.base_url_variable, "") or self.url
 
     async def credentials(self) -> dict[str, str]:
         """Return the headers that authenticate a request.
@@ -158,7 +181,7 @@ class OpenAICompatible(HasModels, AsyncResource):
         """
         key = self._api_key or os.environ.get(self.key_variable) or ""
         if key:
-            return {"authorization": f"Bearer {key}"}
+            return {self.key_header: f"{self.key_prefix}{key}"}
         if self.key_variable:
             raise AuthError(f"{self.key_variable} is not set.")
         return {}
@@ -191,20 +214,38 @@ class OpenAICompatible(HasModels, AsyncResource):
           body: The request body.
 
         """
-        return chat.encode(
+        body = chat.encode(
             request,
             capability=model.capability,
             settings=model.settings,
             reasoning_field=self.reasoning_field,
             temperature=self.temperature,
+            reasoning_details_field=self.reasoning_details_field,
+            reasoning_content_blocks=self.reasoning_content_blocks,
         )
+        if self.max_tokens_field:
+            for field in ("max_tokens", "max_completion_tokens"):
+                if field in body:
+                    body[self.max_tokens_field] = body.pop(field)
+                    break
+        return body
 
     def reader(self, *, model: OpenAIModel) -> Reader:
-        """Return what collects ``model``'s streamed reply."""
+        """Return what collects ``model``'s streamed reply.
+
+        Args:
+          model: The model whose reply is collected.
+
+        Returns:
+          reader: The collector for this endpoint's wire format.
+
+        """
         return chat.StreamReader(
             capability=model.capability,
             settings=model.settings,
             reasoning_field=self.reasoning_field,
+            reasoning_details_field=self.reasoning_details_field,
+            reasoning_content_blocks=self.reasoning_content_blocks,
         )
 
     async def count(self, request: Request, *, model: OpenAIModel) -> int:
@@ -303,6 +344,28 @@ class OpenAICompatible(HasModels, AsyncResource):
             raise DisconnectedError(str(exc)) from exc
 
 
+class ResponsesCompatible(OpenAICompatible):
+    """Models served over the stateless OpenAI Responses wire protocol."""
+
+    path: ClassVar[str] = "/responses"
+
+    @override
+    def encode(self, request: Request, *, model: OpenAIModel) -> dict[str, object]:
+        return responses.encode(
+            request,
+            capability=model.capability,
+            settings=model.settings,
+            temperature=self.temperature,
+        )
+
+    @override
+    def reader(self, *, model: OpenAIModel) -> Reader:
+        return responses.StreamReader(
+            capability=model.capability,
+            settings=model.settings,
+        )
+
+
 class OpenAIModel(AsyncResource):
     """One model, served by ``provider`` with ``settings``."""
 
@@ -364,8 +427,7 @@ class OpenAIModel(AsyncResource):
             headers=headers,
             retry=request.retry,
         ):
-            chunk = reader.feed(event)
-            if chunk is not None:
+            for chunk in reader.feed(event):
                 yield chunk
         yield reader.response()
 

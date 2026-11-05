@@ -28,6 +28,7 @@ if TYPE_CHECKING:
     from sagent.runtime.runtime import Runtime
     from sagent.session.types import (
         Attachment,
+        RequestMeasurement,
         SessionRecord,
         UncategorizedRecord,
     )
@@ -149,8 +150,14 @@ class Agent(Resource, Protocol):
     spend_usd: float
     """What the model calls have cost, in USD; a resumed session's included."""
 
-    def charge(self, usd: float, *, by: str) -> None:
-        """Count spend no reply of its own brought, as a child's; halt past the cap."""
+    def charge(
+        self,
+        usd: float,
+        *,
+        by: str,
+        measurement: RequestMeasurement | None = None,
+    ) -> None:
+        """Count side-call spend and its captured measurement; halt past the cap."""
         ...
 
     async def send(

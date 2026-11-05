@@ -29,6 +29,7 @@ from sagent.session.types import (
     EditResult,
     IncompleteRecord,
     ReadResult,
+    RequestMeasurement,
     SessionRecord,
     Splice,
     SystemMessage,
@@ -111,6 +112,13 @@ def _every_record() -> list[SessionRecord]:
             content=(WebSearchHit(url="u", title="t", snippet="s"),),
         ),
         WebFetchResult(call_id="7", url="u", content="page", code=200),
+        types.WebBrowserResult(
+            call_id="28",
+            action="screenshot",
+            content='{"text":"page"}',
+            attachments=(Attachment(mime_descriptor="image/png", data=b"png"),),
+            extra=_json(),
+        ),
         AgentSpawnResult(call_id="8", agent_id="a", content="done", tokens=5),
         ToolErrorResult(call_id="9", content="ValueError: no", shown="[pruned]"),
         ToolResult(call_id="10", stub="pending", shown="[running]", is_error=True),
@@ -132,7 +140,22 @@ def _every_record() -> list[SessionRecord]:
         types.McpResult(call_id="26", server="s", tool="t", content="ok"),
         types.FunctionResult(call_id="27", name="act", content="acted"),
         SystemMessage(content="reminder", subtype="rules", extra=_json()),
-        TokenUsage(info={"request": 1}, rate_limits={"5h": 0.5}, extra=_json()),
+        TokenUsage(
+            info={"request": 1},
+            rate_limits={"5h": 0.5},
+            extra=_json(),
+            measurement=RequestMeasurement(
+                tokenizer="provider/model",
+                model="provider/model",
+                frame="frame",
+                prefix="prefix",
+                records=2,
+                prompt=101,
+                block="block",
+                block_records=1,
+                block_tokens=31,
+            ),
+        ),
         ContextState(kind="k", content="c", extra={"full": [True]}),
         ContextCompaction(summary="sum", extra={"tokens": {"before": 9}}),
         ContextClear(
@@ -508,7 +531,7 @@ def test_a_class_outside_the_vocabulary_stores_only_where_classes_name_it() -> N
 
 def test_the_round_trip_cases_cover_every_record_kind() -> None:
     covered = {type(r).__name__ for r in _every_record()}
-    containers = {"Attachment", "Splice", "WebSearchHit"}
+    containers = {"Attachment", "Splice", "WebSearchHit", "RequestMeasurement"}
     assert covered | containers == set(record_classes())
 
 

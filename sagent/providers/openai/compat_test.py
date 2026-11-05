@@ -17,12 +17,14 @@ from sagent.model.exceptions import (
     DisconnectedError,
     OverloadedError,
     RateLimitedError,
+    UnknownModelError,
 )
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers import moonshot, retry
 from sagent.providers.openai import chat, token_count
 from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel
 from sagent.providers.resources import SharedResources
+from sagent.providers.table import ModelTable
 from sagent.providers.types import UsageWindow
 from sagent.session.types import (
     AssistantMessage,
@@ -563,6 +565,112 @@ def test_an_attachment_is_billed_by_openai_s_formula() -> None:
         attached,
         capability=model.capability,
     )
+
+
+class _Dialect(_Vendor):
+    """An endpoint whose authentication and token limit spellings differ."""
+
+    max_tokens_field: ClassVar[str] = "max_tokens"
+    base_url_variable: ClassVar[str] = "VENDOR_BASE_URL"
+    key_header: ClassVar[str] = "api-key"
+    key_prefix: ClassVar[str] = ""
+
+
+@pytest.mark.asyncio
+async def test_endpoint_configuration_is_explicit_then_environment_then_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VENDOR_BASE_URL", "https://configured.test/v1")
+    assert await _Dialect().endpoint() == "https://configured.test/v1"
+    assert await _Dialect(base_url="http://box/v1").endpoint() == "http://box/v1"
+    monkeypatch.delenv("VENDOR_BASE_URL")
+    assert await _Dialect().endpoint() == _Dialect.url
+
+
+@pytest.mark.asyncio
+async def test_dialects_authentication_and_token_cap_reach_the_transport() -> None:
+    server = _Server(replies=[_ok()])
+    async with _Served(server) as shared:
+        provider = _Dialect(resources=shared)
+        await _stream(provider["default"])
+    (sent,) = server.requests
+    assert sent.headers["api-key"] == "sk-vendor"
+    assert "authorization" not in sent.headers
+    body = _body(sent)
+    assert (
+        body["max_tokens"] == provider["default"].capability.limits.max_response_tokens
+    )
+    assert "max_completion_tokens" not in body
+
+
+class _Opaque(_Vendor):
+    """A chat endpoint that needs its sealed reasoning blocks back."""
+
+    reasoning_details_field: ClassVar[str] = "reasoning_details"
+
+
+class _Blocks(_Vendor):
+    """A chat endpoint with thinking inside content blocks."""
+
+    reasoning_content_blocks: ClassVar[bool] = True
+
+
+def test_opaque_reasoning_round_trips_only_to_its_model() -> None:
+    provider = _Opaque()
+    model = provider["default"]
+    reader = provider.reader(model=model)
+    detail = {"type": "reasoning.encrypted", "id": "r", "data": "sealed", "index": 0}
+    reader.feed({"choices": [{"delta": {"reasoning_details": [detail]}}]})
+    reader.feed({"choices": [{"finish_reason": "stop"}]})
+    response = reader.response()
+    request = Request(records=response.records)
+    body = provider.encode(request, model=model)
+    assert body["messages"] == [
+        {"role": "assistant", "content": None, "reasoning_details": [detail]},
+    ]
+    other = provider.encode(request, model=provider["utility"])
+    assert other["messages"] == []
+
+
+def test_native_thinking_blocks_round_trip_with_the_answer() -> None:
+    provider = _Blocks()
+    model = provider["default"]
+    reader = provider.reader(model=model)
+    thought = {"type": "thinking", "thinking": [{"type": "text", "text": "Hmm"}]}
+    reader.feed({"choices": [{"delta": {"content": [thought]}}]})
+    reader.feed({"choices": [{"delta": {"content": "Hi"}, "finish_reason": "stop"}]})
+    body = provider.encode(Request(records=reader.response().records), model=model)
+    assert body["messages"] == [
+        {"role": "assistant", "content": [thought, {"type": "text", "text": "Hi"}]},
+    ]
+
+
+def test_empty_catalog_requires_caller_models_without_changing_other_instances() -> (
+    None
+):
+    vendor = _Vendor(models=ModelTable(rows=()))
+    assert list(vendor) == []
+    with pytest.raises(UnknownModelError, match="models=ModelTable"):
+        vendor["default"]
+    assert list(_Vendor())
+
+
+def test_custom_catalog_overrides_lookup_and_iteration_without_changing_defaults() -> (
+    None
+):
+    row = replace(
+        _Vendor.models()["default"],
+        model_id="private-1.0",
+        wire_model_id="deployment",
+    )
+    table = ModelTable(rows=(row,), roles={"default": "private-1.0"})
+    vendor = _Vendor(models=table)
+    assert list(vendor) == ["private-1.0"]
+    assert vendor["default"].capability is row
+    assert vendor["deployment"].capability is row
+    assert vendor["default"].provider is vendor
+    assert _Vendor()["default"].capability.model_id == "kimi-3.0"
+    assert "private-1.0" not in _Vendor.models()
 
 
 if __name__ == "__main__":

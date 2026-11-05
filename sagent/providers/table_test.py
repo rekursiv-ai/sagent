@@ -14,6 +14,7 @@ import re
 import pytest
 import yaml
 
+from sagent.lib.userdirs import config_dir
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
@@ -571,6 +572,28 @@ def _model(model_id: str = "example-1.0", **fields: object) -> dict[str, object]
 
 def _load(path: Path) -> ModelTable:
     return ModelTable.from_yaml(path, section="vendor")
+
+
+@pytest.mark.parametrize("tokenizer", [None, "declared-tokenizer"])
+def test_catalog_tokenizer_is_optional_and_never_invented(
+    tmp_path: Path,
+    tokenizer: str | None,
+) -> None:
+    fields: dict[str, object] = {} if tokenizer is None else {"tokenizer": tokenizer}
+    path = _write(tmp_path / "x.yaml", _model() | fields)
+    assert _load(path)["example"].tokenizer == tokenizer
+
+
+def test_tokenizer_inherits_profile_and_model_override(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path / "x.yaml",
+        _model("base-1.0", profile="shared"),
+        _model("override-1.0", profile="shared", tokenizer="own"),
+        extra={"profiles": {"shared": {"tokenizer": "common"}}},
+    )
+    table = _load(path)
+    assert table["base"].tokenizer == "common"
+    assert table["override"].tokenizer == "own"
 
 
 def test_a_setting_the_provider_does_not_send_offers_only_its_default(
@@ -1462,6 +1485,72 @@ class _Served(HasModels):
 
 def test_a_catalogued_class_serves_its_sections_models() -> None:
     assert _Served.models() is models(anthropic, section="anthropic-cli")
+
+
+@pytest.mark.parametrize("section", ["anthropic", "anthropic-cli"])
+@pytest.mark.parametrize("model_id", ["deployment-1.0", "deployment-2.0"])
+def test_user_catalog_replaces_models_prices_and_settings(
+    section: str,
+    model_id: str,
+) -> None:
+    path = config_dir() / "rekursiv-ai" / "sagent" / "providers" / f"{section}.yaml"
+    path.parent.mkdir(parents=True)
+    _write(
+        path,
+        _model(
+            model_id,
+            wire_model_id="caller/deployment",
+            prices=[_FREE | {"request": 2.0, "response": 8.0}],
+            thinking=_EVERY,
+            thinking_effort_default="high",
+        ),
+        extra={
+            "providers": {
+                section: {
+                    "sends": ["thinking_effort"],
+                    "models": {model_id: None},
+                    "roles": {"default": model_id},
+                },
+                "unused": {"sends": [], "models": {}},
+            },
+        },
+    )
+
+    table = models(anthropic, section=section)
+
+    assert list(table) == [model_id]
+    row = table["default"]
+    assert row.wire_model_id == "caller/deployment"
+    assert row.prices["auto", 1, date.min] == TokenPrice(request=2.0, response=8.0)
+    assert row.thinking_effort == {"none", "low", "high"}
+    assert row.default.thinking_effort == "high"
+    assert row.thinking_budget == {"none"}
+    assert table is models(anthropic, section=section)
+    if section == _Served.section:
+        assert _Served.models() is table
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("models: []\nmodels: []", "given twice"),
+        ("models: []\nproviders: {other: {sends: []}}", "no section 'anthropic-cli'"),
+        (
+            "models: []\nproviders: {anthropic-cli: {}}",
+            "does not say what it sends",
+        ),
+    ],
+)
+def test_invalid_user_catalog_raises_instead_of_using_shipped_models(
+    text: str,
+    message: str,
+) -> None:
+    path = config_dir() / "rekursiv-ai" / "sagent" / "providers" / "anthropic-cli.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(text)
+
+    with pytest.raises(ValueError, match=message):
+        _Served.models()
 
 
 if __name__ == "__main__":

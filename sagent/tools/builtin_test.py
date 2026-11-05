@@ -72,6 +72,7 @@ def test_agent_tools_share_the_team_and_remote_tool_shares_its_endpoints(
     routed = built["RemoteTool"]()
     assert isinstance(routed, RemoteTool)
     assert routed.remote is remote
+    assert "WebBrowser" in routed.local
 
 
 if __name__ == "__main__":
