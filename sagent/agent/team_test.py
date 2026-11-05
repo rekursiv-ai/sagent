@@ -590,7 +590,7 @@ def test_one_who_rejoins_under_a_leaver_s_label_takes_up_none_of_its_ties(
     _ = team.leave("a1")
     _ = team.leave("a")
     _ = team.join(_agent(tmp_path, team), label="a", parent="Agent")
-    _did(team["a"], reply("back"))
+    _complete_responses_and_idle(team["a"], reply("back"))
 
     assert (team.owes("a"), team.owes("b")) == ({}, {})
     assert _told(team["Agent"]) == [("a", "[a is idle] back")]
@@ -727,11 +727,11 @@ def test_a_debtor_is_nudged_at_every_idle_until_it_replies(tmp_path: Path) -> No
 def test_an_idle_debtor_is_nudged_and_its_parent_is_not_told(tmp_path: Path) -> None:
     team = _family(tmp_path)
     a = team["a"]
-    _did(a, reply("half done"))
+    _complete_responses_and_idle(a, reply("half done"))
     team.send("Agent", "a", "x")
 
     for _ in range(3):
-        _did(a, reply(""))
+        _complete_responses_and_idle(a, reply(""))
     inbox = a.runtime.inbox.drain_nowait()
 
     assert [
@@ -768,7 +768,117 @@ def test_a_debtor_without_agentsend_answers_with_an_error_not_a_nudge(
     assert team.owes("mute") == {}
 
 
-def _did(agent: Agent, *responses: Response) -> None:
+@pytest.mark.parametrize("wake", [False, True], ids=["idle", "resume"])
+@pytest.mark.parametrize("missing", [False, True], ids=["excluded", "absent"])
+def test_an_unavailable_reply_tool_fails_once_without_waking_the_debtor(
+    tmp_path: Path,
+    wake: bool,
+    missing: bool,
+) -> None:
+    team = _family(tmp_path)
+    debtor = _agent(tmp_path) if missing else _agent(tmp_path, team)
+    debtor.allowed = None if missing else frozenset()
+    team.join(debtor, label="mute", parent="Agent")
+    team.send("Agent", "mute", "first")
+    team.send("b", "mute", "second")
+    if wake:
+        team.wake("Agent")
+    else:
+        _idle(debtor, "cannot reply")
+    assert _nudged(debtor) == 0
+    assert team.owes("mute") == {}
+    assert debtor.allowed == (None if missing else frozenset())
+    assert ("AgentSend" in debtor.tools) is not missing
+    failed = ("mute", "[mute failed] it has no AgentSend to reply with")
+    assert _told(team["Agent"]) == [failed]
+    assert _told(team["b"]) == [failed]
+    assert (team.owes("Agent"), team.owes("b")) == ({}, {})
+    team.wake("Agent")
+    debtor.runtime.publish(types.AgentIdle())
+    assert _nudged(debtor) == 0
+    assert _told(team["Agent"]) == []
+    assert _told(team["b"]) == []
+
+
+@pytest.mark.parametrize("wake", [False, True], ids=["idle", "resume"])
+def test_an_explicitly_allowed_reply_tool_keeps_the_reply_obligation(
+    tmp_path: Path,
+    wake: bool,
+) -> None:
+    team = _family(tmp_path)
+    debtor = team["a"]
+    debtor.allowed = frozenset({"AgentSend"})
+    team.send("b", "a", "look")
+    if wake:
+        team.wake("Agent")
+    else:
+        _idle(debtor)
+    assert _nudged(debtor) == 1
+    assert team.owes("a") == {"b": "look"}
+    team.send("a", "b", "done")
+    assert team.owes("a") == {}
+    assert _told(team["b"]) == [("a", "done")]
+
+
+@pytest.mark.asyncio
+async def test_the_round_cap_preserves_reply_enforcement(tmp_path: Path) -> None:
+    team = _family(tmp_path)
+    debtor = team["a"]
+    debtor.max_rounds = 1
+    async with debtor:
+        team.send("b", "a", "look")
+        debtor.runtime.publish(
+            types.ModelResponseComplete(response=reply(calls=[call("Read")])),
+        )
+        assert debtor.allowed is None
+        assert debtor.runtime.allowed == frozenset({"AgentSend"})
+        team.wake("Agent")
+        assert _nudged(debtor) == 1
+        assert team.owes("a") == {"b": "look"}
+        _idle(debtor)
+        assert debtor.allowed is None
+        assert _nudged(debtor) == 1
+        team.send("a", "b", "done")
+        assert team.owes("a") == {}
+        assert _told(team["b"]) == [("a", "done")]
+
+
+@pytest.mark.asyncio
+async def test_an_excluded_reply_tool_settles_restored_debt_durably(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "debtor.jsonl"
+    for stage in ("write", "settle", "verify"):
+        async with JsonlJournal(path) as journal:
+            team = _team()
+            team.join(_agent(tmp_path))
+            debtor = Agent(
+                model=ScriptedProvider()["scripted"],
+                tools=[AgentSend(team=team)],
+                allowed=[],
+                tool_context=ToolContext(cwd=tmp_path),
+                journal=journal,
+            )
+            async with debtor:
+                team.join(debtor, label="worker", parent="Agent")
+                if stage == "write":
+                    team.send("Agent", "worker", "look")
+                elif stage == "settle":
+                    assert team.owes("worker") == {"Agent": "look"}
+                    team.wake("Agent")
+                    assert _nudged(debtor) == 0
+                    assert team.owes("worker") == {}
+                    assert _told(team["Agent"]) == [
+                        ("worker", "[worker failed] it has no AgentSend to reply with"),
+                    ]
+                else:
+                    assert team.owes("worker") == {}
+                    team.wake("Agent")
+                    assert _nudged(debtor) == 0
+                    assert _told(team["Agent"]) == []
+
+
+def _complete_responses_and_idle(agent: Agent, *responses: Response) -> None:
     """Have ``agent`` make ``responses``, then go idle."""
     for response in responses:
         agent.runtime.publish(types.ModelResponseComplete(response=response))
@@ -797,7 +907,7 @@ def test_an_idle_with_no_work_since_the_last_is_not_acted_on(tmp_path: Path) -> 
 
     for label in ("a", "b"):
         team[label].runtime.publish(types.AgentIdle())
-    _did(team["b"], reply("done"))
+    _complete_responses_and_idle(team["b"], reply("done"))
     team["b"].runtime.publish(types.AgentIdle())
 
     assert _nudged(team["a"]) == 0
@@ -864,7 +974,7 @@ def test_a_child_that_stops_tells_its_parent_unless_its_last_call_was_to_it(
 ) -> None:
     team = _family(tmp_path)
 
-    _did(team["a"], *responses)
+    _complete_responses_and_idle(team["a"], *responses)
 
     assert _told(team["Agent"]) == told
 
@@ -879,8 +989,8 @@ def test_no_debtor_is_answered_for_whether_it_owes_its_parent_or_another(
     assert _nudged(team["a1"]) == 0
 
     for _ in range(3):
-        _did(team["a"], reply("a so far"))
-        _did(team["a1"], reply("a1 so far"))
+        _complete_responses_and_idle(team["a"], reply("a so far"))
+        _complete_responses_and_idle(team["a1"], reply("a1 so far"))
 
     assert _nudged(team["a"]) == 3
     assert _nudged(team["a1"]) == 3
@@ -908,7 +1018,7 @@ def test_a_child_that_fails_or_halts_owing_no_one_tells_its_parent(
     a = team["a"].runtime
     a.publish(types.ModelResponseComplete(response=reply(calls=[_send("Agent")])))
     a.publish(event)
-    _did(team["a"], reply("back"))
+    _complete_responses_and_idle(team["a"], reply("back"))
 
     assert _told(team["Agent"]) == [("a", said), ("a", "[a is idle] back")]
 
@@ -932,7 +1042,7 @@ def test_what_a_child_said_before_it_failed_is_not_told_again(
     a = team["a"].runtime
     a.publish(types.ModelResponseComplete(response=reply("half done")))
     a.publish(event)
-    _did(team["a"], reply(calls=[call("Read")]))
+    _complete_responses_and_idle(team["a"], reply(calls=[call("Read")]))
 
     assert _told(team["Agent"]) == [("a", said), ("a", "[a is idle]")]
 
@@ -975,11 +1085,11 @@ def test_a_child_waiting_out_a_spent_quota_tells_its_parent_once(
 
 def test_a_run_that_says_nothing_tells_nothing_said_before_it(tmp_path: Path) -> None:
     team = _family(tmp_path)
-    _did(team["a"], reply("old news"))
-    _did(team["a"], reply(calls=[call("Read")]))
+    _complete_responses_and_idle(team["a"], reply("old news"))
+    _complete_responses_and_idle(team["a"], reply(calls=[call("Read")]))
     team.send("Agent", "a", "x")
     for _ in range(3):
-        _did(team["a"], reply(calls=[call("Read")]))
+        _complete_responses_and_idle(team["a"], reply(calls=[call("Read")]))
 
     assert _told(team["Agent"]) == [
         ("a", "[a is idle] old news"),
@@ -1005,8 +1115,8 @@ def test_a_root_and_a_child_whose_spawn_awaits_it_tell_no_one(tmp_path: Path) ->
     team = _family(tmp_path)
     team.awaited.add("b")
 
-    _did(team["Agent"], reply("root done"))
-    _did(team["b"], reply("b done"))
+    _complete_responses_and_idle(team["Agent"], reply("root done"))
+    _complete_responses_and_idle(team["b"], reply("b done"))
 
     assert [_told(team[label]) for label in team] == [[], [], [], []]
 

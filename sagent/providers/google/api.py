@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
     from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
+    from sagent.providers.table import ModelTable
     from sagent.providers.types import ProviderResources, UsageWindow
     from sagent.session.types import Attachment
 else:
@@ -56,6 +57,9 @@ class Google(HasModels, AsyncResource):
       name: The name the catalog knows this provider by; the section by default.
       resources: What this shares with other providers; ``None`` makes and
         closes its own.
+      api_key: The API key; empty reads Google's environment variables.
+      base_url: The endpoint; empty uses Google's Generative Language API.
+      models: A caller's priced model catalog; ``None`` uses the shipped catalog.
 
     """
 
@@ -68,10 +72,16 @@ class Google(HasModels, AsyncResource):
         *,
         name: str = "",
         resources: ProviderResources | None = None,
+        api_key: str = "",
+        base_url: str = "",
+        models: ModelTable | None = None,
     ) -> None:
         self._name = name or self.section
         self._owns_resources = resources is None
         self._resources = SharedResources() if resources is None else resources
+        self._api_key = api_key
+        self._base_url = base_url
+        self._models = models
 
     @property
     def name(self) -> str:
@@ -89,11 +99,12 @@ class Google(HasModels, AsyncResource):
         return ()
 
     def __getitem__(self, model: str) -> GoogleModel:
-        capability, settings = self.models().resolve(model)
+        table = self.models() if self._models is None else self._models
+        capability, settings = table.resolve(model)
         return GoogleModel(provider=self, capability=capability, settings=settings)
 
     def __iter__(self) -> Iterator[str]:
-        return iter(self.models())
+        return iter(self.models() if self._models is None else self._models)
 
     @override
     async def aclose(self) -> None:
@@ -101,9 +112,19 @@ class Google(HasModels, AsyncResource):
             await self._resources.aclose()
 
     async def credentials(self) -> dict[str, str]:
-        """Return the headers that authenticate a request."""
+        """Return the headers that authenticate a request.
+
+        Returns:
+          headers: The Google API key header.
+
+        """
         # Google's own SDK reads both, the first winning.
-        key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY") or ""
+        key = (
+            self._api_key
+            or os.environ.get("GOOGLE_API_KEY")
+            or os.environ.get("GEMINI_API_KEY")
+            or ""
+        )
         if not key:
             raise AuthError("Neither GOOGLE_API_KEY nor GEMINI_API_KEY is set.")
         return {"x-goog-api-key": key}
@@ -123,8 +144,8 @@ class Google(HasModels, AsyncResource):
 
     def endpoint(self, method: str, *, model: str) -> str:
         """Return the URL of ``method`` (``countTokens``) for ``model``."""
-        base = "https://generativelanguage.googleapis.com/v1beta"
-        return f"{base}/models/{model}:{method}"
+        base = self._base_url or "https://generativelanguage.googleapis.com/v1beta"
+        return f"{base.rstrip('/')}/models/{model}:{method}"
 
     async def envelope(
         self,

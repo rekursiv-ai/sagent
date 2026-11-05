@@ -52,6 +52,7 @@ import time
 
 from sagent.model.cost import TokenCost, TokenCount
 from sagent.model.exceptions import ContextOverflowError, RetryableError
+from sagent.model.token_accounting import TokenAccounting
 from sagent.model.types import Request, Response, TextChunk
 
 # Engine consumes a subset of the runtime event vocabulary. No re-export shim.
@@ -467,6 +468,7 @@ class Runtime:
         markers: Markers | None = None,
     ) -> None:
         self._model: Model = model
+        self.token_accounting = TokenAccounting()
         self.markers: Markers = markers if markers is not None else Markers()
         self.tools: dict[str, Tool] = {}
         for t in tools or []:
@@ -2288,7 +2290,12 @@ class Runtime:
             log_exception_or_warning(logger, "model call failed", exc)
             self.inbox.push_back(ModelResponseError(exception=exc))
 
-    def request(self, *, after: Sequence[SessionRecord] = ()) -> Request:
+    def request(
+        self,
+        *,
+        after: Sequence[SessionRecord] = (),
+        max_response_tokens: int | None = None,
+    ) -> Request:
         """Return the request the next model call sends, with ``after`` appended.
 
         Its prefix is the last call's, byte for byte, so a side call such as a
@@ -2296,6 +2303,8 @@ class Runtime:
 
         Args:
           after: Records to add after the context.
+          max_response_tokens: Explicit cap; ``None`` asks ``reply_room``, while
+            ``0`` bypasses it for sizing without recursion.
 
         Returns:
           request: The system prompt, the context and ``after``, and every tool.
@@ -2327,7 +2336,9 @@ class Runtime:
                     for t in sorted(self.tools.values(), key=lambda t: t.name)
                 ),
                 allowed=self.allowed,
-                max_response_tokens=self.reply_room()
+                max_response_tokens=max_response_tokens
+                if max_response_tokens is not None
+                else self.reply_room()
                 if self.reply_room is not None
                 else 0,
             ),
@@ -2377,6 +2388,7 @@ class Runtime:
         """Ask the model about the context; post its words as they arrive."""
         response = None
         request = self.sending(self.request())
+        snapshot = self.token_accounting.capture(request, model=self._called_model)
         # Only the first call after a compaction is told of it.
         self._compaction = ""
         async for event in self._called_model.stream(request):
@@ -2394,7 +2406,10 @@ class Runtime:
         ids = [r.call_id for r in response.records if isinstance(r, ToolCall)]
         if len(ids) != len(set(ids)):
             raise ValueError(f"The reply repeats a tool call id: {sorted(ids)}.")
-        return response
+        return dataclasses.replace(
+            response,
+            measurement=self.token_accounting.observe(snapshot, tokens=response.tokens),
+        )
 
     # Calls sharing a ``serialize_key``, such as Edits of one file, run one after
     # another; the rest run in parallel. A ``"*"`` key, a Bash writer's, contends with

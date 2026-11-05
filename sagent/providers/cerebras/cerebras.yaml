@@ -1,0 +1,41 @@
+sources:
+  model: https://inference-docs.cerebras.ai/models/openai-oss.md
+  chat: https://inference-docs.cerebras.ai/api-reference/chat-completions.md
+  caching: https://inference-docs.cerebras.ai/capabilities/prompt-caching.md
+  limits: https://api.cerebras.ai/public/v1/models/gpt-oss-120b
+
+roles:
+  default: gpt-oss-120b-1.0
+  utility: gpt-oss-120b-1.0
+  best: gpt-oss-120b-1.0
+  everyday: gpt-oss-120b-1.0
+
+reference:
+  effort_as_level: true
+  thinking_effort_default: medium
+  limits:
+    # Paid developer tier; free-tier windows are smaller.
+    max_request_tokens: 131_072
+    max_response_tokens: 40_960
+  thinking:
+    effort: [low, medium, high]
+    budget: [none]
+    output: [text]
+
+models:
+- model_id: gpt-oss-120b-1.0
+  wire_model_id: gpt-oss-120b
+  prices:
+  - service_tier: auto
+    request: 0.35
+    response: 0.75
+    cache_read: 0.35
+
+providers:
+  cerebras:
+    sends: [thinking_effort]
+    retries_internally: true
+    service_tier: [auto]
+    manage_context_server_side: [false]
+    models:
+      gpt-oss-120b-1.0:

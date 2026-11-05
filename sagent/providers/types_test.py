@@ -25,10 +25,11 @@ from sagent.providers.minimax.api import MiniMax
 from sagent.providers.moonshot.api import Moonshot
 from sagent.providers.openai import token_count
 from sagent.providers.openai.api import OpenAI
-from sagent.providers.openai.compat import OpenAIModel
+from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel
 from sagent.providers.openai.sub import OpenAISub
 from sagent.providers.resources import SharedResources, SubprocessPool
 from sagent.providers.selfhosted.server import SelfHosted, SelfHostedModel
+from sagent.providers.table import ModelTable
 from sagent.providers.tool_server import McpMount, McpToolServer
 from sagent.providers.types import (
     HasLogin,
@@ -41,6 +42,7 @@ from sagent.providers.types import (
     ToolServer,
     UsageWindow,
 )
+from sagent.providers.vertex.api import Vertex
 from sagent.session.types import Attachment
 
 
@@ -69,11 +71,25 @@ async def test_every_catalog_provider_is_a_provider_and_serves_models() -> None:
         Moonshot.section: OpenAIModel,
         LlamaCpp.section: OpenAIModel,
         SelfHosted.section: SelfHostedModel,
+        Vertex.section: GoogleModel,
+    }
+    expected |= {
+        listed.section: OpenAIModel
+        for listed in listings()
+        if isinstance(listed, type) and issubclass(listed, OpenAICompatible)
     }
     async with SharedResources() as shared:
         offered = listings()
         providers: list[Provider] = [
             listed(name="", resources=shared) for listed in offered
+        ]
+        row = OpenAI.models()["default"]
+        table = ModelTable(rows=(row,), roles={"default": row.model_id})
+        providers = [
+            type(provider)(resources=shared, models=table)
+            if isinstance(provider, OpenAICompatible) and not list(provider)
+            else provider
+            for provider in providers
         ]
         models: list[Model] = [p["default"] for p in providers]
         served = {

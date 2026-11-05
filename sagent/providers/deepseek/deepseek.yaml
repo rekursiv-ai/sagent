@@ -1,0 +1,49 @@
+sources:
+  pricing: https://api-docs.deepseek.com/quick_start/pricing
+  chat: https://api-docs.deepseek.com/api/create-chat-completion
+  thinking: https://api-docs.deepseek.com/guides/thinking_mode
+
+roles:
+  default: deepseek-flash-4.1
+  utility: deepseek-flash-4.1
+  best: deepseek-pro-4.0
+  everyday: deepseek-flash-4.1
+
+reference:
+  effort_as_level: true
+  thinking_effort_default: high
+  limits:
+    max_request_tokens: 1_048_576
+    max_response_tokens: 393_216
+  thinking:
+    effort: [none, low, high, max]
+    budget: [none]
+    output: [text]
+
+# Peak rates are an upper bound. Off-peak rates are half these rates.
+# The date-only price catalog cannot express intraday UTC or holiday schedules.
+models:
+- model_id: deepseek-flash-4.1
+  wire_model_id: deepseek-flash
+  prices:
+  - service_tier: auto
+    request: 0.3
+    response: 1.2
+    cache_read: 0.006
+- model_id: deepseek-pro-4.0
+  wire_model_id: deepseek-v4-pro
+  prices:
+  - service_tier: auto
+    request: 1.32
+    response: 3.96
+    cache_read: 0.044
+
+providers:
+  deepseek:
+    sends: [thinking_effort]
+    retries_internally: true
+    service_tier: [auto]
+    manage_context_server_side: [false]
+    models:
+      deepseek-flash-4.1:
+      deepseek-pro-4.0:

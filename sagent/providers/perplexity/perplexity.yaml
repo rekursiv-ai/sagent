@@ -1,0 +1,43 @@
+sources:
+  models: https://docs.perplexity.ai/docs/router/models
+  responses: https://docs.perplexity.ai/api-reference/gateway-responses-post
+
+roles:
+  default: glm-5.3
+  best: glm-5.3
+  everyday: glm-5.3
+  utility: glm-flash-5.3
+
+reference:
+  limits:
+    max_request_tokens: 0
+    max_response_tokens: 0
+  thinking:
+    effort: [none]
+    budget: [none]
+    output: [none]
+  manage_context_server_side: [false]
+  service_tier: [auto]
+
+models:
+- model_id: glm-5.3
+  wire_model_id: perplexity/glm-5.3
+  prices:
+  - request: 1.4
+    response: 4.4
+    cache_write: 1.4
+    cache_read: 0.26
+
+- model_id: glm-flash-5.3
+  wire_model_id: perplexity/glm-5.3-flash
+  prices:
+  - request: 0.15
+    response: 0.5
+    cache_read: 0.03
+
+providers:
+  perplexity:
+    sends: []
+    models:
+      glm-5.3:
+      glm-flash-5.3:

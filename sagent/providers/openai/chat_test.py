@@ -285,15 +285,16 @@ def _chunk(finish: str | None = None, **delta: object) -> dict[str, object]:
 
 def test_feed_returns_the_text_and_reasoning_as_they_arrive() -> None:
     reader = _reader()
-    assert reader.feed(_chunk(role="assistant")) is None
-    assert reader.feed(_chunk(reasoning_content="Hmm.")) == TextChunk(
-        text="Hmm.",
-        thinking=True,
+    assert reader.feed(_chunk(role="assistant")) == ()
+    assert reader.feed(_chunk(reasoning_content="Hmm.")) == (
+        TextChunk(text="Hmm.", thinking=True),
     )
-    assert reader.feed(_chunk(content="Hi")) == TextChunk(text="Hi", record=1)
-    assert reader.feed(_chunk(content=" there")) == TextChunk(text=" there", record=1)
-    assert reader.feed({"choices": [], "usage": None}) is None
-    assert reader.feed(_chunk("stop")) is None
+    assert reader.feed(_chunk(content="Hi")) == (TextChunk(text="Hi", record=1),)
+    assert reader.feed(_chunk(content=" there")) == (
+        TextChunk(text=" there", record=1),
+    )
+    assert reader.feed({"choices": [], "usage": None}) == ()
+    assert reader.feed(_chunk("stop")) == ()
     response = reader.response()
     assert response.records == (
         Thinking(content="Hmm."),
@@ -318,7 +319,7 @@ def test_a_vendor_that_streams_reasoning_unasked_says_its_output_is_text(
 
 def test_a_server_that_streams_no_reasoning_has_its_field_ignored() -> None:
     reader = _reader(reasoning_field="")
-    assert reader.feed(_chunk(reasoning_content="Hmm.")) is None
+    assert reader.feed(_chunk(reasoning_content="Hmm.", **{"": "Not reasoning"})) == ()
     reader.feed(_chunk("stop", content="Hi"))
     assert reader.response().records == (AssistantMessage(content="Hi"),)
 
@@ -404,7 +405,7 @@ def test_the_stop_reason_is_in_the_shared_vocabulary(
 ) -> None:
     reader = _reader()
     if refusal:
-        assert reader.feed(_chunk(refusal=refusal)) == TextChunk(text=refusal)
+        assert reader.feed(_chunk(refusal=refusal)) == (TextChunk(text=refusal),)
     reader.feed(_chunk(finish))
     assert reader.response().stop_reason == stop_reason
 
@@ -443,8 +444,8 @@ def test_an_in_stream_error_raises_what_it_means() -> None:
     with pytest.raises(RuntimeError, match=r"^The server replied 0 : broke$"):
         _reader().feed({"object": "error", "message": "broke"})
     # A chunk that names no error is not one.
-    assert _reader().feed({"error": None, **_chunk(content="ok")}) == TextChunk(
-        text="ok",
+    assert _reader().feed({"error": None, **_chunk(content="ok")}) == (
+        TextChunk(text="ok"),
     )
 
 
@@ -589,6 +590,292 @@ def test_a_model_of_unknown_reply_length_is_sent_no_cap() -> None:
         reasoning_field="",
     )
     assert not {"max_tokens", "max_completion_tokens"} & body.keys()
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 20,
+            "prompt_cache_hit_tokens": 700,
+        },
+        {"prompt_tokens": 1000, "completion_tokens": 20, "cached_tokens": 700},
+        {
+            "prompt_tokens": 1000,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 700},
+        },
+    ],
+)
+def test_vendor_cache_usage_counts_each_prompt_token_once(
+    usage: dict[str, object],
+) -> None:
+    reader = _reader()
+    reader.feed({**_chunk("stop"), "usage": usage})
+    assert reader.response().tokens == TokenCount(
+        request=300,
+        response=20,
+        cache_read=700,
+    )
+
+
+def test_usage_nested_in_a_stream_envelope_is_not_lost() -> None:
+    reader = _reader()
+    reader.feed(_chunk("stop", content="ok"))
+    reader.feed({"x_groq": {"usage": {"prompt_tokens": 3, "completion_tokens": 2}}})
+    assert reader.response().tokens == TokenCount(request=3, response=2)
+
+
+def test_content_blocks_are_text_not_their_python_representation() -> None:
+    reader = _reader()
+    assert reader.feed(
+        _chunk(
+            content=[
+                {"type": "text", "text": "Hi"},
+                {"type": "text"},
+                {"type": "text", "text": " there"},
+            ],
+        ),
+    ) == (TextChunk(text="Hi there"),)
+    reader.feed(_chunk("stop"))
+    assert reader.response().records == (AssistantMessage(content="Hi there"),)
+
+
+def test_mixed_thinking_and_text_blocks_keep_both_channels() -> None:
+    reader = _reader()
+    assert reader.feed(
+        _chunk(
+            content=[
+                {
+                    "type": "thinking",
+                    "thinking": [
+                        {"type": "text", "text": "Hmm"},
+                        {"type": "text"},
+                        {"type": "text", "text": "."},
+                    ],
+                },
+                {"type": "text", "text": "Hi"},
+            ],
+        ),
+    ) == (TextChunk(text="Hmm.", thinking=True), TextChunk(text="Hi", record=1))
+    reader.feed(_chunk("stop"))
+    assert reader.response().records == (
+        Thinking(content="Hmm."),
+        AssistantMessage(content="Hi"),
+    )
+
+
+@pytest.mark.parametrize("same_model", [True, False])
+@pytest.mark.parametrize("details_field", ["reasoning_details", "", "other_details"])
+def test_opaque_reasoning_fragments_replay_only_to_the_matching_dialect(
+    same_model: bool,
+    details_field: str,
+) -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_details_field="reasoning_details",
+    )
+    reader.feed(
+        _chunk(
+            reasoning_details=[
+                {"index": 1, "type": "reasoning.encrypted", "data": "sealed"},
+                {"index": 0, "type": "reasoning.text", "text": "First"},
+            ],
+        ),
+    )
+    reader.feed(
+        _chunk(
+            "stop",
+            reasoning_details=[
+                {"index": 1, "data": " tail", "signature": "sig"},
+                {"index": 0, "text": " thought"},
+            ],
+        ),
+    )
+    details = [
+        {"index": 0, "type": "reasoning.text", "text": "First thought"},
+        {
+            "index": 1,
+            "type": "reasoning.encrypted",
+            "data": "sealed tail",
+            "signature": "sig",
+        },
+    ]
+    response = reader.response()
+    assert response.records == (
+        Thinking(
+            extra={
+                "chat_reasoning": {
+                    "model": capability.wire_model_id,
+                    "details_field": "reasoning_details",
+                    "details": details,
+                    "content": [],
+                },
+            },
+        ),
+    )
+    target = capability if same_model else replace(capability, wire_model_id="other")
+    body = chat.encode(
+        Request(records=response.records),
+        capability=target,
+        settings=settings,
+        reasoning_field="",
+        reasoning_details_field=details_field,
+    )
+    assert body["messages"] == (
+        [{"role": "assistant", "content": None, "reasoning_details": details}]
+        if same_model and details_field == "reasoning_details"
+        else []
+    )
+
+
+@pytest.mark.parametrize("same_model", [True, False])
+@pytest.mark.parametrize("content_blocks", [True, False])
+def test_native_thinking_replays_before_text_without_flattened_reasoning(
+    same_model: bool,
+    content_blocks: bool,
+) -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    thought = {"type": "thinking", "thinking": [{"type": "text", "text": "Hmm"}]}
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=True,
+    )
+    reader.feed(_chunk(content=[thought]))
+    reader.feed(_chunk("stop", content="Hi"))
+    records = (
+        *reader.response().records,
+        AssistantMessage(content=" there"),
+        ToolCall(call_id="c", name="Read"),
+    )
+    body = chat.encode(
+        Request(records=records),
+        capability=capability
+        if same_model
+        else replace(capability, wire_model_id="other"),
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=content_blocks,
+    )
+    message: dict[str, object] = {
+        "role": "assistant",
+        "content": "Hi there",
+        "reasoning_content": "Hmm",
+        "tool_calls": [
+            {
+                "id": "call_0",
+                "type": "function",
+                "function": {"name": "Read", "arguments": "{}"},
+            },
+        ],
+    }
+    if same_model and content_blocks:
+        message.pop("reasoning_content")
+        message["content"] = [thought, {"type": "text", "text": "Hi there"}]
+    assert body["messages"] == [message]
+
+
+def test_native_thinking_without_readable_field_replays_without_an_answer() -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    thought = {"type": "thinking", "thinking": [{"type": "text", "text": "Hmm"}]}
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_content_blocks=True,
+    )
+    reader.feed(_chunk("stop", content=[thought]))
+    body = chat.encode(
+        Request(records=reader.response().records),
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_content_blocks=True,
+    )
+    assert body["messages"] == [{"role": "assistant", "content": [thought]}]
+
+
+def test_native_thinking_is_not_overwritten_by_a_tool_only_turn() -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    thought = {"type": "thinking", "thinking": [{"type": "text", "text": "Hmm"}]}
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=True,
+    )
+    reader.feed(_chunk(content=[thought]))
+    reader.feed(
+        _chunk(
+            "tool_calls",
+            tool_calls=[
+                {
+                    "index": 0,
+                    "id": "original",
+                    "function": {"name": "Read", "arguments": "{}"},
+                },
+            ],
+        ),
+    )
+    response = reader.response()
+    body = chat.encode(
+        Request(
+            records=(
+                *response.records,
+                UncategorizedToolResult(call_id="original", content="ok"),
+            ),
+        ),
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=True,
+    )
+    assert body["messages"] == [
+        {
+            "role": "assistant",
+            "content": [thought],
+            "tool_calls": [
+                {
+                    "id": "call_0",
+                    "type": "function",
+                    "function": {"name": "Read", "arguments": "{}"},
+                },
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_0", "content": "ok"},
+    ]
+
+
+@pytest.mark.parametrize("native_blocks", [False, True])
+def test_unreadable_reasoning_still_precedes_streamed_text(native_blocks: bool) -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_details_field="reasoning_details",
+        reasoning_content_blocks=native_blocks,
+    )
+    if native_blocks:
+        reader.feed(_chunk(content=[{"type": "thinking", "signature": "sealed"}]))
+    else:
+        reader.feed(
+            _chunk(
+                reasoning_details=[{"type": "reasoning.encrypted", "data": "sealed"}],
+            ),
+        )
+    assert reader.feed(_chunk("stop", content="Hi")) == (
+        TextChunk(text="Hi", record=1),
+    )
+    thinking, answer = reader.response().records
+    assert isinstance(thinking, Thinking)
+    assert answer == AssistantMessage(content="Hi")
 
 
 if __name__ == "__main__":

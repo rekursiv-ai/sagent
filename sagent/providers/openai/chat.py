@@ -8,7 +8,8 @@ Typical usage example:
   body = encode(request, capability=c, settings=s, reasoning_field="")
   reader = StreamReader(capability=c, settings=s, reasoning_field="")
   async for event in wire.events(response.aiter_lines()):
-      chunk = reader.feed(event)                     # New text, to show at once.
+      for chunk in reader.feed(event):               # New text, to show at once.
+          ...
   reader.response()                                  # The records and their cost.
 """
 
@@ -16,9 +17,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from treekle import (
+    PlainTree,
     ReadError,
     from_plain,
     immutable,
@@ -55,6 +57,8 @@ def encode(
     settings: ModelSettings,
     reasoning_field: str,
     temperature: float | None = None,
+    reasoning_details_field: str = "",
+    reasoning_content_blocks: bool = False,
 ) -> dict[str, object]:
     """Return the body of a streamed ``/chat/completions`` request.
 
@@ -65,6 +69,8 @@ def encode(
       reasoning_field: The assistant message field the server reads the model's
         earlier reasoning back from; empty leaves reasoning out.
       temperature: The sampling temperature; ``None`` sends none.
+      reasoning_details_field: The field that carries opaque reasoning blocks.
+      reasoning_content_blocks: Whether thinking is replayed inside content.
 
     Returns:
       body: The request body.
@@ -77,6 +83,9 @@ def encode(
             request,
             limits=limits,
             reasoning_field=reasoning_field,
+            reasoning_details_field=reasoning_details_field,
+            reasoning_content_blocks=reasoning_content_blocks,
+            model=capability.wire_model_id or capability.model_id,
         ),
     }
     if temperature is not None:
@@ -127,6 +136,8 @@ class StreamReader:
       settings: The settings it was asked with.
       reasoning_field: The delta field the server streams reasoning in; empty
         for a server that streams none.
+      reasoning_details_field: The field that carries opaque reasoning blocks.
+      reasoning_content_blocks: Whether native thinking blocks are retained.
 
     """
 
@@ -136,7 +147,13 @@ class StreamReader:
         capability: ModelCapability,
         settings: ModelSettings,
         reasoning_field: str,
+        reasoning_details_field: str = "",
+        reasoning_content_blocks: bool = False,
     ) -> None:
+        self._details_field = reasoning_details_field
+        self._content_blocks = reasoning_content_blocks
+        self._details: dict[int, dict[str, PlainTree]] = {}
+        self._blocks: list[dict[str, PlainTree]] = []
         self._capability = capability
         self._settings = settings
         self._reasoning_field = reasoning_field
@@ -147,14 +164,14 @@ class StreamReader:
         self._finish = ""
         self._refused = False
 
-    def feed(self, event: Mapping[str, object]) -> TextChunk | None:
-        """Take one chunk, and return the text it adds, if any.
+    def feed(self, event: Mapping[str, object]) -> tuple[TextChunk, ...]:
+        """Take one event and return the text and reasoning it adds.
 
         Args:
           event: One server-sent chunk.
 
         Returns:
-          chunk: The text or reasoning the chunk adds; ``None`` for the rest.
+          chunks: The event's reasoning and text, in record order.
 
         Raises:
           Exception: The ``wire.to_exception`` of an in-stream error.
@@ -164,30 +181,54 @@ class StreamReader:
         if event.get("error") is not None or event.get("object") == "error":
             raise wire.to_exception(0, body=event)
         # Most chunks carry ``"usage": null``; the last carries the counts.
-        if usage := _object(event.get("usage")):
+        if usage := _object(event.get("usage")) or _object(
+            _object(event.get("x_groq")).get("usage"),
+        ):
             self._usage = usage
         choices = _objects(event.get("choices"))
         if not choices:
-            return None
+            return ()
         choice = choices[0]
         self._finish = str(choice.get("finish_reason") or "") or self._finish
         delta = _object(choice.get("delta"))
+        self._reasoning(delta)
         for call in _objects(delta.get("tool_calls")):
             self._call(call)
-        text = str(delta.get("content") or "")
+        content = delta.get("content")
+        blocks = _objects(content)
+        text = (
+            content
+            if isinstance(content, str)
+            else "".join(
+                str(block.get("text") or "")
+                for block in blocks
+                if block.get("type") == "text"
+            )
+        )
         refusal = str(delta.get("refusal") or "")
         thinking = (
             str(delta.get(self._reasoning_field) or "") if self._reasoning_field else ""
+        ) + "".join(
+            str(part.get("text") or "")
+            for block in blocks
+            if block.get("type") == "thinking"
+            for part in _objects(block.get("thinking"))
         )
         self._refused = self._refused or bool(refusal)
         self._text.extend(part for part in (text, refusal) if part)
+        chunks: list[TextChunk] = []
         if thinking:
             self._thinking.append(thinking)
-            return TextChunk(text=thinking, thinking=True)
+            chunks.append(TextChunk(text=thinking, thinking=True))
         # The reply's text is one record, after its reasoning's.
         if text or refusal:
-            return TextChunk(text=text + refusal, record=int(bool(self._thinking)))
-        return None
+            chunks.append(
+                TextChunk(
+                    text=text + refusal,
+                    record=int(bool(self._thinking or self._details or self._blocks)),
+                ),
+            )
+        return tuple(chunks)
 
     def response(self) -> Response:
         """Return the finished reply.
@@ -202,8 +243,19 @@ class StreamReader:
         if not self._finish:
             raise DisconnectedError("The reply ended before it was finished.")
         records: list[AssistantMessage | Thinking | ToolCall] = []
-        if self._thinking:
-            records.append(Thinking(content="".join(self._thinking)))
+        if self._thinking or self._details or self._blocks:
+            extra: dict[str, PlainTree] = {}
+            if self._details or self._blocks:
+                extra["chat_reasoning"] = {
+                    "model": self._capability.wire_model_id
+                    or self._capability.model_id,
+                    "details_field": self._details_field,
+                    "details": [block for _, block in sorted(self._details.items())],
+                    "content": self._blocks,
+                }
+            records.append(
+                Thinking(content="".join(self._thinking) or None, extra=extra),
+            )
         if self._text:
             records.append(AssistantMessage(content="".join(self._text)))
         records.extend(
@@ -232,6 +284,40 @@ class StreamReader:
             ),
         )
 
+    def _reasoning(self, delta: Mapping[str, object]) -> None:
+        """Keep the model's native reasoning blocks for its next tool turn."""
+        if self._content_blocks and isinstance(delta.get("content"), list):
+            self._blocks.extend(
+                block
+                for block in from_plain(
+                    delta.get("content"),
+                    list[dict[str, PlainTree]],
+                    default=[],
+                )
+                if block.get("type") == "thinking"
+            )
+        if self._details_field:
+            for fragment in from_plain(
+                delta.get(self._details_field),
+                list[dict[str, PlainTree]],
+                default=[],
+            ):
+                index = from_plain(
+                    fragment.get("index"),
+                    int,
+                    default=len(self._details),
+                )
+                block = self._details.setdefault(index, {})
+                for key, value in fragment.items():
+                    previous = block.get(key)
+                    block[key] = (
+                        previous + value
+                        if key in {"text", "data"}
+                        and isinstance(previous, str)
+                        and isinstance(value, str)
+                        else value
+                    )
+
     def _call(self, fragment: Mapping[str, object]) -> None:
         """Take one fragment of a tool call, which arrive sparse, by index."""
         index = from_plain(fragment.get("index"), int, default=0)
@@ -258,6 +344,9 @@ def _messages(
     *,
     limits: ModelLimits,
     reasoning_field: str,
+    reasoning_details_field: str,
+    reasoning_content_blocks: bool,
+    model: str,
 ) -> list[dict[str, object]]:
     """Return the system prompt and ``records`` as chat messages."""
     # Another vendor's ids may not fit this server's, so each is renamed,
@@ -276,6 +365,13 @@ def _messages(
                 turn = _Turn()
                 messages.append(turn.message)
             turn.add(record, ids=ids, reasoning_field=reasoning_field)
+            turn.reasoning(
+                record,
+                model=model,
+                details_field=reasoning_details_field,
+                content_blocks=reasoning_content_blocks,
+                reasoning_field=reasoning_field,
+            )
             continue
         said = wire.user_content(record)
         if said is not None:
@@ -304,6 +400,7 @@ class _Turn:
         self.message: dict[str, object] = {"role": "assistant", "content": None}
         self._text: list[str] = []
         self._reasoning: list[str] = []
+        self._native_blocks: list[dict[str, PlainTree]] = []
         self._calls: list[dict[str, object]] = []
 
     def add(
@@ -346,6 +443,56 @@ class _Turn:
                 self.message["tool_calls"] = self._calls
             case _:
                 pass
+
+    def reasoning(
+        self,
+        record: AssistantMessage | Thinking | ToolCall,
+        *,
+        model: str,
+        details_field: str,
+        content_blocks: bool,
+        reasoning_field: str,
+    ) -> None:
+        """Replay native reasoning only to the model that produced it.
+
+        Args:
+          record: The assistant record being added.
+          model: The receiving model's wire ID.
+          details_field: The receiving endpoint's opaque reasoning field.
+          content_blocks: Whether the endpoint reads thinking in content.
+          reasoning_field: The endpoint's readable reasoning field.
+
+        """
+        if not isinstance(record, Thinking):
+            if (
+                content_blocks
+                and isinstance(record, AssistantMessage)
+                and self._native_blocks
+            ):
+                self.message["content"] = [
+                    *self._native_blocks,
+                    {"type": "text", "text": "".join(self._text)},
+                ]
+            return
+        raw = record.extra.get("chat_reasoning")
+        if raw is None:
+            return
+        native = from_plain(raw, _ReasoningData)
+        if native["model"] != model:
+            return
+        if details_field and details_field == native["details_field"]:
+            self.message[details_field] = native["details"]
+        if content_blocks and native["content"]:
+            self._native_blocks.extend(native["content"])
+            self.message.pop(reasoning_field, None)
+            self.message["content"] = list(self._native_blocks)
+
+
+class _ReasoningData(TypedDict):
+    model: str
+    details_field: str
+    details: list[dict[str, PlainTree]]
+    content: list[dict[str, PlainTree]]
 
 
 def _user(
@@ -406,7 +553,14 @@ def _stop_reason(finish: str, *, refused: bool, called: bool) -> str:
 def _tokens(usage: Mapping[str, object]) -> TokenCount:
     """Return the reply's usage, its cached prompt split from the uncached."""
     details = _object(usage.get("prompt_tokens_details"))
-    read = from_plain(details.get("cached_tokens"), int, default=0)
+    read = from_plain(
+        details.get(
+            "cached_tokens",
+            usage.get("prompt_cache_hit_tokens", usage.get("cached_tokens")),
+        ),
+        int,
+        default=0,
+    )
     written = from_plain(details.get("cache_write_tokens"), int, default=0)
     prompt = from_plain(usage.get("prompt_tokens"), int, default=0)
     return TokenCount(

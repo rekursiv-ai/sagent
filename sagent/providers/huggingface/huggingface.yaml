@@ -1,0 +1,40 @@
+sources:
+  route: https://huggingface.co/docs/inference-providers/providers/groq
+  billing: https://huggingface.co/docs/inference-providers/pricing
+  model: https://console.groq.com/docs/model/openai/gpt-oss-120b
+
+roles:
+  default: gpt-oss-120b-1.0
+  utility: gpt-oss-120b-1.0
+  best: gpt-oss-120b-1.0
+  everyday: gpt-oss-120b-1.0
+
+reference:
+  effort_as_level: true
+  thinking_effort_default: medium
+  limits:
+    max_request_tokens: 131_072
+    max_response_tokens: 65_536
+  thinking:
+    effort: [low, medium, high]
+    budget: [none]
+    output: [text]
+
+models:
+- model_id: gpt-oss-120b-1.0
+  # Pin routing so the no-markup Groq rate card remains applicable.
+  wire_model_id: openai/gpt-oss-120b:groq
+  prices:
+  - service_tier: auto
+    request: 0.15
+    response: 0.6
+    cache_read: 0.075
+
+providers:
+  huggingface:
+    sends: [thinking_effort]
+    retries_internally: true
+    service_tier: [auto]
+    manage_context_server_side: [false]
+    models:
+      gpt-oss-120b-1.0:

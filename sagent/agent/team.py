@@ -837,7 +837,7 @@ class _Dun:
             self._idled(owed, last)
 
     def nudge(self, owed: dict[str, str]) -> None:
-        """Wake the agent with whom it owes a reply, in a note only it sees.
+        """Nudge a debtor permitted to reply; otherwise answer with the failure.
 
         Args:
           owed: Each creditor, with the first words it asked.
@@ -862,9 +862,9 @@ class _Dun:
         )
 
     # A debtor is nudged at every idle until it replies; only one that cannot reply,
-    # having no AgentSend, is answered for, with the error.
+    # having no permitted AgentSend, is answered for, with the error.
     def _idled(self, owed: dict[str, str], last: ToolCall | None) -> None:
-        """Nudge a debtor, or answer for one without AgentSend; else tell its parent."""
+        """Nudge a debtor, or answer for one unable to reply; else tell its parent."""
         if owed:
             self.nudge(owed)
             return

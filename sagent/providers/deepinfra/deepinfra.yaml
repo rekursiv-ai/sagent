@@ -1,0 +1,38 @@
+sources:
+  model: https://deepinfra.com/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B
+  chat: https://docs.deepinfra.com/chat/overview
+  reasoning: https://docs.deepinfra.com/chat/reasoning
+
+roles:
+  default: nemotron-super-3.0
+  utility: nemotron-super-3.0
+  best: nemotron-super-3.0
+  everyday: nemotron-super-3.0
+
+reference:
+  limits:
+    max_request_tokens: 262_144
+    max_response_tokens: 0
+    truncates_at_context: false
+  thinking:
+    effort: [none]
+    budget: [none]
+    output: [text]
+
+models:
+- model_id: nemotron-super-3.0
+  wire_model_id: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B
+  prices:
+  - service_tier: auto
+    request: 0.075
+    response: 0.4
+    cache_read: 0.075
+
+providers:
+  deepinfra:
+    sends: []
+    retries_internally: true
+    service_tier: [auto]
+    manage_context_server_side: [false]
+    models:
+      nemotron-super-3.0:

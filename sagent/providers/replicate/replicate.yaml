@@ -1,0 +1,9 @@
+sources:
+  api: https://replicate.com/docs/reference/http
+  schema: https://replicate.com/meta/meta-llama-3-8b-instruct/api
+# Caller tables must describe a prompt/system_prompt/max_tokens text wrapper.
+models: []
+providers:
+  replicate:
+    sends: []
+    models: {}

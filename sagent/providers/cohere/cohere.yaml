@@ -1,0 +1,36 @@
+sources:
+  models: https://docs.cohere.com/docs/models
+  pricing: https://cohere.com/pricing
+  chat: https://docs.cohere.com/v2/reference/chat-stream
+  tools: https://docs.cohere.com/docs/tool-use-streaming
+  errors: https://docs.cohere.com/v2/reference/errors
+
+roles:
+  default: command-r-plus-2024.8
+  best: command-r-plus-2024.8
+  everyday: command-r-plus-2024.8
+  utility: command-r-plus-2024.8
+
+reference:
+  limits:
+    max_request_tokens: 128_000
+    max_response_tokens: 4_000
+  thinking:
+    effort: [none]
+    budget: [none]
+    output: [text]
+  manage_context_server_side: [false]
+  service_tier: [auto]
+
+models:
+- model_id: command-r-plus-2024.8
+  wire_model_id: command-r-plus-08-2024
+  prices:
+  - request: 2.5
+    response: 10.0
+
+providers:
+  cohere:
+    sends: []
+    models:
+      command-r-plus-2024.8:

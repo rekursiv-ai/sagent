@@ -36,7 +36,8 @@ import asyncio
 import functools
 
 from prompt_toolkit.buffer import Buffer
-from prompt_toolkit.filters import is_done
+from prompt_toolkit.enums import DEFAULT_BUFFER
+from prompt_toolkit.filters import has_focus, is_done
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings
@@ -382,6 +383,7 @@ class PromptSource:
 
         """
         while True:
+            self.session.app.layout.focus(DEFAULT_BUFFER)
             try:
                 # Not ``handle_sigint``: on exit it removes the loop's SIGINT handler,
                 # so a Ctrl+C while a command ran reached nothing. Our ``c-c``
@@ -426,22 +428,28 @@ def key_bindings(runtime: Runtime, panes: Panes, nav: Navigation) -> KeyBindings
     # plain Enter. A terminal sending plain CR for it is left as it is.
     for shift_enter in ("\x1b[13;2u", "\x1b[27;2;13~"):
         ANSI_SEQUENCES[shift_enter] = (Keys.Escape, Keys.ControlM)
+    focused = has_focus(DEFAULT_BUFFER)
     # Not once the prompt is accepted: the buffer is no longer the user's.
-    keys.add("enter", filter=~is_done)(functools.partial(_enter, runtime, panes, nav))
-    keys.add("tab", filter=~is_done)(functools.partial(_tab, runtime, panes, nav))
-    keys.add("up", filter=~is_done)(functools.partial(_up, runtime, panes, nav))
-    keys.add("down", filter=~is_done)(functools.partial(_down, runtime, panes, nav))
-    keys.add("left", filter=~is_done)(_left)
-    keys.add("escape", "enter")(_newline)
-    keys.add("s-up")(functools.partial(_search, step=Buffer.history_backward))
-    keys.add("s-down")(functools.partial(_search, step=Buffer.history_forward))
-    keys.add("c-x", "c-e")(_editor)
+    editing = focused & ~is_done
+    keys.add("enter", filter=editing)(functools.partial(_enter, runtime, panes, nav))
+    keys.add("tab", filter=editing)(functools.partial(_tab, runtime, panes, nav))
+    keys.add("up", filter=editing)(functools.partial(_up, runtime, panes, nav))
+    keys.add("down", filter=editing)(functools.partial(_down, runtime, panes, nav))
+    keys.add("left", filter=editing)(_left)
+    keys.add("escape", "enter", filter=focused)(_newline)
+    keys.add("s-up", filter=focused)(
+        functools.partial(_search, step=Buffer.history_backward),
+    )
+    keys.add("s-down", filter=focused)(
+        functools.partial(_search, step=Buffer.history_forward),
+    )
+    keys.add("c-x", "c-e", filter=focused)(_editor)
     # Not eager: the session merges these after its own bindings, so this one is
     # matched last and wins over the Ctrl+C that raises KeyboardInterrupt.
-    keys.add("c-c")(functools.partial(_interrupt, runtime))
+    keys.add("c-c", filter=focused)(functools.partial(_interrupt, runtime))
     keys.add("c-z")(_suspend)
-    keys.add("c-_")(_undo)
-    keys.add("escape", "z")(_undo)
+    keys.add("c-_", filter=focused)(_undo)
+    keys.add("escape", "z", filter=focused)(_undo)
     return keys
 
 

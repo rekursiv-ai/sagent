@@ -1,0 +1,23 @@
+sources:
+  api: https://docs.ollama.com/api/openai-compatibility
+roles:
+  default: llama-small
+reference:
+  limits:
+    max_request_tokens: 8192
+    max_response_tokens: 2048
+  thinking:
+    effort: [none]
+    budget: [none]
+    output: [none]
+models:
+- model_id: llama-small-3.2
+  wire_model_id: llama3.2:3b
+  prices:
+  - request: 0
+    response: 0
+providers:
+  ollama:
+    sends: []
+    models:
+      llama-small-3.2:

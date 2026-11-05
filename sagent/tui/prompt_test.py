@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import asyncio
 import contextlib
@@ -14,9 +15,11 @@ from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
 from prompt_toolkit.application.current import set_app
 from prompt_toolkit.buffer import Buffer
+from prompt_toolkit.enums import DEFAULT_BUFFER
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import InMemoryHistory
 from prompt_toolkit.input import DummyInput, create_pipe_input
+from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout, Window
@@ -76,6 +79,7 @@ class _Prompt:
 
     def __post_init__(self) -> None:
         self.buffer = Buffer(
+            name=DEFAULT_BUFFER,
             history=InMemoryHistory(),
             multiline=True,
             accept_handler=self._accept,
@@ -866,11 +870,25 @@ def test_the_keys_that_send_stop_once_the_prompt_is_accepted() -> None:
     assert {keys for keys, active in done.items() if not active} == guarded
 
 
+def test_only_suspend_is_global_while_a_search_buffer_is_focused() -> None:
+    keys = key_bindings(_runtime(), Panes(), Navigation())
+    session: PromptSession[str] = PromptSession(
+        input=DummyInput(),
+        output=DummyOutput(),
+        key_bindings=keys,
+    )
+    session.app.layout.focus(session.search_buffer)
+    with set_app(session.app):
+        active = {tuple(binding.keys) for binding in keys.bindings if binding.filter()}
+    assert active == {(Keys.ControlZ,)}
+
+
 async def _line(
     keys: str,
     panes: Panes | None = None,
     *,
     bound: KeyBindings | None = None,
+    multiline: bool = False,
 ) -> tuple[str | None, list[str]]:
     notices: list[str] = []
     with create_pipe_input() as pipe:
@@ -878,6 +896,7 @@ async def _line(
             input=pipe,
             output=DummyOutput(),
             key_bindings=bound,
+            multiline=multiline,
         )
         pipe.send_text(keys)
         source = PromptSource(session, panes=panes or Panes(), notice=notices.append)
@@ -907,6 +926,50 @@ async def test_left_on_a_typed_line_moves_the_cursor_and_opens_nothing() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["", "find"])
+@pytest.mark.parametrize("key", [_LEFT, "\x1b[A", "\x1b[B", "\t", "\r", "\x03"])
+async def test_history_search_keeps_prompt_shortcuts_out(
+    key: str,
+    query: str,
+) -> None:
+    runtime, panes = _runtime(), Panes()
+    runtime.cohort.add("c1")
+    panes.stage("queued", deferred=False)
+    panes.stage("deferred", deferred=True)
+    keys = key_bindings(runtime, panes, Navigation())
+    line = await asyncio.wait_for(
+        _line(f"\x12{query}{key}\x07/after\r", panes, bound=keys, multiline=True),
+        timeout=1,
+    )
+    assert line == ("/after", [])
+    assert runtime.inbox.drain_nowait() == []
+    assert panes.queue == Staged(text="queued")
+    assert panes.deferred == Staged(text="deferred")
+
+
+@pytest.mark.asyncio
+async def test_reopening_the_prompt_restores_focus_from_a_hidden_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with create_pipe_input() as pipe:
+        session: PromptSession[str] = PromptSession(
+            input=pipe,
+            output=DummyOutput(),
+            multiline=True,
+            key_bindings=key_bindings(_runtime(), Panes(), Navigation()),
+        )
+        reading = AsyncMock(wraps=session.prompt_async)
+        monkeypatch.setattr(session, "prompt_async", reading)
+        session.app.layout.focus(session.search_buffer)
+        source = PromptSource(session, panes=Panes(), notice=list[str]().append)
+        pipe.send_text("/after\r")
+        assert await asyncio.wait_for(source.line(), timeout=1) == "/after"
+        assert session.app.current_buffer is session.default_buffer
+        assert reading.call_args.kwargs["set_exception_handler"] is False
+        assert reading.call_args.kwargs["handle_sigint"] is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "shift_enter",
     ["\x1b[13;2u", "\x1b[27;2;13~", "\x1b\r"],
@@ -914,7 +977,9 @@ async def test_left_on_a_typed_line_moves_the_cursor_and_opens_nothing() -> None
 )
 async def test_shift_enter_as_a_terminal_sends_it_is_a_newline(
     shift_enter: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delitem(ANSI_SEQUENCES, shift_enter, raising=False)
     keys = key_bindings(_runtime(), Panes(), Navigation())
     # A command, so Enter returns the line rather than sending it.
     assert await _line(f"/a{shift_enter}b\r", bound=keys) == ("/a\nb", [])

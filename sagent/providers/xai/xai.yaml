@@ -1,0 +1,42 @@
+sources:
+  models: https://docs.x.ai/developers/models/grok-4.7
+  reasoning: https://docs.x.ai/developers/model-capabilities/text/reasoning
+  responses: https://docs.x.ai/developers/rest-api-reference/inference/responses
+
+roles:
+  default: grok-4.7
+  best: grok-4.7
+  everyday: grok-4.7
+  utility: grok-4.7
+
+reference:
+  knowledge_cutoff: '2026-05'
+  limits:
+    max_request_tokens: 500_000
+    max_response_tokens: 0
+    max_image_bytes: 20_971_520
+  thinking:
+    effort: [low, medium, high, xhigh]
+    budget: [auto]
+    output: [redacted]
+  thinking_effort_default: high
+  manage_context_server_side: [false]
+  service_tier: [auto]
+
+models:
+- model_id: grok-4.7
+  wire_model_id: grok-4.7
+  prices:
+  - request: 2.0
+    response: 6.0
+    cache_read: 0.5
+  - effective_prompt_tokens: 199_999
+    request: 4.0
+    response: 12.0
+    cache_read: 1.0
+
+providers:
+  xai:
+    sends: [thinking_effort]
+    models:
+      grok-4.7:

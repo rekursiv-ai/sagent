@@ -232,6 +232,9 @@ class ModelCapability:
     model_id: str = ""
     wire_model_id: str = ""
     knowledge_cutoff: str | None = None
+    tokenizer: str | None = None
+    """Declared tokenizer identity; omitted identities are local to provider/model."""
+
     approx_chars_per_token: float = 4.0
     limits: ModelLimits = field(default_factory=ModelLimits)
     prices: PriceCatalog = field(default_factory=PriceCatalog)

@@ -1,0 +1,38 @@
+sources:
+  small: https://docs.mistral.ai/models/mistral-small-4-0-26-03
+  reasoning: https://docs.mistral.ai/inference/conversations/reasoning
+  pricing: https://docs.mistral.ai/inference/pricing
+  chat: https://docs.mistral.ai/api/endpoint/chat
+
+roles:
+  default: mistral-small-4.0
+  best: mistral-small-4.0
+  everyday: mistral-small-4.0
+  utility: mistral-small-4.0
+
+reference:
+  limits:
+    max_request_tokens: 256_000
+    max_response_tokens: 0
+    truncates_at_context: false
+  thinking:
+    effort: [none, high]
+    budget: [none]
+    output: [text]
+  thinking_effort_default: none
+  manage_context_server_side: [false]
+  service_tier: [auto]
+
+models:
+- model_id: mistral-small-4.0
+  wire_model_id: mistral-small-2603
+  prices:
+  - request: 0.15
+    response: 0.6
+    cache_read: 0.015
+
+providers:
+  mistral:
+    sends: [thinking_effort]
+    models:
+      mistral-small-4.0:

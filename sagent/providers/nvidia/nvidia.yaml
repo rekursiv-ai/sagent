@@ -1,0 +1,13 @@
+sources:
+  chat: https://docs.api.nvidia.com/nim/reference/openai-gpt-oss-120b-infer
+
+# NVIDIA's trial endpoint publishes no production per-token rate card.
+# Callers must supply their deployment's priced ModelTable via models=.
+models: []
+providers:
+  nvidia:
+    sends: [thinking_effort]
+    retries_internally: true
+    service_tier: [auto]
+    manage_context_server_side: [false]
+    models: {}

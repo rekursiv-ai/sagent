@@ -1,0 +1,37 @@
+sources:
+  model: https://openrouter.ai/mistralai/mistral-small-2603
+  reasoning: https://openrouter.ai/docs/guides/best-practices/reasoning-tokens
+  errors: https://openrouter.ai/docs/api/reference/errors-and-debugging
+
+roles:
+  default: mistral-small-4.0
+  best: mistral-small-4.0
+  everyday: mistral-small-4.0
+  utility: mistral-small-4.0
+
+reference:
+  limits:
+    max_request_tokens: 262_144
+    max_response_tokens: 262_144
+    truncates_at_context: false
+  thinking:
+    effort: [none, high]
+    budget: [none]
+    output: [text]
+  thinking_effort_default: none
+  manage_context_server_side: [false]
+  service_tier: [auto]
+
+models:
+- model_id: mistral-small-4.0
+  wire_model_id: mistralai/mistral-small-2603
+  prices:
+  - request: 0.15
+    response: 0.6
+    cache_read: 0.015
+
+providers:
+  openrouter:
+    sends: [thinking_effort]
+    models:
+      mistral-small-4.0:
