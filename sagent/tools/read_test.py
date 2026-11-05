@@ -769,7 +769,8 @@ async def test_a_read_unchanged_since_the_last_is_said_so_for_no_call(
 
 
 @pytest.mark.asyncio
-async def test_a_cut_read_never_passes_its_cap(tmp_path: Path) -> None:
+@pytest.mark.parametrize("caps", [range(100), range(100, 150), range(150, 200)])
+async def test_a_cut_read_never_passes_its_cap(tmp_path: Path, caps: range) -> None:
     # 10,000 lines: resuming at the last adds the digit the note must fit.
     (tmp_path / "f").write_text("".join(f"{i}\n" for i in range(10_000)))
     numbered = [f"{n}\t{n - 1}\n" for n in range(9_990, 10_001)]
@@ -780,7 +781,7 @@ async def test_a_cut_read_never_passes_its_cap(tmp_path: Path) -> None:
         return "".join(numbered[:kept]) + note
 
     # From the least that holds one line and its note.
-    for cap in range(len(cut(1)), 200):
+    for cap in range(max(len(cut(1)), caps.start), caps.stop):
         context = ToolContext(cwd=tmp_path, max_result_chars=cap)
         text = (await Read().call(context, {"file_path": "f", "offset": 9_990})).text()
         assert len(text) <= cap, cap

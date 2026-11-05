@@ -204,7 +204,7 @@ async def test_list_and_get_show_each_server_and_how_it_connected(
     assert (await _run(tmp_path, "list")).startswith("No MCP servers. Add one with")
     script = tmp_path / "server.py"
     script.write_text(SHOUT_SERVER)
-    await _run(tmp_path, "add", f"good -- {sys.executable} {script}")
+    await _run(tmp_path, "add", f"good -- {sys.executable} -I -S {script}")
     await _run(
         tmp_path,
         "add-json",
@@ -216,7 +216,7 @@ async def test_list_and_get_show_each_server_and_how_it_connected(
     ]
     assert (await _run(tmp_path, "get", "good")).splitlines() == [
         "good  stdio  every_request  connected, 1 tool",
-        f"  command: {sys.executable} {script}",
+        f"  command: {sys.executable} -I -S {script}",
     ]
     assert (await _run(tmp_path, "get", "off")).splitlines() == [
         "off  http  every_request  disabled",

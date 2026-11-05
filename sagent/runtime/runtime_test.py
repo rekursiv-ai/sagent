@@ -5718,6 +5718,12 @@ async def test_tool_results_are_published_as_they_land() -> None:
 
 _TEXT = st.text(alphabet="ab \n", max_size=8)
 _SENDERS = st.sampled_from(("alice", "bob", "carol"))
+_HISTORY_KINDS = st.sampled_from(("user", "agent", "turn", "result", "note"))
+_TURN_IDS = st.lists(
+    st.sampled_from(("c0", "c1", "c2", "c3")),
+    max_size=3,
+    unique=True,
+)
 
 
 def _peer(sender: str, text: str) -> AgentToAgentMessage:
@@ -5745,19 +5751,13 @@ def _message_history(draw: st.DrawFn) -> list[ModelContextEvent]:
     history: list[ModelContextEvent] = []
     pending: list[str] = []
     for _ in range(draw(st.integers(min_value=0, max_value=12))):
-        kind = draw(st.sampled_from(("user", "agent", "turn", "result", "note")))
+        kind = draw(_HISTORY_KINDS)
         if kind == "user":
             history.append(_user(draw(_TEXT)))
         elif kind == "agent":
             history.append(_peer(draw(_SENDERS), draw(_TEXT)))
         elif kind == "turn":
-            ids = draw(
-                st.lists(
-                    st.sampled_from(("c0", "c1", "c2", "c3")),
-                    max_size=3,
-                    unique=True,
-                ),
-            )
+            ids = draw(_TURN_IDS)
             history.append(_turn(draw(_TEXT), ids))
             pending.extend(ids)
         elif kind == "note":

@@ -295,13 +295,23 @@ def test_masked_refs_by_alive_ignores_a_dead_splices_mask() -> None:
     assert masked == {_ref(2)}
 
 
-def test_masked_refs_are_the_union_of_every_alive_mask() -> None:
+@pytest.mark.parametrize(
+    ("repeat", "stride", "first"),
+    [
+        (repeat, stride, first)
+        for repeat, stride in ((2, 1), (3, 3))
+        for first in [(lo, hi) for lo in range(7) for hi in range(lo, 7)][::stride]
+    ],
+)
+def test_masked_refs_are_the_union_of_every_alive_mask(
+    repeat: int,
+    stride: int,
+    first: tuple[int, int],
+) -> None:
     """Merging intervals as they arrive, in any order, must lose no position."""
     spans = [(lo, hi) for lo in range(7) for hi in range(lo, 7)]
-    for masks in itertools.chain(
-        itertools.product(spans, repeat=2),
-        itertools.product(spans[::3], repeat=3),
-    ):
+    for rest in itertools.product(spans[::stride], repeat=repeat - 1):
+        masks = (first, *rest)
         tape: list[TapeRecord] = [_event(i, _user(str(i))) for i in range(8)]
         tape.extend(
             _splice(100 + n, mask=(MaskRange(session_id="s", lo=lo, hi=hi),))

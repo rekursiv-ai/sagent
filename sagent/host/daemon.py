@@ -103,7 +103,7 @@ async def ensure(dirs: ServeDirs, *, version: str = "") -> DaemonStatus:
     try:
         await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
         deadline = time.monotonic() + 30
-        starting = False
+        status: DaemonStatus | None = None
         process = None
         while time.monotonic() < deadline:
             try:
@@ -114,13 +114,11 @@ async def ensure(dirs: ServeDirs, *, version: str = "") -> DaemonStatus:
                         f"The sagent daemon exited with status {code};"
                         f" see {dirs.state / 'daemon.log'}.",
                     ) from None
-                if not starting:
+                if process is None and status is None:
                     process = _spawn(dirs, version=version)
-                    starting = True
             else:
                 if not status.restarting:
                     return status
-                starting = True
             await asyncio.sleep(0.02)
         raise TimeoutError(
             f"The sagent daemon did not become ready; see {dirs.state / 'daemon.log'}.",

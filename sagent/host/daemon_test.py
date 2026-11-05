@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
@@ -20,6 +21,8 @@ import sys
 import tempfile
 import threading
 
+from treekle import json_loads
+
 import pytest
 import pytest_asyncio
 
@@ -28,6 +31,7 @@ from sagent.agent.team import Team
 from sagent.host import (
     daemon,
     server as host_server,
+    session as host_session,
     strings,
 )
 from sagent.host.daemon import control, ensure
@@ -48,6 +52,8 @@ from sagent.host.wire import (
     Peers,
     Ping,
     Refused,
+    Tools,
+    ToolSpec,
     Welcome,
     encoded,
     received,
@@ -58,7 +64,7 @@ from sagent.lib.posix.sockets import socket_address
 from sagent.lib.userdirs import config_dir, state_dir
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
-from sagent.session.types import AgentToAgentMessage
+from sagent.session.types import AgentToAgentMessage, stored_record
 from sagent.tools.read import Read
 from sagent.tools.remote import RemoteSession, SavedRemote
 
@@ -324,6 +330,61 @@ async def test_ready_competing_daemon_wins_over_exited_startup_child(
     assert await ensure(dirs, version="new") == ready
 
 
+@pytest.mark.asyncio
+async def test_startup_retries_one_live_child_until_it_answers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    ready = DaemonStatus(pid=123, source_version="new", listen=())
+    answers: list[DaemonStatus | OSError] = [
+        FileNotFoundError(),
+        ConnectionRefusedError(),
+        FileNotFoundError(),
+        ready,
+    ]
+    spawned: list[str] = []
+    sleeps: list[float] = []
+
+    def spawn(dirs: ServeDirs, *, version: str) -> SimpleNamespace:
+        del dirs
+        spawned.append(version)
+        return SimpleNamespace(poll=lambda: None)
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(daemon, "control", partial(_control_answers, answers=answers))
+    monkeypatch.setattr(daemon, "_spawn", spawn)
+    monkeypatch.setattr(
+        daemon,
+        "asyncio",
+        SimpleNamespace(to_thread=asyncio.to_thread, sleep=sleep),
+    )
+    assert await ensure(dirs, version="new") == ready
+    assert spawned == ["new"]
+    assert sleeps == [0.02, 0.02, 0.02]
+    assert not answers
+
+
+@pytest.mark.asyncio
+async def test_default_startup_version_comes_from_the_source_fingerprint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    ready = DaemonStatus(pid=123, source_version="from-disk", listen=())
+
+    async def checked(dirs: ServeDirs, request: DaemonControl) -> DaemonStatus:
+        del dirs
+        assert request == DaemonControl(source_version="from-disk")
+        return ready
+
+    monkeypatch.setattr(daemon, "fingerprint", lambda: "from-disk")
+    monkeypatch.setattr(daemon, "control", checked)
+    assert await ensure(dirs) == ready
+
+
 async def _control_answers(
     dirs: ServeDirs,
     request: DaemonControl,
@@ -345,6 +406,8 @@ def test_spawn_returns_the_child_and_reaps_independently(
     process = _SpawnedProcess()
     descriptors: list[int] = []
     threads: list[_WaitThread] = []
+    dirs.state.mkdir()
+    (dirs.state / "daemon.log").write_bytes(b"previous\n")
 
     def launch(
         argv: list[str],
@@ -371,6 +434,7 @@ def test_spawn_returns_the_child_and_reaps_independently(
         assert stdout == stderr
         assert start_new_session
         descriptors.append(stdout)
+        assert os.write(stdout, b"started\n") == len(b"started\n")
         return process
 
     def make_thread(*, target: Callable[[], int], daemon: bool) -> _WaitThread:
@@ -390,6 +454,7 @@ def test_spawn_returns_the_child_and_reaps_independently(
     assert process.waits == 0
     assert thread.target() == 0
     assert process.waits == 1
+    assert (dirs.state / "daemon.log").read_bytes() == b"previous\nstarted\n"
     assert (dirs.state / "daemon.log").stat().st_mode & 0o777 == 0o600
 
 
@@ -830,8 +895,14 @@ async def test_startup_deadline_names_the_daemon_log(
     monkeypatch.setattr(
         daemon,
         "time",
-        SimpleNamespace(monotonic=iter([0, 100]).__next__),
+        SimpleNamespace(monotonic=iter([100, 130]).__next__),
     )
+
+    async def expired(dirs: ServeDirs, request: DaemonControl) -> DaemonStatus:
+        del dirs, request
+        raise AssertionError("Contacted the daemon at the startup deadline")
+
+    monkeypatch.setattr(daemon, "control", expired)
     with pytest.raises(TimeoutError, match=str(dirs.state / "daemon.log")):
         _ = await ensure(dirs, version="test")
 
@@ -870,11 +941,14 @@ async def test_a_restarted_daemon_retains_the_owners_listener_choice(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("model_codec")
 @pytest.mark.parametrize("seed", [17, 83, 409])
 async def test_message_lifecycle_matches_the_model_across_reconnects_and_upgrades(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     seed: int,
 ) -> None:
+    monkeypatch.setattr(host_server, "received", _FrameDecoder(target=Hello).received)
     dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
     clients: list[_ModelClient] = []
     rng = random.Random(seed)  # noqa: S311 -- Repeatable lifecycle ordering, not secrets.
@@ -952,7 +1026,9 @@ async def test_message_lifecycle_matches_the_model_across_reconnects_and_upgrade
                 assert sender.welcome.resumed
             if transition in ("upgrade", "reconnect"):
                 receiver = await _ModelClient.connect(
-                    server, "receiver", clients=clients
+                    server,
+                    "receiver",
+                    clients=clients,
                 )
                 assert receiver.welcome.resumed
                 assert receiver.welcome.calls == (note.id,)
@@ -978,9 +1054,98 @@ async def test_message_lifecycle_matches_the_model_across_reconnects_and_upgrade
         for client in clients:
             client.writer.close()
         await asyncio.gather(
-            *(client.task for client in clients), return_exceptions=True
+            *(client.task for client in clients),
+            return_exceptions=True,
         )
         await server.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("local_daemon")
+@pytest.mark.parametrize(
+    "transition",
+    ["retry", "reconnect", "upgrade", "withdraw", "spoof", "address"],
+)
+async def test_message_transition_over_the_daemon_socket(
+    tmp_path: Path,
+    transition: str,
+) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    clients: list[_Client] = []
+    try:
+        original = await ensure(dirs, version="old")
+        sender = await _Client.connect(dirs, "sender", clients=clients)
+        receiver = await _Client.connect(dirs, "receiver", clients=clients)
+        sender.writer.write(encoded(Peers(labels=("a",))))
+        receiver.writer.write(encoded(Peers(labels=("b",))))
+        await sender.directory(("b#receiver",))
+        note = Note(
+            id="note",
+            sender="a",
+            recipient="b#receiver",
+            content="message",
+            kind="ask",
+        )
+        if transition == "withdraw":
+            receiver.writer.write(encoded(Peers(labels=())))
+            await sender.directory(())
+            sender.writer.write(encoded(note))
+            await sender.expect(
+                Refused(id=note.id, reason="Agent 'b#receiver' is not reachable."),
+            )
+            receiver.writer.write(encoded(Peers(labels=("b",))))
+            await sender.directory(("b#receiver",))
+        if transition == "spoof":
+            sender.writer.write(encoded(replace(note, sender="unregistered")))
+            await sender.expect(
+                Refused(
+                    id=note.id,
+                    reason="The sender is not registered by this session.",
+                ),
+            )
+        if transition == "address":
+            for address in ("", "b", "b#", "b#../receiver", "b@host#receiver"):
+                sender.writer.write(encoded(replace(note, recipient=address)))
+                await sender.expect(
+                    Refused(
+                        id=note.id,
+                        reason=f"Agent {address!r} is not reachable.",
+                    ),
+                )
+        sender.writer.write(encoded(note) * 2)
+        await sender.expect(Ack(id=note.id))
+        await sender.expect(Ack(id=note.id))
+        delivered = replace(note, sender="a#sender", recipient="b")
+        await receiver.expect(delivered)
+        if transition == "upgrade":
+            sender.writer.close()
+            receiver.writer.close()
+            updated = await ensure(dirs, version="new")
+            assert updated.pid == original.pid
+            assert updated.source_version == "new"
+            sender = await _Client.connect(dirs, "sender", clients=clients)
+            assert sender.welcome.resumed
+        if transition in ("upgrade", "reconnect"):
+            receiver = await _Client.connect(dirs, "receiver", clients=clients)
+            assert receiver.welcome.resumed
+            assert receiver.welcome.calls == (note.id,)
+            await receiver.expect(delivered)
+        receiver.writer.write(encoded(Ack(id=note.id)) * 2)
+        await receiver.barrier()
+        sender.writer.write(encoded(note))
+        await sender.expect(Ack(id=note.id))
+        await receiver.barrier()
+        receiver = await _Client.connect(dirs, "receiver", clients=clients)
+        assert receiver.welcome.resumed
+        assert receiver.welcome.calls == ()
+        receiver.writer.write(encoded(Bye()))
+        await receiver.expect(None)
+        fresh = await _Client.connect(dirs, "receiver", clients=clients)
+        assert not fresh.welcome.resumed
+    finally:
+        for client in clients:
+            client.writer.close()
+        _ = await control(dirs, DaemonControl(stop=True))
 
 
 class _RecordingTransport(asyncio.WriteTransport):
@@ -1036,14 +1201,15 @@ class _ModelClient:
         reader.feed_data(
             encoded(
                 Hello(version=VERSION, token="", session_id=session_id, client="model"),
-            )
+            ),
         )
         task = asyncio.create_task(server._local_connected(reader, writer))
         await transport.written.wait()
-        response = asyncio.StreamReader()
-        response.feed_data(transport.lines.pop(0))
-        welcome = await received(response)
-        assert isinstance(welcome, Welcome)
+        welcome = stored_record(
+            json_loads(transport.lines.pop(0)),
+            Welcome,
+            classes={"Welcome": Welcome},
+        )
         client = cls(
             server=server,
             session_id=session_id,
@@ -1051,7 +1217,9 @@ class _ModelClient:
             transport=transport,
             task=task,
             welcome=welcome,
-            directories=frozenset(
+            directories=clients[0].directories
+            if clients
+            else frozenset(
                 encoded(Peers(labels=labels))
                 for labels in (
                     (),
@@ -1081,8 +1249,104 @@ class _ModelClient:
             assert line in self.directories
 
     async def barrier(self) -> None:
-        self.send(Describe(id="barrier", tool="absent"))
-        await self.expect(Described(id="barrier", spec=None))
+        assert all(line in self.directories for line in self.transport.lines)
+        self.transport.lines.clear()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _FrameDecoder[T: Hello | Tools | Peers]:
+    target: type[T]
+    frames: dict[bytes, T] = field(default_factory=dict)
+
+    async def received(self, reader: asyncio.StreamReader) -> T | None:
+        line = await reader.readline()
+        if not line:
+            return None
+        if line not in self.frames:
+            self.frames[line] = stored_record(
+                json_loads(line),
+                self.target,
+                classes={self.target.__name__: self.target, "ToolSpec": ToolSpec},
+            )
+        return deepcopy(self.frames[line])
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _PeerEncoder:
+    frames: dict[Peers, bytes] = field(default_factory=dict[Peers, bytes])
+
+    def __call__(self, message: Message) -> bytes:
+        if not isinstance(message, Peers):
+            return encoded(message)
+        if message not in self.frames:
+            self.frames[message] = encoded(message)
+        return self.frames[message]
+
+
+@pytest.fixture
+def model_codec(monkeypatch: pytest.MonkeyPatch) -> None:
+    encoder = _PeerEncoder()
+    monkeypatch.setattr(host_server, "encoded", encoder)
+    monkeypatch.setattr(host_session, "encoded", encoder)
+
+
+@pytest.mark.asyncio
+async def test_cached_frames_preserve_canonical_values_without_shared_mutation() -> (
+    None
+):
+    message = Tools(
+        tools={
+            "Gate": ToolSpec(
+                description="gate",
+                schema={"type": "object", "properties": {"x": {"enum": ["a", "b"]}}},
+            ),
+        },
+    )
+    frame = encoded(message)
+    canonical = asyncio.StreamReader()
+    canonical.feed_data(frame)
+    expected = await received(canonical)
+    reader = asyncio.StreamReader()
+    reader.feed_data(frame * 2)
+    changed = encoded(Tools(tools={"Other": ToolSpec(description="other", schema={})}))
+    reader.feed_data(changed)
+    reader.feed_eof()
+    decoder = _FrameDecoder(target=Tools)
+    first = await decoder.received(reader)
+    assert isinstance(first, Tools)
+    assert isinstance(expected, Tools)
+    assert first == expected
+    assert encoded(first) == encoded(expected) == frame
+    schema = first.tools["Gate"].schema
+    assert isinstance(schema, dict)
+    properties = schema["properties"]
+    assert isinstance(properties, dict)
+    parameter = properties["x"]
+    assert isinstance(parameter, dict)
+    choices = parameter["enum"]
+    assert isinstance(choices, list)
+    choices.append("changed")
+    parameter["description"] = "changed"
+    second = await decoder.received(reader)
+    assert isinstance(second, Tools)
+    assert second is not first
+    assert second == expected
+    assert first != second
+    assert encoded(second) == frame
+    different = await decoder.received(reader)
+    assert different is not None
+    assert tuple(different.tools) == ("Other",)
+    assert different is not first
+    assert await decoder.received(reader) is None
+    encoder = _PeerEncoder()
+    for peers in (
+        Peers(labels=("a",)),
+        Peers(labels=("a",), public=()),
+        Peers(labels=("b",)),
+    ):
+        assert encoder(peers) == encoded(peers)
+        assert encoder(peers) == encoded(peers)
+    assert encoder(Ack(id="uncached")) == encoded(Ack(id="uncached"))
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1388,9 +1652,108 @@ async def test_malformed_clients_do_not_disrupt_existing_sessions(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("model_codec")
 @pytest.mark.skipif(sys.platform != "linux", reason="Measures Linux process resources.")
 @pytest.mark.parametrize("delayed_close", [False, True])
 async def test_worker_churn_releases_processes_descriptors_and_public_routes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    delayed_close: bool,
+    local_daemon: LocalHost,
+) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    clients: list[_ModelClient] = []
+    counts: list[int] = []
+    async with Server(
+        dirs,
+        listen=[strings.Address(host="127.0.0.1", port=0)],
+        tools=["Gate"],
+        start_host=local_daemon,
+    ) as server:
+        (connection,) = await strings.add(dirs, peer_messaging=True)
+        observer = await _ModelClient.connect(server, "observer", clients=clients)
+        monkeypatch.setattr(
+            host_server,
+            "received",
+            _FrameDecoder(target=Tools).received,
+        )
+        monkeypatch.setattr(
+            host_session,
+            "received",
+            _FrameDecoder(target=Peers).received,
+        )
+        descriptors = Path(f"/proc/{os.getpid()}/fd")
+        baseline = await asyncio.to_thread(lambda: len(list(descriptors.iterdir())))
+        for iteration in range(26):
+            sessions = []
+            for index in range(4):
+                transport = _RecordingTransport(asyncio.StreamReader())
+                writer = asyncio.StreamWriter(
+                    transport,
+                    asyncio.Protocol(),
+                    None,
+                    asyncio.get_running_loop(),
+                )
+                session = await server._admit(
+                    Hello(
+                        version=VERSION,
+                        token=connection.token,
+                        session_id=f"worker-{iteration}-{index}",
+                        client="churn",
+                    ),
+                    ip="127.0.0.1",
+                    writer=writer,
+                )
+                assert session is not None
+                sessions.append(session)
+                server._relay(session, Peers(labels=("worker@churn",)))
+                server._relay(session, Describe(id="spec", tool="Gate"))
+                spec = session.specs["Gate"]
+                assert spec.description
+                assert transport.lines[-1] == encoded(Described(id="spec", spec=spec))
+            assert observer.transport.lines[-1] == encoded(
+                Peers(
+                    labels=tuple(f"worker@churn#{session.id}" for session in sessions),
+                ),
+            )
+            observer.transport.lines.clear()
+            held = os.open(os.devnull, os.O_RDONLY) if delayed_close else None
+            try:
+                await asyncio.gather(
+                    *(server._end(session, reason="bye") for session in sessions),
+                )
+                assert observer.transport.lines[-1] == encoded(Peers(labels=()))
+                observer.transport.lines.clear()
+                assert not any(
+                    row.token_id for row in strings.listing(dirs).sessions or ()
+                )
+                assert len(local_daemon.started) == 4 * (iteration + 1)
+                assert all(worker.task.done() for worker in local_daemon.started)
+                for worker in local_daemon.started:
+                    await worker.writer.wait_closed()
+                if held is not None:
+                    assert (
+                        await asyncio.to_thread(
+                            lambda: len(list(descriptors.iterdir())),
+                        )
+                        == baseline + 1
+                    )
+            finally:
+                if held is not None:
+                    os.close(held)
+            counts.append(
+                await asyncio.to_thread(lambda: len(list(descriptors.iterdir()))),
+            )
+            assert counts[-1] == baseline, counts
+        await server._end(server._sessions["observer"], reason="bye")
+        await observer.expect(None)
+        await observer.task
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Measures Linux process resources.")
+@pytest.mark.parametrize("delayed_close", [False, True])
+async def test_tls_worker_batch_releases_descriptors_and_public_routes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     delayed_close: bool,
@@ -1419,47 +1782,46 @@ async def test_worker_churn_releases_processes_descriptors_and_public_routes(
             return iter(entries)
 
         monkeypatch.setattr(Path, "iterdir", descriptors)
-        for iteration in range(26):
-            async with contextlib.AsyncExitStack() as stack:
-                sessions = [
-                    await stack.enter_async_context(
-                        RemoteSession(
-                            [SavedRemote(url=connection.url)],
-                            team=_local_team("worker"),
-                            client="churn",
-                            retry_sec=0.01,
-                        ),
-                    )
-                    for _ in range(4)
-                ]
-                endpoints = [next(iter(s.endpoints().values())) for s in sessions]
-                await asyncio.wait_for(
-                    asyncio.gather(*(e.until(lambda e: e.up) for e in endpoints)),
-                    5,
+        async with contextlib.AsyncExitStack() as stack:
+            sessions = [
+                await stack.enter_async_context(
+                    RemoteSession(
+                        [SavedRemote(url=connection.url)],
+                        team=_local_team("worker"),
+                        client="churn",
+                        retry_sec=0.01,
+                    ),
                 )
-                await observer.directory(
-                    tuple(f"worker@churn#{s.session_id}" for s in sessions),
+                for _ in range(4)
+            ]
+            endpoints = [next(iter(s.endpoints().values())) for s in sessions]
+            await asyncio.wait_for(
+                asyncio.gather(*(e.until(lambda e: e.up) for e in endpoints)),
+                5,
+            )
+            await observer.directory(
+                tuple(f"worker@churn#{s.session_id}" for s in sessions),
+            )
+            results = await asyncio.gather(*(e.spec("Read") for e in endpoints))
+            assert all(spec is not None and spec.description for spec in results)
+            if delayed_close:
+                _, pending = await asyncio.open_unix_connection(
+                    socket_address(dirs.state / "daemon.sock"),
                 )
-                results = await asyncio.gather(*(e.spec("Read") for e in endpoints))
-                assert all(spec is not None and spec.description for spec in results)
-                if delayed_close and iteration == 0:
-                    _, pending = await asyncio.open_unix_connection(
-                        socket_address(dirs.state / "daemon.sock"),
-                    )
-                    _ = await control(dirs, DaemonControl())
-            await observer.directory(())
-            async with asyncio.timeout(5):
-                while any(  # noqa: ASYNC110 -- The daemon publishes cleanup in this file.
-                    row.token_id for row in strings.listing(dirs).sessions or ()
-                ):
-                    await asyncio.sleep(0.01)
-            assert len(local_daemon.started) == 4 * (iteration + 1)
-            assert all(worker.task.done() for worker in local_daemon.started)
-            async with asyncio.timeout(5):
-                while (count := len(list((process / "fd").iterdir()))) > baseline:  # noqa: ASYNC110 -- TLS transport closure follows session removal.
-                    await asyncio.sleep(0.01)
-            counts.append(count)
-            assert count == baseline, counts
+                _ = await control(dirs, DaemonControl())
+        await observer.directory(())
+        async with asyncio.timeout(5):
+            while any(  # noqa: ASYNC110 -- The daemon publishes cleanup in this file.
+                row.token_id for row in strings.listing(dirs).sessions or ()
+            ):
+                await asyncio.sleep(0.01)
+        assert len(local_daemon.started) == 4
+        assert all(worker.task.done() for worker in local_daemon.started)
+        async with asyncio.timeout(5):
+            while (count := len(list((process / "fd").iterdir()))) > baseline:  # noqa: ASYNC110 -- TLS transport closure follows session removal.
+                await asyncio.sleep(0.01)
+        counts.append(count)
+        assert count == baseline, counts
         observer.writer.write(encoded(Bye()))
         await observer.expect(None)
     finally:
