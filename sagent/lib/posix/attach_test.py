@@ -10,7 +10,6 @@ import contextlib
 import fcntl
 import os
 import pty
-import select
 import shutil
 import signal
 import struct
@@ -531,17 +530,23 @@ class _Shell:
     async def until(self, wanted: bytes, *, timeout_sec: float = 10.0) -> bytes:
         """Read the screen until ``wanted`` shows; return what showed since the call."""
         start = len(self.seen)
-        async with asyncio.timeout(timeout_sec):
-            while wanted not in self.seen[start:]:
-                nothing: list[int] = []
-                readable, _, _ = select.select([self._leader], nothing, nothing, 0)
-                if readable:
+        loop = asyncio.get_running_loop()
+        ready = asyncio.Event()
+        os.set_blocking(self._leader, False)
+        loop.add_reader(self._leader, ready.set)
+        try:
+            async with asyncio.timeout(timeout_sec):
+                while wanted not in self.seen[start:]:
+                    await ready.wait()
+                    ready.clear()
                     try:
                         self.seen += os.read(self._leader, 65_536)
+                    except BlockingIOError:
+                        continue
                     except OSError:
                         raise AssertionError(bytes(self.seen)) from None
-                else:
-                    await asyncio.sleep(0.01)
+        finally:
+            loop.remove_reader(self._leader)
         return bytes(self.seen[start:])
 
     async def line(self, marker: bytes) -> bytes:
