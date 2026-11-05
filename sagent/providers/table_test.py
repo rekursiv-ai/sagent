@@ -1471,6 +1471,15 @@ def test_models_reads_a_packages_own_catalog_once() -> None:
     assert table["default"].model_id in table
 
 
+def test_every_config_dir_without_a_catalog_shares_the_shipped_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = models(anthropic, section="anthropic-cli")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "elsewhere"))
+    assert models(anthropic, section="anthropic-cli") is table
+
+
 def test_models_refuses_a_section_the_catalog_lacks() -> None:
     with pytest.raises(ValueError, match="no section 'nowhere'"):
         models(anthropic, section="nowhere")
