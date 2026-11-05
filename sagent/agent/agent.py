@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING, override
 import asyncio
 import uuid
 
-from treekle import from_plain
+from treekle import PlainTree, from_plain
 
 from sagent.agent.agents_md import AgentsMdConfig, Directives
 from sagent.agent.environment import environment
@@ -204,7 +204,8 @@ class Agent(AsyncResource):
         self.account = account
         self.max_rounds = max_rounds
         self._rounds = 0
-        self.allowed = frozenset(allowed) if allowed is not None else None
+        self._allowed = frozenset(allowed) if allowed is not None else None
+        self.allowed = self._allowed
         self._system_prompt = system_prompt
         self._session = RuntimeSession(
             self,
@@ -1224,7 +1225,7 @@ def _response(
     usage: TokenUsage | None = None,
 ) -> Response:
     """Return a stored model turn as the ``Response`` it came in."""
-    info = usage.info if usage is not None else {}
+    info = usage.info if usage is not None else dict[str, PlainTree]()
     return Response(
         records=tuple(records),
         tokens=from_plain(

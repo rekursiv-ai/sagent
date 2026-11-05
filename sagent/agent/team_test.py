@@ -1422,7 +1422,10 @@ async def test_a_model_the_user_picks_while_moved_signs_in_as_their_choice(
 @pytest.mark.asyncio
 async def test_a_turn_after_the_reset_goes_back_to_the_first_login(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    clock = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
     logins = _saved("personal")
     await logins.spend(
         None,
@@ -1434,7 +1437,7 @@ async def test_a_turn_after_the_reset_goes_back_to_the_first_login(
     _, agent, seen = await _session(accounts, tmp_path)
     try:
         assert await agent.send("first") == "one"
-        await asyncio.sleep(0.4)
+        clock[0] += 0.4
         assert await agent.send("second") == "two"
     finally:
         await agent.aclose()
@@ -1553,8 +1556,11 @@ async def test_a_ledger_that_cannot_be_written_leaves_the_call_to_go_on(
 @pytest.mark.asyncio
 async def test_no_login_left_with_none_spent_says_nothing_of_resets(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every other login is unserving or signed out; a note of no resets says nothing."""
+    clock = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
     _saved("personal")
     accounts = _Accounts()
     accounts.script("default", _spent("5-hour", wait_sec=0.2))
@@ -1562,7 +1568,7 @@ async def test_no_login_left_with_none_spent_says_nothing_of_resets(
     _, agent, seen = await _session(accounts, tmp_path)
     try:
         assert await agent.send("first") == "one"
-        await asyncio.sleep(0.3)
+        clock[0] += 0.3
         accounts.modelless.add("default")
         with pytest.raises(AuthError):
             await agent.send("second")

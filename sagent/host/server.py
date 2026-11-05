@@ -256,7 +256,9 @@ class Server(AsyncResource):
         with contextlib.ExitStack() as undo:
             pid_fd = _locked_pid(self._dirs.state / "server.pid")
             undo.callback(os.close, pid_fd)
-            context = server_context(self._dirs.secrets)
+            context = (
+                server_context(self._dirs.secrets) if self._config.listen else None
+            )
             listeners: list[asyncio.Server] = []
             for address in self._config.listen:
                 listener = await asyncio.start_server(

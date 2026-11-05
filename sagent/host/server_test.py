@@ -832,6 +832,39 @@ async def test_a_host_that_names_no_tools_is_stopped(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("credentials", ["missing", "file", "parent-file"])
+async def test_local_daemon_needs_no_tls_credentials(
+    tmp_path: Path,
+    credentials: str,
+) -> None:
+    secrets = tmp_path / "secrets"
+    if credentials != "missing":
+        secrets.write_text("preserve")
+    dirs = ServeDirs(
+        secrets=secrets / "sagent" / "serve"
+        if credentials == "parent-file"
+        else secrets,
+        state=tmp_path / "state",
+    )
+    address = dirs.state / "daemon.sock"
+    async with Server(dirs, listen=[], local_socket=address):
+        reader, writer = await asyncio.open_unix_connection(address)
+        try:
+            writer.write(encoded(DaemonControl()))
+            status = await _next(reader)
+            assert isinstance(status, DaemonStatus)
+            assert status.listen == ()
+            assert status.pid == os.getpid()
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    if credentials == "missing":
+        assert not secrets.exists()
+    else:
+        assert secrets.read_text() == "preserve"
+
+
+@pytest.mark.asyncio
 async def test_local_clients_discover_message_and_withdraw_without_tool_hosts(
     tmp_path: Path,
 ) -> None:
