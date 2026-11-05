@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import partial
 from io import StringIO
 from typing import TYPE_CHECKING
 
 import asyncio
 
+from prompt_toolkit.application import Application
 from prompt_toolkit.application.current import create_app_session
 from prompt_toolkit.data_structures import Size
 from prompt_toolkit.formatted_text import FormattedText
@@ -25,6 +27,8 @@ from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.session.types import UncategorizedToolResult, UserMessage
 from sagent.tools.display import ToolDisplay
+from sagent.tui import tree
+from sagent.tui.prompt import repaint_on_change
 from sagent.tui.tree import Row, pick, render, rows
 
 
@@ -291,6 +295,7 @@ async def _drawn(
     *,
     focused: str,
     then: Callable[[], None] | None = None,
+    painted: asyncio.Event | None = None,
     team_leaves: bool = False,
 ) -> tuple[str, str]:
     """Return what ``pick`` writes to a terminal before ``keys``, and in all."""
@@ -302,9 +307,11 @@ async def _drawn(
             pick(team, focused=focused, stop=said.stop, cancel=said.cancel),
         )
         if then is not None:
-            await asyncio.sleep(0.05)
+            assert painted is not None
+            await asyncio.wait_for(painted.wait(), timeout=5)
+            painted.clear()
             then()
-            await asyncio.sleep(0.3)
+            await asyncio.wait_for(painted.wait(), timeout=5)
         before = written.getvalue()
         pipe.send_text(keys)
         _ = await asyncio.wait_for(picking, timeout=5)
@@ -355,13 +362,37 @@ async def test_the_tree_takes_the_full_screen_with_the_cursor_hidden() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_tree_that_changes_while_shown_is_redrawn() -> None:
+async def test_a_tree_that_changes_while_shown_is_redrawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     team = _team()
+    painted = asyncio.Event()
+
+    def after_render(app: Application[str | None]) -> None:
+        del app
+        painted.set()
+
+    monkeypatch.setattr(
+        tree,
+        "Application",
+        partial(Application, after_render=after_render),
+    )
+    monkeypatch.setattr(
+        tree,
+        "repaint_on_change",
+        partial(repaint_on_change, interval_sec=0),
+    )
 
     def spend() -> None:
         team["other"].spend_usd = 0.5
 
-    before_keys, _ = await _drawn(team, _RIGHT, focused="kid", then=spend)
+    before_keys, _ = await _drawn(
+        team,
+        _RIGHT,
+        focused="kid",
+        then=spend,
+        painted=painted,
+    )
 
     # The first frame ends with the cursor sent back up the screen; a redraw
     # writes only what changed: ``$0.00`` became ``$0.50``.

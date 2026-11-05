@@ -37,9 +37,16 @@ from sagent.tools.watch import Feed, lines
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+    from pathlib import Path
 
     from sagent.session.types import SessionRecord
     from sagent.tools.types import ToolContext
+
+
+@pytest.fixture(autouse=True)
+def isolated_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the agents' directive discovery outside the checkout."""
+    monkeypatch.chdir(tmp_path)
 
 
 @dataclass(slots=True, kw_only=True)

@@ -50,6 +50,7 @@ from sagent.tui.prompt import Panes, Staged
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.render import Scrollback
 from sagent.tui.settings.runtime import RuntimeSettings
+from sagent.tui.settings.screen import ScreenSettings
 from sagent.tui.slash import Commands, owners_without_agent
 from sagent.tui.types import CommandOutput
 
@@ -62,6 +63,7 @@ if TYPE_CHECKING:
         ProviderFactory,
         ProviderResources,
     )
+    from sagent.settings.types import HasSettings
     from sagent.tools.types import ToolContext
 
 
@@ -1134,7 +1136,13 @@ def _shown(screens: dict[str, _View]) -> dict[str, bool]:
 
 
 @pytest.mark.asyncio
-async def test_a_choice_rolls_down_to_each_child_that_made_none() -> None:
+async def test_a_choice_rolls_down_to_each_child_that_made_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def owners(commands: Commands) -> list[tuple[tuple[str, ...], HasSettings]]:
+        return [((), commands), (("screen",), ScreenSettings(view=commands.screen))]
+
+    monkeypatch.setattr(Commands, "owners", owners)
     desk, screens = _rolled(("a", "Agent"), ("b", "Agent"), ("c", "Agent"), ("a1", "a"))
     team = desk.team
     assert team is not None

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from asyncio import AbstractEventLoop, Task
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NoReturn
 
 import asyncio
@@ -124,7 +127,11 @@ async def test_release_terminates_a_process_with_no_stdin() -> None:
 
 
 @pytest.mark.asyncio
-async def test_release_kills_a_process_that_ignores_sigterm(tmp_path: Path) -> None:
+async def test_release_kills_a_process_that_ignores_sigterm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _grace_clock(monkeypatch)
     stubborn = "trap '' TERM; echo $$ >> \"$0\"; exec tail -f /dev/null"
     log = tmp_path / "pids"
     async with SubprocessPool(grace_sec=0.05) as pool:
@@ -133,6 +140,7 @@ async def test_release_kills_a_process_that_ignores_sigterm(tmp_path: Path) -> N
         await _started(log, count=2)
         await pool.release(process)
         assert process.returncode == -signal.SIGKILL
+        assert clock.sent == [signal.SIGTERM, signal.SIGKILL]
 
 
 @pytest.mark.asyncio
@@ -149,7 +157,11 @@ async def test_release_stops_the_jobs_a_process_started(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_cancelled_release_still_stops_the_process(tmp_path: Path) -> None:
+async def test_a_cancelled_release_still_stops_the_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = _grace_clock(monkeypatch)
     stubborn = "trap '' TERM; echo $$ >> \"$0\"; exec tail -f /dev/null"
     log = tmp_path / "pids"
     async with SubprocessPool(grace_sec=0.05) as pool:
@@ -157,11 +169,11 @@ async def test_a_cancelled_release_still_stops_the_process(tmp_path: Path) -> No
         # Two: the spare logs to the same file, and may log first.
         await _started(log, count=2)
         releasing = asyncio.create_task(pool.release(process))
-        await asyncio.sleep(0.01)
-        releasing.cancel()
+        clock.cancelling = releasing
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(releasing, timeout=5)
         assert process.returncode == -signal.SIGKILL
+        assert clock.sent == [signal.SIGTERM, signal.SIGKILL]
 
 
 @pytest.mark.asyncio
@@ -349,6 +361,45 @@ async def test_closing_what_was_never_used_is_a_no_op() -> None:
 
 async def _refuses() -> NoReturn:
     raise RuntimeError("the pool would not close")
+
+
+@dataclass(slots=True, kw_only=True)
+class _GraceClock:
+    """Expire the real grace timer after TERM, without delaying signal delivery."""
+
+    loop: AbstractEventLoop
+    time: Callable[[], float]
+    signal: Callable[[Child, int], None]
+    offset: float = 0.0
+    cancelling: Task[None] | None = None
+    sent: list[int] = field(default_factory=list)
+
+    def now(self) -> float:
+        return self.time() + self.offset
+
+    def send(self, child: Child, sig: int) -> None:
+        self.signal(child, sig)
+        self.sent.append(sig)
+        if sig == signal.SIGTERM:
+            self.loop.call_soon(self.expire, child.grace_sec)
+
+    def expire(self, seconds: float) -> None:
+        if self.cancelling is not None:
+            self.cancelling.cancel()
+            self.cancelling = None
+        self.offset += seconds
+
+
+def _grace_clock(monkeypatch: pytest.MonkeyPatch) -> _GraceClock:
+    loop = asyncio.get_running_loop()
+    clock = _GraceClock(loop=loop, time=loop.time, signal=Child._signal)
+
+    def send(child: Child, sig: int) -> None:
+        clock.send(child, sig)
+
+    monkeypatch.setattr(loop, "time", clock.now)
+    monkeypatch.setattr(Child, "_signal", send)
+    return clock
 
 
 if __name__ == "__main__":
