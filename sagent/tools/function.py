@@ -30,10 +30,13 @@ from dataclasses import (
     make_dataclass,
     replace,
 )
+from functools import lru_cache
 from typing import TYPE_CHECKING, cast, overload
 
 import asyncio
 import inspect
+
+from treekle import immutable, mutable
 
 from sagent.session.types import FunctionResult
 from sagent.tools.display import ToolDisplay
@@ -47,6 +50,9 @@ if TYPE_CHECKING:
     from treekle import PlainTree
 
     from sagent.session.types import AnyToolResult
+
+    type _Shape = tuple[type[DataclassInstance], Mapping[str, PlainTree], bool]
+    """A tool's arguments type, their schema, and whether it takes the context."""
 
 
 __all__ = ["FunctionTool", "tool"]
@@ -86,12 +92,14 @@ class FunctionTool:
         schema: Mapping[str, PlainTree] | None,
         display: ToolDisplay,
     ) -> None:
+        self._arguments, self.schema, self._takes_context = _shape(
+            fn,
+            name=name,
+            schema=schema,
+        )
         self._fn = fn
-        self._arguments = _signature(fn, name=name)
-        self._takes_context = "context" in inspect.signature(fn).parameters
         self.name = name
         self.description = description
-        self.schema = json_schema(self._arguments) if schema is None else schema
         self.display = display
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
@@ -208,16 +216,98 @@ def tool(
     return make if fn is None else make(fn)
 
 
-def _signature(fn: Callable[..., object], *, name: str) -> type[DataclassInstance]:
+# A function's own shape is read once per function and name; a given ``schema`` is the
+# schema, and none is derived for it.
+def _shape(
+    fn: Callable[..., object],
+    *,
+    name: str,
+    schema: Mapping[str, PlainTree] | None,
+) -> _Shape:
+    """Return the tool ``name``'s arguments over ``fn``, their schema, and its context."""
+    # A tool is often made anew for each line of a conversation, over a method of an
+    # object made for that line: every bound method of one function has one shape.
+    # The cache holds functions only, never the object a method is bound to, nor a
+    # closure, which may hold one.
+    if inspect.ismethod(fn) and _plain(fn.__func__):
+        key: tuple[Callable[..., object], bool] | None = (fn.__func__, True)
+    elif _plain(fn):
+        key = (fn, False)
+    else:
+        key = None
+    if key is None:
+        # A partial's, a closure's or a callable object's shape is its own.
+        arguments, takes_context = _arguments(fn, _read(fn), name=name)
+        derived = json_schema(arguments) if schema is None else schema
+        return arguments, derived, takes_context
+    arguments, takes_context = _function_arguments(key[0], name, bound=key[1])
+    if schema is not None:
+        return arguments, schema, takes_context
+    # Each tool holds its own copy, so a caller changing one changes no other.
+    derived = mutable(_function_schema(key[0], name, bound=key[1]))
+    return arguments, derived, takes_context
+
+
+def _plain(fn: object) -> bool:
+    """Return whether ``fn`` is a function that closes over nothing."""
+    return inspect.isfunction(fn) and fn.__closure__ is None
+
+
+def _read(fn: Callable[..., object]) -> inspect.Signature:
+    """Return ``fn``'s signature, its annotations evaluated."""
+    # A module offering a tool may import `ToolContext` for its checker only.
+    return inspect.signature(fn, locals={"ToolContext": ToolContext}, eval_str=True)
+
+
+# A bound function's first parameter is the object it is bound to, and no argument.
+@lru_cache(maxsize=1_024)
+def _function_arguments(
+    fn: Callable[..., object],
+    name: str,
+    /,
+    *,
+    bound: bool,
+) -> tuple[type[DataclassInstance], bool]:
+    """Return ``fn``'s arguments and whether it takes the context."""
+    signature = _read(fn)
+    if bound:
+        signature = signature.replace(parameters=[*signature.parameters.values()][1:])
+    return _arguments(fn, signature, name=name)
+
+
+@lru_cache(maxsize=1_024)
+def _function_schema(
+    fn: Callable[..., object],
+    name: str,
+    /,
+    *,
+    bound: bool,
+) -> Mapping[str, PlainTree]:
+    """Return the schema of ``fn``'s arguments, read only for a tool given none."""
+    arguments, _ = _function_arguments(fn, name, bound=bound)
+    return immutable(json_schema(arguments))
+
+
+# The arguments are ``signature``'s parameters, described by ``fn``'s docstring.
+def _arguments(
+    fn: Callable[..., object],
+    signature: inspect.Signature,
+    *,
+    name: str,
+) -> tuple[type[DataclassInstance], bool]:
+    """Return the tool ``name``'s arguments, and whether it takes the context."""
+    return _signature(fn, signature, name=name), "context" in signature.parameters
+
+
+def _signature(
+    fn: Callable[..., object],
+    signature: inspect.Signature,
+    *,
+    name: str,
+) -> type[DataclassInstance]:
     """Return ``fn``'s parameters, but ``context``, as the tool ``name``'s arguments."""
     # The signature, not the function's own annotations, so a ``partial`` keeps the
-    # types of what it wraps. A module offering a tool may import `ToolContext`
-    # for its checker only.
-    signature = inspect.signature(
-        fn,
-        locals={"ToolContext": ToolContext},
-        eval_str=True,
-    )
+    # types of what it wraps.
     notes = _notes(inspect.getdoc(fn) or "")
     specs: list[tuple[str, object, object]] = []
     for param in signature.parameters.values():

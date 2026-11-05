@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+import sys
+
 import pytest
 
 from sagent.agent.agent import Agent
@@ -399,6 +401,46 @@ async def test_old_journal_usage_restores_response_meters(tmp_path: Path) -> Non
         )
         assert response.tokens == TokenCount(request=11, cache_read=22, response=33)
         assert not agent.runtime.token_accounting.has_measurements
+
+
+def test_a_capture_hashes_as_a_fresh_one_does_and_a_changed_record_anew() -> None:
+    model = ScriptedProvider()["scripted"]
+    accounting = TokenAccounting()
+    prefix, said, later = (
+        UserMessage(content="prefix"),
+        AssistantMessage(content="a"),
+        UserMessage(content="next"),
+    )
+    first = Request(records=(prefix, said))
+    grown = replace(first, records=(prefix, said, later))
+    changed = replace(grown, records=(prefix, replace(said, content="b"), later))
+
+    snapshots = [
+        accounting.capture(each, model=model) for each in (first, grown, changed)
+    ]
+
+    fresh = [
+        TokenAccounting().capture(each, model=model) for each in (first, grown, changed)
+    ]
+    assert snapshots == fresh
+    assert snapshots[2].hashes[1] != snapshots[1].hashes[1]
+    assert snapshots[2].hashes[::2] == snapshots[1].hashes[::2]
+
+
+def test_accounting_lets_go_of_records_no_later_capture_holds() -> None:
+    model = ScriptedProvider()["scripted"]
+    accounting = TokenAccounting()
+    old = UserMessage(content="old")
+    held = sys.getrefcount(old)
+
+    _ = accounting.capture(Request(records=(old,)), model=model)
+    kept = sys.getrefcount(old)
+    for number in range(3):
+        later = Request(records=(UserMessage(content=f"new {number}"),))
+        _ = accounting.capture(later, model=model)
+
+    assert kept > held
+    assert sys.getrefcount(old) == held
 
 
 if __name__ == "__main__":

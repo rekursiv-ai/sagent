@@ -45,12 +45,17 @@ class RequestSnapshot:
 
 
 class TokenAccounting:
-    """Reuse measured unchanged requests and appended groups before estimating text."""
+    """Reuse measured unchanged requests and appended groups before estimating text.
+
+    It holds the records of the last request it captured, and no older ones, to
+    reuse their hashes when the next request begins with the same records.
+    """
 
     def __init__(self) -> None:
         self._prompts: dict[tuple[str, str, str], RequestMeasurement] = {}
         self._blocks: dict[tuple[int, str], dict[str, int]] = {}
         self._last: RequestMeasurement | None = None
+        self._hashed: tuple[tuple[SessionRecord, str], ...] = ()
 
     @property
     def has_measurements(self) -> bool:
@@ -74,8 +79,23 @@ class TokenAccounting:
             frame=_digest(
                 (request.system, _tools(request), request.allowed, model.settings),
             ),
-            hashes=tuple(_digest(stored_plain(r)) for r in request.records),
+            hashes=self._hashes(request.records),
         )
+
+    # Records are frozen, so the same record object always hashes the same; a record
+    # changed is a new object, and is hashed anew.
+    def _hashes(self, records: Sequence[SessionRecord]) -> tuple[str, ...]:
+        """Return each record's hash, reusing the last capture's for its leading run."""
+        held = self._hashed
+        same = 0
+        while same < min(len(held), len(records)) and held[same][0] is records[same]:
+            same += 1
+        hashes = (
+            *(digest for _, digest in held[:same]),
+            *(_digest(stored_plain(r)) for r in records[same:]),
+        )
+        self._hashed = tuple(zip(records, hashes, strict=True))
+        return hashes
 
     def observe(
         self,

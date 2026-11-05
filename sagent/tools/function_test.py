@@ -6,6 +6,9 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
+import gc
+import weakref
+
 from treekle import PlainTree, from_plain
 
 import pytest
@@ -183,6 +186,26 @@ def test_a_type_with_no_json_schema_is_refused_when_the_tool_is_made() -> None:
         tool(odd)
 
 
+@pytest.mark.asyncio
+async def test_a_given_schema_spares_a_type_with_no_json_schema() -> None:
+    def odd(when: Path = Path("/")) -> str:
+        """Odd.
+
+        Args:
+          when: A path, which JSON has no type for.
+
+        """
+        return str(when)
+
+    made = tool(odd, schema={"type": "object", "properties": {}})
+
+    assert await made.call(_context(), {}) == FunctionResult(
+        call_id="",
+        name="odd",
+        content="/",
+    )
+
+
 def test_tool_as_a_decorator_takes_the_same_settings() -> None:
     @tool(name="Ping")
     def ping() -> str:
@@ -288,6 +311,67 @@ def test_a_display_shows_as_given_and_hides_the_output_by_default() -> None:
 
     assert tool(greet).display == ToolDisplay()
     assert tool(greet, display=shown).display is shown
+
+
+class _Greeter:
+    """An object a tool is made over, as one made for a conversation's line is."""
+
+    def __init__(self, word: str) -> None:
+        self.word = word
+
+    def greet(self, name: str) -> str:
+        """Say the greeter's word.
+
+        Args:
+          name: Who to greet.
+
+        """
+        return f"{self.word} {name}"
+
+
+@pytest.mark.asyncio
+async def test_tools_over_one_method_share_a_schema_but_call_their_own_object() -> None:
+    hello = tool(_Greeter("hello").greet)
+    bye = tool(_Greeter("bye").greet)
+
+    assert (
+        hello.schema
+        == bye.schema
+        == {
+            "type": "object",
+            "properties": {"name": {"type": "string", "description": "Who to greet."}},
+            "required": ["name"],
+            "additionalProperties": False,
+        }
+    )
+    # Each tool has a schema of its own, so changing one changes no other.
+    assert hello.schema is not bye.schema
+    assert await hello.call(_context(), {"name": "ann"}) == FunctionResult(
+        call_id="",
+        name="greet",
+        content="hello ann",
+    )
+    assert await bye.call(_context(), {"name": "ann"}) == FunctionResult(
+        call_id="",
+        name="greet",
+        content="bye ann",
+    )
+    # The function itself still takes the object it would be bound to.
+    assert from_plain(tool(_Greeter.greet).schema["required"], list[str]) == [
+        "self",
+        "name",
+    ]
+
+
+def test_the_object_a_dropped_tool_was_bound_to_is_let_go() -> None:
+    greeter = _Greeter("hello")
+    made = tool(greeter.greet)
+    gone = weakref.ref(greeter)
+
+    del greeter, made
+    _ = gc.collect()
+
+    assert gone() is None
 
 
 @pytest.mark.asyncio
