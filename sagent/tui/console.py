@@ -18,7 +18,7 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, BinaryIO, Protocol, Self, TextIO, override
+from typing import TYPE_CHECKING, BinaryIO, Literal, Protocol, Self, TextIO, override
 
 import contextlib
 import io
@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from collections.abc import Generator, Iterable, Iterator, Sequence
     from types import TracebackType
 
+    from prompt_toolkit.output.color_depth import ColorDepth
+    from prompt_toolkit.output.defaults import create_output
     from rich.cells import cell_len
     from rich.console import Console
     from rich.style import Style
@@ -47,6 +49,9 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
+    ColorDepth = lazy_import("prompt_toolkit.output.color_depth", "ColorDepth")
+    create_output = lazy_import("prompt_toolkit.output.defaults", "create_output")
+    Console = lazy_import("rich.console", "Console")
     cell_len = lazy_import("rich.cells", "cell_len")
     Style = lazy_import("rich.style", "Style")
     Text = lazy_import("rich.text", "Text")
@@ -58,7 +63,28 @@ __all__ = [
     "Screen",
     "TextStream",
     "Title",
+    "terminal_console",
 ]
+
+
+def terminal_console(file: TextIO) -> Console:
+    """Return a Rich console using prompt-toolkit's color-depth selection.
+
+    Args:
+      file: The destination stream, including its terminal status.
+
+    Returns:
+      console: A console with the same color depth as prompt-toolkit.
+
+    """
+    depth = create_output(stdout=file).get_default_color_depth()
+    systems: dict[ColorDepth, Literal["standard", "256", "truecolor"] | None] = {
+        ColorDepth.DEPTH_1_BIT: None,
+        ColorDepth.DEPTH_4_BIT: "standard",
+        ColorDepth.DEPTH_8_BIT: "256",
+        ColorDepth.DEPTH_24_BIT: "truecolor",
+    }
+    return Console(file=file, color_system=systems[depth])
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
