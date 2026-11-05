@@ -92,7 +92,7 @@ The runtime fills in `call_id`.
 
 ## Built-ins
 
-Each built-in lives in its own module under `sagent.tools`, such as `sagent.tools.read.Read` and `sagent.tools.glob_tool.Glob`. `AgentSpawn`, `AgentSend`, `AgentSelf`, and `Session` take the session's `Team`: `AgentSpawn(team=team)`.
+Each built-in lives in its own module under `sagent.tools`, such as `sagent.tools.read.Read` and `sagent.tools.glob_tool.Glob`. `AgentSpawn`, `AgentSend`, `AgentSelf`, and `AgentSession` take the session's `Team`: `AgentSpawn(team=team)`.
 
 | Tool | Purpose | Key inputs |
 | --- | --- | --- |
@@ -110,11 +110,11 @@ Each built-in lives in its own module under `sagent.tools`, such as `sagent.tool
 | `PaperAuthor` | Author search and author papers. | `query` or `ids`; optional `operation="papers"`, `limit`, year bounds, `abstract_chars`. |
 | `PaperFetch` | Download paper PDFs. | `ids`. |
 | `Memory` | Save or forget a project memory, keeping `MEMORY.md` in step. | `action`, `name`; a save also `type`, `description`, `content`. |
-| `AgentSelf` | Let an agent inspect/mutate itself. | Flat patch object; all fields optional. |
+| `AgentSelf` | Inspect or patch yourself or a descendant. | Flat patch object; optional `agent` label or relation. |
 | `AgentSpawn` | Run child agents. | `prompt`; optional `system`, `provider`, `model`, `account`, reasoning settings, `tools`, `max_tool_call_rounds`, `max_depth`, `label`, `watch`. |
 | `AgentSend` | Send to a live named agent inbox. | `to`, `content`; optional `delay`. |
 | `BackgroundTask` | Manage background tool jobs. | `operation=list|cancel|foreground`; optional `id`. |
-| `Session` | List, read, search, prune, compact, or clear the context. | `action`; optional `ids`, `records`, `agent`, `text`, `reason`, `prompt`, `style`. |
+| `AgentSession` | List, read, search, prune, compact, or clear an agent's context. | `action`; optional `agent`, `ids`, `records`, `text`, `reason`, `prompt`, `style`. |
 | `Skill` | Load a user-authored skill body. | `skill`; optional `args`. |
 | `PlayAudio` | Play a short local WAV notification. | `path`. |
 
@@ -211,7 +211,15 @@ Paper tools use Semantic Scholar, OpenAlex, arXiv, and open-access PDF metadata.
 - `diagnostics`: set `true` to report model, settings, limits, and directory.
 - `catalog`, `catalog_provider`: `"providers"` or `"models"` for read-only discovery.
 
-The `Session` tool lists, prunes, compacts, or clears the agent's context.
+`AgentSession` lists, reads, searches, prunes, compacts, or clears a context.
+
+Both tools accept `agent`, a label or single-agent relation, defaulting to
+self: `AgentSelf(agent="helper", effort="high")` and
+`AgentSession(agent="helper", action="list")`. The caller's permissions and
+tool implementation apply; the target need not possess the tool.
+Mutations and estimates reach self or descendants, including grandchildren.
+AgentSession list, read, and search may reach any agent in the team.
+`RemoteTool` remains the router for machine endpoints.
 
 `AgentSpawn` creates child agents. Children inherit the parent's model, settings, tools, system prompt, and directory, or override provider, model, account, effort, tools, max tool-call rounds, and max depth. A child runs its prompt to idle, returns its last text, then stays alive, receiving messages through `AgentSend`, until the team stops it.
 
@@ -220,6 +228,8 @@ A child with its parent's tools builds its system blocks from its parent's setti
 A child of a parent with a journal file stands in that journal, with its own journal path, until it is stopped. Resuming the parent's session starts such children again, each from its own journal. Closing the session, as `Ctrl-D` / `/quit` does, leaves them standing. See [CLI](cli.md) for the slash target grammar.
 
 `AgentSend` sends text to a live named agent inbox, optionally after a delay.
+Every child, watcher, and resumed child receives it, even with `tools=[]` or
+inherited restrictions. All other tools remain bounded by the parent's permissions.
 
 ## Background tasks
 

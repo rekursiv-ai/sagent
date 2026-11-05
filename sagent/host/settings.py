@@ -13,18 +13,18 @@ Typical usage example:
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Protocol, cast
 
-import os
 import re
 
 from treekle import json_dumps
 
-from sagent.host import strings
-from sagent.host.server import DEFAULT_TOOLS, Server
+from sagent.host import daemon, strings
+from sagent.host.server import DEFAULT_TOOLS
 from sagent.host.strings import Address, Listing, ServeDirs
+from sagent.host.wire import DaemonControl
 from sagent.settings.flags import ActionParser
 
 
@@ -79,35 +79,47 @@ class HostSettings:
 
     async def _serve(self, parsed: argparse.Namespace) -> str:
         flags = cast("_Served", parsed)
-        listen = [Address.from_text(a) for a in flags.listen or ("0.0.0.0:7777",)]
+        listen = (
+            ()
+            if flags.disable
+            else tuple(
+                str(Address.from_text(a)) for a in flags.listen or ("0.0.0.0:7777",)
+            )
+        )
         tools = _names(flags.tools)
-        async with Server(
+        ttl_sec = _seconds(flags.ttl)
+        _ = await daemon.ensure(self.dirs)
+        status = await daemon.control(
             self.dirs,
-            listen=listen,
-            tools=tools,
-            ttl_sec=_seconds(flags.ttl),
-        ) as server:
-            where = ", ".join(
-                str(replace(a, port=port))
-                for a, port in zip(listen, server.ports, strict=True)
-            )
-            self.show(
-                f"Serving {', '.join(tools)} on {where}, as pid {os.getpid()};"
-                " make a string with `sagent host add`.",
-            )
-            return await server.serve_forever()
+            DaemonControl(listen=listen, tools=tools, ttl_sec=ttl_sec),
+        )
+        self.show(
+            f"Serving {', '.join(tools)} on {', '.join(status.listen)}, as pid {status.pid};"
+            " make a string with `sagent host add`.",
+        )
+        return ""
 
     async def _add(self, parsed: argparse.Namespace) -> str:
-        flags = cast("_Tooled", parsed)
+        flags = cast("_Granted", parsed)
         made = await strings.add(
             self.dirs,
             tools=_names(flags.tools) if flags.tools else None,
+            peer_messaging=flags.peer_messaging == "on",
         )
         return "\n".join(s.url for s in made)
 
     async def _edit(self, parsed: argparse.Namespace) -> str:
         flags = cast("_Edited", parsed)
-        await strings.edit(self.dirs, flags.token_id, tools=_names(flags.tools))
+        if not flags.tools and flags.peer_messaging is None:
+            raise ValueError("--tools or --peer-messaging is required.")
+        await strings.edit(
+            self.dirs,
+            flags.token_id,
+            tools=_names(flags.tools) if flags.tools else None,
+            peer_messaging=None
+            if flags.peer_messaging is None
+            else flags.peer_messaging == "on",
+        )
         return f"{flags.token_id} now grants {flags.tools}."
 
     async def _del(self, parsed: argparse.Namespace) -> str:
@@ -142,14 +154,19 @@ class _Tooled(Protocol):
 class _Served(_Tooled, Protocol):
     listen: list[str]
     ttl: str
+    disable: bool
+
+
+class _Granted(_Tooled, Protocol):
+    peer_messaging: str | None
 
 
 class _Named(Protocol):
     token_id: str
 
 
-class _Edited(_Named, _Tooled, Protocol):
-    """What ``edit`` reads: an id and the tools."""
+class _Edited(_Named, _Granted, Protocol):
+    """What ``edit`` reads: an id and the grants to change."""
 
 
 class _Listed(Protocol):
@@ -164,6 +181,11 @@ def _parser(name: tuple[str, ...], *, description: str) -> ActionParser:
         description=f"{description[:1].upper()}{description[1:]}.",
     )
     if name == ():
+        parser.add_argument(
+            "--disable",
+            action="store_true",
+            help="disable remote TLS access; keep local messaging running",
+        )
         parser.add_argument(
             "--listen",
             action="append",
@@ -189,10 +211,15 @@ def _parser(name: tuple[str, ...], *, description: str) -> ActionParser:
         parser.add_argument(
             "--tools",
             default="",
-            required=name == ("edit",),
             metavar="T,T,...",
             help="the tools it grants, of those served"
             + ("" if name == ("edit",) else " (default: all)"),
+        )
+        parser.add_argument(
+            "--peer-messaging",
+            choices=("on", "off"),
+            default=None,
+            help="grant cross-session discovery and messaging (default: off)",
         )
     if name == ("list",):
         parser.add_argument(

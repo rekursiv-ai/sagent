@@ -28,7 +28,7 @@ Typical usage example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, cast
@@ -46,11 +46,16 @@ from sagent.agent.agent import Agent
 from sagent.agent.team import RESERVED, Team
 from sagent.host.wire import (
     MAX_LINE_BYTES,
+    Ack,
     Call,
     Cancel,
     Note,
+    Pause,
+    Paused,
     Peers,
+    Refused,
     Result,
+    Resume,
     Tools,
     ToolSpec,
     encoded,
@@ -108,8 +113,10 @@ async def serve(
     writer.write(
         encoded(Tools(tools={n: ToolSpec.from_tool(t) for n, t in tools.items()})),
     )
-    wire = _Wire(writer=writer, team=team)
-    calls = _Calls(writer=writer, tools=tools, new_context=new_context, wire=wire)
+    output = _Output(writer=writer)
+    wire = _Wire(writer=output, team=team)
+    team.changes.add(wire.peers)
+    calls = _Calls(writer=output, tools=tools, new_context=new_context, wire=wire)
     try:
         while (message := await received(reader)) is not None:
             if isinstance(message, Call):
@@ -123,7 +130,27 @@ async def serve(
                 calls.cancel(message.id)
             elif isinstance(message, Note):
                 wire.receive(message)
+            elif isinstance(message, Peers):
+                wire.peered(message.labels)
+            elif isinstance(message, Pause):
+                output.pause()
+            elif isinstance(message, Resume):
+                output.resume()
+            elif isinstance(message, Ack):
+                wire.pending.pop(message.id, None)
+            elif isinstance(message, Refused):
+                note = wire.pending.pop(message.id, None)
+                if note is not None:
+                    team.unreach(note.recipient)
+                    if note.sender in team:
+                        team.tell(
+                            note.recipient,
+                            recipient=note.sender,
+                            content=f"[message refused] {message.reason}",
+                        )
     finally:
+        team.changes.discard(wire.peers)
+        output.resume()
         await calls.close()
 
 
@@ -156,13 +183,51 @@ class Flags(Protocol):
 
 
 @dataclass(slots=True, kw_only=True)
+class _Output:
+    """Hold output in the worker while its daemon replaces itself."""
+
+    writer: asyncio.StreamWriter
+    held: list[bytes] = field(default_factory=list[bytes])
+    paused: bool = False
+
+    def write(self, line: bytes) -> None:
+        """Write now, or retain the line until the replacement resumes us."""
+        if self.paused:
+            self.held.append(line)
+        else:
+            self.writer.write(line)
+
+    def pause(self) -> None:
+        """Mark the last output the old daemon must consume."""
+        self.writer.write(encoded(Paused()))
+        self.paused = True
+
+    def resume(self) -> None:
+        """Flush in order, then send subsequent output directly."""
+        for line in self.held:
+            self.writer.write(line)
+        self.held.clear()
+        self.paused = False
+
+
+@dataclass(slots=True, kw_only=True)
 class _Wire:
     """The team's way to the callers: notes up, and the labels of its agents."""
 
-    writer: asyncio.StreamWriter
+    writer: _Output
     team: Team
-    _told: tuple[str, ...] = ()
-    """The labels last written."""
+    _told: Peers = field(default_factory=lambda: Peers(labels=()))
+    """The private and public labels last written."""
+
+    _peers: tuple[str, ...] = ()
+    pending: dict[str, Note] = field(default_factory=dict[str, Note])
+
+    def peered(self, labels: tuple[str, ...]) -> None:
+        """Replace the directory's cross-session routes, not the caller's own team."""
+        for label in set(self._peers) - set(labels):
+            self.team.unreach(label)
+        self._peers = labels
+        self.reach(labels)
 
     def reach(self, labels: Iterable[str]) -> None:
         """Make each label of another machine's team, not one here, reachable."""
@@ -217,14 +282,17 @@ class _Wire:
             content=content,
             kind=kind,
         )
+        self.pending[note.id] = note
         self.writer.write(encoded(note))
 
     def peers(self) -> None:
         """Write ``Peers`` if the team's labels changed since last written."""
         labels = tuple(self.team)
-        if labels != self._told:
-            self._told = labels
-            self.writer.write(encoded(Peers(labels=labels)))
+        public = tuple(label for label in labels if self.team.peer_messaging(label))
+        peers = Peers(labels=labels, public=public if public != labels else None)
+        if peers != self._told:
+            self._told = peers
+            self.writer.write(encoded(peers))
 
 
 class _Calls:
@@ -233,7 +301,7 @@ class _Calls:
     def __init__(
         self,
         *,
-        writer: asyncio.StreamWriter,
+        writer: _Output,
         tools: Mapping[str, Tool],
         new_context: Callable[[str], ToolContext],
         wire: _Wire,

@@ -6,7 +6,7 @@ fetching them again would. :func:`cut` says when dropping the dead pays for
 breaking the cache. :func:`superseded` and :func:`idle` feed the first,
 :func:`reads` and :func:`requests_left` the second, and :func:`saving` prices
 a chosen drop. A drop that keeps the context under the compaction trigger is taken
-instead of compacting. The Session tool drops what the model chooses with
+instead of compacting. The AgentSession tool drops what the model chooses with
 :func:`drop`.
 
 Typical usage example:

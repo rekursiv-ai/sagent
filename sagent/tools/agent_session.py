@@ -1,18 +1,17 @@
-"""Session: read and edit the calling agent's own session, or read another's.
+"""AgentSession: read and edit an agent's session.
 
 Everything the API does to a session, the model can do to its own: list and
 read what it sees, search the whole session, weigh and make a prune, compact,
 or clear. A change reaches the runtime just after this call's result, so the
 call and its result are part of what it changes.
 
-``agent`` points ``list``, ``read`` and ``search`` at another agent of the
-team, by label or relation, such as the one a watcher watches. ``records``
-reads by record number, as ``search`` and a watcher's feed give them: the
-whole session, what was pruned or compacted away included.
+The ``agent`` argument targets another agent with the caller's authority.
+``records`` reads by record number, as ``search`` and a watcher's feed give
+them: the whole session, what was pruned or compacted away included.
 
 Typical usage example:
 
-  session = Session(team=team)
+  session = AgentSession(team=team)
   result = await session.call(context, {"action": "estimate", "ids": [3, 7]})
 """
 
@@ -50,6 +49,7 @@ from sagent.session.types import (
     TurnContext,
     UserMessage,
 )
+from sagent.tools.agent_tool import target_agent
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
 
@@ -66,7 +66,7 @@ if TYPE_CHECKING:
 
 
 __all__ = [
-    "Session",
+    "AgentSession",
 ]
 
 
@@ -82,14 +82,15 @@ type Action = Literal[
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
-class Session:
-    """Read and edit the calling agent's session."""
+class AgentSession:
+    """Read and edit an agent's session with the caller's permissions."""
 
     @dataclass(frozen=True, slots=True, kw_only=True)
     class Arguments:
         """What the model passes."""
 
         action: Annotated[Action, "What to do."]
+        agent: Annotated[str, "Agent label or relation; omit for yourself."] = ""
         ids: Annotated[
             tuple[int, ...],
             "Entry ids, as list shows them: for read, estimate, and prune.",
@@ -98,11 +99,6 @@ class Session:
             tuple[int, ...],
             "Record numbers, as search and a watch feed give them: for read.",
         ] = ()
-        agent: Annotated[
-            str,
-            "Whose session list, read, and search look at: a label or relation;"
-            " omit for yours.",
-        ] = ""
         text: Annotated[str, "What search finds, case ignored."] = ""
         reason: Annotated[str, "Why prune drops these results."] = ""
         prompt: Annotated[str, "What a compaction must keep."] = ""
@@ -111,7 +107,7 @@ class Session:
             "How compact summarizes; omit for your compactor's.",
         ] = None
 
-    name = "Session"
+    name = "AgentSession"
     description = (files(__package__) / "assets" / "session.md").read_text(
         encoding="utf-8",
     )
@@ -126,10 +122,12 @@ class Session:
     display: ToolDisplay = field(default=ToolDisplay())
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
-        """Return ``Session <action>`` and the ids, such as ``Session prune 3 7``."""
+        """Return ``AgentSession <action>`` and the ids, such as ``AgentSession prune 3 7``."""
         ids = arguments.get("ids")
         named = [str(i) for i in ids] if isinstance(ids, list) else []
-        return " ".join(["Session", str(arguments.get("action", "")), *named]).strip()
+        return " ".join(
+            ["AgentSession", str(arguments.get("action", "")), *named],
+        ).strip()
 
     def serialize_key(
         self,
@@ -145,11 +143,11 @@ class Session:
         context: ToolContext,
         arguments: Mapping[str, PlainTree],
     ) -> SessionResult:
-        """Do the action on the caller's session; say what it found or will change.
+        """Act on the selected session; say what it found or will change.
 
         Args:
-          context: The calling agent's state; its label finds the agent.
-          arguments: What the model passed, as ``Session.Arguments``.
+          context: The caller whose permissions and result limit apply.
+          arguments: What the model passed, as ``AgentSession.Arguments``.
 
         Returns:
           result: What the action found, or what it queued.
@@ -159,10 +157,14 @@ class Session:
             result where one is needed; an action lacks what it needs.
 
         """
-        a = parse(arguments, Session.Arguments)
-        if context.label not in self.team:
-            raise ValueError("Session needs a calling agent in the team.")
-        agent = self.team[self._whose(context.label, a)]
+        a = parse(arguments, AgentSession.Arguments)
+        agent = target_agent(
+            self.team,
+            context=context,
+            name=self.name,
+            agent=a.agent,
+            reading=a.action in ("list", "read", "search"),
+        )
         entries = agent.runtime.context().messages
         if a.action == "list":
             body = "\n".join(_line(i, e, entries) for i, e in enumerate(entries))
@@ -216,26 +218,11 @@ class Session:
             content=f"Compaction queued ({compactor.style}).",
         )
 
-    def _whose(self, caller: str, a: Session.Arguments) -> str:
-        """Return whose session ``a`` acts on; only reads reach another's."""
-        if not a.agent:
-            return caller
-        found = self.team.resolve(a.agent, by=caller)
-        if len(found) != 1:
-            raise ValueError(
-                f"{a.agent!r} names {len(found)} agents; name one."
-                f" Agents: {', '.join(sorted(self.team))}",
-            )
-        (label,) = found
-        if label != caller and a.action not in ("list", "read", "search"):
-            raise ValueError(f"Only list, read and search reach {label!r}'s session.")
-        return label
-
     def _prune(
         self,
         agent: Agent,
         entries: Sequence[ModelContextEvent],
-        a: Session.Arguments,
+        a: AgentSession.Arguments,
     ) -> SessionResult:
         """Weigh dropping the results ``a.ids``; for ``prune``, queue the drop."""
         picked = _picked(entries, a.ids)

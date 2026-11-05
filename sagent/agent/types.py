@@ -132,7 +132,7 @@ class Agent(Resource, Protocol):
 
     @property
     def allowed(self) -> frozenset[str] | None:
-        """The tools the model may call, by name; ``None`` for all."""
+        """Configured tool permissions; ``runtime.allowed`` also applies the round cap."""
         ...
 
     @allowed.setter

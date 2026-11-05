@@ -17,12 +17,13 @@ from sagent.agent.team import Team
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
 from sagent.model.exceptions import UnknownProviderError
-from sagent.model.scripted import ScriptedModel, ScriptedProvider
+from sagent.model.scripted import ScriptedModel, ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.providers.table import ModelTable
 from sagent.runtime import types
 from sagent.tools import agent_self
 from sagent.tools.agent_self import AgentSelf
+from sagent.tools.agent_send import AgentSend
 from sagent.tools.types import ToolContext
 
 
@@ -106,6 +107,20 @@ async def test_an_empty_patch_changes_nothing(tmp_path: Path) -> None:
 
     assert await _patch(tool, tmp_path, {}) == "No change."
     assert agent.runtime.inbox.drain_nowait() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enabled", [False, True])
+async def test_peer_participation_is_applied_and_reported(
+    tmp_path: Path,
+    enabled: bool,
+) -> None:
+    team, _, tool = _setup(tmp_path)
+    team.set_peer_messaging("Agent", not enabled)
+    assert await _patch(tool, tmp_path, {"peer_messaging": enabled}) == (
+        f"peer_messaging: {'on' if enabled else 'off'}"
+    )
+    assert team.peer_messaging("Agent") is enabled
 
 
 @pytest.mark.asyncio
@@ -328,7 +343,47 @@ async def test_diagnostics_report_what_the_agent_runs_on(tmp_path: Path) -> None
         "limits: request=1000 response=100",
         f"cwd: {tmp_path}",
         "tools: ",
+        "offered_tools: ",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("allowed", "callable_tools"),
+    [
+        (None, "AgentSelf, AgentSend"),
+        (frozenset(), ""),
+        (frozenset({"AgentSend"}), "AgentSend"),
+    ],
+)
+@pytest.mark.parametrize("capped", [False, True])
+async def test_diagnostics_distinguishes_callable_tools_from_offered_schemas(
+    tmp_path: Path,
+    allowed: frozenset[str] | None,
+    callable_tools: str,
+    capped: bool,
+) -> None:
+    team, root, tool = _setup(tmp_path)
+    child = Agent(
+        model=ScriptedProvider()["scripted"],
+        tools=[tool, AgentSend(team=team)],
+        allowed=allowed,
+        environment=False,
+    )
+    team.join(child, label="restricted", parent="Agent")
+    if capped:
+        child.max_rounds = 1
+        child._charge(reply(calls=[call("AgentSelf")]))
+        callable_tools = (
+            "AgentSend" if allowed is None or "AgentSend" in allowed else ""
+        )
+    result = await tool.call(
+        root.runtime.tool_context,
+        {"agent": "restricted", "diagnostics": True},
+    )
+    lines = result.text().splitlines()
+    assert "offered_tools: AgentSelf, AgentSend" in lines
+    assert f"tools: {callable_tools}" in lines
 
 
 @pytest.mark.asyncio

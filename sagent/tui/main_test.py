@@ -42,9 +42,13 @@ from sagent.agent.agent import Agent, NoShrinker, default_system_prompt
 from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.pruner import Pruner
 from sagent.agent.team import Team
+from sagent.host import daemon
+from sagent.host.strings import ServeDirs
+from sagent.host.wire import DaemonControl
 from sagent.lib.posix.attach import stop
 from sagent.lib.posix.detached import await_ready
 from sagent.lib.posix.host import serve_command
+from sagent.lib.posix.pids import unlocked_within
 from sagent.lib.posix.sockets import accepts
 from sagent.lib.userdirs import config_dir, data_dir, state_dir
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
@@ -89,6 +93,7 @@ from sagent.settings.types import Setting
 from sagent.tools import mcp_settings
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
+from sagent.tools.agent_session import AgentSession
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.bash import Bash
 from sagent.tools.display import ToolDisplay
@@ -101,7 +106,6 @@ from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.paper_search import PaperSearch
 from sagent.tools.read import Read
 from sagent.tools.remote import RemoteSession, RemoteTool, SavedRemote
-from sagent.tools.session import Session
 from sagent.tools.testing import SHOUT_SERVER
 from sagent.tools.types import ToolContext
 from sagent.tools.web_fetch import WebFetch
@@ -225,6 +229,19 @@ class _Script:
     def _keep(self, provider: ScriptedProvider) -> ScriptedProvider:
         self.providers[provider.name] = provider
         return provider
+
+
+@pytest.fixture(autouse=True)
+def stop_test_daemon() -> Generator[None]:
+    """Every CLI test owns its private daemon; none outlive the isolated directories."""
+    yield
+    dirs = ServeDirs(
+        secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
+        state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
+    )
+    with contextlib.suppress(FileNotFoundError, ConnectionRefusedError):
+        _ = asyncio.run(daemon.control(dirs, DaemonControl(stop=True)))
+        assert unlocked_within(dirs.state / "daemon.lock", seconds=5)
 
 
 @pytest.fixture
@@ -2009,9 +2026,15 @@ def test_a_session_is_named_to_remote_servers_by_its_journal(
             *,
             journal: Path | None = None,
             team: Team | None = None,
+            local_socket: Path | None = None,
         ) -> None:
             teams.append(team)
-            super().__init__(remotes, journal=journal, team=team)
+            super().__init__(
+                remotes,
+                journal=journal,
+                team=team,
+                local_socket=local_socket,
+            )
 
         @override
         async def aopen(self) -> None:
@@ -2036,6 +2059,41 @@ def test_a_session_is_named_to_remote_servers_by_its_journal(
     (team,) = teams
     assert team is not None
     assert list(team) == ["Agent"]
+    del script
+
+
+@pytest.mark.parametrize("participation", ["on", "off"])
+def test_the_cli_connects_to_the_daemon_and_applies_peer_flags(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    participation: str,
+) -> None:
+    async def headless(agent: Agent, parsed: main.Flags) -> int:
+        del parsed
+        routing = agent.tools["RemoteTool"]
+        assert isinstance(routing, RemoteTool)
+        (local,) = [
+            e for e in routing.remote.endpoints().values() if e.local_socket is not None
+        ]
+        await _once(lambda: local.up, timeout_sec=5)
+        assert local.up
+        own = agent.runtime.tool_context.label
+        control = agent.tools["AgentSelf"]
+        assert isinstance(control, AgentSelf)
+        assert control.team.peer_messaging(own) is (participation == "on")
+        return 0
+
+    monkeypatch.setattr(main, "_headless", headless)
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--ephemeral",
+        "--peer-messaging",
+        participation,
+    )
+    _stdin(monkeypatch, "hi")
+    assert main.main() == 0
     del script
 
 
@@ -2357,7 +2415,7 @@ _DEFAULT_TOOLS = [
     "AgentSpawn",
     "AgentSend",
     "AgentSelf",
-    "Session",
+    "AgentSession",
     "Skill",
     "BackgroundTask",
     "RemoteTool",
@@ -2405,7 +2463,7 @@ def test_the_team_s_tools_share_the_team_and_bash_knows_its_peers() -> None:
     web = [WebFetch, WebSearch, PaperSearch, PaperDetails, PaperAuthor, PaperFetch]
     for kind in web:
         assert isinstance(tools[kind.__name__], kind)
-    for kind in (AgentSpawn, AgentSend, AgentSelf, Session):
+    for kind in (AgentSpawn, AgentSend, AgentSelf, AgentSession):
         tool = tools[kind.__name__]
         assert isinstance(tool, kind)
         assert tool.team is team
@@ -2520,8 +2578,15 @@ def test_a_session_at_a_terminal_attaches_to_its_host(
     """The terminal picks the journal once; the host's session is told it."""
     path = tmp_path / "mine.jsonl"
     attached: list[tuple[Path, list[str]]] = []
+    dirs = ServeDirs(
+        secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
+        state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
+    )
+    _ = asyncio.run(daemon.ensure(dirs, version="old"))
 
     def resume(journal: Path, *, command: list[str]) -> int:
+        status = asyncio.run(daemon.control(dirs, DaemonControl()))
+        assert status.source_version == daemon.fingerprint()
         attached.append((journal, command))
         return 7
 
@@ -5128,6 +5193,43 @@ def _poll(ready: Callable[[], bool], *, timeout_sec: float) -> bool:
 def _text(path: Path) -> str:
     """Return ``path``'s text; empty until it is written."""
     return path.read_text() if path.exists() else ""
+
+
+def test_private_daemon_entry_bypasses_session_startup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[list[str]] = []
+
+    def entry(argv: list[str]) -> int:
+        seen.append(argv)
+        return 7
+
+    monkeypatch.setattr(daemon, "main", entry)
+    assert main._run(["daemon", "--state", "/state"]) == 7
+    assert seen == [["--state", "/state"]]
+
+
+@pytest.mark.asyncio
+async def test_peer_setting_validates_and_inherits_without_pinning_a_choice() -> None:
+    catalog = _Script().catalog()
+    team = Team(catalog=catalog)
+    agent = Agent(model=catalog["scripted"]["scripted"])
+    team.join(agent)
+    commands = Commands(
+        agent,
+        catalog=catalog,
+        say=main._dropped,
+        screen=main._Screen(),
+        panes=Panes(),
+        team=team,
+    )
+    (setting,) = commands._peer_messaging()
+    with pytest.raises(SettingError, match="not one of"):
+        _ = await setting.apply("invalid")
+    assert setting.inherit is not None
+    assert await setting.inherit("off") == "on"
+    assert team.choices == {}
+    await commands.aclose()
 
 
 if __name__ == "__main__":

@@ -170,6 +170,8 @@ class Team(Mapping[str, "Agent"], AsyncResource):
 
         self._members: dict[str, _Member] = {}
         self._outside: dict[str, Relay] = {}
+        self.changes: set[Callable[[], None]] = set()
+        """Listeners that publish changes to local agent presence and participation."""
         # Debtor, then creditor, then the first words of what was asked.
         self._owed: dict[str, dict[str, str]] = {}
         # Who watches whom: the watched agent, then its watcher.
@@ -204,6 +206,19 @@ class Team(Mapping[str, "Agent"], AsyncResource):
     def outside(self) -> list[str]:
         """Return the outside members' labels, in the order they were reached."""
         return list(self._outside)
+
+    def peer_messaging(self, label: str) -> bool:
+        """Return whether this agent participates in cross-session messaging."""
+        choices = self.inherited(label) | self.choices.get(label, {})
+        return choices.get("peer-messaging") != "off"
+
+    def set_peer_messaging(self, label: str, enabled: bool) -> None:
+        """Publish this agent's live participation choice."""
+        self.choose(label, "peer-messaging", "on" if enabled else "off")
+
+    def _changed(self) -> None:
+        for changed in tuple(self.changes):
+            changed()
 
     def reach(self, label: str, *, relay: Relay) -> None:
         """Make ``label``, an agent on another machine, an outside member.
@@ -248,6 +263,8 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         """
         if recipient not in self._members:
             raise ValueError(f"Unknown agent {recipient!r}. Active: {sorted(self)}")
+        if "#" in sender and not self.peer_messaging(recipient):
+            raise ValueError("Cross-session peer messaging is disabled for this agent.")
         if kind == "ask":
             self._request(recipient, creditor=sender, content=content)
         elif kind == "reply":
@@ -326,6 +343,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
                 _key(label),
                 UncategorizedRecord(kind="persistent_agent", payload=payload),
             )
+        self._changed()
         return label
 
     def restore(self, label: str) -> None:
@@ -357,6 +375,8 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         else:
             mine[setting] = value
         self._stand(label, "choices", mine)
+        if setting == "peer-messaging":
+            self._changed()
 
     def inherited(self, label: str) -> dict[str, str]:
         """Return the choices ``label`` takes from its ancestors, nearest winning.
@@ -370,7 +390,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         """
         found: dict[str, str] = {}
         above = self._members[label].parent
-        while above is not None:
+        while above is not None and above in self._members:
             for setting, value in self.choices.get(above, {}).items():
                 found.setdefault(setting, value)
             above = self._members[above].parent
@@ -415,6 +435,7 @@ class Team(Mapping[str, "Agent"], AsyncResource):
         observers = member.agent.runtime.observers
         if member.dun in observers:
             observers.remove(member.dun)
+        self._changed()
         return member.agent
 
     def parent(self, label: str) -> str | None:
@@ -527,6 +548,8 @@ class Team(Mapping[str, "Agent"], AsyncResource):
           ValueError: ``recipient`` is no member, or ``user`` when no one shows it.
 
         """
+        if "#" in recipient and not self.peer_messaging(sender):
+            raise ValueError("Cross-session peer messaging is disabled for this agent.")
         self._check(recipient)
         owed = self._owed.get(sender, {})
         if recipient in owed:
@@ -688,8 +711,8 @@ class Team(Mapping[str, "Agent"], AsyncResource):
             watched = self.watched(label)
             if watched is not None:
                 self._members[watched].agent.session.stand(_watch_key(label), None)
-        member = self._members.pop(label)
-        self._forget(label)
+        member = self._members[label]
+        _ = self.leave(label)
         # An outside parent's journal, on its own machine, stands nothing for it.
         if withdraw and member.closing is not None and member.parent in self._members:
             self._members[member.parent].agent.session.stand(_key(label), None)
@@ -820,8 +843,18 @@ class _Dun:
           owed: Each creditor, with the first words it asked.
 
         """
+        agent = self.team[self.label]
+        if "AgentSend" not in agent.tools or (
+            agent.runtime.allowed is not None
+            and "AgentSend" not in agent.runtime.allowed
+        ):
+            self._ended(
+                f"[{self.label} failed] it has no AgentSend to reply with",
+                owed,
+            )
+            return
         asked = "; ".join(f"{c} ({what!r})" for c, what in owed.items())
-        self.team[self.label].runtime.push(
+        agent.runtime.push(
             types.Nudge(
                 content=f"You owe a reply to: {asked}. Answer each message"
                 " with AgentSend. Do not acknowledge this note.",
@@ -832,14 +865,8 @@ class _Dun:
     # having no AgentSend, is answered for, with the error.
     def _idled(self, owed: dict[str, str], last: ToolCall | None) -> None:
         """Nudge a debtor, or answer for one without AgentSend; else tell its parent."""
-        if owed and "AgentSend" in self.team[self.label].tools:
-            self.nudge(owed)
-            return
         if owed:
-            self._ended(
-                f"[{self.label} failed] it has no AgentSend to reply with",
-                owed,
-            )
+            self.nudge(owed)
             return
         said, self._said = self._said, ""
         if not (

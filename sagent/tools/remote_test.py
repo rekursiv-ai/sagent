@@ -33,6 +33,7 @@ from sagent.host.wire import (
     Note,
     Peers,
     Ping,
+    Refused,
     Result,
     ToolsChanged,
     ToolSpec,
@@ -50,6 +51,7 @@ from sagent.session.types import (
     AnyToolResult,
     ReadResult,
 )
+from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.edit import Edit
@@ -90,6 +92,7 @@ async def _remote(
     tools: tuple[str, ...] | None = None,
     host: LocalHost | None = None,
     team: Team | None = None,
+    peer_messaging: bool = False,
 ) -> AsyncGenerator[_Remote]:
     dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
     host = host or LocalHost(
@@ -102,8 +105,9 @@ async def _remote(
         name="gpu1",
         poll_sec=0.01,
         start_host=host,
+        local_socket=tmp_path / "daemon.sock",
     ) as server:
-        (made,) = await strings.add(dirs)
+        (made,) = await strings.add(dirs, peer_messaging=peer_messaging)
         string = ConnectionString(
             host="127.0.0.1",
             port=server.ports[0],
@@ -584,19 +588,15 @@ async def test_notes_cross_both_ways_and_one_unacked_is_sent_again(
         note = await received(reader)
         notes.append(note)
         assert isinstance(note, Note)
-        writer.write(
-            encoded(Ack(id=note.id))
-            + encoded(
-                Note(
-                    id="n9",
-                    sender="w",
-                    recipient="Agent@laptop",
-                    content="seen",
-                    kind="reply",
-                ),
-            ),
+        response = Note(
+            id="n9",
+            sender="w",
+            recipient="Agent@laptop",
+            content="seen",
+            kind="reply",
         )
-        notes.append(await received(reader))
+        writer.write(encoded(Ack(id=note.id)) + encoded(response) * 2)
+        notes.extend([await received(reader), await received(reader)])
         acked.set()
 
     async def last(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -614,7 +614,8 @@ async def test_notes_cross_both_ways_and_one_unacked_is_sent_again(
             assert team.owes("w@gpu1") == {}
             team.send("Agent", "w@gpu1", "more")
             _ = await heard.wait()
-    first, again, ack, after = notes
+    first, again, ack, ack_again, after = notes
+    assert ack_again == ack
     assert isinstance(after, Note)
     assert after.content == "more"
     assert isinstance(first, Note)
@@ -675,6 +676,7 @@ async def test_what_the_server_sends_is_acked_by_its_id_whoever_it_is_for(
     async def send(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         writer.write(
             _welcome()
+            + encoded(Refused(id="never sent", reason="already withdrawn"))
             + encoded(Ack(id="never sent"))
             + encoded(Result(id="r1", record=ReadResult(call_id="", path="/a")))
             + encoded(
@@ -793,6 +795,227 @@ def test_saved_strings_are_read_from_the_user_s_secrets() -> None:
         json_dumps(kept, target=list[SavedRemote]),
     )
     assert saved() == kept
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recipient", ["Agent", "Agent@here"])
+async def test_independent_local_teams_message_and_disable_live(
+    tmp_path: Path,
+    recipient: str,
+) -> None:
+    address = tmp_path / "daemon.sock"
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    first, second = _team(tmp_path), _team(tmp_path)
+    second.join(second.leave("Agent"), label=recipient)
+    async with (
+        Server(dirs, listen=[], local_socket=address),
+        RemoteSession(
+            [],
+            team=first,
+            local_socket=address,
+            client="here",
+            retry_sec=0,
+        ) as a,
+        RemoteSession(
+            [],
+            team=second,
+            local_socket=address,
+            client="here",
+            retry_sec=0,
+        ) as b,
+    ):
+        _ = await _until(a, lambda _: bool(first.outside))
+        _ = await _until(b, lambda _: bool(second.outside))
+        peer = f"{recipient}#{b.session_id}"
+        assert first.outside == [peer]
+        first.send("Agent", peer, "own a.py?")
+        async with asyncio.timeout(5):
+            messages = await second[recipient].runtime.inbox.drain()
+        assert [
+            (m.sender, m.content)
+            for m in messages
+            if isinstance(m, AgentToAgentMessage)
+        ] == [(f"Agent#{a.session_id}", "own a.py?")]
+        second.send(recipient, f"Agent#{a.session_id}", "yes")
+        async with asyncio.timeout(5):
+            messages = await first["Agent"].runtime.inbox.drain()
+        assert first.owes(peer) == {}
+        assert second.owes(recipient) == {}
+        patch = AgentSelf(team=second)
+        _ = await patch.call(
+            second[recipient].runtime.tool_context,
+            {"peer_messaging": False},
+        )
+        _ = await _until(a, lambda _: not first.outside)
+        assert not second.peer_messaging(recipient)
+        with pytest.raises(ValueError, match="disabled"):
+            second.send(recipient, f"Agent#{a.session_id}", "no")
+        second.set_peer_messaging(recipient, True)
+        _ = await _until(a, lambda _: bool(first.outside))
+        assert first.outside == [peer]
+
+
+@pytest.mark.asyncio
+async def test_remote_tool_directs_messaging_to_agent_send(tmp_path: Path) -> None:
+    async with _remote(tmp_path) as remote:
+        await _up(remote.session)
+        with pytest.raises(ValueError, match="Use AgentSend directly"):
+            _ = await remote.tool.call(
+                ToolContext(cwd=tmp_path),
+                {
+                    "endpoint": "gpu1",
+                    "tool": "AgentSend",
+                    "arguments": {"to": "Agent", "content": "hello"},
+                },
+            )
+
+
+@pytest.mark.asyncio
+async def test_tls_client_and_hosted_child_use_the_same_cross_session_router(
+    tmp_path: Path,
+) -> None:
+    caller, local = _team(tmp_path), _team(tmp_path)
+    async with (
+        _remote(tmp_path, team=caller, peer_messaging=True) as remote,
+        RemoteSession(
+            [],
+            team=local,
+            local_socket=tmp_path / "daemon.sock",
+            retry_sec=0,
+        ) as connection,
+    ):
+        _ = await _up(remote.session)
+        _ = await _until(connection, lambda _: bool(local.outside))
+        destination = f"Agent#{connection.session_id}@gpu1"
+        _ = await _until(remote.session, lambda _: destination in caller.outside)
+        caller.send("Agent", destination, "own a.py?")
+        async with asyncio.timeout(5):
+            messages = await local["Agent"].runtime.inbox.drain()
+        request = next(m for m in messages if isinstance(m, AgentToAgentMessage))
+        sender = f"Agent@laptop#{remote.session.session_id}"
+        assert request.sender == sender
+        local.send("Agent", sender, "yes")
+        async with asyncio.timeout(5):
+            messages = await caller["Agent"].runtime.inbox.drain()
+        assert any(
+            isinstance(m, AgentToAgentMessage) and m.content == "yes" for m in messages
+        )
+        assert caller.owes(destination) == {}
+        kid = Agent(
+            model=ScriptedProvider()["scripted"],
+            tool_context=ToolContext(cwd=tmp_path),
+        )
+        remote.host.team.join(kid, label="kid")
+        gate = remote.host.tools["Gate"]
+        assert isinstance(gate, Gate)
+        gate.opened.set()
+        _ = await remote.tool.call(
+            ToolContext(cwd=tmp_path),
+            {"endpoint": "gpu1", "tool": "Gate", "arguments": {}},
+        )
+        child_address = f"kid@host#{remote.session.session_id}"
+        _ = await _until(connection, lambda _: child_address in local.outside)
+        remote.host.team.send("kid", f"Agent#{connection.session_id}", "child asks")
+        async with asyncio.timeout(5):
+            messages = await local["Agent"].runtime.inbox.drain()
+        request = next(m for m in messages if isinstance(m, AgentToAgentMessage))
+        assert (request.sender, request.content) == (child_address, "child asks")
+        local.send("Agent", child_address, "child reply")
+        async with asyncio.timeout(5):
+            messages = await kid.runtime.inbox.drain()
+        assert any(
+            isinstance(m, AgentToAgentMessage) and m.content == "child reply"
+            for m in messages
+        )
+        assert local.owes("Agent") == {}
+        assert remote.host.team.owes("kid") == {}
+        remote.host.team.set_peer_messaging("kid", False)
+        _ = await _until(connection, lambda _: child_address not in local.outside)
+        assert "kid@gpu1" in caller.outside
+        caller.send("Agent", "kid@gpu1", "private parent route")
+        async with asyncio.timeout(5):
+            messages = await kid.runtime.inbox.drain()
+        assert any(
+            isinstance(m, AgentToAgentMessage) and m.content == "private parent route"
+            for m in messages
+        )
+        with pytest.raises(ValueError, match="disabled"):
+            remote.host.team.send("kid", f"Agent#{connection.session_id}", "blocked")
+        remote.host.team.set_peer_messaging("kid", True)
+        _ = await _until(connection, lambda _: child_address in local.outside)
+        (grant,) = strings.listing(remote.dirs).grants
+        await strings.edit(remote.dirs, grant.id, peer_messaging=False)
+        _ = await _until(connection, lambda _: not local.outside)
+        _ = await _until(remote.session, lambda _: destination not in caller.outside)
+        assert "kid@gpu1" in caller.outside
+        caller.join(Agent(model=ScriptedProvider()["scripted"]), label="late")
+        await strings.edit(remote.dirs, grant.id, peer_messaging=True)
+        _ = await _until(connection, lambda _: child_address in local.outside)
+        late = f"late@laptop#{remote.session.session_id}"
+        _ = await _until(connection, lambda _: late in local.outside)
+        _ = await _until(connection, lambda _: sender in local.outside)
+        _ = await _until(remote.session, lambda _: destination in caller.outside)
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_race_reports_refusal_and_clears_the_reply_debt(
+    tmp_path: Path,
+) -> None:
+    caller = Team(catalog=ModelCatalog(factories={}))
+    target = Team(catalog=ModelCatalog(factories={}))
+    sender = Agent(model=ScriptedProvider()["scripted"])
+    receiver = Agent(model=ScriptedProvider()["scripted"])
+    caller.join(sender)
+    target.join(receiver)
+    async with (
+        _remote(tmp_path, team=caller, peer_messaging=True) as remote,
+        RemoteSession([], team=target, local_socket=tmp_path / "daemon.sock") as local,
+    ):
+        endpoint = await _until(remote.session, lambda e: e.up)
+        address = f"Agent#{local.session_id}@gpu1"
+        _ = await _until(remote.session, lambda _: address in caller.outside)
+        target.set_peer_messaging("Agent", False)
+        _ = await _until(remote.session, lambda _: address not in caller.outside)
+        caller.reach(address, relay=endpoint)
+        caller.send("Agent", address, "raced with withdrawal")
+        assert caller.owes(address) == {"Agent": "raced with withdrawal"}
+        _ = await _until(remote.session, lambda _: not caller.owes(address))
+        assert not endpoint._notes
+        assert receiver.runtime.inbox.drain_nowait() == []
+        assert _told(caller, "Agent") == [
+            (
+                address,
+                f"[message refused] Agent 'Agent#{local.session_id}' is not reachable.",
+            ),
+        ]
+
+
+@pytest.mark.asyncio
+async def test_local_refusal_preserves_a_sender_label_with_a_machine_suffix(
+    tmp_path: Path,
+) -> None:
+    caller, target = _team(tmp_path), _team(tmp_path)
+    caller.join(Agent(model=ScriptedProvider()["scripted"]), label="a@laptop")
+    address = tmp_path / "daemon.sock"
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    async with (
+        Server(dirs, listen=[], local_socket=address),
+        RemoteSession([], team=caller, local_socket=address, client="laptop") as remote,
+        RemoteSession([], team=target, local_socket=address) as local,
+    ):
+        endpoint = await _until(remote, lambda e: e.up)
+        peer = f"Agent#{local.session_id}"
+        _ = await _until(remote, lambda _: peer in caller.outside)
+        target.set_peer_messaging("Agent", False)
+        _ = await _until(remote, lambda _: peer not in caller.outside)
+        caller.reach(peer, relay=endpoint)
+        caller.send("a@laptop", peer, "withdrawal race")
+        _ = await _until(remote, lambda _: not caller.owes(peer))
+        assert _told(caller, "a@laptop") == [
+            (peer, f"[message refused] Agent '{peer}' is not reachable."),
+        ]
+        assert caller.owes("a@laptop") == {}
+        assert not endpoint._notes
 
 
 if __name__ == "__main__":

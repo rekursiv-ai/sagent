@@ -16,11 +16,16 @@ from sagent.host import session
 from sagent.host.session import main, serve
 from sagent.host.wire import (
     MAX_LINE_BYTES,
+    Ack,
     Call,
     Cancel,
     Note,
+    Pause,
+    Paused,
     Peers,
+    Refused,
     Result,
+    Resume,
     Tools,
     encoded,
     received,
@@ -363,6 +368,150 @@ async def test_main_serves_on_the_socket_it_is_given(
     writer.write_eof()
     assert await asyncio.wait_for(running, 5) == 0
     writer.close()
+
+
+@pytest.mark.asyncio
+async def test_handoff_buffers_results_and_agent_messages_until_resumed(
+    tmp_path: Path,
+) -> None:
+    team = _team()
+    _ = team.join(_agent(tmp_path), label="kid")
+    async for reader, writer in _host(tmp_path, team):
+        assert isinstance(await _said(reader), Tools)
+        writer.write(encoded(Pause()))
+        assert await _said(reader) == Paused()
+        writer.write(
+            _call(
+                "1",
+                agent="a",
+                window="w",
+                tool="Bash",
+                command="pwd",
+                description="d",
+            ),
+        )
+        writer.write(
+            encoded(
+                Call(
+                    id="send",
+                    agent="kid",
+                    window="w",
+                    tool="AgentSend",
+                    arguments={"to": "caller", "content": "held"},
+                    address_book=("caller",),
+                ),
+            ),
+        )
+        with pytest.raises(TimeoutError):
+            _ = await asyncio.wait_for(received(reader), 0.05)
+        writer.write(encoded(Resume()))
+        messages = [await _said(reader) for _ in range(4)]
+        assert any(
+            isinstance(m, Result) and m.id == "1" and m.record.is_error is not True
+            for m in messages
+        )
+        assert any(isinstance(m, Note) and m.content == "held" for m in messages)
+        assert any(isinstance(m, Peers) and m.labels == ("kid",) for m in messages)
+        writer.write(
+            _call(
+                "2",
+                agent="a",
+                window="w",
+                tool="Bash",
+                command="pwd",
+                description="d",
+            ),
+        )
+        assert (await _result(reader)).id == "2"
+
+
+@pytest.mark.asyncio
+async def test_directory_withdrawal_preserves_private_routes_and_acknowledges_notes(
+    tmp_path: Path,
+) -> None:
+    team = _team()
+    team.join(_agent(tmp_path), label="kid")
+    async for reader, writer in _host(tmp_path, team):
+        assert isinstance(await _said(reader), Tools)
+        writer.write(
+            encoded(
+                Call(
+                    id="private",
+                    agent="kid",
+                    window="w",
+                    tool="AgentSend",
+                    arguments={"to": "caller", "content": "private"},
+                    address_book=("caller",),
+                ),
+            ),
+        )
+        assert isinstance(await _said(reader), Peers)
+        note = await _said(reader)
+        assert isinstance(note, Note)
+        assert (await _result(reader)).id == "private"
+        relay = team._outside["caller"]
+        assert isinstance(relay, session._Wire)
+        assert note.id in relay.pending
+        writer.write(
+            encoded(Ack(id=note.id))
+            + encoded(Peers(labels=("peer#other",)))
+            + _call("first", agent="a", window="w", tool="Train"),
+        )
+        assert (await _result(reader)).id == "first"
+        assert note.id not in relay.pending
+        assert team.outside == ["caller", "peer#other"]
+        writer.write(
+            encoded(Peers(labels=()))
+            + _call("second", agent="a", window="w", tool="Train"),
+        )
+        assert (await _result(reader)).id == "second"
+        assert team.outside == ["caller"]
+
+
+@pytest.mark.asyncio
+async def test_a_hosted_sender_is_told_when_the_directory_refuses_its_note(
+    tmp_path: Path,
+) -> None:
+    team = _team()
+    kid = _agent(tmp_path)
+    team.join(kid, label="kid")
+    async for reader, writer in _host(tmp_path, team):
+        assert isinstance(await _said(reader), Tools)
+        writer.write(
+            encoded(
+                Call(
+                    id="send",
+                    agent="kid",
+                    window="w",
+                    tool="AgentSend",
+                    arguments={"to": "caller#s", "content": "hello"},
+                    address_book=("caller#s",),
+                ),
+            ),
+        )
+        assert isinstance(await _said(reader), Peers)
+        note = await _said(reader)
+        assert isinstance(note, Note)
+        assert isinstance(await _said(reader), Result)
+        writer.write(encoded(Refused(id=note.id, reason="withdrawn")))
+        writer.write(
+            _call(
+                "barrier",
+                agent="a",
+                window="w",
+                tool="Bash",
+                command="pwd",
+                description="d",
+            ),
+        )
+        assert (await _result(reader)).id == "barrier"
+        assert team.owes("caller#s") == {}
+        assert any(
+            isinstance(m, AgentToAgentMessage)
+            and m.content is not None
+            and "withdrawn" in m.content
+            for m in kid.runtime.inbox.drain_nowait()
+        )
 
 
 if __name__ == "__main__":

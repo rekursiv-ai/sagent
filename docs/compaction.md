@@ -60,11 +60,11 @@ A model call that overflows the window starts a compaction, then calls again. A 
 
 ## Manual compaction
 
-Agents with the `Session` tool can request compaction, with what it must keep:
+Agents with the `AgentSession` tool can request compaction, with what it must keep:
 
 ```text
-Session(action="compact", prompt="focus on API decisions")
-Session(action="compact", style="session-audit")
+AgentSession(action="compact", prompt="focus on API decisions")
+AgentSession(action="compact", style="session-audit")
 ```
 
 ## Pruning

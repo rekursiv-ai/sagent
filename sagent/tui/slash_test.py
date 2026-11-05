@@ -1021,7 +1021,7 @@ async def test_send_parent_from_a_root_starts_its_watcher_once(
         assert inbox[0].startswith("<skill name='watch' source='builtin'>")
         assert inbox[1:] == ["keep it honest", "and brief"]
         assert watcher.system_prompt == desk.agent.system_prompt
-        assert list(watcher.tools) == list(desk.agent.tools)
+        assert list(watcher.tools) == [*desk.agent.tools, "AgentSend"]
     assert desk.printer.said == [
         (
             "note",

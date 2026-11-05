@@ -59,6 +59,7 @@ __all__ = [
     "ServerConfig",
     "SessionRow",
     "add",
+    "configuration",
     "edit",
     "grants",
     "listing",
@@ -181,6 +182,9 @@ class Grant:
     added: str
     """The day it was made, as ``YYYY-MM-DD``."""
 
+    peer_messaging: bool = False
+    """Whether this token may discover and message agents in other sessions."""
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ServerConfig:
@@ -226,12 +230,14 @@ async def add(
     dirs: ServeDirs,
     *,
     tools: Sequence[str] | None = None,
+    peer_messaging: bool = False,
 ) -> list[ConnectionString]:
     """Mint a string; return it once per address the server listens at.
 
     Args:
       dirs: The server's.
       tools: What it grants, of the tools served; ``None`` for all of them.
+      peer_messaging: Whether this token also grants cross-session messaging.
 
     Returns:
       strings: One per address, each with the same pin and token.
@@ -240,7 +246,7 @@ async def add(
       ValueError: The server has never run, or does not serve a tool named.
 
     """
-    config = _config(dirs)
+    config = configuration(dirs)
     _check(tools, config=config)
     token = secrets.token_urlsafe(16)
     async with _locked(dirs):
@@ -254,6 +260,7 @@ async def add(
             sha256=token_digest(token),
             tools=tuple(tools) if tools is not None else None,
             added=datetime.now(UTC).date().isoformat(),
+            peer_messaging=peer_messaging,
         )
         _write(dirs, [*kept, grant])
     pin = fingerprint(dirs.secrets)
@@ -264,25 +271,43 @@ async def add(
     ]
 
 
-async def edit(dirs: ServeDirs, token_id: str, *, tools: Sequence[str]) -> None:
+async def edit(
+    dirs: ServeDirs,
+    token_id: str,
+    *,
+    tools: Sequence[str] | None = None,
+    peer_messaging: bool | None = None,
+) -> None:
     """Grant the string ``token_id`` exactly ``tools``, from its next call on.
 
     Args:
       dirs: The server's.
       token_id: The string's id, such as ``tok_51c8``.
-      tools: What it grants now, of the tools served.
+      tools: What it grants now; ``None`` leaves the tool grant unchanged.
+      peer_messaging: Whether to grant cross-session messaging; ``None`` leaves it unchanged.
 
     Raises:
       ValueError: No string is ``token_id``, or a tool is not served.
 
     """
-    _check(tools, config=_config(dirs))
+    _check(tools, config=configuration(dirs))
     async with _locked(dirs):
         kept = grants(dirs)
         _named(kept, token_id)
         _write(
             dirs,
-            [replace(g, tools=tuple(tools)) if g.id == token_id else g for g in kept],
+            [
+                replace(
+                    g,
+                    tools=tuple(tools) if tools is not None else g.tools,
+                    peer_messaging=peer_messaging
+                    if peer_messaging is not None
+                    else g.peer_messaging,
+                )
+                if g.id == token_id
+                else g
+                for g in kept
+            ],
         )
 
 
@@ -322,9 +347,28 @@ def listing(dirs: ServeDirs) -> Listing:
     )
 
 
-def _config(dirs: ServeDirs) -> ServerConfig:
+def configuration(
+    dirs: ServeDirs,
+    *,
+    default: ServerConfig | None = None,
+) -> ServerConfig:
+    """Read the owner's saved listener and tool configuration.
+
+    Args:
+      dirs: Where the daemon keeps its state.
+      default: Configuration for first startup, or ``None`` to require saved state.
+
+    Returns:
+      config: The saved configuration, or the supplied first-start default.
+
+    Raises:
+      ValueError: No configuration exists and no default was supplied.
+
+    """
     path = dirs.state / "server.json"
     if not path.exists():
+        if default is not None:
+            return default
         raise ValueError("No server has listened here yet: run sagent host once first.")
     return json_loads(path.read_text(), ServerConfig)
 

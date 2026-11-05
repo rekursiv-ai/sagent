@@ -2419,16 +2419,22 @@ class Runtime:
         return groups
 
     def _serialize_key(self, call: ToolCall) -> str | None:
-        """Return the tool's serialization key for ``call``; unknown tools have none."""
+        """Return the serialization key, refusing calls whose scheduling fails."""
+        if call.call_id in self._refusals:
+            return None
         tool = self.tools.get(call.name)
         if tool is None:
             return None
-        return tool.serialize_key(
-            self.tool_context,
-            without_controls(call.arguments)
-            if backgroundable(tool)
-            else call.arguments,
-        )
+        try:
+            return tool.serialize_key(
+                self.tool_context,
+                without_controls(call.arguments)
+                if backgroundable(tool)
+                else call.arguments,
+            )
+        except Exception as exc:  # noqa: BLE001 -- Scheduling failures must answer the call without stopping dispatch.
+            self._refusals[call.call_id] = describe(exc)
+            return None
 
     # One coroutine awaits each call in turn, so order never rests on lock fairness.
     # Released at the end, so a killed call holds on until it has stopped.

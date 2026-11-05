@@ -223,11 +223,18 @@ async def test_stopping_a_child_closes_its_children_first(tmp_path: Path) -> Non
         )
     _ = team.join(_agent(tmp_path), label="oneshot", parent="a")
     assert team.persistent() == ["a", "a1", "b"]
+    published: list[tuple[str, ...]] = []
+    team.changes.add(lambda: published.append(tuple(team)))
 
     await team.stop("a")
 
     assert closed == ["a1", "a"]
     assert list(team) == ["Agent", "b"]
+    assert published == [
+        ("Agent", "a", "b", "oneshot"),
+        ("Agent", "a", "b"),
+        ("Agent", "b"),
+    ]
     with pytest.raises(KeyError):
         await team.stop("a")
 
@@ -681,8 +688,13 @@ def _idle(agent: Agent, *said: str | None) -> None:
     agent.runtime.publish(types.AgentIdle())
 
 
-def test_a_nudge_names_each_creditor_and_what_it_asked(tmp_path: Path) -> None:
+@pytest.mark.parametrize("allowed", [None, frozenset({"AgentSend"})])
+def test_a_nudge_names_each_creditor_and_what_it_asked(
+    tmp_path: Path,
+    allowed: frozenset[str] | None,
+) -> None:
     team = _family(tmp_path)
+    team["a"].allowed = allowed
     team.send("Agent", "a", "x")
     team.send("b", "a", "y")
 
@@ -730,15 +742,24 @@ def test_an_idle_debtor_is_nudged_and_its_parent_is_not_told(tmp_path: Path) -> 
     assert _told(team["Agent"]) == [("a", "[a is idle] half done")]
 
 
+@pytest.mark.parametrize("disabled", [False, True])
+@pytest.mark.parametrize("wake", [False, True])
 def test_a_debtor_without_agentsend_answers_with_an_error_not_a_nudge(
     tmp_path: Path,
+    disabled: bool,
+    wake: bool,
 ) -> None:
     team = _family(tmp_path)
-    _ = team.join(_agent(tmp_path), label="mute", parent="a")
+    mute = _agent(tmp_path, team if disabled else None)
+    mute.allowed = frozenset()
+    _ = team.join(mute, label="mute", parent="a")
     team.send("b", "mute", "x")
     _ = team["mute"].runtime.inbox.drain_nowait()
 
-    _idle(team["mute"], "would answer")
+    if wake:
+        team.wake("Agent")
+    else:
+        _idle(team["mute"], "would answer")
 
     failed = ("mute", "[mute failed] it has no AgentSend to reply with")
     assert _nudged(team["mute"]) == 0
@@ -1964,6 +1985,36 @@ def test_a_note_for_no_member_is_refused(tmp_path: Path) -> None:
     team, _ = _reaching(tmp_path, "far")
     with pytest.raises(ValueError, match="Unknown agent 'gone'"):
         team.receive(sender="far", recipient="gone", content="hi", kind="ask")
+
+
+@pytest.mark.parametrize("kind", ["ask", "reply", "tell"])
+def test_disabling_peers_refuses_in_transit_notes_but_keeps_private_messages(
+    tmp_path: Path,
+    kind: MessageKind,
+) -> None:
+    team, relay = _reaching(tmp_path, "far#session", "parent@laptop")
+    changed: list[bool] = []
+    team.changes.add(lambda: changed.append(team.peer_messaging("Agent")))
+    team.set_peer_messaging("Agent", False)
+    assert changed == [False]
+    with pytest.raises(ValueError, match="disabled"):
+        team.send("Agent", "far#session", "blocked")
+    assert relay.sent == []
+    assert team.owes("far#session") == {}
+    with pytest.raises(ValueError, match="disabled"):
+        team.receive(sender="far#session", recipient="Agent", content="late", kind=kind)
+    assert _told(team["Agent"]) == []
+    assert team.owes("Agent") == {}
+    team.receive(
+        sender="parent@laptop",
+        recipient="Agent",
+        content="private",
+        kind=kind,
+    )
+    assert _told(team["Agent"]) == [("parent@laptop", "private")]
+    team.set_peer_messaging("Agent", True)
+    team.receive(sender="far#session", recipient="Agent", content="enabled", kind=kind)
+    assert _told(team["Agent"]) == [("far#session", "enabled")]
 
 
 def test_a_child_of_an_outside_member_tells_it_over_the_relay(tmp_path: Path) -> None:

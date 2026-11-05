@@ -16,14 +16,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from importlib.resources import files
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Protocol, runtime_checkable
 
 import asyncio
 import logging
 
 from sagent.agent.team import Team
 from sagent.session.types import AgentSendResult
-from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.types import Arg, json_schema, parse
 
@@ -106,7 +105,12 @@ class AgentSend:
         """
         me = context.label
         others = sorted(
-            label for label in (*self.team, *self.team.outside) if label != me
+            label
+            for label in (*self.team, *self.team.outside)
+            if label != me
+            and (
+                "#" not in label or me not in self.team or self.team.peer_messaging(me)
+            )
         )
         parent = self.team.above(me) if me in self.team else None
         owed = self.team.owes(me)
@@ -194,10 +198,10 @@ class AgentSend:
         agent = self.team.get(label)
         if agent is None:
             raise ValueError("You have no parent.")
-        spawn = agent.tools.get(AgentSpawn.name)
+        spawn = agent.tools.get("AgentSpawn")
         allowed = agent.allowed
-        if not isinstance(spawn, AgentSpawn) or (
-            allowed is not None and AgentSpawn.name not in allowed
+        if not isinstance(spawn, _StartsWatcher) or (
+            allowed is not None and "AgentSpawn" not in allowed
         ):
             raise ValueError("You have no parent.")
         return await spawn.start_watcher(label)
@@ -209,3 +213,12 @@ class AgentSend:
             self.team.deliver(sender, recipient=to, content=content, kind=kind)
         except ValueError:
             logger.warning("message from %s to %r, which has left", sender, to)
+
+
+@runtime_checkable
+class _StartsWatcher(Protocol):
+    """The spawning capability needed to reach a root's parent."""
+
+    async def start_watcher(self, label: str) -> str:
+        """Start the watcher of the named agent; return its label."""
+        ...

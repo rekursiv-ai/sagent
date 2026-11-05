@@ -1,7 +1,7 @@
-"""AgentSelf: change the calling agent: its title, model, or settings.
+"""AgentSelf: change yourself or a descendant: title, model, or settings.
 
 A patch is planned whole, then applied: an invalid setting rejects all of it.
-What the agent's session holds is the Session tool's to change.
+What the agent's session holds is the AgentSession tool's to change.
 
 Typical usage example:
 
@@ -23,6 +23,7 @@ from sagent.providers.catalog import successor
 from sagent.providers.table import ModelTags
 from sagent.runtime import types
 from sagent.session.types import AgentSelfResult
+from sagent.tools.agent_tool import target_agent
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
 
@@ -45,15 +46,20 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AgentSelf:
-    """Change the calling agent."""
+    """Change yourself or a descendant with your own permissions."""
 
     @dataclass(frozen=True, slots=True, kw_only=True)
     class Arguments:
         """What the model passes."""
 
+        agent: Annotated[str, "Agent label or relation; omit for yourself."] = ""
         status: Annotated[str | None, "3-7 words naming what the session is about."] = (
             None
         )
+        peer_messaging: Annotated[
+            bool | None,
+            "Participate in cross-session discovery and messaging.",
+        ] = None
         provider: Annotated[str | None, "Catalog provider to switch to."] = None
         model: Annotated[
             str | None,
@@ -127,9 +133,13 @@ class AgentSelf:
 
         """
         a = parse(arguments, AgentSelf.Arguments)
-        if context.label not in self.team:
-            raise ValueError("AgentSelf needs a calling agent in the team.")
-        agent = self.team[context.label]
+        agent = target_agent(
+            self.team,
+            context=context,
+            name=self.name,
+            agent=a.agent,
+        )
+        label = agent.runtime.tool_context.label
         model = await self._model(agent, a)
         target = model if model is not None else agent.model
         settings = target.settings
@@ -164,11 +174,14 @@ class AgentSelf:
             f"{axis}: {old} -> {new}" for axis, old, new in changes if old != new
         )
         target.settings = planned
+        if a.peer_messaging is not None:
+            self.team.set_peer_messaging(label, a.peer_messaging)
+            lines.append(f"peer_messaging: {'on' if a.peer_messaging else 'off'}")
         if a.status is not None:
             agent.runtime.publish(types.StatusChanged(text=a.status))
             lines.append(f"status: {a.status}")
         if a.diagnostics:
-            lines.extend(_diagnostics(agent, label=context.label))
+            lines.extend(_diagnostics(agent, label=label))
         if a.catalog == "providers":
             lines.append("providers: " + ", ".join(self.team.catalog.factories))
         elif a.catalog == "models":
@@ -232,5 +245,11 @@ def _diagnostics(agent: Agent, *, label: str) -> list[str]:
         f"service_tier: {s.service_tier}; cache_ttl_sec: {s.cache_ttl_sec:g}",
         f"limits: request={limits.max_request_tokens} response={limits.max_response_tokens}",
         f"cwd: {agent.runtime.tool_context.cwd}",
-        f"tools: {', '.join(agent.tools)}",
+        "tools: "
+        + ", ".join(
+            name
+            for name in agent.tools
+            if agent.runtime.allowed is None or name in agent.runtime.allowed
+        ),
+        f"offered_tools: {', '.join(agent.tools)}",
     ]

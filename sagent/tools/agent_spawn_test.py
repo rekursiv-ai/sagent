@@ -43,6 +43,7 @@ from sagent.session.types import (
     AgentToAgentMessage,
     ContextClear,
     SystemMessage,
+    ToolResult,
     UncategorizedRecord,
     UncategorizedToolResult,
     UserMessage,
@@ -491,8 +492,8 @@ async def test_a_child_runs_its_task_answers_and_stays(tmp_path: Path) -> None:
     # Offered no ``BackgroundTask``, the child is not told how deliveries arrive.
     assert first.system[-1] == "the parent's prompt"
     assert first.records[0] == UserMessage(content="count the TODOs")
-    # Offered every tool its parent is, the child's prefix is its parent's.
-    assert [t.name for t in first.tools] == ["Grep", "Read"]
+    # Messaging is present even when the parent did not carry it.
+    assert [t.name for t in first.tools] == ["AgentSend", "Grep", "Read"]
     assert first.allowed is None
 
 
@@ -533,6 +534,108 @@ async def test_a_child_at_its_round_cap_answers_with_what_it_has(
     result = await _spawn(setup, tmp_path, {"prompt": "go", "max_tool_call_rounds": 1})
 
     assert (result.state, result.content) == ("completed", "found it")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools", [None, ["Read"], ["Grep"], []])
+@pytest.mark.parametrize("restricted", [False, True])
+@pytest.mark.parametrize("background", [False, True])
+async def test_final_round_spawns_inherit_permissions_not_the_round_cap(
+    tmp_path: Path,
+    tools: list[str] | None,
+    restricted: bool,
+    background: bool,
+) -> None:
+    setup = _setup(tmp_path, reply(calls=[call("Read", "read")]), reply("read it"))
+    parent = setup.parent
+    parent.runtime.tools["AgentSpawn"] = setup.spawn
+    parent.max_rounds = 1
+    parent.allowed = frozenset({"AgentSpawn", "Read"}) if restricted else None
+    provider = parent.model.provider
+    assert isinstance(provider, ScriptedProvider)
+    arguments: dict[str, PlainTree] = {
+        "prompt": "read",
+        "label": "kid",
+        "background": background,
+    }
+    if tools is not None:
+        arguments["tools"] = tools
+    provider.replies.extend(
+        [reply(calls=[call("AgentSpawn", "spawn", **arguments)]), *[reply("done")] * 3],
+    )
+    async with setup.team, parent:
+        assert await asyncio.wait_for(parent.send("spawn"), timeout=5) == "done"
+        arrived = (
+            await asyncio.wait_for(parent.runtime.foreground("spawn"), timeout=5)
+            if background
+            else None
+        )
+        results = [
+            r
+            for r in parent.session
+            if isinstance(r, ToolResult) and r.call_id == "spawn"
+        ]
+        result = arrived if arrived is not None else results[-1]
+        if restricted and tools == ["Grep"]:
+            assert result.is_error is True
+            assert "Unknown tools Grep; yours: AgentSpawn, Read" in result.text()
+            assert "kid" not in setup.team
+            return
+        assert result.is_error is not True, result.text()
+        child = setup.team["kid"]
+        expected = (
+            frozenset({*tools, "AgentSend"})
+            if tools is not None
+            else frozenset({"AgentSpawn", "Read", "AgentSend"})
+            if restricted
+            else None
+        )
+        assert child.allowed == expected
+        (read,) = (r for r in child.session if isinstance(r, ToolResult))
+        assert read.is_error is (True if tools in (["Grep"], []) else None)
+        assert read.text() == (
+            "Read is not available to this agent." if tools in (["Grep"], []) else "ok"
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("implicit", [False, True])
+@pytest.mark.parametrize("restricted", [False, True])
+async def test_final_round_watchers_inherit_configured_permissions(
+    tmp_path: Path,
+    implicit: bool,
+    restricted: bool,
+) -> None:
+    wait = _Wait(name="Wait")
+    setup = _setup(tmp_path, reply(calls=[call("Wait")]), tools=[wait], send=True)
+    parent = setup.parent
+    parent.runtime.tools["AgentSpawn"] = setup.spawn
+    parent.max_rounds = 1
+    allowed = (
+        frozenset({"Read", "Wait", "AgentSpawn", "AgentSend"}) if restricted else None
+    )
+    parent.allowed = allowed
+    provider = parent.model.provider
+    assert isinstance(provider, ScriptedProvider)
+    calls = (
+        [call("Read"), call("AgentSend", "watch", to="parent", content="watch me")]
+        if implicit
+        else [call("AgentSpawn", "watch", prompt="watch me", watch=True)]
+    )
+    provider.replies.extend([reply(calls=calls), *[reply("done")] * 3])
+    async with setup.team, parent:
+        assert await asyncio.wait_for(parent.send("watch"), timeout=5) == "done"
+        (result,) = (
+            r
+            for r in parent.session
+            if isinstance(r, ToolResult) and r.call_id == "watch"
+        )
+        assert result.is_error is not True, result.text()
+        watcher = setup.team["watcher"]
+        assert watcher.allowed == allowed
+        await asyncio.wait_for(wait.started.wait(), timeout=5)
+        assert setup.children.requests[0].allowed == allowed
+    assert wait.stopped.is_set()
 
 
 @pytest.mark.asyncio
@@ -667,8 +770,8 @@ async def test_a_persistent_child_inherits_from_its_parent_unless_told(
         heir, own = setup.team["Agent_0"], setup.team["told"]
 
         assert inherited.state == told.state == "completed"
-        assert list(heir.tools) == list(own.tools) == ["Read", "Grep"]
-        assert (heir.allowed, own.allowed) == (None, frozenset({"Grep"}))
+        assert list(heir.tools) == list(own.tools) == ["Read", "Grep", "AgentSend"]
+        assert (heir.allowed, own.allowed) == (None, frozenset({"Grep", "AgentSend"}))
         assert (heir.system_prompt, own.system_prompt) == (
             "the parent's prompt",
             "the child's prompt",
@@ -721,7 +824,10 @@ async def test_a_child_and_a_watcher_inherit_every_setting_alike(
         _ = await _spawn(setup, tmp_path, {"prompt": "wait"})
         assert await setup.spawn.watch("Agent") == "watcher"
         watcher = setup.team["watcher"]
-        assert (watcher.allowed, watcher.account) == (frozenset({"Grep"}), "work")
+        assert (watcher.allowed, watcher.account) == (
+            frozenset({"Grep", "AgentSend"}),
+            "work",
+        )
         # A root with no journal keeps no watcher to start again.
         assert [r for r in parent.session.standing() if r.kind == "watcher"] == []
         for label in ("Agent_0", "watcher"):
@@ -771,7 +877,7 @@ async def test_a_child_waits_out_rate_limits_when_its_parent_does(
 
 
 @pytest.mark.asyncio
-async def test_a_child_given_no_tools_may_call_none(tmp_path: Path) -> None:
+async def test_a_child_given_no_work_tools_can_only_message(tmp_path: Path) -> None:
     setup = _setup(tmp_path, reply("ready"))
     async with setup.team:
         _ = await _spawn(
@@ -781,8 +887,8 @@ async def test_a_child_given_no_tools_may_call_none(tmp_path: Path) -> None:
         )
         child = setup.team["Agent_0"]
 
-        assert list(child.tools) == ["Read", "Grep"]
-        assert child.allowed == frozenset()
+        assert list(child.tools) == ["Read", "Grep", "AgentSend"]
+        assert child.allowed == frozenset({"AgentSend"})
 
 
 @pytest.mark.asyncio
@@ -822,7 +928,7 @@ async def test_a_child_may_call_only_what_its_gated_parent_may(tmp_path: Path) -
                 {"prompt": "go", "tools": ["Read"]},
             )
 
-        assert setup.team["Agent_0"].allowed == frozenset({"Grep"})
+        assert setup.team["Agent_0"].allowed == frozenset({"Grep", "AgentSend"})
 
 
 @pytest.mark.asyncio
@@ -1036,7 +1142,10 @@ async def test_a_resumed_parent_starts_its_running_children_again(
         async with setup.parent, setup.team:
             assert await setup.spawn.resume("Agent") == ["helper"]
             helper = setup.team["helper"]
-            assert (helper.allowed, helper.max_rounds) == (frozenset({"Grep"}), 3)
+            assert (helper.allowed, helper.max_rounds) == (
+                frozenset({"Grep", "AgentSend"}),
+                3,
+            )
             assert not setup.team.can_spawn("helper")
 
             assert await helper.send("which number?") == "7"
@@ -1113,6 +1222,8 @@ async def test_a_child_stood_before_its_journal_kept_its_model_resumes_on_it(
             assert await setup.spawn.resume("Agent") == ["helper"]
             helper = setup.team["helper"]
             assert helper.model.provider.name == "other"
+            assert helper.allowed == frozenset({"AgentSend"})
+            assert isinstance(helper.tools["AgentSend"], AgentSend)
             assert await helper.send("which number?") == "7"
 
 
@@ -1944,7 +2055,7 @@ async def test_an_agent_on_another_machine_spawns_a_child_here(tmp_path: Path) -
     )
     child = setup.team["far_0"]
     assert setup.team.parent("far_0") == "far"
-    assert list(child.tools) == ["Read"]
+    assert list(child.tools) == ["Read", "AgentSend"]
     assert child.system_prompt == "this machine's prompt"
     assert relay.sent == []
     setup.team.receive(sender="far", recipient="far_0", content="more?", kind="ask")
@@ -1975,6 +2086,75 @@ async def test_a_far_caller_needs_this_machine_s_agent_and_no_watcher(
     with pytest.raises(ValueError, match=match):
         _ = await _spawn(setup, tmp_path, arguments, label="far")
     assert list(setup.team) == ["Agent"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tools", [None, [], ["Grep"], ["AgentSend"]])
+@pytest.mark.parametrize("send", [False, True])
+async def test_every_child_can_reply_even_when_work_tools_are_restricted(
+    tmp_path: Path,
+    tools: list[str] | None,
+    send: bool,
+) -> None:
+    setup = _setup(
+        tmp_path,
+        reply("ready"),
+        reply(calls=[call("AgentSend", to="parent", content="done")]),
+        reply("sent"),
+        send=send,
+    )
+    arguments: dict[str, PlainTree] = {"prompt": "wait", "label": "kid"}
+    if tools is not None:
+        arguments["tools"] = tools
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, arguments)
+        child = setup.team["kid"]
+        assert "AgentSend" in child.tools
+        assert child.allowed is None or "AgentSend" in child.allowed
+        if tools is not None:
+            assert child.allowed == frozenset({*tools, "AgentSend"})
+        setup.team.send("Agent", "kid", "status?")
+        (message,) = await _messages(setup.parent, 1)
+        assert message.content == "done"
+        assert setup.team.owes("kid") == {}
+
+
+@pytest.mark.asyncio
+async def test_messaging_survives_inherited_restrictions_and_grandchildren(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(tmp_path, reply("ready"), reply("ready"))
+    setup.parent.allowed = frozenset({"Grep"})
+    async with setup.team:
+        _ = await _spawn(setup, tmp_path, {"prompt": "go", "label": "kid"})
+        _ = await _spawn(
+            setup,
+            tmp_path,
+            {"prompt": "go", "label": "grand"},
+            label="kid",
+        )
+        for name in ("kid", "grand"):
+            assert setup.team[name].allowed == frozenset({"Grep", "AgentSend"})
+        with pytest.raises(ValueError, match="Unknown tools AgentSelf"):
+            _ = await _spawn(
+                setup,
+                tmp_path,
+                {"prompt": "go", "tools": ["AgentSelf"]},
+                label="kid",
+            )
+
+
+@pytest.mark.asyncio
+async def test_a_restricted_watcher_can_send_without_gaining_work_tools(
+    tmp_path: Path,
+) -> None:
+    setup = _setup(tmp_path)
+    setup.parent.allowed = frozenset()
+    async with setup.team:
+        label = await setup.spawn.watch("Agent")
+        watcher = setup.team[label]
+        assert "AgentSend" in watcher.tools
+        assert watcher.allowed == frozenset({"AgentSend"})
 
 
 if __name__ == "__main__":
