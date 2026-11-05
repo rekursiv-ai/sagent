@@ -8,8 +8,10 @@ from pathlib import Path
 from random import Random
 from typing import TYPE_CHECKING, Final
 
+import sys
 import time
 
+from sagent.tui.console import terminal_console
 from sagent.tui.holiday import holiday_icon, icon_rows
 from sagent.tui.theme import load_theme
 from sagent.tui.types import fill
@@ -26,7 +28,6 @@ if TYPE_CHECKING:
 else:
     from wrapt import lazy_import
 
-    Console = lazy_import("rich.console", "Console")
     Text = lazy_import("rich.text", "Text")
 
 
@@ -47,7 +48,7 @@ def print_welcome(
 
     """
     render_welcome(
-        Console(stderr=True),
+        terminal_console(sys.stderr),
         model=model,
         provider=provider,
         folder=folder,

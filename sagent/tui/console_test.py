@@ -19,7 +19,13 @@ from sagent.lib.userdirs import config_dir
 from sagent.runtime import types
 from sagent.tools.bash import Bash
 from sagent.tools.display import DisplaySpec, ToolDisplay
-from sagent.tui.console import ConsolePrinter, ConsoleStyle, Screen, Title
+from sagent.tui.console import (
+    ConsolePrinter,
+    ConsoleStyle,
+    Screen,
+    Title,
+    terminal_console,
+)
 from sagent.tui.theme import ThemeState, load_theme
 from sagent.tui.types import Header
 
@@ -81,6 +87,61 @@ def _visible(row: str) -> str:
 
 def _console() -> Console:
     return Console(file=Screen(io.StringIO()))
+
+
+@pytest.mark.parametrize(
+    ("term", "depth", "no_color", "terminal", "expected"),
+    [
+        ("screen-256color", "", "", True, "256"),
+        ("xterm-256color", "", "", True, "256"),
+        ("linux", "", "", True, "standard"),
+        ("dumb", "", "", True, None),
+        ("xterm-256color", "DEPTH_1_BIT", "", True, None),
+        ("xterm-256color", "DEPTH_4_BIT", "", True, "standard"),
+        ("xterm-256color", "DEPTH_8_BIT", "", True, "256"),
+        ("xterm-256color", "DEPTH_24_BIT", "", True, "truecolor"),
+        ("xterm-256color", "invalid", "", True, "256"),
+        ("xterm-256color", "DEPTH_24_BIT", "1", True, None),
+        ("xterm-256color", "DEPTH_24_BIT", "", False, None),
+    ],
+)
+def test_terminal_console_uses_the_prompt_color_depth(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    term: str,
+    depth: str,
+    no_color: str,
+    terminal: bool,
+    expected: str | None,
+) -> None:
+    monkeypatch.setenv("TERM", term)
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    monkeypatch.setenv("PROMPT_TOOLKIT_COLOR_DEPTH", depth)
+    monkeypatch.setenv("NO_COLOR", no_color)
+    out = _Tty() if terminal else io.StringIO()
+    screen = Screen(out)
+    console = terminal_console(screen)
+    assert console.file is screen
+    assert console.color_system == expected
+    # Rich caches rendered codes on equal styles across consoles.
+    style = Style(color="#123456", bgcolor="#654321", meta={"depth": expected})
+    console.print(Text("sample", style=style))
+    raw = out.getvalue()
+    assert "sample" in raw
+    if expected is None:
+        assert "\x1b" not in raw
+    elif expected == "256":
+        assert "38;5;" in raw
+        assert "48;5;" in raw
+        assert "38;2;" not in raw
+        assert "48;2;" not in raw
+    elif expected == "truecolor":
+        assert "38;2;18;52;86" in raw
+        assert "48;2;101;67;33" in raw
+    else:
+        assert "\x1b[" in raw
+        assert "38;" not in raw
+        assert "48;" not in raw
 
 
 def test_a_new_printer_owes_no_gap_and_has_no_call() -> None:

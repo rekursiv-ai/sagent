@@ -5,14 +5,16 @@ from __future__ import annotations
 from datetime import date
 from itertools import groupby
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Literal, override
+from typing import IO, TYPE_CHECKING, Literal, TextIO, override
 
 import io
 import re
+import sys
 import time
 
 from rich.cells import cell_len
 from rich.console import Console
+from rich.style import Style
 from rich.text import Text
 
 import pytest
@@ -114,14 +116,38 @@ def test_print_welcome_writes_to_stderr(capsys: pytest.CaptureFixture[str]) -> N
     assert capsys.readouterr() == ("", "[TestProvider] test-model\n")
 
 
+def test_print_welcome_uses_the_prompt_color_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COLORTERM", "truecolor")
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.delenv("PROMPT_TOOLKIT_COLOR_DEPTH", raising=False)
+    monkeypatch.setattr(sys, "stderr", _Terminal())
+    seen: list[str | None] = []
+
+    def capture(console: Console, **kwargs: object) -> None:
+        del kwargs
+        seen.append(console.color_system)
+
+    monkeypatch.setattr(welcome, "render_welcome", capture)
+    welcome.print_welcome(folder=Path("/research"))
+    assert seen == ["256"]
+
+
+class _Terminal(io.StringIO):
+    @override
+    def isatty(self) -> bool:
+        return True
+
+
 def test_print_welcome_passes_every_choice_on(monkeypatch: pytest.MonkeyPatch) -> None:
     console = Console(file=io.StringIO(), force_terminal=True, record=True, width=80)
 
-    def to_stderr(*, stderr: bool) -> Console:
-        assert stderr
+    def to_stderr(file: TextIO) -> Console:
+        assert file is sys.stderr
         return console
 
-    monkeypatch.setattr(welcome, "Console", to_stderr)
+    monkeypatch.setattr(welcome, "terminal_console", to_stderr)
     welcome.print_welcome(folder=Path("/research"))
     bare = console.export_text(styles=False)
     welcome.print_welcome(model="solo", folder=Path("/research"))
@@ -394,8 +420,8 @@ def test_print_welcome_shows_todays_holiday(monkeypatch: pytest.MonkeyPatch) -> 
     console = _holiday_console(color_system="truecolor")
     asked: list[date] = []
 
-    def to_stderr(*, stderr: bool) -> Console:
-        assert stderr
+    def to_stderr(file: TextIO) -> Console:
+        assert file is sys.stderr
         return console
 
     def pumpkin(today: date, *, rng: Random) -> Icon:
@@ -408,7 +434,7 @@ def test_print_welcome_shows_todays_holiday(monkeypatch: pytest.MonkeyPatch) -> 
         # Late on Halloween here is already November in UTC.
         return time.struct_time((2026, 10, 31, 23, 0, 0, 5, 304, 0))
 
-    monkeypatch.setattr(welcome, "Console", to_stderr)
+    monkeypatch.setattr(welcome, "terminal_console", to_stderr)
     monkeypatch.setattr(welcome, "holiday_icon", pumpkin)
     monkeypatch.setattr(time, "localtime", local)
     welcome.print_welcome(folder=Path("/research"))
@@ -729,8 +755,9 @@ def test_fixed_brand_colors_do_not_paint_a_background() -> None:
     html = console.export_html(inline_styles=True)
     for color in ("#4a90c4", "#93c47d", "#e06666", "#808080"):
         assert color in html
-    assert not re.search(r"\x1b\[[0-9;]*48;", out)
-    assert not re.search(r"\x1b\[(?:[0-9]+;)*(?:4[0-7]|10[0-7])(?:;|m)", out)
+    for span in Text.from_ansi(out).spans:
+        assert isinstance(span.style, Style)
+        assert span.style.bgcolor is None
 
 
 @pytest.mark.parametrize("width", [40, 80])
@@ -752,14 +779,14 @@ def test_custom_theme_reaches_print_welcome(
         height=24,
     )
 
-    def to_stderr(*, stderr: bool) -> Console:
-        assert stderr
+    def to_stderr(file: TextIO) -> Console:
+        assert file is sys.stderr
         return console
 
     def no_holiday(today: date, *, rng: Random) -> None:
         del today, rng
 
-    monkeypatch.setattr(welcome, "Console", to_stderr)
+    monkeypatch.setattr(welcome, "terminal_console", to_stderr)
     monkeypatch.setattr(welcome, "holiday_icon", no_holiday)
     welcome.print_welcome(folder=Path("/research"), theme=load_theme("welcome-test"))
     out = stream.getvalue()

@@ -103,7 +103,7 @@ from sagent.tools.mcp import McpServer, McpSession, servers
 from sagent.tools.mcp_settings import add_config_arguments
 from sagent.tools.remote import RemoteSession, saved
 from sagent.tools.types import ToolContext
-from sagent.tui.console import ConsolePrinter, Screen
+from sagent.tui.console import ConsolePrinter, Screen, terminal_console
 from sagent.tui.prompt import (
     OPEN_TREE,
     Input,
@@ -135,7 +135,6 @@ if TYPE_CHECKING:
     from prompt_toolkit.key_binding import DynamicKeyBindings
     from prompt_toolkit.patch_stdout import StdoutProxy
     from prompt_toolkit.styles import DynamicStyle
-    from rich.console import Console
     from treekle import PlainTree
 
     from sagent.agent.types import (
@@ -163,7 +162,6 @@ else:
     DynamicKeyBindings = lazy_import("prompt_toolkit.key_binding", "DynamicKeyBindings")
     StdoutProxy = lazy_import("prompt_toolkit.patch_stdout", "StdoutProxy")
     DynamicStyle = lazy_import("prompt_toolkit.styles", "DynamicStyle")
-    Console = lazy_import("rich.console", "Console")  # 60 ms cold.
 
 
 __all__ = [
@@ -267,7 +265,7 @@ async def run(
         contextlib.redirect_stderr(screen),
     ):
         printer = ConsolePrinter(
-            Console(file=screen),
+            terminal_console(screen),
             show_thinking=show_thinking,
             theme=theme,
         )
