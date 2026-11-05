@@ -67,6 +67,11 @@ if TYPE_CHECKING:
     from sagent.tools.types import ToolContext
 
 
+@pytest.fixture(autouse=True)
+def working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Echo:
     name: str = "Echo"

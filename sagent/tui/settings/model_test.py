@@ -26,8 +26,15 @@ from sagent.tui.settings.model import AgentModel
 
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from sagent.providers.types import ProviderFactory
     from sagent.settings.types import Setting
+
+
+@pytest.fixture(autouse=True)
+def working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
 
 
 def _windowed(model_id: str, window: int) -> ModelCapability:

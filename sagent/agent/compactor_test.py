@@ -2934,28 +2934,29 @@ async def test_every_prefix_call_reserves_reply_room_and_charges_the_agent(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("chars", range(40_000, 60_000, 400))
 async def test_an_audits_request_and_its_summary_fit_the_window(
     tmp_path: Path,
+    chars: int,
 ) -> None:
     """As the trigger requires: ``B + s + p ≤ R`` and ``B + s + p + S(B) ≤ C``."""
     window = 14_000
-    for chars in range(40_000, 60_000, 400):
-        provider, agent, compactor = _auditing(
-            tmp_path,
-            *[_Answer(summary="s")] * 4,
-            window=window,
-        )
-        _hold(agent, (_user("a" * chars), _turn("ok")))
+    provider, agent, compactor = _auditing(
+        tmp_path,
+        *[_Answer(summary="s")] * 4,
+        window=window,
+    )
+    _hold(agent, (_user("a" * chars), _turn("ok")))
 
-        _ = await _compact(compactor, agent, agent.runtime.context().messages)
+    _ = await _compact(compactor, agent, agent.runtime.context().messages)
 
-        audit = _instruction(provider.requests[-1])
-        body, _, session = audit.rpartition("\n\n<session>\n")
-        lines = session.removesuffix("\n</session>").splitlines()
-        held = sum(map(len, lines)) / 4
-        fixed = (len(provider.requests[-1].system[0]) + len(body)) / 4
-        assert held + fixed <= window
-        assert held + fixed + summary_tokens(held) <= window
+    audit = _instruction(provider.requests[-1])
+    body, _, session = audit.rpartition("\n\n<session>\n")
+    lines = session.removesuffix("\n</session>").splitlines()
+    held = sum(map(len, lines)) / 4
+    fixed = (len(provider.requests[-1].system[0]) + len(body)) / 4
+    assert held + fixed <= window
+    assert held + fixed + summary_tokens(held) <= window
 
 
 @pytest.mark.asyncio

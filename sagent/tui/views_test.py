@@ -31,8 +31,14 @@ from sagent.tui.views import Views
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
+    from pathlib import Path
 
     from sagent.tui.slash import Commands
+
+
+@pytest.fixture(autouse=True)
+def working_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
 
 
 def _catalog() -> ModelCatalog:

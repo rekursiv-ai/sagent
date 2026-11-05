@@ -920,7 +920,7 @@ async def test_a_shell_that_ignores_terminate_is_killed_after_the_grace(
         _run(
             tmp_path,
             f"trap '' TERM; {_SLEEPER}",
-            limit_ms=50,
+            limit_ms=1,
             tool=Bash(exec_prefix=_OTHER_GROUP),
         ),
         timeout=5,

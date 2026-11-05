@@ -6,7 +6,7 @@ from dataclasses import replace
 from functools import partial
 from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, ClassVar, override
+from typing import TYPE_CHECKING, ClassVar, cast, override
 
 import re
 
@@ -97,11 +97,12 @@ def test_all_vendor_adapters_are_registered() -> None:
     assert expected <= ModelCatalog().factories.keys()
 
 
-@pytest.fixture
+@pytest.fixture(params=[listed.section for listed in listings()])
 def rows(
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
 ) -> list[tuple[str, ModelCapability]]:
-    """Return every catalog row, as ``provider/model``, with its capability.
+    """Return each provider's rows, as ``provider/model``, with their capabilities.
 
     SelfHosted reads its window from the model's config on the Hub, which took
     2.5s; the window it states is not what these tests check.
@@ -113,12 +114,9 @@ def rows(
 
     monkeypatch.setattr(server, "_window", stated)
     catalog = ModelCatalog()
-    return [
-        (f"{name}/{model}", provider[model].capability)
-        for name in catalog.factories
-        for provider in (catalog[name],)
-        for model in provider
-    ]
+    name = cast(str, request.param)
+    provider = catalog[name]
+    return [(f"{name}/{model}", provider[model].capability) for model in provider]
 
 
 def test_every_row_offers_the_effort_it_starts_at(
@@ -173,8 +171,10 @@ def test_every_row_budgets_replies_with_its_documented_context_limits(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("section", [listed.section for listed in listings()])
 async def test_every_setting_a_row_offers_changes_what_is_sent(
     monkeypatch: pytest.MonkeyPatch,
+    section: str,
 ) -> None:
     """A value that changes nothing sent is a label: ``anthropic-cli`` once said
     ``nothink`` while ``claude`` thought at its own medium.
@@ -187,31 +187,26 @@ async def test_every_setting_a_row_offers_changes_what_is_sent(
     request = Request(system=("Be terse.",), records=(UserMessage(content="hi"),))
     catalog = ModelCatalog()
     unsent: list[str] = []
-    for name in catalog.factories:
-        provider = catalog[name]
-        for model_name in provider:
-            model = provider[model_name]
-            capability = model.capability
-            plural: dict[ModelSettingName, tuple[object, ...]] = {
-                f: v
-                for f in model_setting_names()
-                if len(v := capability.values(f)) > 1
-            }
-            committed = capability.default
-            for field, values in plural.items():
-                committed = committed.with_value(field, values[-1])
-            for field, values in plural.items():
-                sent: dict[object, set[str]] = {value: set[str]() for value in values}
-                for base in (capability.default, committed):
-                    for value in values:
-                        model.settings = base.with_value(field, value)
-                        sent[value].add(await _sent(model, request))
-                same = [
-                    v for v in values if sum(sent[v] == s for s in sent.values()) > 1
-                ]
-                if same:
-                    unsent.append(f"{name}/{model_name} {field}: {same}")
-            await model.aclose()
+    provider = catalog[section]
+    for model_name in provider:
+        model = provider[model_name]
+        capability = model.capability
+        plural: dict[ModelSettingName, tuple[object, ...]] = {
+            f: v for f in model_setting_names() if len(v := capability.values(f)) > 1
+        }
+        committed = capability.default
+        for field, values in plural.items():
+            committed = committed.with_value(field, values[-1])
+        for field, values in plural.items():
+            sent: dict[object, set[str]] = {value: set[str]() for value in values}
+            for base in (capability.default, committed):
+                for value in values:
+                    model.settings = base.with_value(field, value)
+                    sent[value].add(await _sent(model, request))
+            same = [v for v in values if sum(sent[v] == s for s in sent.values()) > 1]
+            if same:
+                unsent.append(f"{section}/{model_name} {field}: {same}")
+        await model.aclose()
     await catalog.aclose()
     assert unsent == []
 

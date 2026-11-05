@@ -21,6 +21,7 @@ import re
 import select
 import signal
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -121,6 +122,7 @@ from sagent.tui.views import Views
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator, Sequence
+    from subprocess import Popen
 
     from prompt_toolkit import PromptSession
     from rich.console import Console
@@ -4722,67 +4724,37 @@ async def test_a_host_that_does_not_start_says_where_to_look(
     assert capsys.readouterr().err == f"Error: the session's host {why}; see {log}\n"
 
 
-class _Forked:
-    """A child this test forked: waited on as ``subprocess.Popen`` waits on one."""
-
-    def __init__(self, pid: int) -> None:
-        self.pid = pid
-        self._status: int | None = None
-
-    def poll(self) -> int | None:
-        """Return its exit status, as ``Popen.returncode``; None while it runs."""
-        if self._status is None:
-            pid, status = os.waitpid(self.pid, os.WNOHANG)
-            if pid:
-                self._status = os.waitstatus_to_exitcode(status)
-        return self._status
-
-    def wait(self, timeout: float = 10.0) -> int:
-        """Return its exit status once it ends, failing after ``timeout``."""
-        deadline = time.monotonic() + timeout
-        while (status := self.poll()) is None:
-            assert time.monotonic() < deadline, f"pid {self.pid} still runs"
-            time.sleep(0.001)
-        return status
-
-
-def _hold(journal: Path, *, stubborn: bool, held: int) -> None:
-    """Run in a forked child: hold ``journal`` with one command running, never return."""
-    os.setsid()
-    if stubborn:
-        _ = signal.signal(signal.SIGTERM, signal.SIG_IGN)
-    if os.fork() == 0:
-        while True:
-            signal.pause()
-    fd = os.open(journal, os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(fd, fcntl.LOCK_EX)
-    _ = os.write(held, b"held")
-    while True:
-        signal.pause()
-
-
-# Forked, not a new interpreter: it stands for an old sagent, and needs none.
 @contextlib.contextmanager
-def _holder(journal: Path, *, stubborn: bool = False) -> Generator[_Forked]:
+def _holder(journal: Path, *, stubborn: bool = False) -> Generator[Popen[bytes]]:
     """Yield a process with no terminal that holds ``journal``, running one command."""
-    ready, held = os.pipe()
-    pid = os.fork()
-    if pid == 0:
+    # Fork only the small interpreter, not the fully collected pytest heap.
+    script = journal.parent / "holder.py"
+    script.write_text(
+        "import fcntl, os, signal, sys\n"
+        "os.setsid()\n"
+        "if sys.argv[2] == 'True':\n"
+        "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        "if os.fork() == 0:\n"
+        "    while True:\n"
+        "        signal.pause()\n"
+        "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
+        "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+        "os.write(1, b'held')\n"
+        "while True:\n"
+        "    signal.pause()\n",
+    )
+    with subprocess.Popen(  # noqa: S603 -- Fixed interpreter and test-owned script.
+        [sys.executable, "-I", "-S", str(script), str(journal), str(stubborn)],
+        stdout=subprocess.PIPE,
+    ) as holder:
         try:
-            os.close(ready)
-            _hold(journal, stubborn=stubborn, held=held)
+            assert holder.stdout is not None
+            assert holder.stdout.read(4) == b"held"
+            yield holder
         finally:
-            os._exit(1)
-    os.close(held)
-    holder = _Forked(pid)
-    try:
-        assert os.read(ready, 4) == b"held"
-        yield holder
-    finally:
-        os.close(ready)
-        with contextlib.suppress(ProcessLookupError):
-            os.killpg(pid, signal.SIGKILL)
-        _ = holder.wait()
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(holder.pid, signal.SIGKILL)
+            _ = holder.wait(timeout=5)
 
 
 @pytest.mark.asyncio
