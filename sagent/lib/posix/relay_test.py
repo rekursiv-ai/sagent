@@ -35,7 +35,7 @@ from sagent.lib.posix.relay import (
     real_fd,
     terminal_size,
 )
-from sagent.lib.posix.terminal import PASTE_START, Terminal
+from sagent.lib.posix.terminal import PASTE_START, TERMINAL_RESET, Terminal
 
 
 if TYPE_CHECKING:
@@ -276,6 +276,78 @@ class TestTerminalHandback:
             b"\x1b[?25h",  # Cursor visible.
         ):
             assert disable in seen
+
+    @pytest.mark.parametrize(
+        ("chunks", "extra"),
+        [
+            ([b"ordinary output"], b""),
+            ([b"\x1b[?1049h", b"\x1b[?1049l", b"done"], b""),
+            ([b"\x1b[?1049h"], b"\x1b[?1049l"),
+            ([b"\x1b[?47h"], b"\x1b[?47l"),
+            ([b"\x1b[?1047h"], b"\x1b[?1047l"),
+            ([bytes([byte]) for byte in b"\x1b[?25;1049;1004h"], b"\x1b[?1049l"),
+            ([b"\x1b[?1049h\x1b[?47l"], b""),
+            ([b"\x1b[?1049h\x1bc"], b""),
+            ([b"\x1b]0;title \x1b[?1049h\x07"], b""),
+            ([b"\x1bPignored \x1b[?1049h\x1b\\"], b""),
+            ([bytes([byte]) for byte in b"\x1b[?1049h\x1b[?1049l"], b""),
+            ([b"\x1b[31mplain\x1b[?1004h"], b""),
+            ([b"\x1b[?1049\x18h\x1b[?1049\x1ah"], b""),
+            ([b"\x1b[?1049$h"], b""),
+            ([b"\x1b[?1049\x00h"], b"\x1b[?1049l"),
+            ([b"\x1b[?10000000000000000000000049h"], b""),
+            ([b"\x1b[?00001049h"], b"\x1b[?1049l"),
+            ([b"\x1b[?1049h\x1b[?25l"], b"\x1b[?1049l"),
+            ([b"\x1b]title\x1b\\\x1b[?1049h"], b"\x1b[?1049l"),
+            ([b"\x1b]title\x07\x1b[?1049h"], b"\x1b[?1049l"),
+            ([b"\x1bP\x07\x1b[?1049h\x1b\\"], b""),
+            ([b"\x1b[?1049\x1b[?47h"], b"\x1b[?47l"),
+        ],
+    )
+    def test_cleanup_leaves_only_an_active_alternate_screen(
+        self,
+        chunks: list[bytes],
+        extra: bytes,
+    ) -> None:
+        master, slave = pty.openpty()
+        try:
+            relay = Relay(
+                _FakeChild(chunks=chunks),
+                stdin=_NoFileno(),
+                stdout=_Fd(slave),
+            )
+            assert asyncio.run(relay.serve()) == 0
+            seen = _terminal_bytes(
+                master,
+                size=len(b"".join(chunks) + extra + TERMINAL_RESET),
+            )
+        finally:
+            os.close(master)
+            os.close(slave)
+        child_output = b"".join(chunks)
+        for mode in (47, 1047, 1049):
+            leave = f"\x1b[?{mode}l".encode()
+            assert seen.count(leave) == (child_output + extra).count(leave)
+        assert seen == child_output + extra + TERMINAL_RESET
+
+    @pytest.mark.parametrize("mode", [47, 1047, 1049])
+    def test_suspend_leaves_and_resume_reenters_the_active_screen(
+        self,
+        mode: int,
+    ) -> None:
+        master, slave = pty.openpty()
+        enter = f"\x1b[?{mode}h".encode()
+        relay = Relay(_FakeChild(chunks=[enter]))
+        expected = enter + f"\x1b[?{mode}l".encode() + TERMINAL_RESET + enter
+        with mock.patch.object(os, "killpg"):
+            try:
+                asyncio.run(relay._pump(-1, slave))
+                relay._suspend(-1, slave)
+                seen = _terminal_bytes(master, size=len(expected))
+            finally:
+                os.close(master)
+                os.close(slave)
+        assert seen == expected
 
     def test_line_discipline_is_restored(self) -> None:
         """Raw mode is undone, so the shell afterwards still echoes and canons."""
@@ -708,7 +780,12 @@ class TestRelayBranchEdges:
     ) -> None:
         reset: list[int] = []
 
-        def reset_terminal_modes(fd: int) -> bool:
+        def reset_terminal_modes(
+            fd: int,
+            *,
+            alternate_screen: int | None = None,
+        ) -> bool:
+            assert alternate_screen is None
             reset.append(fd)
             return True
 
@@ -1245,7 +1322,8 @@ class TestForwardInput:
                 os.close(fd)
         assert cooked_at_stop == [True]
         assert raw_again
-        assert b"\x1b[?1049l" in reset
+        assert b"\x1b[?1049l" not in reset
+        assert b"\x1b[?25h" in reset
         assert kept is not None
         assert _modes(kept) == _modes(cooked)
 
@@ -1483,6 +1561,17 @@ class TestThreadedRelayWiring:
             "write dropped: child not running (1 bytes)",
             "submit dropped: master died (4 bytes)",
         ]
+
+
+def _terminal_bytes(fd: int, *, size: int) -> bytes:
+    """Read at least ``size`` bytes, including writes still crossing the pty."""
+    seen = b""
+    nothing: list[int] = []
+    while len(seen) < size:
+        ready, _, _ = select.select([fd], nothing, nothing, 1)
+        assert ready
+        seen += os.read(fd, 4096)
+    return seen
 
 
 class _Fd:

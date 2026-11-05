@@ -7,13 +7,16 @@ from unittest import mock
 
 import asyncio
 import contextlib
+import fcntl
 import importlib
 import os
 import pty
 import select
 import signal
+import struct
 import subprocess
 import sys
+import termios
 
 import pytest
 
@@ -126,15 +129,26 @@ class TestResetTerminalModes:
             os.close(master)
             os.close(slave)
         assert seen == TERMINAL_RESET
+        assert b"\x1b[?1049l" not in seen
         for disable in (
             b"\x1b[?1004l",  # Focus reporting: the reported ``\x1b[I`` symptom.
             b"\x1b[?1003l",  # any-motion mouse reporting.
             b"\x1b[?1006l",  # SGR mouse encoding.
-            b"\x1b[?1049l",  # Alternate screen.
             b"\x1b[?2004l",  # Bracketed paste.
             b"\x1b[?25h",  # Cursor visible.
         ):
             assert disable in seen
+
+    @pytest.mark.parametrize("mode", [47, 1047, 1049])
+    def test_leaves_the_selected_alternate_screen(self, mode: int) -> None:
+        master, slave = pty.openpty()
+        try:
+            assert reset_terminal_modes(slave, alternate_screen=mode)
+            seen = os.read(master, 4096)
+        finally:
+            os.close(master)
+            os.close(slave)
+        assert seen == f"\x1b[?{mode}l".encode() + TERMINAL_RESET
 
     def test_is_written_only_to_a_real_terminal(self) -> None:
         """A redirected destination must not collect escape junk it cannot use."""
@@ -842,6 +856,25 @@ class TestLifecycle:
 
     def test_set_winsize_on_a_released_terminal_is_harmless(self) -> None:
         Terminal(["cat"]).set_winsize(40, 120)
+
+    def test_set_winsize_keeps_unsigned_geometry_on_descriptor_zero(self) -> None:
+        term = Terminal(["true"])
+        term._master_fd = 0
+        with mock.patch.object(fcntl, "ioctl") as ioctl:
+            term.set_winsize(40_000, 50_000)
+        ioctl.assert_called_once_with(
+            0,
+            termios.TIOCSWINSZ,
+            struct.pack("HHHH", 40_000, 50_000, 0, 0),
+        )
+        assert term._winsize == (40_000, 50_000)
+
+    def test_set_winsize_tolerates_a_closed_master(self) -> None:
+        term = Terminal(["true"])
+        term._master_fd = 0
+        with mock.patch.object(fcntl, "ioctl", side_effect=OSError("closed")):
+            term.set_winsize(40, 120)
+        assert term._winsize == (40, 120)
 
     def test_silence_line_discipline_on_a_released_terminal_is_harmless(self) -> None:
         Terminal(["cat"]).silence_line_discipline()
