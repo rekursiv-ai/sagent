@@ -233,6 +233,7 @@ class Relay:
         self._interrupted: int | None = None
         self._teardowns: set[asyncio.Task[None]] = set()
         self._old_attr: list[int | list[bytes | int]] | None = None
+        self._screen = _ScreenMode()
 
     async def serve(self) -> int:
         """Spawn the child, relay until it exits, and restore the terminal.
@@ -273,7 +274,7 @@ class Relay:
                 # While the child is provably gone and raw mode still stands:
                 # these are emulator modes, so ``tcsetattr`` below cannot undo
                 # them and nothing after it can reach them.
-                _ = reset_terminal_modes(out_fd)
+                _ = reset_terminal_modes(out_fd, alternate_screen=self._screen.active)
                 _restore(stdin_fd, old_attr)
         finally:
             await self._terminal.terminate()
@@ -328,6 +329,7 @@ class Relay:
         )
         try:
             async for chunk in self._terminal.output():
+                self._screen.feed(chunk)
                 # Tee BEFORE the mirror: a caller whose session source is the
                 # stream must see every byte even when there is no real
                 # destination to mirror to (captured stdout under a harness).
@@ -377,11 +379,13 @@ class Relay:
     # pipeline's other members running.
     def _suspend(self, stdin_fd: int, out_fd: int) -> None:
         """Hand the terminal back and stop this job; take it back on ``fg``."""
-        _ = reset_terminal_modes(out_fd)
+        _ = reset_terminal_modes(out_fd, alternate_screen=self._screen.active)
         _restore(stdin_fd, self._old_attr)
         os.killpg(os.getpgrp(), signal.SIGTSTP)
         # Continued: ``fg`` gave the terminal back to this job.
         self._old_attr = _enter_raw(stdin_fd)
+        if self._screen.active is not None and out_fd >= 0 and os.isatty(out_fd):
+            _ = write_all(out_fd, f"\x1b[?{self._screen.active}h".encode())
         self._resize(stdin_fd)
         if self._on_resume is not None:
             self._on_resume()
@@ -556,6 +560,74 @@ class ThreadedRelay:
             # loop can stop between it and the scheduling, cancelling the
             # future.
             return
+
+
+class _ScreenMode:
+    """Track screen switches across chunks without retaining terminal output."""
+
+    def __init__(self) -> None:
+        self.active: int | None = None
+        self._state = "ground"
+        self._osc = False
+        self._parameter = 0
+        self._mode: int | None = None
+
+    def feed(self, chunk: bytes) -> None:
+        """Observe control sequences without interpreting control-string payloads.
+
+        Args:
+          chunk: The next bytes mirrored to the terminal.
+
+        """
+        for byte in chunk:
+            if self._state in ("string", "string_escape"):
+                self._string(byte)
+            elif byte == 27:
+                self._state = "escape"
+            elif byte in (24, 26):
+                self._state = "ground"
+            elif self._state == "escape":
+                self._escape(byte)
+            elif self._state == "private":
+                self._state = "parameters" if byte == ord("?") else "ignore"
+            elif self._state == "parameters":
+                self._parameters(byte)
+            elif self._state == "ignore" and 0x40 <= byte <= 0x7E:
+                self._state = "ground"
+
+    def _string(self, byte: int) -> None:
+        if (self._state == "string_escape" and byte == ord("\\")) or (
+            self._osc and byte == 7
+        ):
+            self._state = "ground"
+        else:
+            self._state = "string_escape" if byte == 27 else "string"
+
+    def _escape(self, byte: int) -> None:
+        self._state = "ground"  # pragma: no mutate -- Other labels act as ground.
+        if byte == ord("["):
+            self._state = "private"
+            self._parameter = 0
+            self._mode = None
+        elif byte in b"]PX^_":  # pragma: no mutate -- X is already a member.
+            self._osc = byte == ord("]")
+            self._state = "string"
+        elif byte == ord("c"):
+            self.active = None
+
+    def _parameters(self, byte: int) -> None:
+        if ord("0") <= byte <= ord("9"):
+            self._parameter = min(10_000, self._parameter * 10 + byte - ord("0"))
+        elif byte == ord(";") or byte in b"hl":
+            if self._parameter in (47, 1047, 1049):
+                self._mode = self._parameter
+            self._parameter = 0
+            if byte in b"hl":
+                if self._mode is not None:
+                    self.active = self._mode if byte == ord("h") else None
+                self._state = "ground"
+        elif byte >= 0x20:
+            self._state = "ground" if byte >= 0x40 else "ignore"
 
 
 # None when ``fd`` is not a terminal (piped stdin, or -1), so the relay still runs -- it

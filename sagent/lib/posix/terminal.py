@@ -90,7 +90,6 @@ dotfile picks a different wrong answer.
 # idempotent, so sending them when the child already cleaned up is a no-op.
 TERMINAL_RESET: Final = b"".join(
     (
-        b"\x1b[?1049l",  # Leave alternate screen.
         b"\x1b[?1000l\x1b[?1002l\x1b[?1003l",  # Mouse: click, drag, any-motion.
         b"\x1b[?1005l\x1b[?1006l\x1b[?1015l",  # Mouse encodings: utf8, SGR, urxvt.
         b"\x1b[?1004l",  # Focus in/out reporting.
@@ -159,7 +158,7 @@ def write_all(fd: int, data: bytes) -> bool:
     return True
 
 
-def reset_terminal_modes(fd: int) -> bool:
+def reset_terminal_modes(fd: int, *, alternate_screen: int | None = None) -> bool:
     """Disable DECSET modes a child may have left on; True if written.
 
     Only for a real terminal: a redirected or piped ``fd`` would collect the
@@ -168,6 +167,7 @@ def reset_terminal_modes(fd: int) -> bool:
 
     Args:
       fd: Descriptor of the terminal to restore.
+      alternate_screen: Active screen-switch mode (47, 1047, 1049), or None.
 
     Returns:
       written: Whether the reset was sent.
@@ -175,7 +175,9 @@ def reset_terminal_modes(fd: int) -> bool:
     """
     if fd < 0 or not os.isatty(fd):
         return False
-    return write_all(fd, TERMINAL_RESET)
+    # Resetting 1049 on the normal screen restores a stale cursor position.
+    leave = b"" if alternate_screen is None else f"\x1b[?{alternate_screen}l".encode()
+    return write_all(fd, leave + TERMINAL_RESET)
 
 
 class Terminal:
