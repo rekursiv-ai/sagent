@@ -69,6 +69,9 @@ def write_private(path: Path, data: str | bytes) -> None:
 def _make_directories(directory: Path) -> None:
     """Make ``directory`` and each missing parent ``0o700``; leave existing ones be."""
     # ``mkdir(parents=True, mode=...)`` gives the mode to the last one alone.
-    missing = [d for d in (directory, *directory.parents) if not d.exists()]
+    missing: list[Path] = []
+    while not directory.exists():
+        missing.append(directory)
+        directory = directory.parent
     for made in reversed(missing):
         made.mkdir(mode=0o700, exist_ok=True)

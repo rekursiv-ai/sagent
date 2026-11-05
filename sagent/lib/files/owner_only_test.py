@@ -156,6 +156,35 @@ def test_an_exclusive_open_refuses_a_file_that_exists(tmp_path: Path) -> None:
         open_private(path, os.O_WRONLY | os.O_EXCL)
 
 
+@pytest.mark.parametrize("opening", [False, True])
+@pytest.mark.parametrize("missing", [False, True])
+def test_directory_creation_stops_at_the_first_existing_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    opening: bool,
+    missing: bool,
+) -> None:
+    parent = tmp_path / "a" / "b" if missing else tmp_path
+    path = parent / "secret"
+    visited: list[Path] = []
+    real = pathlib.Path.exists
+
+    def recorded(directory: Path) -> bool:
+        visited.append(directory)
+        return real(directory)
+
+    monkeypatch.setattr(pathlib.Path, "exists", recorded)
+    if opening:
+        os.close(open_private(path, os.O_RDWR))
+    else:
+        write_private(path, "one")
+    assert visited == ([parent, parent.parent, tmp_path] if missing else [tmp_path])
+    assert _mode(path) == 0o600
+    if missing:
+        assert _mode(parent) == 0o700
+        assert _mode(parent.parent) == 0o700
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 
