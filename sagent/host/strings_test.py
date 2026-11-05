@@ -95,6 +95,17 @@ def test_a_url_that_is_no_string_is_refused(url: str) -> None:
         _ = ConnectionString.from_url(url)
 
 
+def test_first_start_uses_the_supplied_configuration_without_writing_it(
+    tmp_path: Path,
+) -> None:
+    dirs = _dirs(tmp_path)
+    default = ServerConfig(listen=(), tools=("Read",))
+    assert strings.configuration(dirs, default=default) == default
+    assert not (dirs.state / "server.json").exists()
+    _served(dirs)
+    assert strings.configuration(dirs, default=default).tools == _TOOLS
+
+
 @pytest.mark.asyncio
 async def test_add_needs_a_server_that_has_run(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="run sagent host once first"):

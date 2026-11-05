@@ -482,6 +482,82 @@ async def test_the_round_that_reaches_the_cap_runs_its_calls(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("allowed", [None, frozenset({"Work"})])
+async def test_round_caps_preserve_configured_permissions(
+    tmp_path: Path,
+    allowed: frozenset[str] | None,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Work")]),
+        tools=[_Reminding(name="Work", told="use Work")],
+        max_rounds=1,
+    )
+    agent.allowed = allowed
+    provider.replies.append(partial(_check_capped_permissions, agent, allowed=allowed))
+    async with agent:
+        assert await agent.send("go") == "done"
+    assert agent.allowed == allowed
+    assert agent.runtime.allowed == allowed
+
+
+def _check_capped_permissions(
+    agent: Agent,
+    request: Request,
+    *,
+    allowed: frozenset[str] | None,
+) -> Response:
+    assert agent.allowed == allowed
+    assert agent.runtime.allowed == request.allowed == frozenset()
+    assert [r for r in request.records if isinstance(r, TurnContext)][-1].tools == ()
+    assert any(
+        isinstance(r, SystemMessage) and r.content == "No longer in force: use Work"
+        for r in request.records
+    )
+    return reply("done")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "allowed",
+    [None, frozenset(), frozenset({"AgentSend"}), frozenset({"Work"})],
+)
+async def test_permission_changes_during_a_round_cap_survive_the_next_turn(
+    tmp_path: Path,
+    allowed: frozenset[str] | None,
+) -> None:
+    provider, agent = _agent(
+        tmp_path,
+        reply(calls=[call("Work")]),
+        tools=[_Tool(name="Work"), _Tool(name="AgentSend")],
+        max_rounds=1,
+    )
+    provider.replies.extend(
+        [partial(_change_capped_permissions, agent, allowed=allowed), reply("again")],
+    )
+    async with agent:
+        assert await agent.send("go") == "done"
+        assert agent.allowed == agent.runtime.allowed == allowed
+        assert await agent.send("next") == "again"
+    assert provider.requests[2].allowed == allowed
+
+
+def _change_capped_permissions(
+    agent: Agent,
+    request: Request,
+    *,
+    allowed: frozenset[str] | None,
+) -> Response:
+    assert request.allowed == frozenset({"AgentSend"})
+    agent.allowed = allowed
+    assert agent.allowed == allowed
+    assert agent.runtime.allowed == (
+        frozenset({"AgentSend"}) if allowed is None else allowed & {"AgentSend"}
+    )
+    return reply("done")
+
+
+@pytest.mark.asyncio
 async def test_a_message_from_another_agent_mid_turn_keeps_the_round_cap(
     tmp_path: Path,
 ) -> None:
@@ -1463,6 +1539,32 @@ def test_a_gated_off_tool_reminds_of_nothing(tmp_path: Path) -> None:
     assert [u.content for u in opened if isinstance(u, SystemMessage)] == [
         "reply by Peers",
     ]
+
+
+@pytest.mark.parametrize("allowed", [frozenset(), frozenset({"_Tool"})])
+def test_disabling_a_tool_withdraws_its_reminder_until_reenabled(
+    tmp_path: Path,
+    allowed: frozenset[str],
+) -> None:
+    reminding = _Reminding(name="Peers", told="reply by Peers")
+    _, agent = _agent(tmp_path, tools=[_Tool(), reminding])
+    session = _session(agent)
+    session.append(*session.updates())
+    agent.allowed = allowed
+    withdrawn = session.updates()
+    notes = [u for u in withdrawn if isinstance(u, SystemMessage)]
+    assert len(notes) == 1
+    assert notes[0].content == "No longer in force: reply by Peers"
+    assert notes[0].extra == {"tool": "Peers", "withdrawn": True}
+    session.append(*withdrawn)
+    assert session.updates() == []
+    agent.allowed = None
+    restored = session.updates()
+    assert [u.content for u in restored if isinstance(u, SystemMessage)] == [
+        "reply by Peers",
+    ]
+    session.append(*restored)
+    assert session.updates() == []
 
 
 def test_a_reminder_that_empties_is_withdrawn_once(tmp_path: Path) -> None:

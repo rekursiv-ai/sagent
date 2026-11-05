@@ -4238,10 +4238,41 @@ async def test_input_held_for_a_cancelled_reply_is_taken_in_once_it_ends() -> No
 
 
 @dataclass(slots=True, kw_only=True)
+class _SchedulingArguments(Gated):
+    """A tool that records the arguments passed to its scheduler."""
+
+    @override
+    def serialize_key(
+        self,
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> str | None:
+        self.received.append(dict(arguments))
+        return super(_SchedulingArguments, self).serialize_key(context, arguments)
+
+
+@pytest.mark.parametrize("declares_delay", [False, True])
+def test_scheduling_strips_only_runtime_owned_controls(declares_delay: bool) -> None:
+    tool = _SchedulingArguments(
+        schema={"properties": {"delay": {"type": "number"}}} if declares_delay else {},
+    )
+    h = Harness(tools=[tool])
+    invocation = call("echo", "c1", key="shared", background=False, delay=0)
+    assert h.runtime._serialize_key(invocation) == "shared"
+    assert tool.received == [
+        {"key": "shared", "background": False, "delay": 0}
+        if declares_delay
+        else {"key": "shared"},
+    ]
+
+
+@dataclass(slots=True, kw_only=True)
 class _Unkeyable(Gated):
     """A tool whose ``serialize_key`` raises."""
 
     name: str = "bad"
+    fail_after: int = 0
+    key_calls: int = 0
 
     @override
     def serialize_key(
@@ -4250,21 +4281,80 @@ class _Unkeyable(Gated):
         arguments: Mapping[str, PlainTree],
     ) -> str | None:
         del context, arguments
-        raise RuntimeError("no key")
+        self.key_calls += 1
+        if self.key_calls > self.fail_after:
+            raise RuntimeError("no key")
+        return "shared"
 
 
 @pytest.mark.asyncio
-async def test_an_event_that_fails_to_dispatch_loses_none_after_it() -> None:
-    """A reply that cannot be taken is a failed call; the message after it is answered."""
-    async with Harness(reply("answered"), tools=[_Unkeyable()]) as h:
+@pytest.mark.parametrize("fail_after", [0, 1], ids=["partition", "hold"])
+async def test_a_scheduling_failure_answers_only_its_call_and_the_round_continues(
+    fail_after: int,
+) -> None:
+    bad = _Unkeyable(fail_after=fail_after)
+    good = Gated()
+    h = Harness(
+        reply(calls=[call("bad", "b1"), call("echo", "g1", key="shared")]),
+        reply("recovered"),
+        tools=[bad, good],
+    )
+    await run_once(h.runtime, _user("go"))
+    assert h.count(ModelResponseError) == 0
+    assert h.results("b1") == [
+        ToolErrorResult(call_id="b1", content="RuntimeError: no key", is_error=True),
+    ]
+    assert bad.started == []
+    assert bad.key_calls == fail_after + 1
+    assert good.finished == ["echo"]
+    assert [r.text() for r in h.results("g1")] == ["ok"]
+    assert h.answers()[-1] == "recovered"
+    assert h.runtime._refusals == {}
+    assert h.runtime._holding == []
+    assert h.runtime.running_tools == {}
+    assert h.runtime.cohort == set()
+    validate_context(h.history())
+
+
+@pytest.mark.asyncio
+async def test_an_already_refused_call_never_runs_its_scheduling_hook() -> None:
+    bad = _Unkeyable()
+    h = Harness(reply(calls=[call("bad", "b1")]), reply("recovered"), tools=[bad])
+    h.runtime.allowed = frozenset()
+    await run_once(h.runtime, _user("go"))
+    assert h.count(ModelResponseError) == 0
+    assert h.results("b1") == [
+        ToolErrorResult(
+            call_id="b1",
+            content="bad is not available to this agent.",
+            is_error=True,
+        ),
+    ]
+    assert (bad.key_calls, bad.started) == (0, [])
+    assert h.answers()[-1] == "recovered"
+
+
+@pytest.mark.asyncio
+async def test_a_scheduling_failure_loses_no_following_input() -> None:
+    """A failed call still lets the message after its reply be answered."""
+    async with Harness(
+        reply("answered"),
+        reply("handled failure"),
+        tools=[_Unkeyable()],
+    ) as h:
         _ = h.runtime.append_history(_user("go"))
         h.push(
             ModelResponseComplete(response=reply(calls=[call("bad", "b1")])),
             _user("next"),
         )
-        await h.seen(ModelIdle)
-    assert h.count(ModelResponseError) == 1
-    assert h.texts()[-2:] == ["next", "answered"]
+        await h.seen(ModelIdle, n=2)
+    assert h.count(ModelResponseError) == 0
+    assert [answer for answer in h.answers() if answer] == [
+        "answered",
+        "handled failure",
+    ]
+    assert "next" in h.texts()
+    validate_context(h.history())
 
 
 @pytest.mark.asyncio

@@ -82,7 +82,7 @@ _NO_SKILL_TOOLS: Final = [
     "AgentSpawn",
     "AgentSend",
     "AgentSelf",
-    "Session",
+    "AgentSession",
     "BackgroundTask",
 ]
 

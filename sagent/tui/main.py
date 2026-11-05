@@ -59,6 +59,8 @@ from sagent.agent.agents_md import AgentsMdConfig
 from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.pruner import Pruner
 from sagent.agent.team import Team
+from sagent.host import daemon
+from sagent.host.strings import ServeDirs
 from sagent.lib.asyncio_stalls import watch_stalls
 from sagent.lib.files.owner_only import open_private
 from sagent.lib.posix.attach import attach, viewers
@@ -72,7 +74,7 @@ from sagent.lib.posix.pids import (
 )
 from sagent.lib.posix.relay import real_fd, terminal_size
 from sagent.lib.posix.sockets import accepts, socket_address
-from sagent.lib.userdirs import data_dir, state_dir
+from sagent.lib.userdirs import config_dir, data_dir, state_dir
 from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.providers.table import ModelTags
 from sagent.runtime import types
@@ -368,6 +370,8 @@ async def _tree(views: Views) -> None:
 
 def _run(argv: list[str]) -> int:
     """Run what ``argv`` names: an action, a session here, or one at its host."""
+    if argv[:1] == ["daemon"]:
+        return daemon.main(argv[1:])
     if argv and not argv[0].startswith("-"):
         return asyncio.run(_action(argv))
     # No ``allow_abbrev``: ``flags`` takes every word argparse does not know as a
@@ -385,6 +389,14 @@ def _run(argv: list[str]) -> int:
     journal = _hosted_journal(parsed)
     if journal is None:
         return asyncio.run(_main(parsed, given=given))
+    _ = asyncio.run(
+        daemon.ensure(
+            ServeDirs(
+                secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
+                state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
+            ),
+        ),
+    )
     return _resume(
         journal,
         command=[
@@ -741,7 +753,17 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
             sys.stderr.write(f"Error: {error_text(e)}\n")
             return 1
         path = _session_path(flags, cwd=cwd, interactive=interactive)
-        remote = RemoteSession(remotes, journal=path, team=team)
+        serve = ServeDirs(
+            secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
+            state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
+        )
+        _ = await daemon.ensure(serve)
+        remote = RemoteSession(
+            remotes,
+            journal=path,
+            team=team,
+            local_socket=socket_address(serve.state / "daemon.sock"),
+        )
         # Before the servers connect: at a terminal, what they log must reach the
         # session's file, not overlay the screen.
         _logging(flags.log_level, path=path, interactive=interactive)
@@ -778,9 +800,11 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
                 system = _system(flags)
                 if system is not None:
                     agent.system_prompt = system
+                label = team.join(agent, label=flags.name)
                 commands = Commands(
                     agent,
                     catalog=catalog,
+                    team=team,
                     say=_dropped,
                     screen=screen,
                     panes=Panes(),
@@ -802,7 +826,6 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
                 )
                 sys.stderr.write(f"[/model] {described}\n")
             await stack.enter_async_context(agent)
-            label = team.join(agent, label=flags.name)
             spawn = agent.tools.get("AgentSpawn")
             if flags.resume_persistent and isinstance(spawn, AgentSpawn):
                 await spawn.resume(label)

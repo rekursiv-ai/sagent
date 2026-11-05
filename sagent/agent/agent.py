@@ -200,6 +200,8 @@ class Agent(AsyncResource):
         self.tools: Mapping[str, Tool] = self.runtime.tools
         self.environment = environment
         self.account = account
+        self.max_rounds = max_rounds
+        self._rounds = 0
         self.allowed = frozenset(allowed) if allowed is not None else None
         self._system_prompt = system_prompt
         self._session = RuntimeSession(
@@ -225,14 +227,10 @@ class Agent(AsyncResource):
         if isinstance(dropper, Pruning):
             self.runtime.prune = dropper.prune
         self._loop: asyncio.Task[None] | None = None
-        self.max_rounds = max_rounds
         self.max_spend_usd = max_spend_usd
         self.runtime.persistent_retry = persistent_retry
         # What the model calls have cost, a resumed session's included.
         self.spend_usd = 0.0
-        # The tools allowed before the round cap took them all; ``None`` while uncapped.
-        self._capped: tuple[frozenset[str] | None] | None = None
-        self._new_turn()
         # Models assigned away from, closed at the runtime's next safe point.
         self._retired: list[Model] = []
         # The settings each model was left with, by ``cache_key``: a switch back
@@ -283,8 +281,11 @@ class Agent(AsyncResource):
 
     @property
     def allowed(self) -> frozenset[str] | None:
-        """The tools the model may call, by name; ``None`` for all."""
-        return self.runtime.allowed
+        """Configured tool permissions, inherited by children; ``None`` for all.
+
+        ``runtime.allowed`` additionally applies the current turn's round cap.
+        """
+        return self._allowed
 
     # Every tool stays offered, so a change of gate keeps the cached prefix; the
     # next round states the new gate to the model.
@@ -294,7 +295,8 @@ class Agent(AsyncResource):
             unknown = sorted(names - set(self.tools))
             if unknown:
                 raise ValueError(f"Unknown tools: {', '.join(unknown)}.")
-        self.runtime.allowed = names
+        self._allowed = names
+        self._gate_tools()
 
     def charge(self, usd: float, *, by: str) -> None:
         """Count spend no reply of this agent's own brought; halt the turn past the cap.
@@ -525,17 +527,11 @@ class Agent(AsyncResource):
         )
         if (over := self._over_budget()) is not None:
             self._limit = over
-        elif called and self._capped is not None:
-            # Capped the round the count reached the cap.
+        elif called and self.max_rounds is not None and self._rounds >= self.max_rounds:
             self._limit = RoundLimitError(rounds=self._rounds, max_rounds=self._rounds)
         elif called:
             self._rounds += 1
-            if self.max_rounds is not None and self._rounds >= self.max_rounds:
-                was = self.runtime.allowed
-                self._capped = (was,)
-                self.runtime.allowed = frozenset({"AgentSend"}) & frozenset(
-                    self.tools if was is None else was,
-                )
+            self._gate_tools()
         if self._limit is not None:
             self.runtime.halt()
 
@@ -551,9 +547,16 @@ class Agent(AsyncResource):
     def _new_turn(self) -> None:
         """Count the rounds from none, with the tools the round cap took given back."""
         self._rounds = 0
-        if self._capped is not None:
-            (self.runtime.allowed,) = self._capped
-            self._capped = None
+        self._gate_tools()
+
+    def _gate_tools(self) -> None:
+        """Apply configured permissions and the turn's round cap to future calls."""
+        self.runtime.allowed = (
+            frozenset({"AgentSend"})
+            & frozenset(self.tools if self.allowed is None else self.allowed)
+            if self.max_rounds is not None and self._rounds >= self.max_rounds
+            else self.allowed
+        )
 
     # A new window starts where the session did: its prompt holds that directory's
     # AGENTS.md, and the model, which no longer sees where it had moved, is told.
@@ -935,16 +938,18 @@ class RuntimeSession:
             if isinstance(entry, SystemMessage) and entry.subtype == "reminder"
         }
         tool_context = self._agent.runtime.tool_context
-        allowed = self._agent.allowed
+        allowed = self._agent.runtime.allowed
         out: list[SystemMessage] = []
         for name, tool in self._agent.tools.items():
             # Offered for the cache but gated off, a tool's reminder would ask for
             # calls the model may not make, such as a reply by AgentSend.
-            if not isinstance(tool, Reminding) or (
-                allowed is not None and name not in allowed
-            ):
+            if not isinstance(tool, Reminding):
                 continue
-            text = tool.reminder(tool_context)
+            text = (
+                tool.reminder(tool_context)
+                if allowed is None or name in allowed
+                else ""
+            )
             last = said.get(name, "")
             if text == last:
                 continue
@@ -975,7 +980,7 @@ class RuntimeSession:
             if agent.environment
             else None,
             model=ModelTags.from_settings(model.capability, settings).name,
-            tools=_gate(agent.allowed, offered=offered),
+            tools=_gate(agent.runtime.allowed, offered=offered),
         )
         now = _now()
         delta = current

@@ -124,15 +124,22 @@ class Endpoint:
 
     def __init__(
         self,
-        remote: SavedRemote,
+        remote: SavedRemote | None,
         *,
         session_id: str,
         client: str,
         team: Team,
         retry_sec: float,
         ping_sec: float,
+        local_socket: Path | None = None,
     ) -> None:
-        self.string = ConnectionString.from_url(remote.url)
+        self.local_socket = local_socket
+        self._peer_messaging = local_socket is not None
+        self.string = (
+            ConnectionString(host="local", port=0, fingerprint="", token="")
+            if remote is None
+            else ConnectionString.from_url(remote.url)
+        )
         self.name = self.string.host
         """The server's machine once it has said so; until then the string's host."""
 
@@ -152,12 +159,13 @@ class Endpoint:
         self._specs: dict[str, ToolSpec] = {}
         self._describing: dict[str, asyncio.Future[ToolSpec | None]] = {}
 
-        self._requested = remote.tools
+        self._requested = remote.tools if remote is not None else ()
         self._session_id = session_id
         self._client = client
         self._team = team
         self._peers: tuple[str, ...] = ()
         self._notes: dict[str, Note] = {}
+        self._seen_notes: set[str] = set()
         self._retry_sec = retry_sec
         self._ping_sec = ping_sec
         self._silence_sec = SILENT_PINGS * ping_sec
@@ -316,19 +324,24 @@ class Endpoint:
 
     async def _serve(self) -> None:
         """Connect once, and handle what the server says until it goes."""
-        reader, writer = await asyncio.wait_for(
-            asyncio.open_connection(
+        connection = (
+            asyncio.open_unix_connection(self.local_socket, limit=MAX_LINE_BYTES)
+            if self.local_socket is not None
+            else asyncio.open_connection(
                 self.string.host,
                 self.string.port,
                 ssl=client_context(),
                 limit=MAX_LINE_BYTES,
-            ),
-            timeout=self._silence_sec,
+            )
         )
+        reader, writer = await asyncio.wait_for(connection, timeout=self._silence_sec)
         try:
             # Checked before the token is sent: a server that is not the one
             # pinned never sees it.
-            if peer_fingerprint(writer) != self.string.fingerprint:
+            if (
+                self.local_socket is None
+                and peer_fingerprint(writer) != self.string.fingerprint
+            ):
                 raise ConnectionError(
                     f"{self.string.host} showed a certificate its string does not pin.",
                 )
@@ -345,6 +358,7 @@ class Endpoint:
             )
             self._welcome(await asyncio.wait_for(received(reader), self._silence_sec))
             self._writer, self.tried = writer, True
+            self.publish()
             for message in (*self._notes.values(), *self._queued):
                 writer.write(encoded(message))
             self._queued.clear()
@@ -367,8 +381,12 @@ class Endpoint:
             raise ConnectionRefusedError(f"{self.string.host} refused: {answer.reason}")
         if not isinstance(answer, Welcome):
             raise ConnectionError(f"{self.string.host} did not welcome this client.")
-        self.name, self.error = answer.name, ""
+        self.name, self.error = (
+            ("local" if self.local_socket is not None else answer.name),
+            "",
+        )
         self._granted(answer.tools)
+        self._peer_messaging = self.local_socket is not None or answer.peer_messaging
         # A new session's host has no agents yet.
         if not answer.resumed:
             self._peered(())
@@ -393,13 +411,35 @@ class Endpoint:
                 writer.write(encoded(Ack(id=message.id)))
             elif isinstance(message, ToolsChanged):
                 self._granted(message.tools)
+                if message.peer_messaging is not None:
+                    self._peer_messaging = message.peer_messaging
+                    self.publish()
                 await self._note()
             elif isinstance(message, Described) and message.id in self._describing:
                 self._describing[message.id].set_result(message.spec)
             elif isinstance(message, Ack):
                 self._notes.pop(message.id, None)
+            elif isinstance(message, Refused):
+                note = self._notes.pop(message.id, None)
+                if note is not None:
+                    recipient = self._there(note.recipient)
+                    sender = (
+                        note.sender
+                        if self.local_socket is not None
+                        else note.sender.removesuffix(f"@{self._client}")
+                    )
+                    self._team.unreach(recipient)
+                    if sender in self._team:
+                        self._team.tell(
+                            recipient,
+                            recipient=sender,
+                            content=f"[message refused] {message.reason}",
+                        )
+                await self._note()
             elif isinstance(message, Note):
-                self._received(message)
+                if message.id not in self._seen_notes:
+                    self._received(message)
+                    self._seen_notes.add(message.id)
                 writer.write(encoded(Ack(id=message.id)))
             elif isinstance(message, Peers):
                 self._peered(message.labels)
@@ -412,7 +452,9 @@ class Endpoint:
         try:
             self._team.receive(
                 sender=sender,
-                recipient=note.recipient.removesuffix(f"@{self._client}"),
+                recipient=note.recipient
+                if self.local_socket is not None
+                else note.recipient.removesuffix(f"@{self._client}"),
                 content=note.content,
                 kind=note.kind,
             )
@@ -446,11 +488,26 @@ class Endpoint:
 
     def _here(self, label: str) -> str:
         """Return the label of an agent here, as the host knows it."""
-        return f"{label}@{self._client}"
+        return label if self.local_socket is not None else f"{label}@{self._client}"
 
     def _there(self, label: str) -> str:
         """Return the label of an agent there, as the team here knows it."""
-        return f"{label}@{self.name}"
+        return label if self.local_socket is not None else f"{label}@{self.name}"
+
+    def publish(self) -> None:
+        """Publish participating local agents on the daemon connection."""
+        if self._peer_messaging and self._writer is not None:
+            self._writer.write(
+                encoded(
+                    Peers(
+                        labels=tuple(
+                            self._here(label)
+                            for label in self._team
+                            if self._team.peer_messaging(label)
+                        ),
+                    ),
+                ),
+            )
 
     def _granted(self, tools: Mapping[str, str]) -> None:
         """Take ``tools`` as the tools granted; count it a change once first known."""
@@ -496,6 +553,7 @@ class RemoteSession(AsyncResource):
         client: str = "",
         retry_sec: float = 2.0,
         ping_sec: float = PING_SEC,
+        local_socket: Path | None = None,
     ) -> None:
         self.session_id = uuid.uuid4().hex if journal is None else journal.parent.name
         """What each server knows this session by."""
@@ -512,6 +570,19 @@ class RemoteSession(AsyncResource):
             )
             for r in remotes
         ]
+        self._team = here
+        if local_socket is not None:
+            self._endpoints.append(
+                Endpoint(
+                    None,
+                    session_id=self.session_id,
+                    client=client or socket.gethostname(),
+                    team=here,
+                    retry_sec=retry_sec,
+                    ping_sec=ping_sec,
+                    local_socket=local_socket,
+                ),
+            )
         self._tasks: list[asyncio.Task[None]] = []
 
     def endpoints(self) -> dict[str, Endpoint]:
@@ -533,10 +604,17 @@ class RemoteSession(AsyncResource):
 
     @override
     async def aopen(self) -> None:
+        self._team.changes.add(self.publish)
         self._tasks = [asyncio.create_task(e.run()) for e in self._endpoints]
+
+    def publish(self) -> None:
+        """Publish local agent changes through each connection."""
+        for endpoint in self._endpoints:
+            endpoint.publish()
 
     @override
     async def aclose(self) -> None:
+        self._team.changes.discard(self.publish)
         for endpoint in self._endpoints:
             endpoint.bye()
         # A moment for each goodbye to leave before its connection is cut.
@@ -654,6 +732,8 @@ class RemoteTool:
 
         """
         a = parse(arguments, RemoteTool.Arguments)
+        if a.tool == "AgentSend":
+            raise ValueError("Use AgentSend directly for local and remote messaging.")
         named = self.remote.endpoints()
         if not a.endpoint:
             return _said(

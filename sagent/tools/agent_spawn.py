@@ -52,6 +52,7 @@ from sagent.session.types import (
     ToolCall,
     ToolResult,
 )
+from sagent.tools.agent_send import AgentSend
 from sagent.tools.display import ToolDisplay
 from sagent.tools.skill import Skill
 from sagent.tools.types import Arg, FileTracker, json_schema, parse
@@ -121,7 +122,8 @@ class AgentSpawn:
         ] = None
         tools: Annotated[
             tuple[str, ...] | None,
-            "Which of your tools the child gets; omit for all, [] for none.",
+            "Which of your work tools the child gets; omit for all, [] for none."
+            " AgentSend is always included.",
         ] = None
         max_tool_call_rounds: Annotated[
             int | None,
@@ -345,6 +347,7 @@ class AgentSpawn:
         opened = JsonlJournal(journal) if journal is not None else None
         agent = _agent_from_parent(
             target,
+            team=self.team,
             model=model,
             journal=opened,
             allowed=target.allowed,
@@ -369,7 +372,7 @@ class AgentSpawn:
             journal=str(journal) if journal is not None else None,
         )
         # A new watcher is sent the window its root sees: a long session's earlier
-        # windows would not fit one message, and Session reads them by number.
+        # windows would not fit one message, and AgentSession reads them by number.
         kept = target.session.journal
         feed = Feed(
             team=self.team,
@@ -487,9 +490,8 @@ class AgentSpawn:
         return started
 
     # The child joins before anything is awaited, so a label chosen for it cannot be
-    # taken by a spawn running beside this one. It is offered every tool its parent
-    # is, so its requests open with the parent's cached prefix; ``allowed`` gates
-    # what it may call.
+    # taken by a spawn running beside this one. Parent tools are retained, with
+    # mandatory messaging added when absent; ``allowed`` gates what it may call.
     # A child given ``recall`` takes the model, settings, and prompt its journal stood,
     # once the journal is open and before the child opens.
     async def _start(
@@ -519,6 +521,7 @@ class AgentSpawn:
         ]
         child = _agent_from_parent(
             parent,
+            team=self.team,
             model=model,
             journal=opened,
             allowed=allowed,
@@ -685,7 +688,7 @@ def _allowed(parent: Agent, names: tuple[str, ...] | None) -> frozenset[str] | N
     if names is None:
         return parent.allowed
     mine = parent.allowed if parent.allowed is not None else frozenset(parent.tools)
-    unknown = sorted(set(names) - mine)
+    unknown = sorted(set(names) - mine - {AgentSend.name})
     if unknown:
         raise ValueError(
             f"Unknown tools {', '.join(unknown)}; yours: {', '.join(sorted(mine))}",
@@ -698,6 +701,7 @@ def _allowed(parent: Agent, names: tuple[str, ...] | None) -> frozenset[str] | N
 def _agent_from_parent(
     parent: Agent,
     *,
+    team: Team,
     model: Model,
     journal: JsonlJournal | None,
     allowed: Collection[str] | None,
@@ -706,11 +710,13 @@ def _agent_from_parent(
     max_rounds: int | None = None,
     max_spend_usd: float | None = None,
 ) -> Agent:
-    """Return a new agent with ``parent``'s settings, but those it is given."""
+    """Return a derived agent with communication always available."""
+    tools = dict(parent.tools)
+    tools[AgentSend.name] = tools.get(AgentSend.name) or AgentSend(team=team)
     agent = Agent(
         model=model,
-        tools=list(parent.tools.values()),
-        allowed=allowed,
+        tools=list(tools.values()),
+        allowed=None if allowed is None else frozenset(allowed) | {AgentSend.name},
         system_prompt=system_prompt,
         journal=journal,
         compactor=parent.compactor_factory,

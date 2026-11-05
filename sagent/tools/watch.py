@@ -3,8 +3,8 @@
 The feed carries what the user typed, what the agent said, and each tool call,
 by the tool's own summary. Everything else is a one-line stub: a compaction, a
 clear, a settings change, a system note, each with the record number that
-``Session read agent=<label> records=[n]`` opens in full. Tool results and
-reasoning are left out; their record numbers follow their call's.
+AgentSession opens with ``agent=label``, ``action="read"``, and ``records=[n]``.
+Tool results and reasoning are left out; their record numbers follow their call's.
 
 It goes when the watched agent idles, and at once when it compacts, clears,
 fails, or is halted. An idle after work ends it ``[idle: <label> does nothing

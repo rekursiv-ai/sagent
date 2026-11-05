@@ -14,9 +14,13 @@ from treekle import json_dumps, json_loads
 import pytest
 
 from sagent.host import strings
+from sagent.host.daemon import control, fingerprint
+from sagent.host.server import Server
 from sagent.host.settings import HostSettings
 from sagent.host.strings import Listing, ServeDirs, SessionRow
+from sagent.host.wire import DaemonControl
 from sagent.lib.files.owner_only import write_private
+from sagent.lib.posix.sockets import socket_address
 from sagent.settings.harvest import harvest
 
 
@@ -38,25 +42,17 @@ def _actions(dirs: ServeDirs, shown: list[str] | None = None) -> dict[str, Setti
 
 @contextlib.asynccontextmanager
 async def _running(dirs: ServeDirs, shown: list[str]) -> AsyncGenerator[None]:
-    up = asyncio.Event()
-
-    def show(line: str) -> None:
-        shown.append(line)
-        up.set()
-
-    owner = HostSettings(dirs=dirs, show=show)
+    owner = HostSettings(dirs=dirs, show=shown.append)
     serve = {".".join(s.name): s for s in harvest([(("host",), owner)])}["host"]
-    serving = asyncio.ensure_future(
-        serve.apply("--listen 127.0.0.1:0 --tools Read --ttl 90s"),
-    )
-    async with asyncio.timeout(5):
-        _ = await up.wait()
-    try:
+    async with Server(
+        dirs,
+        listen=[],
+        local_socket=socket_address(dirs.state / "daemon.sock"),
+        source_version=fingerprint(),
+    ):
+        async with asyncio.timeout(5):
+            _ = await serve.apply("--listen 127.0.0.1:0 --tools Read --ttl 90s")
         yield
-    finally:
-        serving.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await serving
 
 
 def test_every_verb_is_an_action_the_command_line_reaches(tmp_path: Path) -> None:
@@ -154,7 +150,7 @@ async def test_list_filters_by_token(tmp_path: Path) -> None:
         ("host.add", "", "run sagent host once first"),
         ("host.edit", "tok_none --tools Read", "run sagent host once first"),
         ("host.del", "tok_none", "No string 'tok_none'"),
-        ("host.edit", "tok_none", "the following arguments are required: --tools"),
+        ("host.edit", "tok_none", "--tools or --peer-messaging is required"),
         ("host", "--ttl soon", "'soon' is no duration"),
     ],
 )
@@ -167,6 +163,33 @@ async def test_a_mistake_is_a_setting_error(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         _ = await _actions(_dirs(tmp_path))[verb].apply(args)
+
+
+@pytest.mark.asyncio
+async def test_owner_disables_tls_without_stopping_the_daemon(tmp_path: Path) -> None:
+    dirs = _dirs(tmp_path)
+    async with _running(dirs, []):
+        actions = _actions(dirs)
+        assert await actions["host"].apply("--disable") == ""
+        status = await control(dirs, DaemonControl())
+        assert status.listen == ()
+        assert not status.restarting
+
+
+@pytest.mark.asyncio
+async def test_connection_strings_have_an_explicit_editable_peer_grant(
+    tmp_path: Path,
+) -> None:
+    dirs = _dirs(tmp_path)
+    async with _running(dirs, []):
+        actions = _actions(dirs)
+        _ = await actions["host.add"].apply("--peer-messaging on")
+        (grant,) = strings.listing(dirs).grants
+        assert grant.peer_messaging
+        _ = await actions["host.edit"].apply(f"{grant.id} --peer-messaging off")
+        (edited,) = strings.listing(dirs).grants
+        assert not edited.peer_messaging
+        assert edited.tools == grant.tools
 
 
 if __name__ == "__main__":

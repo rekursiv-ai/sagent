@@ -32,11 +32,12 @@ Tool results and its reasoning are left out. Each `r<n>` is a record number.
 
 ## Dig deeper
 
-- `Session(action="read", agent="<label>", records=[n])` -- the record whole;
-  a call comes with its result.
-- `Session(action="search", agent="<label>", text="...")` -- every record
-  holding the text, compacted windows included.
-- `Session(action="list", agent="<label>")` -- what it sees now.
+Use `AgentSession(agent="<label>", ...)`:
+- `{"action": "read", "records": [n]}` -- the record whole; a call comes
+  with its result.
+- `{"action": "search", "text": "..."}` -- every record holding the text,
+  compacted windows included.
+- `{"action": "list"}` -- what it sees now.
 
 ## Judge by evidence
 

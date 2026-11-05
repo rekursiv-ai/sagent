@@ -67,15 +67,20 @@ __all__ = [
     "Bye",
     "Call",
     "Cancel",
+    "DaemonControl",
+    "DaemonStatus",
     "Describe",
     "Described",
     "Hello",
     "Message",
     "Note",
+    "Pause",
+    "Paused",
     "Peers",
     "Ping",
     "Refused",
     "Result",
+    "Resume",
     "ToolSpec",
     "Tools",
     "ToolsChanged",
@@ -154,12 +159,16 @@ class Welcome:
     tools: Mapping[str, str]
     """The tools granted: each name's ``ToolSpec.digest``."""
 
+    peer_messaging: bool = False
+    """Whether the token also grants cross-session messaging."""
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Refused:
-    """The server's answer to a ``Hello`` it turns away; it closes after."""
+    """A refused handshake, or an identified message rejected by the directory."""
 
     reason: str
+    id: str = ""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -199,9 +208,10 @@ class Note:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Peers:
-    """The agents the host's team holds now, by label: whom a client may message."""
+    """Private team labels, optionally narrowed for cross-session discovery."""
 
     labels: tuple[str, ...]
+    public: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -232,6 +242,42 @@ class Bye:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class DaemonControl:
+    """An owner-only request to inspect, configure, or replace the daemon."""
+
+    source_version: str = ""
+    listen: tuple[str, ...] | None = None
+    tools: tuple[str, ...] | None = None
+    ttl_sec: float | None = None
+    stop: bool = False
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DaemonStatus:
+    """The serving process, its code fingerprint, and enabled TLS listeners."""
+
+    pid: int
+    source_version: str
+    listen: tuple[str, ...]
+    restarting: bool = False
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Pause:
+    """Buffer worker output after acknowledging the daemon's handoff boundary."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Paused:
+    """All preceding worker output has been sent; subsequent output is buffered."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Resume:
+    """Flush buffered worker output and continue on the inherited connection."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Ping:
     """Nothing to say; a peer silent for three pings is gone."""
 
@@ -245,9 +291,10 @@ class Tools:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ToolsChanged:
-    """The tools a client is granted now: each name's ``ToolSpec.digest``."""
+    """The current tool digests and an optional cross-session permission change."""
 
     tools: Mapping[str, str]
+    peer_messaging: bool | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -267,7 +314,9 @@ class Described:
 
 
 type Message = (
-    Hello
+    DaemonControl
+    | DaemonStatus
+    | Hello
     | Welcome
     | Refused
     | Call
@@ -282,9 +331,14 @@ type Message = (
     | Described
     | Note
     | Peers
+    | Pause
+    | Paused
+    | Resume
 )
 
 _KINDS: Final = (
+    DaemonControl,
+    DaemonStatus,
     Hello,
     Welcome,
     Refused,
@@ -300,6 +354,9 @@ _KINDS: Final = (
     Described,
     Note,
     Peers,
+    Pause,
+    Paused,
+    Resume,
 )
 
 

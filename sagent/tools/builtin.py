@@ -14,6 +14,7 @@ from sagent.host.wire import ToolSpec
 from sagent.session.projects import project_dir
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
+from sagent.tools.agent_session import AgentSession
 from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.background_task import BackgroundTask
 from sagent.tools.bash import Bash
@@ -29,7 +30,6 @@ from sagent.tools.paper_search import PaperSearch
 from sagent.tools.play_audio import PlayAudio
 from sagent.tools.read import Read
 from sagent.tools.remote import RemoteTool
-from sagent.tools.session import Session
 from sagent.tools.skill import Skill
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
@@ -70,7 +70,7 @@ TOOLS: Final = (
     "AgentSpawn",
     "AgentSend",
     "AgentSelf",
-    "Session",
+    "AgentSession",
     "Skill",
     "BackgroundTask",
     "RemoteTool",
@@ -117,7 +117,7 @@ def builders(
         "AgentSpawn": lambda: AgentSpawn(team=team),
         "AgentSend": lambda: AgentSend(team=team),
         "AgentSelf": lambda: AgentSelf(team=team),
-        "Session": lambda: Session(team=team),
+        "AgentSession": lambda: AgentSession(team=team),
         "Skill": Skill,
         "BackgroundTask": BackgroundTask,
     }

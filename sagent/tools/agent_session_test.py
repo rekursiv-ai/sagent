@@ -1,4 +1,4 @@
-"""Tests for the Session tool: an agent reading and editing its own session."""
+"""Tests for the AgentSession tool: an agent reading and editing its own session."""
 
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
-from sagent.tools.session import Session
+from sagent.tools.agent_session import AgentSession
 from sagent.tools.types import ToolContext
 
 
@@ -62,7 +62,8 @@ def _setup(
     price: TokenPrice | None = _CACHED,
     compactor: Factory[Shrinker] = SummaryCompactor,
     journal: RecordingJournal | None = None,
-) -> tuple[Agent, Session]:
+    routed: bool = False,
+) -> tuple[Agent, AgentSession]:
     prices = PriceCatalog(
         prices={} if price is None else {PriceCondition(): price},
         window=200_000,
@@ -77,8 +78,10 @@ def _setup(
         factories={"scripted": partial(ScriptedProvider, capability=capability)},
     )
     team = Team(catalog=catalog)
+    tool = AgentSession(team=team)
     agent = Agent(
         model=catalog["scripted"]["priced"],
+        tools=[tool] if routed else [],
         tool_context=ToolContext(cwd=tmp_path),
         compactor=compactor,
         journal=journal,
@@ -96,11 +99,11 @@ def _setup(
         SystemMessage(content="a note"),
         TurnContext(cwd="/w"),
     )
-    return agent, Session(team=team)
+    return agent, tool
 
 
 async def _ask(
-    tool: Session,
+    tool: AgentSession,
     tmp_path: Path,
     arguments: dict[str, PlainTree],
     *,
@@ -109,18 +112,19 @@ async def _ask(
     result = await tool.call(ToolContext(cwd=tmp_path, label=label), arguments)
     # The runtime stamps the call's id; a tool leaves it empty.
     assert (result.call_id, result.is_error) == ("", None)
+    assert result.action == arguments["action"]
     return result.text()
 
 
 @pytest.mark.parametrize(
     ("arguments", "summary", "key"),
     [
-        ({"action": "list"}, "Session list", None),
-        ({"action": "prune", "ids": [3, 7]}, "Session prune 3 7", "*"),
-        ({"action": "compact"}, "Session compact", "*"),
-        ({"action": "clear"}, "Session clear", "*"),
-        ({"action": "read", "ids": "x"}, "Session read", None),
-        ({}, "Session", None),
+        ({"action": "list"}, "AgentSession list", None),
+        ({"action": "prune", "ids": [3, 7]}, "AgentSession prune 3 7", "*"),
+        ({"action": "compact"}, "AgentSession compact", "*"),
+        ({"action": "clear"}, "AgentSession clear", "*"),
+        ({"action": "read", "ids": "x"}, "AgentSession read", None),
+        ({}, "AgentSession", None),
     ],
 )
 def test_the_summary_names_the_action_and_edits_run_alone(
@@ -139,7 +143,7 @@ async def test_a_caller_outside_the_team_is_refused(tmp_path: Path) -> None:
     _, tool = _setup(tmp_path)
     with pytest.raises(
         ValueError,
-        match=r"^Session needs a calling agent in the team\.$",
+        match=r"^AgentSession needs a calling agent in the team\.$",
     ):
         _ = await _ask(tool, tmp_path, {"action": "list"}, label="nobody")
 
@@ -428,24 +432,25 @@ async def test_clear_queues_a_clear_after_the_call(tmp_path: Path) -> None:
 async def test_read_by_record_finds_a_call_with_its_result_in_another_s_session(
     tmp_path: Path,
 ) -> None:
-    _, tool = _setup(tmp_path, journal=RecordingJournal())
+    _, tool = _setup(tmp_path, journal=RecordingJournal(), routed=True)
     watcher = Agent(
         model=ScriptedProvider()["scripted"],
+        tools=[tool],
         tool_context=ToolContext(cwd=tmp_path),
     )
     _ = tool.team.join(watcher, label="watcher")
     tool.team.watch("watcher", "Agent")
-
-    said = await _ask(tool, tmp_path, {"action": "list", "agent": "parent"})
-    read = await _ask(
-        tool,
-        tmp_path,
-        {"action": "read", "agent": "Agent", "records": [1, 1]},
-        label="watcher",
+    said = await tool.call(
+        tool.team["Agent"].runtime.tool_context,
+        {"agent": "parent", "action": "list"},
+    )
+    read = await tool.call(
+        watcher.runtime.tool_context,
+        {"agent": "Agent", "action": "read", "records": [1, 1]},
     )
 
-    assert said == "The context is empty."
-    head, result = read.split("\n\n")
+    assert said.text() == "The context is empty."
+    head, result = read.text().split("\n\n")
     assert head == 'record 1, ToolCall:\nRead {"file_path": "a.py"}'
     assert result.startswith("its result, record 3:\n" + "a" * 100)
     first = await _ask(tool, tmp_path, {"action": "read", "records": [0]})
@@ -494,59 +499,54 @@ async def test_a_read_by_record_or_a_search_decodes_off_the_loop_from_the_first_
         ({"action": "read", "records": [99]}, "No record 99; the session has"),
         ({"action": "read", "records": [14]}, r"^No record 14; the session has 14\.$"),
         ({"action": "read", "records": [-1]}, r"^No record -1; the session has 14\.$"),
-        (
-            {"action": "list", "agent": "children"},
-            r"^'children' names 0 agents; name one\. Agents: Agent, watcher$",
-        ),
-        ({"action": "prune", "agent": "kid", "ids": [2]}, "Only list, read and search"),
+        ({"action": "list", "agent": "kid"}, "names 0 agents"),
     ],
 )
-async def test_another_s_session_is_only_read(
+async def test_direct_session_calls_reject_bad_record_ids_and_target_arguments(
     tmp_path: Path,
     arguments: dict[str, PlainTree],
     match: str,
 ) -> None:
     _, tool = _setup(tmp_path)
-    _ = tool.team.join(
-        Agent(
-            model=ScriptedProvider()["scripted"],
-            tool_context=ToolContext(cwd=tmp_path),
-        ),
-        label="kid",
-        parent="Agent",
-    )
-    _ = tool.team.leave("kid") if arguments.get("agent") == "children" else None
-    _ = tool.team.join(
-        Agent(
-            model=ScriptedProvider()["scripted"],
-            tool_context=ToolContext(cwd=tmp_path),
-        ),
-        label="watcher",
-    )
-
     with pytest.raises(ValueError, match=match):
         _ = await tool.call(ToolContext(cwd=tmp_path, label="Agent"), arguments)
 
 
 @pytest.mark.asyncio
 async def test_list_and_search_reach_a_child_s_session(tmp_path: Path) -> None:
-    _, tool = _setup(tmp_path)
+    _, tool = _setup(tmp_path, routed=True)
     kid = Agent(
         model=ScriptedProvider()["scripted"],
         tool_context=ToolContext(cwd=tmp_path),
     )
     _ = tool.team.join(kid, label="kid", parent="Agent")
     kid.session.append(UserMessage(content="kid's own words"))
-
-    listed = await _ask(tool, tmp_path, {"action": "list", "agent": "kid"})
-    found = await _ask(
-        tool,
-        tmp_path,
-        {"action": "search", "agent": "kid", "text": "own words"},
+    caller = tool.team["Agent"]
+    listed = await tool.call(
+        caller.runtime.tool_context,
+        {"agent": "kid", "action": "list"},
+    )
+    found = await tool.call(
+        caller.runtime.tool_context,
+        {"agent": "kid", "action": "search", "text": "own words"},
     )
 
-    assert listed.startswith("#0 user message")
-    assert found == "record 0, UserMessage: ...kid's own words..."
+    assert listed.text().startswith("#0 user message")
+    assert found.text() == "record 0, UserMessage: ...kid's own words..."
+
+
+@pytest.mark.asyncio
+async def test_search_reaches_an_unrelated_agents_journal(tmp_path: Path) -> None:
+    _, tool = _setup(tmp_path)
+    peer = Agent(model=ScriptedProvider()["scripted"], environment=False)
+    tool.team.join(peer, label="peer")
+    peer.session.append(UserMessage(content="the peer's words"))
+    result = await tool.call(
+        tool.team["Agent"].runtime.tool_context,
+        {"agent": "peer", "action": "search", "text": "words"},
+    )
+    assert result.action == "search"
+    assert "the peer's words" in result.text()
 
 
 if __name__ == "__main__":

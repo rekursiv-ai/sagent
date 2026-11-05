@@ -176,19 +176,54 @@ class Commands:
           settings: Each of ``actions``, run on this agent, then ``watcher``.
 
         """
+        return (
+            [
+                Setting(
+                    name=a.name,
+                    help_short=a.help_short,
+                    help_long=a.help_long,
+                    usage=a.usage,
+                    value=None if a.value is None else partial(a.value, self),
+                    apply=partial(a.run, self),
+                    cli=a.cli,
+                    flags=a.flags,
+                )
+                for a in self.actions()
+            ]
+            + self._watching()
+            + self._peer_messaging()
+        )
+
+    def _peer_messaging(self) -> list[Setting]:
+        team, own = self.team, self._label
+        if team is None or own not in team:
+            return []
+
+        def value() -> str:
+            return "on" if team.peer_messaging(own) else "off"
+
+        async def apply(args: str) -> str:
+            if args not in ("on", "off", "default"):
+                raise SettingError(f"{args!r} is not one of: on, off, default")
+            team.choose(own, "peer-messaging", None if args == "default" else args)
+            return value()
+
+        async def inherit(args: str) -> str:
+            del args
+            return value()
+
         return [
             Setting(
-                name=a.name,
-                help_short=a.help_short,
-                help_long=a.help_long,
-                usage=a.usage,
-                value=None if a.value is None else partial(a.value, self),
-                apply=partial(a.run, self),
-                cli=a.cli,
-                flags=a.flags,
-            )
-            for a in self.actions()
-        ] + self._watching()
+                name=("peer-messaging",),
+                help_short="participate in cross-session discovery and messaging",
+                usage="on|off|default",
+                value=value,
+                options=lambda: ("on", "off", "default"),
+                apply=apply,
+                inherit=inherit,
+                cli=True,
+            ),
+        ]
 
     # Listed with no agent, so the shell knows a command before it builds a model.
     # Each runs ``Commands``' own method, never a subclass's override: the shell lists
