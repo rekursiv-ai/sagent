@@ -442,9 +442,8 @@ def models(package: ModuleType, *, section: str) -> ModelTable:
 
     ``config_dir()/rekursiv-ai/sagent/providers/<section>.yaml`` replaces the
     shipped document, using the same schema and named provider section. Invalid
-    overrides raise rather than falling back. The shipped catalog is read once
-    per section and a user document once per path and section; restart the
-    process to reload an edited document.
+    overrides raise rather than falling back. Catalogs are read once per user
+    path and section; restart the process to reload an edited document.
 
     Args:
       package: The vendor's package, which holds its catalog as
@@ -456,13 +455,14 @@ def models(package: ModuleType, *, section: str) -> ModelTable:
         the vendor does.
 
     """
-    user_path = (
-        config_dir() / "rekursiv-ai" / "sagent" / "providers" / f"{section}.yaml"
-    )
     return _read(
         package.__name__,
         section=section,
-        user_path=user_path if user_path.exists() else None,
+        user_path=config_dir()
+        / "rekursiv-ai"
+        / "sagent"
+        / "providers"
+        / f"{section}.yaml",
     )
 
 
@@ -485,14 +485,26 @@ class HasModels:
 
 
 # Keyed by name: pyrefly rejects a module as a cache key, though it hashes.
-# A missing user document keys as ``None``, so every config dir without one
-# shares the shipped table, while tests give each case its own config dir.
 @cache
-def _read(package: str, *, section: str, user_path: Path | None) -> ModelTable:
-    """Read one section from the user's document, or the shipped one when there is none."""
+def _read(package: str, *, section: str, user_path: Path) -> ModelTable:
+    """Read one section, preferring the user's document over the shipped one."""
+    if user_path.exists():
+        return ModelTable.from_yaml(user_path, section=section)
+    shipped = _shipped(package, section=section)
+    return ModelTable(
+        rows=tuple(
+            replace(row, prices=replace(row.prices, prices=dict(row.prices.prices)))
+            for row in shipped.rows
+        ),
+        roles=shipped.roles,
+    )
+
+
+@cache
+def _shipped(package: str, *, section: str) -> ModelTable:
+    """Read the bundled catalog once, independently of per-user snapshot paths."""
     leaf = package.rpartition(".")[2]
-    path = user_path or files(package) / f"{leaf}.yaml"
-    return ModelTable.from_yaml(path, section=section)
+    return ModelTable.from_yaml(files(package) / f"{leaf}.yaml", section=section)
 
 
 def _choices() -> tuple[ModelSettingName, ...]:

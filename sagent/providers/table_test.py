@@ -24,12 +24,16 @@ from sagent.model.capability import (
 )
 from sagent.model.cost import PriceCatalog, PriceCondition, TokenPrice
 from sagent.model.exceptions import UnknownModelError, UnsupportedTagError
-from sagent.providers import anthropic
+from sagent.providers import (
+    anthropic,
+    table as provider_table,
+)
 from sagent.providers.table import HasModels, ModelTable, ModelTags, models
 
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from importlib.resources.abc import Traversable
     from pathlib import Path
 
 
@@ -1471,18 +1475,59 @@ def test_models_reads_a_packages_own_catalog_once() -> None:
     assert table["default"].model_id in table
 
 
-def test_every_config_dir_without_a_catalog_shares_the_shipped_one(
+def test_every_config_dir_without_a_catalog_shares_immutable_shipped_facts(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     table = models(anthropic, section="anthropic-cli")
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "elsewhere"))
-    assert models(anthropic, section="anthropic-cli") is table
+    monkeypatch.setattr(provider_table, "config_dir", lambda: tmp_path / "elsewhere")
+    other = models(anthropic, section="anthropic-cli")
+    assert other == table
+    assert other.rows[0].limits is table.rows[0].limits
+    assert other.rows[0].prices.prices is not table.rows[0].prices.prices
 
 
 def test_models_refuses_a_section_the_catalog_lacks() -> None:
     with pytest.raises(ValueError, match="no section 'nowhere'"):
         models(anthropic, section="nowhere")
+
+
+def test_absent_user_catalogs_reuse_the_shipped_parse_without_sharing_prices(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loaded: list[str] = []
+    original = ModelTable.from_yaml
+
+    def counted(path: Traversable, *, section: str) -> ModelTable:
+        loaded.append(str(path))
+        return original(path, section=section)
+
+    monkeypatch.setattr(ModelTable, "from_yaml", counted)
+    first = models(anthropic, section="anthropic-cli")
+    before = list(loaded)
+    monkeypatch.setattr(provider_table, "config_dir", lambda: tmp_path)
+    second = models(anthropic, section="anthropic-cli")
+    assert loaded == before
+    assert first == second
+    assert second is models(anthropic, section="anthropic-cli")
+    prices = first.rows[0].prices.prices
+    assert isinstance(prices, dict)
+    condition = next(iter(prices))
+    original_price = prices[condition]
+    try:
+        prices[condition] = replace(original_price, request=original_price.request + 1)
+        assert second.rows[0].prices.prices[condition] == original_price
+    finally:
+        prices[condition] = original_price
+
+
+def test_a_catalog_added_after_the_first_lookup_waits_for_restart() -> None:
+    table = models(anthropic, section="anthropic-cli")
+    path = config_dir() / "rekursiv-ai" / "sagent" / "providers" / "anthropic-cli.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text("invalid after the catalog was first read")
+    assert models(anthropic, section="anthropic-cli") is table
 
 
 class _Served(HasModels):
