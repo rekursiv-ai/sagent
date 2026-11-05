@@ -10,7 +10,6 @@ from urllib.parse import parse_qs, urlparse
 
 import asyncio
 import base64
-import builtins
 import fcntl
 import hashlib
 import os
@@ -418,7 +417,7 @@ class _Paster:
     def show(self, text: str) -> None:
         self.shown.append(text)
 
-    def input(self, prompt: str = "") -> str:
+    async def input(self, prompt: str = "") -> str:
         del prompt
         query = parse_qs(urlparse(_shown_url(self.shown)).query)
         return self.pasted(query["state"][0], query["code_challenge"][0])
@@ -485,7 +484,7 @@ def _no_browser(url: str) -> bool:
     raise AssertionError(url)
 
 
-def _pasted_c(prompt: str = "") -> str:
+async def _pasted_c(prompt: str = "") -> str:
     """Paste sign-in ``s``'s code ``c``."""
     del prompt
     return "c#s"
@@ -524,7 +523,7 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
         return f"http://localhost:1455/auth/callback?code=the-code&state={state}"
 
     paster = _Paster(pasted=pasted)
-    monkeypatch.setattr(builtins, "input", paster.input)
+    monkeypatch.setattr("sagent.providers.login.read_login_input", paster.input)
     access = _token("signed-in", account="acct-9")
     server = _Server(
         replies=[
@@ -601,7 +600,7 @@ async def test_a_pasted_code_must_belong_to_this_sign_in(
     message: str,
 ) -> None:
     paster = _Paster(pasted=pasted)
-    monkeypatch.setattr(builtins, "input", paster.input)
+    monkeypatch.setattr("sagent.providers.login.read_login_input", paster.input)
     server = _Server(replies=[])
     async with _Served(server) as shared:
         with pytest.raises(AuthError, match=message):
@@ -616,7 +615,7 @@ async def test_a_pasted_code_and_state_alone_are_enough(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     paster = _Paster(pasted=_hashed)
-    monkeypatch.setattr(builtins, "input", paster.input)
+    monkeypatch.setattr("sagent.providers.login.read_login_input", paster.input)
     server = _Server(
         replies=[_reply({"access_token": _token("x"), "refresh_token": "r"})],
     )
@@ -641,11 +640,11 @@ async def test_sign_in_takes_the_browsers_code_without_a_paste(
         visits.append(asyncio.create_task(visit(listened.bound[0], target)))
         return True
 
-    def no_paste(prompt: str = "") -> str:
+    async def no_paste(prompt: str = "") -> str:
         raise AssertionError(prompt)
 
     monkeypatch.setattr(login, "open_browser", open_in_browser)
-    monkeypatch.setattr(builtins, "input", no_paste)
+    monkeypatch.setattr("sagent.providers.login.read_login_input", no_paste)
     server = _Server(
         replies=[_reply({"access_token": _token("x"), "refresh_token": "r"})],
     )
@@ -706,7 +705,7 @@ async def test_a_browser_that_never_redirects_gives_way_to_a_paste(
 
     monkeypatch.setattr(login, "open_browser", _nowhere)
     monkeypatch.setattr(asyncio, "wait_for", wait_for)
-    monkeypatch.setattr(builtins, "input", _pasted_c)
+    monkeypatch.setattr("sagent.providers.login.read_login_input", _pasted_c)
     shown: list[str] = []
     code = await login._code(
         "https://sign.in",
@@ -732,7 +731,7 @@ async def test_a_browser_sign_in_gives_way_when_its_port_is_taken(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(login, "open_browser", _no_browser)
-    monkeypatch.setattr(builtins, "input", _pasted_c)
+    monkeypatch.setattr("sagent.providers.login.read_login_input", _pasted_c)
     shown: list[str] = []
     with socket.socket() as taken:
         taken.bind(("127.0.0.1", 0))

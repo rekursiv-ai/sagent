@@ -71,6 +71,7 @@ from sagent.tui.settings.model import AgentModel
 from sagent.tui.settings.runtime import RuntimeSettings
 from sagent.tui.settings.screen import ScreenSettings
 from sagent.tui.settings.tool import ToolDisplaySettings
+from sagent.tui.theme import ThemeState
 from sagent.tui.types import CommandOutput
 
 
@@ -100,8 +101,8 @@ logger = logging.getLogger(__name__)
 # Relations ``/send`` and ``/LABEL.NAME`` resolve from the agent the commands act on.
 _RELATIONS = frozenset({"parent", "children", "ancestors", "descendants"})
 
-# Settings of one agent alone, never rolled down to its children.
-_OWN = frozenset({("watcher",)})
+# Settings of one agent or terminal alone, never rolled down to its children.
+_OWN = frozenset({("watcher",), ("screen", "theme")})
 
 
 class Commands:
@@ -117,6 +118,7 @@ class Commands:
       focus: Shows the agent a label names, for ``/focus``; ``None`` where
         there is no screen to show it.
       screens: Each agent's screen settings, by label; ``None`` shares ``screen``.
+      theme: The terminal's color theme, shared across agent views.
 
     """
 
@@ -131,7 +133,9 @@ class Commands:
         team: Team | None = None,
         focus: Callable[[str], None] | None = None,
         screens: Callable[[str], ThinkingView] | None = None,
+        theme: ThemeState | None = None,
     ) -> None:
+        self.theme = theme if theme is not None else ThemeState()
         self.agent = agent
         self.team = team
         self.catalog = catalog
@@ -162,7 +166,7 @@ class Commands:
                 for name in tools
             ),
             (("runtime",), RuntimeSettings(runtime=self.agent.runtime)),
-            (("screen",), ScreenSettings(view=self.screen)),
+            (("screen",), ScreenSettings(view=self.screen, theme=self.theme)),
             *owners_without_agent(
                 cwd=self.agent.runtime.tool_context.origin,
                 say=self.say,
@@ -400,7 +404,9 @@ class Commands:
         if not args and setting.value is not None:
             self._say("note", _valued(setting.value, setting.options), command=shown)
             return
-        rolls = setting.value is not None and setting.name not in _OWN
+        rolls = setting.value is not None and not any(
+            setting.name[: len(own)] == own for own in _OWN
+        )
         given = self._given(key) if rolls and args == "default" else None
         chosen = args if given is None else given
         if not await apply_setting(setting, chosen, say=self.say):
@@ -558,6 +564,7 @@ class Commands:
                 team=team,
                 focus=self.focus,
                 screens=self.screens,
+                theme=self.theme,
             )
             await commands.inherit()
         return commands
@@ -631,6 +638,10 @@ class Commands:
         provider = self.agent.model.provider
         if not isinstance(provider, HasLogin):
             raise SettingError(f"{provider.name} has no interactive sign-in")
+        if self.catalog.account is not None and not isinstance(provider, HasLogins):
+            raise SettingError(
+                f"{provider.name} supports only the default account; use /account default",
+            )
         given = cast("bool | None", parsed.headless)
         headless = headless_wanted(os.environ, given=given)
         # A pasted code from another sign-in, or no answer at the prompt at all.

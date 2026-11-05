@@ -116,6 +116,7 @@ from sagent.tui.console import ConsolePrinter
 from sagent.tui.prompt import Input, Panes, PromptSource, prompt_text
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.slash import Commands
+from sagent.tui.theme import Theme, ThemeState
 from sagent.tui.types import CommandOutput, Frame, Header
 from sagent.tui.views import Views
 
@@ -578,6 +579,7 @@ class _TreeViews:
 
     lineage: tuple[str, ...] = ("Agent", "a")
     current: _Shown = field(default_factory=_Shown)
+    theme: ThemeState = field(default_factory=ThemeState)
     released: list[bool] = field(default_factory=list[bool])
     focused: list[str] = field(default_factory=list[str])
     asked: list[dict[str, object]] = field(default_factory=list[dict[str, object]])
@@ -625,7 +627,12 @@ async def test_the_tree_shows_the_agent_picked_or_the_one_before(
     await main._tree(cast("Views", views))
     assert (views.released, views.focused) == (released, focused)
     assert views.asked == [
-        {"focused": "Agent", "stop": views.stop, "cancel": views.cancel},
+        {
+            "focused": "Agent",
+            "stop": views.stop,
+            "cancel": views.cancel,
+            "theme": views.theme.current,
+        },
     ]
 
 
@@ -1777,8 +1784,8 @@ def test_without_an_allow_list_every_provider_is_offered(
     assert list(script.catalogs[0].factories) == ["scripted", "deep", "signing"]
 
 
-def _no_welcome(*, folder: Path) -> None:
-    del folder
+def _no_welcome(*, folder: Path, theme: Theme | None = None) -> None:
+    del folder, theme
 
 
 def _no_tools(flags: main.Flags, **kwargs: object) -> list[Tool]:
@@ -1935,7 +1942,8 @@ def test_an_interactive_run_opens_the_prompt_and_names_the_model(
     _quick_prints(monkeypatch)
     welcomed: list[Path] = []
 
-    def welcome(*, folder: Path) -> None:
+    def welcome(*, folder: Path, theme: Theme | None = None) -> None:
+        del theme
         welcomed.append(folder)
 
     monkeypatch.setattr(main, "print_welcome", welcome)
@@ -2230,8 +2238,9 @@ def test_an_interactive_session_runs_on_its_team_signed_in_and_waits_out_limits(
         team: Team,
         history: Path | None,
         show_thinking: bool,
+        theme: ThemeState,
     ) -> None:
-        del catalog, show_thinking
+        del catalog, show_thinking, theme
         ran.append((agent.runtime.persistent_retry, team["lead"] is agent, history))
 
     monkeypatch.chdir(tmp_path)
@@ -3449,8 +3458,14 @@ async def test_a_write_to_stderr_during_a_session_names_the_call_again(
     labels: list[str] = []
 
     class _Kept(ConsolePrinter):
-        def __init__(self, console: Console, *, show_thinking: bool = False) -> None:
-            super().__init__(console, show_thinking=show_thinking)
+        def __init__(
+            self,
+            console: Console,
+            *,
+            show_thinking: bool = False,
+            theme: ThemeState | None = None,
+        ) -> None:
+            super().__init__(console, show_thinking=show_thinking, theme=theme)
             made.append(self)
 
         @override
@@ -3806,7 +3821,8 @@ def test_an_interactive_resume_picks_and_logs_at_the_level_asked(
     _quick_prints(monkeypatch)
     welcomed: list[Path] = []
 
-    def welcome(*, folder: Path) -> None:
+    def welcome(*, folder: Path, theme: Theme | None = None) -> None:
+        del theme
         welcomed.append(folder)
 
     monkeypatch.setattr(main, "print_welcome", welcome)
@@ -3891,11 +3907,11 @@ async def test_the_prompt_session_wears_the_screen_s_settings_for_the_agent_show
     assert isinstance(session.history, FileHistory)
     assert session.history.filename == str(tmp_path / "h")
     assert session.style is not None
-    assert session.style.style_rules == [
-        ("bottom-toolbar", "fg:ansibrightblack noreverse bg:default"),
-        ("queued_input_pane", "fg:ansibrightblack"),
-        ("input_pane", "bold"),
-    ]
+    assert session.style.style_rules == views.theme.current.prompt_style().style_rules
+    assert session.style.get_attrs_for_style_str("class:bottom-toolbar").bgcolor in (
+        "",
+        "default",
+    )
     keys, message = session.key_bindings, session.message
     assert keys is not None
     assert callable(message)
@@ -5277,6 +5293,87 @@ async def test_peer_setting_validates_and_inherits_without_pinning_a_choice() ->
     assert await setting.inherit("off") == "on"
     assert team.choices == {}
     await commands.aclose()
+
+
+def test_theme_flag_reaches_the_welcome_and_live_slash_setting(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    welcomed: list[tuple[Path, str]] = []
+
+    def welcome(*, folder: Path, theme: Theme | None = None) -> None:
+        assert theme is not None
+        welcomed.append((folder, theme.name))
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main, "print_welcome", welcome)
+    _argv(
+        monkeypatch,
+        "--ephemeral",
+        "--screen.theme",
+        "light",
+        "--history",
+        str(tmp_path / "history"),
+    )
+    _stdin(monkeypatch, tty=True)
+    _quick_prints(monkeypatch)
+    screen = io.StringIO()
+    with (
+        create_pipe_input() as pipe,
+        create_app_session(input=pipe, output=PlainTextOutput(screen)),
+    ):
+        pipe.send_text(
+            "/screen.theme\r/screen.theme dark\r/screen.theme default\r/quit\r",
+        )
+        assert main.main() == 0
+    assert welcomed == [(tmp_path, "light")]
+    shown = screen.getvalue()
+    assert "[/screen.theme] light   (" in shown
+    assert "[/screen.theme] dark" in shown
+    assert "[/screen.theme] default" in shown
+    del script
+
+
+def test_invalid_theme_flag_is_a_setting_error_without_running_the_model(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _argv(monkeypatch, "--ephemeral", "--screen.theme", "../elsewhere")
+    _stdin(monkeypatch, "not sent")
+    assert main.main() == 1
+    assert "[--screen.theme]" in capsys.readouterr().err
+    assert script.providers["scripted"].requests == []
+
+
+@pytest.mark.asyncio
+async def test_prompt_styles_follow_slash_changes_without_rebuilding_the_session(
+    tmp_path: Path,
+) -> None:
+    root = Agent(model=ScriptedProvider()["scripted"])
+    theme = ThemeState()
+    views = Views(
+        root,
+        team=None,
+        printer=RecordingPrinter(),
+        catalog=_Script().catalog(),
+        theme=theme,
+    )
+    with (
+        create_pipe_input() as pipe,
+        create_app_session(input=pipe, output=DummyOutput()),
+    ):
+        session = main._prompt_session(views, entry=Input(), history=tmp_path / "h")
+        assert session.style is not None
+        before = session.style.get_attrs_for_style_str("")
+        await views.current.commands("/screen.theme light")
+        after = session.style.get_attrs_for_style_str("")
+        assert after != before
+        assert after == theme.current.prompt_style().get_attrs_for_style_str("")
+        await views.current.commands("/screen.theme default")
+        assert session.style.get_attrs_for_style_str("") == before
+    await views.aclose()
 
 
 if __name__ == "__main__":

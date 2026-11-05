@@ -6,19 +6,23 @@ from datetime import date
 from functools import partial
 from pathlib import Path
 from random import Random
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import time
 
 from sagent.tui.holiday import holiday_icon, icon_rows
+from sagent.tui.theme import load_theme
 from sagent.tui.types import fill
 
+
+_BRAND_BLUE: Final = "#4a90c4"
 
 if TYPE_CHECKING:
     from rich.console import Console
     from rich.text import Text
 
     from sagent.tui.holiday import Icon
+    from sagent.tui.theme import Theme
 else:
     from wrapt import lazy_import
 
@@ -31,6 +35,7 @@ def print_welcome(
     model: str = "",
     provider: str = "",
     folder: Path,
+    theme: Theme | None = None,
 ) -> None:
     """Print identity and help before credentials or prompt-toolkit are needed.
 
@@ -38,6 +43,7 @@ def print_welcome(
       model: The model line; empty before one is configured.
       provider: The provider serving it.
       folder: The project directory.
+      theme: Frame, metadata, and help styles; artwork keeps its own palette.
 
     """
     render_welcome(
@@ -45,6 +51,7 @@ def print_welcome(
         model=model,
         provider=provider,
         folder=folder,
+        theme=theme,
         icon=holiday_icon(
             date(*time.localtime()[:3]),
             rng=Random(),  # noqa: S311 -- Picks a picture, not a secret.
@@ -52,9 +59,8 @@ def print_welcome(
     )
 
 
-# Text cells only: no image protocol or extra font required. Only a holiday
-# icon sets a background color, packing two pixels into one cell.
-# The blue is slightly darker than the logo reference to work on light terminals.
+# Text cells only: no image protocol or extra font required. Holiday
+# backgrounds pack two artwork pixels into one cell.
 def render_welcome(
     console: Console,
     *,
@@ -62,9 +68,7 @@ def render_welcome(
     provider: str = "",
     folder: Path,
     icon: Icon | None = None,
-    blue: str = "#4a90c4",
-    green: str = "#93c47d",
-    red: str = "#e06666",
+    theme: Theme | None = None,
     padding: int = 2,
 ) -> None:
     """Render a width-aware welcome without performing any model request.
@@ -82,9 +86,7 @@ def render_welcome(
       icon: A holiday icon to show in place of the logo. Terminals without 256
         colors, or with NO_COLOR set, keep the logo: the icon's shape is
         drawn in its colors.
-      blue: The wordmark's color, and the first bar's.
-      green: The second bar's color.
-      red: The third bar's color.
+      theme: Frame, metadata, and help styles; artwork keeps its own palette.
       padding: Columns between the frame's sides and its content.
 
     """
@@ -92,14 +94,12 @@ def render_welcome(
         if model:
             console.print(Text(f"[{provider}] {model}"))
         return
+    theme = theme or load_theme("terminal")
     unicode_ok = _supports_blocks(console.encoding)
     frame_width = fill(0, total_padding=0, width=console.width)
     many_colors = console.color_system in {"256", "truecolor"} and not console.no_color
     banner = _banner_rows(
-        icon=icon_rows(icon)
-        if icon and many_colors
-        else _logo_rows(blue=blue, green=green, red=red),
-        blue=blue,
+        icon=icon_rows(icon) if icon and many_colors else _logo_rows(),
     )
     large = (
         not console.is_dumb_terminal
@@ -115,16 +115,22 @@ def render_welcome(
         framed=framed,
         unicode_ok=unicode_ok,
         padding=padding,
+        theme=theme,
     )
     console.print()
     if framed:
         left, horizontal, right = ("╭", "─", "╮") if unicode_ok else ("+", "-", "+")
-        console.print(Text(left + horizontal * (frame_width - 2) + right, style="dim"))
+        console.print(
+            Text(
+                left + horizontal * (frame_width - 2) + right,
+                style=theme.style("muted"),
+            ),
+        )
         print_rows([Text()])
     if large:
         print_rows(banner)
     else:
-        print_rows([Text("SAGENT", style=f"bold {blue}")])
+        print_rows([Text("SAGENT", style=f"bold {_BRAND_BLUE}")])
     print_rows([Text()])
     # Keep metadata inside the terminal frame.
     # Never crop a model ID; long IDs/providers fold normally. Folder paths
@@ -149,23 +155,32 @@ def render_welcome(
         metadata = [("model", combined)]
     metadata.append(("project", display_folder))
     for label, value in metadata:
-        row = Text(f"{label:<10}", style="dim")
-        row.append(value, style="not dim")
+        row = Text()
+        row.append(f"{label:<10}", style=theme.style("muted"))
+        row.append(value, style=theme.style("text"))
         print_rows([row])
     print_rows([Text()])
-    print_rows(_command_rows(max(1, content_width), unicode_ok=unicode_ok))
+    print_rows(_command_rows(max(1, content_width), unicode_ok=unicode_ok, theme=theme))
     if framed:
         print_rows([Text()])
         left, horizontal, right = ("╰", "─", "╯") if unicode_ok else ("+", "-", "+")
-        console.print(Text(left + horizontal * (frame_width - 2) + right, style="dim"))
+        console.print(
+            Text(
+                left + horizontal * (frame_width - 2) + right,
+                style=theme.style("muted"),
+            ),
+        )
     console.print()
-    greeting = Text("Good news, everyone! The discovering begins.")
+    greeting = Text(
+        "Good news, everyone! The discovering begins.",
+        style=theme.style("text"),
+    )
     for line in greeting.wrap(console, frame_width):
         console.print(line)
     console.print()
 
 
-def _banner_rows(*, icon: list[Text], blue: str) -> list[Text]:
+def _banner_rows(*, icon: list[Text]) -> list[Text]:
     """Return the icon beside the wordmark, one row per banner line, all one width."""
     wordmark = (
         "███████╗ █████╗  ██████╗ ███████╗███╗   ██╗████████╗",
@@ -182,7 +197,7 @@ def _banner_rows(*, icon: list[Text], blue: str) -> list[Text]:
         lettering = icon_row.copy()
         lettering.append(" " * (icon_width - icon_row.cell_len + 3))
         for char in letters:
-            style = f"dim {blue}" if char in "╔╗╚╝═║" else blue
+            style = f"dim {_BRAND_BLUE}" if char in "╔╗╚╝═║" else _BRAND_BLUE
             lettering.append(char, style=style)
         # Keep the lockup rectangular, including its final alignment row.
         lettering.append(" " * (width - lettering.cell_len))
@@ -190,7 +205,7 @@ def _banner_rows(*, icon: list[Text], blue: str) -> list[Text]:
     return rows
 
 
-def _logo_rows(*, blue: str, green: str, red: str) -> list[Text]:
+def _logo_rows() -> list[Text]:
     """Return the document-loop logo, with its three colored bars."""
     # Terminal adaptation of the supplied document-loop icon, with its three bars.
     logo = (
@@ -205,11 +220,11 @@ def _logo_rows(*, blue: str, green: str, red: str) -> list[Text]:
     for row_index, logo_row in enumerate(logo):
         row = Text()
         for char in logo_row:
-            # Box glyphs share the wordmark's regular face. Some terminal bold
-            # faces lack them; the double-line shape supplies their weight.
-            style = "not bold"
+            # Some terminal bold faces lack box glyphs.
+            style = "not bold #808080"
             if char == "█" and 2 <= row_index <= 4:
-                style = f"bold {(blue, green, red)[row_index - 2]}"
+                color = (_BRAND_BLUE, "#93c47d", "#e06666")[row_index - 2]
+                style = f"bold {color}"
             row.append(char, style=style)
         rows.append(row)
     return rows
@@ -223,6 +238,7 @@ def _print_framed(
     framed: bool,
     unicode_ok: bool,
     padding: int,
+    theme: Theme,
 ) -> None:
     """Print ``rows`` inside a quiet border, wrapped to terminal cell widths."""
     if not framed:
@@ -234,16 +250,16 @@ def _print_framed(
     for row in rows:
         for line in row.wrap(console, content_width, overflow="fold") or [Text()]:
             framed_line = Text()
-            framed_line.append(side + " " * padding, style="dim")
+            framed_line.append(side + " " * padding, style=theme.style("muted"))
             framed_line.append_text(line)
             framed_line.append(
                 " " * (content_width - line.cell_len + padding) + side,
-                style="dim",
+                style=theme.style("muted"),
             )
             console.print(framed_line)
 
 
-def _command_rows(width: int, *, unicode_ok: bool) -> list[Text]:
+def _command_rows(width: int, *, unicode_ok: bool, theme: Theme) -> list[Text]:
     """Keep each command beside its description when the terminal is narrow."""
     commands = (
         ("/help", "commands"),
@@ -258,9 +274,10 @@ def _command_rows(width: int, *, unicode_ok: bool) -> list[Text]:
     rows: list[Text] = []
     row = Text()
     for command, description in commands:
-        item = Text(command, style="bold")
+        item = Text()
+        item.append(command, style=theme.style("heading"))
         if show_descriptions:
-            item.append(" " + description, style="dim not bold")
+            item.append(" " + description, style=theme.style("muted"))
         if row and row.cell_len + 3 + item.cell_len > width:
             rows.append(row)
             row = Text()

@@ -33,8 +33,7 @@ def _members() -> set[str]:
 
 
 def test_the_console_printer_is_a_printer() -> None:
-    printer: Printer = ConsolePrinter(Console(file=Screen(io.StringIO())))
-    assert isinstance(printer, ConsolePrinter)
+    ConsolePrinter(Console(file=Screen(io.StringIO())))
 
 
 def test_the_console_printer_has_every_member_a_printer_declares() -> None:

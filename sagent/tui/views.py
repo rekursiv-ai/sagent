@@ -36,6 +36,7 @@ from sagent.tui.render import Scrollback, error_text
 from sagent.tui.replay import replay
 from sagent.tui.slash import Commands
 from sagent.tui.status import Status
+from sagent.tui.theme import ThemeState
 
 
 if TYPE_CHECKING:
@@ -89,6 +90,7 @@ class Views:
       catalog: Where each view's model settings find models.
       commands: Builds each view's commands.
       switched: Called after the focus moves.
+      theme: The terminal's theme, shared across agent views.
 
     """
 
@@ -101,7 +103,9 @@ class Views:
         catalog: ModelCatalog,
         commands: Callable[..., Commands] = Commands,
         switched: Callable[[], None] = lambda: None,
+        theme: ThemeState | None = None,
     ) -> None:
+        self.theme = theme if theme is not None else ThemeState()
         self.team = team
         self.printer = printer
         self.catalog = catalog
@@ -336,6 +340,7 @@ class Views:
                 team=self.team,
                 focus=self.focus,
                 screens=self.screen,
+                theme=self.theme,
             ),
             uncommit=commit_panes(runtime, panes),
         )

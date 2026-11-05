@@ -23,12 +23,14 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import Team
+from sagent.lib.userdirs import config_dir
 from sagent.model.scripted import ScriptedProvider, call, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.session.types import UncategorizedToolResult, UserMessage
 from sagent.tools.display import ToolDisplay
 from sagent.tui import tree
 from sagent.tui.prompt import repaint_on_change
+from sagent.tui.theme import load_theme
 from sagent.tui.tree import Row, pick, render, rows
 
 
@@ -36,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from sagent.tools.types import ToolContext
+    from sagent.tui.theme import Theme
 
 
 @dataclass(slots=True, kw_only=True)
@@ -213,7 +216,7 @@ def test_the_cursor_row_is_reversed_and_long_text_is_cut() -> None:
 
     styles = [part[0] for part in lines if part[1].strip()]
     texts = [part[1] for part in lines]
-    assert styles[:2] == ["", "reverse"]
+    assert styles == ["", "class:tree.selected", "class:tree.help"]
     assert texts[0] == f" {'a':<72}  idle         $0.00 "
     assert texts[2] == f" {'└─ ' + 'b' * 68}…  busy         $1.00 "
     assert texts[-1].endswith("→ back · stopping b\n")
@@ -228,11 +231,11 @@ def test_short_rows_draw_at_least_32_wide_and_a_full_row_is_not_cut() -> None:
         cursor=0,
     ) == FormattedText(
         [
-            ("reverse", f" {'a':<33}  idle               "),
+            ("class:tree.selected", f" {'a':<33}  idle               "),
             ("", "\n"),
             ("", f" {'b' * 33}  idle               "),
             ("", "\n"),
-            ("fg:ansibrightblack", "\n ↑↓ move · Enter focus · Del stop · → back\n"),
+            ("class:tree.help", "\n ↑↓ move · Enter focus · Del stop · → back\n"),
         ],
     )
     (first, *_) = render(
@@ -244,7 +247,7 @@ def test_short_rows_draw_at_least_32_wide_and_a_full_row_is_not_cut() -> None:
 
 def test_with_no_rows_only_the_keys_are_drawn() -> None:
     assert render([], cursor=0) == FormattedText(
-        [("fg:ansibrightblack", "\n ↑↓ move · Enter focus · Del stop · → back\n")],
+        [("class:tree.help", "\n ↑↓ move · Enter focus · Del stop · → back\n")],
     )
 
 
@@ -297,6 +300,7 @@ async def _drawn(
     then: Callable[[], None] | None = None,
     painted: asyncio.Event | None = None,
     team_leaves: bool = False,
+    theme: Theme | None = None,
 ) -> tuple[str, str]:
     """Return what ``pick`` writes to a terminal before ``keys``, and in all."""
     written = StringIO()
@@ -304,7 +308,13 @@ async def _drawn(
     said = _Said(team=team if team_leaves else None)
     with create_pipe_input() as pipe, create_app_session(input=pipe, output=output):
         picking = asyncio.ensure_future(
-            pick(team, focused=focused, stop=said.stop, cancel=said.cancel),
+            pick(
+                team,
+                focused=focused,
+                stop=said.stop,
+                cancel=said.cancel,
+                theme=theme,
+            ),
         )
         if then is not None:
             assert painted is not None
@@ -359,6 +369,24 @@ async def test_the_tree_takes_the_full_screen_with_the_cursor_hidden() -> None:
     assert "\x1b[?25h" not in shown
     assert closed.endswith("\x1b[?25h")
     assert opened
+
+
+@pytest.mark.asyncio
+async def test_custom_theme_colors_reach_the_live_picker() -> None:
+    path = config_dir() / "rekursiv-ai" / "sagent" / "themes" / "tree-test.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _ = path.write_text(
+        "preset: terminal\nstyles:\n  selected: magenta\n  status: cyan\n",
+    )
+    _, drawn = await _drawn(
+        _team(),
+        _RIGHT,
+        focused="kid",
+        theme=load_theme("tree-test"),
+    )
+    assert "\x1b[0;35m ├─ ● kid " in drawn
+    assert "\x1b[0;36m" in drawn
+    assert "↑↓ move" in drawn
 
 
 @pytest.mark.asyncio

@@ -7,10 +7,13 @@ import re
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.style import Style
 
 import pytest
 
+from sagent.lib.userdirs import config_dir
 from sagent.tui.markdown import TightMarkdown, stable_boundary
+from sagent.tui.theme import load_theme
 from sagent.tui.types import Sticky
 
 
@@ -42,9 +45,9 @@ def _bare(rendered: str) -> str:
 
 def _ansi(markdown: Markdown) -> str:
     out = io.StringIO()
-    Console(file=out, width=80, color_system="truecolor", force_terminal=True).print(
-        markdown,
-    )
+    console = Console(file=out, width=80, color_system="truecolor", force_terminal=True)
+    with console.use_theme(load_theme().rich_theme()):
+        console.print(markdown)
     # Each hyperlink gets a random id; the link itself is what must match.
     return re.sub(r"id=\d+;", "id=;", out.getvalue())
 
@@ -197,7 +200,10 @@ def _edges(text: str, *, width: int = 200) -> set[int]:
     """Return the columns where the rows painted with a background end."""
     console = Console(file=io.StringIO(), width=width, color_system="truecolor")
     ends: set[int] = set()
-    for line in console.render_lines(TightMarkdown(text), console.options):
+    for line in console.render_lines(
+        TightMarkdown(text, code_theme="monokai"),
+        console.options,
+    ):
         column = end = 0
         for segment in line:
             column += segment.cell_length
@@ -271,6 +277,79 @@ def test_the_stable_boundary_is_where_the_last_block_starts(
 
 def test_a_nested_block_is_not_a_boundary() -> None:
     assert stable_boundary("- a\n\n  nested\n") == 0
+
+
+@pytest.mark.parametrize("language", ["python", "text", "unknown-language"])
+def test_terminal_code_inherits_terminal_background(language: str) -> None:
+    console = Console(file=io.StringIO(), color_system="truecolor")
+    segments = list(
+        console.render(
+            TightMarkdown(
+                f"```{language}\nx = 1\n```",
+                theme=load_theme("terminal"),
+            ),
+        ),
+    )
+    assert any("x" in segment.text for segment in segments)
+    assert all(
+        segment.style is None or segment.style.bgcolor is None for segment in segments
+    )
+    assert all(
+        segment.style is None
+        or segment.style.color is None
+        or segment.style.color.is_system_defined
+        for segment in segments
+    )
+
+
+@pytest.mark.parametrize("language", ["python", "text", "unknown-language"])
+def test_custom_theme_reaches_prose_inline_and_fenced_code(language: str) -> None:
+    themes = config_dir() / "rekursiv-ai" / "sagent" / "themes"
+    themes.mkdir(parents=True)
+    (themes / "custom.yaml").write_text(
+        "preset: terminal\nstyles:\n  text: magenta\n  keyword: blue\n  number: cyan\n",
+    )
+    console = Console(file=io.StringIO(), color_system="truecolor")
+    markdown = TightMarkdown(
+        f"ordinary `inline`\n\n```{language}\nsample\n```",
+        theme=load_theme("custom"),
+    )
+    segments = list(console.render(markdown))
+    for word in ("ordinary", "inline", "sample"):
+        selected = [segment for segment in segments if word in segment.text]
+        assert selected
+        assert all(
+            segment.style is not None
+            and segment.style.color == Style.parse("magenta").color
+            for segment in selected
+        )
+    assert console.get_style("markdown.code") != load_theme("custom").style("code")
+
+
+def test_fenced_and_inline_lexers_use_semantic_token_roles() -> None:
+    themes = config_dir() / "rekursiv-ai" / "sagent" / "themes"
+    themes.mkdir(parents=True)
+    (themes / "syntax.yaml").write_text(
+        "preset: terminal\nstyles:\n  keyword: magenta\n  number: cyan\n",
+    )
+    console = Console(file=io.StringIO(), color_system="truecolor")
+    segments = list(
+        console.render(
+            TightMarkdown(
+                "`return 1`\n\n```python\nreturn 1\n```",
+                theme=load_theme("syntax"),
+                inline_code_lexer="python",
+            ),
+        ),
+    )
+    for word, color in (("return", "magenta"), ("1", "cyan")):
+        matching = [segment for segment in segments if word in segment.text]
+        assert len(matching) == 2
+        assert all(
+            segment.style is not None
+            and segment.style.color == Style.parse(color).color
+            for segment in matching
+        )
 
 
 if __name__ == "__main__":

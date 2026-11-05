@@ -40,6 +40,7 @@ from rich.style import Style as RichStyle
 from rich.syntax import Syntax
 from rich.text import Text
 
+from sagent.tui.theme import load_theme
 from sagent.tui.types import Sticky
 
 
@@ -48,6 +49,8 @@ if TYPE_CHECKING:
     from markdown_it.token import Token
     from rich.console import Console, ConsoleOptions, JustifyMethod, RenderResult
     from rich.style import Style
+
+    from sagent.tui.theme import Theme
 
 
 __all__ = [
@@ -65,15 +68,22 @@ class FitCodeBlock(CodeBlock):
         lexer_name: str,
         theme: str,
         sticky: Sticky | None = None,
+        syntax_theme: Theme | None = None,
     ) -> None:
         super().__init__(lexer_name, theme)
         self.sticky = sticky if sticky is not None else Sticky()
+        self.syntax_theme = syntax_theme
 
     @override
     @classmethod
     def create(cls, markdown: Markdown, token: Token) -> FitCodeBlock:
         lexer_name = (token.info or "").partition(" ")[0]
-        return cls(lexer_name or "text", markdown.code_theme, _sticky(markdown))
+        return cls(
+            lexer_name or "text",
+            markdown.code_theme,
+            _sticky(markdown),
+            markdown.theme if isinstance(markdown, TightMarkdown) else None,
+        )
 
     @override
     def __rich_console__(
@@ -93,7 +103,7 @@ class FitCodeBlock(CodeBlock):
         syntax = Syntax(
             code,
             self.lexer_name,
-            theme=self.theme,
+            theme=self.theme or self.syntax_theme or load_theme(),
             word_wrap=True,
             padding=1,
         )
@@ -207,14 +217,16 @@ class TightMarkdown(Markdown):
     def __init__(
         self,
         markup: str,
-        code_theme: str = "monokai",
+        code_theme: str = "",
         justify: JustifyMethod | None = None,
         style: str | Style = "none",
         hyperlinks: bool = True,
         inline_code_lexer: str | None = None,
         inline_code_theme: str | None = None,
         sticky: Sticky | None = None,
+        theme: Theme | None = None,
     ) -> None:
+        self.theme = theme if theme is not None else load_theme()
         self.sticky = sticky if sticky is not None else Sticky()
         super().__init__(
             markup,
@@ -243,14 +255,18 @@ class TightMarkdown(Markdown):
         console: Console,
         options: ConsoleOptions,
     ) -> RenderResult:
-        style = console.get_style(self.style, default="none")
+        with console.use_theme(self.theme.rich_theme()):
+            yield from self._render(console, options)
+
+    def _render(self, console: Console, options: ConsoleOptions) -> RenderResult:
+        style = self.theme.style("text") + console.get_style(self.style, default="none")
         options = options.update(height=None)
-        context = MarkdownContext(
+        context = _ThemedContext(
             console,
             options,
             style,
-            inline_code_lexer=self.inline_code_lexer,
-            inline_code_theme=self.inline_code_theme,
+            lexer=self.inline_code_lexer,
+            theme=self.inline_code_theme or self.theme,
         )
         new_line = False
         first_render = True
@@ -379,6 +395,23 @@ def stable_boundary(text: str) -> int:
         return 0
     lines = text.split("\n")
     return sum(len(lines[i]) + 1 for i in range(starts[-1]))
+
+
+class _ThemedContext(MarkdownContext):
+    """Accept semantic syntax themes for inline code as well as named Pygments styles."""
+
+    def __init__(
+        self,
+        console: Console,
+        options: ConsoleOptions,
+        style: Style,
+        *,
+        lexer: str | None,
+        theme: str | Theme,
+    ) -> None:
+        super().__init__(console, options, style)
+        if lexer is not None:
+            self._syntax = Syntax("", lexer, theme=theme)
 
 
 def _sticky(markdown: Markdown) -> Sticky:

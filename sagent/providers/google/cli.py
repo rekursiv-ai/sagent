@@ -38,6 +38,7 @@ import tempfile
 
 from treekle import ReadError, from_plain, json_dumps, json_loads, mutable
 
+from sagent.lib.posix.child import Child
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import AuthError, DisconnectedError, RateLimitedError
 from sagent.model.types import Response, TextChunk
@@ -149,14 +150,8 @@ class GoogleCLI(HasModels, AsyncResource):
 
         """
         del headless
-        process = await asyncio.create_subprocess_exec("agy", "acp", "--login")
-        try:
-            status = await process.wait()
-        except asyncio.CancelledError:
-            if process.returncode is None:
-                process.terminate()
-            await process.wait()
-            raise
+        async with await Child.start("agy", "acp", "--login") as child:
+            status = await child.process.wait()
         if status:
             raise AuthError(f"agy sign-in failed (exit {status}).")
 

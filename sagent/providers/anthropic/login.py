@@ -36,6 +36,7 @@ from sagent.providers.login import (
     login_flow,
     open_browser,
     pasted_code,
+    read_login_input,
     redirected,
 )
 
@@ -327,7 +328,7 @@ async def _pasted_code(
     redirect = "https://platform.claude.com/oauth/code/callback"
     url = _authorize_url(redirect, challenge, state)
     show(f"Open this, sign in, and paste the code it shows:\n\n  {url}\n")
-    pasted = await asyncio.to_thread(input, "Code: ")
+    pasted = await read_login_input("Code: ")
     return pasted_code(pasted, state=state), redirect
 
 

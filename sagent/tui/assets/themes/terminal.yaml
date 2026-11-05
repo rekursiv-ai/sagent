@@ -1,0 +1,42 @@
+styles:
+  text: ""
+  muted: dim
+  status: bright_black not reverse
+  thinking: dim italic
+  accent: blue
+  success: green
+  warning: yellow
+  error: red
+  heading: bold
+  section: magenta
+  user: ""
+  to_agent: blue
+  to_user: yellow
+  selected: reverse
+  code: ""
+  comment: dim
+  keyword: red
+  string: yellow
+  number: magenta
+  function: green
+  added: green
+  removed: red
+  added_word: bold underline green
+  removed_word: bold underline red
+  failure: red
+  gutter: dim
+  inline_code: ""
+  block_code: ""
+  quote: dim
+  list: ""
+  bullet: blue
+  list_number: blue
+  link: blue
+  link_url: blue
+  table_border: dim
+  table_header: bold
+  kbd: ""
+  syntax_added: green
+  syntax_removed: red
+  syntax_error: red
+  suggestion: bright_black

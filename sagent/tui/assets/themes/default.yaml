@@ -1,0 +1,58 @@
+preset: terminal
+syntax: monokai
+styles:
+  text: ""
+  muted: dim
+  status: bright_black not reverse
+  suggestion: "#666666"
+  thinking: dim italic
+  heading: bold
+  section: magenta
+  user: white on rgb(55,55,55)
+  to_agent: white on rgb(25,45,70)
+  to_user: black on rgb(150,115,30)
+  failure: dim red
+  error: red
+  code: ""
+  comment: ""
+  keyword: ""
+  string: ""
+  number: ""
+  function: ""
+  syntax_added: ""
+  syntax_removed: ""
+  syntax_error: ""
+  added: on rgb(34,92,43)
+  removed: on rgb(122,41,54)
+  added_word: on rgb(56,166,96)
+  removed_word: on rgb(179,89,107)
+  gutter: rgb(160,160,160)
+  inline_code: bold cyan on black
+  block_code: cyan on black
+  quote: magenta
+  list: cyan
+  bullet: bold
+  list_number: cyan
+  link: bright_blue
+  link_url: blue
+  table_border: cyan
+  table_header: not bold cyan
+  kbd: bright_yellow
+source_tokens:
+  Token: color(255)
+  Keyword: color(197)
+  Keyword.Type: color(81)
+  Name.Builtin: color(148)
+  Name.Class: color(148)
+  Name.Function: color(148)
+  Name.Attribute: color(148)
+  Name.Decorator: color(148)
+  Name.Variable: color(15)
+  Literal.Number: color(141)
+  Literal.String: color(186)
+  Literal.String.Escape: color(141)
+  Comment: color(242)
+  Operator: color(197)
+  Punctuation: color(255)
+  Name.Namespace: color(197)
+  Name.Tag: color(197)

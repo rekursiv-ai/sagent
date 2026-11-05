@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Final
+
 import io
 import re
 
 from rich.console import Console
+from rich.style import Style
 
 import pytest
 
+from sagent.lib.userdirs import config_dir
 from sagent.session.types import EditResult, Splice, WriteResult
 from sagent.tui.diff import (
     DiffStyle,
@@ -17,7 +21,12 @@ from sagent.tui.diff import (
     splice_diff,
     write_diff,
 )
+from sagent.tui.theme import load_theme
 from sagent.tui.types import Sticky
+
+
+if TYPE_CHECKING:
+    from sagent.tui.theme import Theme
 
 
 _ADDED = "48;2;34;92;43"
@@ -25,6 +34,14 @@ _REMOVED = "48;2;122;41;54"
 _ADDED_WORD = "48;2;56;166;96"
 _REMOVED_WORD = "48;2;179;89;107"
 _GUTTER = "38;2;160;160;160"
+
+_CONTRAST: Final = DiffStyle(
+    added="on rgb(34,92,43)",
+    removed="on rgb(122,41,54)",
+    added_word="on rgb(56,166,96)",
+    removed_word="on rgb(179,89,107)",
+    gutter="rgb(160,160,160)",
+)
 
 
 def _plain(diff: str, *, path: str = "", width: int = 40) -> list[str]:
@@ -38,10 +55,12 @@ def _ansi(
     diff: str,
     *,
     path: str = "",
-    style: DiffStyle | None = None,
+    style: DiffStyle | None = _CONTRAST,
     width: int = 40,
     lines: tuple[int, int] | None = None,
+    theme: Theme | None = None,
 ) -> list[str]:
+    """Render with explicit contrast colors, or ``style=None`` for theme defaults."""
     out = io.StringIO()
     console = Console(
         file=out,
@@ -49,7 +68,15 @@ def _ansi(
         color_system="truecolor",
         force_terminal=True,
     )
-    render_diff(console, diff, row_indent="  ", path=path, style=style, lines=lines)
+    render_diff(
+        console,
+        diff,
+        row_indent="  ",
+        path=path,
+        style=style,
+        lines=lines,
+        theme=theme,
+    )
     return out.getvalue().splitlines()
 
 
@@ -260,7 +287,10 @@ def test_the_style_picks_the_colors() -> None:
 
 
 def test_a_threshold_of_one_marks_words_in_any_change() -> None:
-    rows = _ansi("@@ -1 +1 @@\n-alpha\n+omega\n", style=DiffStyle(word_threshold=1.0))
+    rows = _ansi(
+        "@@ -1 +1 @@\n-alpha\n+omega\n",
+        style=DiffStyle(word_threshold=1.0, removed_word="on rgb(179,89,107)"),
+    )
     assert _styled(rows[0], _REMOVED_WORD) == "alpha"
 
 
@@ -532,6 +562,91 @@ def test_a_long_run_of_alike_lines_still_pairs_the_one_that_changed() -> None:
     diff = f"@@ -1 +1 @@\n{same}-tail value b\n+new\n{same.replace('-', '+')}+tail value c\n"
     rows = _ansi(diff, lines=(0, 1))
     assert _styled(rows[-1], _ADDED_WORD) == "c"
+
+
+def test_default_diff_restores_original_line_and_word_backgrounds() -> None:
+    diff = "@@ -1 +1 @@\n-value = 1 + 2\n+value = 1 + 3"
+    assert _ansi(diff, path="x.py", style=None) == _ansi(
+        diff,
+        path="x.py",
+        style=_CONTRAST,
+    )
+    removed, added = _ansi(diff, style=None)
+    assert _styled(removed, _REMOVED_WORD) == "2"
+    assert _styled(added, _ADDED_WORD) == "3"
+    assert _styled(removed, _GUTTER) == "1 "
+    assert _styled(added, _GUTTER) == "1 "
+
+
+def test_terminal_diff_has_semantic_ansi_colors_without_backgrounds() -> None:
+    rows = _ansi(
+        "@@ -1 +1 @@\n-value = 1 + 2\n+value = 1 + 3",
+        path="x.py",
+        style=None,
+        theme=load_theme("terminal"),
+    )
+    codes = {
+        int(part)
+        for row in rows
+        for code, _ in _segments(row)
+        for part in code.split(";")
+    }
+    assert not ({38, 48, *range(40, 48), *range(100, 108)} & codes)
+    assert "3" in _visible(rows[1])
+
+
+@pytest.mark.parametrize("name", ["terminal", "light", "dark"])
+@pytest.mark.parametrize("paired", [False, True])
+def test_changed_gutters_keep_the_change_color_over_base_text(
+    name: str,
+    paired: bool,
+) -> None:
+    theme = load_theme(name)
+    before, after = ("value = 1", "value = 2") if paired else ("old", "new")
+    rows = _ansi(
+        f"@@ -1 +1 @@\n-{before}\n+{after}",
+        style=None,
+        theme=theme,
+    )
+    for row, role in zip(rows, ("removed", "added"), strict=True):
+        color = theme.style(role).color
+        assert color is not None
+        codes = color.get_ansi_codes()
+        assert _styled(row, ";".join(codes)).startswith("1 ")
+
+
+def test_custom_diff_theme_marks_lines_and_changed_words() -> None:
+    themes = config_dir() / "rekursiv-ai" / "sagent" / "themes"
+    themes.mkdir(parents=True)
+    (themes / "diff.yaml").write_text(
+        "preset: terminal\nstyles:\n  added: cyan\n  removed: magenta\n"
+        "  added_word: bold cyan\n  removed_word: bold magenta\n",
+    )
+    removed, added = _ansi(
+        "@@ -1 +1 @@\n-value = 1 + 2\n+value = 1 + 3",
+        style=None,
+        theme=load_theme("diff"),
+    )
+    assert _styled(removed, "1;35") == "2"
+    assert _styled(added, "1;36") == "3"
+    assert "value = 1 + " in _styled(removed, "35")
+    assert "value = 1 + " in _styled(added, "36")
+
+
+@pytest.mark.parametrize("language", ["python", "text", "unknown-language"])
+def test_source_inherits_custom_text_and_syntax_roles(language: str) -> None:
+    themes = config_dir() / "rekursiv-ai" / "sagent" / "themes"
+    themes.mkdir(parents=True)
+    (themes / "source.yaml").write_text(
+        "preset: terminal\nstyles:\n  text: magenta\n  keyword: cyan\n",
+    )
+    text = highlight_source("sample", language, theme=load_theme("source"))
+    console = Console(file=io.StringIO())
+    assert text.plain == "sample"
+    assert text.get_style_at_offset(console, 0).color == Style.parse("magenta").color
+    if language == "python":
+        token = highlight_source("return", language, theme=load_theme("source"))
+        assert token.get_style_at_offset(console, 0).color == Style.parse("cyan").color
 
 
 if __name__ == "__main__":

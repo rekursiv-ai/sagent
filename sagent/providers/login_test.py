@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import override
+from typing import TYPE_CHECKING, override
 
 import asyncio
 import logging
@@ -14,6 +14,9 @@ import sys
 import time
 import webbrowser
 
+from prompt_toolkit import PromptSession
+from prompt_toolkit.input import create_pipe_input
+from prompt_toolkit.output import DummyOutput
 from treekle import json_dumps, json_loads
 
 import pytest
@@ -33,6 +36,48 @@ from sagent.providers.login import (
     redirected,
 )
 from sagent.providers.testing import bound_port, first_live, send, visit, window
+
+
+if TYPE_CHECKING:
+    from prompt_toolkit.application import Application
+
+
+@pytest.mark.asyncio
+async def test_cancelled_input_releases_the_terminal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ready = asyncio.Event()
+
+    def rendered(application: Application[str]) -> None:
+        del application
+        ready.set()
+
+    with create_pipe_input() as pipe:
+        session = PromptSession[str](input=pipe, output=DummyOutput())
+        session.app.before_render += rendered
+        monkeypatch.setattr(login, "PromptSession", lambda: session)
+        reading = asyncio.create_task(login.read_login_input("Code: "))
+        async with asyncio.timeout(5):
+            await ready.wait()
+            assert session.message == "Code: "
+            reading.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await reading
+            assert not session.app.is_running
+            pipe.send_text("4/code\n")
+            assert await login.read_login_input("Code: ") == "4/code"
+
+
+@pytest.mark.asyncio
+async def test_closed_sign_in_input_raises_eof(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with create_pipe_input() as pipe:
+        session = PromptSession[str](input=pipe, output=DummyOutput())
+        monkeypatch.setattr(login, "PromptSession", lambda: session)
+        pipe.close()
+        with pytest.raises(EOFError):
+            await login.read_login_input("Code: ")
 
 
 @pytest.mark.asyncio
@@ -179,11 +224,11 @@ async def test_pkce_accepts_a_hosted_code_or_a_state_checked_redirect(
     pasted: str,
     code: str,
 ) -> None:
-    def typed(prompt: str) -> str:
+    async def typed(prompt: str) -> str:
         assert prompt == "Code: "
         return pasted
 
-    monkeypatch.setattr("builtins.input", typed)
+    monkeypatch.setattr(login, "read_login_input", typed)
     shown: list[str] = []
     assert (
         await read_pasted_code(
@@ -208,11 +253,11 @@ async def test_pkce_still_refuses_missing_codes_and_mismatched_states(
     monkeypatch: pytest.MonkeyPatch,
     pasted: str,
 ) -> None:
-    def typed(prompt: str) -> str:
+    async def typed(prompt: str) -> str:
         assert prompt == "Code: "
         return pasted
 
-    monkeypatch.setattr("builtins.input", typed)
+    monkeypatch.setattr(login, "read_login_input", typed)
     shown: list[str] = []
     with pytest.raises(AuthError):
         await read_pasted_code(
@@ -448,11 +493,11 @@ async def test_a_pasted_address_is_asked_for_and_its_code_read(
 ) -> None:
     prompts: list[str] = []
 
-    def typed(prompt: str) -> str:
+    async def typed(prompt: str) -> str:
         prompts.append(prompt)
         return " http://127.0.0.1:1/cb?code=c1&state=s1 "
 
-    monkeypatch.setattr("builtins.input", typed)
+    monkeypatch.setattr(login, "read_login_input", typed)
     shown: list[str] = []
     code = await read_pasted_code(
         state="s1",

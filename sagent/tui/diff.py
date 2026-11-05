@@ -9,42 +9,29 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 import difflib
 import re
 import textwrap
 
-from pygments import highlight
-from pygments.formatters import Terminal256Formatter
 from pygments.lexers import TextLexer, get_lexer_by_name, get_lexer_for_filename
-from pygments.style import Style
-from pygments.token import (
-    Comment,
-    Keyword,
-    Name,
-    Number,
-    Operator,
-    Punctuation,
-    String,
-    Token,
-)
 from pygments.util import ClassNotFound
 from rich.cells import cell_len
+from rich.style import Style
 from rich.text import Text
 
 from sagent.tools.display import Elided
+from sagent.tui.theme import load_theme
 from sagent.tui.types import Sticky, hang
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from pygments.lexer import Lexer
-    from pygments.token import _TokenType
     from rich.console import Console
 
     from sagent.session.types import EditResult, WriteResult
+    from sagent.tui.theme import Theme
 
 
 __all__ = [
@@ -58,13 +45,13 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DiffStyle:
-    """The colors of a diff, for a dark terminal."""
+    """Explicit diff overrides; empty styles inherit the selected theme."""
 
-    added: str = "on rgb(34,92,43)"
-    removed: str = "on rgb(122,41,54)"
-    added_word: str = "on rgb(56,166,96)"
-    removed_word: str = "on rgb(179,89,107)"
-    gutter: str = "rgb(160,160,160)"
+    added: str | Style = ""
+    removed: str | Style = ""
+    added_word: str | Style = ""
+    removed_word: str | Style = ""
+    gutter: str | Style = ""
 
     word_threshold: float = 0.4
     """Share of changed characters past which a line is marked whole, not by word."""
@@ -79,6 +66,7 @@ def render_diff(
     style: DiffStyle | None = None,
     lines: tuple[int, int] | None = None,
     sticky: Sticky | None = None,
+    theme: Theme | None = None,
 ) -> None:
     """Print a unified diff, its line numbers read from the ``@@`` headers.
 
@@ -87,13 +75,23 @@ def render_diff(
       diff: The diff; ``---``/``+++`` file headers are skipped.
       row_indent: What starts every row.
       path: The file, whose name picks the highlighting.
-      style: The colors; dark-terminal ones when omitted.
+      style: Explicit color and word-marking overrides.
       lines: Body lines kept from the head and the tail, the rest counted in
         a ``⋯ N lines ⋯`` row; ``None`` keeps all.
       sticky: This turn's width, shared with its other blocks.
+      theme: Semantic colors; original appearance when omitted.
 
     """
-    s = style if style is not None else DiffStyle()
+    theme = theme if theme is not None else load_theme()
+    overrides = style if style is not None else DiffStyle()
+    s = DiffStyle(
+        added=overrides.added or theme.style("added"),
+        removed=overrides.removed or theme.style("removed"),
+        added_word=overrides.added_word or theme.style("added_word"),
+        removed_word=overrides.removed_word or theme.style("removed_word"),
+        gutter=overrides.gutter or theme.styles["gutter"],
+        word_threshold=overrides.word_threshold,
+    )
     lexer = _path_lexer(path)
     hunk = re.compile(r"^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
     body = _dedent(
@@ -133,7 +131,7 @@ def render_diff(
                 lead = indent + " " * (digits + 1)
                 hang(
                     console,
-                    Text(Elided(hidden=len(hidden)).marker, style="dim"),
+                    Text(Elided(hidden=len(hidden)).marker, style=theme.style("muted")),
                     first=lead,
                     rest=lead,
                     width=width,
@@ -148,6 +146,7 @@ def render_diff(
                 s=s,
                 width=width,
                 lexer=lexer,
+                theme=theme,
             )
         else:
             background = {"+": s.added, "-": s.removed}.get(sigil, "")
@@ -155,9 +154,9 @@ def render_diff(
                 console,
                 indent,
                 f"{number:>{digits}} ",
-                content=_highlight(line[1:], lexer),
+                content=_highlight(line[1:], lexer, theme=theme),
                 background=background,
-                gutter=s.gutter,
+                gutter=s.gutter if background else theme.style("muted"),
                 width=width,
             )
         old += sigil != "+"
@@ -202,24 +201,26 @@ def write_diff(result: WriteResult) -> str:
     return "\n".join([f"@@ -0,0 +1,{len(lines)} @@", *(f"+{ln}" for ln in lines)])
 
 
-def highlight_source(code: str, language: str) -> Text:
+def highlight_source(code: str, language: str, *, theme: Theme | None = None) -> Text:
     """Return ``code`` highlighted as ``language``; plain when the name is unknown.
 
     Args:
       code: The source.
       language: A Pygments lexer name, such as ``"bash"``.
+      theme: Semantic colors; original appearance when omitted.
 
     Returns:
       text: The highlighted source.
 
     """
+    theme = theme if theme is not None else load_theme()
     if not code:
         return Text("")
     try:
         lexer = get_lexer_by_name(language, stripnl=False, ensurenl=False)
     except ClassNotFound:
-        return Text(code)
-    return _highlight(code, lexer)
+        return Text(code, style=theme.style("code"))
+    return _highlight(code, lexer, theme=theme)
 
 
 def _path_lexer(path: str) -> Lexer:
@@ -237,12 +238,14 @@ def _dedent(body: list[str], hunk: re.Pattern[str]) -> list[str]:
     return [ln if hunk.match(ln) else ln[:1] + next(contents) for ln in body]
 
 
-def _highlight(code: str, lexer: Lexer) -> Text:
+def _highlight(code: str, lexer: Lexer, *, theme: Theme) -> Text:
     """Return ``code`` highlighted by ``lexer``."""
-    if not code:
-        return Text("")
-    formatter = Terminal256Formatter[str](style=_Monokai)
-    return Text.from_ansi(highlight(code, lexer, formatter).rstrip("\n"))
+    text = Text(style=theme.style("code"))
+    text.append_tokens(
+        (value, theme.source_style(token))
+        for token, value in lexer.get_tokens(code.rstrip("\n"))
+    )
+    return text
 
 
 def _words(
@@ -328,15 +331,15 @@ def _print_line(
     margin: str,
     *,
     content: Text,
-    background: str,
-    gutter: str,
+    background: str | Style,
+    gutter: str | Style,
     width: int,
 ) -> None:
-    """Print one diff line: margin, content, and a background to the edge."""
-    style = f"{gutter} {background}" if background else "dim"
+    """Print one diff line: margin, content, and its style to the edge."""
+    style = console.get_style(background) + console.get_style(gutter)
     if background:
         content = content.copy()
-        content.stylize(background)
+        content.stylize_before(background)
     _print_rows(
         console,
         row_indent,
@@ -358,22 +361,25 @@ def _print_words(
     s: DiffStyle,
     width: int,
     lexer: Lexer,
+    theme: Theme,
 ) -> None:
     """Print one changed line with its changed words marked."""
     line_bg = s.added if sigil == "+" else s.removed
     word_bg = s.added_word if sigil == "+" else s.removed_word
     kept = [(kind, text) for kind, text in parts if kind in ("=", sigil)]
-    content = _highlight("".join(text for _, text in kept), lexer)
+    content = _highlight("".join(text for _, text in kept), lexer, theme=theme)
+    content.stylize_before(line_bg)
     at = 0
     for kind, text in kept:
-        content.stylize(line_bg if kind == "=" else word_bg, at, at + len(text))
+        if kind != "=":
+            content.stylize(word_bg, at, at + len(text))
         at += len(text)
     _print_rows(
         console,
         row_indent,
         margin,
         content,
-        margin_style=f"{s.gutter} {line_bg}",
+        margin_style=console.get_style(line_bg) + console.get_style(s.gutter),
         fill_style=line_bg,
         width=width,
     )
@@ -385,8 +391,8 @@ def _print_rows(
     margin: str,
     content: Text,
     *,
-    margin_style: str,
-    fill_style: str,
+    margin_style: str | Style,
+    fill_style: str | Style,
     width: int,
 ) -> None:
     """Print ``content`` inside ``width``, later rows blank under ``row_indent`` and ``margin``."""
@@ -401,27 +407,3 @@ def _print_rows(
         width=width,
         background=fill_style,
     )
-
-
-class _Monokai(Style):
-    """Monokai Extended, in syntect's hex values."""
-
-    styles: ClassVar[Mapping[_TokenType, str]] = {
-        Token: "#f8f8f2",
-        Keyword: "#f92672",
-        Keyword.Type: "#66d9ef",
-        Name.Builtin: "#a6e22e",
-        Name.Class: "#a6e22e",
-        Name.Function: "#a6e22e",
-        Name.Attribute: "#a6e22e",
-        Name.Decorator: "#a6e22e",
-        Name.Variable: "#ffffff",
-        Number: "#ae84ff",
-        String: "#e6db74",
-        String.Escape: "#ae84ff",
-        Comment: "#75715e",
-        Operator: "#f92672",
-        Punctuation: "#f8f8f2",
-        Name.Namespace: "#f92672",
-        Name.Tag: "#f92672",
-    }
