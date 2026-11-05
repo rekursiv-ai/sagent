@@ -283,38 +283,7 @@ repos:
         alias: superseded-at-pre-push
         types_or: [python, pyi]
         entry: uv --quiet run --frozen --group pre-commit python -m tools.typecheck ty-check
-      # Off: `pyrefly-check` is the checker. Run with `--hook-stage manual`.
-      # Named files bypass pyproject's `[tool.basedpyright] exclude`, so the
-      # twin's exclude mirrors it.
-      - id: basedpyright-spool
-        name: basedpyright-spool
-        alias: basedpyright
-        language: system
-        stages: [manual]
-        require_serial: true
-        types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.gate spool basedpyright
-        exclude: |
-          (?x)^(
-            typings/
-            |(.*/)?third_party/
-          )
-      - id: basedpyright
-        name: basedpyright
-        language: system
-        stages: [manual]
-        # Pre-commit discards a PASSING hook's output (see the Pre-Push Gates
-        # note on `verbose`); this keeps basedpyright's summary line visible.
-        verbose: true
-        require_serial: true
-        pass_filenames: false
-        types_or: [python, pyi]
-        entry: >-
-          env NODE_OPTIONS=--max-old-space-size=2048
-          uv --quiet run --frozen --group pre-commit python -m tools.typecheck
-          basedpyright
-      # Default type checker; `basedpyright` above runs only under
-      # `--hook-stage manual`.
+      # Default type checker; `basedpyright` below is an additional opt-in.
       - id: pyrefly-check-spool
         name: pyrefly-check-spool
         alias: pyrefly-check
@@ -333,6 +302,36 @@ repos:
         alias: superseded-at-pre-push
         types_or: [python, pyi]
         entry: uv --quiet run --frozen --group pre-commit python -m tools.typecheck pyrefly-check
+      # Opt in with PRECOMMIT_BASEDPYRIGHT=1; unset or 0 is off.
+      # Named files bypass pyproject's `[tool.basedpyright] exclude`, so the
+      # twin's exclude mirrors it.
+      - id: basedpyright-spool
+        name: basedpyright-spool
+        alias: basedpyright
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        types_or: [python, pyi]
+        entry: uv --quiet run --frozen --group pre-commit python -m tools.gate spool basedpyright
+        exclude: |
+          (?x)^(
+            typings/
+            |(.*/)?third_party/
+          )
+      - id: basedpyright
+        name: basedpyright
+        language: system
+        stages: [pre-commit]
+        # Pre-commit discards a PASSING hook's output (see the Pre-Push Gates
+        # note on `verbose`); this keeps basedpyright's summary line visible.
+        verbose: true
+        require_serial: true
+        pass_filenames: false
+        types_or: [python, pyi]
+        entry: >-
+          env NODE_OPTIONS=--max-old-space-size=2048
+          uv --quiet run --frozen --group pre-commit python -m tools.typecheck
+          basedpyright --when PRECOMMIT_BASEDPYRIGHT
   - repo: local
     hooks:
       # Each heavy hook below is a `-spool` twin, which collects pre-commit's

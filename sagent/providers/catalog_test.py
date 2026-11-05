@@ -47,7 +47,7 @@ from sagent.providers.replicate.api import Replicate
 from sagent.providers.selfhosted import server
 from sagent.providers.selfhosted.server import SelfHostedModel
 from sagent.providers.table import ModelTable, ModelTags
-from sagent.providers.types import HasLogin
+from sagent.providers.types import HasLogins
 from sagent.session.types import UserMessage
 from sagent.tools.types import ToolContext
 from sagent.types import AsyncResource
@@ -268,8 +268,8 @@ def test_the_default_provider_is_the_first_listed() -> None:
 
 @pytest.mark.parametrize(
     "listed",
-    [listed for listed in listings() if isinstance(listed, HasLogin)],
-    ids=[listed.section for listed in listings() if isinstance(listed, HasLogin)],
+    [listed for listed in listings() if isinstance(listed, HasLogins)],
+    ids=[listed.section for listed in listings() if isinstance(listed, HasLogins)],
 )
 def test_a_named_account_signs_every_login_provider_in_as_it(listed: Listed) -> None:
     factory = ModelCatalog(account="work").factories[listed.section]

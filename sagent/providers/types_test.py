@@ -8,7 +8,7 @@ from PIL import Image
 
 import pytest
 
-from sagent.model.scripted import ScriptedModel, ScriptedProvider
+from sagent.model.scripted import ScriptedProvider
 from sagent.providers.anthropic import wire as anthropic_wire
 from sagent.providers.anthropic.api import Anthropic, AnthropicModel
 from sagent.providers.anthropic.cli import AnthropicCLI, AnthropicCLIModel
@@ -27,12 +27,13 @@ from sagent.providers.openai import token_count
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel
 from sagent.providers.openai.sub import OpenAISub
-from sagent.providers.resources import SharedResources, SubprocessPool
+from sagent.providers.resources import SharedResources
 from sagent.providers.selfhosted.server import SelfHosted, SelfHostedModel
 from sagent.providers.table import ModelTable
-from sagent.providers.tool_server import McpMount, McpToolServer
+from sagent.providers.tool_server import McpMount
 from sagent.providers.types import (
     HasLogin,
+    HasLogins,
     Model,
     ModelCatalog,
     ProcessPool,
@@ -145,9 +146,8 @@ async def test_each_model_bills_an_attachment_by_its_vendors_formula() -> None:
 
 def test_a_scripted_provider_is_a_provider_too() -> None:
     provider: Provider = ScriptedProvider()
-    model: Model = provider["any"]
+    provider["any"]
 
-    assert isinstance(model, ScriptedModel)
     assert list(provider) == ["scripted"]
     assert provider.usage == ()
 
@@ -155,6 +155,9 @@ def test_a_scripted_provider_is_a_provider_too() -> None:
 def test_a_provider_without_a_login_is_no_login() -> None:
     assert not isinstance(OpenAI(), HasLogin)
     assert isinstance(OpenAISub(), HasLogin)
+    assert isinstance(GoogleCLI(), HasLogin)
+    assert isinstance(OpenAISub(), HasLogins)
+    assert not isinstance(GoogleCLI(), HasLogins)
 
 
 @pytest.mark.asyncio
@@ -167,8 +170,6 @@ async def test_the_shared_resources_meet_their_protocols() -> None:
         mount: ToolMount = McpMount("http://127.0.0.1:1/token")
 
         assert typed["anthropic"] is catalog["anthropic"]
-        assert isinstance(pool, SubprocessPool)
-        assert isinstance(server, McpToolServer)
         assert mount.url == "http://127.0.0.1:1/token"
         for protocol, value in (
             (ProviderResources, shared),

@@ -11,8 +11,8 @@ Typical usage example:
   login = CodexLogin(resources=shared)          # $CODEX_HOME or ~/.codex
   work = CodexLogin(Path("~/.codex/auth-work.json"), resources=shared)
 
-  await login.sign_in()          # In the browser; over ssh, paste the redirect.
-  await login.sign_in_device()   # Or enter a code on another device.
+  await login.sign_in()                  # In this host's browser.
+  await login.sign_in(headless=True)     # Approve a code on another device.
   token, account = await login.token()    # Renewed before it expires.
   await login.lend(rejected="")           # A ``TokenLease``, for a borrower.
 
@@ -26,6 +26,7 @@ from __future__ import annotations
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 from urllib.parse import urlencode
@@ -43,6 +44,7 @@ from sagent.lib.files.owner_only import write_private
 from sagent.model.exceptions import AuthError
 from sagent.providers.login import (
     file_lock,
+    login_flow,
     open_browser,
     read_pasted_code,
     redirected,
@@ -199,17 +201,24 @@ class CodexLogin:
         headless: bool = False,
         show: Callable[[str], object] = print,
     ) -> None:
-        """Sign in through the browser, or with the redirect pasted from it.
+        """Sign in through this host's browser, or approve a device code elsewhere.
 
         Args:
-          headless: Skip the browser and take a pasted redirect at once.
-          show: Where to write the sign-in link for the user.
+          headless: Use device authorization without a localhost callback.
+          show: Where to write the sign-in link and device code for the user.
 
         Raises:
-          AuthError: The pasted redirect belongs to another sign-in, or the
-            server refused the code.
+          AuthError: The server refused the sign-in.
 
         """
+        await login_flow(
+            headless=headless,
+            browser=partial(self._sign_in_browser, show=show),
+            remote=partial(self.sign_in_device, show=show),
+        )
+
+    async def _sign_in_browser(self, *, show: Callable[[str], object]) -> None:
+        """Sign in with a loopback redirect, falling back to a pasted address."""
         verifier = secrets.token_urlsafe(64)
         # A SHA-256 digest is 32 bytes, which base64 pads with exactly one ``=``.
         challenge = (
@@ -222,7 +231,7 @@ class CodexLogin:
         # other port is refused by the server.
         redirect = "http://localhost:1455/auth/callback"
         url = _authorize_url(redirect, challenge=challenge, state=state)
-        code = await _code(url, state=state, show=show, headless=headless)
+        code = await _code(url, state=state, show=show, headless=False)
         grant = await _exchange(
             self._resources.http,
             code,

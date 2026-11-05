@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "HasLogin",
+    "HasLogins",
     "Model",
     "ModelCatalog",
     "ProcessPool",
@@ -245,8 +246,13 @@ class HasLogin(Protocol):
     """A provider that signs in to an account."""
 
     async def login(self, *, headless: bool = False) -> None:
-        """Sign in, interactively; ``headless`` skips the browser and takes a pasted code."""
+        """Sign in; ``headless`` authorizes elsewhere, without opening a local browser."""
         ...
+
+
+@runtime_checkable
+class HasLogins(Protocol):
+    """A provider whose credential files support account selection and precedence."""
 
     @property
     def logins(self) -> Logins:

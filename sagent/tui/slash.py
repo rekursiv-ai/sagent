@@ -54,7 +54,7 @@ from sagent.host.settings import HostSettings
 from sagent.host.strings import ServeDirs
 from sagent.lib.userdirs import config_dir, state_dir
 from sagent.providers.login import SIGN_IN_ERRORS, headless_wanted
-from sagent.providers.types import HasLogin
+from sagent.providers.types import HasLogin, HasLogins
 from sagent.runtime import types
 from sagent.session.types import UserMessage
 from sagent.settings.exceptions import SettingError
@@ -646,7 +646,7 @@ class Commands:
 
     def _precedence_value(self) -> str:
         provider = self.agent.model.provider
-        if not isinstance(provider, HasLogin):
+        if not isinstance(provider, HasLogins):
             return ""
         return ",".join(provider.logins.order())
 
@@ -673,7 +673,7 @@ class Commands:
             )
         except ValueError as e:
             raise SettingError(f"{e}; {usage}") from e
-        if not isinstance(provider, HasLogin):
+        if not isinstance(provider, HasLogins):
             raise SettingError(f"{provider.name} keeps no logins to order")
         await provider.logins.prefer(None if accounts == ("off",) else accounts)
         order = provider.logins.order()
@@ -832,7 +832,7 @@ def _login_parser() -> ActionParser:
     parser.add_argument(
         "--headless",
         action=argparse.BooleanOptionalAction,
-        help="print the URL and take the code pasted back; default: over ssh, or"
+        help="authorize in another machine's browser; default: over ssh, or"
         " on Linux with no display",
     )
     return parser

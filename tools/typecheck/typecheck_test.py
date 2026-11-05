@@ -328,6 +328,30 @@ def test_each_checker_is_a_command_of_its_own(
     assert flags.handler is typecheck._check
 
 
+@pytest.mark.parametrize("value", [None, "", "0", "false", "01", "1", "2"])
+def test_cli_environment_gate(
+    processes: fakes.Processes,
+    monkeypatch: pytest.MonkeyPatch,
+    value: str | None,
+) -> None:
+    Path("a.py").touch()
+    monkeypatch.setattr(sys, "argv", ["gate", "spool", "basedpyright", "a.py"])
+    assert gate.main() == 0
+    processes.calls.clear()
+    if value is not None:
+        monkeypatch.setenv("PRECOMMIT_BASEDPYRIGHT", value)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["typecheck", "basedpyright", "--when", "PRECOMMIT_BASEDPYRIGHT"],
+    )
+
+    assert typecheck.main() == (4 if value in {"1", "2"} else 0)
+    checks = [call for call in processes.calls if "--threads=1" in call]
+    assert len(checks) == (1 if value in {"1", "2"} else 0)
+    assert list(Path().glob("precommit-spool-*/basedpyright.*")) == []
+
+
 def test_a_command_is_required(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exited:
         typecheck._parse_args(argparse.ArgumentParser(), [])
@@ -359,6 +383,7 @@ def test_the_help_names_each_checker_and_the_fixer_module(
     for name in ("ty-check", "pyrefly-check", "basedpyright"):
         assert f"{name} Run {name} over its spool." in top
     assert "--fixer MODULE" in pyrefly
+    assert "--when VARIABLE" in pyrefly
 
 
 @pytest.mark.parametrize(

@@ -630,7 +630,15 @@ async def test_headless_sign_in_asks_for_the_code_without_the_browser(
     ]
     assert browser.opened == []
     assert waited.timeouts == []
-    assert _body(server.requests[0])["code"] == "pasted"
+    sent = _body(server.requests[0])
+    assert sent["code"] == "pasted"
+    query = parse_qs(urlparse(shown[0].split()[-1]).query)
+    verifier = sent["code_verifier"]
+    assert isinstance(verifier, str)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+    assert query["code_challenge"] == [challenge.rstrip(b"=").decode()]
+    assert sent["redirect_uri"] == "https://platform.claude.com/oauth/code/callback"
+    assert _oauth(path)["accessToken"] == "at-1"
 
 
 @pytest.mark.asyncio

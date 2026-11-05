@@ -11,8 +11,9 @@ continues. Anything else -- a new system prompt, new tools, another model or
 effort, a rewritten history -- starts a fresh ``agy``, which reads the
 conversation as text.
 
-``agy`` keeps its own login, in the system keyring, and signs in with
-``agy`` itself: run it once. It takes text alone, so an image is named, not sent.
+``agy`` keeps its own login in the system keyring. ``login(headless=True)``
+runs its hosted-code terminal sign-in. It takes text alone, so an image is named,
+not sent.
 
 Typical usage example:
 
@@ -132,6 +133,32 @@ class GoogleCLI(HasModels, AsyncResource):
 
     def __iter__(self) -> Iterator[str]:
         return iter(self.models())
+
+    async def login(
+        self,
+        *,
+        headless: bool = False,  # pragma: no mutate -- Both values use native terminal auth.
+    ) -> None:
+        """Sign in through agy's terminal flow, keeping its credentials in its keyring.
+
+        Args:
+          headless: Both modes use agy's hosted-code terminal flow.
+
+        Raises:
+          AuthError: The native sign-in failed.
+
+        """
+        del headless
+        process = await asyncio.create_subprocess_exec("agy", "acp", "--login")
+        try:
+            status = await process.wait()
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                process.terminate()
+            await process.wait()
+            raise
+        if status:
+            raise AuthError(f"agy sign-in failed (exit {status}).")
 
     @override
     async def aclose(self) -> None:

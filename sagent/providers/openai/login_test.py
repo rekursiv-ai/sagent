@@ -498,7 +498,20 @@ _ANYWHERE = (
 )
 
 
+@pytest.fixture
+def paste_after_browser(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Skip the browser wait so the manual fallback can be exercised."""
+
+    async def timeout(code: asyncio.Future[str], **limits: float) -> str:
+        del code, limits
+        raise TimeoutError
+
+    monkeypatch.setattr(asyncio, "wait_for", timeout)
+    monkeypatch.setattr(login, "open_browser", _nowhere)
+
+
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("paste_after_browser")
 async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
     auth: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -511,7 +524,6 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
         return f"http://localhost:1455/auth/callback?code=the-code&state={state}"
 
     paster = _Paster(pasted=pasted)
-    monkeypatch.setattr(login, "open_browser", _no_browser)
     monkeypatch.setattr(builtins, "input", paster.input)
     access = _token("signed-in", account="acct-9")
     server = _Server(
@@ -521,11 +533,16 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
     )
     async with _Served(server) as shared:
         codex = CodexLogin(auth, resources=shared)
-        await codex.sign_in(headless=True, show=paster.show)
+        await codex.sign_in(show=paster.show)
         assert await codex.token() == (access, "acct-9")
-    # Headless, the redirect's port is still held while the user pastes.
     assert (listened.hosts, listened.ports) == (["127.0.0.1"], [1455])
-    assert paster.shown == [_LINK.format(_shown_url(paster.shown)), _ANYWHERE]
+    assert paster.shown == [
+        _LINK.format(_shown_url(paster.shown)),
+        (
+            "No browser came back. Paste the address it was sent to, though it fails"
+            " to load:\n"
+        ),
+    ]
     (sent,) = server.requests
     assert str(sent.url) == "https://auth.openai.com/oauth/token"
     assert set(from_plain(sent.extensions["timeout"], dict[str, float]).values()) == {
@@ -576,41 +593,35 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
     [(_stale, "belongs to another sign-in"), (_no_code, "holds no sign-in code")],
 )
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("paste_after_browser")
 async def test_a_pasted_code_must_belong_to_this_sign_in(
     auth: Path,
     monkeypatch: pytest.MonkeyPatch,
     pasted: Callable[[str, str], str],
     message: str,
 ) -> None:
-    monkeypatch.setattr(login, "open_browser", _no_browser)
     paster = _Paster(pasted=pasted)
     monkeypatch.setattr(builtins, "input", paster.input)
     server = _Server(replies=[])
     async with _Served(server) as shared:
         with pytest.raises(AuthError, match=message):
-            await CodexLogin(auth, resources=shared).sign_in(
-                headless=True,
-                show=paster.show,
-            )
+            await CodexLogin(auth, resources=shared).sign_in(show=paster.show)
     assert server.requests == []
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("paste_after_browser")
 async def test_a_pasted_code_and_state_alone_are_enough(
     auth: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(login, "open_browser", _no_browser)
     paster = _Paster(pasted=_hashed)
     monkeypatch.setattr(builtins, "input", paster.input)
     server = _Server(
         replies=[_reply({"access_token": _token("x"), "refresh_token": "r"})],
     )
     async with _Served(server) as shared:
-        await CodexLogin(auth, resources=shared).sign_in(
-            headless=True,
-            show=paster.show,
-        )
+        await CodexLogin(auth, resources=shared).sign_in(show=paster.show)
     assert _form(server.requests[0])["code"] == "the-code"
 
 
@@ -741,6 +752,7 @@ async def test_a_browser_sign_in_gives_way_when_its_port_is_taken(
 async def test_sign_in_device_polls_until_the_code_is_approved(
     auth: Path,
     monkeypatch: pytest.MonkeyPatch,
+    listened: _Listened,
 ) -> None:
     waits: list[float] = []
     real_sleep = asyncio.sleep
@@ -773,12 +785,13 @@ async def test_sign_in_device_polls_until_the_code_is_approved(
     shown: list[str] = []
     async with _Served(server) as shared:
         codex = CodexLogin(auth, resources=shared)
-        await codex.sign_in_device(show=shown.append)
+        await codex.sign_in(headless=True, show=shown.append)
         assert await codex.token() == (access, "acct-d")
     assert shown == [
         "Open https://auth.openai.com/codex/device and enter the code ABCD-1234.\n",
     ]
     assert waits == [3.0, 3.0, 3.0]
+    assert listened.hosts == []
     # Fifteen minutes to approve it.
     assert limits == [900.0]
     assert (auth.parent / "auth.json.lock").exists()
