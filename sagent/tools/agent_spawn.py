@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Annotated, Literal
 
 import asyncio
 import logging
+import re
 import time
 
 from sagent.agent.agent import Agent
@@ -137,7 +138,8 @@ class AgentSpawn:
         ] = None
         label: Annotated[
             str,
-            "Label for the child; omit for <your label>_<n>.",
+            "Label for the child: 1 to 64 letters, digits, _ or -; omit for"
+            " <your label>_<n>.",
         ] = ""
         watch: Annotated[
             bool,
@@ -222,8 +224,8 @@ class AgentSpawn:
 
         Raises:
           ValueError: The caller is in no team or may not spawn, a tool or model
-            is unknown, or the label is taken or reserved; with ``watch``, the
-            prompt is empty or the caller is no unwatched root.
+            is unknown, or the label is malformed, taken or reserved; with ``watch``,
+            the prompt is empty or the caller is no unwatched root.
 
         """
         a = parse(arguments, AgentSpawn.Arguments)
@@ -247,6 +249,10 @@ class AgentSpawn:
             raise ValueError(
                 "Your depth cap is reached: you are a leaf and cannot spawn.",
             )
+        if a.label and re.fullmatch(r"[A-Za-z0-9_-]{1,64}", a.label) is None:
+            raise ValueError(
+                f"A label is 1 to 64 letters, digits, '_' or '-'; got {a.label!r}.",
+            )
         if a.label and a.label in self.team:
             raise ValueError(f"An agent is already labelled {a.label!r}.")
         if a.label in _TAKEN:
@@ -265,7 +271,7 @@ class AgentSpawn:
             output=a.output,
         )
         path = parent.session.journal.path
-        journal = child_journal(path, label) if path is not None else None
+        journal = child_journal(path) if path is not None else None
         spec = (
             ChildSpec(
                 label=label,
@@ -333,7 +339,7 @@ class AgentSpawn:
         resumed = journal is not None
         path = target.session.journal.path
         if journal is None and path is not None:
-            journal = child_journal(path, label)
+            journal = child_journal(path)
         model = await self._model(
             target,
             provider=None,

@@ -6,7 +6,7 @@ Layout:
 - Per project: ``<root>/<cwd_slug(cwd)>/``, holding a directory per session
   and ``memory/``.
 - Per session: ``<id>/session.jsonl``, its log beside it, and a session
-  directory per agent it spawned, ``<id>/<label>/``.
+  directory per agent it spawned, ``<id>/<uuid>/``.
 - Per scope (a Slack thread, say): ``<root>/<scope>/<id>/session.jsonl``.
 
 The experimental sagent wrote ``session.jsonl`` in its own format, converted on
@@ -256,18 +256,21 @@ def find_sessions(
     return _infos(_found(base, pattern), limit=limit)
 
 
-def child_journal(journal: Path, label: str) -> Path:
-    """Return the journal of the agent ``label`` that a session spawned.
+# A uuid, never the agent's label: a model chooses a label, and a journal opened at a
+# path it chose reads and appends to whichever session lives there. A label used again
+# would also reopen the journal of the agent that had it.
+def child_journal(journal: Path) -> Path:
+    """Return a new journal for an agent a session spawns.
 
     Args:
       journal: The session's journal.
-      label: The agent's label.
 
     Returns:
-      path: ``<label>/session.jsonl`` in the session's directory.
+      path: ``<uuid>/session.jsonl`` in the session's directory, a dashed uuid, which
+        may not exist yet.
 
     """
-    return journal.parent / label / "session.jsonl"
+    return journal.parent / str(uuid.uuid4()) / "session.jsonl"
 
 
 def session_file(directory: Path) -> Path:
@@ -317,7 +320,7 @@ def is_session(path: Path) -> bool:
 
     A session's directory is named by its id, the hex digits ``new_session_path``
     mints (an old sagent's last resort was a whole uuid's). An agent a session
-    spawned is named by its label, or by an old sagent a dashed uuid, and one
+    spawned is named by a dashed uuid, or in an older session by its label, and one
     of today's sits beside its parent's journal.
 
     Args:

@@ -31,6 +31,6 @@ Recycle before spawning fresh. Every spawn reloads a full system prompt (expensi
 - `max_tool_call_rounds` -- rarely set; cap on the child's rounds (one round = one model response, regardless of parallel tool calls).
 - `max_depth` -- rarely set; cap on the child's sub-spawning (`0` = leaf: the child cannot spawn). Tightened by your own cap.
 - `watch` -- start your watcher instead of a child (see above).
-- `label` -- explicit label; must be unique among live agents. Not `parent`, `children`, `ancestors`, `descendants`, `all`, `user`, `model`, `tool`, `runtime`, `screen`, or `sagent`.
+- `label` -- explicit label: 1 to 64 letters, digits, `_` or `-`; must be unique among live agents. Not `parent`, `children`, `ancestors`, `descendants`, `all`, `user`, `model`, `tool`, `runtime`, `screen`, or `sagent`.
 
 Errors (round cap, exceptions) come back as the result. If a file changes under you while children work, a staleness reminder fires -- re-read before editing.

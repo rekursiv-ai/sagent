@@ -120,16 +120,23 @@ def test_a_scope_may_hold_a_colon_past_its_first_part(tmp_path: Path) -> None:
     assert scope_dir("slack/T:1", root=tmp_path) == tmp_path / "slack" / "T:1"
 
 
-def test_a_child_is_a_session_inside_its_parents_whatever_its_name() -> None:
-    assert child_journal(Path("/p/abc/journal.jsonl"), "helper") == Path(
-        "/p/abc/helper/session.jsonl",
-    )
+@pytest.mark.parametrize("name", ["journal.jsonl", "session.jsonl"])
+def test_a_child_is_a_session_in_a_new_uuid_folder_inside_its_parents(
+    name: str,
+) -> None:
+    first = child_journal(Path("/p/abc") / name)
+
+    assert first.parent.parent == Path("/p/abc")
+    assert first.name == "session.jsonl"
+    assert str(uuid.UUID(first.parent.name)) == first.parent.name
+    assert first != child_journal(Path("/p/abc") / name)
 
 
-def test_a_child_is_a_session_inside_its_parents() -> None:
-    assert child_journal(Path("/p/abc/session.jsonl"), "helper") == Path(
-        "/p/abc/helper/session.jsonl",
-    )
+def test_a_childs_uuid_folder_never_lists_as_a_session(tmp_path: Path) -> None:
+    parent = _journal(tmp_path / "abcdef012345", UserMessage(content="mine"))
+    _ = _journal(child_journal(parent).parent, UserMessage(content="the helper's"))
+
+    assert [info.path for info in list_sessions(tmp_path)] == [parent]
 
 
 def test_a_new_session_is_a_private_directory_holding_an_empty_journal(
