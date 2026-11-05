@@ -132,6 +132,68 @@ async def test_an_upgrade_gap_does_not_spawn_a_competing_daemon(
     assert spawned == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [0, 7, -9])
+async def test_startup_reports_child_exit_without_waiting_for_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    exit_code: int,
+) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    answers: list[DaemonStatus | OSError] = [
+        FileNotFoundError(),
+        ConnectionRefusedError(),
+    ]
+    spawned: list[str] = []
+    sleeps: list[float] = []
+
+    def spawn(dirs: ServeDirs, *, version: str) -> SimpleNamespace:
+        del dirs
+        spawned.append(version)
+        return SimpleNamespace(poll=lambda: exit_code)
+
+    async def sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(daemon, "control", partial(_control_answers, answers=answers))
+    monkeypatch.setattr(daemon, "_spawn", spawn)
+    monkeypatch.setattr(
+        daemon,
+        "time",
+        SimpleNamespace(monotonic=iter([0, 1, 2, 100]).__next__),
+    )
+    monkeypatch.setattr(
+        daemon,
+        "asyncio",
+        SimpleNamespace(to_thread=asyncio.to_thread, sleep=sleep),
+    )
+    with pytest.raises(RuntimeError, match=f"exited with status {exit_code}") as exc:
+        _ = await ensure(dirs, version="test")
+    assert str(dirs.state / "daemon.log") in str(exc.value)
+    assert spawned == ["test"]
+    assert sleeps == [0.02]
+    with (dirs.state / "daemon-start.lock").open() as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+@pytest.mark.asyncio
+async def test_ready_competing_daemon_wins_over_exited_startup_child(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    ready = DaemonStatus(pid=123, source_version="new", listen=())
+    answers: list[DaemonStatus | OSError] = [FileNotFoundError(), ready]
+
+    def spawn(dirs: ServeDirs, *, version: str) -> SimpleNamespace:
+        del dirs, version
+        return SimpleNamespace(poll=lambda: 0)
+
+    monkeypatch.setattr(daemon, "control", partial(_control_answers, answers=answers))
+    monkeypatch.setattr(daemon, "_spawn", spawn)
+    assert await ensure(dirs, version="new") == ready
+
+
 async def _control_answers(
     dirs: ServeDirs,
     request: DaemonControl,

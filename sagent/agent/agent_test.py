@@ -53,6 +53,7 @@ from sagent.session.types import (
     AssistantMessage,
     Attachment,
     ContextClear,
+    RequestMeasurement,
     SessionRecord,
     SystemMessage,
     TokenUsage,
@@ -520,7 +521,7 @@ def _check_capped_permissions(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "allowed",
-    [None, frozenset(), frozenset({"AgentSend"}), frozenset({"Work"})],
+    [None, frozenset[str](), frozenset({"AgentSend"}), frozenset({"Work"})],
 )
 async def test_permission_changes_during_a_round_cap_survive_the_next_turn(
     tmp_path: Path,
@@ -1129,6 +1130,46 @@ async def test_a_resumed_session_tells_vendors_it_is_the_same_conversation(
     assert str(uuid.UUID(first)) == first
 
 
+def test_appended_turn_restores_usage_and_request_measurement(tmp_path: Path) -> None:
+    _, agent = _agent(tmp_path)
+    measurement = RequestMeasurement(
+        tokenizer="tokenizer",
+        model="scripted/scripted",
+        frame="frame",
+        prefix="prefix",
+        records=2,
+        prompt=37,
+    )
+    turn = (AssistantMessage(content="reading"), ToolCall(call_id="c1", name="Read"))
+    usage = TokenUsage(
+        info={
+            "request": 11,
+            "response": 13,
+            "cache_write": 17,
+            "cache_write_1h": 19,
+            "cache_read": 23,
+            "spend_usd": 0.25,
+            "agent": "worker",
+        },
+        measurement=measurement,
+    )
+    agent.session.append(*turn, usage)
+
+    (restored,) = agent.runtime.context().messages
+    assert isinstance(restored, Response)
+    assert restored.records == turn
+    assert restored.tokens == TokenCount(
+        request=11,
+        response=13,
+        cache_write=17,
+        cache_write_1h=19,
+        cache_read=23,
+    )
+    assert restored.spend == TokenCost(request=0.25)
+    assert restored.stop_reason == ""
+    assert restored.measurement is measurement
+
+
 def test_appended_records_are_turns_and_what_no_turn_holds_is_dropped(
     tmp_path: Path,
 ) -> None:
@@ -1541,7 +1582,7 @@ def test_a_gated_off_tool_reminds_of_nothing(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize("allowed", [frozenset(), frozenset({"_Tool"})])
+@pytest.mark.parametrize("allowed", [frozenset[str](), frozenset({"_Tool"})])
 def test_disabling_a_tool_withdraws_its_reminder_until_reenabled(
     tmp_path: Path,
     allowed: frozenset[str],

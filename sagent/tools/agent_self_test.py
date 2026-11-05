@@ -352,7 +352,7 @@ async def test_diagnostics_report_what_the_agent_runs_on(tmp_path: Path) -> None
     ("allowed", "callable_tools"),
     [
         (None, "AgentSelf, AgentSend"),
-        (frozenset(), ""),
+        (frozenset[str](), ""),
         (frozenset({"AgentSend"}), "AgentSend"),
     ],
 )
