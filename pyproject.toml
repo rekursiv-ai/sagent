@@ -1,6 +1,6 @@
 # NEVER EDIT THIS FILE!
-# uv sync --all-groups --no-group jax --no-group tf --frozen  # cu132 aka "cuda"
-# uv sync --all-groups --no-group jax --no-group tf --frozen --no-group cuda --extra cpu
+# uv sync --all-groups --frozen  # cu132 aka "cuda"
+# uv sync --all-groups --frozen --no-group cuda --extra cpu
 
 [project]
 name = "sagent"
@@ -59,6 +59,54 @@ dependencies = [
     "cryptography>=50.0.2",
 ]
 
+[project.scripts]
+sagent = "sagent.tui.main:main"
+
+[dependency-groups]
+
+# Requirements are floors; uv.lock fixes versions. Never cap a dependency.
+# Public package deltas replace project.dependencies; these groups are monorepo-only.
+
+cuda = [
+    "torch",
+    "torchao",
+    "torchvision",
+]
+
+lint = [
+    "codespell>=2.4.3",
+    "ruff>=0.17.3",
+]
+test = [
+    "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
+    "pytest>=9.2.0",
+    "hypothesis>=6.170.14",
+    "pytest-cov>=7.1.0",
+    "pytest-asyncio>=1.4.1",
+    "sagent[selfhosted]",
+]
+typecheck = [
+    "basedpyright>=1.40.2",
+    "pyrefly>=1.4.0",
+    "ty>=0.0.95",
+    "rekursiv-ai-typings>=0.1.11",
+]
+"pre-commit" = [
+    "pre-commit>=4.7.0",
+    {include-group = "lint"},
+    {include-group = "test"},
+    {include-group = "typecheck"},
+]
+dev = [
+    {include-group = "debug"},
+    {include-group = "pre-commit"},
+]
+debug = [
+    "ipython>=9.18.0",
+    "tqdm>=4.70.1",
+]
+
 [project.optional-dependencies]
 cpu = [
     "torch",
@@ -104,54 +152,6 @@ selfhosted = [
     "torchvision>=0.26.0",
     "transformers>=5.22.1",
 ]
-
-[project.scripts]
-sagent = "sagent.tui.main:main"
-
-[dependency-groups]
-# NEVER ADD MORE DEPENDENCIES!
-
-cuda = [
-    "torch",
-    "torchao",
-    "torchvision",
-]
-
-debug = [
-    "ipython>=9.18.0",
-    "tqdm>=4.70.1",
-]
-lint = [
-    "codespell>=2.4.3",
-    "ruff>=0.17.3",
-]
-test = [
-    "pytest-timeout>=2.4.0",
-    "pytest-xdist>=3.8.0",
-    "pytest>=9.2.0",
-    "hypothesis>=6.170.14",
-    "pytest-cov>=7.1.0",
-    "pytest-asyncio>=1.4.1",
-    "sagent[selfhosted]",
-]
-typecheck = [
-    "basedpyright>=1.40.2",
-    "pyrefly>=1.4.0",
-    "ty>=0.0.95",
-    "rekursiv-ai-typings>=0.1.11",
-]
-"pre-commit" = [
-    "pre-commit>=4.7.0",
-    {include-group = "lint"},
-    {include-group = "test"},
-    {include-group = "typecheck"},
-]
-dev = [
-    {include-group = "debug"},
-    {include-group = "pre-commit"},
-]
-
-# NEVER ADD OTHER DEPENDENCY GROUPS: A NEW GROUP SERVES A PROJECT, AS ABOVE.
 
 [project.urls]
 Homepage = "https://www.rekursiv.ai"
