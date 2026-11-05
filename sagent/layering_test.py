@@ -42,16 +42,21 @@ def _outside_the_frontend() -> list[Path]:
     ]
 
 
-def test_nothing_but_the_frontend_and_the_entry_point_imports_the_frontend() -> None:
-    importers = [
-        str(path.relative_to(_ROOT))
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param(path, id=str(path.relative_to(_ROOT)))
         for path in _outside_the_frontend()
-        if any(
-            name == _FRONTEND or name.startswith(f"{_FRONTEND}.")
-            for name in _imports(path)
-        )
-    ]
-    assert importers == []
+    ],
+)
+def test_nothing_but_the_frontend_and_the_entry_point_imports_the_frontend(
+    path: Path,
+) -> None:
+    assert not {
+        name
+        for name in _imports(path)
+        if name == _FRONTEND or name.startswith(f"{_FRONTEND}.")
+    }
 
 
 def test_the_check_sees_an_import_of_the_frontend(tmp_path: Path) -> None:

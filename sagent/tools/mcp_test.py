@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Self, cast, override
 
 import asyncio
 import base64
 import contextlib
+import fcntl
 import json
 import logging
 import re
@@ -23,7 +25,7 @@ from mcp.client._memory import InMemoryTransport
 from mcp.client.session_group import StreamableHttpParameters
 from mcp.server.lowlevel import Server
 from mcp.shared.auth import OAuthToken
-from treekle import json_loads
+from treekle import PlainTree, json_loads
 
 import mcp.types as mcp_types
 import pytest
@@ -60,7 +62,6 @@ if TYPE_CHECKING:
     from mcp.client._transport import Transport, TransportStreams
     from mcp.client.session import MessageHandlerFnT
     from mcp.server.context import ServerRequestContext
-    from treekle import PlainTree
 
     from sagent.tools.mcp import McpScope, McpToolLoading
     from sagent.tools.types import Tool
@@ -241,31 +242,19 @@ def test_two_writers_at_once_keep_both_servers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each writer reads the file, then writes it; neither may write over the other."""
-    both_read = threading.Barrier(2)
-    read = mcp._file_config
-
-    def slow_read(
-        path: Path,
-    ) -> tuple[dict[str, PlainTree], dict[str, dict[str, PlainTree]]]:
-        config = read(path)
-        # Holds the first reader until the second has read too, unless a lock
-        # keeps the second waiting; then the first goes on alone.
-        with contextlib.suppress(threading.BrokenBarrierError):
-            both_read.wait(timeout=0.2)
-        return config
-
-    monkeypatch.setattr(mcp, "_file_config", slow_read)
-    writers = [
-        threading.Thread(
-            target=asyncio.run,
-            args=(add_server(name, {"command": "uvx"}, cwd=tmp_path),),
-        )
-        for name in ("git", "docs")
-    ]
-    for writer in writers:
-        writer.start()
-    for writer in writers:
-        writer.join()
+    race = _ConfigRace(read=mcp._file_config)
+    monkeypatch.setattr(mcp, "_file_config", race)
+    monkeypatch.setattr(
+        fcntl,
+        "flock",
+        _Flock(real=fcntl.flock, blocked=race.blocked.set),
+    )
+    with ThreadPoolExecutor(max_workers=2) as writers:
+        first = writers.submit(_add_from_thread, tmp_path, "git")
+        assert race.reading.wait(timeout=1), "the first writer never read"
+        second = writers.submit(_add_from_thread, tmp_path, "docs")
+        first.result(timeout=1)
+        second.result(timeout=1)
     assert sorted(s.name for s in servers(tmp_path)) == ["docs", "git"]
 
 
@@ -471,25 +460,35 @@ async def test_a_sign_in_a_renewal_writes_again_still_says_whose_it_is(
 
 
 @pytest.mark.asyncio
-async def test_a_removal_waits_out_another_writer_of_its_file(tmp_path: Path) -> None:
+async def test_a_removal_waits_out_another_writer_of_its_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A server added and signed in while a removal cleans up keeps its sign-in."""
     await add_server("docs", {"url": "https://a/mcp"}, cwd=tmp_path)
+    blocked = asyncio.Event()
+    monkeypatch.setattr(fcntl, "flock", _Flock(real=fcntl.flock, blocked=blocked.set))
     path = project_dir(tmp_path) / "mcp.json"
     async with mcp._locked(path):
         removing = asyncio.create_task(remove_server("docs", cwd=tmp_path))
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(blocked.wait(), timeout=1)
         assert not removing.done()
     assert await removing == "local"
 
 
 @pytest.mark.asyncio
-async def test_a_logout_sweeps_only_once_its_file_is_its_own(tmp_path: Path) -> None:
+async def test_a_logout_sweeps_only_once_its_file_is_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An ``add`` and its sign-in between the sweep's read and delete would be lost."""
     await add_server("docs", {"url": "https://a/mcp"}, cwd=tmp_path)
     (docs,) = servers(tmp_path)
+    blocked = asyncio.Event()
+    monkeypatch.setattr(fcntl, "flock", _Flock(real=fcntl.flock, blocked=blocked.set))
     async with mcp._locked(project_dir(tmp_path) / "mcp.json"):
         sweeping = asyncio.create_task(logout(docs))
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(blocked.wait(), timeout=1)
         assert not sweeping.done()
     assert await sweeping is False
 
@@ -1169,7 +1168,10 @@ async def test_a_session_connects_its_servers_and_skips_one_that_fails(
     script.write_text(SHOUT_SERVER)
     good = McpServer(
         name="good",
-        parameters=StdioServerParameters(command=sys.executable, args=[str(script)]),
+        parameters=StdioServerParameters(
+            command=sys.executable,
+            args=["-I", "-S", str(script)],
+        ),
     )
     missing = McpServer(
         name="missing",
@@ -1193,23 +1195,40 @@ async def test_a_session_connects_its_servers_and_skips_one_that_fails(
     log = state_dir() / "rekursiv-ai" / "sagent" / "mcp" / f"good-{good.key}.log"
     assert "server started" in log.read_text()
     assert stat.S_IMODE(log.stat().st_mode) == 0o600
-    log.chmod(0o664)
-    # A second session, as another process would run, adds to the log.
-    async with McpSession([good]):
-        pass
-    assert log.read_text().count("server started") == 2
-    assert stat.S_IMODE(log.stat().st_mode) == 0o600
-    # Another project's ``good`` runs another command, so writes another log.
-    other = McpServer(
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("other", [False, True], ids=["same-server", "other-server"])
+async def test_a_server_log_is_private_appended_and_specific_to_its_command(
+    tmp_path: Path,
+    other: bool,
+) -> None:
+    script = tmp_path / "server.py"
+    script.write_text(SHOUT_SERVER)
+    good = McpServer(
         name="good",
         parameters=StdioServerParameters(
             command=sys.executable,
-            args=[str(script), "--other"],
+            args=["-I", "-S", str(script)],
         ),
     )
-    async with McpSession([other]):
+    async with McpSession([good]):
         pass
-    assert log.read_text().count("server started") == 2
+    log = state_dir() / "rekursiv-ai" / "sagent" / "mcp" / f"good-{good.key}.log"
+    log.chmod(0o664)
+    again = McpServer(
+        name="good",
+        parameters=StdioServerParameters(
+            command=sys.executable,
+            args=["-I", "-S", str(script), *(["--other"] if other else [])],
+        ),
+    )
+    async with McpSession([again]):
+        pass
+    assert log.read_text().count("server started") == (1 if other else 2)
+    written = log.with_name(f"good-{again.key}.log")
+    assert stat.S_IMODE(written.stat().st_mode) == 0o600
+    assert written.read_text().count("server started") == (1 if other else 2)
 
 
 @pytest.mark.asyncio
@@ -1607,6 +1626,44 @@ def _greet(name: str) -> str:
 
 def _context() -> ToolContext:
     return ToolContext(cwd=Path.cwd())
+
+
+@dataclass(slots=True, kw_only=True)
+class _Flock:
+    """Observe actual lock contention without replacing the kernel's lock."""
+
+    real: Callable[[int, int], object]
+    blocked: Callable[[], None]
+
+    def __call__(self, fd: int, operation: int) -> None:
+        try:
+            self.real(fd, operation)
+        except BlockingIOError:
+            self.blocked()
+            raise
+
+
+@dataclass(slots=True, kw_only=True)
+class _ConfigRace:
+    """Hold the first read until another writer actually contends for its lock."""
+
+    read: Callable[[Path], tuple[dict[str, PlainTree], dict[str, dict[str, PlainTree]]]]
+    reading: threading.Event = field(default_factory=threading.Event)
+    blocked: threading.Event = field(default_factory=threading.Event)
+
+    def __call__(
+        self,
+        path: Path,
+    ) -> tuple[dict[str, PlainTree], dict[str, dict[str, PlainTree]]]:
+        config = self.read(path)
+        if not self.reading.is_set():
+            self.reading.set()
+            assert self.blocked.wait(timeout=1), "the other writer bypassed the lock"
+        return config
+
+
+def _add_from_thread(path: Path, name: str) -> None:
+    asyncio.run(add_server(name, {"command": "uvx"}, cwd=path))
 
 
 if __name__ == "__main__":

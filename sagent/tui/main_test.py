@@ -43,13 +43,13 @@ from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.pruner import Pruner
 from sagent.agent.team import Team
 from sagent.host import daemon
+from sagent.host.server import Server
 from sagent.host.strings import ServeDirs
 from sagent.host.wire import DaemonControl
 from sagent.lib.posix.attach import stop
 from sagent.lib.posix.detached import await_ready
 from sagent.lib.posix.host import serve_command
-from sagent.lib.posix.pids import unlocked_within
-from sagent.lib.posix.sockets import accepts
+from sagent.lib.posix.sockets import accepts, socket_address
 from sagent.lib.userdirs import config_dir, data_dir, state_dir
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog
@@ -231,17 +231,74 @@ class _Script:
         return provider
 
 
+class _DaemonThread(threading.Thread):
+    """Run the real socket protocol across the CLI's separate event loops."""
+
+    def __init__(self, dirs: ServeDirs, *, version: str) -> None:
+        super().__init__(daemon=True)
+        self.dirs = dirs
+        self.version = version
+        self.error: BaseException | None = None
+
+    @override
+    def run(self) -> None:
+        try:
+            asyncio.run(self._serve())
+        except BaseException as error:
+            logging.getLogger(__name__).exception("Test daemon failed")
+            self.error = error
+
+    def poll(self) -> int | None:
+        return None if self.is_alive() else int(self.error is not None)
+
+    async def _serve(self) -> None:
+        version, handoff = self.version, ""
+        while version:
+            async with Server(
+                self.dirs,
+                listen=(),
+                local_socket=socket_address(self.dirs.state / "daemon.sock"),
+                source_version=version,
+                handoff=handoff,
+            ) as server:
+                await server.stopping.wait()
+                version = server.replacement
+                if version:
+                    handoff = await server.handoff()
+
+
 @pytest.fixture(autouse=True)
-def stop_test_daemon() -> Generator[None]:
-    """Every CLI test owns its private daemon; none outlive the isolated directories."""
+def stop_test_daemon(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
+    """Replace interpreter startup, retaining ensure, control, and real client sockets."""
+    started: list[_DaemonThread] = []
+
+    def spawn(dirs: ServeDirs, *, version: str) -> _DaemonThread:
+        process = _DaemonThread(dirs, version=version)
+        started.append(process)
+        process.start()
+        return process
+
+    monkeypatch.setattr(daemon, "_spawn", spawn)
+    monkeypatch.setattr(daemon, "fingerprint", lambda: "cli-current")
     yield
-    dirs = ServeDirs(
-        secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
-        state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
-    )
-    with contextlib.suppress(FileNotFoundError, ConnectionRefusedError):
-        _ = asyncio.run(daemon.control(dirs, DaemonControl(stop=True)))
-        assert unlocked_within(dirs.state / "daemon.lock", seconds=5)
+    for process in started:
+        if process.is_alive():
+            _ = asyncio.run(daemon.control(process.dirs, DaemonControl(stop=True)))
+        process.join(timeout=5)
+        assert not process.is_alive()
+        assert process.error is None
+
+
+@contextlib.contextmanager
+def _no_stalls(*, threshold_sec: float) -> Generator[None]:
+    del threshold_sec
+    yield
+
+
+@pytest.fixture(autouse=True)
+def no_stall_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep wall-clock monitoring in its own tests; CLI wiring has a recording test."""
+    monkeypatch.setattr(main, "watch_stalls", _no_stalls)
 
 
 @pytest.fixture
@@ -955,10 +1012,21 @@ def test_the_journal_is_written_where_resume_finds_it(
     assert "noted" in journal.read_text()
 
 
+@pytest.mark.parametrize(
+    ("resumed", "effort", "system"),
+    [
+        ((), "high", "mine"),
+        (("--effort", "low", "--system-prompt", "theirs"), "low", "theirs"),
+    ],
+)
 def test_a_resumed_session_comes_back_on_its_model_and_prompt_and_a_flag_wins(
     script: _Script,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    *,
+    resumed: tuple[str, ...],
+    effort: str,
+    system: str,
 ) -> None:
     script.capability = ModelCapability(
         model_id="scripted",
@@ -968,14 +1036,22 @@ def test_a_resumed_session_comes_back_on_its_model_and_prompt_and_a_flag_wins(
     monkeypatch.chdir(tmp_path)
     runs = (
         ("--effort", "high", "--system-prompt", "mine"),
-        ("--continue",),
-        ("--continue", "--effort", "low", "--system-prompt", "theirs"),
+        ("--continue", *resumed),
     )
     stood: list[str] = []
     systems: list[str] = []
     for given in runs:
         script.replies.append(reply("ok"))
-        _argv(monkeypatch, "--provider", "scripted", "--model", "scripted", *given)
+        _argv(
+            monkeypatch,
+            "--provider",
+            "scripted",
+            "--model",
+            "scripted",
+            "--tools",
+            "none",
+            *given,
+        )
         _stdin(monkeypatch, "hi")
         assert main.main() == 0
         (path,) = project_dir(tmp_path).glob("*/session.jsonl")
@@ -984,10 +1060,9 @@ def test_a_resumed_session_comes_back_on_its_model_and_prompt_and_a_flag_wins(
 
     assert stood == [
         "scripted/scripted+fullcontext+highthink",
-        "scripted/scripted+fullcontext+highthink",
-        "scripted/scripted+fullcontext+lowthink",
+        f"scripted/scripted+fullcontext+{effort}think",
     ]
-    assert [s.rpartition("\n\n")[2] for s in systems] == ["mine", "mine", "theirs"]
+    assert [s.rpartition("\n\n")[2] for s in systems] == ["mine", system]
 
 
 def test_a_resumed_session_comes_back_on_its_account(
@@ -1585,11 +1660,13 @@ def test_a_group_listed_from_the_shell_is_a_note(
     ]
 
 
+@pytest.mark.parametrize("index", range(16))
 def test_every_shell_command_runs_as_its_prompt_command_does(
     script: _Script,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
     tmp_path: Path,
+    index: int,
 ) -> None:
     """``sagent NAME ARGS`` and ``/NAME ARGS`` reach one action and say one thing."""
     monkeypatch.chdir(tmp_path)
@@ -1624,23 +1701,23 @@ def test_every_shell_command_runs_as_its_prompt_command_does(
         "remote del",
         "remote list",
     ]
-    for action in actions:
-        dotted = ".".join(action.name)
-        for args, code in [("--help", 0), ("--bogus", 1)]:
-            _argv(monkeypatch, *action.name, args)
-            assert main.main() == code, (action.name, args)
-            shell = capsys.readouterr()
-            asyncio.run(commands(f"/{dotted} {args}"))
-            (prompt,) = said
-            said.clear()
-            assert prompt.command == f"/{dotted}"
-            if code == 0:
-                assert prompt.tone == "note"
-                assert prompt.text == action.help_long.rstrip()
-                assert (shell.out, shell.err) == (f"{prompt.text}\n", "")
-            else:
-                assert prompt.tone == "error"
-                assert (shell.out, shell.err) == ("", f"Error: {prompt.text}\n")
+    action = actions[index]
+    dotted = ".".join(action.name)
+    for args, code in [("--help", 0), ("--bogus", 1)]:
+        _argv(monkeypatch, *action.name, args)
+        assert main.main() == code, (action.name, args)
+        shell = capsys.readouterr()
+        asyncio.run(commands(f"/{dotted} {args}"))
+        (prompt,) = said
+        said.clear()
+        assert prompt.command == f"/{dotted}"
+        if code == 0:
+            assert prompt.tone == "note"
+            assert prompt.text == action.help_long.rstrip()
+            assert (shell.out, shell.err) == (f"{prompt.text}\n", "")
+        else:
+            assert prompt.tone == "error"
+            assert (shell.out, shell.err) == ("", f"Error: {prompt.text}\n")
 
 
 def test_the_allow_list_picks_the_provider_and_bounds_the_team(
@@ -3319,7 +3396,6 @@ async def test_run_redraws_the_session_then_answers_what_is_typed(
                     print_batch_sec=0,
                 ),
             )
-            await asyncio.sleep(0.05)
             pipe.send_text("hello\r")
             await asyncio.wait_for(answered.wait(), timeout=5)
             pipe.send_text("/quit\r")
@@ -4120,7 +4196,6 @@ async def test_run_labels_calls_by_their_tool_and_quits_by_command(
                     print_batch_sec=0,
                 ),
             )
-            await asyncio.sleep(0.05)
             pipe.send_text("read it\r")
             await asyncio.wait_for(answered.wait(), timeout=5)
             pipe.send_text("/kill all\r/quit now\r")
@@ -4556,7 +4631,6 @@ async def test_quitting_with_a_message_waiting_says_it_is_discarded(
                     print_batch_sec=0,
                 ),
             )
-            await asyncio.sleep(0.05)
             pipe.send_text("go\r")
             await asyncio.wait_for(slow.started.wait(), timeout=5)
             pipe.send_text("after the tools\t\x04")
@@ -4736,7 +4810,7 @@ async def test_kill_ends_the_holder_and_resumes_here(
     monkeypatch.setattr(main, "accepts", _never)
     # A holder that heeds TERM frees the journal at once; one deaf to it waits out
     # the whole grace, so the deaf one is given a short one.
-    grace = 0.05 if stubborn else 10.0
+    grace = 0.005 if stubborn else 10.0
     monkeypatch.setattr(main, "_take_over", partial(main._take_over, term_sec=grace))
     with _holder(journal, stubborn=stubborn) as holder:
         status = await _resume(journal, command=["sagent"])

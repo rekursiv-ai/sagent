@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from subprocess import Popen
 
 
 def fingerprint() -> str:
@@ -103,12 +104,18 @@ async def ensure(dirs: ServeDirs, *, version: str = "") -> DaemonStatus:
         await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
         deadline = time.monotonic() + 30
         starting = False
+        process = None
         while time.monotonic() < deadline:
             try:
                 status = await control(dirs, DaemonControl(source_version=version))
             except (FileNotFoundError, ConnectionRefusedError):
+                if process is not None and (code := process.poll()) is not None:
+                    raise RuntimeError(
+                        f"The sagent daemon exited with status {code};"
+                        f" see {dirs.state / 'daemon.log'}.",
+                    ) from None
                 if not starting:
-                    _spawn(dirs, version=version)
+                    process = _spawn(dirs, version=version)
                     starting = True
             else:
                 if not status.restarting:
@@ -219,8 +226,8 @@ async def _serve(dirs: ServeDirs, *, version: str, handoff: str = "") -> None:
         os.close(fd)
 
 
-def _spawn(dirs: ServeDirs, *, version: str) -> None:
-    """Start outside the launching client's terminal and reap without owning its lifetime."""
+def _spawn(dirs: ServeDirs, *, version: str) -> Popen[bytes]:
+    """Start outside the client's terminal; return its handle and reap it independently."""
     fd = open_private(dirs.state / "daemon.log", os.O_WRONLY | os.O_APPEND)
     try:
         process = subprocess.Popen(  # noqa: S603 -- Fixed interpreter and module, owner-owned paths.
@@ -245,6 +252,7 @@ def _spawn(dirs: ServeDirs, *, version: str) -> None:
     finally:
         os.close(fd)
     threading.Thread(target=process.wait, daemon=True).start()
+    return process
 
 
 def _add_arguments(parser: argparse.ArgumentParser) -> None:

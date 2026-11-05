@@ -40,6 +40,7 @@ def _ansi(
     path: str = "",
     style: DiffStyle | None = None,
     width: int = 40,
+    lines: tuple[int, int] | None = None,
 ) -> list[str]:
     out = io.StringIO()
     console = Console(
@@ -48,7 +49,7 @@ def _ansi(
         color_system="truecolor",
         force_terminal=True,
     )
-    render_diff(console, diff, row_indent="  ", path=path, style=style)
+    render_diff(console, diff, row_indent="  ", path=path, style=style, lines=lines)
     return out.getvalue().splitlines()
 
 
@@ -529,7 +530,7 @@ def test_a_long_run_of_alike_lines_still_pairs_the_one_that_changed() -> None:
     # Junking the two hundred alike lines would pair every line off by one.
     same = "-s\n" * 205
     diff = f"@@ -1 +1 @@\n{same}-tail value b\n+new\n{same.replace('-', '+')}+tail value c\n"
-    rows = _ansi(diff)
+    rows = _ansi(diff, lines=(0, 1))
     assert _styled(rows[-1], _ADDED_WORD) == "c"
 
 

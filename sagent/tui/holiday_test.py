@@ -16,7 +16,7 @@ from sagent.tui.holiday import Icon, holiday_icon, holidays, icon_rows
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable, Iterator, Sequence
     from pathlib import Path
 
 
@@ -434,14 +434,27 @@ def test_window_is_the_day_or_its_whole_weekend(
 
 
 @pytest.mark.usefixtures("los_angeles")
-def test_overlapping_holidays_are_all_chosen() -> None:
+def test_overlapping_holidays_are_all_chosen(monkeypatch: pytest.MonkeyPatch) -> None:
     # March 20, 2026: spring begins, and with it Nowruz; Eid al-Fitr too.
     expected = (
         _holiday_icons("First day of spring")
         | _holiday_icons("Nowruz")
         | _holiday_icons("Eid al-Fitr")
     )
-    assert _icon_names(date(2026, 3, 20), draws=200) == expected
+    choices = iter(
+        index for pair in itertools.product(range(3), range(2)) for index in pair
+    )
+    sizes: list[int] = []
+
+    def choose[T](options: Sequence[T]) -> T:
+        sizes.append(len(options))
+        return options[next(choices)]
+
+    rng = Random(0)  # noqa: S311 -- Test draws, not cryptography.
+    monkeypatch.setattr(rng, "choice", choose)
+    icons = [holiday_icon(date(2026, 3, 20), rng=rng) for _ in range(6)]
+    assert {icon.name for icon in icons if icon is not None} == expected
+    assert sizes == [3, 2] * 6
 
 
 def test_an_asset_error_names_the_asset(

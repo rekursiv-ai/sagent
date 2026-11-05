@@ -63,7 +63,8 @@ if TYPE_CHECKING:
 
 @pytest.fixture(autouse=True)
 def isolate_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the children's git probe off the user's config and above ``tmp_path``."""
+    """Keep the children's git probe and default directory inside ``tmp_path``."""
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
