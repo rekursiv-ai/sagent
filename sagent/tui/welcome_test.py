@@ -5,7 +5,8 @@ from __future__ import annotations
 from datetime import date
 from itertools import groupby
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Literal, TextIO, override
+from random import Random
+from typing import IO, Literal, TextIO, override
 
 import io
 import re
@@ -24,10 +25,6 @@ from sagent.tui import welcome
 from sagent.tui.holiday import Icon
 from sagent.tui.theme import load_theme
 from sagent.tui.welcome import render_welcome
-
-
-if TYPE_CHECKING:
-    from random import Random
 
 
 @pytest.fixture(autouse=True)
@@ -425,7 +422,7 @@ def test_print_welcome_shows_todays_holiday(monkeypatch: pytest.MonkeyPatch) -> 
         return console
 
     def pumpkin(today: date, *, rng: Random) -> Icon:
-        del rng
+        assert type(rng) is Random
         asked.append(today)
         return _PUMPKIN
 

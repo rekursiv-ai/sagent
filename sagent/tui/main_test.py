@@ -112,7 +112,7 @@ from sagent.tools.types import ToolContext
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
 from sagent.tui import main, slash
-from sagent.tui.console import ConsolePrinter
+from sagent.tui.console import ConsolePrinter, Screen, terminal_console
 from sagent.tui.prompt import Input, Panes, PromptSource, prompt_text
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.slash import Commands
@@ -124,6 +124,7 @@ from sagent.tui.views import Views
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator, Sequence
     from subprocess import Popen
+    from typing import TextIO
 
     from prompt_toolkit import PromptSession
     from rich.console import Console
@@ -5374,6 +5375,53 @@ async def test_prompt_styles_follow_slash_changes_without_rebuilding_the_session
         await views.current.commands("/screen.theme default")
         assert session.style.get_attrs_for_style_str("") == before
     await views.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_run_shares_the_theme_and_terminal_with_the_printer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    explicit: bool,
+) -> None:
+    theme = ThemeState() if explicit else None
+    seen: list[Views] = []
+    prompt_session = main._prompt_session
+
+    def capture(views: Views, *, entry: Input, history: Path) -> PromptSession[str]:
+        seen.append(views)
+        return prompt_session(views, entry=entry, history=history)
+
+    def console(file: TextIO) -> Console:
+        assert isinstance(file, Screen)
+        assert file is sys.stdout
+        return terminal_console(file)
+
+    monkeypatch.setattr(main, "_prompt_session", capture)
+    monkeypatch.setattr(main, "terminal_console", console)
+    async with Agent(
+        model=ScriptedProvider()["scripted"],
+        journal=RecordingJournal(),
+    ) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=DummyOutput()),
+        ):
+            pipe.send_text("/quit\r")
+            await main.run(
+                agent,
+                catalog=_Script().catalog(),
+                history=tmp_path / "history",
+                print_batch_sec=0,
+                theme=theme,
+            )
+    (views,) = seen
+    assert isinstance(views.printer, ConsolePrinter)
+    assert isinstance(views.theme, ThemeState)
+    assert views.printer.theme is views.theme
+    if explicit:
+        assert views.theme is theme
 
 
 if __name__ == "__main__":
