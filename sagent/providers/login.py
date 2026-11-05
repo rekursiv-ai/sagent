@@ -40,6 +40,7 @@ import time
 import webbrowser
 
 from treekle import from_plain, json_dumps, json_loads, to_plain
+from wrapt import lazy_import
 
 from sagent.lib.files.owner_only import open_private, write_private
 from sagent.lib.userdirs import state_dir
@@ -49,6 +50,10 @@ from sagent.model.exceptions import AuthError
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
     from pathlib import Path
+
+    from prompt_toolkit import PromptSession
+else:
+    PromptSession = lazy_import("prompt_toolkit", "PromptSession")
 
 
 __all__ = [
@@ -61,6 +66,7 @@ __all__ = [
     "login_flow",
     "open_browser",
     "pasted_code",
+    "read_login_input",
     "read_pasted_code",
     "redirected",
 ]
@@ -529,6 +535,12 @@ def pasted_code(pasted: str, *, state: str) -> str:
     return codes[0]
 
 
+async def read_login_input(prompt: str) -> str:
+    """Read a sign-in line, releasing the terminal when cancelled."""
+    session: PromptSession[str] = PromptSession()
+    return await session.prompt_async(prompt)
+
+
 async def read_pasted_code(
     *,
     state: str,
@@ -557,7 +569,7 @@ async def read_pasted_code(
         show(
             "Open the link in your browser, then paste the authorization code or full redirect URL:\n",
         )
-        pasted = (await asyncio.to_thread(input, "Code: ")).strip()
+        pasted = (await read_login_input("Code: ")).strip()
         if pasted and not any(c in pasted for c in "?#:"):
             return pasted
         return pasted_code(pasted, state=state)
@@ -568,7 +580,7 @@ async def read_pasted_code(
         else "Open it in a browser anywhere, then paste the address it was sent"
         " to, though it fails to load:\n",
     )
-    return pasted_code(await asyncio.to_thread(input, "Address: "), state=state)
+    return pasted_code(await read_login_input("Address: "), state=state)
 
 
 def _open(path: Path) -> int:

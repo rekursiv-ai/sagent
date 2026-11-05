@@ -35,6 +35,7 @@ from prompt_toolkit.layout.controls import FormattedTextControl
 
 from sagent.tui.prompt import repaint_on_change
 from sagent.tui.status import elapsed
+from sagent.tui.theme import load_theme
 
 
 if TYPE_CHECKING:
@@ -43,6 +44,7 @@ if TYPE_CHECKING:
     from prompt_toolkit.key_binding import KeyPressEvent
 
     from sagent.agent.types import Agent
+    from sagent.tui.theme import Theme
 
 
 __all__ = [
@@ -130,9 +132,9 @@ def render(shown: list[Row], *, cursor: int, note: str = "") -> FormattedText:
         head = f"{row.branch}{row.text}"
         head = head if len(head) <= width else f"{head[: width - 1]}…"
         line = f" {head:<{width}}  {row.state:<9} {row.detail:>8} "
-        out.extend([("reverse" if i == cursor else "", line), ("", "\n")])
+        out.extend([("class:tree.selected" if i == cursor else "", line), ("", "\n")])
     keys = "↑↓ move · Enter focus · Del stop · → back"
-    out.append(("fg:ansibrightblack", f"\n {keys}{f' · {note}' if note else ''}\n"))
+    out.append(("class:tree.help", f"\n {keys}{f' · {note}' if note else ''}\n"))
     return FormattedText(out)
 
 
@@ -142,6 +144,7 @@ async def pick(
     focused: str,
     stop: Callable[[str], str],
     cancel: Callable[[str, str], str],
+    theme: Theme | None = None,
 ) -> str | None:
     """Show the tree full screen until a row is picked or the user goes back.
 
@@ -152,6 +155,7 @@ async def pick(
       focused: The agent the screen shows; the cursor starts on it.
       stop: Called with an agent's label on Delete; returns what to say.
       cancel: Called with a job's agent and call id on Delete; returns what to say.
+      theme: Semantic styles; the original appearance when omitted.
 
     Returns:
       label: The agent picked with Enter; ``None`` for Right or Ctrl+C.
@@ -164,6 +168,7 @@ async def pick(
         ),
         key_bindings=screen.keys(),
         full_screen=True,
+        style=(theme or load_theme()).prompt_style(),
     )
     redraw = asyncio.create_task(
         repaint_on_change(app.invalidate, screen.text),

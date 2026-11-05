@@ -8,15 +8,19 @@ import io
 import re
 import sys
 
+from rich.color import ColorSystem
 from rich.console import Console
 from rich.style import Style
+from rich.text import Text
 
 import pytest
 
+from sagent.lib.userdirs import config_dir
 from sagent.runtime import types
 from sagent.tools.bash import Bash
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tui.console import ConsolePrinter, ConsoleStyle, Screen, Title
+from sagent.tui.theme import ThemeState, load_theme
 from sagent.tui.types import Header
 
 
@@ -79,8 +83,10 @@ def _console() -> Console:
     return Console(file=Screen(io.StringIO()))
 
 
-def test_a_new_printer_owes_no_gap() -> None:
-    assert ConsolePrinter(_console()).gap_owed is False
+def test_a_new_printer_owes_no_gap_and_has_no_call() -> None:
+    printer = ConsolePrinter(_console())
+    assert printer.gap_owed is False
+    assert printer._tail is None
 
 
 def test_it_is_a_printer_that_hides_thinking_by_default() -> None:
@@ -114,8 +120,18 @@ def test_a_user_bar_fills_the_width_with_a_prompt_on_its_first_row() -> None:
         "  world wide",
         "  web       ",
     ]
-    assert all("48;2;55;55;55" in _codes(r)[0] for r in raw[1:])
-    assert all(_codes(r)[0].startswith("37;") for r in raw[1:])
+    expected = load_theme().style("user")
+    assert expected.color is not None
+    assert expected.bgcolor is not None
+    for row in raw[1:]:
+        text = Text.from_ansi(row)
+        for offset in range(len(text)):
+            style = text.get_style_at_offset(screen.printer.console, offset)
+            assert style.color is not None
+            assert style.bgcolor is not None
+            assert style.color.get_ansi_codes() == expected.color.get_ansi_codes()
+            assert style.bgcolor.get_ansi_codes() == expected.bgcolor.get_ansi_codes()
+            assert style.bold is not True
 
 
 def test_a_user_bar_stops_at_80_in_a_wide_window() -> None:
@@ -187,7 +203,9 @@ def test_a_user_bar_on_a_tiny_console_is_one_unwrapped_row() -> None:
     screen.printer.user("hi")
     raw = screen.raw()
     assert "".join(_visible(r) for r in raw) == "> hi"
-    assert "48;2;55;55;55" in _codes(raw[1])[0]
+    assert _codes(raw[1]) == _codes(
+        load_theme().style("user").render("hi", color_system=ColorSystem.TRUECOLOR),
+    )
 
 
 def test_a_wide_character_wraps_by_cells() -> None:
@@ -222,12 +240,34 @@ def test_markdown_follows_a_blank_line_without_one_of_its_own() -> None:
     assert screen.rows() == ["", " • one", " • two"]
 
 
+def test_reply_keeps_plain_prose_normal_and_only_explicit_emphasis_bold() -> None:
+    screen = _Pane(color=True)
+    screen.printer.user("question")
+    screen.printer.thinking("reason", opens=True, closes=True)
+    screen.printer.markdown("## Heading\n\nplain response\n\n**emphasis**")
+    rows = screen.raw()
+    assert next(row for row in rows if "plain response" in row).rstrip() == (
+        "plain response"
+    )
+    heading = next(row for row in rows if "Heading" in row)
+    assert "1" not in {part for code in _codes(heading) for part in code.split(";")}
+    emphasis = next(row for row in rows if "emphasis" in row)
+    assert "1" in {part for code in _codes(emphasis) for part in code.split(";")}
+
+
 def test_thinking_is_headed_and_indented() -> None:
     screen = _Pane(color=True)
     screen.printer.thinking("why\nbecause", opens=True, closes=True)
     raw = screen.raw()
     assert [_visible(r) for r in raw] == ["∴ Thinking", "  why", "  because"]
-    assert _codes(raw[0])[0] == "2;3"
+    assert (
+        _codes(raw[0])[0]
+        == _codes(
+            load_theme()
+            .style("thinking")
+            .render("Thinking", color_system=ColorSystem.TRUECOLOR),
+        )[0]
+    )
     assert _codes(raw[1])[0] == "2"
 
 
@@ -634,7 +674,12 @@ def test_a_failure_is_red_with_an_x_on_its_first_row(kind: str, indent: str) -> 
     getattr(screen.printer, kind)("failed\ndetail\n")
     raw = screen.raw()
     assert [_visible(r) for r in raw] == [f"{indent}✗ failed", f"{indent}  detail"]
-    assert all(_codes(r)[0] == "2;31" for r in raw)
+    expected = (
+        load_theme()
+        .style("failure")
+        .render("failed", color_system=ColorSystem.TRUECOLOR)
+    )
+    assert all(_codes(r)[0] == _codes(expected)[0] for r in raw)
 
 
 @pytest.mark.parametrize(("kind", "indent"), _FAILURES)
@@ -1343,6 +1388,77 @@ def test_a_wrapped_command_keeps_its_strings_colored_past_the_cut() -> None:
     (string,) = {codes for codes, text in _runs(head[0]) if "line0" in text}
     for row in tail:
         assert all(codes == string for codes, text in _runs(row) if "y" in text), row
+
+
+@pytest.mark.parametrize("kind", [*_KINDS, "markdown", "halt"])
+def test_terminal_scrollback_uses_no_fixed_rgb_or_background(kind: str) -> None:
+    screen = _Pane(color=True)
+    screen.printer.theme.select("terminal")
+    if kind == "markdown":
+        screen.printer.markdown("```python\nx = 1\n```")
+    elif kind == "halt":
+        screen.printer.halt("stopped")
+    else:
+        _KINDS[kind][0](screen.printer, "x = 1")
+    codes = [
+        int(part) for code in _codes(screen.out.getvalue()) for part in code.split(";")
+    ]
+    assert not ({38, 48, *range(40, 48), *range(100, 108)} & set(codes))
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [*_KINDS, "markdown", "markdown-code", "markdown-inline", "halt", "line"],
+)
+def test_one_printer_switches_every_new_block_without_recoloring_old_output(
+    kind: str,
+) -> None:
+    themes = config_dir() / "rekursiv-ai" / "sagent" / "themes"
+    themes.mkdir(parents=True)
+    roles = (
+        "text",
+        "muted",
+        "user",
+        "to_agent",
+        "to_user",
+        "heading",
+        "thinking",
+        "error",
+        "failure",
+        "code",
+        "added",
+        "removed",
+        "added_word",
+        "removed_word",
+    )
+    for name in ("magenta", "cyan"):
+        (themes / f"{name}.yaml").write_text(
+            "preset: terminal\nstyles:\n"
+            + "".join(f"  {role}: {name}\n" for role in roles),
+        )
+    state = ThemeState()
+    screen = _Pane(color=True)
+    screen.printer = ConsolePrinter(screen.printer.console, theme=state)
+    before = ""
+    for name, code in (("magenta", "35"), ("cyan", "36")):
+        state.select(name)
+        if kind in _KINDS:
+            _KINDS[kind][0](screen.printer, "sample")
+        elif kind == "markdown-code":
+            screen.printer.markdown("```unknown-language\nsample\n```")
+        elif kind == "markdown-inline":
+            screen.printer.markdown("`sample`")
+        else:
+            getattr(screen.printer, kind)("sample")
+        after = screen.out.getvalue()
+        assert after.startswith(before)
+        added = after[len(before) :]
+        assert "sample" in _visible(added)
+        assert any(
+            code in codes.split(";") and "sample" in text
+            for codes, text in _runs(added)
+        )
+        before = after
 
 
 if __name__ == "__main__":

@@ -552,7 +552,7 @@ async def test_a_pasted_code_must_carry_this_sign_ins_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pasted = _Typist(answers=["the-code#abc  \n"])
-    monkeypatch.setattr("builtins.input", pasted)
+    monkeypatch.setattr(login, "read_login_input", pasted)
     shown: list[str] = []
     code, redirect = await login._pasted_code("challenge", "abc", show=shown.append)
     assert (code, redirect) == (
@@ -582,7 +582,7 @@ async def test_sign_in_falls_back_to_a_pasted_code(
     browser = _Browser(visits=())
     waited = _Expired()
     monkeypatch.setattr(asyncio, "wait_for", waited)
-    monkeypatch.setattr("builtins.input", _Reader(browser=browser))
+    monkeypatch.setattr(login, "read_login_input", _Reader(browser=browser))
     server = _Server(
         replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [httpx2.Response(500)]},
     )
@@ -614,7 +614,11 @@ async def test_headless_sign_in_asks_for_the_code_without_the_browser(
     waited = _Expired()
     monkeypatch.setattr(asyncio, "wait_for", waited)
     shown: list[str] = []
-    monkeypatch.setattr("builtins.input", _Reader(browser=browser, shown=shown))
+    monkeypatch.setattr(
+        login,
+        "read_login_input",
+        _Reader(browser=browser, shown=shown),
+    )
     server = _Server(
         replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [httpx2.Response(500)]},
     )
@@ -831,7 +835,7 @@ class _Typist:
     answers: list[str] = field(default_factory=list[str])
     prompts: list[str] = field(default_factory=list[str])
 
-    def __call__(self, prompt: str) -> str:
+    async def __call__(self, prompt: str) -> str:
         self.prompts.append(prompt)
         return self.answers.pop(0)
 
@@ -843,7 +847,7 @@ class _Reader:
     browser: _Browser
     shown: list[str] = field(default_factory=list[str])
 
-    def __call__(self, prompt: str) -> str:
+    async def __call__(self, prompt: str) -> str:
         del prompt
         link = self.browser.opened[0] if self.browser.opened else self.shown[0]
         state = parse_qs(urlparse(link.split()[-1]).query)["state"][0]

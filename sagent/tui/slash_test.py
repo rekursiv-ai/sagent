@@ -278,6 +278,64 @@ def _teamed(*labels: str) -> tuple[_Desk, dict[str, Agent]]:
 
 
 @pytest.mark.asyncio
+async def test_delegated_theme_commands_change_the_same_terminal() -> None:
+    desk, _ = _teamed("kid")
+    await desk.commands("/screen.theme light")
+    await desk.commands("/send kid /screen.theme dark")
+    assert desk.commands.theme.current.name == "dark"
+    assert desk.team is not None
+    assert "screen.theme" not in desk.team.choices.get("Agent", {})
+    assert "screen.theme" not in desk.team.choices.get("kid", {})
+    await desk.commands("/send kid /screen.theme default")
+    assert desk.commands.theme.current.name == "default"
+    await desk.commands.aclose()
+
+
+@pytest.mark.asyncio
+async def test_theme_edits_are_live_terminal_settings_not_inherited_choices() -> None:
+    desk, _ = _teamed("kid")
+    await desk.commands("/screen.theme paper")
+    await desk.commands("/screen.theme.paper.thinking bold cyan")
+    await desk.commands("/send kid /screen.theme.paper.status italic yellow")
+    assert desk.commands.theme.current.name == "paper"
+    assert desk.commands.theme.current.styles["thinking"].bold is True
+    assert desk.commands.theme.current.styles["status"].italic is True
+    assert desk.team is not None
+    assert desk.team.choices == {}
+    await desk.commands("/screen.theme.default.thinking italic magenta")
+    assert desk.commands.theme.current.name == "user1"
+    assert desk.printer.said[-1] == (
+        "note",
+        "[/screen.theme.default.thinking] user1.thinking: italic magenta",
+    )
+    await desk.commands.aclose()
+
+
+@pytest.mark.asyncio
+async def test_theme_edits_preserve_the_teams_independent_messaging_choice() -> None:
+    desk, _ = _teamed("kid")
+    assert desk.team is not None
+    await desk.commands("/peer-messaging off")
+    await desk.commands("/screen.theme paper")
+    await desk.commands("/screen.theme.paper.status bold cyan")
+    await desk.commands("/peer-messaging")
+    assert desk.printer.said[-1] == (
+        "note",
+        "[/peer-messaging] off   (on, off, default)",
+    )
+    await desk.commands("/send kid /peer-messaging default")
+    await desk.commands("/peer-messaging invalid")
+    assert desk.printer.said[-1] == (
+        "error",
+        "[/peer-messaging] 'invalid' is not one of: on, off, default",
+    )
+    assert desk.commands.theme.current.name == "paper"
+    assert desk.team.choices == {"Agent": {"peer-messaging": "off"}, "kid": {}}
+    assert not desk.team.peer_messaging("kid")
+    await desk.commands.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("line", ["", "   ", "\n"])
 async def test_a_blank_line_does_nothing(line: str) -> None:
     desk = _Desk()
@@ -334,8 +392,9 @@ def test_actions_come_first_then_the_model_the_tools_the_screen_and_mcp() -> Non
     assert names.index("tool.Echo.display.command.lines") < names.index(
         "tool.Plain.display.command.lines",
     )
-    assert names[-16:] == [
+    assert [n for n in names if not n.startswith("screen.theme.")][-17:] == [
         "screen.thinking",
+        "screen.theme",
         "mcp.list",
         "mcp.get",
         "mcp.add",
@@ -1686,6 +1745,52 @@ async def test_login_precedence_refuses_a_list_it_cannot_read(line: str) -> None
     ((kind, text),) = desk.printer.said
     assert kind == "error"
     assert text.endswith("give [PROVIDER] ACCOUNT,... or [PROVIDER] off")
+
+
+class _NativeSigning(_Picky):
+    """A native sign-in with no managed credential files."""
+
+    signed_in = 0
+
+    async def login(self, *, headless: bool = False) -> None:
+        del headless
+        self.signed_in += 1
+
+
+def _with_native(account: str | None) -> dict[str, ProviderFactory]:
+    return {
+        **_per_account(account),
+        "native": partial(_NativeSigning, serves=frozenset({"native", "scripted"})),
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("selected", "allowed"),
+    [(None, True), ("default", True), ("work", False)],
+)
+async def test_native_login_refuses_named_accounts_before_authentication(
+    selected: str | None,
+    *,
+    allowed: bool,
+) -> None:
+    desk = _Desk(
+        provider="native",
+        catalog=ModelCatalog(account=selected, factories=_with_native),
+    )
+    await desk.commands("/login --headless")
+    provider = desk.catalog["native"]
+    assert isinstance(provider, _NativeSigning)
+    assert provider.signed_in == int(allowed)
+    assert desk.catalog.account == (None if allowed else selected)
+    assert desk.printer.said == [
+        ("note", "[/login] native signed in")
+        if allowed
+        else (
+            "error",
+            "[/login] native supports only the default account; use /account default",
+        ),
+    ]
 
 
 @pytest.mark.asyncio

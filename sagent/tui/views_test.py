@@ -25,6 +25,7 @@ from sagent.tui import views as views_module
 from sagent.tui.console import Title
 from sagent.tui.prompt import Navigation
 from sagent.tui.recording import RecordingPrinter
+from sagent.tui.theme import ThemeState
 from sagent.tui.tree_test import _Wait
 from sagent.tui.views import Views
 
@@ -94,6 +95,7 @@ async def test_the_root_is_shown_first_its_session_replayed(
     views = Views(root, team=None, printer=printer, catalog=_catalog())
 
     assert views.current.agent is root
+    assert views.theme.current.name == "default"
     assert "earlier" in printer.text
     assert views.toolbar() == views.current.status.frame()
     for observer in (views.current.scrollback, views.current.status, views.title):
@@ -668,6 +670,31 @@ async def test_a_failed_stop_is_logged_with_its_trace(
     assert isinstance(record.exc_info, tuple)
     assert record.exc_info[0] is RuntimeError
     assert not views._tasks
+
+
+@pytest.mark.asyncio
+async def test_theme_belongs_to_the_terminal_across_agent_focus(
+    stack: AsyncExitStack,
+) -> None:
+    team = await _team(stack)
+    theme = ThemeState()
+    theme.select("light")
+    views = Views(
+        team["Agent"],
+        team=team,
+        printer=RecordingPrinter(),
+        catalog=_catalog(),
+        theme=theme,
+    )
+    await views.current.commands("/screen.theme dark")
+    assert theme.current.name == "dark"
+    assert "screen.theme" not in team.choices.get("Agent", {})
+    views.focus("kid")
+    await views.current.commands("/screen.theme default")
+    assert theme.current.name == "default"
+    views.focus("Agent")
+    assert views.theme is theme
+    await views.aclose()
 
 
 if __name__ == "__main__":

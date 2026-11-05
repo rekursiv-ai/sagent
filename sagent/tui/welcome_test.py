@@ -17,8 +17,10 @@ from rich.text import Text
 
 import pytest
 
+from sagent.lib.userdirs import config_dir
 from sagent.tui import welcome
 from sagent.tui.holiday import Icon
+from sagent.tui.theme import load_theme
 from sagent.tui.welcome import render_welcome
 
 
@@ -344,10 +346,7 @@ def test_icon_and_wordmark_use_compact_layout_when_the_pair_would_wrap(
 
 
 def test_identity_keeps_a_rectangular_cell_grid() -> None:
-    rows = welcome._banner_rows(
-        icon=welcome._logo_rows(blue="blue", green="green", red="red"),
-        blue="blue",
-    )
+    rows = welcome._banner_rows(icon=welcome._logo_rows())
     assert len(rows) == 6
     assert {row.cell_len for row in rows} == {66}
     # The icon's 11 columns, a 3-column gap, then the wordmark.
@@ -541,35 +540,38 @@ def _rendered(
 
 
 def test_the_logo_colors_only_its_three_bars() -> None:
-    rows = welcome._logo_rows(blue="b", green="g", red="r")
+    rows = welcome._logo_rows()
+    text, accent, success, error = (
+        "not bold #808080",
+        "bold #4a90c4",
+        "bold #93c47d",
+        "bold #e06666",
+    )
     assert [_runs(row) for row in rows] == [
-        [("   ╔══════╗", "not bold")],
-        [("   ▼      ║", "not bold")],
-        [(" ", "not bold"), ("██████", "bold b"), ("   ║", "not bold")],
-        [(" ", "not bold"), ("█████", "bold g"), ("    ║", "not bold")],
-        [(" ", "not bold"), ("███████", "bold r"), ("  ║", "not bold")],
-        [("   ╚══════╝", "not bold")],
+        [("   ╔══════╗", text)],
+        [("   ▼      ║", text)],
+        [(" ", text), ("██████", accent), ("   ║", text)],
+        [(" ", text), ("█████", success), ("    ║", text)],
+        [(" ", text), ("███████", error), ("  ║", text)],
+        [("   ╚══════╝", text)],
     ]
 
 
 def test_the_wordmark_dims_its_box_glyphs_beside_an_unstyled_gap() -> None:
-    rows = welcome._banner_rows(
-        icon=welcome._logo_rows(blue="b", green="g", red="r"),
-        blue="b",
-    )
-    assert _runs(rows[0])[1:6] == [
+    rows = welcome._banner_rows(icon=welcome._logo_rows())
+    assert _runs(rows[0][11:])[:5] == [
         ("   ", ""),
-        ("███████", "b"),
-        ("╗", "dim b"),
-        (" █████", "b"),
-        ("╗", "dim b"),
+        ("███████", "#4a90c4"),
+        ("╗", "dim #4a90c4"),
+        (" █████", "#4a90c4"),
+        ("╗", "dim #4a90c4"),
     ]
     assert _runs(rows[2])[-1] == ("   ", "")
 
 
 def test_an_icon_shorter_than_the_wordmark_is_refused() -> None:
     with pytest.raises(ValueError, match="zip"):
-        welcome._banner_rows(icon=[Text("x")], blue="b")
+        welcome._banner_rows(icon=[Text("x")])
 
 
 @pytest.mark.parametrize(
@@ -585,14 +587,22 @@ def test_commands_fill_each_row_and_drop_descriptions_that_cannot_fit(
     width: int,
     rows: list[str],
 ) -> None:
-    assert [r.plain for r in welcome._command_rows(width, unicode_ok=True)] == rows
+    assert [
+        r.plain
+        for r in welcome._command_rows(
+            width,
+            unicode_ok=True,
+            theme=load_theme("terminal"),
+        )
+    ] == rows
 
 
 def test_a_command_is_bold_and_its_description_dim() -> None:
-    (row,) = welcome._command_rows(80, unicode_ok=True)
+    theme = load_theme("terminal")
+    (row,) = welcome._command_rows(80, unicode_ok=True, theme=theme)
     assert _runs(row)[:3] == [
-        ("/help", "bold"),
-        (" commands", "dim not bold"),
+        ("/help", str(theme.style("heading"))),
+        (" commands", str(theme.style("muted"))),
         ("   ", ""),
     ]
 
@@ -617,11 +627,13 @@ def test_a_framed_row_folds_inside_dim_sides(
         framed=framed,
         unicode_ok=unicode_ok,
         padding=2,
+        theme=load_theme("terminal"),
     )
     side = lines[0][0][0]
+    muted = str(load_theme("terminal").style("muted"))
     assert [_runs(t) for t in console.texts] == [
-        lines,
-        [(f"{side}  ", "dim"), ("ghi", ""), (f"     {side}", "dim")],
+        [(text, muted if style == "dim" else style) for text, style in lines],
+        [(f"{side}  ", muted), ("ghi", ""), (f"     {side}", muted)],
     ]
 
 
@@ -634,6 +646,7 @@ def test_an_unframed_row_is_only_indented() -> None:
         framed=False,
         unicode_ok=True,
         padding=2,
+        theme=load_theme("terminal"),
     )
     assert [t.plain for t in console.texts] == ["  abc"]
 
@@ -645,13 +658,50 @@ def test_the_banner_shows_only_where_it_fits(width: int, height: int) -> None:
 
 
 def test_the_frame_and_the_compact_heading_are_styled() -> None:
+    theme = load_theme("terminal")
     console = _Printed(width=40)
-    render_welcome(console, folder=Path("/research"), blue="b")
+    render_welcome(console, folder=Path("/research"), theme=theme)
     top, *_, bottom = (t for t in console.texts if t.plain[:1] in "╭╰")
-    assert _runs(top) == [("╭" + "─" * 38 + "╮", "dim")]
-    assert _runs(bottom) == [("╰" + "─" * 38 + "╯", "dim")]
+    assert _runs(top) == [("╭" + "─" * 38 + "╮", str(theme.style("muted")))]
+    assert _runs(bottom) == [("╰" + "─" * 38 + "╯", str(theme.style("muted")))]
     (heading,) = (t for t in console.texts if "SAGENT" in t.plain)
-    assert ("SAGENT", "bold b") in _runs(heading)
+    assert ("SAGENT", "bold #4a90c4") in _runs(heading)
+
+
+@pytest.mark.parametrize("width", [40, 80])
+@pytest.mark.parametrize("icon", [None, _PUMPKIN])
+def test_themes_leave_brand_and_holiday_artwork_unchanged(
+    width: int,
+    icon: Icon | None,
+) -> None:
+    path = config_dir() / "rekursiv-ai" / "sagent" / "themes" / "brand-test.yaml"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "styles: {text: 'bold yellow on blue', accent: magenta, "
+        "heading: italic, muted: green, success: cyan, error: white}",
+    )
+    identities: list[list[tuple[str, str]]] = []
+    for name in ("terminal", "light", "dark", "brand-test"):
+        console = _Printed(width=width)
+        render_welcome(
+            console,
+            folder=Path("/research"),
+            icon=icon,
+            theme=load_theme(name),
+        )
+        identity = [
+            row[3:69] if width == 80 else row[3:9]
+            for row in console.texts
+            if "███████╗" in row.plain
+            or "╚══════╝╚═╝" in row.plain
+            or "SAGENT" in row.plain
+            or (width == 80 and "█" in row.plain)
+        ]
+        assert len(identity) == (6 if width == 80 else 1)
+        rendered = [run for row in identity for run in _runs(row)]
+        if identities:
+            assert rendered == identities[0]
+        identities.append(rendered)
 
 
 def test_an_ascii_frame_is_drawn_in_ascii() -> None:
@@ -663,11 +713,60 @@ def test_an_ascii_frame_is_drawn_in_ascii() -> None:
     assert any("test-model / TestProvider" in line for line in lines)
 
 
-def test_the_default_colors_paint_the_logos_bars() -> None:
-    console = _Printed()
+def test_fixed_brand_colors_do_not_paint_a_background() -> None:
+    stream = io.StringIO()
+    console = Console(
+        file=stream,
+        force_terminal=True,
+        color_system="truecolor",
+        record=True,
+        width=80,
+        height=24,
+    )
     render_welcome(console, folder=Path("/research"))
-    styles = {s for t in console.texts for _, s in _runs(t)}
-    assert {"bold #4a90c4", "bold #93c47d", "bold #e06666", "#4a90c4"} <= styles
+    out = stream.getvalue()
+    assert "███████" in re.sub(r"\x1b\[[0-9;]*m", "", out)
+    html = console.export_html(inline_styles=True)
+    for color in ("#4a90c4", "#93c47d", "#e06666", "#808080"):
+        assert color in html
+    assert not re.search(r"\x1b\[[0-9;]*48;", out)
+    assert not re.search(r"\x1b\[(?:[0-9]+;)*(?:4[0-7]|10[0-7])(?:;|m)", out)
+
+
+@pytest.mark.parametrize("width", [40, 80])
+def test_custom_theme_reaches_print_welcome(
+    monkeypatch: pytest.MonkeyPatch,
+    width: int,
+) -> None:
+    path = config_dir() / "rekursiv-ai" / "sagent" / "themes" / "welcome-test.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _ = path.write_text(
+        "preset: terminal\nstyles:\n  accent: magenta\n  heading: magenta\n  muted: cyan\n  text: yellow\n",
+    )
+    stream = io.StringIO()
+    console = Console(
+        file=stream,
+        force_terminal=True,
+        color_system="truecolor",
+        width=width,
+        height=24,
+    )
+
+    def to_stderr(*, stderr: bool) -> Console:
+        assert stderr
+        return console
+
+    def no_holiday(today: date, *, rng: Random) -> None:
+        del today, rng
+
+    monkeypatch.setattr(welcome, "Console", to_stderr)
+    monkeypatch.setattr(welcome, "holiday_icon", no_holiday)
+    welcome.print_welcome(folder=Path("/research"), theme=load_theme("welcome-test"))
+    out = stream.getvalue()
+    assert "\x1b[35m" in out
+    assert "\x1b[36m" in out
+    assert "\x1b[33m/research" in out
+    assert "\x1b[33mGood news, everyone!" in out
 
 
 @pytest.mark.parametrize("color_system", ["256", "truecolor"])
@@ -703,7 +802,11 @@ def test_a_metadata_row_dims_its_label_only() -> None:
     console = _Printed()
     render_welcome(console, model="m", provider="P", folder=Path("/research"))
     (row,) = (t for t in console.texts if "model" in t.plain)
-    assert _runs(row)[:2] == [("│  model     ", "dim"), ("m · P", "not dim")]
+    theme = load_theme("terminal")
+    assert _runs(row)[:2] == [
+        ("│  model     ", str(theme.style("muted"))),
+        ("m · P", str(theme.style("text") or "")),
+    ]
 
 
 @pytest.mark.parametrize(("length", "rows"), [(60, 1), (61, 2)])
@@ -717,7 +820,7 @@ def test_a_model_with_no_provider_keeps_its_separator() -> None:
     console = _Printed()
     render_welcome(console, model="m", folder=Path("/research"))
     (row,) = (t for t in console.texts if "model" in t.plain)
-    assert ("m · ", "not dim") in _runs(row)
+    assert ("m · ", str(load_theme("terminal").style("text") or "")) in _runs(row)
 
 
 def _screen_rows(width: int) -> list[str]:

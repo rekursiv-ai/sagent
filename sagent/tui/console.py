@@ -29,6 +29,7 @@ from sagent.runtime import types
 from sagent.tools.display import Elided
 from sagent.tui.diff import highlight_source, render_diff
 from sagent.tui.markdown import TightMarkdown
+from sagent.tui.theme import ThemeState, load_theme
 from sagent.tui.types import Sticky, fill, hang
 
 
@@ -37,7 +38,6 @@ if TYPE_CHECKING:
     from types import TracebackType
 
     from rich.cells import cell_len
-    from rich.color import Color
     from rich.console import Console
     from rich.style import Style
     from rich.text import Text
@@ -48,7 +48,6 @@ else:
     from wrapt import lazy_import
 
     cell_len = lazy_import("rich.cells", "cell_len")
-    Color = lazy_import("rich.color", "Color")
     Style = lazy_import("rich.style", "Style")
     Text = lazy_import("rich.text", "Text")
 
@@ -64,48 +63,31 @@ __all__ = [
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ConsoleStyle:
-    """The scrollback's colors, for a dark terminal."""
+    """Explicit scrollback style overrides, with the original appearance by default."""
 
-    quiet: Style = field(default_factory=lambda: Style(dim=True))
+    quiet: Style = field(default_factory=lambda: load_theme().style("muted"))
     """What the harness says: notes, calls, their input and output, reasoning."""
 
-    heading: Style = field(default_factory=lambda: Style(dim=True, italic=True))
+    heading: Style = field(default_factory=lambda: load_theme().style("thinking"))
     """The ``∴ Thinking`` over the reasoning."""
 
-    user: Style = field(
-        default_factory=lambda: Style(
-            color=Color.from_ansi(7),
-            bgcolor=Color.from_rgb(55, 55, 55),
-        ),
-    )
+    user: Style = field(default_factory=lambda: load_theme().style("user"))
     """The bar of what the user said."""
 
-    to_agent: Style = field(
-        default_factory=lambda: Style(
-            color=Color.from_ansi(7),
-            bgcolor=Color.from_rgb(25, 45, 70),
-        ),
-    )
+    to_agent: Style = field(default_factory=lambda: load_theme().style("to_agent"))
     """The bar of what another agent sent this one."""
 
-    to_user: Style = field(
-        default_factory=lambda: Style(
-            color=Color.from_ansi(0),
-            bgcolor=Color.from_rgb(150, 115, 30),
-        ),
-    )
+    to_user: Style = field(default_factory=lambda: load_theme().style("to_user"))
     """The bar of what an agent sent the user."""
 
-    failure: Style = field(
-        default_factory=lambda: Style(dim=True, color=Color.from_ansi(1)),
-    )
+    failure: Style = field(default_factory=lambda: load_theme().style("failure"))
     """What failed."""
 
-    rule: Style = field(default_factory=lambda: Style(color=Color.from_ansi(1)))
+    rule: Style = field(default_factory=lambda: load_theme().style("error"))
     """The rules around why the agent stopped."""
 
     halted: Style = field(
-        default_factory=lambda: Style(bold=True, color=Color.from_ansi(1)),
+        default_factory=lambda: load_theme().style("error") + Style(bold=True),
     )
     """Why the agent stopped, and what the user can do."""
 
@@ -122,7 +104,8 @@ class ConsolePrinter:
         session keeps every summary the model returns.
       max_label_lines: The most rows one call's header may take; its input
         is bounded by its display's ``command.lines``.
-      style: The colors; dark-terminal ones when omitted.
+      style: Explicit scrollback overrides; the current theme when omitted.
+      theme: Shared live theme selection; original appearance when omitted.
 
     Raises:
       TypeError: ``console`` writes to no ``Screen``.
@@ -140,6 +123,7 @@ class ConsolePrinter:
         show_thinking: bool = False,
         max_label_lines: int = 12,
         style: ConsoleStyle | None = None,
+        theme: ThemeState | None = None,
     ) -> None:
         if not isinstance(console.file, Screen):
             raise TypeError(f"The console writes to {console.file!r}, not a Screen.")
@@ -147,10 +131,30 @@ class ConsolePrinter:
         self.console = console
         self.show_thinking = show_thinking
         self.max_label_lines = max_label_lines
-        self.style = style if style is not None else ConsoleStyle()
+        self.theme = theme if theme is not None else ThemeState()
+        self._style = style
         self.sticky = Sticky()
         self.gap_owed = False
         self._tail: _Tail | None = None
+
+    @property
+    def style(self) -> ConsoleStyle:
+        """Return explicit overrides or the currently selected theme's styles."""
+        theme = self.theme.current
+        return (
+            self._style
+            if self._style is not None
+            else ConsoleStyle(
+                quiet=theme.style("muted"),
+                heading=theme.style("thinking"),
+                user=theme.style("user"),
+                to_agent=theme.style("to_agent"),
+                to_user=theme.style("to_user"),
+                failure=theme.style("failure"),
+                rule=theme.style("error"),
+                halted=theme.style("error") + Style(bold=True),
+            )
+        )
 
     @property
     def output_width(self) -> int:
@@ -158,9 +162,19 @@ class ConsolePrinter:
         return self.console.width - cell_len(self.output_indent)
 
     def line(self, text: str) -> None:
-        """Write ``text`` as it is, with no markup read in it."""
+        """Write ``text`` as it is, with no markup read in it.
+
+        Args:
+          text: The literal line to print in the current theme.
+
+        """
         self._gap()
-        self.console.print(_shown(text), markup=False, highlight=False)
+        self.console.print(
+            _shown(text),
+            style=self.theme.current.style("text"),
+            markup=False,
+            highlight=False,
+        )
 
     def note(self, text: str, *, lead: str = "", prose: bool = False) -> None:
         """Write ``text`` dim, after ``lead``.
@@ -182,7 +196,7 @@ class ConsolePrinter:
         )
 
     def user(self, text: str) -> None:
-        """Write ``text`` as dark-gray bars, between blank lines.
+        """Write ``text`` as user-styled bars, between blank lines.
 
         A user message starts a turn, so the turn's fills narrow again.
 
@@ -211,7 +225,9 @@ class ConsolePrinter:
         """Write a block of the reply, after a blank line."""
         self.gap_owed = True
         self._gap()
-        self.console.print(TightMarkdown(_shown(text), sticky=self.sticky))
+        self.console.print(
+            TightMarkdown(_shown(text), sticky=self.sticky, theme=self.theme.current),
+        )
 
     def thinking(self, text: str, *, opens: bool, closes: bool) -> None:
         """Write the reasoning's rows, indented and dim.
@@ -266,8 +282,12 @@ class ConsolePrinter:
         rest = rest.rstrip("\n")
         if rest.strip():
             # An unknown or empty language highlights as plain text.
-            body = highlight_source(rest, display.command_language)
-            body.stylize(self.style.quiet)
+            body = highlight_source(
+                rest,
+                display.command_language,
+                theme=self.theme.current,
+            )
+            body.stylize_before(self.style.quiet)
             output_indent = Text(self.output_indent, style=self.style.quiet)
             self._rows(
                 display.command.keep(list(body.split("\n", allow_blank=True))),
@@ -333,6 +353,7 @@ class ConsolePrinter:
                 path=_shown(path),
                 lines=lines,
                 sticky=self.sticky,
+                theme=self.theme.current,
             )
 
     def error(self, text: str) -> None:

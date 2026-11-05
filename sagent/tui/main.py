@@ -119,6 +119,7 @@ from sagent.tui.slash import (
     help_text,
     owners_without_agent,
 )
+from sagent.tui.theme import ThemeState
 from sagent.tui.tree import pick
 from sagent.tui.types import CommandOutput, Frame
 from sagent.tui.views import Views
@@ -133,7 +134,7 @@ if TYPE_CHECKING:
     from prompt_toolkit.history import FileHistory
     from prompt_toolkit.key_binding import DynamicKeyBindings
     from prompt_toolkit.patch_stdout import StdoutProxy
-    from prompt_toolkit.styles import Style
+    from prompt_toolkit.styles import DynamicStyle
     from rich.console import Console
     from treekle import PlainTree
 
@@ -161,7 +162,7 @@ else:
     FileHistory = lazy_import("prompt_toolkit.history", "FileHistory")
     DynamicKeyBindings = lazy_import("prompt_toolkit.key_binding", "DynamicKeyBindings")
     StdoutProxy = lazy_import("prompt_toolkit.patch_stdout", "StdoutProxy")
-    Style = lazy_import("prompt_toolkit.styles", "Style")
+    DynamicStyle = lazy_import("prompt_toolkit.styles", "DynamicStyle")
     Console = lazy_import("rich.console", "Console")  # 60 ms cold.
 
 
@@ -230,6 +231,7 @@ async def run(
     history: Path | None = None,
     show_thinking: bool = False,
     print_batch_sec: float = 0.2,
+    theme: ThemeState | None = None,
 ) -> None:
     """Show ``agent``'s session and take what the user types, until they quit.
 
@@ -241,8 +243,10 @@ async def run(
       show_thinking: Whether reasoning shows; ``/screen.thinking`` flips it.
       print_batch_sec: How long prints above the prompt gather into one repaint;
         quitting waits out the last one.
+      theme: The screen's shared theme; terminal-native when omitted.
 
     """
+    theme = theme if theme is not None else ThemeState()
     path = (
         history
         if history is not None
@@ -262,7 +266,11 @@ async def run(
         contextlib.redirect_stdout(screen := Screen(proxy)),
         contextlib.redirect_stderr(screen),
     ):
-        printer = ConsolePrinter(Console(file=screen), show_thinking=show_thinking)
+        printer = ConsolePrinter(
+            Console(file=screen),
+            show_thinking=show_thinking,
+            theme=theme,
+        )
 
         def shown() -> int:
             return printer.output_width
@@ -279,6 +287,7 @@ async def run(
             catalog=catalog,
             commands=Commands,
             switched=lambda: setattr(source, "panes", views.current.panes),
+            theme=theme,
         )
         session = _prompt_session(views, entry=entry, history=path)
         source = PromptSource(session, panes=views.current.panes, notice=printer.note)
@@ -303,6 +312,7 @@ async def run(
                 try:
                     if await views.current.commands(line):
                         break
+                    session.app.invalidate()
                 except Exception as e:
                     logger.warning("command %r failed", line, exc_info=True)
                     printer.error(error_text(e))
@@ -340,13 +350,7 @@ def _prompt_session(views: Views, *, entry: Input, history: Path) -> PromptSessi
         auto_suggest=AutoSuggestFromHistory(),
         bottom_toolbar=views.toolbar,
         key_bindings=DynamicKeyBindings(lambda: views.current.keys),
-        style=Style.from_dict(
-            {
-                "bottom-toolbar": "fg:ansibrightblack noreverse bg:default",
-                "queued_input_pane": "fg:ansibrightblack",
-                "input_pane": "bold",
-            },
-        ),
+        style=DynamicStyle(views.theme.prompt_style),
     )
 
 
@@ -361,6 +365,7 @@ async def _tree(views: Views) -> None:
             focused=views.current.label,
             stop=views.stop,
             cancel=views.cancel,
+            theme=views.theme.current,
         )
     finally:
         views.release(show=picked is None or picked == views.current.label)
@@ -726,6 +731,7 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
     cwd = Path.cwd()
     interactive = sys.stdin.isatty()
     screen = _Screen()
+    theme = ThemeState()
     async with (
         ModelCatalog() as catalog,
         Team(catalog=catalog) as team,
@@ -774,8 +780,6 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
         except ValueError as e:
             sys.stderr.write(f"Error: {error_text(e)}\n")
             return 1
-        if interactive:
-            print_welcome(folder=cwd)
         journal = JsonlJournal(path) if path is not None else None
         agent = _agent(
             flags,
@@ -808,6 +812,7 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
                     say=_dropped,
                     screen=screen,
                     panes=Panes(),
+                    theme=theme,
                 )
                 await _configure(
                     harvest(commands.owners()),
@@ -818,6 +823,7 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
                 sys.stderr.write(f"Error: {error_text(e)}\n")
                 return 1
             if interactive:
+                print_welcome(folder=cwd, theme=theme.current)
                 described = ModelTags.from_settings(
                     agent.model.capability,
                     agent.model.settings,
@@ -837,6 +843,7 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
                         team=team,
                         history=flags.history,
                         show_thinking=screen.show_thinking,
+                        theme=theme,
                     )
                     return 0
                 return await _headless(agent, flags)

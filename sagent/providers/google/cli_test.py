@@ -19,6 +19,7 @@ import asyncio
 import io
 import os
 import shutil
+import signal
 import stat
 import tempfile
 
@@ -157,7 +158,7 @@ async def test_cancelling_native_login_reaps_its_process(
     stub: _Stub,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    (stub.dir / "agy").write_text("#!/bin/sh\nexec sleep 2\n")
+    (stub.dir / "agy").write_text("#!/bin/sh\necho ready\nexec sleep 2\n")
     ready = asyncio.Event()
     started: list[Process] = []
     monkeypatch.setattr(
@@ -184,13 +185,53 @@ async def test_cancelling_native_login_reaps_its_process(
             os.kill(process.pid, 0)
 
 
+@pytest.mark.asyncio
+async def test_cancelled_native_login_kills_a_process_ignoring_term(
+    stub: _Stub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (stub.dir / "agy").write_text(
+        "#!/bin/sh\ntrap '' TERM\necho ready\nexec sleep 60\n",
+    )
+    ready = asyncio.Event()
+    started: list[Process] = []
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        partial(
+            _started_login,
+            ready=ready,
+            started=started,
+            real=asyncio.create_subprocess_exec,
+        ),
+    )
+    async with GoogleCLI() as provider:
+        task = asyncio.create_task(provider.login(headless=True))
+        async with asyncio.timeout(5):
+            await ready.wait()
+        (process,) = started
+        try:
+            task.cancel()
+            async with asyncio.timeout(3):
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+            assert process.returncode == -signal.SIGKILL
+        finally:
+            if process.returncode is None:
+                process.kill()
+            await process.wait()
+
+
 async def _started_login(
     *argv: str,
     ready: asyncio.Event,
     started: list[Process],
     real: Callable[..., Awaitable[Process]],
+    **options: object,
 ) -> Process:
-    process = await real(*argv)
+    process = await real(*argv, **{**options, "stdout": asyncio.subprocess.PIPE})
+    assert process.stdout is not None
+    assert await process.stdout.readline() == b"ready\n"
     started.append(process)
     ready.set()
     return process
