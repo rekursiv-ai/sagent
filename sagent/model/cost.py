@@ -273,13 +273,12 @@ def _get_context_sizes(
         **{
             name: ContextSize(
                 context_name=name,
-                tokens=top,
-                display_name=_tokens_to_display_name(top),
+                tokens=tops[index],
+                display_name=_tokens_to_display_name(tops[index]),
             )
-            for name, top in zip(named, tops, strict=False)
+            for index, name in enumerate[ContextSizeName](named)
         },
         "fullcontext": ContextSize(
-            context_name="fullcontext",
             tokens=window,
             display_name=_tokens_to_display_name(window),
         ),

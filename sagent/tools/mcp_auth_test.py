@@ -322,7 +322,7 @@ async def test_an_abandoned_second_sign_in_keeps_the_first(
         server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
         await _sign_in(server, monkeypatch=monkeypatch)
         kept = McpTokenStorage(server.key).path.read_text()
-        monkeypatch.setattr("builtins.input", _no_answer)
+        monkeypatch.setattr("sagent.providers.login.read_login_input", _no_answer)
         with pytest.raises(EOFError):
             await login(server, show=list[str]().append, headless=True)
         assert McpTokenStorage(server.key).path.read_text() == kept
@@ -339,7 +339,7 @@ async def test_sagent_registers_as_a_public_client_that_may_renew(
     async with _protected(authority) as url:
         server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
         paste = _Paste()
-        monkeypatch.setattr("builtins.input", paste)
+        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
         await login(server, show=paste.shown.append, headless=True)
     (client,) = authority.clients.values()
     assert client.client_name == "sagent"
@@ -358,7 +358,7 @@ async def test_a_headless_sign_in_takes_the_pasted_address(
         server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
         paste = _Paste()
         monkeypatch.setattr(mcp_auth, "open_browser", _never)
-        monkeypatch.setattr("builtins.input", paste)
+        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
         await login(server, show=paste.shown.append, headless=True)
         assert paste.shown[-1] == (
             "Open it in a browser anywhere, then paste the address it was sent"
@@ -375,7 +375,7 @@ async def test_a_pasted_address_of_another_sign_in_is_refused(
     async with _protected() as url:
         server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
         paste = _Paste(fixed="http://127.0.0.1:1/callback?code=c&state=other")
-        monkeypatch.setattr("builtins.input", paste)
+        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
         with pytest.raises(AuthError, match="belongs to another sign-in"):
             await login(server, show=paste.shown.append, headless=True)
 
@@ -387,7 +387,7 @@ async def test_a_pasted_address_with_no_code_is_refused(
     async with _protected() as url:
         server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
         paste = _Paste(drop_code=True)
-        monkeypatch.setattr("builtins.input", paste)
+        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
         with pytest.raises(AuthError, match="holds no sign-in code"):
             await login(server, show=paste.shown.append, headless=True)
 
@@ -399,7 +399,7 @@ async def test_nothing_pasted_says_it_holds_no_code(
     async with _protected() as url:
         server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
         paste = _Paste(fixed=" ")
-        monkeypatch.setattr("builtins.input", paste)
+        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
         with pytest.raises(AuthError, match="holds no sign-in code"):
             await login(server, show=paste.shown.append, headless=True)
 
@@ -419,7 +419,7 @@ async def test_a_browser_that_never_comes_back_gives_way_to_a_paste(
         server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
         paste = _Paste()
         monkeypatch.setattr(mcp_auth, "open_browser", _never)
-        monkeypatch.setattr("builtins.input", paste)
+        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
         await login(server, show=paste.shown.append, wait_sec=0.05)
         assert "No browser came back" in paste.shown[-1]
         assert await McpTokenStorage(server.key).get_tokens() is not None
@@ -429,7 +429,7 @@ def _never(url: str) -> None:
     del url
 
 
-def _no_answer(prompt: str) -> str:
+async def _no_answer(prompt: str) -> str:
     del prompt
     raise EOFError
 
@@ -437,7 +437,7 @@ def _no_answer(prompt: str) -> str:
 async def _sign_in(server: McpServer, *, monkeypatch: pytest.MonkeyPatch) -> None:
     """Sign in to ``server`` headless, pasting where its sign-in page lands."""
     paste = _Paste()
-    monkeypatch.setattr("builtins.input", paste)
+    monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
     await login(server, show=paste.shown.append, headless=True)
 
 
@@ -458,7 +458,7 @@ class _Paste:
     drop_code: bool = False
     """Paste the address the page lands on without its ``code``."""
 
-    def __call__(self, prompt: str) -> str:
+    async def __call__(self, prompt: str) -> str:
         del prompt
         if self.fixed:
             return self.fixed

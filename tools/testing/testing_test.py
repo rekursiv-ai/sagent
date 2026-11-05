@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
-from unittest.mock import Mock
 
 import argparse
 import os
@@ -24,6 +23,9 @@ from tools.typecheck import typecheck
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from types import ModuleType
+
+
+pytest_plugins = ("pytester",)
 
 
 @pytest.fixture
@@ -404,42 +406,37 @@ def test_pytest_falls_back_to_the_pairs_when_the_graph_names_nothing(
 
 
 class _Runs(fakes.Recorder):
-    """Records each command, then runs it for real in ``root``."""
+    """Run the gate's actual pytest selection in pytester's isolated interpreter."""
 
-    def __init__(self, root: Path, *, output: str) -> None:
+    def __init__(self, root: Path, *, output: str, pytester: pytest.Pytester) -> None:
         super().__init__(output=output, installed=False)
         self.root = root
+        self.pytester = pytester
         self.returned: list[int] = []
 
     @override
     def run(self, argv: Sequence[str]) -> int:
-        _ = super().run(argv)
-        self.returned.append(
-            subprocess.run(  # noqa: S603 -- the gate's own pytest argv.
-                argv,
-                cwd=self.root,
-                env={
-                    **os.environ,
-                    "PYTHONPATH": os.pathsep.join(sys.path),
-                },
-                capture_output=True,
-                check=False,
-            ).returncode,
-        )
+        super().run(argv)
+        with pytest.MonkeyPatch.context() as isolated:
+            isolated.chdir(self.root)
+            isolated.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+            isolated.delenv("PYTEST_ADDOPTS", raising=False)
+            isolated.delenv("PYTEST_PLUGINS", raising=False)
+            result = self.pytester.runpytest_inprocess(
+                *argv[argv.index("pytest") + 1 :],
+            )
+        self.returned.append(int(result.ret))
         return self.returned[-1]
 
 
-def test_a_subprocess_keeps_its_import_paths(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    run = Mock(return_value=subprocess.CompletedProcess([], 0))
-    monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.syspath_prepend(str(tmp_path))
+def test_a_nested_run_restores_its_import_paths(pytester: pytest.Pytester) -> None:
+    pytester.makepyfile(
+        'import sys\n\ndef test_path():\n    sys.path.append("nested")\n',
+    )
+    before = list(sys.path)
 
-    assert _Runs(tmp_path, output="").run(["pytest"]) == 0
-    path = cast(dict[str, str], run.call_args.kwargs["env"])["PYTHONPATH"]
-    assert path == os.pathsep.join(sys.path)
+    assert _Runs(pytester.path, output="", pytester=pytester).run(["pytest"]) == 0
+    assert sys.path == before
 
 
 def _skipped_module(root: Path) -> None:
@@ -453,6 +450,7 @@ def _skipped_module(root: Path) -> None:
 
 def test_a_module_skipped_test_does_not_drop_the_rest_of_the_walk(
     tmp_path: Path,
+    pytester: pytest.Pytester,
 ) -> None:
     """Pytest 9 runs nothing else once one nodeid points into a skipped module.
 
@@ -471,6 +469,7 @@ def test_a_module_skipped_test_does_not_drop_the_rest_of_the_walk(
     tools = _Runs(
         root,
         output="b_test.py::test_b\nskip_test.py::test_a\nc_test.py::test_c\n",
+        pytester=pytester,
     )
 
     status = _pytest(
@@ -485,7 +484,10 @@ def test_a_module_skipped_test_does_not_drop_the_rest_of_the_walk(
     assert status == 0
 
 
-def test_a_walk_reaching_only_a_skipped_module_passes(tmp_path: Path) -> None:
+def test_a_walk_reaching_only_a_skipped_module_passes(
+    tmp_path: Path,
+    pytester: pytest.Pytester,
+) -> None:
     """Pytest exits 5 when its every test skips at module level: nothing failed.
 
     A live-acceptance module skips unless its variable is set, and a change
@@ -493,7 +495,7 @@ def test_a_walk_reaching_only_a_skipped_module_passes(tmp_path: Path) -> None:
     """
     root = tmp_path / "repo"
     _skipped_module(root)
-    tools = _Runs(root, output="skip_test.py::test_a\n")
+    tools = _Runs(root, output="skip_test.py::test_a\n", pytester=pytester)
 
     status = _pytest(
         tmp_path,
