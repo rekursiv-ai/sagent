@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, date, datetime
+from functools import partial
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from typing import TYPE_CHECKING, Self, cast, override
@@ -62,7 +63,7 @@ from sagent.types import AsyncResource
 
 if TYPE_CHECKING:
     from asyncio.subprocess import Process
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     import httpx2
 
@@ -119,6 +120,80 @@ def stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Stub:
 async def shared(stub: _Stub) -> AsyncIterator[_Resources]:
     async with _Resources(stub=stub) as resources:
         yield resources
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headless", [True, False])
+@pytest.mark.parametrize("status", [0, 1])
+async def test_native_login_uses_the_terminal_and_propagates_failure(
+    stub: _Stub,
+    monkeypatch: pytest.MonkeyPatch,
+    headless: bool,
+    status: int,
+) -> None:
+    (stub.dir / "agy").write_text(
+        '#!/bin/sh\ndir=$(dirname "$0")\nprintf "%s\\n" "$@" > "$dir/login-argv"\n'
+        'env > "$dir/login-env"\nexit "$LOGIN_STATUS"\n',
+    )
+    monkeypatch.setenv("LOGIN_STATUS", str(status))
+    monkeypatch.setenv("NO_BROWSER", "inherited")
+    async with GoogleCLI() as provider:
+        if status:
+            with pytest.raises(AuthError, match=r"agy.*sign-in"):
+                await provider.login(headless=headless)
+        else:
+            await provider.login(headless=headless)
+    assert (stub.dir / "login-argv").read_text().splitlines() == ["acp", "--login"]
+    env = dict(
+        line.split("=", 1)
+        for line in (stub.dir / "login-env").read_text().splitlines()
+        if "=" in line
+    )
+    assert env["NO_BROWSER"] == os.environ["NO_BROWSER"] == "inherited"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_native_login_reaps_its_process(
+    stub: _Stub,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (stub.dir / "agy").write_text("#!/bin/sh\nexec sleep 2\n")
+    ready = asyncio.Event()
+    started: list[Process] = []
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        partial(
+            _started_login,
+            ready=ready,
+            started=started,
+            real=asyncio.create_subprocess_exec,
+        ),
+    )
+    async with GoogleCLI() as provider:
+        task = asyncio.create_task(provider.login(headless=True))
+        async with asyncio.timeout(5):
+            await ready.wait()
+        (process,) = started
+        task.cancel()
+        async with asyncio.timeout(0.5):
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        assert process.returncode is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(process.pid, 0)
+
+
+async def _started_login(
+    *argv: str,
+    ready: asyncio.Event,
+    started: list[Process],
+    real: Callable[..., Awaitable[Process]],
+) -> Process:
+    process = await real(*argv)
+    started.append(process)
+    ready.set()
+    return process
 
 
 @pytest.mark.asyncio

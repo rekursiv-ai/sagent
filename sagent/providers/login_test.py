@@ -36,6 +36,26 @@ from sagent.providers.testing import bound_port, first_live, send, visit, window
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("headless", [True, False])
+async def test_login_flow_runs_only_the_selected_authorization(
+    headless: bool,
+) -> None:
+    called: list[str] = []
+
+    async def browser() -> str:
+        called.append("browser")
+        return "browser-code"
+
+    async def remote() -> str:
+        called.append("remote")
+        return "remote-code"
+
+    code = await login.login_flow(headless=headless, browser=browser, remote=remote)
+    selected = "remote" if headless else "browser"
+    assert (code, called) == (f"{selected}-code", [selected])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["/callback", "/oauth2callback", "/auth/callback"])
 async def test_the_redirect_is_answered_only_on_its_path_with_its_state(
     path: str,
@@ -142,6 +162,65 @@ def test_a_pasted_address_or_code_yields_its_code(pasted: str, code: str) -> Non
 def test_a_pasted_address_must_be_this_sign_ins(pasted: str, message: str) -> None:
     with pytest.raises(AuthError, match=message):
         pasted_code(pasted, state="s")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pasted", "code"),
+    [
+        (" 4/code ", "4/code"),
+        ("https://host/cb?code=4%2Fcode&state=s", "4/code"),
+        ("4/code#s", "4/code"),
+        ("Xcode", "Xcode"),
+    ],
+)
+async def test_pkce_accepts_a_hosted_code_or_a_state_checked_redirect(
+    monkeypatch: pytest.MonkeyPatch,
+    pasted: str,
+    code: str,
+) -> None:
+    def typed(prompt: str) -> str:
+        assert prompt == "Code: "
+        return pasted
+
+    monkeypatch.setattr("builtins.input", typed)
+    shown: list[str] = []
+    assert (
+        await read_pasted_code(
+            state="s",
+            show=shown.append,
+            browser_tried=False,
+            pkce=True,
+        )
+        == code
+    )
+    assert shown == [
+        "Open the link in your browser, then paste the authorization code or full redirect URL:\n",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "pasted",
+    ["", "https://host/cb?state=s", "code#wrong", "https://host/cb?code=c&state=wrong"],
+)
+async def test_pkce_still_refuses_missing_codes_and_mismatched_states(
+    monkeypatch: pytest.MonkeyPatch,
+    pasted: str,
+) -> None:
+    def typed(prompt: str) -> str:
+        assert prompt == "Code: "
+        return pasted
+
+    monkeypatch.setattr("builtins.input", typed)
+    shown: list[str] = []
+    with pytest.raises(AuthError):
+        await read_pasted_code(
+            state="s",
+            show=shown.append,
+            browser_tried=False,
+            pkce=True,
+        )
 
 
 def _noisy(tmp_path: Path) -> Path:

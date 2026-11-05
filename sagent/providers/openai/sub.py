@@ -96,7 +96,7 @@ class OpenAISub(OpenAI):
         return self._logins
 
     async def login(self, *, headless: bool = False) -> None:
-        """Sign in through the browser, or with the redirect pasted from it."""
+        """Sign in through the browser, or with a device code when headless."""
         await self._login.sign_in(headless=headless)
         await self._logins.added(self._account)
 

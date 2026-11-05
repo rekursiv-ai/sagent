@@ -61,7 +61,7 @@ from sagent.agent.agent import Agent
 from sagent.model.exceptions import AuthError, RateLimitedError
 from sagent.providers.catalog import successor
 from sagent.providers.login import Spent
-from sagent.providers.types import HasLogin, Provider
+from sagent.providers.types import HasLogins, Provider
 from sagent.runtime import types
 from sagent.runtime.exceptions import describe, local_time
 from sagent.session.types import (
@@ -1065,7 +1065,7 @@ class _Precedence:
     def _logins(self) -> tuple[Logins, _Seat] | None:
         """Return the provider's logins and seat, a switch since taken up; else ``None``."""
         provider = self._agent.model.provider
-        if not isinstance(provider, HasLogin):
+        if not isinstance(provider, HasLogins):
             return None
         seat = self._seat
         if (

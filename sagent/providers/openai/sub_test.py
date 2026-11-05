@@ -365,7 +365,10 @@ async def test_an_account_signs_in_with_codex_s_file_for_that_account() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_borrowing_subscription_asks_its_lender_never_a_file() -> None:
+@pytest.mark.parametrize("headless", [True, False])
+async def test_a_borrowing_subscription_asks_its_lender_never_a_file(
+    headless: bool,
+) -> None:
     lent: list[str] = []
 
     async def lend(*, rejected: str) -> LeasedToken:
@@ -382,7 +385,7 @@ async def test_a_borrowing_subscription_asks_its_lender_never_a_file() -> None:
         sub = OpenAISub(resources=shared, lease=lend)
         events = [event async for event in sub["utility"].stream(_REQUEST)]
         with pytest.raises(AuthError, match="lent by another process"):
-            await sub.login()
+            await sub.login(headless=headless)
     assert isinstance(events[-1], Response)
     assert [sent.headers["authorization"] for sent in server.requests] == [
         "Bearer lent-1",

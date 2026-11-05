@@ -13,6 +13,7 @@ Typical usage example:
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode
@@ -32,6 +33,7 @@ from sagent.lib.posix.child import Child
 from sagent.model.exceptions import AuthError
 from sagent.providers.login import (
     file_lock,
+    login_flow,
     open_browser,
     pasted_code,
     redirected,
@@ -123,7 +125,11 @@ class ClaudeLogin:
             .decode()
         )
         state = secrets.token_urlsafe()
-        browsed = None if headless else await _browser_code(challenge, state, show=show)
+        browsed = await login_flow(
+            headless=headless,
+            browser=partial(_browser_code, challenge, state, show=show),
+            remote=partial(_pasted_code, challenge, state, show=show),
+        )
         code, redirect = browsed or await _pasted_code(challenge, state, show=show)
         grant = await self._grant(
             {

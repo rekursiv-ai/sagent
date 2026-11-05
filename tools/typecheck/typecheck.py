@@ -53,6 +53,7 @@ def typecheck(
     context: gate.Context,
     dependents: str | None,
     fixer: str | None,
+    when: str | None = None,
 ) -> int:
     """Run type checker ``name`` once over its spool.
 
@@ -64,13 +65,16 @@ def typecheck(
         spooled files.
       fixer: Module that runs the checker and deletes each unnecessary
         ``assert isinstance``; None runs the checker alone.
+      when: Variable that must hold a positive integer; None always runs.
 
     Returns:
-      exit_code: The checker's; 0 when there was nothing to check; 1 when its
+      exit_code: The checker's; 0 when skipped or nothing to check; 1 when its
         spool was never written.
 
     """
     spooled = gate.drained(name, context=context)
+    if when is not None and not gate.positive(context.environ.get(when)):
+        return 0
     if spooled is None:
         return gate.unspooled(name)
     count = gate.workers(name, environ=context.environ)
@@ -126,6 +130,7 @@ class Flags(Protocol):
     command: str
     dependents: str | None
     fixer: str | None
+    when: str | None
 
 
 def _parse_args(
@@ -138,6 +143,11 @@ def _parse_args(
         checker = commands.add_parser(name, help=f"Run {name} over its spool.")
         checker.set_defaults(handler=_check, fixer=None)
         gate.add_dependents(checker)
+        checker.add_argument(
+            "--when",
+            metavar="VARIABLE",
+            help="Run only when this variable holds a positive integer.",
+        )
         if name != "ty-check":
             checker.add_argument(
                 "--fixer",
@@ -153,6 +163,7 @@ def _check(flags: Flags, context: gate.Context) -> int:
         context=context,
         dependents=flags.dependents,
         fixer=flags.fixer,
+        when=flags.when,
     )
 
 

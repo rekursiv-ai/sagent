@@ -1543,6 +1543,29 @@ async def test_tool_says_what_it_cannot_change(line: str, error: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_peer_participation_is_chosen_inherited_and_validated() -> None:
+    desk, _ = _teamed("child")
+    team = desk.team
+    assert team is not None
+    await desk.commands("/peer-messaging off")
+    assert not team.peer_messaging("Agent")
+    child = await desk.commands.child_commands(team, "child")
+    await child("/peer-messaging")
+    assert desk.printer.said[-1] == (
+        "note",
+        "[/peer-messaging] off   (on, off, default)",
+    )
+    await child("/peer-messaging on")
+    assert team.peer_messaging("child")
+    await child("/peer-messaging default")
+    assert not team.peer_messaging("child")
+    await child("/peer-messaging invalid")
+    assert desk.printer.said[-1][0] == "error"
+    await desk.commands("/peer-messaging default")
+    assert team.peer_messaging("child")
+
+
+@pytest.mark.asyncio
 async def test_login_signs_in_and_sends_what_waited() -> None:
     desk = _Desk(provider="signing")
     model = desk.agent.model

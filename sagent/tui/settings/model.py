@@ -44,7 +44,7 @@ from sagent.model.capability import (
 )
 from sagent.providers.catalog import successor
 from sagent.providers.table import ModelTags
-from sagent.providers.types import HasLogin, ModelCatalog
+from sagent.providers.types import HasLogins, ModelCatalog
 from sagent.settings.exceptions import SettingError
 from sagent.settings.types import Setting
 
@@ -240,7 +240,7 @@ class AgentModel:
         """Return ``default``, then each login this provider keeps and the one in use."""
         provider = self.agent.model.provider
         saved = set(
-            provider.logins.accounts() if isinstance(provider, HasLogin) else (),
+            provider.logins.accounts() if isinstance(provider, HasLogins) else (),
         )
         if self.catalog.account is not None:
             saved.add(self.catalog.account)

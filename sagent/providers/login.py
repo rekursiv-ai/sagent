@@ -47,7 +47,7 @@ from sagent.model.exceptions import AuthError
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable, Mapping
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
     from pathlib import Path
 
 
@@ -58,6 +58,7 @@ __all__ = [
     "check_account",
     "file_lock",
     "headless_wanted",
+    "login_flow",
     "open_browser",
     "pasted_code",
     "read_pasted_code",
@@ -393,6 +394,26 @@ def headless_wanted(
     )
 
 
+async def login_flow[T](
+    *,
+    headless: bool,
+    browser: Callable[[], Awaitable[T]],
+    remote: Callable[[], Awaitable[T]],
+) -> T:
+    """Run exactly one authorization flow, without starting the other.
+
+    Args:
+      headless: Use remote authorization without opening this host's browser.
+      browser: Authorize using a browser on this host.
+      remote: Authorize from another machine, by device code or manual paste.
+
+    Returns:
+      authorized: The selected flow's result.
+
+    """
+    return await (remote if headless else browser)()
+
+
 # ``webbrowser`` runs a command browser ($BROWSER, xdg-open) on the terminal's own
 # streams, so what it says lands in the scrollback past ``Screen``, under a call
 # whose result then prints unlabelled. Its other browsers already discard theirs.
@@ -513,14 +534,16 @@ async def read_pasted_code(
     state: str,
     show: Callable[[str], object],
     browser_tried: bool,
+    pkce: bool = False,
 ) -> str:
-    """Ask for the address a sign-in landed on; return the code it carries.
+    """Ask for an authorization code or redirect address; return its code.
 
     Args:
       state: The sign-in's own ``state``.
       show: Shows the user what to paste.
       browser_tried: A browser was opened and never came back, as over ssh;
         else none was, and the user opens the page anywhere.
+      pkce: Accept a plain hosted code bound to this sign-in's verifier.
 
     Returns:
       code: The sign-in code.
@@ -530,6 +553,14 @@ async def read_pasted_code(
       EOFError: Nothing was typed at all.
 
     """
+    if pkce:
+        show(
+            "Open the link in your browser, then paste the authorization code or full redirect URL:\n",
+        )
+        pasted = (await asyncio.to_thread(input, "Code: ")).strip()
+        if pasted and not any(c in pasted for c in "?#:"):
+            return pasted
+        return pasted_code(pasted, state=state)
     show(
         "No browser came back. Paste the address it was sent to, though it fails"
         " to load:\n"
