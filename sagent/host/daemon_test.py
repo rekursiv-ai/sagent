@@ -15,6 +15,7 @@ import contextlib
 import fcntl
 import os
 import random
+import secrets
 import shlex
 import subprocess
 import sys
@@ -75,6 +76,7 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
+    from sagent.host.server import _Session
     from sagent.host.wire import Message
     from sagent.session.types import FunctionResult
     from sagent.tools.types import ToolContext
@@ -1268,7 +1270,8 @@ class _FrameDecoder[T: Hello | Tools | Peers]:
                 self.target,
                 classes={self.target.__name__: self.target, "ToolSpec": ToolSpec},
             )
-        return deepcopy(self.frames[line])
+        cached = self.frames[line]
+        return deepcopy(cached) if isinstance(cached, Tools) else replace(cached)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1347,6 +1350,61 @@ async def test_cached_frames_preserve_canonical_values_without_shared_mutation()
         assert encoder(peers) == encoded(peers)
         assert encoder(peers) == encoded(peers)
     assert encoder(Ack(id="uncached")) == encoded(Ack(id="uncached"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "message",
+    [
+        Hello(
+            version=VERSION,
+            token=secrets.token_hex(16),
+            session_id="session",
+            client="client",
+        ),
+        Hello(
+            version=VERSION,
+            token=secrets.token_hex(16),
+            session_id="session",
+            client="client",
+            tools=("Gate",),
+        ),
+        Peers(labels=("a",)),
+        Peers(labels=("a",), public=("a",)),
+        Peers(labels=("a",), public=()),
+    ],
+)
+async def test_cached_immutable_frames_preserve_values_and_fresh_records(
+    message: Hello | Peers,
+) -> None:
+    frame = encoded(message)
+    reader = asyncio.StreamReader()
+    changed = (
+        replace(message, client="changed")
+        if isinstance(message, Hello)
+        else replace(message, labels=("changed",))
+    )
+    reader.feed_data(frame * 2 + encoded(changed))
+    reader.feed_eof()
+    decoder = _FrameDecoder(target=type(message))
+    first = await decoder.received(reader)
+    second = await decoder.received(reader)
+    assert first == second == message
+    assert first is not second
+    assert first is not None
+    assert second is not None
+    assert encoded(first) == encoded(second) == frame
+    if isinstance(first, Hello):
+        assert first.tools is None or isinstance(first.tools, tuple)
+    else:
+        assert isinstance(first.labels, tuple)
+        assert first.public is None or isinstance(first.public, tuple)
+    different = await decoder.received(reader)
+    assert different == changed
+    assert different != first
+    assert different is not None
+    assert encoded(different) == encoded(changed)
+    assert await decoder.received(reader) is None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -1685,7 +1743,7 @@ async def test_worker_churn_releases_processes_descriptors_and_public_routes(
         descriptors = Path(f"/proc/{os.getpid()}/fd")
         baseline = await asyncio.to_thread(lambda: len(list(descriptors.iterdir())))
         for iteration in range(26):
-            sessions = []
+            sessions: list[_Session] = []
             for index in range(4):
                 transport = _RecordingTransport(asyncio.StreamReader())
                 writer = asyncio.StreamWriter(
