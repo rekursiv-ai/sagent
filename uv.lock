@@ -3365,7 +3365,7 @@ wheels = [
 
 [[package]]
 name = "sagent"
-version = "0.2.1"
+version = "0.2.2"
 source = { editable = "." }
 default-groups = ["cuda", "dev"]
 dependencies = [
