@@ -653,7 +653,7 @@ ignore = [
     # NEVER ADD MORE IGNORES! SUPPRESS IN FILE!
     "**/typings/",
 ]
-pythonPlatform = "Linux"
+pythonPlatform = "All"
 pythonVersion = "3.12"  # Intentional; test at 3.12 for exports.
 
 reportCallInDefaultInitializer = false     # Immutable constructors (e.g. NamedTuple) in defaults are safe.

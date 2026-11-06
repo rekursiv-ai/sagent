@@ -291,6 +291,24 @@ def test_only_the_wanted_suffixes_are_expanded(tmp_path: Path) -> None:
     assert walk.expand([tmp_path], suffixes={".py"}) == [files["py"]]
 
 
+def test_directory_expansion_skips_dangling_and_directory_symlinks(
+    tmp_path: Path,
+) -> None:
+    kept = _write(tmp_path, "kept.py")
+    (tmp_path / "dangling.py").symlink_to("missing.py")
+    (tmp_path / "target").mkdir()
+    (tmp_path / "linked.py").symlink_to("target", target_is_directory=True)
+
+    assert walk.expand([tmp_path], suffixes={".py"}) == [kept]
+
+
+def test_a_named_dangling_symlink_is_kept_as_given(tmp_path: Path) -> None:
+    named = tmp_path / "dangling.py"
+    named.symlink_to("missing.py")
+
+    assert walk.expand([named], suffixes={".py"}) == [named]
+
+
 def test_a_named_file_is_kept_as_given(tmp_path: Path) -> None:
     """A file passes through unexpanded, as pre-commit's file lists do."""
     named = _write(tmp_path, "notes.txt")

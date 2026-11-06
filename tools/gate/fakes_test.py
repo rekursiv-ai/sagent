@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import os
 import subprocess
@@ -66,6 +66,8 @@ def test_isolate_records_every_process_and_priority_change(
 
     assert (first.returncode, first.stdout) == (4, "")
     assert (done.returncode, done.stdout) == (4, "out")
+    assert cast(list[str], first.args) == ["tool", "a"]
+    assert cast(list[str], done.args) == ["tool", "b"]
     assert recorded.calls == [["tool", "a"], ["tool", "b"]]
     assert os.nice(19) == 0
     assert recorded.niceness == [19]
@@ -84,6 +86,18 @@ def test_a_recorder_answers_its_canned_results_in_order(tmp_path: Path) -> None:
     assert fakes.Recorder().which("tool") == "/bin/tool"
     assert tools.calls == [["tool", f"@{tmp_path / 'args'}"], ["tool"], ["walk"]]
     assert tools.argfiles == [["a", "b"]]
+
+
+def test_a_recorder_reads_each_test_file_listing(tmp_path: Path) -> None:
+    first = tmp_path / "first listing"
+    first.write_text("a_test.py\nb_test.py\n")
+    second = tmp_path / "second listing"
+    second.write_text("c_test.py\n")
+    tools = fakes.Recorder()
+
+    assert tools.run(["tool", f"--test-files={first}", "--other"]) == 0
+    assert tools.run(["tool", f"--test-files={second}"]) == 0
+    assert tools.listings == [["a_test.py", "b_test.py"], ["c_test.py"]]
 
 
 def test_a_context_runs_through_its_recorder_in_a_project_root(tmp_path: Path) -> None:
@@ -118,13 +132,13 @@ def test_a_context_writes_the_excludes_into_a_new_project(tmp_path: Path) -> Non
 
 
 def test_touch_makes_each_file_under_the_context_root(tmp_path: Path) -> None:
-    fakes.touch(tmp_path, ["a.py", "pkg/deep/b.py"])
+    fakes.touch(tmp_path, ["a.py", "pkg/deep/b.py", "pkg/deep/c.py"])
 
     assert sorted(
         str(path.relative_to(tmp_path / "repo"))
         for path in (tmp_path / "repo").rglob("*")
         if path.is_file()
-    ) == ["a.py", "pkg/deep/b.py"]
+    ) == ["a.py", "pkg/deep/b.py", "pkg/deep/c.py"]
 
 
 if __name__ == "__main__":

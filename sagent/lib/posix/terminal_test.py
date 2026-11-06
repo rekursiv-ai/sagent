@@ -879,6 +879,46 @@ class TestLifecycle:
     def test_silence_line_discipline_on_a_released_terminal_is_harmless(self) -> None:
         Terminal(["cat"]).silence_line_discipline()
 
+    def test_silence_preserves_other_flags_on_descriptor_zero(self) -> None:
+        term = Terminal(["true"])
+        term._master_fd = 0
+        attributes = [
+            0,
+            0,
+            0,
+            termios.ECHO | termios.ICANON | termios.ISIG,
+            0,
+            0,
+            [b"\x00"],
+        ]
+        with (
+            mock.patch.object(termios, "tcgetattr", return_value=attributes) as get,
+            mock.patch.object(termios, "tcsetattr") as set_attributes,
+        ):
+            term.silence_line_discipline()
+        get.assert_called_once_with(0)
+        set_attributes.assert_called_once_with(
+            0,
+            termios.TCSANOW,
+            [0, 0, 0, termios.ISIG, 0, 0, [b"\x00"]],
+        )
+
+    @pytest.mark.parametrize("operation", ["tcgetattr", "tcsetattr"])
+    def test_silence_tolerates_a_closed_master(self, operation: str) -> None:
+        term = Terminal(["true"])
+        term._master_fd = 0
+        with (
+            mock.patch.object(termios, "tcgetattr", return_value=[0] * 7),
+            mock.patch.object(termios, "tcsetattr"),
+            mock.patch.object(
+                termios,
+                operation,
+                side_effect=termios.error("closed"),
+            ) as failed,
+        ):
+            term.silence_line_discipline()
+        failed.assert_called_once()
+
     def test_wait_on_a_terminal_that_never_spawned_is_zero(self) -> None:
         async def run() -> int:
             return await Terminal(["cat"]).wait()

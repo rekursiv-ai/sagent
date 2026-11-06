@@ -122,7 +122,14 @@ def test_frontmatter_is_split_from_the_body(
 
 @pytest.mark.parametrize(
     "text",
-    ["body only\n", "---\nname: a\nno closing line\n", "", "text\n---\nname: a\n---\n"],
+    [
+        "body only\n",
+        "---\nname: a\nno closing line\n",
+        "",
+        "text\n---\nname: a\n---\n",
+        "  ---\nname: a\n---\nbody\n",
+        "\t---\nname: a\n---\nbody\n",
+    ],
 )
 def test_text_that_opens_with_no_block_has_no_frontmatter(text: str) -> None:
     assert split_frontmatter(text) is None

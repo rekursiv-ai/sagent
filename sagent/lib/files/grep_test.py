@@ -67,6 +67,15 @@ def rg() -> bool:
 _BOTH = pytest.mark.parametrize("rg", [True, False], ids=["rg", "python"])
 
 
+def _batch_paths(root: Path) -> list[Path]:
+    """Cross the real argv limit with fewer files, using long parent paths."""
+    directory = root.joinpath(*("d" * 200 for _ in range(10)))
+    directory.mkdir(parents=True)
+    names = [directory / f"{i:04}.txt" for i in range(100)]
+    assert len(" ".join(map(str, names))) > 2 * ARGV_CHARS
+    return names
+
+
 def _tree(root: Path) -> Path:
     """Make ``root`` a git root holding a small mixed tree."""
     (root / ".git").mkdir()
@@ -507,7 +516,7 @@ def test_named_files_split_where_the_next_would_pass_the_argv_limit(
     tmp_path: Path,
 ) -> None:
     """Thousands of named files must not overflow one command line."""
-    names = [tmp_path / f"{i:04}{'n' * 200}.txt" for i in range(1_200)]
+    names = _batch_paths(tmp_path)
     for path in names:
         path.write_text("hit\n")
     with patch(
@@ -804,7 +813,7 @@ def test_multiline_count_of_two_matches_on_one_line(
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
 def test_a_batch_may_fill_the_argv_limit_exactly(tmp_path: Path) -> None:
     """Names joined by spaces may total ``ARGV_CHARS`` and still share a run."""
-    names = [tmp_path / f"{i:04}{'n' * 200}.txt" for i in range(1_200)]
+    names = _batch_paths(tmp_path)
     widths = [len(str(path)) + 1 for path in names]
     fit = next(k for k in range(len(names)) if sum(widths[: k + 1]) - 1 > ARGV_CHARS)
     # Lengthen the first ``fit`` names, a few characters each, until they
@@ -840,7 +849,7 @@ def test_pcre_without_rg_names_the_reason_in_full(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("rg", [True], ids=["rg"])
 def test_batches_of_context_rows_are_separated_like_files(tmp_path: Path) -> None:
-    names = [tmp_path / f"{i:04}{'n' * 200}.txt" for i in range(1_200)]
+    names = _batch_paths(tmp_path)
     for path in names:
         path.write_text("a\nhit\n")
     query = Query(pattern="hit", output_mode="content", context_before=1)

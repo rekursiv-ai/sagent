@@ -637,7 +637,7 @@ def _resolve(ready: asyncio.Future[None]) -> None:
 # anchors the process group until ``wait`` reaps it.
 if sys.platform == "darwin" and sys.version_info < (3, 13):
 
-    def _exit_seen(pid: int, *, block: bool) -> bool:  # pyright: ignore[reportUnreachable] -- Linux-targeted checking omits macOS select types.
+    def _exit_seen(pid: int, *, block: bool) -> bool:
         """Whether ``pid`` has exited, without reaping it; ``block`` waits."""
         with contextlib.closing(select.kqueue()) as kernel:
             note = select.kevent(
