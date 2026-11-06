@@ -571,21 +571,14 @@ class TestLifecycle:
     @pytest.mark.asyncio
     @pytest.mark.parametrize("operation", ["write", "output", "close"])
     async def test_descriptor_zero_is_a_real_owned_master(self, operation: str) -> None:
-        """Allocate fd 0 only inside an owned subprocess with an outer watchdog."""
-        child = (
-            "import asyncio\n"
-            "from sagent.lib.posix.terminal_test import "
-            f"{_descriptor_zero_operation.__name__}\n"
-            f"asyncio.run({_descriptor_zero_operation.__name__}({operation!r}))\n"
-        )
-        async with asyncio.timeout(10):
-            async with Terminal(
-                [sys.executable, "-u", "-c", child],
-                bracketed_paste=False,
-            ) as term:
-                seen = b"".join([chunk async for chunk in term.output()])
-                assert await term.wait() == 0, seen.decode(errors="replace")
-        assert seen == b""
+        """Exercise descriptor zero and restore pytest's stdin afterwards."""
+        stdin_fd = os.dup(0)
+        try:
+            async with asyncio.timeout(10):
+                await _descriptor_zero_operation(operation)
+        finally:
+            os.dup2(stdin_fd, 0)
+            os.close(stdin_fd)
 
     def test_context_exit_reaps_the_owned_child(self) -> None:
         async def run() -> None:

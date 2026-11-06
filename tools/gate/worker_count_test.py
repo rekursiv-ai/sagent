@@ -464,16 +464,8 @@ def test_main_prints_the_job_capped_count(
 
 def test_running_the_module_with_a_job_size_prints_the_capped_count() -> None:
     env = {k: v for k, v in os.environ.items() if k != "WORKERS_DEFAULT"}
-    run = subprocess.run(  # noqa: S603 -- No shell; the module's own executable.
+    commands = [
         [sys.executable, "-m", worker_count_module.__name__, "--units", "1"],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=env,
-        cwd=_REPO,
-    )
-    assert run.stdout == "1\n"
-    run = subprocess.run(  # noqa: S603 -- No shell; the module's own executable.
         [
             sys.executable,
             "-m",
@@ -483,13 +475,21 @@ def test_running_the_module_with_a_job_size_prints_the_capped_count() -> None:
             "--per-worker",
             "16",
         ],
-        capture_output=True,
-        text=True,
-        check=True,
-        env=env,
-        cwd=_REPO,
-    )
-    assert run.stdout == "1\n"
+    ]
+    processes = [
+        subprocess.Popen(  # noqa: S603 -- No shell; the module's own executable.
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+            cwd=_REPO,
+        )
+        for command in commands
+    ]
+    outputs = [process.communicate() for process in processes]
+    assert [process.returncode for process in processes] == [0, 0]
+    assert [stdout for stdout, _ in outputs] == ["1\n", "1\n"]
 
 
 if __name__ == "__main__":
