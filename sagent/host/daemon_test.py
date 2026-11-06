@@ -41,6 +41,7 @@ from sagent.host.settings import HostSettings
 from sagent.host.strings import ServeDirs
 from sagent.host.testing import Gate, LocalHost
 from sagent.host.wire import (
+    MAX_LINE_BYTES,
     VERSION,
     Ack,
     Bye,
@@ -49,6 +50,7 @@ from sagent.host.wire import (
     Describe,
     Described,
     Hello,
+    Message,
     Note,
     Peers,
     Ping,
@@ -77,7 +79,6 @@ if TYPE_CHECKING:
     from treekle import PlainTree
 
     from sagent.host.server import _Session
-    from sagent.host.wire import Message
     from sagent.session.types import FunctionResult
     from sagent.tools.types import ToolContext
 
@@ -886,6 +887,56 @@ async def test_control_rejects_a_connection_without_status(tmp_path: Path) -> No
     ):
         with pytest.raises(ConnectionError, match="returned no status"):
             _ = await control(dirs, DaemonControl())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["connection", "status"])
+async def test_control_bounds_a_stalled_connection_or_status(
+    control_peer: _ControlPeer,
+    monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+) -> None:
+    """Reject an unbounded wait without requiring an exact timeout duration."""
+    control_peer.delay_status = phase == "status"
+    if phase == "connection":
+        monkeypatch.setattr(
+            daemon,
+            "asyncio",
+            SimpleNamespace(
+                open_unix_connection=control_peer.connect,
+                wait_for=asyncio.wait_for,
+            ),
+        )
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    with monkeypatch.context() as clock:
+        clock.setattr(loop, "time", lambda: now)
+        release = loop.call_later(60, control_peer.release.set)
+        pending = asyncio.create_task(control(control_peer.dirs, DaemonControl()))
+        try:
+            await control_peer.pending.wait()
+            now += 60
+            with pytest.raises(TimeoutError):
+                _ = await pending
+        finally:
+            release.cancel()
+            control_peer.release.set()
+            _ = pending.cancel()
+            _ = await asyncio.gather(pending, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_control_accepts_a_status_above_the_default_stream_limit(
+    control_peer: _ControlPeer,
+) -> None:
+    """Read a supported status line larger than asyncio's default 64 KiB."""
+    control_peer.status = replace(
+        control_peer.status,
+        listen=tuple(f"127.0.0.1:{port}" for port in range(10_000, 14_000)),
+    )
+    assert 64 << 10 < len(encoded(control_peer.status)) < MAX_LINE_BYTES
+    assert await control(control_peer.dirs, DaemonControl()) == control_peer.status
+    assert control_peer.requests == [DaemonControl()]
 
 
 @pytest.mark.asyncio
@@ -1891,6 +1942,77 @@ async def test_tls_worker_batch_releases_descriptors_and_public_routes(
             dirs.state / "daemon.lock",
             seconds=5,
         )
+
+
+@dataclass(slots=True, kw_only=True)
+class _ControlPeer:
+    """A Unix protocol peer with an externally releasable connection or response."""
+
+    dirs: ServeDirs
+    status: DaemonStatus
+    delay_status: bool = False
+    pending: asyncio.Event = field(default_factory=asyncio.Event)
+    release: asyncio.Event = field(default_factory=asyncio.Event)
+    requests: list[Message | None] = field(default_factory=list)
+    tasks: list[asyncio.Task[None]] = field(default_factory=list)
+
+    async def connect(
+        self,
+        path: Path,
+        *,
+        limit: int,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        self.pending.set()
+        await self.release.wait()
+        return await asyncio.open_unix_connection(path, limit=limit)
+
+    def connected(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        self.tasks.append(asyncio.create_task(self.reply(reader, writer=writer)))
+
+    async def reply(
+        self,
+        reader: asyncio.StreamReader,
+        *,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        try:
+            self.requests.append(await received(reader))
+            if self.delay_status:
+                self.pending.set()
+                await self.release.wait()
+            writer.write(encoded(self.status))
+            await writer.drain()
+        except ConnectionError:
+            pass
+        finally:
+            writer.close()
+            with contextlib.suppress(ConnectionError):
+                await writer.wait_closed()
+
+
+@pytest_asyncio.fixture
+async def control_peer(tmp_path: Path) -> AsyncIterator[_ControlPeer]:
+    """Serve real control frames and join every accepted connection on teardown."""
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    dirs.state.mkdir()
+    peer = _ControlPeer(
+        dirs=dirs,
+        status=DaemonStatus(pid=os.getpid(), source_version="fixture", listen=()),
+    )
+    async with await asyncio.start_unix_server(
+        peer.connected,
+        path=socket_address(dirs.state / "daemon.sock"),
+        limit=MAX_LINE_BYTES,
+    ):
+        try:
+            yield peer
+        finally:
+            peer.release.set()
+            await asyncio.gather(*peer.tasks)
 
 
 async def _cli(*arguments: str) -> str:

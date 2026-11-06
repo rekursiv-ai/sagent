@@ -1120,6 +1120,16 @@ def test_an_empty_usage_counts_nothing() -> None:
     assert reader.response().tokens == TokenCount()
 
 
+def test_a_reply_without_events_has_no_records_or_usage() -> None:
+    _, reader = _read()
+
+    response = reader.response()
+
+    assert response.records == ()
+    assert response.tokens == TokenCount()
+    assert response.stop_reason == ""
+
+
 @pytest.mark.parametrize(
     ("speed", "served"),
     [("fast", "priority"), ("standard", "auto")],

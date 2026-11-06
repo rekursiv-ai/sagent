@@ -290,6 +290,12 @@ class TestTerminalHandback:
             ([b"\x1b[?1049h\x1bc"], b""),
             ([b"\x1b]0;title \x1b[?1049h\x07"], b""),
             ([b"\x1bPignored \x1b[?1049h\x1b\\"], b""),
+            ([b"\x1bPpayload\x1bX\x1b[?1049h\x1b\\"], b""),
+            ([bytes([byte]) for byte in b"\x1bPpayload\x1bX\x1b[?1049h\x1b\\"], b""),
+            ([b"\x1bPpayload\\\x1b[?1049h\x1b\\"], b""),
+            ([b"\x1b[?1049Xh"], b""),
+            ([b"\x1b[;1049h"], b""),
+            ([b"\x1b[?1049 h"], b""),
             ([bytes([byte]) for byte in b"\x1b[?1049h\x1b[?1049l"], b""),
             ([b"\x1b[31mplain\x1b[?1004h"], b""),
             ([b"\x1b[?1049\x18h\x1b[?1049\x1ah"], b""),
@@ -329,6 +335,79 @@ class TestTerminalHandback:
             leave = f"\x1b[?{mode}l".encode()
             assert seen.count(leave) == (child_output + extra).count(leave)
         assert seen == child_output + extra + TERMINAL_RESET
+
+    def test_resume_keeps_the_normal_screen_when_the_child_never_switched(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        master, slave = pty.openpty()
+        input_r, input_w = os.pipe()
+        monkeypatch.setattr(os, "killpg", mock.Mock())
+
+        async def run() -> int:
+            resumed = asyncio.Event()
+            relay = Relay(
+                _ResumedChild(resumed),
+                stdin=_Fd(input_r),
+                stdout=_Fd(slave),
+                suspend_key=b"\x1a",
+                on_resume=resumed.set,
+            )
+            _ = os.write(input_w, b"\x1a")
+            return await asyncio.wait_for(relay.serve(), 5.0)
+
+        try:
+            assert asyncio.run(run()) == 0
+            seen = _terminal_bytes(master, size=2 * len(TERMINAL_RESET))
+        finally:
+            for fd in (master, slave, input_r, input_w):
+                os.close(fd)
+        assert seen == TERMINAL_RESET * 2
+
+    @pytest.mark.parametrize("mode", [47, 1047, 1049])
+    def test_resume_reenters_the_active_screen_on_descriptor_zero(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mode: int,
+    ) -> None:
+        master, slave = pty.openpty()
+        input_r, input_w = os.pipe()
+        enter = f"\x1b[?{mode}h".encode()
+        leave = f"\x1b[?{mode}l".encode()
+        monkeypatch.setattr(os, "killpg", mock.Mock())
+
+        class ScreenChild(_ResumedChild):
+            @override
+            async def output(self) -> AsyncIterator[bytes]:
+                yield enter
+                async for chunk in super().output():
+                    yield chunk
+
+        def suspend_after_output(chunk: bytes) -> None:
+            assert chunk == enter
+            _ = os.write(input_w, b"\x1a")
+
+        async def run() -> int:
+            resumed = asyncio.Event()
+            relay = Relay(
+                ScreenChild(resumed),
+                stdin=_Fd(input_r),
+                stdout=_Fd(0),
+                suspend_key=b"\x1a",
+                on_output=suspend_after_output,
+                on_resume=resumed.set,
+            )
+            return await asyncio.wait_for(relay.serve(), 5.0)
+
+        expected = (enter + leave + TERMINAL_RESET) * 2
+        try:
+            with _as_stdin(slave):
+                assert asyncio.run(run()) == 0
+            seen = _terminal_bytes(master, size=len(expected))
+        finally:
+            for fd in (master, slave, input_r, input_w):
+                os.close(fd)
+        assert seen == expected
 
     @pytest.mark.parametrize("mode", [47, 1047, 1049])
     def test_suspend_leaves_and_resume_reenters_the_active_screen(
@@ -1526,7 +1605,12 @@ class TestThreadedRelayWiring:
     def test_work_that_never_finishes_is_left_at_its_timeout(self) -> None:
         threaded = ThreadedRelay(["cat"])
         loop = asyncio.new_event_loop()
-        serving = threading.Thread(target=loop.run_forever, daemon=True)
+
+        def serve() -> None:
+            with asyncio.Runner(loop_factory=lambda: loop):
+                loop.run_forever()
+
+        serving = threading.Thread(target=serve, daemon=True)
         serving.start()
         threaded._loop = loop
         caller = threading.Thread(
@@ -1540,11 +1624,10 @@ class TestThreadedRelayWiring:
             caller.join(timeout=5.0)
             assert not caller.is_alive()
         finally:
-            for task in asyncio.all_tasks(loop):
-                _ = loop.call_soon_threadsafe(task.cancel)
             _ = loop.call_soon_threadsafe(loop.stop)
             serving.join(timeout=5.0)
-            loop.close()
+        assert not serving.is_alive()
+        assert loop.is_closed()
 
     def test_a_dropped_call_says_what_and_how_much(
         self,

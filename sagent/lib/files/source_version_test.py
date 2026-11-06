@@ -50,6 +50,23 @@ def test_empty_deleted_and_racy_sources(tmp_path: Path) -> None:
     assert _read(tmp_path / "missing.py") == b""
 
 
+def test_missing_dependency_does_not_hide_later_racy_edits(tmp_path: Path) -> None:
+    root = tmp_path / "pkg"
+    root.mkdir()
+    dependency = tmp_path / "dependency.py"
+    dependency.write_text("x = 1\n")
+    status = dependency.stat()
+    outside = ("../missing.py", "../dependency.py")
+    before = source_version(root, outside=outside)
+
+    dependency.write_text("x = 2\n")
+    os.utime(dependency, ns=(status.st_atime_ns, status.st_mtime_ns))
+    after = dependency.stat()
+    assert after.st_size == status.st_size
+    assert after.st_mtime_ns == status.st_mtime_ns
+    assert source_version(root, outside=outside) != before
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 
