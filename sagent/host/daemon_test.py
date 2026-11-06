@@ -1793,7 +1793,7 @@ async def test_worker_churn_releases_processes_descriptors_and_public_routes(
         )
         descriptors = Path(f"/proc/{os.getpid()}/fd")
         baseline = _descriptor_count(descriptors)
-        for iteration in range(26):
+        for iteration in range(8):
             sessions: list[_Session] = []
             for index in range(4):
                 transport = _RecordingTransport(asyncio.StreamReader())

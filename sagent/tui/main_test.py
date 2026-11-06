@@ -3948,7 +3948,7 @@ async def test_run_wires_the_catalog_team_and_printer_into_its_commands(
             create_pipe_input() as pipe,
             create_app_session(input=pipe, output=PlainTextOutput(screen)),
         ):
-            pipe.send_text("/model deep/deep\r/halt kid\r/help\r/quit\r")
+            pipe.send_text("/model deep/deep\r/halt kid\r/help model\r/quit\r")
             await asyncio.wait_for(
                 main.run(
                     agent,
@@ -3966,7 +3966,7 @@ async def test_run_wires_the_catalog_team_and_printer_into_its_commands(
         "[/model] deep/deep+fullcontext+nothink\n" in shown  # codespell:ignore nothink
     )
     assert "[/halt] halted kid" in shown
-    assert "sagent commands" in shown
+    assert "the model, by name, family, or role, with any tags" in shown
     assert "$1.25" in shown
     del caplog
 
