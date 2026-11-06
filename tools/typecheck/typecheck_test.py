@@ -104,15 +104,36 @@ def test_pyrefly_checks_nothing_when_ty_checked_nothing(tmp_path: Path) -> None:
     ("name", "checker"),
     [("pyrefly-check", "pyrefly"), ("basedpyright", "basedpyright")],
 )
+@pytest.mark.parametrize(
+    ("value", "enabled"),
+    [
+        (None, False),
+        ("", False),
+        ("0", False),
+        ("false", False),
+        ("01", False),
+        ("1", True),
+        ("2", True),
+    ],
+)
 def test_the_fixer_runs_the_checker_in_its_place(
     tmp_path: Path,
     name: str,
     checker: str,
+    value: str | None,
+    *,
+    enabled: bool,
 ) -> None:
     _spool(tmp_path, "a.py")
     tools = fakes.Recorder()
 
-    _typecheck(name, tmp_path, tools, fixer="pkg.fixer")
+    _typecheck(
+        name,
+        tmp_path,
+        tools,
+        fixer="pkg.fixer",
+        **({"PRECOMMIT_BASEDPYRIGHT": value} if value is not None else {}),
+    )
 
     [[_, *head, named]] = tools.calls
     assert head == [
@@ -123,6 +144,9 @@ def test_the_fixer_runs_the_checker_in_its_place(
         "--fix",
         "--threads",
         "3",
+        "--typechecker",
+        "pyrefly",
+        *(["basedpyright"] if enabled or name == "basedpyright" else []),
         "--",
     ]
     assert named.startswith("@")
