@@ -92,7 +92,7 @@ def no_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
 @pytest.mark.parametrize(
     ("physical", "expected"),
-    [(2, 2), (4, 2), (8, 3), (12, 5), (16, 6), (24, 9), (32, 12)],
+    [(2, 2), (4, 2), (8, 3), (9, 3), (12, 5), (16, 6), (24, 9), (32, 12)],
 )
 def test_default_workers_take_three_eighths_of_the_physical_cores(
     tmp_path: Path,
@@ -150,6 +150,7 @@ def test_default_workers_are_capped_by_available_memory(tmp_path: Path) -> None:
     cpu = _topology(tmp_path / "cpu", [(0, c, 1) for c in range(32)])
     assert default_workers(cpu=cpu, meminfo=_meminfo(tmp_path / "a", 6 * 1024)) == 3
     assert default_workers(cpu=cpu, meminfo=_meminfo(tmp_path / "b", 100)) == 1
+    assert default_workers(cpu=cpu, meminfo=_meminfo(tmp_path / "c", 5 * 1024)) == 2
 
 
 def test_workers_default_overrides_the_formula(
@@ -260,6 +261,10 @@ def test_capped_workers_is_one_per_per_worker_units_within_the_budget(
     expected: int,
 ) -> None:
     assert capped_workers(workers, units=units, per_worker=per_worker) == expected
+
+
+def test_capped_workers_default_to_one_unit_per_worker() -> None:
+    assert capped_workers(8, units=3) == 3
 
 
 def _fake_tool(bin_dir: Path, name: str, body: str) -> None:

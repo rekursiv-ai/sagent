@@ -1741,7 +1741,7 @@ async def test_worker_churn_releases_processes_descriptors_and_public_routes(
             _FrameDecoder(target=Peers).received,
         )
         descriptors = Path(f"/proc/{os.getpid()}/fd")
-        baseline = await asyncio.to_thread(lambda: len(list(descriptors.iterdir())))
+        baseline = _descriptor_count(descriptors)
         for iteration in range(26):
             sessions: list[_Session] = []
             for index in range(4):
@@ -1787,25 +1787,22 @@ async def test_worker_churn_releases_processes_descriptors_and_public_routes(
                 )
                 assert len(local_daemon.started) == 4 * (iteration + 1)
                 assert all(worker.task.done() for worker in local_daemon.started)
-                for worker in local_daemon.started:
+                for worker in local_daemon.started[-len(sessions) :]:
                     await worker.writer.wait_closed()
                 if held is not None:
-                    assert (
-                        await asyncio.to_thread(
-                            lambda: len(list(descriptors.iterdir())),
-                        )
-                        == baseline + 1
-                    )
+                    assert _descriptor_count(descriptors) == baseline + 1
             finally:
                 if held is not None:
                     os.close(held)
-            counts.append(
-                await asyncio.to_thread(lambda: len(list(descriptors.iterdir()))),
-            )
+            counts.append(_descriptor_count(descriptors))
             assert counts[-1] == baseline, counts
         await server._end(server._sessions["observer"], reason="bye")
         await observer.expect(None)
         await observer.task
+
+
+def _descriptor_count(path: Path) -> int:
+    return len(list(path.iterdir()))
 
 
 @pytest.mark.asyncio

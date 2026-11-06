@@ -16,7 +16,6 @@ import stat
 import sys
 import tempfile
 import threading
-import time
 
 import pytest
 
@@ -451,7 +450,15 @@ class TestThreadedHost:
     ) -> None:
         """The inbound poller types routed messages in from its own thread."""
         listening = threading.Event()
+        echoed = threading.Event()
+        output = bytearray()
         scrollback = short_dir / "scrollback"
+
+        def observed(chunk: bytes) -> None:
+            output.extend(chunk)
+            if b"ECHO:routed" in output:
+                echoed.set()
+
         relay = ThreadedRelay(
             [sys.executable, "-u", "-c", _ECHO],
             enter_delay_sec=0,
@@ -461,6 +468,7 @@ class TestThreadedHost:
                 scrollback=scrollback,
                 on_listening=listening.set,
             ),
+            on_output=observed,
         )
         statuses: list[int] = []
         runner = threading.Thread(
@@ -471,14 +479,11 @@ class TestThreadedHost:
         try:
             assert listening.wait(5.0)
             relay.submit("routed")
-            deadline = time.monotonic() + 5.0
-            while (
-                b"ECHO:routed" not in _read(scrollback) and time.monotonic() < deadline
-            ):
-                time.sleep(0.01)
+            assert echoed.wait(5.0)
         finally:
             relay.terminate()
             runner.join(5.0)
+        assert not runner.is_alive()
         assert b"ECHO:routed" in _read(scrollback)
         assert relay.submitted == 1
         assert statuses == [128 + 15]
