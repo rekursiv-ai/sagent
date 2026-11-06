@@ -165,7 +165,7 @@ def render_welcome(
     print_rows([Text()])
     print_rows(_command_rows(content_width, unicode_ok=unicode_ok, theme=theme))
     print_rows([Text()])
-    news = f"Behold, {holiday[0]}!" if holiday else "The discovering begins."
+    news = f"I've discovered {holiday[0]}!" if holiday else "The discovering begins."
     print_rows([Text(f"Good news, everyone! {news}", style=theme.style("text"))])
     if framed:
         print_rows([Text()])
