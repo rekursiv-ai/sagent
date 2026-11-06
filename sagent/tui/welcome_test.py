@@ -260,7 +260,7 @@ def test_literal_metadata_is_not_parsed_as_markup() -> None:
 
 
 @pytest.mark.parametrize("width", [16, 40, 56, 80, 120])
-def test_terminal_width_border_contains_identity_commands_with_greeting_outside(
+def test_terminal_width_border_contains_identity_commands_and_greeting(
     width: int,
 ) -> None:
     stream = io.StringIO()
@@ -286,8 +286,8 @@ def test_terminal_width_border_contains_identity_commands_with_greeting_outside(
     assert all(line.startswith("│ ") and line.endswith(" │") for line in frame[1:-1])
     assert "project" in "\n".join(frame)
     assert "/help" in "\n".join(frame)
-    assert "everyone!" not in "\n".join(frame)
-    assert "everyone!" in "\n".join(lines[bottom + 1 :])
+    assert "everyone!" in "\n".join(frame)
+    assert "".join(lines[bottom + 1 :]).strip() == ""
     assert all(cell_len(line) <= width for line in lines)
 
 
@@ -399,7 +399,7 @@ def _holiday_console(*, color_system: Literal["truecolor", "standard"]) -> Conso
 
 def test_holiday_icon_replaces_the_logo_beside_the_wordmark() -> None:
     console = _holiday_console(color_system="truecolor")
-    render_welcome(console, folder=Path("/research"), icon=_PUMPKIN)
+    render_welcome(console, folder=Path("/research"), holiday=("Halloween", _PUMPKIN))
     plain = console.export_text(styles=False, clear=False)
     first = next(line for line in plain.splitlines() if "███████╗" in line)
     assert first.startswith("│  " + "█" * 11 + "   ███████╗")
@@ -409,7 +409,7 @@ def test_holiday_icon_replaces_the_logo_beside_the_wordmark() -> None:
 
 def test_few_color_terminal_keeps_the_logo_on_a_holiday() -> None:
     console = _holiday_console(color_system="standard")
-    render_welcome(console, folder=Path("/research"), icon=_PUMPKIN)
+    render_welcome(console, folder=Path("/research"), holiday=("Halloween", _PUMPKIN))
     assert "▼" in console.export_text(styles=False)
 
 
@@ -421,10 +421,10 @@ def test_print_welcome_shows_todays_holiday(monkeypatch: pytest.MonkeyPatch) -> 
         assert file is sys.stderr
         return console
 
-    def pumpkin(today: date, *, rng: Random) -> Icon:
+    def pumpkin(today: date, *, rng: Random) -> tuple[str, Icon]:
         assert type(rng) is Random
         asked.append(today)
-        return _PUMPKIN
+        return "Halloween", _PUMPKIN
 
     def local(seconds: float | None = None) -> time.struct_time:
         del seconds
@@ -432,10 +432,12 @@ def test_print_welcome_shows_todays_holiday(monkeypatch: pytest.MonkeyPatch) -> 
         return time.struct_time((2026, 10, 31, 23, 0, 0, 5, 304, 0))
 
     monkeypatch.setattr(welcome, "terminal_console", to_stderr)
-    monkeypatch.setattr(welcome, "holiday_icon", pumpkin)
+    monkeypatch.setattr(welcome, "todays_holiday", pumpkin)
     monkeypatch.setattr(time, "localtime", local)
     welcome.print_welcome(folder=Path("/research"))
-    assert "▼" not in console.export_text(styles=False)
+    plain = console.export_text(styles=False)
+    assert "▼" not in plain
+    assert "Behold, Halloween!" in plain
     assert asked == [date(2026, 10, 31)]
 
 
@@ -491,7 +493,7 @@ def test_command_descriptions_stay_with_their_command(width: int) -> None:
     assert all(cell_len(line) <= width for line in lines)
 
 
-def test_wrapped_greeting_is_flush_with_the_frame_edge() -> None:
+def test_a_wrapped_greeting_stays_inside_the_frame() -> None:
     stream = io.StringIO()
     console = Console(
         file=stream,
@@ -507,11 +509,23 @@ def test_wrapped_greeting_is_flush_with_the_frame_edge() -> None:
         folder=Path("/research"),
     )
     lines = console.export_text(styles=False).splitlines()
-    greeting_start = next(
-        i for i, line in enumerate(lines) if "Good news, everyone!" in line
-    )
-    assert lines[greeting_start].startswith("Good news")
-    assert lines[greeting_start + 1] == "begins."
+    start = next(i for i, line in enumerate(lines) if "Good news, everyone!" in line)
+    assert lines[start : start + 3] == [
+        f"│  {row:<34}  │"
+        for row in ("Good news, everyone! The", "discovering begins.", "")
+    ]
+    assert lines[start + 3].startswith("╰")
+
+
+@pytest.mark.parametrize("color_system", ["standard", "truecolor"])
+def test_a_holiday_greets_by_name_on_every_terminal(
+    color_system: Literal["truecolor", "standard"],
+) -> None:
+    console = _holiday_console(color_system=color_system)
+    render_welcome(console, folder=Path("/research"), holiday=("Diwali", _PUMPKIN))
+    plain = console.export_text(styles=False)
+    assert "│  Good news, everyone! Behold, Diwali!" in plain
+    assert "discovering" not in plain
 
 
 def _runs(text: Text) -> list[tuple[str, str]]:
@@ -692,10 +706,10 @@ def test_the_frame_and_the_compact_heading_are_styled() -> None:
 
 
 @pytest.mark.parametrize("width", [40, 80])
-@pytest.mark.parametrize("icon", [None, _PUMPKIN])
+@pytest.mark.parametrize("holiday", [None, ("Halloween", _PUMPKIN)])
 def test_themes_leave_brand_and_holiday_artwork_unchanged(
     width: int,
-    icon: Icon | None,
+    holiday: tuple[str, Icon] | None,
 ) -> None:
     path = config_dir() / "rekursiv-ai" / "sagent" / "themes" / "brand-test.yaml"
     path.parent.mkdir(parents=True)
@@ -709,7 +723,7 @@ def test_themes_leave_brand_and_holiday_artwork_unchanged(
         render_welcome(
             console,
             folder=Path("/research"),
-            icon=icon,
+            holiday=holiday,
             theme=load_theme(name),
         )
         identity = [
@@ -732,7 +746,7 @@ def test_an_ascii_frame_is_drawn_in_ascii() -> None:
     console = _Printed(file=io.TextIOWrapper(raw, encoding="ascii"))
     lines = _rendered(console)
     assert lines[0] == "+" + "-" * 78 + "+"
-    assert lines[-2] == "+" + "-" * 78 + "+"
+    assert lines[-1] == "+" + "-" * 78 + "+"
     assert any("test-model / TestProvider" in line for line in lines)
 
 
@@ -784,7 +798,7 @@ def test_custom_theme_reaches_print_welcome(
         del today, rng
 
     monkeypatch.setattr(welcome, "terminal_console", to_stderr)
-    monkeypatch.setattr(welcome, "holiday_icon", no_holiday)
+    monkeypatch.setattr(welcome, "todays_holiday", no_holiday)
     welcome.print_welcome(folder=Path("/research"), theme=load_theme("welcome-test"))
     out = stream.getvalue()
     assert "\x1b[35m" in out
@@ -804,7 +818,7 @@ def test_a_many_color_terminal_shows_the_holiday_icon(
 
 
 def _rendered_icon(console: _Printed) -> list[str]:
-    render_welcome(console, folder=Path("/research"), icon=_PUMPKIN)
+    render_welcome(console, folder=Path("/research"), holiday=("Halloween", _PUMPKIN))
     return [t.plain for t in console.texts]
 
 

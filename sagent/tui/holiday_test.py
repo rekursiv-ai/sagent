@@ -12,7 +12,7 @@ import time
 import pytest
 
 from sagent.tui import holiday
-from sagent.tui.holiday import Icon, holiday_icon, holidays, icon_rows
+from sagent.tui.holiday import Icon, holidays, icon_rows, todays_holiday
 
 
 if TYPE_CHECKING:
@@ -52,22 +52,22 @@ US_2026 = {
     "St. Patrick's Day": "03-17",
     "Holi": "03-03",
     "Nowruz": "03-20",
-    "First day of spring": "03-20",
+    "spring": "03-20",
     "Easter": "04-05",
     "Vaisakhi": "04-14",
     "Eid al-Fitr": "03-20",
     "Vesak": "05-01",
     "Juneteenth": "06-19",
-    "First day of summer": "06-21",
+    "summer": "06-21",
     "Independence Day": "07-04",
     "Eid al-Adha": "05-27",
-    "First day of fall": "09-22",
+    "fall": "09-22",
     "Mid-Autumn Festival": "09-25",
     "Halloween": "10-31",
     "Diwali": "11-08",
     "Thanksgiving": "11-26",
     "Hanukkah": "12-04",
-    "First day of winter": "12-21",
+    "winter": "12-21",
     "Christmas": "12-25",
     "Kwanzaa": "12-26",
 }
@@ -336,9 +336,9 @@ def test_the_arithmetic_calendar_takes_over_after_the_announced_dates() -> None:
 def _icon_names(day: date, *, draws: int = 1) -> set[str]:
     rng = Random(0)  # noqa: S311 -- Test draws, not cryptography.
     return {
-        icon.name
+        found[1].name
         for _ in range(draws)
-        if (icon := holiday_icon(day, rng=rng)) is not None
+        if (found := todays_holiday(day, rng=rng)) is not None
     }
 
 
@@ -437,7 +437,7 @@ def test_window_is_the_day_or_its_whole_weekend(
 def test_overlapping_holidays_are_all_chosen(monkeypatch: pytest.MonkeyPatch) -> None:
     # March 20, 2026: spring begins, and with it Nowruz; Eid al-Fitr too.
     expected = (
-        _holiday_icons("First day of spring")
+        _holiday_icons("spring")
         | _holiday_icons("Nowruz")
         | _holiday_icons("Eid al-Fitr")
     )
@@ -452,9 +452,12 @@ def test_overlapping_holidays_are_all_chosen(monkeypatch: pytest.MonkeyPatch) ->
 
     rng = Random(0)  # noqa: S311 -- Test draws, not cryptography.
     monkeypatch.setattr(rng, "choice", choose)
-    icons = [holiday_icon(date(2026, 3, 20), rng=rng) for _ in range(6)]
-    assert {icon.name for icon in icons if icon is not None} == expected
+    found = [todays_holiday(date(2026, 3, 20), rng=rng) for _ in range(6)]
+    pairs = [pair for pair in found if pair is not None]
+    assert {icon.name for _, icon in pairs} == expected
     assert sizes == [3, 2] * 6
+    # Each icon comes with the name of the holiday it belongs to.
+    assert all(icon.name in _holiday_icons(name) for name, icon in pairs)
 
 
 def test_an_asset_error_names_the_asset(

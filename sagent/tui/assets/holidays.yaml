@@ -11,14 +11,14 @@
 # A holiday is here if it has at least 100M observers worldwide, is a US
 # federal holiday, is a date that spells something (an in-joke), or starts a
 # Northern Hemisphere season. Three exceptions fall below 100M: Hanukkah,
-# Vaisakhi, and Kwanzaa. Each holiday's `why` names its reason.
+# Vaisakhi, and Kwanzaa.
+# The welcome greets with "Behold, <name>!", so a name reads there.
 # Solemn days (Yom Kippur, Good Friday, Ashura) are left out on purpose: a
 # playful logo does not belong on a day of mourning or fasting.
 # Additions that meet this rule are welcome.
 
 - name: "New Year's"
   dates: 01-01
-  why: "US federal holiday."
   icons:
     - name: "fireworks"
       palette: {B: "#4da6ff", R: "#ff4d4d", S: "#888888", W: "#ffffff", Y: "#ffd23f"}
@@ -53,7 +53,6 @@
 
 - name: "Lunar New Year"
   dates: lunar_new_year
-  why: "Over 100M observers: China, Korea, Vietnam, and diasporas."
   icons:
     - name: "lantern"
       palette: {R: "#e0262f", Y: "#ffd23f", r: "#a01c2c", y: "#ffb300"}
@@ -88,7 +87,6 @@
 
 - name: "Valentine's Day"
   dates: 02-14
-  why: "Over 100M observers, in the US and beyond."
   icons:
     - name: "heart"
       palette: {P: "#ff8fa3", R: "#e53950"}
@@ -123,7 +121,6 @@
 
 - name: "Mario Day"
   dates: 03-10
-  why: "In-joke: MAR10 spells Mario; the Halloween ghost is a Boo."
   icons:
     - name: "mushroom"
       palette: {K: "#222222", R: "#e53935", T: "#f5d6a0", W: "#ffffff"}
@@ -158,7 +155,6 @@
 
 - name: "Pi Day"
   dates: 03-14
-  why: "In-joke: 3/14 spells 3.14."
   icons:
     - name: "pi"
       palette: {B: "#4a90c4"}
@@ -193,7 +189,6 @@
 
 - name: "St. Patrick's Day"
   dates: 03-17
-  why: "Over 100M observers, in Ireland, the US, and beyond."
   icons:
     - name: "shamrock"
       palette: {G: "#7fd67f", g: "#3fa34d"}
@@ -228,7 +223,6 @@
 
 - name: "Holi"
   dates: holi
-  why: "Over 100M observers: Hindus, the festival of colors."
   icons:
     - name: "powder burst"
       palette: {C: "#00c8e8", G: "#2ecc40", O: "#ff7a00", P: "#e91e8c", Y: "#ffd600"}
@@ -263,7 +257,6 @@
 
 - name: "Nowruz"
   dates: spring
-  why: "Over 100M observers: about 300M across Iran, Afghanistan, and Central Asia, of several faiths."
   icons:
     - name: "hyacinth"
       palette: {G: "#4caf50", O: "#c1663f", V: "#c3a6f0", v: "#8e5fd6"}
@@ -296,9 +289,8 @@
         ...........
         ...........
 
-- name: "First day of spring"
+- name: "spring"
   dates: spring
-  why: "Season: the March equinox."
   icons:
     - name: "tulip"
       palette: {G: "#4caf50", P: "#f8bbd0", p: "#f06292"}
@@ -333,7 +325,6 @@
 
 - name: "Easter"
   dates: easter
-  why: "Over 100M observers: Christians."
   workday: monday  # Friday is Good Friday, a solemn day.
   icons:
     - name: "egg"
@@ -369,7 +360,6 @@
 
 - name: "Vaisakhi"
   dates: vaisakhi
-  why: "Exception: the main Sikh festival; Sikhs number about 26M."
   icons:
     - name: "wheat sheaf"
       palette: {O: "#ff9933", Y: "#e8c05a", y: "#b8902a"}
@@ -404,7 +394,6 @@
 
 - name: "Eid al-Fitr"
   dates: eid_al_fitr
-  why: "Over 100M observers: Muslims; it ends Ramadan."
   icons:
     - name: "crescent + star"
       palette: {Y: "#e0a800"}
@@ -439,7 +428,6 @@
 
 - name: "Vesak"
   dates: vesak
-  why: "Over 100M observers: Buddhists."
   icons:
     - name: "lotus"
       palette: {G: "#4caf50", P: "#f48fb1", W: "#fce4ec", Y: "#ffd23f"}
@@ -474,7 +462,6 @@
 
 - name: "Juneteenth"
   dates: 06-19
-  why: "US federal holiday."
   icons:
     - name: "Juneteenth flag"
       palette: {B: "#b8cdf5", R: "#d7263d", W: "#ffffff", b: "#2b4c9b"}
@@ -507,9 +494,8 @@
         RRRRRRRRRRR
         ...........
 
-- name: "First day of summer"
+- name: "summer"
   dates: summer
-  why: "Season: the June solstice."
   icons:
     - name: "sun"
       palette: {O: "#ff8c1a", Y: "#ffd23f"}
@@ -544,7 +530,6 @@
 
 - name: "Independence Day"
   dates: 07-04
-  why: "US federal holiday."
   icons:
     - name: "flag"
       palette: {B: "#2b4c9b", R: "#d7263d", W: "#f2f2f2"}
@@ -579,7 +564,6 @@
 
 - name: "Eid al-Adha"
   dates: eid_al_adha
-  why: "Over 100M observers: Muslims."
   icons:
     - name: "mosque"
       palette: {C: "#26a69a", W: "#d8c39a", Y: "#ffd23f"}
@@ -612,9 +596,8 @@
         tttttttTTTT
         ...........
 
-- name: "First day of fall"
+- name: "fall"
   dates: fall
-  why: "Season: the September equinox."
   icons:
     - name: "maple leaf"
       palette: {N: "#6d4c41", O: "#ff8c1a", R: "#d84315"}
@@ -649,7 +632,6 @@
 
 - name: "Mid-Autumn Festival"
   dates: mid_autumn
-  why: "Over 100M observers: China, Korea, and Vietnam."
   icons:
     - name: "mooncake"
       palette: {T: "#d9a441", t: "#9c6a2a"}
@@ -684,7 +666,6 @@
 
 - name: "Halloween"
   dates: 10-31
-  why: "Over 100M observers, mostly in the US."
   icons:
     - name: "jack-o-lantern"
       palette: {G: "#4caf50", O: "#e8761c", Y: "#ffd23f"}
@@ -719,7 +700,6 @@
 
 - name: "Diwali"
   dates: diwali
-  why: "Over 100M observers: Hindus, Sikhs, and Jains."
   icons:
     - name: "diya"
       palette: {N: "#8a3f22", O: "#ff8c1a", W: "#fff6c8", Y: "#ffd23f", o: "#c1663f"}
@@ -754,7 +734,6 @@
 
 - name: "Thanksgiving"
   dates: thanksgiving
-  why: "US federal holiday."
   icons:
     - name: "turkey"
       palette: {K: "#222222", N: "#8b5a2b", O: "#ff8c1a", R: "#d7263d", T: "#c08850", Y: "#ffd23f", r: "#e0262f", y: "#ffb300"}
@@ -789,7 +768,6 @@
 
 - name: "Hanukkah"
   dates: hanukkah
-  why: "Exception: Jews number about 15M, but Hanukkah is widely marked in the US."
   icons:
     - name: "menorah"
       palette: {B: "#4a90e2", Y: "#ffd23f", y: "#e6b422"}
@@ -822,9 +800,8 @@
         .....b.....
         ...........
 
-- name: "First day of winter"
+- name: "winter"
   dates: winter
-  why: "Season: the December solstice."
   icons:
     - name: "snowflake"
       palette: {B: "#4a90e2", b: "#8fd3ff"}
@@ -859,7 +836,6 @@
 
 - name: "Christmas"
   dates: 12-25
-  why: "Over 100M observers, and a US federal holiday."
   icons:
     - name: "tree"
       palette: {B: "#42a5f5", G: "#2e8b3e", N: "#8b5a2b", R: "#e53935", Y: "#ffd23f"}
@@ -894,7 +870,6 @@
 
 - name: "Kwanzaa"
   dates: 12-26
-  why: "Exception: an African American cultural celebration."
   icons:
     - name: "kinara"
       palette: {G: "#43a047", K: "#5a5a5a", N: "#8b5a2b", R: "#e53935", Y: "#ffd23f", g: "#1b5e20", r: "#9e1b1b"}
