@@ -437,7 +437,7 @@ def test_print_welcome_shows_todays_holiday(monkeypatch: pytest.MonkeyPatch) -> 
     welcome.print_welcome(folder=Path("/research"))
     plain = console.export_text(styles=False)
     assert "▼" not in plain
-    assert "Behold, Halloween!" in plain
+    assert "I've discovered Halloween!" in plain
     assert asked == [date(2026, 10, 31)]
 
 
@@ -524,7 +524,7 @@ def test_a_holiday_greets_by_name_on_every_terminal(
     console = _holiday_console(color_system=color_system)
     render_welcome(console, folder=Path("/research"), holiday=("Diwali", _PUMPKIN))
     plain = console.export_text(styles=False)
-    assert "│  Good news, everyone! Behold, Diwali!" in plain
+    assert "│  Good news, everyone! I've discovered Diwali!" in plain
     assert "discovering" not in plain
 
 
