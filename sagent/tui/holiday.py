@@ -54,8 +54,8 @@ class Holiday:
     workday: Literal["friday", "monday"] = "friday"
 
 
-def holiday_icon(today: date, *, rng: Random) -> Icon | None:
-    """Pick an icon of a random holiday showing ``today``, if any.
+def todays_holiday(today: date, *, rng: Random) -> tuple[str, Icon] | None:
+    """Pick a random holiday showing ``today``, if any, and one of its icons.
 
     A holiday shows on its day. On a Saturday or Sunday, it also shows on the
     rest of that weekend and its ``workday``, Friday or Monday, so it is seen
@@ -66,11 +66,15 @@ def holiday_icon(today: date, *, rng: Random) -> Icon | None:
       rng: Chooses among overlapping holidays, then between their icons.
 
     Returns:
-      icon: The chosen icon, or None outside every holiday.
+      name: The chosen holiday's name, or None outside every holiday.
+      icon: One of its icons.
 
     """
     current = [h for h in holidays() if _in_window(h, today)]
-    return rng.choice(rng.choice(current).icons) if current else None
+    if not current:
+        return None
+    chosen = rng.choice(current)
+    return chosen.name, rng.choice(chosen.icons)
 
 
 def icon_rows(icon: Icon) -> list[Text]:
@@ -433,7 +437,6 @@ class _IconEntry(TypedDict):
 class _HolidayEntry(TypedDict):
     name: str
     dates: str
-    why: str  # Required, so every holiday states which inclusion rule it meets.
     workday: NotRequired[Literal["friday", "monday"]]
     icons: list[_IconEntry]
 

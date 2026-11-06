@@ -12,7 +12,7 @@ import sys
 import time
 
 from sagent.tui.console import terminal_console
-from sagent.tui.holiday import holiday_icon, icon_rows
+from sagent.tui.holiday import icon_rows, todays_holiday
 from sagent.tui.theme import load_theme
 from sagent.tui.types import fill
 
@@ -53,7 +53,7 @@ def print_welcome(
         provider=provider,
         folder=folder,
         theme=theme,
-        icon=holiday_icon(
+        holiday=todays_holiday(
             date(*time.localtime()[:3]),
             rng=Random(),  # noqa: S311 -- Picks a picture, not a secret.
         ),
@@ -68,7 +68,7 @@ def render_welcome(
     model: str = "",
     provider: str = "",
     folder: Path,
-    icon: Icon | None = None,
+    holiday: tuple[str, Icon] | None = None,
     theme: Theme | None = None,
     padding: int = 2,
 ) -> None:
@@ -84,9 +84,9 @@ def render_welcome(
       model: The model line; empty before one is configured.
       provider: The provider serving it.
       folder: The project directory.
-      icon: A holiday icon to show in place of the logo. Terminals without 256
-        colors, or with NO_COLOR set, keep the logo: the icon's shape is
-        drawn in its colors.
+      holiday: Today's holiday, which the greeting names, and its icon to show
+        in place of the logo. Terminals without 256 colors, or with NO_COLOR
+        set, keep the logo: the icon's shape is drawn in its colors.
       theme: Frame, metadata, and help styles; artwork keeps its own palette.
       padding: Columns between the frame's sides and its content.
 
@@ -97,15 +97,17 @@ def render_welcome(
         return
     theme = theme or load_theme("terminal")
     unicode_ok = _supports_blocks(console.encoding)
+    # pragma: no mutate start -- an empty block needs the 80-cell floor; a cell more does not move it.
     frame_width = fill(0, total_padding=0, width=console.width)
+    # pragma: no mutate end
     many_colors = console.color_system in {"256", "truecolor"} and not console.no_color
     banner = _banner_rows(
-        icon=icon_rows(icon) if icon and many_colors else _logo_rows(),
+        icon=icon_rows(holiday[1]) if holiday and many_colors else _logo_rows(),
     )
     large = (
         not console.is_dumb_terminal
         and unicode_ok
-        and frame_width >= banner[0].cell_len + 2 * (padding + 1)
+        and frame_width >= max(row.cell_len for row in banner) + 2 * (padding + 1)
         and console.height >= 22
     )
     framed = not console.is_dumb_terminal and frame_width >= 16
@@ -161,7 +163,10 @@ def render_welcome(
         row.append(value, style=theme.style("text"))
         print_rows([row])
     print_rows([Text()])
-    print_rows(_command_rows(max(1, content_width), unicode_ok=unicode_ok, theme=theme))
+    print_rows(_command_rows(content_width, unicode_ok=unicode_ok, theme=theme))
+    print_rows([Text()])
+    news = f"Behold, {holiday[0]}!" if holiday else "The discovering begins."
+    print_rows([Text(f"Good news, everyone! {news}", style=theme.style("text"))])
     if framed:
         print_rows([Text()])
         left, horizontal, right = ("╰", "─", "╯") if unicode_ok else ("+", "-", "+")
@@ -171,13 +176,6 @@ def render_welcome(
                 style=theme.style("muted"),
             ),
         )
-    console.print()
-    greeting = Text(
-        "Good news, everyone! The discovering begins.",
-        style=theme.style("text"),
-    )
-    for line in greeting.wrap(console, frame_width):
-        console.print(line)
     console.print()
 
 
