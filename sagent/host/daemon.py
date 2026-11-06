@@ -34,6 +34,7 @@ _CWD: Final = Path(__file__).resolve().parent
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
+    from asyncio.streams import StreamReader, StreamWriter
     from collections.abc import Sequence
     from subprocess import Popen
 
@@ -66,6 +67,8 @@ async def control(dirs: ServeDirs, request: DaemonControl) -> DaemonStatus:
       status: The daemon's identity and listener configuration.
 
     """
+    reader: StreamReader
+    writer: StreamWriter
     reader, writer = await asyncio.wait_for(
         asyncio.open_unix_connection(
             socket_address(dirs.state / "daemon.sock"),

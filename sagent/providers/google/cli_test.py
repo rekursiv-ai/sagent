@@ -90,6 +90,7 @@ while IFS= read -r line; do
   while IFS= read -r out; do
     case "$out" in
       "WAIT "*) f="$dir/${out#WAIT }"; while [ ! -e "$f" ]; do sleep 0.005; done ;;
+      "BARRIER "*) IFS= read -r barrier < "$dir/${out#BARRIER }" ;;
       EXIT) exit 0 ;;
       *) printf '%s\n' "$out" ;;
     esac
@@ -360,6 +361,46 @@ async def test_a_first_turn_tells_the_conversation_and_streams_the_reply(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "usage",
+    [
+        pytest.param({"output_tokens": 2}, id="missing-input-tokens"),
+        pytest.param(
+            {"input_tokens": None, "output_tokens": 2},
+            id="null-input-tokens",
+        ),
+    ],
+)
+async def test_missing_or_null_input_tokens_count_as_zero(
+    shared: _Resources,
+    stub: _Stub,
+    usage: dict[str, int | None],
+) -> None:
+    stub.script(
+        [
+            _INIT,
+            {
+                "event": "step_update",
+                "step_update": {
+                    "step_type": "agent_response",
+                    "text_delta": "hi",
+                    "usage": usage,
+                },
+            },
+            _result(),
+        ],
+    )
+    async with GoogleCLI(resources=shared) as provider:
+        events = await _stream(provider["gemini-flash"], Request(records=_HELLO))
+
+    assert events[:-1] == [TextChunk(text="hi")]
+    response = _response(events)
+    assert response.records == (AssistantMessage(content="hi"),)
+    assert response.stop_reason == "end_turn"
+    assert response.tokens == TokenCount(request=0, response=2)
+
+
+@pytest.mark.asyncio
 async def test_the_next_user_message_goes_to_the_same_agy(
     shared: _Resources,
     stub: _Stub,
@@ -414,6 +455,46 @@ async def test_a_call_of_our_tools_is_held_and_its_result_continues_the_turn(
     assert len(stub.processes()) == 1
     assert shared.mount.offered[-1] == ("Echo",)
     await model.provider.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stdout_keeps_streaming_while_a_tool_call_has_not_arrived(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    barrier = stub.dir / "release-text"
+    os.mkfifo(barrier)
+    stub.script(
+        [
+            _INIT,
+            _step("tool", state="ACTIVE", tool="call_mcp_tool"),
+            "BARRIER release-text",
+            _step("agent_response", text="waiting", usage=(7, 2, 0)),
+        ],
+    )
+    chunks = asyncio.Queue[TextChunk]()
+    call = ToolCall(call_id="c1", name="Echo", arguments={"text": "x"})
+    with os.fdopen(
+        os.open(barrier, os.O_RDWR | os.O_NONBLOCK),
+        "wb",
+        buffering=0,
+    ) as release:
+        async with GoogleCLI(resources=shared) as provider:
+            model = provider["gemini-flash"]
+            request = Request(records=_HELLO, tools=(_Echo(),))
+            async with asyncio.timeout(5), asyncio.TaskGroup() as group:
+                streamed = group.create_task(_stream(model, request, chunks=chunks))
+                await shared.mount.call_waiting.wait()
+                release.write(b"\n")
+                assert await chunks.get() == TextChunk(text="waiting")
+                shared.mount.calls.put_nowait(call)
+                events = await streamed
+
+    assert events[:-1] == [TextChunk(text="waiting")]
+    response = _response(events)
+    assert response.records == (AssistantMessage(content="waiting"), call)
+    assert response.stop_reason == "tool_use"
+    assert response.tokens == TokenCount(request=7, response=2)
 
 
 @pytest.mark.asyncio
@@ -1072,8 +1153,15 @@ def _said(text: str, *, tokens: tuple[int, int] = (1, 1)) -> list[object]:
 async def _stream(
     model: GoogleCLIModel,
     request: Request,
+    *,
+    chunks: asyncio.Queue[TextChunk] | None = None,
 ) -> list[TextChunk | Response]:
-    return [event async for event in model.stream(request)]
+    events: list[TextChunk | Response] = []
+    async for event in model.stream(request):
+        events.append(event)
+        if isinstance(event, TextChunk) and chunks is not None:
+            chunks.put_nowait(event)
+    return events
 
 
 def _response(events: Sequence[TextChunk | Response]) -> Response:
@@ -1131,6 +1219,7 @@ class _Mount:
     stub: _Stub
     url: str = "http://127.0.0.1:1/mount"
     calls: asyncio.Queue[ToolCall] = field(default_factory=asyncio.Queue[ToolCall])
+    call_waiting: asyncio.Event = field(default_factory=asyncio.Event)
     offered: list[tuple[str, ...]] = field(default_factory=list[tuple[str, ...]])
     answered: list[tuple[ToolCall, AnyToolResult]] = field(
         default_factory=list[tuple[ToolCall, "AnyToolResult"]],
@@ -1145,6 +1234,7 @@ class _Mount:
         self.offered.append(tuple(tool.name for tool in tools))
 
     async def called(self) -> ToolCall:
+        self.call_waiting.set()
         return await self.calls.get()
 
     async def answer(self, call: ToolCall, result: AnyToolResult) -> None:

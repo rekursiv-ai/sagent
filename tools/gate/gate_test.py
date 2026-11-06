@@ -233,6 +233,24 @@ def test_run_without_a_module_is_a_usage_error() -> None:
         gate._parse_args(argparse.ArgumentParser(), ["run", "leaks", "--"])
 
 
+@pytest.mark.parametrize(
+    "paths",
+    [[], ["alpha.py"], ["alpha.py", "path with spaces.py"]],
+    ids=["zero", "one", "multiple"],
+)
+def test_the_cli_spools_zero_or_more_intact_paths(
+    processes: fakes.Processes,
+    monkeypatch: pytest.MonkeyPatch,
+    paths: list[str],
+) -> None:
+    del processes
+    monkeypatch.setattr(sys, "argv", ["gate", "spool", "spooled", *paths])
+
+    assert gate.main() == 0
+    context = gate.context()
+    assert spool.drain(context.directory, gate="spooled", key=context.key) == paths
+
+
 def test_the_cli_spools_then_runs_one_module(
     processes: fakes.Processes,
     monkeypatch: pytest.MonkeyPatch,

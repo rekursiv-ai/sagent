@@ -34,6 +34,8 @@ from sagent.tools.read import Read
 
 
 if TYPE_CHECKING:
+    from treekle import PlainTree
+
     from sagent.model.capability import ModelCapability
 
 
@@ -876,6 +878,148 @@ def test_unreadable_reasoning_still_precedes_streamed_text(native_blocks: bool) 
     thinking, answer = reader.response().records
     assert isinstance(thinking, Thinking)
     assert answer == AssistantMessage(content="Hi")
+
+
+@pytest.mark.parametrize("null_index", [False, True])
+def test_indexless_reasoning_blocks_keep_their_payloads_and_order(
+    null_index: bool,
+) -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_details_field="reasoning_details",
+    )
+    details: list[dict[str, PlainTree]] = [
+        {"type": "reasoning.encrypted", "data": "first", "signature": "sig-a"},
+        {"type": "reasoning.encrypted", "data": "second", "signature": "sig-b"},
+    ]
+    if null_index:
+        for block in details:
+            block["index"] = None
+    reader.feed(_chunk(reasoning_details=[details[0]]))
+    reader.feed(_chunk("stop", reasoning_details=[details[1]]))
+
+    assert reader.response().records == (
+        Thinking(
+            extra={
+                "chat_reasoning": {
+                    "model": capability.wire_model_id or capability.model_id,
+                    "details_field": "reasoning_details",
+                    "details": details,
+                    "content": [],
+                },
+            },
+        ),
+    )
+
+
+def test_indexless_and_indexed_reasoning_blocks_finish_together() -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="",
+        reasoning_details_field="reasoning_details",
+    )
+    details: list[dict[str, PlainTree]] = [
+        {"type": "reasoning.encrypted", "data": "first", "signature": "sig-a"},
+        {
+            "index": 1,
+            "type": "reasoning.encrypted",
+            "data": "second",
+            "signature": "sig-b",
+        },
+    ]
+    reader.feed(_chunk(reasoning_details=details))
+    reader.feed(_chunk("stop", content="Hi"))
+
+    assert reader.response().records == (
+        Thinking(
+            extra={
+                "chat_reasoning": {
+                    "model": capability.wire_model_id or capability.model_id,
+                    "details_field": "reasoning_details",
+                    "details": details,
+                    "content": [],
+                },
+            },
+        ),
+        AssistantMessage(content="Hi"),
+    )
+
+
+def test_encode_defaults_to_readable_reasoning_and_a_string_answer() -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=True,
+    )
+    reader.feed(
+        _chunk(
+            content=[
+                {
+                    "type": "thinking",
+                    "thinking": [{"type": "text", "text": "Hmm"}],
+                    "signature": "sealed",
+                },
+            ],
+        ),
+    )
+    reader.feed(_chunk("stop", content="Hi"))
+    request = Request(records=reader.response().records)
+    body = chat.encode(
+        request,
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+    )
+
+    assert body["messages"] == [
+        {"role": "assistant", "content": "Hi", "reasoning_content": "Hmm"},
+    ]
+    assert body == chat.encode(
+        request,
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=False,
+    )
+
+
+def test_native_content_keeps_the_default_details_dialect_empty() -> None:
+    capability, settings = _model("qwen-plus-3.7")
+    reader = chat.StreamReader(
+        capability=capability,
+        settings=settings,
+        reasoning_field="reasoning_content",
+        reasoning_content_blocks=True,
+    )
+    thought: dict[str, PlainTree] = {
+        "type": "thinking",
+        "thinking": [{"type": "text", "text": "Hmm"}],
+        "signature": "sealed",
+    }
+    reader.feed(_chunk(content=[thought]))
+    reader.feed(_chunk("stop", content="Hi"))
+
+    assert reader.response().records == (
+        Thinking(
+            content="Hmm",
+            extra={
+                "chat_reasoning": {
+                    "model": capability.wire_model_id or capability.model_id,
+                    "details_field": "",
+                    "details": [],
+                    "content": [thought],
+                },
+            },
+        ),
+        AssistantMessage(content="Hi"),
+    )
 
 
 if __name__ == "__main__":
