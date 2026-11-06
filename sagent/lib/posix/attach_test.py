@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import asyncio
 import contextlib
 import fcntl
+import inspect
 import os
 import pty
 import shutil
 import signal
 import struct
+import subprocess
 import sys
 import tempfile
 import termios
@@ -31,6 +33,8 @@ from sagent.lib.posix.attach import (
 from sagent.lib.posix.host import Frame, Host, HostSpec, encode_frame, encode_winsize
 from sagent.lib.posix.terminal import Terminal
 
+
+_CWD: Final = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -502,24 +506,36 @@ def _shell(address: Path, follower: int, go: int) -> int:
 class _Shell:
     """The attach as a job of :func:`_shell` on a pty this test types into.
 
-    Forked from this process, not a new interpreter, and before any event loop
-    runs: the job's ``asyncio.run`` would refuse a loop the fork copied. It waits
-    for :meth:`start`, once the host it attaches to is listening.
+    A fresh interpreter keeps the job-control fork independent of the pytest
+    process's size after torch imports. It waits for :meth:`start`, once the
+    host it attaches to is listening.
     """
 
     def __init__(self, address: Path) -> None:
         self._leader, follower = pty.openpty()
         go, self._go = os.pipe()
         self.seen = bytearray()
-        self.pid = os.fork()
-        if self.pid == 0:
-            code = 1
-            try:
-                os.close(self._leader)
-                os.close(self._go)
-                code = _shell(address, follower, go)
-            finally:
-                os._exit(code)
+        source = "\n".join(inspect.getsource(fn) for fn in (_Fd, _say, _cooked, _shell))
+        self._process = subprocess.Popen(  # noqa: S603 -- Only this test's helper source and descriptors.
+            [
+                sys.executable,
+                "-S",
+                "-c",
+                (
+                    "import asyncio, os, signal, sys, termios\n"
+                    "from pathlib import Path\n"
+                    "from sagent.lib.posix.attach import attach\n"
+                    f"{source}\n"
+                    "os._exit(_shell(Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])))"
+                ),
+                str(address),
+                str(follower),
+                str(go),
+            ],
+            cwd=_CWD.parents[2],
+            pass_fds=(follower, go),
+        )
+        self.pid = self._process.pid
         os.close(follower)
         os.close(go)
 
@@ -583,7 +599,7 @@ class _Shell:
             os.killpg(self.pid, signal.SIGKILL)
         with contextlib.suppress(ProcessLookupError):
             os.kill(self.pid, signal.SIGKILL)
-        _ = os.waitpid(self.pid, 0)
+        _ = self._process.wait()
         os.close(self._go)
         os.close(self._leader)
 
@@ -672,10 +688,12 @@ class TestTheTerminalBehavesAsBeforeHosting:
                 shell.start()
                 _ = await shell.until(b"early")
                 _ = serving.cancel()
-                return await shell.until(b"cooked")
+                return await shell.line(b"EXIT")
 
         with _shell_on(short_dir) as shell:
-            assert b"EXIT" in asyncio.run(run(shell))
+            ended = asyncio.run(run(shell))
+        assert b"EXIT" in ended
+        assert b"cooked" in ended
 
     def test_a_terminated_attach_leaves_the_terminal_cooked_and_the_session_up(
         self,

@@ -109,6 +109,14 @@ def typecheck(
                     "--fix",
                     "--threads",
                     str(count),
+                    "--typechecker",
+                    "pyrefly",
+                    *(
+                        ["basedpyright"]
+                        if name == "basedpyright"
+                        or gate.positive(context.environ.get("PRECOMMIT_BASEDPYRIGHT"))
+                        else []
+                    ),
                     "--",
                     named,
                 ],
