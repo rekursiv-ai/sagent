@@ -363,7 +363,11 @@ async def test_events_retry_by_default(slept: list[float]) -> None:
     async with _Served(server) as shared:
         events = [
             event
-            async for event in _Vendor(resources=shared).events(body={}, headers={})
+            async for event in _Vendor(resources=shared).events(
+                body={},
+                model="default",
+                headers={},
+            )
         ]
     assert len(events) == len(_said("Hello"))
     assert len(server.requests) == 2

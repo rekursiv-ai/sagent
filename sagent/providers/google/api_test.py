@@ -68,6 +68,23 @@ async def test_the_key_is_googles_variable_else_geminis(
     assert await Google().credentials() == {"x-goog-api-key": key}
 
 
+def test_each_key_and_endpoint_of_each_model_is_paced_apart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gemini limits each key's project; its key names the account, as a digest."""
+    key = Google().gate_key("gemini-pro")
+    who, _, model = key.removeprefix("google@").partition("/")
+    assert (len(who), model) == (16, "gemini-pro")
+    assert "AIza" not in key
+    assert Google().gate_key("gemini-flash") != key
+    assert Google(api_key="AIza-other").gate_key("gemini-pro") != key
+    assert Google(base_url="https://proxy.example").gate_key("gemini-pro") != key
+    assert Google(api_key="AIza-test").gate_key("gemini-pro") == key
+    monkeypatch.delenv("GOOGLE_API_KEY")
+    monkeypatch.setenv("GEMINI_API_KEY", "AIza-test")
+    assert Google().gate_key("gemini-pro") == key
+
+
 @pytest.mark.asyncio
 async def test_no_key_is_an_auth_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("GOOGLE_API_KEY")

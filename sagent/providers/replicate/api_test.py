@@ -138,7 +138,7 @@ async def test_unsuccessful_predictions_raise(value: dict[str, object]) -> None:
     provider, _ = _provider(value)
     with pytest.raises(RuntimeError, match="Replicate prediction"):
         async with provider:
-            await anext(provider.events({}, headers={}))
+            await anext(provider.events({}, model="m", headers={}))
 
 
 @pytest.mark.asyncio
@@ -146,7 +146,7 @@ async def test_missing_text_is_not_a_successful_reply() -> None:
     provider, _ = _provider({"status": "succeeded", "output": None})
     with pytest.raises(DisconnectedError, match="no text"):
         async with provider:
-            await anext(provider.events({}, headers={}))
+            await anext(provider.events({}, model="m", headers={}))
 
 
 @pytest.mark.asyncio
@@ -154,7 +154,7 @@ async def test_missing_counts_cannot_silently_report_free_generation() -> None:
     provider, _ = _provider({"status": "succeeded", "output": "hello"})
     with pytest.raises(RuntimeError, match="token counts"):
         async with provider:
-            await anext(provider.events({}, headers={}))
+            await anext(provider.events({}, model="m", headers={}))
 
 
 @pytest.mark.asyncio

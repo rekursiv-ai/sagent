@@ -22,6 +22,7 @@ import shutil
 import signal
 import stat
 import tempfile
+import time
 
 from PIL import Image
 from treekle import PlainTree, json_dumps, json_loads
@@ -724,6 +725,21 @@ async def test_a_spent_quota_waits_for_the_reset_agy_names(
 
 
 @pytest.mark.asyncio
+async def test_a_spent_quota_holds_the_model_for_every_caller(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    error = "RESOURCE_EXHAUSTED (code 429): Resets in 45s."
+    stub.script([_INIT, _result(status="ERROR", error=error)])
+    model = GoogleCLI(resources=shared)["gemini-flash"]
+    with pytest.raises(RateLimitedError):
+        await _stream(model, Request(records=_HELLO))
+    held = shared.gate.states()[f"google-cli@default/{model.capability.model_id}"]
+    assert held.held_until > time.time() + 40.0
+    await model.provider.aclose()
+
+
+@pytest.mark.asyncio
 async def test_agy_exiting_mid_turn_is_a_disconnect(
     shared: _Resources,
     stub: _Stub,
@@ -1266,8 +1282,6 @@ class _Resources(AsyncResource):
     def __init__(self, *, stub: _Stub) -> None:
         self._shared = SharedResources()
         self.gate = self._shared.gate
-        self.locks = self._shared.locks
-        self.ledger = self._shared.ledger
         self.mount = _Mount(stub=stub)
         self.server = _ToolServer(mounted=self.mount)
 

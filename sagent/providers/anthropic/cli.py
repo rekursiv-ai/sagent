@@ -20,6 +20,7 @@ Typical usage example:
 from __future__ import annotations
 
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, override
 
@@ -38,6 +39,7 @@ from sagent.providers.anthropic import wire
 from sagent.providers.anthropic.login import ClaudeLogin
 from sagent.providers.login import Logins
 from sagent.providers.resources import SharedResources
+from sagent.providers.retry import account_key, retried
 from sagent.providers.table import HasModels
 from sagent.session.types import (
     AgentToAgentMessage,
@@ -107,7 +109,7 @@ class AnthropicCLI(HasModels, AsyncResource):
         self._owns_resources = resources is None
         self._resources = SharedResources() if resources is None else resources
         self._account = account
-        self._logins = Logins(ClaudeLogin.default_path(), shared=self._resources)
+        self._logins = Logins(ClaudeLogin.default_path())
         self._login = ClaudeLogin(self._logins.path(account), resources=self._resources)
 
     @property
@@ -145,6 +147,11 @@ class AnthropicCLI(HasModels, AsyncResource):
     def logins(self) -> Logins:
         """Return every account kept beside ``claude``'s login."""
         return self._logins
+
+    @property
+    def account(self) -> str | None:
+        """Return the named account signed in as; ``None`` for ``claude``'s own."""
+        return self._account
 
     async def login(self, *, headless: bool = False) -> None:
         """Sign in through the browser, or with a code pasted from it."""
@@ -272,6 +279,9 @@ class AnthropicCLIModel(AsyncResource):
     async def stream(self, request: Request) -> AsyncIterator[TextChunk | Response]:
         """Yield the reply as it is written, then the finished ``Response``.
 
+        Paced as the subscription's calls to the same login are: ``claude``
+        bills it too. Never started again, for the process holds the turn.
+
         Args:
           request: What the model is asked.
 
@@ -279,6 +289,21 @@ class AnthropicCLIModel(AsyncResource):
           event: Each ``TextChunk`` as the model writes it, then one ``Response``.
 
         """
+        key = account_key(
+            ClaudeLogin.gate_section,
+            model=self.capability.model_id,
+            account=self.provider.account or "default",
+        )
+        async for event in retried(
+            partial(self._stream, request),
+            gate=self.provider.resources.gate,
+            key=key,
+            retries=0,
+        ):
+            yield event
+
+    async def _stream(self, request: Request) -> AsyncIterator[TextChunk | Response]:
+        """Yield one turn of ``claude``'s, unpaced."""
         records = tuple(request.records)
         mount = await self._mounted()
         mount.offer(request.tools)

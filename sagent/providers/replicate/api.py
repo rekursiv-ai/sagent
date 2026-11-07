@@ -85,10 +85,11 @@ class Replicate(OpenAICompatible):
         self,
         body: Mapping[str, object],
         *,
+        model: str,
         headers: Mapping[str, str],
         retry: bool = True,
     ) -> AsyncIterator[dict[str, object]]:
-        del headers, retry
+        del model, headers, retry
         prediction = await self._prediction(
             HTTPMethod.POST,
             url=f"{(await self.endpoint()).rstrip('/')}/predictions",

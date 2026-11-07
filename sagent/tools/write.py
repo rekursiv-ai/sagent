@@ -17,6 +17,7 @@ import os
 import uuid
 
 from sagent.lib.userdirs import state_dir
+from sagent.providers.login import file_lock
 from sagent.session.types import WriteResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
@@ -90,7 +91,7 @@ class Write:
         """
         a = parse(arguments, Write.Arguments)
         path = context.path(a.file_path)
-        async with context.locks.held(file_lock_path(path)):
+        async with file_lock(file_lock_path(path)):
             return await asyncio.to_thread(_write, context, path, a.content)
 
 

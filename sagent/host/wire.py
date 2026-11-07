@@ -24,9 +24,8 @@ one, its attachments' bytes included.
       Bye      ──────────▶      ends the session
 
 An owner on the daemon's own socket may instead send one request, alone on its
-connection: ``DaemonControl`` (answered ``DaemonStatus``), ``GateCall``
-(``GateAnswer``), ``LedgerCall`` (``LedgerText``), or ``Hold`` (``Held``, the
-hold lasting until the connection closes).
+connection: ``DaemonControl`` (answered ``DaemonStatus``) or ``GateCall``
+(``GateAnswer``).
 
 A client is sent a tool's digest, never its schema; it asks ``Describe`` only
 for a tool whose digest matches none of its own. A ``Note`` is acked as a
@@ -49,7 +48,7 @@ import hashlib
 import json
 
 from treekle import PlainTree, json_loads, mutable
-from wesearch.fetch.gate import Admission, GateState, SitePolicy
+from wesearch.fetch.gate import Admission, GatePolicy
 
 from sagent.agent.team import MessageKind
 from sagent.session.types import (
@@ -79,11 +78,7 @@ __all__ = [
     "Described",
     "GateAnswer",
     "GateCall",
-    "Held",
     "Hello",
-    "Hold",
-    "LedgerCall",
-    "LedgerText",
     "Message",
     "Note",
     "Pause",
@@ -279,12 +274,13 @@ class DaemonStatus:
 class GateCall:
     """An owner's call of the daemon's ``Gate``: ``op`` names the method."""
 
-    op: Literal["admit", "admitted", "trip", "hold", "release_probe", "reset", "states"]
-    """``admitted`` stays open until the caller is admitted, or refused."""
+    op: Literal["admitted", "trip", "hold", "release_probe", "reset"]
+    """``admitted`` stays open until the caller is admitted, or refused; each
+    other changes the key, waking every caller waiting on it."""
 
     key: str = ""
-    policy: SitePolicy | None = None
-    """For ``admit``, ``admitted`` and ``trip``."""
+    policy: GatePolicy | None = None
+    """For ``admitted`` and ``trip``."""
 
     until: float = 0.0
     """For ``hold``."""
@@ -298,36 +294,9 @@ class GateCall:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GateAnswer:
-    """What a ``GateCall`` returned: an ``admit``'s admission, or the ``states``."""
+    """What a ``GateCall`` returned: an ``admitted``'s admission; else nothing."""
 
     admission: Admission = field(default_factory=Admission)
-    states: Mapping[str, GateState] = field(default_factory=dict[str, GateState])
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Hold:
-    """Take the daemon's hold on ``name``, a lock file; it ends as the connection does."""
-
-    name: str
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class Held:
-    """The hold a ``Hold`` asked for is taken."""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class LedgerCall:
-    """Read the logins ledger; with ``text``, replace it first."""
-
-    text: str | None = None
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class LedgerText:
-    """The logins ledger's text, after a ``LedgerCall``."""
-
-    text: str
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -386,10 +355,6 @@ type Message = (
     | DaemonStatus
     | GateCall
     | GateAnswer
-    | Hold
-    | Held
-    | LedgerCall
-    | LedgerText
     | Hello
     | Welcome
     | Refused
@@ -415,10 +380,6 @@ _KINDS: Final = (
     DaemonStatus,
     GateCall,
     GateAnswer,
-    Hold,
-    Held,
-    LedgerCall,
-    LedgerText,
     Hello,
     Welcome,
     Refused,
@@ -494,6 +455,6 @@ def _classes() -> dict[str, type]:
     return {
         **record_classes(),
         ToolSpec.__name__: ToolSpec,
-        **{kind.__name__: kind for kind in (SitePolicy, Admission, GateState)},
+        **{kind.__name__: kind for kind in (GatePolicy, Admission)},
         **{kind.__name__: kind for kind in _KINDS},
     }

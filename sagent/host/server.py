@@ -16,9 +16,9 @@ shutdown each stop the host and wait for that.
 
 The per-user daemon owns this server. ``sagent host`` configures its optional
 TLS listeners; local clients always connect through its owner-only Unix socket,
-where they also reach what every sagent on the host shares: the rate gate, the
-holds on files and logins, and the logins ledger (``host/shared.py``). Those are
-the host's files, so they need no handoff: an exec keeps them as they were.
+where they also reach the rate gate every sagent on the host shares
+(``host/shared.py``). Its state is the host's files, so it needs no handoff: an
+exec keeps it as it was, and only the callers waiting on it ask again.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ from asyncio.trsock import TransportSocket
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast, override
 from weakref import WeakValueDictionary
 
@@ -45,7 +44,7 @@ import time
 
 from treekle import json_dumps, json_loads
 
-from sagent.host.shared import Shared
+from sagent.host.shared import ServedGate
 from sagent.host.strings import (
     Address,
     Grant,
@@ -69,10 +68,7 @@ from sagent.host.wire import (
     Describe,
     Described,
     GateCall,
-    Held,
     Hello,
-    Hold,
-    LedgerCall,
     Note,
     Pause,
     Paused,
@@ -90,17 +86,16 @@ from sagent.host.wire import (
 )
 from sagent.lib.files.owner_only import open_private, write_private
 from sagent.lib.posix.child import Child, finish
-from sagent.providers.login import FileLocks
 from sagent.session.types import ToolErrorResult
 from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
+    from pathlib import Path
 
     from sagent.host.strings import ServeDirs
     from sagent.host.wire import Message
-    from sagent.providers.login import Locks
 
 
 __all__ = [
@@ -231,8 +226,7 @@ class Server(AsyncResource):
         source_version: str = "",
         handoff: str = "",
     ) -> None:
-        self._shared = Shared()
-        self._locks: Locks = FileLocks()
+        self._gate = ServedGate()
         self.source_version = source_version
         self.replacement = ""
         self.stopping = asyncio.Event()
@@ -252,10 +246,6 @@ class Server(AsyncResource):
         self._admissions = WeakValueDictionary[str, asyncio.Lock]()
         self._opened: list[_Opened] = []
         """What each ``aopen`` holds until its ``aclose``."""
-
-    def waiting(self) -> int:
-        """Return how many callers wait in the daemon to be admitted by its gate."""
-        return self._shared.waiting
 
     @property
     def ports(self) -> list[int]:
@@ -575,8 +565,8 @@ class Server(AsyncResource):
                 writer.write(encoded(await self._control(hello)))
                 await writer.drain()
                 return
-            if isinstance(hello, GateCall | LedgerCall):
-                answering = asyncio.create_task(self._shared.answer(hello))
+            if isinstance(hello, GateCall):
+                answering = asyncio.create_task(self._gate.answer(hello))
                 hung_up = asyncio.create_task(reader.read())
                 try:
                     # A caller that hangs up mid-wait wants no answer.
@@ -593,13 +583,6 @@ class Server(AsyncResource):
                     return
                 writer.write(encoded(answering.result()))
                 await writer.drain()
-                return
-            if isinstance(hello, Hold):
-                async with self._locks.held(Path(hello.name)):
-                    writer.write(encoded(Held()))
-                    await writer.drain()
-                    # The holder ends the hold by closing, or by dying.
-                    _ = await reader.read()
                 return
             if not isinstance(hello, Hello) or hello.version != VERSION:
                 writer.write(

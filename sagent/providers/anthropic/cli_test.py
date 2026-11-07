@@ -795,6 +795,27 @@ async def test_a_spent_window_with_no_reset_is_still_named(
 
 
 @pytest.mark.asyncio
+async def test_a_rate_limit_through_claude_holds_the_login_for_every_caller(
+    claude: _Stub,
+    shared: _Resources,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CLI bills the subscription's login: its 429 holds that model there too."""
+    monkeypatch.setattr(time, "time", lambda: 1_793_285_478.0)
+    claude.script(
+        [
+            _rate_limit_event("rejected", resets_at=1_793_451_600, kind="seven_day"),
+            _SPENT,
+        ],
+    )
+    with pytest.raises(RateLimitedError):
+        await _stream(_model(shared), Request(records=(UserMessage(content="hi"),)))
+    model = _model(shared).capability.model_id
+    held = shared.gate.states()[f"claude@default/{model}"]
+    assert held.held_until == 1_793_451_600.0
+
+
+@pytest.mark.asyncio
 async def test_a_window_still_allowed_says_nothing_of_the_wait(
     claude: _Stub,
     shared: _Resources,
@@ -1105,8 +1126,6 @@ class _Resources(AsyncResource):
     ) -> None:
         self._shared = SharedResources()
         self.gate = self._shared.gate
-        self.locks = self._shared.locks
-        self.ledger = self._shared.ledger
         self._client = http
         self._pool = pool
         self.server = _ToolServer()

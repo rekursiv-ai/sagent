@@ -108,17 +108,26 @@ class Anthropic(HasModels, AsyncResource):
 
     @property
     def usage(self) -> tuple[UsageWindow, ...]:
-        """Return the account's rate-limit windows; ``()`` for an API key."""
+        """Return the rate-limit windows the last reply reported, as of that reply."""
         return self._usage
 
-    @property
-    def gate_key(self) -> str:
-        """Return the key every call to this account is paced by."""
-        # Anthropic limits an organization, not a key; a workload identity names its own.
+    def gate_key(self, model: str) -> str:
+        """Return the key every call to ``model`` on this account is paced by.
+
+        Args:
+          model: The model called, as the catalog names it.
+
+        Returns:
+          key: As ``account_key`` makes it, for this API key's account.
+
+        """
+        # An organization's keys share its limits. A key stands for its
+        # organization only when the organization is not named.
         return account_key(
             self.section,
-            credential=os.environ.get("ANTHROPIC_API_KEY")
-            or os.environ.get("ANTHROPIC_ORGANIZATION_ID", ""),
+            model=model,
+            credential=os.environ.get("ANTHROPIC_ORGANIZATION_ID")
+            or os.environ.get("ANTHROPIC_API_KEY", ""),
         )
 
     def __getitem__(self, model: str) -> AnthropicModel:
@@ -189,6 +198,7 @@ class Anthropic(HasModels, AsyncResource):
         self,
         body: Mapping[str, object],
         *,
+        model: str,
         betas: Sequence[str],
         headers: Mapping[str, str],
     ) -> AsyncIterator[dict[str, object]]:
@@ -196,6 +206,7 @@ class Anthropic(HasModels, AsyncResource):
 
         Args:
           body: The ``/v1/messages`` request body.
+          model: The model asked, as the catalog names it; its calls are paced.
           betas: Beta features this request needs, beyond ``self.betas``.
           headers: Headers beyond the credentials.
 
@@ -207,6 +218,7 @@ class Anthropic(HasModels, AsyncResource):
             advised wait longer than 30 seconds, or after five attempts.
 
         """
+        gate, key = self.resources.gate, self.gate_key(model)
 
         async def attempt() -> AsyncIterator[dict[str, object]]:
             async with self._reply(
@@ -215,14 +227,11 @@ class Anthropic(HasModels, AsyncResource):
                 betas=betas,
                 headers=headers,
             ) as response:
+                await observed(gate, key, self._usage)
                 async for event in wire.events(response.aiter_lines()):
                     yield event
 
-        async for event in retried(
-            attempt,
-            gate=self.resources.gate,
-            key=self.gate_key,
-        ):
+        async for event in retried(attempt, gate=gate, key=key):
             yield event
 
     async def reply(
@@ -292,7 +301,6 @@ class Anthropic(HasModels, AsyncResource):
                             body=_error_body(text),
                             headers=response.headers,
                         )
-                    await observed(self.resources.gate, self.gate_key, self._usage)
                     yield response
                     return
         except httpx2.TransportError as exc:
@@ -375,6 +383,7 @@ class AnthropicModel(AsyncResource):
         body, betas = self.encode(request)
         async for event in self.provider.events(
             body,
+            model=self.capability.model_id,
             betas=betas,
             headers=self.provider.headers(request),
         ):
