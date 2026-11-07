@@ -98,16 +98,21 @@ class Google(HasModels, AsyncResource):
         """Return ``()``: Gemini reports no rate-limit windows."""
         return ()
 
-    @property
-    def gate_key(self) -> str:
-        """Return the key every call to this account is paced by."""
-        key = (
-            self._api_key
-            or os.environ.get("GOOGLE_API_KEY")
-            or os.environ.get("GEMINI_API_KEY")
-            or ""
+    def gate_key(self, model: str) -> str:
+        """Return the key every call to ``model`` on this account is paced by.
+
+        Args:
+          model: The model called, as the catalog names it.
+
+        Returns:
+          key: As ``account_key`` makes it, for this API key and endpoint.
+
+        """
+        return account_key(
+            self.section,
+            model=model,
+            credential=f"{self._base_url}\0{self._key()}",
         )
-        return account_key(self.section, credential=f"{self._base_url}\0{key}")
 
     def __getitem__(self, model: str) -> GoogleModel:
         table = self.models() if self._models is None else self._models
@@ -129,16 +134,20 @@ class Google(HasModels, AsyncResource):
           headers: The Google API key header.
 
         """
+        key = self._key()
+        if not key:
+            raise AuthError("Neither GOOGLE_API_KEY nor GEMINI_API_KEY is set.")
+        return {"x-goog-api-key": key}
+
+    def _key(self) -> str:
+        """Return the API key given, else the environment's; ``""`` for none."""
         # Google's own SDK reads both, the first winning.
-        key = (
+        return (
             self._api_key
             or os.environ.get("GOOGLE_API_KEY")
             or os.environ.get("GEMINI_API_KEY")
             or ""
         )
-        if not key:
-            raise AuthError("Neither GOOGLE_API_KEY nor GEMINI_API_KEY is set.")
-        return {"x-goog-api-key": key}
 
     async def reauthenticate(self, *, rejected: Mapping[str, str]) -> bool:
         """Renew credentials after a 401; ``False`` when there are none to renew.
@@ -229,7 +238,7 @@ class Google(HasModels, AsyncResource):
         async for event in retried(
             attempt,
             gate=self.resources.gate,
-            key=self.gate_key,
+            key=self.gate_key(model),
         ):
             yield event
 

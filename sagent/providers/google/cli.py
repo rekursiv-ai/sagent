@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, ClassVar, override
 
@@ -45,6 +46,7 @@ from sagent.model.types import Response, TextChunk
 from sagent.providers import google
 from sagent.providers.google import wire
 from sagent.providers.resources import SharedResources
+from sagent.providers.retry import account_key, retried
 from sagent.providers.table import HasModels
 from sagent.session.types import (
     AgentToAgentMessage,
@@ -247,6 +249,9 @@ class GoogleCLIModel(AsyncResource):
     async def stream(self, request: Request) -> AsyncIterator[TextChunk | Response]:
         """Yield the reply as it is written, then the finished ``Response``.
 
+        Paced by ``agy``'s own login. Never started again, for the process holds
+        the turn.
+
         Args:
           request: What the model is asked.
 
@@ -254,6 +259,21 @@ class GoogleCLIModel(AsyncResource):
           event: Each ``TextChunk`` as the model writes it, then one ``Response``.
 
         """
+        key = account_key(
+            self.provider.section,
+            model=self.capability.model_id,
+            account="default",
+        )
+        async for event in retried(
+            partial(self._stream, request),
+            gate=self.provider.resources.gate,
+            key=key,
+            retries=0,
+        ):
+            yield event
+
+    async def _stream(self, request: Request) -> AsyncIterator[TextChunk | Response]:
+        """Yield one turn of ``agy``'s, unpaced."""
         records = tuple(request.records)
         mount = await self._mounted()
         mount.offer(request.tools)

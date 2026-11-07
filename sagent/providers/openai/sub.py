@@ -82,7 +82,7 @@ class OpenAISub(OpenAI):
     ) -> None:
         super().__init__(name=name, resources=resources)
         self._account = account
-        self._logins = Logins(CodexLogin.default_path(), shared=self.resources)
+        self._logins = Logins(CodexLogin.default_path())
         self._login: _Login = (
             CodexLogin(self._logins.path(account), resources=self.resources)
             if lease is None
@@ -96,10 +96,12 @@ class OpenAISub(OpenAI):
         """Return every account kept beside ``codex``'s login."""
         return self._logins
 
-    @property
     @override
-    def gate_key(self) -> str:
-        return account_key(self.section, account=self._account or "default")
+    def gate_key(self, model: str, *, credentials: Mapping[str, str]) -> str:
+        # By the ChatGPT account the token names: two users' borrowed logins,
+        # each ``default`` here, are two accounts.
+        account = credentials["chatgpt-account-id"]
+        return account_key(self.section, model=model, account=account)
 
     async def login(self, *, headless: bool = False) -> None:
         """Sign in through the browser, or with a device code when headless."""

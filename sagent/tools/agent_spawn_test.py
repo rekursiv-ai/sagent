@@ -883,8 +883,7 @@ async def test_a_child_and_a_watcher_inherit_every_setting_alike(
 _INHERITED = [
     f
     for f in fields(ToolContext)
-    if f.name
-    in {"cwd", "root", "max_result_chars", "columns", "fetch_session", "locks"}
+    if f.name in {"cwd", "root", "max_result_chars", "columns", "fetch_session"}
 ]
 _OWN = {"files", "label", "spill_dir"}
 

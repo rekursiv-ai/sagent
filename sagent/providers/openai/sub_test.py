@@ -15,19 +15,22 @@ from treekle import from_plain, json_dumps, json_loads
 import httpx2
 import pytest
 
-from sagent.model.exceptions import AuthError
+from sagent.model.exceptions import AuthError, RateLimitedError
 from sagent.model.types import Request, Response
 from sagent.providers.login import Logins
 from sagent.providers.openai import responses, token_count, wire
 from sagent.providers.openai.lease import LeasedToken
 from sagent.providers.openai.sub import OpenAISub
 from sagent.providers.resources import SharedResources
+from sagent.providers.testing import paused_backoff
 from sagent.session.types import AssistantMessage, UserMessage
 
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
+
+    from sagent.providers.openai.lease import TokenLease
 
 
 _REQUEST = Request(system=("Be terse.",), records=(UserMessage(content="hi"),))
@@ -394,6 +397,43 @@ async def test_a_borrowing_subscription_asks_its_lender_never_a_file(
     assert server.requests[1].headers["chatgpt-account-id"] == "acct-lent"
     # The refused token is named, so the lender knows to renew it.
     assert lent == ["", "lent-1"]
+
+
+@pytest.mark.asyncio
+async def test_one_users_rate_limit_leaves_another_users_borrowed_login_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two users' logins, both lent and both named default here, are two accounts."""
+    paused_backoff(monkeypatch)
+
+    def lender(account: str) -> TokenLease:
+        async def lend(*, rejected: str) -> LeasedToken:
+            del rejected
+            return LeasedToken(
+                access_token=f"at-{account}",
+                account_id=account,
+                expires_at=time.time() + 3_600.0,
+            )
+
+        return lend
+
+    limited = httpx2.Response(
+        429,
+        headers={"retry-after": "600"},
+        content=b'{"error": {"message": "slow down", "type": "rate_limit_error"}}',
+    )
+    server = _Server(replies=[limited, _ok()])
+    async with _Served(server) as shared:
+        alice = OpenAISub(resources=shared, lease=lender("acct-alice"))
+        bob = OpenAISub(resources=shared, lease=lender("acct-bob"))
+        with pytest.raises(RateLimitedError):
+            [event async for event in alice["utility"].stream(_REQUEST)]
+        events = [event async for event in bob["utility"].stream(_REQUEST)]
+    assert isinstance(events[-1], Response)
+    assert [sent.headers["chatgpt-account-id"] for sent in server.requests] == [
+        "acct-alice",
+        "acct-bob",
+    ]
 
 
 def _access(auth: Path) -> str:

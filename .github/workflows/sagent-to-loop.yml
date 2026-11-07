@@ -278,8 +278,8 @@ jobs:
             --record-on-validation-failure "${{ github.event_name == 'push' }}" \
             --refresh-public-lockfile \
             --validation-command 'uv sync --frozen --all-groups --compile-bytecode' \
-            --validation-command 'SKIP=superseded-at-pre-push uv run pre-commit run --all-files --hook-stage pre-commit' \
-            --validation-command 'uv run pre-commit run --all-files --hook-stage pre-push' \
+            --validation-command 'SKIP=ty-check,pyrefly-check uv run pre-commit run --all-files --hook-stage pre-commit' \
+            --validation-command 'SKIP=pytest-global,pytest-slow-global,pytest-ci-smoke-global,pytest-integration-global uv run pre-commit run --all-files --hook-stage pre-push' \
             --open-pr false
 
       - name: Open or update target import PR

@@ -1,6 +1,6 @@
 """Retry a streamed reply that fails before its first event, paced per account.
 
-Every call to one account goes through the account's key in a shared ``Gate``,
+Every call to one model of an account goes through its key in a shared ``Gate``,
 so a rate limit one caller meets holds back every other caller on the host:
 none sends into a 429 another has already met. A rate limit holds the key until
 the server's advised time, or trips it into a doubling cooldown when the server
@@ -9,6 +9,7 @@ window resets.
 
 Typical usage example:
 
+  key = account_key("openai-sub", account="work", model="sol-6.1")
   async for event in retried(lambda: self._events(body), gate=gate, key=key):
       yield event
 """
@@ -21,7 +22,7 @@ import asyncio
 import hashlib
 import time
 
-from wesearch.fetch.gate import SitePolicy
+from wesearch.fetch.gate import GatePolicy
 
 from sagent.model.exceptions import RateLimitedError, RetryableError
 
@@ -42,8 +43,7 @@ __all__ = [
 ]
 
 
-ACCOUNT_POLICY: Final = SitePolicy(
-    host="account",
+ACCOUNT_POLICY: Final = GatePolicy(
     # A 429 that names no wait: 5s, doubling to 5 minutes.
     cooldown_sec=5.0,
     max_cooldown_sec=300.0,
@@ -62,18 +62,22 @@ async def retried[T](
     *,
     gate: Gate,
     key: str,
+    retries: int = 4,
 ) -> AsyncIterator[T]:
     """Yield what ``stream`` yields, starting it again after a short early failure.
 
     Text the caller already showed cannot be taken back, and a long wait is the
     caller's to sit through or not: only a failure before the first event, with
-    an advised wait of at most 30 seconds, is retried, at most four times. Each
-    attempt first waits for ``gate`` to admit it to ``key``.
+    an advised wait of at most 30 seconds, is retried, at most ``retries`` times.
+    Each attempt first waits for ``gate`` to admit it to ``key``, and how it ends
+    is recorded there, retried or not.
 
     Args:
       stream: Starts one attempt.
       gate: The pace and locks every caller on the host shares.
-      key: The account the attempts are billed to.
+      key: The model and account the attempts are billed to, as ``account_key``.
+      retries: The most attempts started again; ``0`` for a stream that cannot
+        be, as one a process holds the conversation of.
 
     Yields:
       event: Each event of the attempt that streams.
@@ -97,13 +101,13 @@ async def retried[T](
         except RateLimitedError as failure:
             # The hold or cooldown is the backoff: the next admission sits it out.
             await _limited(gate, key, failure)
-            if attempt == 4 or failure.retry_after_sec > 30.0:
+            if attempt == retries or failure.retry_after_sec > 30.0:
                 raise
             attempt += 1
             continue
         except RetryableError as failure:
             await asyncio.to_thread(gate.release_probe, key)
-            if attempt == 4 or failure.retry_after_sec > 30.0:
+            if attempt == retries or failure.retry_after_sec > 30.0:
                 raise
             await asyncio.sleep(max(failure.retry_after_sec, 0.5 * (1 << attempt)))
             attempt += 1
@@ -118,23 +122,35 @@ async def retried[T](
         return
 
 
-def account_key(section: str, *, account: str = "", credential: str = "") -> str:
-    """Return the gate key of the account a provider bills, as ``openai-sub@work``.
+def account_key(
+    section: str,
+    *,
+    model: str,
+    account: str = "",
+    credential: str = "",
+) -> str:
+    """Return the gate key of one model on the account a provider bills.
+
+    A key is no wider than one model: an API key's limits are each model's, and
+    a window named for a family (``weekly Opus``) leaves the account's other
+    models free. A limit the whole account shares is then met once per model,
+    and recorded for every model by the logins' ledger.
 
     Args:
       section: The provider's catalog section; providers of one section that
         bill one account share a key.
+      model: The model called, as ``opus-5.5``.
       account: A named login's account; ``default`` for the default login.
       credential: What tells an API key's account apart, as the key itself; only a
         digest of it is kept, for the key names a file on disk.
 
     Returns:
-      key: ``<section>@<account>``, or ``<section>@<digest of credential>``.
+      key: ``<section>@<account>/<model>``, the account a digest of
+        ``credential`` when it has no name.
 
     """
-    if account:
-        return f"{section}@{account}"
-    return f"{section}@{hashlib.sha256(credential.encode()).hexdigest()[:16]}"
+    who = account or hashlib.sha256(credential.encode()).hexdigest()[:16]
+    return f"{section}@{who}/{model}"
 
 
 async def observed(gate: Gate, key: str, windows: Iterable[UsageWindow]) -> None:
@@ -142,7 +158,7 @@ async def observed(gate: Gate, key: str, windows: Iterable[UsageWindow]) -> None
 
     Args:
       gate: The shared state.
-      key: The account the reply was billed to.
+      key: The model and account the reply was billed to, as ``account_key``.
       windows: The windows the reply reported.
 
     """

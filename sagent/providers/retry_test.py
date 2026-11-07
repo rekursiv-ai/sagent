@@ -25,7 +25,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
 
 
-_KEY = "openai-sub@work"
+_KEY = "openai-sub@work/sol-6.1"
 
 
 class _Clock:
@@ -239,7 +239,7 @@ async def test_another_account_is_not_held(clock: _Clock) -> None:
         await _all(_retried(first))
     other, made = _script(["ok"])
 
-    assert await _all(_retried(other, key="openai-sub@home")) == ["ok"]
+    assert await _all(_retried(other, key="openai-sub@home/sol-6.1")) == ["ok"]
     assert made == [0]
     assert clock.slept == []
 
@@ -339,13 +339,23 @@ async def test_a_reply_with_nothing_spent_holds_nothing() -> None:
 
 
 def test_an_api_key_is_kept_only_as_a_digest() -> None:
-    key = account_key("anthropic", credential="sk-ant-secret")
-    assert key.startswith("anthropic@")
-    assert len(key.removeprefix("anthropic@")) == 16
+    key = account_key("anthropic", model="opus-5.5", credential="sk-ant-secret")
+    who, _, model = key.removeprefix("anthropic@").partition("/")
+    assert (len(who), model) == (16, "opus-5.5")
     assert "secret" not in key
-    assert account_key("anthropic") == account_key("anthropic", credential="")
-    assert key != account_key("anthropic", credential="sk-ant-other")
-    assert account_key("openai-sub", account="work") == "openai-sub@work"
+    assert account_key("anthropic", model="m") == account_key(
+        "anthropic",
+        model="m",
+        credential="",
+    )
+    assert key != account_key("anthropic", model="opus-5.5", credential="sk-other")
+
+
+def test_each_model_of_an_account_is_paced_apart() -> None:
+    """A window named for one family leaves the account's other models free."""
+    opus = account_key("claude", model="opus-5.5", account="work")
+    assert opus == "claude@work/opus-5.5"
+    assert opus != account_key("claude", model="sonnet-5", account="work")
 
 
 if __name__ == "__main__":

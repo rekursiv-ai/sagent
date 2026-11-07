@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from functools import partial
+from typing import TYPE_CHECKING, cast
 
 import asyncio
 import logging
 import socket
+
+from wesearch.fetch import FetchSession
 
 import pytest
 
@@ -14,6 +17,7 @@ from sagent.agent.agent import Agent
 from sagent.agent.team import Team
 from sagent.host import session
 from sagent.host.session import main, serve
+from sagent.host.shared import DaemonGate
 from sagent.host.wire import (
     MAX_LINE_BYTES,
     Ack,
@@ -368,6 +372,37 @@ async def test_main_serves_on_the_socket_it_is_given(
     writer.write_eof()
     assert await asyncio.wait_for(running, 5) == 0
     writer.close()
+
+
+def test_main_paces_its_agents_and_fetches_through_the_daemon(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent spawned here bills the same accounts as every other sagent."""
+    monkeypatch.chdir(tmp_path)
+    gates: list[object] = []
+
+    async def served(*args: object, **kwargs: object) -> None:
+        del args
+        stand_in = kwargs["stand_in"]
+        new_context = kwargs["new_context"]
+        assert isinstance(stand_in, partial)
+        assert isinstance(new_context, partial)
+        catalog = cast(object, stand_in.keywords["catalog"])
+        fetch = cast(object, new_context.keywords["fetch_session"])
+        assert isinstance(catalog, ModelCatalog)
+        assert isinstance(fetch, FetchSession)
+        gates.extend((catalog.gate, fetch.gate))
+
+    monkeypatch.setattr(session, "serve", served)
+    theirs, ours = socket.socketpair()
+    argv = ["--fd", str(theirs.detach()), "--tools", "Read", "--spill", str(tmp_path)]
+    try:
+        assert main(argv) == 0
+    finally:
+        ours.close()
+    assert [type(gate) for gate in gates] == [DaemonGate, DaemonGate]
+    assert gates[0] is gates[1]
 
 
 @pytest.mark.asyncio

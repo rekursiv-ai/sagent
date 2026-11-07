@@ -44,6 +44,7 @@ from wesearch.fetch import FetchSession
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import RESERVED, Team
+from sagent.host.shared import host_gate
 from sagent.host.wire import (
     MAX_LINE_BYTES,
     Ack,
@@ -432,6 +433,8 @@ async def _main(flags: Flags) -> None:
         FetchSession() as fetch,
         RemoteSession(saved(), team=team) as remote,
     ):
+        # An agent spawned here bills the same accounts as every sagent on the host.
+        catalog.gate = fetch.gate = host_gate()
         built = builders(cwd=home, team=team, remote=remote)
         new_context = partial(
             _new_context,

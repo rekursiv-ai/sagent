@@ -1,10 +1,8 @@
 """A login's credentials files: the lock held while renewing one, and its accounts.
 
 A refresh token works once, so two processes renewing one login at once leave
-one of them signed out. Each holds its ``Locks`` hold on the login across the
-whole read, renew and write, and the one that waited reads the token the other
-just wrote. ``FileLocks``, an ``flock`` per lock file, is the default; a daemon
-may serve another, so long as every holder on the host takes the same.
+one of them signed out. Each holds ``file_lock`` across the whole read, renew
+and write, and the one that waited reads the token the other just wrote.
 
 A named account keeps its login beside the default one, ``-<account>`` added
 to its stem. ``Logins`` owns every account kept beside one default file: their
@@ -28,7 +26,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, ClassVar, Protocol
+from typing import TYPE_CHECKING, ClassVar
 from urllib.parse import parse_qs, urlparse
 
 import asyncio
@@ -51,7 +49,6 @@ from sagent.model.exceptions import AuthError
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping
-    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
     from prompt_toolkit import PromptSession
@@ -61,13 +58,7 @@ else:
 
 __all__ = [
     "SIGN_IN_ERRORS",
-    "FileLedger",
-    "FileLocks",
-    "HostFiles",
-    "Ledger",
-    "Locks",
     "Logins",
-    "Shared",
     "Spent",
     "check_account",
     "file_lock",
@@ -149,9 +140,8 @@ class Logins:
     signed_out_sec: ClassVar[float] = 86_400.0
     """How long a login found signed out is passed over, unless signed in again."""
 
-    def __init__(self, default: Path, *, shared: Shared | None = None) -> None:
+    def __init__(self, default: Path) -> None:
         self.default = default
-        self._shared = HostFiles() if shared is None else shared
 
     def path(self, account: str | None) -> Path:
         """Return the file ``account`` keeps its login in.
@@ -322,88 +312,19 @@ class Logins:
 
     def _family(self) -> _Family:
         """Return what the ledger keeps for this default."""
-        return _family(_raw(self._shared.ledger.read()).get(str(self.default), {}))
+        return _family(_raw(_ledger_text()).get(str(self.default), {}))
 
     async def _edit(self, change: Callable[[_Family], _Family]) -> None:
         """Change what the ledger keeps for this default, dropping marks past reset."""
-        lock = state_dir() / "rekursiv-ai" / "sagent" / "logins.json.lock"
-        ledger = self._shared.ledger
-
-        def rewrite() -> None:
-            families = _rewrite(
-                _raw(ledger.read()),
+        ledger = state_dir() / "rekursiv-ai" / "sagent" / "logins.json"
+        async with file_lock(ledger.with_name(f"{ledger.name}.lock")):
+            await asyncio.to_thread(
+                _rewrite,
+                ledger,
                 str(self.default),
                 change,
                 signed_out_sec=self.signed_out_sec,
             )
-            ledger.write(json_dumps(families))
-
-        async with self._shared.locks.held(lock):
-            await asyncio.to_thread(rewrite)
-
-
-class Shared(Protocol):
-    """Where logins keep what every process signed in on the host shares.
-
-    Read at each use, so a daemon may take them over once it is up.
-    """
-
-    locks: Locks
-    """The holds a login takes while it renews, and the ledger while edited."""
-
-    ledger: Ledger
-    """What ``Logins`` keeps that is not a login file."""
-
-
-class Locks(Protocol):
-    """Exclusive holds by name, for every holder that shares them."""
-
-    def held(self, path: Path) -> AbstractAsyncContextManager[None]:
-        """Return a hold on ``path``, a lock file, kept until the block ends."""
-        ...
-
-
-class FileLocks:
-    """``Locks`` every process on the host shares: an ``flock`` per lock file."""
-
-    def held(self, path: Path) -> AbstractAsyncContextManager[None]:
-        """Return ``file_lock(path)``."""
-        return file_lock(path)
-
-
-class Ledger(Protocol):
-    """Where ``Logins`` keeps what is not a file, as JSON text; edits hold its lock."""
-
-    def read(self) -> str:
-        """Return the ledger's text; ``""`` when there is none."""
-        ...
-
-    def write(self, text: str) -> None:
-        """Replace the ledger's text with ``text``."""
-        ...
-
-
-class FileLedger:
-    """A ``Ledger`` every process on the host shares, in the user's state directory."""
-
-    def read(self) -> str:
-        """Return the ledger file's text; ``""`` when there is none."""
-        try:
-            return (state_dir() / "rekursiv-ai" / "sagent" / "logins.json").read_text()
-        except FileNotFoundError:
-            return ""
-
-    def write(self, text: str) -> None:
-        """Replace the ledger file, owner-only: it names the user's accounts."""
-        write_private(state_dir() / "rekursiv-ai" / "sagent" / "logins.json", text)
-
-
-@dataclass(slots=True, kw_only=True)
-class HostFiles:
-    """``Shared`` as the host's files: what a process with no daemon uses."""
-
-    locks: Locks = field(default_factory=FileLocks)
-    ledger: Ledger = field(default_factory=FileLedger)
 
 
 # A sidecar, not the credentials file itself: a write replaces the file's inode,
@@ -666,6 +587,14 @@ def _open(path: Path) -> int:
     return open_private(path, os.O_RDWR)
 
 
+def _ledger_text() -> str:
+    """Return the logins ledger's text; ``""`` when there is none."""
+    try:
+        return (state_dir() / "rekursiv-ai" / "sagent" / "logins.json").read_text()
+    except FileNotFoundError:
+        return ""
+
+
 # Every session shares the ledger, of whatever version: what this one cannot read
 # is passed over, never fatal, and what it does not know is written back as it was.
 def _raw(text: str) -> dict[str, dict[str, object]]:
@@ -728,13 +657,14 @@ def _spent(
 
 
 def _rewrite(
-    families: dict[str, dict[str, object]],
+    ledger: Path,
     key: str,
     change: Callable[[_Family], _Family],
     *,
     signed_out_sec: float,
-) -> dict[str, dict[str, object]]:
-    """Return ``families`` with ``change`` applied to ``key``, only marks yet to expire kept."""
+) -> None:
+    """Apply ``change`` to the family ``key``, keeping only marks yet to expire."""
+    families = _raw(_ledger_text())
     kept = families.get(key, {})
     now = time.time()
     changed = change(_family(kept))
@@ -754,7 +684,8 @@ def _rewrite(
     )
     # A field left at its default is not written; the old value must not survive.
     theirs = {k: v for k, v in kept.items() if k not in _Family.__dataclass_fields__}
-    return families | {key: theirs | known}
+    # It names the user's accounts and when each ran out.
+    write_private(ledger, json_dumps(families | {key: theirs | known}))
 
 
 def _redirect_code(request_line: str, *, path: str, state: str) -> str | None:

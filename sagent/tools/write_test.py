@@ -11,7 +11,7 @@ import stat
 
 import pytest
 
-from sagent.providers.login import FileLocks
+from sagent.providers.login import file_lock
 from sagent.session.types import UncategorizedToolResult, WriteResult
 from sagent.tools.read import Read
 from sagent.tools.types import ToolContext
@@ -49,7 +49,7 @@ async def test_a_write_waits_for_another_agents_hold_then_sees_its_change(
     path.write_text("old")
     context = ToolContext(cwd=tmp_path)
     context.files.saw(path)
-    async with FileLocks().held(file_lock_path(tmp_path / "." / "notes.md")):
+    async with file_lock(file_lock_path(tmp_path / "." / "notes.md")):
         writing = asyncio.create_task(
             Write().call(context, {"file_path": "notes.md", "content": "mine"}),
         )

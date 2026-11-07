@@ -273,6 +273,44 @@ async def test_a_reply_with_no_requests_left_holds_the_key_before_a_429(
     assert len(server.requests) == 2
 
 
+def test_two_keys_of_one_organization_are_paced_as_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Anthropic limits the organization; its keys share every limit."""
+    monkeypatch.setenv("ANTHROPIC_ORGANIZATION_ID", "org-1")
+    first = Anthropic().gate_key("opus-5.5")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-other")
+    assert Anthropic().gate_key("opus-5.5") == first
+    monkeypatch.setenv("ANTHROPIC_ORGANIZATION_ID", "org-2")
+    assert Anthropic().gate_key("opus-5.5") != first
+
+
+@pytest.mark.asyncio
+async def test_a_weekly_opus_limit_leaves_sonnet_free(
+    slept: list[float],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A window named for one family holds that family's model, not the account."""
+    monkeypatch.setattr(wire, "time", SimpleNamespace(time=lambda: 1_000_000.0))
+    opus_spent = {
+        "anthropic-ratelimit-unified-status": "rejected",
+        "anthropic-ratelimit-unified-representative-claim": "seven_day_opus",
+        "anthropic-ratelimit-unified-reset": str(1_000_000 + 3 * 86_400),
+    }
+    weekly = _failed(429, "rate_limit_error", "weekly", headers=opus_spent)
+    server = _Server(replies=[weekly, _ok()])
+    async with _Served(server) as shared:
+        provider = Anthropic(resources=shared)
+        with pytest.raises(RateLimitedError) as opus:
+            await _stream(provider["opus"])
+        assert opus.value.limit == "weekly Opus"
+        await _stream(provider["sonnet"])
+        with pytest.raises(RateLimitedError, match="cooling down"):
+            await _stream(provider["opus"])
+    assert slept == []
+    assert len(server.requests) == 2
+
+
 @pytest.mark.asyncio
 async def test_a_long_advised_wait_is_left_to_the_caller(slept: list[float]) -> None:
     server = _Server(

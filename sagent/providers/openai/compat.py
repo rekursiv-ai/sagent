@@ -148,14 +148,27 @@ class OpenAICompatible(HasModels, AsyncResource):
         """Return the account's rate-limit windows, as last reported."""
         return self._usage
 
-    @property
-    def gate_key(self) -> str:
-        """Return the key every call to this account is paced by."""
+    def gate_key(self, model: str, *, credentials: Mapping[str, str]) -> str:
+        """Return the key every call to ``model`` on this account is paced by.
+
+        Args:
+          model: The model called, as the catalog names it.
+          credentials: What the call is sent with, which may name the account.
+
+        Returns:
+          key: As ``account_key`` makes it, for this API key and endpoint.
+
+        """
+        del credentials
         endpoint = (
             self._base_url or os.environ.get(self.base_url_variable, "") or self.url
         )
         key = self._api_key or os.environ.get(self.key_variable) or ""
-        return account_key(self.section, credential=f"{endpoint}\0{key}")
+        return account_key(
+            self.section,
+            model=model,
+            credential=f"{endpoint}\0{key}",
+        )
 
     def __getitem__(self, model: str) -> OpenAIModel:
         table = self.models() if self._models is None else self._models
@@ -265,6 +278,7 @@ class OpenAICompatible(HasModels, AsyncResource):
         self,
         body: Mapping[str, object],
         *,
+        model: str,
         headers: Mapping[str, str],
         retry: bool = True,
     ) -> AsyncIterator[dict[str, object]]:
@@ -272,6 +286,7 @@ class OpenAICompatible(HasModels, AsyncResource):
 
         Args:
           body: The request body.
+          model: The model asked, as the catalog names it; its calls are paced.
           headers: Headers beyond the credentials.
           retry: Whether to retry failures before the first event.
 
@@ -283,6 +298,10 @@ class OpenAICompatible(HasModels, AsyncResource):
             advised wait longer than 30 seconds, or after five attempts.
 
         """
+        # Asked once for the first attempt: the key the call is paced by may be
+        # the account they name, and a login lent anew for each ask would lend twice.
+        first = [await self.credentials()]
+        gate, key = self.resources.gate, self.gate_key(model, credentials=first[0])
 
         async def attempt() -> AsyncIterator[dict[str, object]]:
             async with (
@@ -293,13 +312,15 @@ class OpenAICompatible(HasModels, AsyncResource):
                         **headers,
                         "accept": "text/event-stream",  # pragma: no mutate -- HTTP ignores case.
                     },
+                    credentials=first.pop() if first else None,
                 ) as response
             ):
+                await observed(gate, key, self._usage)
                 async for event in wire.events(response.aiter_lines()):
                     yield event
 
-        gate, key = self.resources.gate, self.gate_key
-        async for event in retried(attempt, gate=gate, key=key) if retry else attempt():
+        retries = 4 if retry else 0
+        async for event in retried(attempt, gate=gate, key=key, retries=retries):
             yield event
 
     async def reply(
@@ -313,6 +334,7 @@ class OpenAICompatible(HasModels, AsyncResource):
         async with self._reply(path, body=body, headers=headers) as response:
             return json_loads(await response.aread(), dict[str, object])
 
+    # ``credentials``, when given, are sent first; a renewal asks again.
     @contextlib.asynccontextmanager
     async def _reply(
         self,
@@ -320,17 +342,20 @@ class OpenAICompatible(HasModels, AsyncResource):
         *,
         body: Mapping[str, object],
         headers: Mapping[str, str],
+        credentials: Mapping[str, str] | None = None,
     ) -> AsyncGenerator[httpx2.Response]:
         """Open the reply to ``body``, renewing the login once on a 401."""
         renewable = True
         try:
             while True:
+                sent = await self.credentials() if credentials is None else credentials
+                credentials = None
                 async with self.resources.http.stream(
                     "POST",
                     f"{(await self.endpoint()).rstrip('/')}{path}",
                     content=json_dumps(body),
                     headers={
-                        **await self.credentials(),
+                        **sent,
                         **headers,
                         "content-type": "application/json",
                     },
@@ -348,7 +373,6 @@ class OpenAICompatible(HasModels, AsyncResource):
                             body=_error_body(text),
                             headers=response.headers,
                         )
-                    await observed(self.resources.gate, self.gate_key, self._usage)
                     yield response
                     return
         except httpx2.TransportError as exc:
@@ -435,6 +459,7 @@ class OpenAIModel(AsyncResource):
         headers = self.provider.headers(request)
         async for event in self.provider.events(
             body,
+            model=self.capability.model_id,
             headers=headers,
             retry=request.retry,
         ):

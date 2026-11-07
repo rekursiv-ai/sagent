@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 
     from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
-    from sagent.providers.login import Ledger, Locks, Logins
+    from sagent.providers.login import Logins
     from sagent.session.types import AnyToolResult, Attachment, ToolCall
     from sagent.tools.types import Tool
 
@@ -120,12 +120,6 @@ class ProviderResources(Resource, Protocol):
 
     gate: Gate
     """Paces each account, and holds one a rate limit stopped, host-wide."""
-
-    locks: Locks
-    """The holds a login takes while it renews, and the logins ledger while edited."""
-
-    ledger: Ledger
-    """Where ``Logins`` keeps the accounts' order, sign-outs and spent windows."""
 
     @property
     def http(self) -> httpx2.AsyncClient:
