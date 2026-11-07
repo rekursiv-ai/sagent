@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -232,6 +233,16 @@ def test_an_attachment_costs_its_bytes_scaled_as_characters_are() -> None:
     assert model.attachment_tokens(attached) == int(
         40 / model.capability.approx_chars_per_token,
     )
+
+
+def test_settings_accept_offered_choices_and_preserve_them_on_refusal() -> None:
+    model = ScriptedProvider()["scripted"]
+    chosen = replace(model.settings, service_tier="default")
+    model.settings = chosen
+    assert model.settings is chosen
+    with pytest.raises(ValueError, match="thinking_effort='high' is not offered"):
+        model.settings = replace(chosen, thinking_effort="high")
+    assert model.settings is chosen
 
 
 if __name__ == "__main__":

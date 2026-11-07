@@ -141,6 +141,36 @@ def test_a_help_word_after_the_separator_is_an_argument() -> None:
     assert cast(_Added, read).args == ["--help"]
 
 
+@pytest.mark.asyncio
+async def test_an_action_setting_exports_its_parser_and_runs_only_without_help() -> (
+    None
+):
+    parser = _parser()
+    seen: list[_Added] = []
+
+    async def run(parsed: object) -> str:
+        seen.append(cast(_Added, parsed))
+        return f"added {seen[-1].name}"
+
+    setting = parser.setting(run, name=("add",), help_short="add a server")
+    assert setting.name == ("add",)
+    assert setting.help_short == "add a server"
+    assert setting.help_long == parser.format_help()
+    assert setting.usage == "[-h] [-e ENV] name target [args ...]"
+    assert setting.cli is True
+    assert setting.flags == frozenset({"-h", "--help", "-e", "--env"})
+    assert await setting.apply("--help") == parser.format_help()
+    assert seen == []
+    assert await setting.apply("srv -e A=1 -- npx pkg") == "added srv"
+    (parsed,) = seen
+    assert (parsed.name, parsed.target, parsed.args, parsed.env) == (
+        "srv",
+        "npx",
+        ["pkg"],
+        ["A=1"],
+    )
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 

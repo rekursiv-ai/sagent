@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from unittest.mock import Mock
+
 import asyncio
 import logging
+import time
 
 import pytest
 
@@ -12,6 +15,7 @@ from sagent.runtime.exceptions import (
     RoundLimitError,
     UserFacingError,
     describe,
+    local_time,
     log_exception_or_warning,
     log_task_exception,
 )
@@ -140,6 +144,15 @@ async def test_task_callback_is_silent_on_success_and_cancel(
         await _settled(done)
         await _settled(cancelled)
     assert caplog.records == []
+
+
+def test_local_time_formats_the_supplied_epoch_in_the_local_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = Mock(return_value=time.struct_time((2001, 1, 2, 3, 4, 5, 1, 2, 0)))
+    monkeypatch.setattr(time, "localtime", clock)
+    assert local_time(123.5) == "Tue Jan 02 03:04:05"
+    clock.assert_called_once_with(123.5)
 
 
 if __name__ == "__main__":
