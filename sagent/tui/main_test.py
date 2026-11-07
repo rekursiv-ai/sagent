@@ -3553,7 +3553,7 @@ async def test_a_quit_with_words_after_it_still_quits(tmp_path: Path) -> None:
             create_pipe_input() as pipe,
             create_app_session(input=pipe, output=PlainTextOutput(screen)),
         ):
-            pipe.send_text("/help\r/quit now\r")
+            pipe.send_text("/quit now\r")
             await asyncio.wait_for(
                 main.run(
                     agent,

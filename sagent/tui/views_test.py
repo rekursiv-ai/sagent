@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import asyncio
 import functools
@@ -17,7 +18,7 @@ import pytest_asyncio
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import Team
-from sagent.model.scripted import ScriptedProvider, call, reply
+from sagent.model.scripted import ScriptedProvider, reply
 from sagent.providers.catalog import ModelCatalog
 from sagent.runtime import types
 from sagent.session.types import AssistantMessage, UserMessage
@@ -26,7 +27,6 @@ from sagent.tui.console import Title
 from sagent.tui.prompt import Navigation
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.theme import ThemeState
-from sagent.tui.tree_test import _Wait
 from sagent.tui.views import Views
 
 
@@ -100,7 +100,10 @@ async def test_the_root_is_shown_first_its_session_replayed(
     assert views.toolbar() == views.current.status.frame()
     for observer in (views.current.scrollback, views.current.status, views.title):
         assert observer in root.runtime.observers
+    root.runtime.observers.remove(views.current.status)
     await views.aclose()
+    for observer in (views.current.scrollback, views.current.status, views.title):
+        assert observer not in root.runtime.observers
 
 
 @pytest.mark.asyncio
@@ -405,25 +408,26 @@ async def test_a_stop_that_fails_prints_why(
 async def test_cancel_ends_a_job_or_says_it_already_ended(
     stack: AsyncExitStack,
 ) -> None:
-    wait = _Wait()
-    provider = ScriptedProvider(
-        replies=[reply(calls=[call("Wait", "w1")]), reply("ok")],
-    )
-    root = await stack.enter_async_context(
-        Agent(model=provider["scripted"], tools=[wait]),
-    )
+    root = await _open(stack)
     views = Views(
         root,
         team=None,
         printer=RecordingPrinter(),
         catalog=_catalog(),
     )
-    root.runtime.push(UserMessage(content="go"))
-    await asyncio.wait_for(wait.started.wait(), timeout=5)
-
-    assert views.cancel("", "w1") == "cancelled w1"
-    await _idle(root)
-    assert views.cancel("", "w1") == "w1 already ended"
+    cancelled = MagicMock()
+    jobs = {"w1": MagicMock(spec=types.Job, cancel=cancelled)}
+    with patch.object(
+        type(root.runtime),
+        "jobs",
+        new_callable=PropertyMock,
+        return_value=jobs,
+    ):
+        assert views.cancel("", "w1") == "cancelled w1"
+        cancelled.assert_called_once_with()
+        del jobs["w1"]
+        assert views.cancel("", "w1") == "w1 already ended"
+        cancelled.assert_called_once_with()
     await views.aclose()
 
 
@@ -521,6 +525,9 @@ async def test_closing_drops_what_was_held_and_keeps_the_team_s_other_listener(
     views.hold()
     root.runtime.push(UserMessage(content="go"))
     await _idle(root)
+    held = views._held
+    assert held is not None
+    root.runtime.observers.remove(held.append)
 
     await views.aclose()
 

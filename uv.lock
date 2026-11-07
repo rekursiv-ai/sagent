@@ -600,7 +600,7 @@ wheels = [
 [[package]]
 name = "codedoctor"
 version = "0.1.2"
-source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#d37824994511b70ea2305958bd3896793e501cd8" }
+source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#babd804b74cb639ecd29b4a48e14433bfc53960c" }
 dependencies = [
     { name = "rignore" },
     { name = "treekle" },
@@ -617,6 +617,11 @@ mutation = [
     { name = "pytest" },
     { name = "tomlkit" },
     { name = "wrapt" },
+]
+notebook = [
+    { name = "jupytext" },
+    { name = "nbstripout", marker = "sys_platform != 'linux'" },
+    { name = "nbstripout-fast", marker = "sys_platform == 'linux'" },
 ]
 
 [[package]]
@@ -1040,6 +1045,15 @@ wheels = [
 ]
 
 [[package]]
+name = "fastjsonschema"
+version = "2.22.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1c/80/cc3c531dd70c8ffa1045aecf33c97c5581cc8fd0e824b3ecb2c1881550c1/fastjsonschema-2.22.3.tar.gz", hash = "sha256:8330c91b027dcf941efcb7b1f0998515ff95d177ea15bbabdfe8671965620901", size = 388854, upload-time = "2026-11-01T21:11:34.389Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d7/0d/6caab33488dc9d26440c24221fa610c7c8b83c30715ab45d31f0e004308e/fastjsonschema-2.22.3-py3-none-any.whl", hash = "sha256:f670b443830b75aca3f00b75949efa20f4b2a80302ec7a21505c28dd54cffd43", size = 28442, upload-time = "2026-11-01T21:11:29.306Z" },
+]
+
+[[package]]
 name = "filelock"
 version = "4.2.7"
 source = { registry = "https://pypi.org/simple" }
@@ -1435,6 +1449,35 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl", hash = "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", size = 18437, upload-time = "2025-09-08T01:34:57.871Z" },
+]
+
+[[package]]
+name = "jupyter-core"
+version = "5.9.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "platformdirs" },
+    { name = "traitlets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/02/49/9d1284d0dc65e2c757b74c6687b6d319b02f822ad039e5c512df9194d9dd/jupyter_core-5.9.1.tar.gz", hash = "sha256:4d09aaff303b9566c3ce657f580bd089ff5c91f5f89cf7d8846c3cdf465b5508", size = 89814, upload-time = "2025-10-16T19:19:18.444Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e7/e7/80988e32bf6f73919a113473a604f5a8f09094de312b9d52b79c2df7612b/jupyter_core-5.9.1-py3-none-any.whl", hash = "sha256:ebf87fdc6073d142e114c72c9e29a9d7ca03fad818c5d300ce2adc1fb0743407", size = 29032, upload-time = "2025-10-16T19:19:16.783Z" },
+]
+
+[[package]]
+name = "jupytext"
+version = "1.19.6"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "markdown-it-py" },
+    { name = "mdit-py-plugins" },
+    { name = "nbformat" },
+    { name = "packaging" },
+    { name = "pyyaml" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/79/7f/5d2cc9618eca61dbc2d76628da3622a311702abd6b15c824bbf2b53e0db6/jupytext-1.19.6.tar.gz", hash = "sha256:ba1d143bb3751e054d3164376b148ee8fa74e1a860fc9411e1da93ff588b8a17", size = 4603767, upload-time = "2026-10-04T21:00:31.103Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/70/c3/c4eff5bdbe79b688dda8f06f2b66dbcf9a483cf660e5ced0b2dd5c21623d/jupytext-1.19.6-py3-none-any.whl", hash = "sha256:eb725d66841f1a91707bdcf4703b194a53151a060ecb3fd31d78139cc9ec090a", size = 230809, upload-time = "2026-10-04T21:00:29.143Z" },
 ]
 
 [[package]]
@@ -2013,6 +2056,45 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/0f/46/2b92ba15645575501fced5c930bd61afbf0dcf5878fcd53615d20f8b838d/mutmut-3.8.1.tar.gz", hash = "sha256:9fb7cfc23caabff22a938e33b8d34317f5fa79b1deab82642cd5e014f3f400aa", size = 87451, upload-time = "2026-10-28T07:54:39.055Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/18/0d/1885a8307b845e5b44ddf568939900819653e0168356ab94ed670b0e7ed0/mutmut-3.8.1-py3-none-any.whl", hash = "sha256:e424d72c0557b6a52a721d9b71e2d18eb9590af746db0bbad50b71e8d4d8ed78", size = 82376, upload-time = "2026-10-28T07:54:36.982Z" },
+]
+
+[[package]]
+name = "nbformat"
+version = "5.11.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "fastjsonschema" },
+    { name = "jsonschema" },
+    { name = "jupyter-core" },
+    { name = "traitlets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/31/72/b3446efab8756e7df4b8ec587f8e611cb5a7249e4323db480802f1d3be04/nbformat-5.11.1.tar.gz", hash = "sha256:32d4521c68c6e7d5b29c76defaeed9f42ea733142b9b19f88277ce10390b9c4d", size = 147775, upload-time = "2026-08-17T08:10:51.942Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/1a/69/ee613f74085ca7103f79cd08d579c4f3177d1d26e5d3d9528d2d6536a707/nbformat-5.11.1-py3-none-any.whl", hash = "sha256:cc6698fa75f4fab8755ead786317815f13a6fee3b53311c0abb1a8b51d52f7ec", size = 79849, upload-time = "2026-08-17T08:10:50.18Z" },
+]
+
+[[package]]
+name = "nbstripout"
+version = "0.9.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "nbformat" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f9/6f/b52c4da26babeb521078c08c78c3187a59197098ffc7a70b0fe76851813a/nbstripout-0.9.1.tar.gz", hash = "sha256:313bbb4217c8e38998567e5d790b6bd6c3a17a8c39073b205b84dadfc5d756dc", size = 32356, upload-time = "2026-02-21T16:19:55.975Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/20/16/e777eadfa0c0305878c36fae1d5e6db474fbb15dae202b9ec378809dfb4d/nbstripout-0.9.1-py3-none-any.whl", hash = "sha256:ca027ee45742ee77e4f8e9080254f9a707f1161ba11367b82fdf4a29892c759e", size = 19136, upload-time = "2026-02-21T16:19:54.868Z" },
+]
+
+[[package]]
+name = "nbstripout-fast"
+version = "1.1.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a5/e2/4f811cef01e9d407c26bd543c01d94247d4016128fda884ff22698c0edab/nbstripout_fast-1.1.2.tar.gz", hash = "sha256:5a5738b0b35211c2830ad3a432639f209473514564483cfcc9da55e7b87f8843", size = 28458, upload-time = "2026-03-20T19:34:25.412Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8a/68/abf62ad4fff5b23d24870102e3b605bab6a57aa8c53c0b6cfbb687b436d3/nbstripout_fast-1.1.2-py3-none-manylinux_2_28_aarch64.whl", hash = "sha256:25798de286d9455b1d4cd1e7e96e7d912ecea63e198ba27db0c7736c123f6707", size = 1297955, upload-time = "2026-03-20T19:34:16.173Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/10/4332c3b8a7e08690963e005ba2c31c8976d97e92bea8f26371b05ea3e1a9/nbstripout_fast-1.1.2-py3-none-manylinux_2_28_x86_64.whl", hash = "sha256:49f2e53a2a31007e6f3e9bd21bf88681a32f8957824d474ac308607c838757a0", size = 1361148, upload-time = "2026-03-20T19:34:17.96Z" },
+    { url = "https://files.pythonhosted.org/packages/99/24/d0f6d6bc9d009d48d2d2233ab7bdfaec31127f9aca9b60c195b3ee90a5d1/nbstripout_fast-1.1.2-py3-none-musllinux_1_2_aarch64.whl", hash = "sha256:e0efb96b48c01100e3f3f3dc7366b235ff1e4e7f1f26cdc54484f800fe87e6aa", size = 1315111, upload-time = "2026-03-20T19:34:19.52Z" },
+    { url = "https://files.pythonhosted.org/packages/27/e3/5bf934adc82a4759f7343a6ed3da695166a508d56444b8be0df42b0981c1/nbstripout_fast-1.1.2-py3-none-musllinux_1_2_x86_64.whl", hash = "sha256:5cd63824e747a1d95b3c3b9ffaa0dc673883295ce24e35df5cc0de1dda5de939", size = 1432579, upload-time = "2026-03-20T19:34:21.146Z" },
 ]
 
 [[package]]
@@ -3213,7 +3295,7 @@ wheels = [
 [[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.15"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#c8ecf164afac5227ee4e31ecf043563829f0778a" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#3bf7b4a2491cb512983ad0ff403dd76e734dfb5f" }
 
 [[package]]
 name = "requests"
@@ -3579,7 +3661,7 @@ debug = [
 ]
 dev = [
     { name = "basedpyright" },
-    { name = "codedoctor", extra = ["coverage", "mutation"] },
+    { name = "codedoctor", extra = ["coverage", "mutation", "notebook"] },
     { name = "codespell" },
     { name = "hypothesis" },
     { name = "ipython" },
@@ -3602,7 +3684,7 @@ lint = [
 ]
 pre-commit = [
     { name = "basedpyright" },
-    { name = "codedoctor", extra = ["coverage", "mutation"] },
+    { name = "codedoctor", extra = ["coverage", "mutation", "notebook"] },
     { name = "codespell" },
     { name = "hypothesis" },
     { name = "pre-commit" },
@@ -4541,7 +4623,7 @@ wheels = [
 [[package]]
 name = "wesearch"
 version = "0.1.18"
-source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#276698c7d954a98a01190c6f961a1f9948041d07" }
+source = { git = "https://github.com/rekursiv-ai/wesearch?branch=main#234844de6d93e9529eaaafc73f987886b3ab9d99" }
 dependencies = [
     { name = "beautifulsoup4" },
     { name = "brotli" },
