@@ -37,7 +37,7 @@ from sagent.session.types import TokenUsage, UserMessage
 
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterator, Sequence
 
     from sagent.session.types import SessionRecord
 
@@ -879,12 +879,27 @@ def test_a_command_without_an_output_file_prints_where_this_process_does(
 
 
 @pytest.fixture
-def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Point the default experiment and work roots into ``tmp_path``."""
+def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Isolate CLI paths, signal handling, and logging configuration."""
     monkeypatch.setattr(swebench, "_OUT", tmp_path / "out")
+
+    def basic_config(**kwargs: object) -> None:
+        del kwargs
+
     monkeypatch.setattr(swebench, "_WORK", tmp_path / "work")
     monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
-    return tmp_path
+    monkeypatch.setattr(logging, "basicConfig", basic_config)
+    previous = signal.getsignal(signal.SIGTERM)
+    loggers = [
+        logging.getLogger(name) for name in ("httpx", "huggingface_hub", "datasets")
+    ]
+    levels = [logger.level for logger in loggers]
+    try:
+        yield tmp_path
+    finally:
+        _ = signal.signal(signal.SIGTERM, previous)
+        for logger, level in zip(loggers, levels, strict=True):
+            logger.setLevel(level)
 
 
 def test_an_experiment_is_named_by_its_flags() -> None:

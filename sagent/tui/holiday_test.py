@@ -23,14 +23,16 @@ if TYPE_CHECKING:
 @pytest.fixture
 def zone(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], None]]:
     """Set the process's local time zone, as a user's machine would have it."""
+    try:
+        with monkeypatch.context() as local:
 
-    def to(name: str) -> None:
-        monkeypatch.setenv("TZ", name)
+            def to(name: str) -> None:
+                local.setenv("TZ", name)
+                time.tzset()
+
+            yield to
+    finally:
         time.tzset()
-
-    yield to
-    monkeypatch.undo()
-    time.tzset()
 
 
 @pytest.fixture

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from importlib.util import resolve_name
 from pathlib import Path
 from typing import Final
 
@@ -22,12 +23,13 @@ def _imports(path: Path) -> set[str]:
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
             found |= {alias.name for alias in node.names}
-        elif (
-            isinstance(node, ast.ImportFrom)
-            and node.module is not None
-            and not node.level
-        ):
-            found.add(node.module)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level:
+                package = ".".join(("sagent", *path.relative_to(_ROOT).parts[:-1]))
+                module = resolve_name("." * node.level + module, package)
+            found.add(module)
+            found.update(f"{module}.{alias.name}" for alias in node.names)
     return found
 
 
@@ -59,10 +61,30 @@ def test_nothing_but_the_frontend_and_the_entry_point_imports_the_frontend(
     }
 
 
-def test_the_check_sees_an_import_of_the_frontend(tmp_path: Path) -> None:
-    module = tmp_path / "leak.py"
-    module.write_text("from sagent.tui.console import ConsolePrinter\n")
-    assert _FRONTEND + ".console" in _imports(module)
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import sagent.tui.console",
+        "from sagent.tui.console import ConsolePrinter",
+        "from sagent.tui import console",
+        "from sagent import tui",
+        "from ..tui import console",
+        "from .. import tui",
+    ],
+)
+def test_the_check_sees_an_import_of_the_frontend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source: str,
+) -> None:
+    monkeypatch.setattr(__name__ + "._ROOT", tmp_path)
+    module = tmp_path / "tools" / "leak.py"
+    module.parent.mkdir()
+    module.write_text(source + "\n")
+    assert any(
+        name == _FRONTEND or name.startswith(f"{_FRONTEND}.")
+        for name in _imports(module)
+    )
 
 
 @pytest.mark.parametrize(

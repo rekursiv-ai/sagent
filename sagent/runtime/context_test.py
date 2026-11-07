@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import itertools
 import logging
@@ -353,29 +353,39 @@ def test_the_message_list_is_fresh_each_resolve() -> None:
 
 def test_resolve_probes_each_anchor_once(monkeypatch: pytest.MonkeyPatch) -> None:
     """A per-splice scan of the emitted order made the resolver quadratic."""
-    probes = 0
-    real_contains = context._OrderedRefs.contains
+    reads = 0
 
-    def counting(order: context._OrderedRefs, ref: TapeRef) -> bool:
-        nonlocal probes
-        probes += 1
-        return real_contains(order, ref)
+    class CountingLinks(dict[TapeRef | None, TapeRef | None]):
+        @override
+        def __getitem__(self, key: TapeRef | None) -> TapeRef | None:
+            nonlocal reads
+            reads += 1
+            return super().__getitem__(key)
 
-    monkeypatch.setattr(context._OrderedRefs, "contains", counting)
+    real_order = context._OrderedRefs
+
+    def order() -> context._OrderedRefs:
+        linked = real_order()
+        linked._next = CountingLinks(linked._next)
+        return linked
+
+    monkeypatch.setattr(context, "_OrderedRefs", order)
     tape: list[TapeRecord] = []
-    for i in range(100):
+    replies = [reply(f"a{i}") for i in range(3)]
+    for i, response in enumerate(replies):
         tape.append(_event(2 * i, _user(f"u{i}")))
-        anchor = _ref(2 * i - 1) if i else None
         tape.append(
             _splice(
                 2 * i + 1,
                 mask=(_one(2 * i),),
-                insert_after=anchor,
-                payload=(reply(f"a{i}"),),
+                insert_after=_ref(2 * i - 1) if i else None,
+                payload=(response,),
             ),
         )
-    _ = resolve_context(tape)
-    assert probes <= len(tape)
+    resolved = resolve_context(tape)
+    assert resolved.messages == replies
+    assert resolved.origins == [_ref(1), _ref(3), _ref(5)]
+    assert reads <= 2 * len(tape) + 1
 
 
 def test_a_duplicate_ref_is_refused() -> None:

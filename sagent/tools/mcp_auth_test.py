@@ -1,57 +1,39 @@
-"""Tests for signing in to MCP servers, against a real OAuth-protected server."""
+"""Unit tests for MCP credentials, sign-in callbacks, and shared renewal."""
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, cast, override
-from unittest.mock import Mock, call
-from urllib.parse import parse_qs, urlencode, urlparse
+from contextlib import asynccontextmanager, nullcontext
+from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict
+from unittest.mock import ANY, AsyncMock, MagicMock, Mock, call
 
 import asyncio
-import functools
-import logging
-import re
-import secrets
-import socket
-import threading
 import time
 
+from mcp.client.auth import OAuthClientProvider
 from mcp.client.session_group import StreamableHttpParameters
-from mcp.server.auth.provider import (
-    AccessToken,
-    AuthorizationCode,
-    AuthorizationParams,
-    IdentityAssertionParams,
-    RefreshToken,
-    construct_redirect_uri,
-)
-from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
-from mcp.server.mcpserver import MCPServer
-from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
-from pydantic import AnyHttpUrl, AnyUrl
-from treekle import json_dumps, json_loads
+from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
+from pydantic import AnyUrl
+from treekle import ReadError, json_loads
 
 import httpx2
 import pytest
-import uvicorn
 
 from sagent.lib.userdirs import config_dir
 from sagent.model.exceptions import AuthError
 from sagent.providers.testing import refuse_browsers
 from sagent.tools import mcp_auth
-from sagent.tools.mcp import McpServer, McpSession, login, logout
+from sagent.tools.mcp import McpServer
 from sagent.tools.mcp_auth import McpTokenStorage
-from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Callable
+    from collections.abc import AsyncGenerator
 
 
 @pytest.fixture(autouse=True)
 def no_real_browser(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail a test that opens the user's browser, as a sign-in not headless would."""
+    """Refuse the user's browser; sign-in tests supply their own boundary fake."""
     refuse_browsers(monkeypatch, mcp_auth)
 
 
@@ -67,47 +49,110 @@ def _storage(server: McpServer = _WEB) -> McpTokenStorage:
     return McpTokenStorage(server.key, source=server.source)
 
 
+def _kept(
+    access: str = "old",
+    *,
+    expires_at: float | None = None,
+) -> mcp_auth._MemoryStorage:
+    return mcp_auth._MemoryStorage(
+        tokens=OAuthToken(
+            access_token=access,
+            token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
+            refresh_token=f"r-{access}",
+        ),
+        client=OAuthClientInformationFull(
+            client_id=f"c-{access}",
+            redirect_uris=[AnyUrl("http://127.0.0.1:1/callback")],
+        ),
+        expires_at=expires_at,
+    )
+
+
+async def _session() -> mcp_auth._Shared:
+    shared = await mcp_auth.session_auth(
+        "web",
+        "https://h/mcp",
+        key=_WEB.key,
+        source=_WEB.source,
+    )
+    assert isinstance(shared, mcp_auth._Shared)
+    return shared
+
+
 @pytest.mark.asyncio
 async def test_tokens_and_client_are_kept_per_server_in_a_private_file() -> None:
     storage = _storage()
     assert await storage.get_tokens() is None
     assert await storage.get_client_info() is None
-    token = OAuthToken(
-        access_token="a1",  # noqa: S106 -- A test's token, no secret.
-        token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
-        refresh_token="r1",  # noqa: S106 -- A test's token, no secret.
-    )
-    client = OAuthClientInformationFull(
-        client_id="c1",
-        redirect_uris=[AnyUrl("http://127.0.0.1:1/callback")],
-    )
-    await storage.set_tokens(token)
-    await storage.set_client_info(client)
+    kept = _kept()
+    assert kept.tokens is not None
+    assert kept.client is not None
+    await storage.set_tokens(kept.tokens)
+    await storage.set_client_info(kept.client)
     again = _storage()
-    assert await again.get_tokens() == token
-    assert await again.get_client_info() == client
-    assert await _storage(_OTHER).get_tokens() is None
-    path = config_dir() / "rekursiv-ai" / "secrets" / "mcp" / f"{_WEB.key}.json"
-    assert json_loads(path.read_text(), dict[str, object])["source"] == "/p/mcp.json"
-    assert path.stat().st_mode & 0o777 == 0o600
-    assert path.parent.stat().st_mode & 0o777 == 0o700
+    assert await again.get_tokens() == kept.tokens
+    assert await again.get_client_info() == kept.client
+    anonymous = McpTokenStorage(_OTHER.key)
+    assert anonymous.source == ""
+    assert await anonymous.get_tokens() is None
+    plain = json_loads(storage.path.read_text(), _Saved)
+    assert plain["source"] == "/p/mcp.json"
+    assert plain["tokens"] == {
+        "access_token": "old",
+        "token_type": "Bearer",
+        "refresh_token": "r-old",
+    }
+    assert all(value is not None for value in plain["client"].values())
+    assert storage.path.stat().st_mode & 0o777 == 0o600
+    assert storage.path.parent.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.asyncio
+async def test_malformed_saved_credentials_fail_at_the_json_boundary() -> None:
+    storage = _storage()
+    storage.path.parent.mkdir(parents=True)
+    storage.path.write_text('{"tokens": 5}', encoding="utf-8")
+    with pytest.raises(ReadError):
+        await storage.read()
+
+
+@pytest.mark.asyncio
+async def test_saved_client_names_are_utf8_even_with_another_locale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    storage = _storage()
+    storage.path.parent.mkdir(parents=True)
+    storage.path.write_bytes(
+        '{"client":{"client_id":"c","client_name":"Café",'
+        '"redirect_uris":["http://127.0.0.1/callback"]}}'.encode(),
+    )
+    original = Path.read_text
+
+    def read(
+        path: Path,
+        encoding: str | None = None,
+        errors: str | None = None,
+    ) -> str:
+        return original(path, encoding=encoding or "latin-1", errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", read)
+    client = await storage.get_client_info()
+    assert client is not None
+    assert client.client_name == "Café"
 
 
 @pytest.mark.asyncio
 async def test_sign_ins_are_the_files_that_record_the_servers_source() -> None:
-    token = OAuthToken(
-        access_token="a1",  # noqa: S106 -- A test's token, no secret.
-        token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
-    )
+    kept = _kept()
+    assert kept.tokens is not None
     elsewhere = McpServer(
         name="web",
         parameters=StreamableHttpParameters(url="https://h/mcp"),
         source="/q/mcp.json",
     )
     for server in (_WEB, _OTHER, elsewhere):
-        await _storage(server).set_tokens(token)
+        await _storage(server).set_tokens(kept.tokens)
     folder = config_dir() / "rekursiv-ai" / "secrets" / "mcp"
-
     assert mcp_auth.sign_ins("/p/mcp.json") == {_WEB.key: folder / f"{_WEB.key}.json"}
     assert mcp_auth.sign_ins("/q/mcp.json") == {
         elsewhere.key: folder / f"{elsewhere.key}.json",
@@ -117,698 +162,429 @@ async def test_sign_ins_are_the_files_that_record_the_servers_source() -> None:
 
 @pytest.mark.asyncio
 async def test_two_changes_at_once_keep_both() -> None:
-    """Each change reads the file, then writes it; neither may write over the other."""
     storage = _storage()
-    token = OAuthToken(
-        access_token="a1",  # noqa: S106 -- A test's token, no secret.
-        token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
+    kept = _kept()
+    assert kept.tokens is not None
+    assert kept.client is not None
+    await asyncio.gather(
+        storage.set_tokens(kept.tokens),
+        storage.set_client_info(kept.client),
     )
-    client = OAuthClientInformationFull(
-        client_id="c1",
-        redirect_uris=[AnyUrl("http://127.0.0.1:1/callback")],
-    )
-    await asyncio.gather(storage.set_tokens(token), storage.set_client_info(client))
-    assert await storage.get_tokens() == token
-    assert await storage.get_client_info() == client
+    assert await storage.get_tokens() == kept.tokens
+    assert await storage.get_client_info() == kept.client
 
 
 @pytest.mark.asyncio
-async def test_a_change_waits_for_another_task_holding_the_file() -> None:
-    """Only the task holding the lock may write without taking it; any other waits."""
+async def test_a_change_waits_for_another_task_holding_the_file(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     storage = _storage()
-    token = OAuthToken(
-        access_token="a1",  # noqa: S106 -- A test's token, no secret.
-        token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
-    )
-    async with storage.locked():
-        writing = asyncio.create_task(storage.set_tokens(token))
-        await asyncio.sleep(0.05)
+    kept = _kept()
+    assert kept.tokens is not None
+    gate, contending = asyncio.Lock(), asyncio.Event()
+    calls: list[Path] = []
+
+    @asynccontextmanager
+    async def lock(path: Path) -> AsyncGenerator[None]:
+        calls.append(path)
+        if gate.locked():
+            contending.set()
+        async with gate:
+            yield
+
+    monkeypatch.setattr(mcp_auth, "file_lock", lock)
+    async with asyncio.TaskGroup() as tasks, storage.locked():
+        writing = tasks.create_task(storage.set_tokens(kept.tokens))
+        async with asyncio.timeout(1):
+            await contending.wait()
         assert not writing.done()
         async with storage.locked():
             assert await storage.get_tokens() is None
-    await writing
-    assert await storage.get_tokens() == token
+    assert await storage.get_tokens() == kept.tokens
+    assert calls == [storage.path.with_suffix(".json.lock")] * 2
 
 
 @pytest.mark.asyncio
-async def test_sessions_open_at_once_renew_once_and_share_the_renewal(
+async def test_a_token_expiry_is_saved_and_restored(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two sessions, as two processes hold them, outlive one token between them.
-
-    The authority hands out a new refresh token with each renewal and refuses
-    the old one, as Atlassian's does; a session renewing with the token it read
-    at its start, after another session renewed it, is refused.
-    """
-    authority = _Authority(lifetime_sec=1)
-    async with _protected(authority) as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        await _sign_in(server, monkeypatch=monkeypatch)
-        async with McpSession([server]) as first, McpSession([server]) as second:
-            # The token's second runs out on every clock here at once, client and
-            # server alike, with no second spent waiting for it.
-            monkeypatch.setattr(time, "time", functools.partial(_later, time.time, 5))
-            for session in (first, second):
-                (greet,) = session.tools()
-                result = await greet.call(
-                    ToolContext(cwd=config_dir()),
-                    {"name": "Ada"},
-                )
-                assert result.text() == "hello Ada"
-    assert authority.renewed == 1
+    monkeypatch.setattr(time, "time", lambda: 100.0)
+    kept = _kept()
+    assert kept.tokens is not None
+    expiring = kept.tokens.model_copy(update={"expires_in": 60})
+    pending = mcp_auth._MemoryStorage()
+    await pending.set_tokens(expiring)
+    assert pending.expires_at == 160.0
+    assert kept.client is not None
+    await pending.set_client_info(kept.client)
+    assert await pending.get_tokens() == expiring
+    assert await pending.get_client_info() == kept.client
+    await _storage().save(pending)
+    shared = await _session()
+    assert shared.auth.context.token_expiry_time == 160.0
+    await _storage().set_tokens(kept.tokens)
+    assert (await _storage().read()).expires_at is None
 
 
 @pytest.mark.asyncio
-async def test_a_token_refused_before_it_seems_to_expire_is_renewed_once(
+@pytest.mark.parametrize("missing", ["tokens", "client", "both"])
+async def test_a_session_without_complete_credentials_never_registers(
     monkeypatch: pytest.MonkeyPatch,
+    missing: str,
 ) -> None:
-    """A server may give no expiry, or revoke a token early: a 401 then renews it."""
-    authority = _Authority(says_expiry=False)
-    async with _protected(authority) as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        await _sign_in(server, monkeypatch=monkeypatch)
-        authority.tokens.clear()
-        first, second = McpSession([server]), McpSession([server])
-        try:
-            await asyncio.gather(first.aopen(), second.aopen())
-            for session in (first, second):
-                assert [t.name for t in session.tools()] == ["mcp__web__greet"]
-        finally:
-            await asyncio.gather(first.aclose(), second.aclose())
-    assert authority.renewed == 1
-
-
-@pytest.mark.asyncio
-async def test_a_session_refused_after_another_renewed_takes_the_renewal() -> None:
-    """Refused a token another session already renewed, it renews nothing itself.
-
-    A server that hands out a new refresh token with each renewal refuses the old
-    one, so a second renewal would spend the first's and lose the sign-in.
-    """
-    old, new = (
-        OAuthToken(
-            access_token=access,
-            token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
-            refresh_token=f"r-{access}",
-        )
-        for access in ("a-old", "a-new")
-    )
-    await _storage().save(
-        mcp_auth._MemoryStorage(
-            tokens=new,
-            client=OAuthClientInformationFull(
-                client_id="c1",
-                redirect_uris=[AnyUrl("http://127.0.0.1:1/callback")],
-            ),
-        ),
-    )
-    shared = await mcp_auth.session_auth(
+    kept = _kept()
+    if missing in {"tokens", "both"}:
+        kept.tokens = None
+    if missing in {"client", "both"}:
+        kept.client = None
+    await _storage().save(kept)
+    build = Mock()
+    monkeypatch.setattr(mcp_auth, "OAuthClientProvider", build)
+    needed = await mcp_auth.session_auth(
         "web",
         "https://h/mcp",
         key=_WEB.key,
         source=_WEB.source,
     )
-    assert isinstance(shared, mcp_auth._Shared)
-    context = shared.auth.context
-    async with shared._renewing(old):
-        assert context.current_tokens == new
-        assert context.is_token_valid()
-    async with shared._renewing(new):
-        assert not context.is_token_valid()
+    assert isinstance(needed, mcp_auth._SignInNeeded)
+    build.assert_not_called()
+    request = httpx2.Request("GET", "https://h/mcp")
+    flow = needed.auth_flow(request)
+    assert next(flow) is request
+    with pytest.raises(AuthError, match="run `sagent mcp login web`"):
+        flow.send(httpx2.Response(401))
 
 
 @pytest.mark.asyncio
-async def test_logging_out_keeps_another_project_s_server_of_the_same_name(
+async def test_a_saved_session_wires_its_url_credentials_and_refusal_callbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two projects' ``web`` are two servers; signing out of one leaves the other."""
-    async with _protected() as url:
-        theirs = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        await _sign_in(theirs, monkeypatch=monkeypatch)
-    mine = McpServer(name="web", parameters=StreamableHttpParameters(url="https://b"))
-    assert await logout(mine) is False
-    assert McpTokenStorage(theirs.key).path.exists()
-
-
-@pytest.mark.asyncio
-async def test_a_server_needing_a_sign_in_is_skipped_until_one_is_made(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    async with _protected() as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        with caplog.at_level(logging.WARNING):
-            async with McpSession([server]) as session:
-                assert session.tools() == []
-        assert "run `sagent mcp login web`" in caplog.text
-        browser = _Browser()
-        monkeypatch.setattr(mcp_auth, "open_browser", browser.open)
-        shown: list[str] = []
-        await login(server, show=shown.append)
-        assert len(browser.opened) == 1
-        assert browser.opened[0] in shown[0]
-        async with McpSession([server]) as session:
-            (greet,) = session.tools()
-            result = await greet.call(ToolContext(cwd=config_dir()), {"name": "Ada"})
-    assert greet.name == "mcp__web__greet"
-    assert result.text() == "hello Ada"
-
-
-@pytest.mark.asyncio
-async def test_a_session_with_no_sign_in_registers_no_client(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    authority = _Authority()
-    async with _protected(authority) as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        with caplog.at_level(logging.WARNING):
-            async with McpSession([server]) as session:
-                assert session.tools() == []
-    assert authority.clients == {}
-    assert not McpTokenStorage(server.key).path.exists()
-    assert "run `sagent mcp login web`" in caplog.text
-
-
-@pytest.mark.asyncio
-async def test_an_expired_token_is_renewed_by_a_later_session(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    authority = _Authority()
-    async with _protected(authority) as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        await _sign_in(server, monkeypatch=monkeypatch)
-        _expire(authority, server)
-        async with McpSession([server]) as session:
-            assert [t.name for t in session.tools()] == ["mcp__web__greet"]
-    assert authority.renewed == 1
-
-
-@pytest.mark.asyncio
-async def test_a_sign_in_the_server_has_revoked_asks_for_another(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    authority = _Authority()
-    async with _protected(authority) as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        await _sign_in(server, monkeypatch=monkeypatch)
-        authority.tokens.clear()
-        authority.refresh_tokens.clear()
-        with caplog.at_level(logging.WARNING):
-            async with McpSession([server]) as session:
-                assert session.tools() == []
-    assert "run `sagent mcp login web`" in caplog.text
-    assert len(authority.clients) == 1
-
-
-@pytest.mark.asyncio
-async def test_signing_in_again_keeps_the_token_renewable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    authority = _Authority()
-    async with _protected(authority) as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        await _sign_in(server, monkeypatch=monkeypatch)
-        await _sign_in(server, monkeypatch=monkeypatch)
-        _expire(authority, server)
-        async with McpSession([server]) as session:
-            assert [t.name for t in session.tools()] == ["mcp__web__greet"]
-    assert authority.renewed == 1
-
-
-@pytest.mark.asyncio
-async def test_an_abandoned_second_sign_in_keeps_the_first(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    authority = _Authority()
-    async with _protected(authority) as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        await _sign_in(server, monkeypatch=monkeypatch)
-        kept = McpTokenStorage(server.key).path.read_text()
-        monkeypatch.setattr("sagent.providers.login.read_login_input", _no_answer)
-        with pytest.raises(EOFError):
-            await login(server, show=list[str]().append, headless=True)
-        assert McpTokenStorage(server.key).path.read_text() == kept
-        _expire(authority, server)
-        async with McpSession([server]) as session:
-            assert [t.name for t in session.tools()] == ["mcp__web__greet"]
-
-
-@pytest.mark.asyncio
-async def test_sagent_registers_as_a_public_client_that_may_renew(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    authority = _Authority()
-    async with _protected(authority) as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        paste = _Paste()
-        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
-        await login(server, show=paste.shown.append, headless=True)
-    (client,) = authority.clients.values()
-    assert client.client_name == "sagent"
-    assert client.grant_types == ["authorization_code", "refresh_token"]
-    assert client.response_types == ["code"]
-    assert client.token_endpoint_auth_method == "none"  # noqa: S105 -- A method's name.
-    (redirect,) = client.redirect_uris or []
-    assert re.fullmatch(r"http://127\.0\.0\.1:\d+/callback", str(redirect))
-
-
-@pytest.mark.asyncio
-async def test_a_headless_sign_in_takes_the_pasted_address(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async with _protected() as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        paste = _Paste()
-        monkeypatch.setattr(mcp_auth, "open_browser", _never)
-        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
-        await login(server, show=paste.shown.append, headless=True)
-        assert paste.shown[-1] == (
-            "Open it in a browser anywhere, then paste the address it was sent"
-            " to, though it fails to load:\n"
-        )
-        async with McpSession([server]) as session:
-            assert [t.name for t in session.tools()] == ["mcp__web__greet"]
-
-
-@pytest.mark.asyncio
-async def test_a_pasted_address_of_another_sign_in_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async with _protected() as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        paste = _Paste(fixed="http://127.0.0.1:1/callback?code=c&state=other")
-        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
-        with pytest.raises(AuthError, match="belongs to another sign-in"):
-            await login(server, show=paste.shown.append, headless=True)
-
-
-@pytest.mark.asyncio
-async def test_a_pasted_address_with_no_code_is_refused(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async with _protected() as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        paste = _Paste(drop_code=True)
-        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
-        with pytest.raises(AuthError, match="holds no sign-in code"):
-            await login(server, show=paste.shown.append, headless=True)
-
-
-@pytest.mark.asyncio
-async def test_nothing_pasted_says_it_holds_no_code(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async with _protected() as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        paste = _Paste(fixed=" ")
-        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
-        with pytest.raises(AuthError, match="holds no sign-in code"):
-            await login(server, show=paste.shown.append, headless=True)
-
-
-@pytest.mark.asyncio
-async def test_a_session_never_asks_for_the_code_it_cannot_get() -> None:
+    kept = _kept(expires_at=160.0)
+    await _storage().save(kept)
     needed = mcp_auth._SignInNeeded(name="web")
+    refusal = Mock(return_value=needed)
+    provider = Mock(wraps=OAuthClientProvider)
+    monkeypatch.setattr(mcp_auth, "_SignInNeeded", refusal)
+    monkeypatch.setattr(mcp_auth, "OAuthClientProvider", provider)
+    shared = await _session()
+    refusal.assert_called_once_with(name="web")
+    provider.assert_called_once_with(
+        server_url="https://h/mcp",
+        client_metadata=OAuthClientMetadata(
+            client_name="sagent",
+            redirect_uris=[AnyUrl("http://127.0.0.1/callback")],
+            token_endpoint_auth_method="none",  # noqa: S106 -- OAuth public-client method.
+        ),
+        storage=shared.storage,
+        redirect_handler=needed.redirect,
+        callback_handler=needed.callback,
+    )
+    assert shared.storage.path == _storage().path
+    assert shared.storage.source == "/p/mcp.json"
+    assert shared.auth.context.token_expiry_time == 160.0
+
+
+@pytest.mark.asyncio
+async def test_a_session_never_asks_for_a_sign_in_or_its_code() -> None:
+    needed = mcp_auth._SignInNeeded(name="web")
+    request = httpx2.Request("GET", "https://h/mcp")
+    flow = needed.auth_flow(request)
+    assert next(flow) is request
+    with pytest.raises(StopIteration):
+        flow.send(httpx2.Response(200))
+    with pytest.raises(AuthError, match="MCP server 'web' needs a sign-in"):
+        await needed.redirect("https://authority/authorize")
     with pytest.raises(AuthError, match="MCP server 'web' needs a sign-in"):
         await needed.callback()
 
 
 @pytest.mark.asyncio
-async def test_a_browser_that_never_comes_back_gives_way_to_a_paste(
+@pytest.mark.parametrize("headless", [False, True])
+async def test_a_sign_in_records_its_state_and_opens_only_a_local_browser(
+    monkeypatch: pytest.MonkeyPatch,
+    headless: bool,
+) -> None:
+    opened = Mock()
+    monkeypatch.setattr(mcp_auth, "open_browser", opened)
+    shown: list[str] = []
+    sign_in = mcp_auth._SignIn(show=shown.append, headless=headless, wait_sec=0)
+    url = "https://authority/authorize?state=this-sign-in"
+    await sign_in.redirect(url)
+    assert sign_in.state == "this-sign-in"
+    assert shown == [f"Sign in to the MCP server in your browser:\n\n  {url}\n"]
+    assert opened.call_args_list == ([] if headless else [call(url)])
+
+
+@pytest.mark.asyncio
+async def test_the_browser_callback_wins_without_asking_for_a_paste(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _protected() as url:
-        server = McpServer(name="web", parameters=StreamableHttpParameters(url=url))
-        paste = _Paste()
-        monkeypatch.setattr(mcp_auth, "open_browser", _never)
-        monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
-        await login(server, show=paste.shown.append, wait_sec=0.05)
-        assert "No browser came back" in paste.shown[-1]
-        assert await McpTokenStorage(server.key).get_tokens() is not None
+    paste = AsyncMock()
+    monkeypatch.setattr(mcp_auth, "read_pasted_code", paste)
+    sign_in = mcp_auth._SignIn(
+        show=list[str]().append,
+        headless=False,
+        wait_sec=1,
+        state="s",
+    )
+    sign_in.code.set_result("browser-code")
+    result = await sign_in.callback()
+    assert (result.code, result.state) == ("browser-code", "s")
+    paste.assert_not_awaited()
 
 
-def _never(url: str) -> None:
-    del url
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headless", [False, True])
+async def test_headless_or_missing_browser_callbacks_use_the_paste_boundary(
+    monkeypatch: pytest.MonkeyPatch,
+    headless: bool,
+) -> None:
+    paste = AsyncMock(return_value="pasted-code")
+    monkeypatch.setattr(mcp_auth, "read_pasted_code", paste)
+    show = list[str]().append
+    sign_in = mcp_auth._SignIn(show=show, headless=headless, wait_sec=0, state="s")
+    result = await sign_in.callback()
+    assert (result.code, result.state) == ("pasted-code", "s")
+    paste.assert_awaited_once_with(state="s", show=show, browser_tried=not headless)
+    assert not sign_in.code.cancelled()
 
 
-async def _no_answer(prompt: str) -> str:
-    del prompt
-    raise EOFError
+@pytest.mark.asyncio
+async def test_a_failed_paste_propagates_without_a_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paste = AsyncMock(side_effect=AuthError("invalid pasted address"))
+    monkeypatch.setattr(mcp_auth, "read_pasted_code", paste)
+    sign_in = mcp_auth._SignIn(
+        show=list[str]().append,
+        headless=True,
+        wait_sec=0,
+        state="s",
+    )
+    with pytest.raises(AuthError, match="invalid pasted address"):
+        await sign_in.callback()
+    assert not sign_in.code.done()
 
 
-async def _sign_in(server: McpServer, *, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Sign in to ``server`` headless, pasting where its sign-in page lands."""
-    paste = _Paste()
-    monkeypatch.setattr("sagent.providers.login.read_login_input", paste)
-    await login(server, show=paste.shown.append, headless=True)
+@pytest.mark.asyncio
+async def test_the_loopback_answer_passes_the_sign_ins_state_and_future(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    redirect = AsyncMock()
+    monkeypatch.setattr(mcp_auth, "redirected", redirect)
+    sign_in = mcp_auth._SignIn(
+        show=list[str]().append,
+        headless=False,
+        wait_sec=1,
+        state="s",
+    )
+    reader, writer = Mock(spec=asyncio.StreamReader), Mock(spec=asyncio.StreamWriter)
+    await sign_in.answer(reader, writer)
+    redirect.assert_awaited_once_with(
+        reader,
+        writer,
+        path="/callback",
+        state="s",
+        code=sign_in.code,
+    )
 
 
-def _expire(authority: _Authority, server: McpServer) -> None:
-    """Expire every access token, at the authority and in the file sagent keeps."""
-    authority.tokens.clear()
-    path = McpTokenStorage(server.key).path
-    kept = json_loads(path.read_text(), dict[str, object])
-    path.write_text(json_dumps({**kept, "expires_at": time.time() - 1}))
+@pytest.mark.asyncio
+@pytest.mark.parametrize("succeeds", [True, False])
+async def test_a_login_publishes_its_client_and_tokens_only_after_successful_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    succeeds: bool,
+) -> None:
+    storage = _storage()
+    old, new = _kept(), _kept("new", expires_at=160.0)
+    await storage.save(old)
+    pending: list[mcp_auth._MemoryStorage] = []
+    metadata: list[OAuthClientMetadata] = []
+    auth = Mock()
 
+    def provider(**options: object) -> Mock:
+        assert options["server_url"] == "https://h/mcp"
+        memory, info = options["storage"], options["client_metadata"]
+        assert isinstance(memory, mcp_auth._MemoryStorage)
+        assert isinstance(info, OAuthClientMetadata)
+        assert memory == mcp_auth._MemoryStorage()
+        pending.append(memory)
+        metadata.append(info)
+        assert callable(options["redirect_handler"])
+        assert callable(options["callback_handler"])
+        return auth
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _Paste:
-    """The user at ``input``: pastes where the sign-in page shown lands, or ``fixed``."""
+    async def exited(*exc: object) -> None:
+        del exc
+        assert await storage.read() == old
 
-    shown: list[str] = field(default_factory=list[str])
-    fixed: str = ""
-    drop_code: bool = False
-    """Paste the address the page lands on without its ``code``."""
-
-    async def __call__(self, prompt: str) -> str:
-        del prompt
-        if self.fixed:
-            return self.fixed
-        (url,) = (w for w in self.shown[0].split() if w.startswith("http"))
-        with httpx2.Client() as http:
-            landed = http.get(url).headers["location"]
-        if self.drop_code:
-            query = parse_qs(urlparse(landed).query)
-            return (
-                urlparse(landed)
-                ._replace(query=urlencode({"state": query["state"][0]}))
-                .geturl()
+    finish = AsyncMock(side_effect=exited)
+    listener = MagicMock(
+        sockets=[Mock(getsockname=Mock(return_value=("127.0.0.1", 4321)))],
+        __aenter__=AsyncMock(),
+        __aexit__=finish,
+    )
+    start = AsyncMock(return_value=listener)
+    monkeypatch.setattr(asyncio, "start_server", start)
+    monkeypatch.setattr(mcp_auth, "OAuthClientProvider", provider)
+    with nullcontext() if succeeds else pytest.raises(AuthError, match="abandoned"):
+        async with mcp_auth.login_auth(
+            "https://h/mcp",
+            key=_WEB.key,
+            source=_WEB.source,
+            show=list[str]().append,
+            headless=True,
+        ) as yielded:
+            assert yielded is auth
+            (memory,) = pending
+            memory.tokens, memory.client, memory.expires_at = (
+                new.tokens,
+                new.client,
+                new.expires_at,
             )
-        return landed
+            if not succeeds:
+                raise AuthError("abandoned")
+    start.assert_awaited_once_with(ANY, "127.0.0.1")
+    finish.assert_awaited_once()
+    (client,) = metadata
+    assert client.client_name == "sagent"
+    assert client.token_endpoint_auth_method == "none"  # noqa: S105 -- A method's name.
+    assert [str(uri) for uri in client.redirect_uris or []] == [
+        "http://127.0.0.1:4321/callback",
+    ]
+    assert await storage.read() == (new if succeeds else old)
 
 
-@dataclass(slots=True, kw_only=True)
-class _Browser:
-    """Visits what it is asked to open, following redirects to the sign-in's own."""
-
-    opened: list[str] = field(default_factory=list[str])
-    visits: set[asyncio.Task[None]] = field(default_factory=set[asyncio.Task[None]])
-
-    def open(self, url: str) -> None:
-        self.opened.append(url)
-        task = asyncio.get_running_loop().create_task(self._visit(url))
-        self.visits.add(task)
-        task.add_done_callback(self.visits.discard)
-
-    async def _visit(self, url: str) -> None:
-        async with httpx2.AsyncClient(follow_redirects=True) as http:
-            await http.get(url)
-
-
-def _later(clock: Callable[[], float], seconds: float) -> float:
-    """Return ``clock()`` moved ``seconds`` on."""
-    return clock() + seconds
+@pytest.mark.asyncio
+async def test_a_session_refused_after_another_renewed_takes_the_renewal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(time, "time", lambda: 100.0)
+    old, new = _kept(), _kept("new", expires_at=200.0)
+    await _storage().save(new)
+    shared = await _session()
+    context = shared.auth.context
+    async with shared._renewing(old.tokens):
+        assert context.current_tokens == new.tokens
+        assert context.token_expiry_time == 200.0
+        assert context.is_token_valid()
+    async with shared._renewing(new.tokens):
+        assert context.token_expiry_time == 99.0
+        assert not context.is_token_valid()
 
 
-@dataclass(slots=True, kw_only=True)
-class _Authority:
-    """An OAuth server that approves every request at once, all in memory."""
-
-    clients: dict[str, OAuthClientInformationFull] = field(
-        default_factory=dict[str, OAuthClientInformationFull],
-    )
-    codes: dict[str, AuthorizationCode] = field(
-        default_factory=dict[str, AuthorizationCode],
-    )
-    tokens: dict[str, AccessToken] = field(default_factory=dict[str, AccessToken])
-    refresh_tokens: dict[str, RefreshToken] = field(
-        default_factory=dict[str, RefreshToken],
-    )
-    renewed: int = 0
-    """How many refresh tokens were exchanged."""
-
-    lifetime_sec: int = 3600
-    """How long the access token a sign-in issues is good for.
-
-    A renewed access token, and every refresh token, is good for an hour: a short
-    lifetime then makes the sign-in's token expire, while two sessions that share
-    one renewal both outlive it however slowly the second one calls.
-    """
-
-    says_expiry: bool = True
-    """Whether it tells the client when a token expires, as ``expires_in``."""
-
-    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return self.clients.get(client_id)
-
-    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        assert client_info.client_id is not None
-        self.clients[client_info.client_id] = client_info
-
-    async def authorize(
-        self,
-        client: OAuthClientInformationFull,
-        params: AuthorizationParams,
-    ) -> str:
-        code = secrets.token_hex(8)
-        assert client.client_id is not None
-        self.codes[code] = AuthorizationCode(
-            code=code,
-            scopes=params.scopes or [],
-            expires_at=time.time() + 300,
-            client_id=client.client_id,
-            code_challenge=params.code_challenge,
-            redirect_uri=params.redirect_uri,
-            redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
-            resource=params.resource,
-        )
-        return construct_redirect_uri(
-            str(params.redirect_uri),
-            code=code,
-            state=params.state,
-        )
-
-    async def load_authorization_code(
-        self,
-        client: OAuthClientInformationFull,
-        authorization_code: str,
-    ) -> AuthorizationCode | None:
-        del client
-        return self.codes.get(authorization_code)
-
-    async def exchange_authorization_code(
-        self,
-        client: OAuthClientInformationFull,
-        authorization_code: AuthorizationCode,
-    ) -> OAuthToken:
-        del self.codes[authorization_code.code]
-        return self._issue(
-            client,
-            scopes=authorization_code.scopes,
-            resource=authorization_code.resource,
-            lifetime_sec=self.lifetime_sec,
-        )
-
-    async def load_access_token(self, token: str) -> AccessToken | None:
-        return self.tokens.get(token)
-
-    async def load_refresh_token(
-        self,
-        client: OAuthClientInformationFull,
-        refresh_token: str,
-    ) -> RefreshToken | None:
-        del client
-        return self.refresh_tokens.get(refresh_token)
-
-    async def exchange_refresh_token(
-        self,
-        client: OAuthClientInformationFull,
-        refresh_token: RefreshToken,
-        scopes: list[str],
-    ) -> OAuthToken:
-        del self.refresh_tokens[refresh_token.token]
-        self.renewed += 1
-        return self._issue(
-            client,
-            scopes=scopes or refresh_token.scopes,
-            resource=refresh_token.resource,
-            lifetime_sec=3600,
-        )
-
-    def _issue(
-        self,
-        client: OAuthClientInformationFull,
-        *,
-        scopes: list[str],
-        resource: str | None,
-        lifetime_sec: int,
-    ) -> OAuthToken:
-        """Issue an access token good for ``lifetime_sec``, and a refresh token."""
-        assert client.client_id is not None
-        access, refresh = secrets.token_hex(8), secrets.token_hex(8)
-        now = int(time.time())
-        self.tokens[access] = AccessToken(
-            token=access,
-            client_id=client.client_id,
-            scopes=scopes,
-            expires_at=now + lifetime_sec,
-            resource=resource,
-        )
-        self.refresh_tokens[refresh] = RefreshToken(
-            token=refresh,
-            client_id=client.client_id,
-            scopes=scopes,
-            expires_at=now + 3600,
-            resource=resource,
-        )
-        return OAuthToken(
-            access_token=access,
-            token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
-            expires_in=lifetime_sec if self.says_expiry else None,
-            refresh_token=refresh,
-        )
-
-    async def exchange_identity_assertion(
-        self,
-        client: OAuthClientInformationFull,
-        params: IdentityAssertionParams,
-    ) -> OAuthToken:
-        del client, params
-        raise NotImplementedError
-
-    async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
-        del token
+@pytest.mark.asyncio
+async def test_two_sessions_take_the_same_renewal_instead_of_spending_the_old_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(time, "time", lambda: 100.0)
+    old, new = _kept(expires_at=99.0), _kept("new", expires_at=200.0)
+    await _storage().save(old)
+    first, second = await _session(), await _session()
+    async with first._renewing(old.tokens):
+        assert first.auth.context.current_tokens == old.tokens
+        assert not first.auth.context.is_token_valid()
+        await _storage().save(new)
+    async with second._renewing(old.tokens):
+        assert second.auth.context.current_tokens == new.tokens
+        assert second.auth.context.is_token_valid()
 
 
-@dataclass(slots=True, kw_only=True)
-class _Switch(_Authority):
-    """The authority of the one server every test shares: whichever test's is current."""
-
-    current: _Authority = field(default_factory=_Authority)
-
-    @override
-    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return await self.current.get_client(client_id)
-
-    @override
-    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
-        await self.current.register_client(client_info)
-
-    @override
-    async def authorize(
-        self,
-        client: OAuthClientInformationFull,
-        params: AuthorizationParams,
-    ) -> str:
-        return await self.current.authorize(client, params)
-
-    @override
-    async def load_authorization_code(
-        self,
-        client: OAuthClientInformationFull,
-        authorization_code: str,
-    ) -> AuthorizationCode | None:
-        return await self.current.load_authorization_code(client, authorization_code)
-
-    @override
-    async def exchange_authorization_code(
-        self,
-        client: OAuthClientInformationFull,
-        authorization_code: AuthorizationCode,
-    ) -> OAuthToken:
-        return await self.current.exchange_authorization_code(
-            client,
-            authorization_code,
-        )
-
-    @override
-    async def load_access_token(self, token: str) -> AccessToken | None:
-        return await self.current.load_access_token(token)
-
-    @override
-    async def load_refresh_token(
-        self,
-        client: OAuthClientInformationFull,
-        refresh_token: str,
-    ) -> RefreshToken | None:
-        return await self.current.load_refresh_token(client, refresh_token)
-
-    @override
-    async def exchange_refresh_token(
-        self,
-        client: OAuthClientInformationFull,
-        refresh_token: RefreshToken,
-        scopes: list[str],
-    ) -> OAuthToken:
-        return await self.current.exchange_refresh_token(client, refresh_token, scopes)
+@pytest.mark.asyncio
+async def test_empty_storage_does_not_replace_the_sdks_current_tokens() -> None:
+    kept = _kept()
+    await _storage().save(kept)
+    shared = await _session()
+    shared.auth.context.current_tokens = kept.tokens
+    await _storage().save(mcp_auth._MemoryStorage())
+    async with shared._renewing(None):
+        assert shared.auth.context.current_tokens == kept.tokens
 
 
-class _Serving(uvicorn.Server):
-    """A uvicorn server that says when it is listening."""
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [200, 401])
+async def test_a_refused_request_closes_the_sdk_flow_before_one_expired_retry(
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    monkeypatch.setattr(time, "time", lambda: 100.0)
+    kept = _kept(expires_at=200.0)
+    await _storage().save(kept)
+    shared = await _session()
+    shared.auth.context.current_tokens = kept.tokens
+    seen: list[tuple[float | None, int]] = []
+    closed: list[bool] = []
+    answered: list[int] = []
 
-    def __init__(self, config: uvicorn.Config) -> None:
-        super().__init__(config)
-        self.listening = threading.Event()
+    async def sdk(
+        request: httpx2.Request,
+    ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
+        seen.append((shared.auth.context.token_expiry_time, len(closed)))
+        try:
+            response = yield request
+            answered.append(response.status_code)
+        finally:
+            closed.append(True)
 
-    @override
-    async def startup(self, sockets: list[socket.socket] | None = None) -> None:
-        await super().startup(sockets)
-        self.listening.set()
-
-
-# One server for every test in the process, on a thread of its own: starting one
-# cost each test 40ms. Its loop outlives any test's, so every test can reach it.
-@functools.cache
-def _shared() -> tuple[str, _Switch]:
-    """Return the shared server's MCP URL, and the authority switch it signs in with."""
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        # Typeshed types an address as ``Any``; an IPv4 one is ``(host, port)``.
-        _, port = cast(tuple[str, int], probe.getsockname())
-    base = f"http://127.0.0.1:{port}"
-    switch = _Switch()
-    app = MCPServer(
-        "web",
-        auth_server_provider=switch,
-        auth=AuthSettings(
-            issuer_url=AnyHttpUrl(base),
-            resource_server_url=AnyHttpUrl(f"{base}/mcp"),
-            validate_token_resource=True,
-            client_registration_options=ClientRegistrationOptions(enabled=True),
-        ),
-    )
-
-    # Unstructured: an output schema makes the client compile it with jsonschema,
-    # whose first import costs 0.6s, for a sign-in that never reads the output.
-    @app.tool(structured_output=False)
-    def greet(name: str) -> str:
-        """Say hello."""
-        return f"hello {name}"
-
-    server = _Serving(
-        uvicorn.Config(
-            app.streamable_http_app(),
-            host="127.0.0.1",
-            port=port,
-            log_level="critical",
-            lifespan="on",
-        ),
-    )
-    threading.Thread(target=asyncio.run, args=(server.serve(),), daemon=True).start()
-    assert server.listening.wait(timeout=10)
-    return f"{base}/mcp", switch
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _serving() -> None:
-    """Start the shared server once, before the first test that signs in to it."""
-    _ = _shared()
-
-
-@asynccontextmanager
-async def _protected(authority: _Authority | None = None) -> AsyncGenerator[str]:
-    """Serve an MCP server that needs a sign-in from ``authority``; yield its URL."""
-    url, switch = _shared()
-    switch.current = authority if authority is not None else _Authority()
+    monkeypatch.setattr(shared.auth, "async_auth_flow", sdk)
+    request = httpx2.Request("GET", "https://h/mcp")
+    flow = shared.async_auth_flow(request)
     try:
-        yield url
+        assert await anext(flow) is request
+        sent = await flow.asend(httpx2.Response(401))  # codespell:ignore asend
+        assert sent is request
+        with pytest.raises(StopAsyncIteration):
+            await flow.asend(httpx2.Response(status))  # codespell:ignore asend
     finally:
-        switch.current = _Authority()
+        await flow.aclose()
+    assert seen == [(200.0, 0), (99.0, 1)]
+    assert closed == [True, True]
+    assert answered == [status]
+
+
+@pytest.mark.asyncio
+async def test_expiry_reloads_storage_before_forwarding_sdk_exchange_responses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(time, "time", lambda: 100.0)
+    old, new = _kept(expires_at=99.0), _kept("new", expires_at=200.0)
+    await _storage().save(old)
+    shared = await _session()
+    shared.auth.context.current_tokens = old.tokens
+    await _storage().save(new)
+    exchange = httpx2.Request("POST", "https://authority/token")
+    answered: list[int] = []
+    closed = Mock()
+
+    async def sdk(
+        request: httpx2.Request,
+    ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
+        assert shared.auth.context.current_tokens == new.tokens
+        try:
+            response = yield exchange
+            answered.append(response.status_code)
+            response = yield request
+            answered.append(response.status_code)
+        finally:
+            closed()
+
+    monkeypatch.setattr(shared.auth, "async_auth_flow", sdk)
+    request = httpx2.Request("GET", "https://h/mcp")
+    flow = shared.async_auth_flow(request)
+    try:
+        assert await anext(flow) is exchange
+        sent = await flow.asend(httpx2.Response(401))  # codespell:ignore asend
+        assert sent is request
+        with pytest.raises(StopAsyncIteration):
+            await flow.asend(httpx2.Response(200))  # codespell:ignore asend
+    finally:
+        await flow.aclose()
+    assert answered == [401, 200]
+    closed.assert_called_once_with()
 
 
 class TestSignIns:
-    """Exercise directory discovery without the OAuth server integration fixture."""
+    """Exercise directory discovery without an OAuth server."""
 
     def test_only_json_files_recording_the_requested_source_are_returned(self) -> None:
         directory = config_dir() / "rekursiv-ai" / "secrets" / "mcp"
@@ -835,10 +611,13 @@ class TestSignIns:
         assert mcp_auth.sign_ins("/p/mcp.json") == {"b": kept}
         assert load.call_args_list == [call(vanished), call(kept)]
 
-    @pytest.fixture(scope="class")
-    @classmethod
-    def _serving(cls) -> None:
-        """Directory-only tests need no OAuth server; existing tests still use theirs."""
+
+class _Saved(TypedDict):
+    """A completed credential write, with both client and tokens present."""
+
+    source: str
+    tokens: dict[str, object]
+    client: dict[str, object]
 
 
 if __name__ == "__main__":

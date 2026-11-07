@@ -174,11 +174,13 @@ def _every_record() -> list[SessionRecord]:
 @pytest.fixture
 def pacific(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Run in Los Angeles' time zone."""
-    monkeypatch.setenv("TZ", "America/Los_Angeles")
-    time.tzset()
-    yield
-    monkeypatch.undo()
-    time.tzset()
+    try:
+        with monkeypatch.context() as local:
+            local.setenv("TZ", "America/Los_Angeles")
+            time.tzset()
+            yield
+    finally:
+        time.tzset()
 
 
 @pytest.mark.usefixtures("pacific")
@@ -305,11 +307,11 @@ def test_a_restated_result_keeps_its_type_and_fields_and_drops_attachments(
 @pytest.mark.parametrize(
     ("old", "kind"),
     [
-        ("BashResult", types.BashResult),
-        ("ReadResult", types.ReadResult),
-        ("WriteResult", types.WriteResult),
-        ("EditResult", types.EditResult),
-        ("AgentSpawnResult", types.AgentSpawnResult),
+        ("ShellCommandResult", types.BashResult),
+        ("FileReadResult", types.ReadResult),
+        ("FileWriteResult", types.WriteResult),
+        ("FileEditResult", types.EditResult),
+        ("AgentStatusResult", types.AgentSpawnResult),
     ],
 )
 def test_a_record_stored_under_its_old_name_reads_as_the_renamed_type(
@@ -551,11 +553,12 @@ def test_a_session_preserves_interleaved_tool_lifecycles() -> None:
         ReadResult(call_id="a", content="A"),
     )
 
-    assert [item.call_id for item in records if isinstance(item, ToolResult)] == [
-        "a",
-        "b",
-        "a",
-    ]
+    restored = stored_record(stored_plain(ContextClear(history=records)), ContextClear)
+
+    assert restored.history == records
+    assert [
+        item.call_id for item in restored.history if isinstance(item, ToolResult)
+    ] == ["a", "b", "a"]
 
 
 def test_reasoning_is_a_sibling_of_the_reply_not_nested_in_it() -> None:
@@ -566,13 +569,15 @@ def test_reasoning_is_a_sibling_of_the_reply_not_nested_in_it() -> None:
     user = UserMessage(context_id=0, content="Check this.")
 
     records = (user, thinking, assistant)
+    restored = stored_record(stored_plain(ContextClear(history=records)), ContextClear)
 
-    assert [type(record).__name__ for record in records] == [
+    assert restored.history == records
+    assert [type(record).__name__ for record in restored.history] == [
         "UserMessage",
         "Thinking",
         "AssistantMessage",
     ]
-    assert not hasattr(assistant, "thinking")
+    assert not hasattr(restored.history[-1], "thinking")
 
 
 def test_a_record_names_its_settings_by_index_rather_than_copying_them() -> None:
@@ -583,7 +588,13 @@ def test_a_record_names_its_settings_by_index_rather_than_copying_them() -> None
         AssistantMessage(context_id=4, content="Second turn."),
     )
 
-    assert [record.context_id for record in records] == [0, 4]
+    restored = stored_record(stored_plain(ContextClear(history=records)), ContextClear)
+
+    assert restored.history == records
+    first, second = restored.history
+    assert isinstance(first, AssistantMessage)
+    assert isinstance(second, AssistantMessage)
+    assert (first.context_id, second.context_id) == (0, 4)
 
 
 if __name__ == "__main__":

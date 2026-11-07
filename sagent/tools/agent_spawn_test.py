@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, override
 
 import asyncio
-import importlib
 import logging
 import os
+import runpy
 import uuid
 
 from treekle import PlainTree
@@ -2088,10 +2088,13 @@ def test_the_description_reads_as_utf8_whatever_the_locale(
     asked = _Asked()
     with monkeypatch.context() as patched:
         patched.setattr(Path, "read_text", asked)
-        _ = importlib.reload(agent_spawn)
-    _ = importlib.reload(agent_spawn)
+        _ = runpy.run_path(
+            agent_spawn.__file__ or "",
+            run_name=f"{agent_spawn.__name__}_fresh",
+        )
 
     assert asked.encodings["agentspawn.md"] == "utf-8"
+    assert agent_spawn.AgentSpawn is AgentSpawn
 
 
 @dataclass(slots=True, kw_only=True)

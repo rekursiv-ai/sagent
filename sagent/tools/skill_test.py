@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from importlib import util
+from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
@@ -116,7 +117,7 @@ def test_the_skills_sagent_ships_are_found_last(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.undo()
+    monkeypatch.setattr(skill, "files", files)
     shipped = Skill(user_dir=tmp_path / "u")
     assert shipped.builtin_dir == _CWD.parent / "skills"
     (watch,) = [s for s in shipped.discover(tmp_path) if s.name == "watch"]

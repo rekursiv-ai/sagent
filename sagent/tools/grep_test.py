@@ -845,16 +845,28 @@ async def test_a_cut_result_never_passes_its_cap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Resuming past 9,999, with 100 left after one or two rows kept, fills the
-    # note's every digit: the reserve must hold all of them.
+    # The resume offset gains a digit while the remaining count loses one.
     _capture(monkeypatch, rows=[Row(text=f"row{i:05d}") for i in range(10_101)])
-    # From the least that holds the note and one row.
-    for cap in range(62, 160):
+    lines = [f"row{i:05d}\n" for i in range(9_999, 10_101)]
+    reserve = len("... (102 more entries; pass offset=10101 to continue)")
+    caps = {
+        reserve + len("".join(lines[:kept])) + delta
+        for kept in (2, 3, 11)
+        for delta in (-1, 0, 1)
+    }
+    for cap in sorted(caps):
         result = await Grep(max_result_chars=cap).call(
             ToolContext(cwd=tmp_path),
             {"pattern": "r", "offset": 9_999},
         )
-        assert len(result.text()) <= cap, cap
+        text = result.text()
+        kept = text.count("\n")
+        assert text == "".join(lines[:kept]).rstrip("\n") + (
+            f"\n... ({102 - kept:,} more entries;"
+            f" pass offset={9_999 + kept} to continue)"
+        )
+        assert len(text) <= cap, cap
+        assert kept == (cap - reserve) // len(lines[0]), cap
 
 
 def test_rg_reading_its_input_by_dash_is_not_greps_job() -> None:
