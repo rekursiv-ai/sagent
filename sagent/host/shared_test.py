@@ -150,6 +150,7 @@ async def test_a_hold_lifted_mid_wait_admits_at_once() -> None:
 @pytest.mark.asyncio
 async def test_a_change_to_another_key_leaves_a_waiter_waiting() -> None:
     served = ServedGate()
+    assert await served._changed_within("absent", [0], 0.0) is False
     waiting = asyncio.create_task(served._changed_within("k", [0], 60.0))
     try:
         await asyncio.sleep(0)
@@ -301,7 +302,10 @@ async def test_an_explicit_reset_clears_the_same_hold_with_or_without_a_daemon(
 ) -> None:
     async with _daemon(tmp_path) as (_, address):
         gate = DaemonGate(address if daemon else tmp_path / "absent.sock")
-        await asyncio.to_thread(gate.hold, "k", until=time.time() + 432_000.0)
+        until = time.time() + 432_000.0
+        await asyncio.to_thread(gate.hold, "k", until=until)
+        await asyncio.to_thread(gate.reset, "k")
+        assert FileGate().states()["k"].held_until == until
         await asyncio.to_thread(gate.reset, "k", clear_hold=True)
         assert (await gate.admitted("k", _LONG)).admitted
         assert FileGate().states()["k"].held_until == 0.0

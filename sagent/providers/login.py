@@ -289,7 +289,13 @@ class Logins:
         )
 
     async def clear_spent(self, account: str | None, *, model: str) -> None:
-        """Forget this model's stale quota before explicitly retrying its account."""
+        """Forget this model's stale quota before explicitly retrying its account.
+
+        Args:
+          account: The account; ``None`` for the default.
+          model: The model whose covering quota marks are cleared.
+
+        """
         name = account or "default"
         await self._edit(
             lambda f: replace(

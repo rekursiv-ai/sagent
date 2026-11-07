@@ -66,7 +66,8 @@ class TestConfigureHypothesis:
 
     def test_ci_searches_harder_and_prints_a_reproduction_blob(self) -> None:
         assert (_profile("dev").max_examples, _profile("ci").max_examples) == (20, 200)
-        assert (_profile("dev").print_blob, _profile("ci").print_blob) == (False, True)
+        # Dev leaves print_blob to Hypothesis, which turns it on when it sees CI.
+        assert _profile("ci").print_blob is True
 
     def test_no_profile_times_a_test_or_its_input_generation(self) -> None:
         for name in ("dev", "ci"):
