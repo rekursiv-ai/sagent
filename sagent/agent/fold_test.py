@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from functools import partial
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import math
 import re
@@ -25,11 +26,14 @@ from sagent.model.exceptions import (
     OverloadedError,
     RateLimitedError,
 )
-from sagent.model.scripted import ScriptedModel, ScriptedProvider, reply
-from sagent.session.types import UserMessage
+from sagent.model.scripted import ScriptedModel, ScriptedProvider, call, reply
+from sagent.model.types import TextChunk
+from sagent.session.types import AssistantMessage, UserMessage
 
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+
     from sagent.model.types import Request, Response
 
 
@@ -102,10 +106,19 @@ async def _fold(model: ScriptedModel, text: str) -> str:
 
 
 @pytest.mark.asyncio
-async def test_a_text_that_fits_is_returned_untouched() -> None:
-    provider, model = _model(_Summarize())
+@pytest.mark.parametrize("max_tokens", [1, 2])
+async def test_a_text_that_fits_is_returned_untouched(max_tokens: int) -> None:
+    provider = ScriptedProvider()
 
-    assert await _fold(model, "short") == "short"
+    assert (
+        await fold(
+            "short",
+            model=provider["scripted"],
+            max_tokens=max_tokens,
+            call_tokens=2,
+        )
+        == "short"
+    )
     assert provider.requests == []
 
 
@@ -123,6 +136,13 @@ async def test_the_fold_fits_its_budget_and_keeps_head_and_tail_verbatim() -> No
     assert "[summary of the omitted middle of this message]\n" in out
     assert "\n[end of summary]" in out
     assert provider.requests
+    for request in provider.requests:
+        prompt = _prompt(request)
+        content = prompt.split("<content>\n", 1)[1].removesuffix("\n</content>\n")
+        words = max(1, math.floor(max(1, _tokens(content) // 4) * 0.75))
+        assert prompt.startswith(
+            f"Summarize the content between the <content> tags in at most {words} words.\n",
+        )
 
 
 def _costly(request: Request) -> Response:
@@ -184,15 +204,17 @@ async def test_summaries_that_still_overflow_are_folded_again() -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "summarize",
-    [
-        _Summarize(truncate_calls=frozenset({0})),
-        _Summarize(empty_calls=frozenset({0})),
-    ],
+    ("truncate_calls", "empty_calls"),
+    [(frozenset({0}), frozenset[int]()), (frozenset[int](), frozenset({0}))],
     ids=["cut-off", "empty"],
 )
-async def test_a_failed_summary_is_asked_again(summarize: _Summarize) -> None:
-    provider, model = _model(summarize)
+async def test_a_failed_summary_is_asked_again(
+    truncate_calls: frozenset[int],
+    empty_calls: frozenset[int],
+) -> None:
+    provider, model = _model(
+        _Summarize(truncate_calls=truncate_calls, empty_calls=empty_calls),
+    )
     text, markers = _document()
 
     out = await _fold(model, text)
@@ -283,14 +305,76 @@ async def test_every_attempt_coming_back_empty_raises() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_budget_the_head_and_tail_fill_raises_before_any_call() -> None:
-    provider, model = _model(_Summarize())
-    text, _ = _document()
+@pytest.mark.parametrize("max_tokens", [1, 2])
+async def test_a_budget_the_head_and_tail_fill_raises_before_any_call(
+    max_tokens: int,
+) -> None:
+    provider = ScriptedProvider(replies=[reply("x")])
 
     with pytest.raises(FoldError, match="no room"):
-        _ = await fold(text, model=model, max_tokens=1, call_tokens=6_000)
+        _ = await fold(
+            "abcdefghijkl",
+            model=provider["scripted"],
+            max_tokens=max_tokens,
+            call_tokens=100,
+            opener="",
+            closer="",
+            prompt="{{content}}",
+        )
 
     assert provider.requests == []
+
+
+@pytest.mark.asyncio
+async def test_a_summary_that_fills_the_remaining_budget_needs_no_second_call() -> None:
+    provider = ScriptedProvider(replies=[reply("summary!")])
+
+    out = await fold(
+        "abcdefghijklmnopqrstuvwx",
+        model=provider["scripted"],
+        max_tokens=4,
+        call_tokens=100,
+        opener="",
+        closer="",
+        prompt="{{content}}",
+    )
+
+    assert _tokens(out) <= 4
+    assert out.startswith("abcd")
+    assert out.endswith("uvwx")
+    assert "summary!" in out
+    assert len(provider.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("responses", "expected"),
+    [
+        (("alpha", "beta"), "HEAD\n\nalpha\nbeta\n\nTAIL\n"),
+        (("", "a", "b", "c"), "HEAD\n\na\nb\nc\n\nTAIL\n"),
+    ],
+    ids=["chunks", "halved-chunk"],
+)
+async def test_joined_summaries_add_no_words_to_the_model_replies(
+    responses: tuple[str, ...],
+    expected: str,
+) -> None:
+    provider = ScriptedProvider(replies=[reply(text) for text in responses])
+
+    out = await fold(
+        "HEAD\naaaa\nbbbb\ncccc\ndddd\nTAIL\n",
+        model=provider["scripted"],
+        max_tokens=6,
+        call_tokens=4,
+        opener="",
+        closer="",
+        prompt="{{content}}",
+        attempts=1,
+    )
+
+    assert _tokens(out) <= 6
+    assert out == expected
+    assert len(provider.requests) == len(responses)
 
 
 @pytest.mark.asyncio
@@ -336,15 +420,144 @@ async def test_a_level_that_does_not_shrink_in_tokens_raises() -> None:
     assert [_prompt(r) for r in provider.requests] == ["aaa\n", "aaa\n"]
 
 
-def test_an_edge_wider_than_the_text_takes_all_of_it() -> None:
+@pytest.mark.parametrize(
+    ("text", "chars_per_token", "limit", "expected"),
+    [
+        ("ab\ncd\n", 4.0, 100, "ab\ncd\n"),
+        ("", 4.0, 1, ""),
+        ("abc\nnext", 1.5, 1, "ab"),
+    ],
+)
+def test_an_edge_preserves_whole_lines_or_cuts_the_first_line(
+    text: str,
+    chars_per_token: float,
+    limit: int,
+    expected: str,
+) -> None:
+    model = ScriptedProvider(
+        capability=ModelCapability(
+            model_id="scripted",
+            approx_chars_per_token=chars_per_token,
+        ),
+    )["scripted"]
+
+    assert agent_fold._edge(text, model=model, limit=limit) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "limit", "expected"),
+    [
+        ("", 10, []),
+        ("aaa\nbbbbbbb\nccc\ndddd\n", 3, ["aaa\nbbbbbbb\n", "ccc\ndddd\n"]),
+        ("aaa\nbbbbbbb\nccc\ndddd\n", 0, ["aaa\n", "bbbbbbb\n", "ccc\n", "dddd\n"]),
+    ],
+)
+def test_chunk_boundaries_preserve_every_character(
+    text: str,
+    limit: int,
+    expected: list[str],
+) -> None:
+    assert (
+        agent_fold._chunks(text, model=ScriptedProvider()["scripted"], limit=limit)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("abcde", ("ab", "cde")),
+        ("a\nlonger\n", ("a\n", "longer\n")),
+        ("a\nb\nc\nd\n", ("a\nb\n", "c\nd\n")),
+    ],
+)
+def test_halving_preserves_lines_and_every_character(
+    text: str,
+    expected: tuple[str, str],
+) -> None:
+    assert agent_fold._halve(text) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tokens", "shrink", "words_per_token", "words", "responses"),
+    [
+        (7, 2, 0.75, 2, ("a",)),
+        (3, 2, 1.5, 1, ("bbbbbbbbbbbb", "a")),
+        (1, 4, 1.75, 1, ("a",)),
+    ],
+)
+async def test_a_filled_call_at_its_budget_uses_the_requested_word_share(
+    tokens: int,
+    shrink: int,
+    words_per_token: float,
+    words: int,
+    responses: tuple[str, ...],
+) -> None:
+    provider = ScriptedProvider(
+        replies=[*[reply(text) for text in responses], *[reply("a")] * 20],
+    )
+    content = "c" * (4 * tokens)
+    invocation = agent_fold._Call(
+        model=provider["scripted"],
+        call_tokens=tokens,
+        shrink=shrink,
+        attempts=len(responses),
+        words_per_token=words_per_token,
+        spent=lambda _: None,
+        tag=lambda request: request,
+        prompt="{{words}}:{{content}}",
+    )
+
+    assert await agent_fold._summarize(content, call=invocation) == "a"
+    assert [_prompt(request) for request in provider.requests] == [
+        f"{words}:{content}",
+    ] * len(responses)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finished", [False, True], ids=["unfinished", "multipart"])
+async def test_an_attempt_uses_only_finished_assistant_text(
+    monkeypatch: pytest.MonkeyPatch,
+    finished: bool,
+) -> None:
+    response = replace(
+        reply("", spend=TokenCost(response=0.01)),
+        records=(
+            AssistantMessage(content=" alpha"),
+            call("Read"),
+            AssistantMessage(content=None),
+            AssistantMessage(content="beta "),
+        ),
+    )
+
+    async def stream(request: Request) -> AsyncIterator[TextChunk | Response]:
+        del request
+        yield TextChunk(text="partial")
+        if finished:
+            yield response
+
     model = ScriptedProvider()["scripted"]
+    monkeypatch.setattr(model, "stream", stream)
+    spent = Mock()
+    invocation = agent_fold._Call(
+        model=model,
+        call_tokens=10,
+        shrink=4,
+        attempts=1,
+        words_per_token=0.75,
+        spent=spent,
+        tag=lambda request: request,
+        prompt="{{content}}",
+    )
 
-    assert agent_fold._edge("ab\ncd\n", model=model, limit=100) == "ab\ncd\n"
-    assert agent_fold._edge("", model=model, limit=1) == ""
-
-
-def test_no_text_is_no_chunks() -> None:
-    assert agent_fold._chunks("", model=ScriptedProvider()["scripted"], limit=10) == []
+    assert await agent_fold._attempt("content", call=invocation) == (
+        "alphabeta" if finished else ""
+    )
+    if finished:
+        spent.assert_called_once_with(0.01)
+    else:
+        spent.assert_not_called()
 
 
 @pytest.mark.asyncio

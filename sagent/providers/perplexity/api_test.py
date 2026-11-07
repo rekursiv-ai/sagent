@@ -47,6 +47,9 @@ def test_supported_function_schema_and_tool_filter() -> None:
     denied = provider.encode(Request(tools=(tool,), allowed=frozenset()), model=model)
     assert "tools" not in denied
     assert denied["tool_choice"] == "none"
+    unrestricted = provider.encode(Request(), model=model)
+    assert "tools" not in unrestricted
+    assert "tool_choice" not in unrestricted
 
 
 if __name__ == "__main__":

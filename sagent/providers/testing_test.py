@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import TYPE_CHECKING, override
+from unittest.mock import AsyncMock, Mock, call
 
 import asyncio
 import socket
@@ -41,24 +42,66 @@ def test_a_free_port_can_be_bound() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_visit_returns_the_status_of_the_answer() -> None:
-    requests: list[bytes] = []
+async def test_a_visit_returns_the_status_of_the_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readline = AsyncMock(return_value=b"HTTP/1.1 418 Teapot\r\n")
+    reader = Mock(spec=asyncio.StreamReader, readline=readline)
+    write, close = Mock(), Mock()
+    drain, wait_closed = AsyncMock(), AsyncMock()
+    writer = Mock(
+        spec=asyncio.StreamWriter,
+        write=write,
+        drain=drain,
+        close=close,
+        wait_closed=wait_closed,
+    )
+    connect = AsyncMock(return_value=(reader, writer))
+    monkeypatch.setattr(asyncio, "open_connection", connect)
 
-    async def answer(
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        requests.append(await reader.readline())
-        writer.write(b"HTTP/1.1 418 Teapot\r\ncontent-length: 0\r\n\r\n")
-        await writer.drain()
-        writer.close()
+    assert await visit(9, "/a?b=c") == 418
+    assert await send(9, b"garbage\r\n") == 418
 
-    server = await asyncio.start_server(answer, "127.0.0.1", 0)
-    port = bound_port(server.sockets[0])
-    async with server:
-        assert await visit(port, "/a?b=c") == 418
-        assert await send(port, b"garbage\r\n") == 418
-    assert requests == [b"GET /a?b=c HTTP/1.1\r\n", b"garbage\r\n"]
+    assert connect.await_args_list == [call("127.0.0.1", 9)] * 2
+    assert write.call_args_list == [
+        call(b"GET /a?b=c HTTP/1.1\r\nhost: localhost\r\n\r\n"),
+        call(b"garbage\r\n"),
+    ]
+    assert drain.await_count == readline.await_count == 2
+    assert close.call_count == wait_closed.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["drain", "read", "status"])
+async def test_a_failed_visit_still_closes_its_connection(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    error = OSError("connection lost")
+    drain = AsyncMock(side_effect=error if failure == "drain" else None)
+    readline = AsyncMock(
+        return_value=b"HTTP/1.1 invalid Status\r\n",
+        side_effect=error if failure == "read" else None,
+    )
+    close, wait_closed = Mock(), AsyncMock()
+    writer = Mock(
+        spec=asyncio.StreamWriter,
+        drain=drain,
+        close=close,
+        wait_closed=wait_closed,
+    )
+    connect = AsyncMock(
+        return_value=(Mock(spec=asyncio.StreamReader, readline=readline), writer),
+    )
+    monkeypatch.setattr(asyncio, "open_connection", connect)
+
+    with pytest.raises(ValueError if failure == "status" else OSError) as caught:
+        await visit(9, "/callback")
+
+    if failure != "status":
+        assert caught.value is error
+    close.assert_called_once_with()
+    wait_closed.assert_awaited_once_with()
 
 
 def test_a_browser_opened_through_a_refused_module_fails_the_test(

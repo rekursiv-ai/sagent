@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,14 +12,17 @@ import stat
 
 import pytest
 
-from sagent.providers.login import file_lock
+from sagent.lib.userdirs import state_dir
 from sagent.session.types import UncategorizedToolResult, WriteResult
+from sagent.tools import write
 from sagent.tools.read import Read
 from sagent.tools.types import ToolContext
 from sagent.tools.write import Write, file_lock_path, write_file
 
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from treekle import PlainTree
 
 
@@ -40,24 +44,53 @@ def test_the_schema_requires_the_path_and_the_content() -> None:
     assert Write.schema["required"] == ["file_path", "content"]
 
 
+def test_file_locks_are_distinct_and_live_in_the_user_namespace(tmp_path: Path) -> None:
+    first, second = file_lock_path(tmp_path / "a.py"), file_lock_path(tmp_path / "b.py")
+
+    assert first != second
+    for lock in (first, second):
+        assert lock.parent == state_dir() / "rekursiv-ai" / "sagent" / "file-locks"
+        assert lock.suffix == ".lock"
+
+
 @pytest.mark.asyncio
 async def test_a_write_waits_for_another_agents_hold_then_sees_its_change(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Held by another agent mid-edit, the file is checked only once that lands."""
     path = tmp_path / "notes.md"
     path.write_text("old")
     context = ToolContext(cwd=tmp_path)
     context.files.saw(path)
-    async with file_lock(file_lock_path(tmp_path / "." / "notes.md")):
-        writing = asyncio.create_task(
+    gate, contending = asyncio.Lock(), asyncio.Event()
+    calls: list[Path] = []
+
+    @asynccontextmanager
+    async def lock(target: Path) -> AsyncGenerator[None]:
+        calls.append(target)
+        if gate.locked():
+            contending.set()
+        async with gate:
+            yield
+
+    monkeypatch.setattr(write, "file_lock", lock)
+    async with (
+        asyncio.TaskGroup() as tasks,
+        lock(
+            file_lock_path(tmp_path / "." / "notes.md"),
+        ),
+    ):
+        writing = tasks.create_task(
             Write().call(context, {"file_path": "notes.md", "content": "mine"}),
         )
-        await asyncio.sleep(0.05)
+        async with asyncio.timeout(1):
+            await contending.wait()
         assert not writing.done()
         path.write_text("theirs")
-    result = await writing
+    result = writing.result()
 
+    assert calls == [file_lock_path(path)] * 2
     assert result.is_error is True
     assert "changed since it was read" in result.text()
     assert path.read_text() == "theirs"
