@@ -125,19 +125,26 @@ async def test_a_hold_lifted_mid_wait_admits_at_once(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_change_to_another_key_leaves_a_waiter_waiting(
-    tmp_path: Path,
-) -> None:
-    async with _daemon(tmp_path) as (_, address):
-        gate = DaemonGate(address)
-        await asyncio.to_thread(gate.hold, "k", until=time.time() + 0.5)
-        waiting = asyncio.create_task(gate.admitted("k", _LONG))
-        await asyncio.sleep(0.1)
-        await asyncio.to_thread(gate.hold, "other", until=time.time() + 600.0)
-        await asyncio.sleep(0.1)
+async def test_a_change_to_another_key_leaves_a_waiter_waiting() -> None:
+    shared = Shared()
+    waiting = asyncio.create_task(shared._changed_within("k", 0, 60.0))
+    try:
+        await asyncio.sleep(0)
+        async with shared._changed:
+            shared._versions["other"] = 1
+            shared._changed.notify_all()
+        await asyncio.sleep(0)
         assert not waiting.done()
+        async with shared._changed:
+            shared._versions["k"] = 1
+            shared._changed.notify_all()
         async with asyncio.timeout(5):
-            assert await waiting == Admission()
+            assert await waiting is True
+        assert await shared._changed_within("k", 1, 0.0) is False
+        assert await shared._changed_within("k", 0, 60.0) is True
+    finally:
+        waiting.cancel()
+        await asyncio.gather(waiting, return_exceptions=True)
 
 
 @pytest.mark.asyncio

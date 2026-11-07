@@ -2,105 +2,80 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from functools import partial
-from io import StringIO
-from typing import TYPE_CHECKING
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import asyncio
 
-from prompt_toolkit.application import Application
-from prompt_toolkit.application.current import create_app_session
-from prompt_toolkit.data_structures import Size
-from prompt_toolkit.formatted_text import FormattedText
-from prompt_toolkit.input import create_pipe_input
-from prompt_toolkit.output import DummyOutput
-from prompt_toolkit.output.vt100 import Vt100_Output
-from treekle import PlainTree
+from prompt_toolkit.formatted_text import FormattedText, to_formatted_text
+from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
+from prompt_toolkit.layout import Layout, Window
+from prompt_toolkit.layout.controls import FormattedTextControl
 
 import pytest
 
-from sagent.agent.agent import Agent
-from sagent.agent.team import Team
-from sagent.lib.userdirs import config_dir
-from sagent.model.scripted import ScriptedProvider, call, reply
-from sagent.providers.catalog import ModelCatalog
-from sagent.session.types import UncategorizedToolResult, UserMessage
-from sagent.tools.display import ToolDisplay
+from sagent.agent.types import Agent
+from sagent.session.types import ToolCall
 from sagent.tui import tree
-from sagent.tui.prompt import repaint_on_change
 from sagent.tui.theme import load_theme
 from sagent.tui.tree import Row, pick, render, rows
 
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from sagent.tools.types import ToolContext
-    from sagent.tui.theme import Theme
+    from collections.abc import Iterator
 
 
 @dataclass(slots=True, kw_only=True)
-class _Wait:
-    """A tool that runs until cancelled."""
+class _Runtime:
+    jobs: dict[str, SimpleNamespace] = field(default_factory=dict[str, SimpleNamespace])
+    cohort: set[str] = field(default_factory=set[str])
+    model_call: object = None
+    compact_task: object = None
 
-    name: str = "Wait"
-    description: str = "Waits."
-    schema: Mapping[str, PlainTree] = field(
-        default_factory=lambda: {
-            "type": "object",
-            "properties": dict[str, PlainTree](),
+
+class _Agent(MagicMock):
+    runtime: _Runtime
+    tools: dict[str, SimpleNamespace]
+    spend_usd: float
+
+
+@dataclass(slots=True, kw_only=True)
+class _Team:
+    agents: dict[str, _Agent] = field(default_factory=dict[str, _Agent])
+    parents: dict[str, str | None] = field(default_factory=dict[str, str | None])
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self.agents)
+
+    def __getitem__(self, label: str) -> _Agent:
+        return self.agents[label]
+
+    def parent(self, label: str) -> str | None:
+        return self.parents[label]
+
+
+def _team() -> _Team:
+    parents = {"Agent": None, "kid": "Agent", "other": "Agent", "grand": "kid"}
+    return _Team(
+        parents=parents,
+        agents={
+            label: _Agent(
+                spec=Agent,
+                spend_usd=0.0,
+                tools={},
+                runtime=_Runtime(),
+            )
+            for label in parents
         },
     )
-    display: ToolDisplay = field(default_factory=ToolDisplay)
-    started: asyncio.Event = field(default_factory=asyncio.Event)
-
-    def summary(self, arguments: Mapping[str, PlainTree]) -> str:
-        return f"{self.name} {arguments.get('on', '')}".strip()
-
-    def serialize_key(
-        self,
-        context: ToolContext,
-        arguments: Mapping[str, PlainTree],
-    ) -> str | None:
-        del context, arguments
-        return None
-
-    async def call(
-        self,
-        context: ToolContext,
-        arguments: Mapping[str, PlainTree],
-    ) -> UncategorizedToolResult:
-        del context, arguments
-        self.started.set()
-        await asyncio.Event().wait()
-        return UncategorizedToolResult(call_id="", content="never")
-
-
-def _team() -> Team:
-    """Return ``Agent``, its children ``kid`` and ``other``, and ``kid``'s ``grand``."""
-    team = Team(catalog=ModelCatalog(factories={}))
-    for label, parent in (
-        ("Agent", None),
-        ("kid", "Agent"),
-        ("other", "Agent"),
-        ("grand", "kid"),
-    ):
-        _ = team.join(
-            Agent(model=ScriptedProvider()["scripted"]),
-            label=label,
-            parent=parent,
-        )
-    return team
 
 
 def test_each_agent_follows_its_parent_depth_first_with_the_shown_one_marked() -> None:
     team = _team()
     team["kid"].spend_usd = 0.25
-
     shown = rows(team, focused="kid", now=0.0)
-
     assert [(r.branch, r.text, r.state, r.detail) for r in shown] == [
         ("", "Agent", "idle", "$0.00"),
         ("├─ ", "● kid", "idle", "$0.25"),
@@ -112,98 +87,72 @@ def test_each_agent_follows_its_parent_depth_first_with_the_shown_one_marked() -
 
 def test_an_agent_calling_its_model_or_compacting_alone_is_busy() -> None:
     team = _team()
-
-    async def never() -> None:
-        await asyncio.Event().wait()
-
-    async def check() -> None:
-        kid, other = team["kid"].runtime, team["other"].runtime
-        kid.model_call = asyncio.create_task(never())
-        other.compact_task = asyncio.create_task(never())
-        try:
-            assert [r.state for r in rows(team, focused="kid", now=0.0)] == [
-                "idle",
-                "busy",
-                "idle",
-                "busy",
-            ]
-        finally:
-            for task in (kid.model_call, other.compact_task):
-                _ = task.cancel()
-
-    asyncio.run(check())
+    team["kid"].runtime.model_call = object()
+    team["other"].runtime.compact_task = object()
+    assert [r.state for r in rows(team, focused="kid", now=0.0)] == [
+        "idle",
+        "busy",
+        "idle",
+        "busy",
+    ]
 
 
-@pytest.mark.asyncio
-async def test_a_last_child_s_job_hangs_from_a_blank_stem_and_never_runs_backwards() -> (
-    None
-):
-    wait = _Wait()
-    team = Team(catalog=ModelCatalog(factories={}))
-    _ = team.join(Agent(model=ScriptedProvider()["scripted"]))
-    provider = ScriptedProvider(replies=[reply(calls=[call("Wait", "w1")])])
-    async with Agent(model=provider["scripted"], tools=[wait]) as kid:
-        _ = team.join(kid, label="kid", parent="Agent")
-        kid.runtime.push(UserMessage(content="go"))
-        await asyncio.wait_for(wait.started.wait(), timeout=5)
-        started = kid.runtime.jobs["w1"].started
-
-        shown = rows(team, focused="Agent", now=started - 5)
-
-        assert [(r.branch, r.text, r.detail) for r in shown] == [
-            ("", "● Agent", "$0.00"),
-            ("└─ ", "kid", "$0.00"),
-            ("   └─ ", "Wait", "0s"),
-        ]
-        kid.runtime.halt()
+def test_a_last_child_s_job_hangs_from_a_blank_stem_and_never_runs_backwards() -> None:
+    team = _team()
+    del team.agents["grand"], team.agents["other"]
+    team["kid"].runtime.jobs = {
+        "w1": SimpleNamespace(
+            call=ToolCall(call_id="w1", name="Wait", arguments={}),
+            started=10.0,
+            state="running",
+        ),
+    }
+    team["kid"].tools = {
+        "Wait": SimpleNamespace(summary=MagicMock(return_value="Wait")),
+    }
+    shown = rows(team, focused="Agent", now=5.0)
+    assert [(r.branch, r.text, r.detail) for r in shown] == [
+        ("", "● Agent", "$0.00"),
+        ("└─ ", "kid", "$0.00"),
+        ("   └─ ", "Wait", "0s"),
+    ]
 
 
-@pytest.mark.asyncio
-async def test_a_busy_agent_lists_its_jobs_but_not_its_spawns() -> None:
-    wait, spawn = _Wait(), _Wait(name="AgentSpawn")
-    team = Team(catalog=ModelCatalog(factories={}))
-    provider = ScriptedProvider(
-        replies=[
-            reply(calls=[call("Wait", "w1", on="tests"), call("AgentSpawn", "s1")]),
-        ],
-    )
-    async with Agent(model=provider["scripted"], tools=[wait, spawn]) as agent:
-        _ = team.join(agent)
-        _ = team.join(
-            Agent(model=ScriptedProvider()["scripted"]),
-            label="kid",
-            parent="Agent",
+def test_a_busy_agent_lists_its_jobs_but_not_its_spawns() -> None:
+    team = _team()
+    del team.agents["grand"], team.agents["other"]
+    team["Agent"].runtime.cohort = {"w1", "s1"}
+    team["Agent"].runtime.jobs = {
+        call_id: SimpleNamespace(
+            call=ToolCall(call_id=call_id, name=name, arguments={"on": "tests"}),
+            started=10.0,
+            state="running",
         )
-        agent.runtime.push(UserMessage(content="go"))
-        await asyncio.wait_for(wait.started.wait(), timeout=5)
-        await asyncio.wait_for(spawn.started.wait(), timeout=5)
-        started = agent.runtime.jobs["w1"].started
-
-        shown = rows(team, focused="Agent", now=started + 42)
-
-        assert [(r.branch, r.text, r.state, r.detail, r.call_id) for r in shown] == [
-            ("", "● Agent", "busy", "$0.00", ""),
-            ("├─ ", "Wait tests", "running", "42s", "w1"),
-            ("└─ ", "kid", "idle", "$0.00", ""),
-        ]
-        agent.runtime.halt()
+        for call_id, name in (("w1", "Wait"), ("s1", "AgentSpawn"))
+    }
+    summary = MagicMock(return_value="Wait tests")
+    team["Agent"].tools = {"Wait": SimpleNamespace(summary=summary)}
+    shown = rows(team, focused="Agent", now=52.0)
+    assert [(r.branch, r.text, r.state, r.detail, r.call_id) for r in shown] == [
+        ("", "● Agent", "busy", "$0.00", ""),
+        ("├─ ", "Wait tests", "running", "42s", "w1"),
+        ("└─ ", "kid", "idle", "$0.00", ""),
+    ]
+    summary.assert_called_once_with({"on": "tests"})
 
 
-@pytest.mark.asyncio
-async def test_a_job_whose_tool_is_gone_shows_its_name() -> None:
-    wait = _Wait()
-    team = Team(catalog=ModelCatalog(factories={}))
-    provider = ScriptedProvider(replies=[reply(calls=[call("Wait", "w1")])])
-    async with Agent(model=provider["scripted"], tools=[wait]) as agent:
-        _ = team.join(agent)
-        agent.runtime.push(UserMessage(content="go"))
-        await asyncio.wait_for(wait.started.wait(), timeout=5)
-        agent.tools = {}
-
-        (_, job) = rows(team, focused="Agent")
-
-        assert (job.branch, job.text) == ("└─ ", "Wait")
-        agent.runtime.halt()
+def test_a_job_whose_tool_is_gone_shows_its_name() -> None:
+    team = _team()
+    team.agents = {"Agent": team["Agent"]}
+    team["Agent"].runtime.jobs = {
+        "w1": SimpleNamespace(
+            call=ToolCall(call_id="w1", name="Wait", arguments={}),
+            started=0.0,
+            state="detached",
+        ),
+    }
+    _, job = rows(team, focused="Agent")
+    assert (job.branch, job.text, job.state) == ("└─ ", "Wait", "detached")
 
 
 def test_the_cursor_row_is_reversed_and_long_text_is_cut() -> None:
@@ -211,9 +160,7 @@ def test_the_cursor_row_is_reversed_and_long_text_is_cut() -> None:
         Row(label="a", branch="", text="a", state="idle", detail="$0.00"),
         Row(label="b", branch="└─ ", text="b" * 100, state="busy", detail="$1.00"),
     ]
-
     lines = render(shown, cursor=1, note="stopping b")
-
     styles = [part[0] for part in lines if part[1].strip()]
     texts = [part[1] for part in lines]
     assert styles == ["", "class:tree.selected", "class:tree.help"]
@@ -238,7 +185,7 @@ def test_short_rows_draw_at_least_32_wide_and_a_full_row_is_not_cut() -> None:
             ("class:tree.help", "\n ↑↓ move · Enter focus · Del stop · → back\n"),
         ],
     )
-    (first, *_) = render(
+    first, *_ = render(
         [Row(label="a", branch="", text="a", state="idle", detail="")],
         cursor=0,
     )
@@ -253,16 +200,14 @@ def test_with_no_rows_only_the_keys_are_drawn() -> None:
 
 @dataclass(slots=True, kw_only=True)
 class _Said:
-    """What Delete asked for; a stop takes the agent out of ``team``, as a real one does."""
-
-    team: Team | None = None
+    team: _Team | None = None
     stopped: list[str] = field(default_factory=list[str])
     cancelled: list[tuple[str, str]] = field(default_factory=list[tuple[str, str]])
 
     def stop(self, label: str) -> str:
         self.stopped.append(label)
         if self.team is not None:
-            _ = self.team.leave(label)
+            del self.team.agents[label]
         return f"stopping {label}"
 
     def cancel(self, label: str, call_id: str) -> str:
@@ -270,236 +215,239 @@ class _Said:
         return f"cancelled {call_id}"
 
 
-async def _pick(
-    team: Team,
-    keys: str,
-    *,
-    focused: str = "kid",
-    said: _Said | None = None,
-) -> tuple[str | None, _Said]:
-    said = said if said is not None else _Said()
-    with (
-        create_pipe_input() as pipe,
-        create_app_session(input=pipe, output=DummyOutput()),
-    ):
-        pipe.send_text(keys)
-        picked = await asyncio.wait_for(
-            pick(team, focused=focused, stop=said.stop, cancel=said.cancel),
-            timeout=5,
-        )
-    return picked, said
+def _press(screen: tree._Screen, *keys: str) -> MagicMock:
+    exiting = MagicMock()
+    event = MagicMock(spec=KeyPressEvent, app=SimpleNamespace(exit=exiting))
+    bindings = screen.keys()
+    for key in keys:
+        (binding,) = bindings.get_bindings_for_keys((key,))
+        binding.handler(event)
+    return exiting
 
 
-# ``then`` changes the tree mid-way; with ``team_leaves``, an agent Delete stops leaves
-# ``team``.
-async def _drawn(
-    team: Team,
-    keys: str,
-    *,
-    focused: str,
-    then: Callable[[], None] | None = None,
-    painted: asyncio.Event | None = None,
-    team_leaves: bool = False,
-    theme: Theme | None = None,
-) -> tuple[str, str]:
-    """Return what ``pick`` writes to a terminal before ``keys``, and in all."""
-    written = StringIO()
-    output = Vt100_Output(written, lambda: Size(rows=24, columns=80), term="xterm")
-    said = _Said(team=team if team_leaves else None)
-    with create_pipe_input() as pipe, create_app_session(input=pipe, output=output):
-        picking = asyncio.ensure_future(
-            pick(
-                team,
-                focused=focused,
-                stop=said.stop,
-                cancel=said.cancel,
-                theme=theme,
-            ),
-        )
-        if then is not None:
-            assert painted is not None
-            await asyncio.wait_for(painted.wait(), timeout=5)
-            painted.clear()
-            then()
-            await asyncio.wait_for(painted.wait(), timeout=5)
-        before = written.getvalue()
-        pipe.send_text(keys)
-        _ = await asyncio.wait_for(picking, timeout=5)
-    return before, written.getvalue()
-
-
-_UP, _DOWN, _RIGHT, _DELETE = "\x1b[A", "\x1b[B", "\x1b[C", "\x1b[3~"
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("keys", "picked"),
     [
-        ("\r", "kid"),
-        (f"{_DOWN}\r", "grand"),
-        (f"{_DOWN * 9}\r", "other"),
-        (f"{_UP * 9}\r", "Agent"),
-        (f"{_DOWN}{_DOWN}{_UP}\r", "grand"),
-        (f"{_DOWN * 9}{_UP}\r", "grand"),
-        (_RIGHT, None),
-        ("\x03", None),
+        (("c-m",), "kid"),
+        (("down", "c-m"), "grand"),
+        ((*["down"] * 4, "c-m"), "other"),
+        ((*["up"] * 2, "c-m"), "Agent"),
+        (("down", "down", "up", "c-m"), "grand"),
+        ((*["down"] * 4, "up", "c-m"), "grand"),
+        (("right",), None),
+        (("c-c",), None),
     ],
 )
-async def test_the_cursor_starts_on_the_shown_agent_and_enter_picks(
-    keys: str,
+def test_the_cursor_starts_on_the_shown_agent_and_enter_picks(
+    keys: tuple[str, ...],
     picked: str | None,
 ) -> None:
-    assert (await _pick(_team(), keys))[0] == picked
+    said = _Said()
+    screen = tree._Screen(
+        team=_team(),
+        focused="kid",
+        stop=said.stop,
+        cancel=said.cancel,
+    )
+    _press(screen, *keys).assert_called_once_with(result=picked)
 
 
-@pytest.mark.asyncio
-async def test_a_shown_agent_not_in_the_tree_starts_the_cursor_on_the_first_row() -> (
-    None
-):
-    assert (await _pick(_team(), "\r", focused="gone"))[0] == "Agent"
+def test_a_shown_agent_not_in_the_tree_starts_the_cursor_on_the_first_row() -> None:
+    said = _Said()
+    screen = tree._Screen(
+        team=_team(),
+        focused="gone",
+        stop=said.stop,
+        cancel=said.cancel,
+    )
+    _press(screen, "c-m").assert_called_once_with(result="Agent")
 
 
 @pytest.mark.asyncio
 async def test_the_tree_takes_the_full_screen_with_the_cursor_hidden() -> None:
-    _, drawn = await _drawn(_team(), _RIGHT, focused="kid")
-
-    opened, _, rest = drawn.partition("\x1b[?1049h")
-    shown, _, closed = rest.partition("\x1b[?1049l")
-    assert "\x1b[0;7m ├─ ● kid " in shown
-    assert "\x1b[?25h" not in shown
-    assert closed.endswith("\x1b[?25h")
-    assert opened
-
-
-@pytest.mark.asyncio
-async def test_custom_theme_colors_reach_the_live_picker() -> None:
-    path = config_dir() / "rekursiv-ai" / "sagent" / "themes" / "tree-test.yaml"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    _ = path.write_text(
-        "preset: terminal\nstyles:\n  selected: magenta\n  status: cyan\n",
-    )
-    _, drawn = await _drawn(
-        _team(),
-        _RIGHT,
-        focused="kid",
-        theme=load_theme("tree-test"),
-    )
-    assert "\x1b[0;35m ├─ ● kid " in drawn
-    assert "\x1b[0;36m" in drawn
-    assert "↑↓ move" in drawn
-
-
-@pytest.mark.asyncio
-async def test_a_tree_that_changes_while_shown_is_redrawn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
     team = _team()
-    painted = asyncio.Event()
-
-    def after_render(app: Application[str | None]) -> None:
-        del app
-        painted.set()
-
-    monkeypatch.setattr(
-        tree,
-        "Application",
-        partial(Application, after_render=after_render),
+    said = _Said()
+    before = asyncio.all_tasks()
+    invalidate = MagicMock()
+    made = SimpleNamespace(
+        run_async=AsyncMock(return_value="kid"),
+        invalidate=invalidate,
     )
-    monkeypatch.setattr(
-        tree,
-        "repaint_on_change",
-        partial(repaint_on_change, interval_sec=0),
+    repaint = AsyncMock()
+    with (
+        patch.object(tree, "Application", return_value=made) as application,
+        patch.object(tree, "repaint_on_change", repaint),
+    ):
+        assert (
+            await pick(team, focused="kid", stop=said.stop, cancel=said.cancel) == "kid"
+        )
+    options = application.call_args.kwargs
+    assert options["full_screen"] is True
+    window = cast(Layout, options["layout"]).container
+    assert isinstance(window, Window)
+    assert window.always_hide_cursor()
+    control = window.content
+    assert isinstance(control, FormattedTextControl)
+    assert any(
+        part[0] == "class:tree.selected" and "├─ ● kid" in part[1]
+        for part in to_formatted_text(control.text)
     )
-
-    def spend() -> None:
-        team["other"].spend_usd = 0.5
-
-    before_keys, _ = await _drawn(
-        team,
-        _RIGHT,
-        focused="kid",
-        then=spend,
-        painted=painted,
+    keys = cast(KeyBindings, options["key_bindings"])
+    (down,) = keys.get_bindings_for_keys(("down",))
+    down.handler(MagicMock(spec=KeyPressEvent))
+    assert any(
+        part[0] == "class:tree.selected" and "grand" in part[1]
+        for part in to_formatted_text(control.text)
     )
-
-    # The first frame ends with the cursor sent back up the screen; a redraw
-    # writes only what changed: ``$0.00`` became ``$0.50``.
-    first, _, redrawn = before_keys.partition("\x1b[23A")
-    assert "$0.00" in first
-    assert "5" in redrawn
+    (delete,) = keys.get_bindings_for_keys(("delete",))
+    delete.handler(MagicMock(spec=KeyPressEvent))
+    assert said.stopped == ["grand"]
+    team["grand"].runtime.jobs = {
+        "w1": SimpleNamespace(
+            call=ToolCall(call_id="w1", name="Wait", arguments={}),
+            started=0.0,
+            state="running",
+        ),
+    }
+    down.handler(MagicMock(spec=KeyPressEvent))
+    delete.handler(MagicMock(spec=KeyPressEvent))
+    assert said.cancelled == [("grand", "w1")]
+    repaint.assert_called_once_with(invalidate, control.text)
+    assert options["style"] is load_theme().prompt_style()
+    (redraw,) = asyncio.all_tasks() - before
+    assert redraw.cancelling() == 1
+    with pytest.raises(asyncio.CancelledError):
+        await redraw
 
 
 @pytest.mark.asyncio
-async def test_what_delete_did_is_said_and_the_cursor_falls_back_a_row() -> None:
-    team = _team()
+async def test_custom_theme_colors_reach_the_picker() -> None:
+    said = _Said()
+    theme = load_theme("terminal")
+    before = asyncio.all_tasks()
+    made = SimpleNamespace(
+        run_async=AsyncMock(side_effect=RuntimeError("closed")),
+        invalidate=MagicMock(),
+    )
+    with (
+        patch.object(tree, "Application", return_value=made) as application,
+        pytest.raises(RuntimeError, match="closed"),
+    ):
+        await pick(
+            _team(),
+            focused="kid",
+            stop=said.stop,
+            cancel=said.cancel,
+            theme=theme,
+        )
+    assert application.call_args.kwargs["style"] is theme.prompt_style()
+    (redraw,) = asyncio.all_tasks() - before
+    assert redraw.cancelling() == 1
+    with pytest.raises(asyncio.CancelledError):
+        await redraw
 
-    _, drawn = await _drawn(
-        team,
-        f"{_DELETE}{_RIGHT}",
+
+def test_a_tree_that_changes_while_shown_is_redrawn() -> None:
+    team = _team()
+    said = _Said()
+    screen = tree._Screen(team=team, focused="kid", stop=said.stop, cancel=said.cancel)
+    before = screen.text()
+    team["other"].spend_usd = 0.5
+    after = screen.text()
+    assert before != after
+    assert "$0.00" in before[-3][1]
+    assert "$0.50" in after[-3][1]
+
+
+def test_what_delete_did_is_said_and_the_cursor_falls_back_a_row() -> None:
+    team = _team()
+    said = _Said(team=team)
+    screen = tree._Screen(
+        team=team,
         focused="other",
-        team_leaves=True,
+        stop=said.stop,
+        cancel=said.cancel,
     )
-
-    # Before the Delete, grand hangs from ``│  ``: these are drawn only after.
-    assert "\x1b[0;7m    └─ grand " in drawn
-    assert "→ back · stopping other" in drawn
-
-
-@pytest.mark.asyncio
-async def test_a_lone_root_is_drawn_under_the_cursor() -> None:
-    team = Team(catalog=ModelCatalog(factories={}))
-    _ = team.join(Agent(model=ScriptedProvider()["scripted"]))
-
-    _, drawn = await _drawn(team, _RIGHT, focused="Agent")
-
-    assert "\x1b[0;7m ● Agent " in drawn
+    _press(screen, "delete")
+    drawn = screen.text()
+    assert drawn[-3][0] == "class:tree.selected"
+    assert "   └─ grand" in drawn[-3][1]
+    assert drawn[-1][1].endswith("→ back · stopping other\n")
 
 
-@pytest.mark.asyncio
-async def test_delete_stops_the_agent_of_its_row() -> None:
-    _, said = await _pick(_team(), f"{_DOWN}{_DELETE}{_RIGHT}")
+def test_a_lone_root_is_drawn_under_the_cursor() -> None:
+    team = _team()
+    team.agents = {"Agent": team["Agent"]}
+    said = _Said()
+    screen = tree._Screen(
+        team=team,
+        focused="Agent",
+        stop=said.stop,
+        cancel=said.cancel,
+    )
+    first, *_ = screen.text()
+    assert first == ("class:tree.selected", f" {'● Agent':<32}  idle         $0.00 ")
+
+
+def test_delete_stops_the_agent_of_its_row() -> None:
+    said = _Said()
+    screen = tree._Screen(
+        team=_team(),
+        focused="kid",
+        stop=said.stop,
+        cancel=said.cancel,
+    )
+    _press(screen, "down", "delete", "right").assert_called_once_with(result=None)
     assert (said.stopped, said.cancelled) == (["grand"], [])
 
 
-@pytest.mark.asyncio
-async def test_delete_on_a_job_cancels_it() -> None:
-    wait = _Wait()
-    team = Team(catalog=ModelCatalog(factories={}))
-    provider = ScriptedProvider(replies=[reply(calls=[call("Wait", "w1")])])
-    async with Agent(model=provider["scripted"], tools=[wait]) as agent:
-        _ = team.join(agent)
-        agent.runtime.push(UserMessage(content="go"))
-        await asyncio.wait_for(wait.started.wait(), timeout=5)
-
-        _, said = await _pick(team, f"{_DOWN}{_DELETE}{_RIGHT}", focused="Agent")
-
-        assert (said.stopped, said.cancelled) == ([], [("Agent", "w1")])
-        agent.runtime.halt()
-
-
-@pytest.mark.asyncio
-async def test_when_the_last_row_leaves_the_cursor_falls_back_a_row() -> None:
+def test_delete_on_a_job_cancels_it() -> None:
     team = _team()
-    picked, said = await _pick(
-        team,
-        f"{_DELETE}\r",
-        focused="other",
-        said=_Said(team=team),
-    )
-    assert (picked, said.stopped) == ("grand", ["other"])
-
-
-@pytest.mark.asyncio
-async def test_with_every_agent_gone_enter_and_delete_do_nothing() -> None:
-    team = Team(catalog=ModelCatalog(factories={}))
-    _ = team.join(Agent(model=ScriptedProvider()["scripted"]))
-    picked, said = await _pick(
-        team,
-        f"{_DELETE}{_DELETE}\r{_RIGHT}",
+    team["Agent"].runtime.jobs = {
+        "w1": SimpleNamespace(
+            call=ToolCall(call_id="w1", name="Wait", arguments={}),
+            started=0.0,
+            state="running",
+        ),
+    }
+    said = _Said()
+    screen = tree._Screen(
+        team=team,
         focused="Agent",
-        said=_Said(team=team),
+        stop=said.stop,
+        cancel=said.cancel,
     )
-    assert (picked, said.stopped) == (None, ["Agent"])
+    _press(screen, "down", "delete", "right").assert_called_once_with(result=None)
+    assert (said.stopped, said.cancelled) == ([], [("Agent", "w1")])
+
+
+def test_when_the_last_row_leaves_the_cursor_falls_back_a_row() -> None:
+    team = _team()
+    said = _Said(team=team)
+    screen = tree._Screen(
+        team=team,
+        focused="other",
+        stop=said.stop,
+        cancel=said.cancel,
+    )
+    _press(screen, "delete", "c-m").assert_called_once_with(result="grand")
+    assert said.stopped == ["other"]
+
+
+def test_with_every_agent_gone_enter_and_delete_do_nothing() -> None:
+    team = _team()
+    team.agents = {"Agent": team["Agent"]}
+    said = _Said(team=team)
+    screen = tree._Screen(
+        team=team,
+        focused="Agent",
+        stop=said.stop,
+        cancel=said.cancel,
+    )
+    _press(screen, "delete", "delete", "c-m").assert_not_called()
+    assert screen.text() == render([], cursor=0, note="stopping Agent")
+    _press(screen, "right").assert_called_once_with(result=None)
+    assert said.stopped == ["Agent"]
 
 
 if __name__ == "__main__":

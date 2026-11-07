@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Self
 
 import fcntl
@@ -265,6 +266,26 @@ async def test_edit_changes_a_grant_and_del_revokes_it(tmp_path: Path) -> None:
     assert [g.tools for g in strings.listing(dirs).grants] == [("Bash",), None]
     _ = await strings.remove(dirs, first.id)
     assert strings.listing(dirs).grants == (second,)
+
+
+@pytest.mark.asyncio
+async def test_edit_enables_and_revokes_peer_messaging_without_changing_tools(
+    tmp_path: Path,
+) -> None:
+    dirs = _dirs(tmp_path)
+    _served(dirs)
+    _ = await strings.add(dirs, tools=("Read",))
+    _ = await strings.add(dirs, tools=("Bash",), peer_messaging=True)
+    first, second = strings.listing(dirs).grants
+
+    await strings.edit(dirs, first.id, peer_messaging=True)
+    assert strings.listing(dirs).grants == (
+        replace(first, peer_messaging=True),
+        second,
+    )
+
+    await strings.edit(dirs, first.id, peer_messaging=False)
+    assert strings.listing(dirs).grants == (first, second)
 
 
 @pytest.mark.asyncio

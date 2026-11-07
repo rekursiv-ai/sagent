@@ -76,9 +76,7 @@ def test_an_unreaped_zombie_runs_only_where_its_state_is_unreadable(
     counted: bool,
 ) -> None:
     """It only waits for its parent to collect it, which ``kill(pid, 0)`` cannot tell."""
-    pid = os.fork()
-    if pid == 0:
-        os._exit(0)
+    pid = os.posix_spawn("/bin/true", ["/bin/true"], os.environ)
     try:
         _ = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT)
         assert running(pid, proc=proc) == counted
@@ -152,10 +150,7 @@ async def test_gone_within_waits_for_an_exit_and_notices_it_promptly() -> None:
 
 def test_a_killed_child_is_reaped_so_no_one_else_collects_it() -> None:
     """A harness that waits on any child, as mutmut does, would collect it."""
-    pid = os.fork()
-    if pid == 0:
-        signal.pause()
-        os._exit(0)
+    pid = os.posix_spawn("/bin/sleep", ["/bin/sleep", "60"], os.environ)
     kill_and_reap([pid])
     with pytest.raises(ChildProcessError):
         _ = os.waitpid(pid, os.WNOHANG)
@@ -192,12 +187,21 @@ async def test_a_process_not_ours_is_killed_and_not_waited_for(
         os.kill(denied, signal.SIGKILL)
 
 
-def test_a_process_long_gone_is_passed_over() -> None:
-    pid = os.fork()
-    if pid == 0:
-        os._exit(0)
-    _ = os.waitpid(pid, 0)
-    kill_and_reap([pid])
+def test_a_process_long_gone_is_passed_over(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempted: list[tuple[int, int]] = []
+
+    def gone(pid: int, sig: int) -> None:
+        attempted.append((pid, sig))
+        raise ProcessLookupError(3, "No such process")
+
+    def reaped(pid: int, options: int) -> tuple[int, int]:
+        attempted.append((pid, options))
+        raise ChildProcessError(10, "No child processes")
+
+    monkeypatch.setattr(os, "kill", gone)
+    monkeypatch.setattr(os, "waitpid", reaped)
+    kill_and_reap([42])
+    assert attempted == [(42, signal.SIGKILL), (42, 0)]
 
 
 @pytest.mark.asyncio

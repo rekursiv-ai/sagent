@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import platform
-import shutil
 import subprocess
 import sys
 
@@ -18,14 +17,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-@pytest.fixture(autouse=True)
-def isolate_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep git off the user's config, and from walking above ``tmp_path``."""
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "gitconfig"))
-    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
-
-
 def test_a_directory_outside_any_repository_says_so(tmp_path: Path) -> None:
     lines = environment(tmp_path).splitlines()
 
@@ -35,7 +26,8 @@ def test_a_directory_outside_any_repository_says_so(tmp_path: Path) -> None:
 
 def test_a_repository_is_named_without_the_worktree_warning(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
-    _git("init", "-q", str(repo))
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
 
     lines = environment(repo).splitlines()
 
@@ -45,11 +37,16 @@ def test_a_repository_is_named_without_the_worktree_warning(tmp_path: Path) -> N
 
 def test_a_linked_worktree_is_told_to_stay_put(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
-    _git("init", "-q", str(repo))
-    _git("-C", str(repo), "commit", "-q", "--allow-empty", "-m", "init")
-    _git("-C", str(repo), "worktree", "add", "-q", str(tmp_path / "wt"))
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    gitdir = repo / ".git" / "worktrees" / "wt"
+    gitdir.mkdir(parents=True)
+    (gitdir / "HEAD").write_text("ref: refs/heads/wt\n")
+    checkout = tmp_path / "wt"
+    checkout.mkdir()
+    (checkout / ".git").write_text("gitdir: ../repo/.git/worktrees/wt\n")
 
-    lines = environment(tmp_path / "wt").splitlines()
+    lines = environment(checkout).splitlines()
 
     assert lines[0] == (
         "This working directory is a git worktree (not the primary checkout)."
@@ -64,7 +61,8 @@ def test_the_git_state_is_read_without_running_a_process(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo = tmp_path / "repo"
-    _git("init", "-q", str(repo))
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     (repo / "sub").mkdir()
 
     def refuse(*args: object, **kwargs: object) -> None:
@@ -114,7 +112,8 @@ def test_a_dot_git_file_naming_no_repository_is_none(
 
 def test_a_dot_git_directory_without_a_head_is_passed_over(tmp_path: Path) -> None:
     outer = tmp_path / "outer"
-    _git("init", "-q", str(outer))
+    (outer / ".git").mkdir(parents=True)
+    (outer / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
     inner = outer / "inner"
     (inner / ".git").mkdir(parents=True)
 
@@ -173,22 +172,6 @@ def test_the_knowledge_cutoff_is_the_last_line_when_known(tmp_path: Path) -> Non
         "Knowledge cutoff: June 2026."
     )
     assert "Knowledge cutoff" not in environment(tmp_path)
-
-
-def _git(*args: str) -> None:
-    """Run git with a fixed identity, failing the test on error."""
-    subprocess.run(  # noqa: S603 -- The arguments are the test's own.
-        [
-            shutil.which("git") or "git",
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            *args,
-        ],
-        check=True,
-        capture_output=True,
-    )
 
 
 if __name__ == "__main__":

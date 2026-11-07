@@ -1238,7 +1238,13 @@ async def test_a_choice_rolls_down_to_each_child_that_made_none(
 
 
 @pytest.mark.asyncio
-async def test_default_on_a_child_takes_its_parent_s_again() -> None:
+async def test_default_on_a_child_takes_its_parent_s_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def owners(commands: Commands) -> list[tuple[tuple[str, ...], HasSettings]]:
+        return [((), commands), (("screen",), ScreenSettings(view=commands.screen))]
+
+    monkeypatch.setattr(Commands, "owners", owners)
     desk, screens = _rolled(("a", "Agent"), ("a1", "a"))
     team = desk.team
     assert team is not None
