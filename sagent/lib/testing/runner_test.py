@@ -7,6 +7,10 @@ import pytest
 from sagent.lib.testing import runner
 
 
+def test_runner_opts_out_of_pytest_collection() -> None:
+    assert runner.__test__ is False
+
+
 def test_test_main_exits_with_pytest_result(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[list[str]] = []
 

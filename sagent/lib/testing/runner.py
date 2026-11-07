@@ -12,6 +12,10 @@ import sys
 import pytest
 
 
+# Explicit gate selection can hand this helper module to pytest.
+__test__ = False
+
+
 def test_main(test_file: str) -> None:
     """Run pytest on a test file with standard flags.
 
