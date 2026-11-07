@@ -504,6 +504,7 @@ repos:
         name: ty-check
         language: system
         stages: [pre-commit]
+        verbose: true
         require_serial: true
         pass_filenames: false
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
@@ -527,6 +528,7 @@ repos:
         name: pyrefly-check
         language: system
         stages: [pre-commit]
+        verbose: true
         require_serial: true
         pass_filenames: false
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.

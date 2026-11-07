@@ -600,7 +600,7 @@ wheels = [
 [[package]]
 name = "codedoctor"
 version = "0.1.2"
-source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#311c5c26999748c7df8c38bd906c71f8b671ae55" }
+source = { git = "https://github.com/rekursiv-ai/codedoctor?branch=main#cd7ca9a2387bde4db2a3ed4d21991bba1b63ae75" }
 dependencies = [
     { name = "rignore" },
     { name = "treekle" },
@@ -3295,7 +3295,7 @@ wheels = [
 [[package]]
 name = "rekursiv-ai-typings"
 version = "0.1.15"
-source = { git = "https://github.com/rekursiv-ai/typings?branch=main#206ecb821e29208d3c5d3b38c69ba7937036db0c" }
+source = { git = "https://github.com/rekursiv-ai/typings?branch=main#c7fb6041e7ba23d6396ea9382d392b26da1f263e" }
 
 [[package]]
 name = "requests"

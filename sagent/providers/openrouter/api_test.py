@@ -1,8 +1,11 @@
 """Tests for OpenRouter's identity and reasoning configuration."""
 
+from dataclasses import replace
+
 import pytest
 
 from sagent.model.types import Request
+from sagent.providers.openai.compat import OpenAIModel
 from sagent.providers.openrouter.api import OpenRouter
 from sagent.session.types import AssistantMessage, Thinking, UserMessage
 
@@ -24,6 +27,24 @@ async def test_endpoint_auth_and_catalog(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "reasoning_effort" not in body
     assert await model.count(Request(records=(UserMessage(content="hello"),))) > 0
     await provider.aclose()
+
+
+def test_a_nonreasoning_model_sends_no_reasoning_configuration() -> None:
+    provider = OpenRouter(api_key="key")
+    capability = replace(
+        provider["default"].capability,
+        thinking_effort=frozenset({"none"}),
+    )
+    model = OpenAIModel(
+        provider=provider,
+        capability=capability,
+        settings=capability.default,
+    )
+
+    body = provider.encode(Request(), model=model)
+
+    assert "reasoning" not in body
+    assert "reasoning_effort" not in body
 
 
 def test_reasoning_details_round_trip() -> None:

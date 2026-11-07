@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast, override
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import argparse
 import asyncio
@@ -44,9 +45,7 @@ from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.pruner import Pruner
 from sagent.agent.team import Team
 from sagent.host import daemon
-from sagent.host.server import Server
 from sagent.host.strings import ServeDirs
-from sagent.host.wire import DaemonControl
 from sagent.lib.posix.attach import stop
 from sagent.lib.posix.detached import await_ready
 from sagent.lib.posix.host import serve_command
@@ -107,7 +106,6 @@ from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.paper_search import PaperSearch
 from sagent.tools.read import Read
 from sagent.tools.remote import RemoteSession, RemoteTool, SavedRemote
-from sagent.tools.testing import SHOUT_SERVER
 from sagent.tools.types import ToolContext
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
@@ -235,62 +233,13 @@ class _Script:
         return provider
 
 
-class _DaemonThread(threading.Thread):
-    """Run the real socket protocol across the CLI's separate event loops."""
-
-    def __init__(self, dirs: ServeDirs, *, version: str) -> None:
-        super().__init__(daemon=True)
-        self.dirs = dirs
-        self.version = version
-        self.error: BaseException | None = None
-
-    @override
-    def run(self) -> None:
-        try:
-            asyncio.run(self._serve())
-        except BaseException as error:
-            logging.getLogger(__name__).exception("Test daemon failed")
-            self.error = error
-
-    def poll(self) -> int | None:
-        return None if self.is_alive() else int(self.error is not None)
-
-    async def _serve(self) -> None:
-        version, handoff = self.version, ""
-        while version:
-            async with Server(
-                self.dirs,
-                listen=(),
-                local_socket=socket_address(self.dirs.state / "daemon.sock"),
-                source_version=version,
-                handoff=handoff,
-            ) as server:
-                await server.stopping.wait()
-                version = server.replacement
-                if version:
-                    handoff = await server.handoff()
-
-
 @pytest.fixture(autouse=True)
-def stop_test_daemon(monkeypatch: pytest.MonkeyPatch) -> Generator[None]:
-    """Replace interpreter startup, retaining ensure, control, and real client sockets."""
-    started: list[_DaemonThread] = []
-
-    def spawn(dirs: ServeDirs, *, version: str) -> _DaemonThread:
-        process = _DaemonThread(dirs, version=version)
-        started.append(process)
-        process.start()
-        return process
-
-    monkeypatch.setattr(daemon, "_spawn", spawn)
-    monkeypatch.setattr(daemon, "fingerprint", lambda: "cli-current")
-    yield
-    for process in started:
-        if process.is_alive():
-            _ = asyncio.run(daemon.control(process.dirs, DaemonControl(stop=True)))
-        process.join(timeout=5)
-        assert not process.is_alive()
-        assert process.error is None
+def offline_daemon(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Keep daemon lifecycle and socket startup at the CLI's dependency boundary."""
+    ensure = AsyncMock()
+    monkeypatch.setattr(daemon, "ensure", ensure)
+    monkeypatch.setattr(RemoteSession, "aopen", AsyncMock())
+    return ensure
 
 
 @contextlib.contextmanager
@@ -858,13 +807,13 @@ def test_a_tool_its_server_does_not_give_is_refused_once_it_connects(
     script: _Script,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    tmp_path: Path,
 ) -> None:
-    server = tmp_path / "server.py"
-    server.write_text(SHOUT_SERVER)
-    config = {
-        "mcpServers": {"good": {"command": sys.executable, "args": [str(server)]}},
-    }
+    tools = Mock(return_value=[])
+    session = Mock(tools=tools)
+    enter, exit_session = AsyncMock(return_value=session), AsyncMock()
+    build = Mock(return_value=MagicMock(__aenter__=enter, __aexit__=exit_session))
+    monkeypatch.setattr(main, "McpSession", build)
+    config = {"mcpServers": {"good": {"url": "https://mcp.example/mcp"}}}
     _argv(
         monkeypatch,
         "--provider",
@@ -881,6 +830,10 @@ def test_a_tool_its_server_does_not_give_is_refused_once_it_connects(
     assert capsys.readouterr().err.startswith(
         "Error: ValueError: unknown tools mcp__good__yell; known: Bash, ",
     )
+    build.assert_called_once()
+    enter.assert_awaited_once()
+    tools.assert_called_once_with()
+    exit_session.assert_awaited_once()
     del script
 
 
@@ -1473,6 +1426,10 @@ def test_mcp_verbs_run_from_the_shell_without_a_model(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """No provider is set up, and none is needed to manage MCP servers."""
+    session = Mock(status=Mock(return_value={"web": "failed: offline"}))
+    enter, exit_session = AsyncMock(return_value=session), AsyncMock()
+    build = Mock(return_value=MagicMock(__aenter__=enter, __aexit__=exit_session))
+    monkeypatch.setattr(mcp_settings, "McpSession", build)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("SAGENT_PROVIDER", "nowhere")
     for argv, out in [
@@ -1493,6 +1450,9 @@ def test_mcp_verbs_run_from_the_shell_without_a_model(
         said = capsys.readouterr()
         assert said.out.startswith(out), (argv, said)
         assert said.err == "", (argv, said)
+    build.assert_called_once()
+    enter.assert_awaited_once()
+    exit_session.assert_awaited_once_with(None, None, None)
 
 
 def test_mcp_login_shows_the_sign_in_page_then_what_it_did(
@@ -1526,16 +1486,28 @@ def test_mcp_commands_log_to_the_log_file_not_the_terminal(
     capsys: pytest.CaptureFixture[str],
     logs: logging.Logger,
 ) -> None:
+    session = Mock(status=Mock(return_value={"dead": "failed: offline"}))
+
+    async def connect() -> Mock:
+        logging.getLogger("sagent.tools.mcp").warning("MCP dependency warning")
+        return session
+
+    enter, exit_session = AsyncMock(side_effect=connect), AsyncMock()
+    build = Mock(return_value=MagicMock(__aenter__=enter, __aexit__=exit_session))
+    monkeypatch.setattr(mcp_settings, "McpSession", build)
     config = {"mcpServers": {"dead": {"url": "http://127.0.0.1:9/mcp"}}}
     _argv(monkeypatch, "mcp", "list", "--mcp-config", json_dumps(config))
     assert main.main() == 0
     said = capsys.readouterr()
-    assert said.out.startswith("dead  http  every_request  failed: ")
+    assert said.out == "dead  http  every_request  failed: offline\n"
     assert said.err == ""
+    build.assert_called_once()
+    enter.assert_awaited_once()
+    exit_session.assert_awaited_once_with(None, None, None)
     for handler in logs.handlers:
         handler.flush()
     log = data_dir() / "rekursiv-ai" / "sagent" / "repl.log"
-    assert "MCP server 'dead' failed to connect" in log.read_text()
+    assert "MCP dependency warning" in log.read_text()
 
 
 @pytest.mark.parametrize("argv", [("mcp",), ("mcp", "--help"), ("mcp", "-h")])
@@ -1977,8 +1949,20 @@ def test_an_interactive_run_logs_a_failed_mcp_server_to_its_file_not_the_termina
     logs: logging.Logger,
     tmp_path: Path,
 ) -> None:
+    session = Mock(tools=Mock(return_value=[]))
+
+    async def connect(context: object) -> Mock:
+        del context
+        logging.getLogger("sagent.tools.mcp").warning("MCP dependency warning")
+        return session
+
+    enter, exit_session = AsyncMock(side_effect=connect), AsyncMock()
+    build = Mock(return_value=MagicMock(__aenter__=enter, __aexit__=exit_session))
+    run = AsyncMock()
+    monkeypatch.setattr(main, "McpSession", build)
+    monkeypatch.setattr(main, "run", run)
     monkeypatch.chdir(tmp_path)
-    config = {"mcpServers": {"dead": {"url": "http://127.0.0.1:9/mcp"}}}
+    config = {"mcpServers": {"dead": {"url": "https://mcp.example/mcp"}}}
     _argv(
         monkeypatch,
         "--provider",
@@ -1991,21 +1975,17 @@ def test_an_interactive_run_logs_a_failed_mcp_server_to_its_file_not_the_termina
         json_dumps(config),
     )
     _stdin(monkeypatch, tty=True)
-    _quick_prints(monkeypatch)
     monkeypatch.setattr(main, "print_welcome", _no_welcome)
-    with (
-        create_pipe_input() as pipe,
-        create_app_session(input=pipe, output=DummyOutput()),
-    ):
-        pipe.send_text("/quit\r")
-        assert main.main() == 0
-    assert "MCP server" not in capsys.readouterr().err
+    assert main.main() == 0
+    assert "MCP dependency warning" not in capsys.readouterr().err
     (journal,) = project_dir(tmp_path).glob("*/session.jsonl")
     for handler in logs.handlers:
         handler.flush()
-    assert "MCP server 'dead' failed to connect" in (
-        journal.with_suffix(".log").read_text()
-    )
+    assert "MCP dependency warning" in journal.with_suffix(".log").read_text()
+    build.assert_called_once()
+    enter.assert_awaited_once()
+    exit_session.assert_awaited_once()
+    run.assert_awaited_once()
     del script
 
 
@@ -2153,20 +2133,23 @@ def test_a_session_is_named_to_remote_servers_by_its_journal(
 
 
 @pytest.mark.parametrize("participation", ["on", "off"])
-def test_the_cli_connects_to_the_daemon_and_applies_peer_flags(
+def test_the_cli_configures_its_daemon_connection_and_applies_peer_flags(
     script: _Script,
     monkeypatch: pytest.MonkeyPatch,
+    offline_daemon: AsyncMock,
     participation: str,
 ) -> None:
     async def headless(agent: Agent, parsed: main.Flags) -> int:
         del parsed
+        offline_daemon.assert_awaited_once()
         routing = agent.tools["RemoteTool"]
         assert isinstance(routing, RemoteTool)
         (local,) = [
             e for e in routing.remote.endpoints().values() if e.local_socket is not None
         ]
-        await _once(lambda: local.up, timeout_sec=5)
-        assert local.up
+        assert local.local_socket == socket_address(
+            state_dir() / "rekursiv-ai" / "sagent" / "serve" / "daemon.sock",
+        )
         own = agent.runtime.tool_context.label
         control = agent.tools["AgentSelf"]
         assert isinstance(control, AgentSelf)
@@ -2666,6 +2649,7 @@ def test_a_hosted_session_runs_the_journal_its_terminal_picked(
 def test_a_session_at_a_terminal_attaches_to_its_host(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    offline_daemon: AsyncMock,
 ) -> None:
     """The terminal picks the journal once; the host's session is told it."""
     path = tmp_path / "mine.jsonl"
@@ -2674,11 +2658,9 @@ def test_a_session_at_a_terminal_attaches_to_its_host(
         secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
         state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
     )
-    _ = asyncio.run(daemon.ensure(dirs, version="old"))
 
     def resume(journal: Path, *, command: list[str]) -> int:
-        status = asyncio.run(daemon.control(dirs, DaemonControl()))
-        assert status.source_version == daemon.fingerprint()
+        offline_daemon.assert_awaited_once_with(dirs)
         attached.append((journal, command))
         return 7
 

@@ -25,6 +25,7 @@ from sagent.providers.table import ModelTable
 from sagent.session.types import (
     AssistantMessage,
     Attachment,
+    Thinking,
     ToolCall,
     UserMessage,
 )
@@ -197,7 +198,11 @@ def test_text_wrapper_encodes_system_and_history() -> None:
     body = provider.encode(
         Request(
             system=("system",),
-            records=(UserMessage(content="hi"), AssistantMessage(content="hello")),
+            records=(
+                UserMessage(content="hi"),
+                Thinking(content="private deliberation"),
+                AssistantMessage(content="hello"),
+            ),
             max_response_tokens=23,
         ),
         model=model,

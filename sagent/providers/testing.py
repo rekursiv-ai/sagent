@@ -156,9 +156,10 @@ async def send(port: int, request: bytes) -> int:
 
     """
     reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    writer.write(request)
-    await writer.drain()
-    status = int((await reader.readline()).split()[1])
-    writer.close()
-    await writer.wait_closed()
-    return status
+    try:
+        writer.write(request)
+        await writer.drain()
+        return int((await reader.readline()).split()[1])
+    finally:
+        writer.close()
+        await writer.wait_closed()

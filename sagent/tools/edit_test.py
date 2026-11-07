@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -17,10 +18,12 @@ from sagent.tools import edit
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.edit import Edit
 from sagent.tools.types import ToolContext, parse
-from sagent.tools.write import write_file
+from sagent.tools.write import file_lock_path, write_file
 
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
     from treekle import PlainTree
 
 
@@ -399,14 +402,24 @@ async def test_two_agents_editing_one_file_never_lose_an_edit(
     first.files.saw(path)
     second.files.saw(path)
     writing, written = threading.Event(), threading.Event()
+    gate, contending = asyncio.Lock(), asyncio.Event()
+    calls: list[Path] = []
+
+    @asynccontextmanager
+    async def lock(target: Path) -> AsyncGenerator[None]:
+        calls.append(target)
+        if gate.locked():
+            contending.set()
+        async with gate:
+            yield
 
     def held(target: Path, data: bytes) -> None:
         if data.startswith(b"A"):
             writing.set()
-            # Unlocked, the second edit finishes meanwhile; locked, it waits.
-            written.wait(0.2)
+            assert written.wait(5)
         write_file(target, data)
 
+    monkeypatch.setattr(edit, "file_lock", lock)
     monkeypatch.setattr(edit, "write_file", held)
 
     async def run(context: ToolContext, old: str, new: str) -> EditResult:
@@ -417,17 +430,24 @@ async def test_two_agents_editing_one_file_never_lose_an_edit(
         }
         return _typed(await Edit().call(context, arguments))
 
-    one = asyncio.create_task(run(first, "a", "A"))
-    assert await asyncio.to_thread(writing.wait, 5)
-    two = asyncio.create_task(run(second, "b", "B"))
-    await asyncio.wait({two}, timeout=0.1)
-    written.set()
-    done, theirs = await one, await two
+    async with asyncio.TaskGroup() as tasks:
+        one = tasks.create_task(run(first, "a", "A"))
+        try:
+            assert await asyncio.to_thread(writing.wait, 1)
+            two = tasks.create_task(run(second, "b", "B"))
+            async with asyncio.timeout(1):
+                await contending.wait()
+            assert not two.done()
+        finally:
+            written.set()
+            await one
+    done, theirs = one.result(), two.result()
 
+    assert calls == [file_lock_path(path)] * 2
     assert done.is_error is not True
-    told = theirs.is_error is True and "changed since it was read" in theirs.text()
-    assert told or path.read_text() == "A = 1\nB = 1\n"
-    assert path.read_text() in ("A = 1\nb = 1\n", "A = 1\nB = 1\n")
+    assert theirs.is_error is True
+    assert "changed since it was read" in theirs.text()
+    assert path.read_text() == "A = 1\nb = 1\n"
 
 
 def _typed(result: object) -> EditResult:
