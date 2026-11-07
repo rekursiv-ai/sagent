@@ -30,28 +30,21 @@
 #   fires on a dirty tree) STASHES your changes -- a git mutation, and this
 #   worktree is shared.
 #
-#   Opt-in gates. Each value is a count; unset or 0 is off. `ops/env` exports
-#   the recommended counts:
+#   Scope. PRECOMMIT_SCOPE defaults to granular. Any other value overrides
+#   every applicable hook's individual setting:
 #
-#     export PRECOMMIT_CODEGRAPH_TYPECHECK=3
-#     export PRECOMMIT_CODEGRAPH_PYTEST=1
-#     export PRECOMMIT_BASEDPYRIGHT=1
-#     export PRECOMMIT_MUTATION=1
+#     PRECOMMIT_SCOPE=exact       Supplied files only.
+#     PRECOMMIT_SCOPE=sidecar     Supplied files plus paired source/tests.
+#     PRECOMMIT_SCOPE=affected:3  Sidecars plus three reverse-dependency hops.
 #
-#   CODEGRAPH_TYPECHECK     Type-check the changed files plus their dependents
-#                           up to N import/call hops away.
-#   CODEGRAPH_PYTEST        Run the tests reaching the changed functions within
-#                           N hops, instead of only each file's paired test.
-#                           Depth 1 already has 100% median recall; deeper
-#                           mostly adds runtime.
-#   BASEDPYRIGHT            Run basedpyright alongside ty and pyrefly.
-#   MUTATION                Mutate a seeded 5% of the changed functions, at
-#                           most 4, and fail if a mutant survives their paired
-#                           tests, i.e. the tests do not check what the code
-#                           does. Any count turns it on; the sample is fixed.
-#
-#   Either CODEGRAPH variable also keeps the CodeGraph index synced. See
-#   `harvest-affected` and `mutation` below for measurements and details.
+#   Under granular, PRECOMMIT_SCOPE_<HOOK_ID> overrides that hook's default.
+#   Uppercase the hook ID and replace hyphens with underscores, for example
+#   PRECOMMIT_SCOPE_TY_CHECK=exact or PRECOMMIT_SCOPE_PYTEST=affected:1.
+#   Individual settings accept exact, sidecar, affected:N; never granular.
+#   Defaults: ty-check, pyrefly-check, basedpyright affected:3;
+#   pytest and mutation sidecar. No shell exports are required.
+#   Invalid scopes fail. Missing/unusable graphs warn and fall back to sidecars.
+#   Disable checks with SKIP, not enablement variables.
 #
 #   NUL-delimited, per AGENTS.md: a path containing a space becomes two
 #   arguments under `$(...)` or a bare `xargs`, and a rename record yields the
@@ -411,27 +404,10 @@ repos:
       # backbone serves only the codegraph CLI and MCP server, and
       # `codegraph_sync --cli` makes it on request (README).
       #
-      # OPT-IN. Unset, this hook no-ops and both consumers use the same
-      # sidecar/changed-files scope an exported package gets; the graph engages
-      # only per consumer, under `PRECOMMIT_CODEGRAPH_PYTEST=<depth>` and
-      # `PRECOMMIT_CODEGRAPH_TYPECHECK=<depth>`, the reverse-dependency hops
-      # each walks; this sync runs when either is set. Measured choices are
-      # 1 and 3 respectively (see below and `pyrefly-check`). Off by default
-      # because it costs a 387 MB index, an npm install, and a resolver whose
-      # false-positive rate is 35% misresolved edges (see below) -- none of
-      # which a commit should depend on before someone has chosen it.
+      # Sync only when an enabled consumer resolves to affected:N. Global
+      # exact/sidecar scopes never need an index. Graph failures retain sidecars.
       #
-      # Only a positive integer without a leading zero engages a consumer.
-      # Anything else -- `0`, `false`, empty, unset, `01`, a typo -- is off. An
-      # allowlist rather than a blocklist because the cost of guessing wrong is
-      # minutes to hours: the walk is superlinear in seed count (2.7s at 1 seed,
-      # 16.8s at 20, 101s at 60 on the 16-thread laptop), and `--all-files` is 4213 seeds.
-      #
-      # The gate was `[ -n "${PRECOMMIT_CODEGRAPH:-}" ]`, and `-n "0"` is TRUE,
-      # so `PRECOMMIT_CODEGRAPH=0` -- the spelling that reads as off -- was the
-      # one that left the graph on. `gate.positive` is the one allowlist.
-      #
-      # TWO SKIP TOKENS once opted in, because "don't re-index" and "don't use
+      # TWO SKIP TOKENS, because "don't re-index" and "don't use
       # the index" differ and the wrong one is a silent downgrade:
       #
       #   SKIP=harvest-affected  the alias. Skips this hook AND makes both
@@ -531,11 +507,10 @@ repos:
         alias: superseded-at-pre-push
         types_or: [python, pyi]
         entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.typecheck ty-check
-        # Widens to dependents `PRECOMMIT_CODEGRAPH_TYPECHECK` hops away, from
-        # the index `codegraph-sync` above keeps current.
+        # Resolved affected:N scopes read the index maintained above.
         args: [--dependents, codedoctor.affected]
 
-      # Default type checker; `basedpyright` below is an additional opt-in.
+      # Each checker resolves its own scope independently.
       - id: pyrefly-check-spool
         name: pyrefly-check-spool
         alias: pyrefly-check
@@ -562,7 +537,7 @@ repos:
           - --fixer
           - codedoctor.assert_isinstance
 
-      # Opt in with PRECOMMIT_BASEDPYRIGHT=1; unset or 0 is off.
+      # Disable with SKIP=basedpyright.
       # Named files bypass pyproject's `[tool.basedpyright] exclude`, so the
       # twin's exclude mirrors it.
       - id: basedpyright-spool
@@ -594,7 +569,7 @@ repos:
         entry: >-
           env NODE_OPTIONS=--max-old-space-size=2048
           uv --quiet run --frozen --group pre-commit python -m codedoctor.typecheck
-          basedpyright --when PRECOMMIT_BASEDPYRIGHT
+          basedpyright
         # Widens as `ty-check` does; the fixer is one basedpyright run that
         # also deletes each unnecessary `assert isinstance`.
         args:
@@ -638,10 +613,9 @@ repos:
       # gate. Exit 5 (nothing collected) passes: a selection whose every test
       # carries a deselected marker is not a failure.
       #
-      # `--dependents` adds the individual tests `PRECOMMIT_CODEGRAPH_PYTEST`
-      # hops from each changed file (1 recommended; see `harvest-affected`) to
-      # the pairs, which always run: `coverage-floor` below floors each file by
-      # them, from this run's per-test coverage, so they run once, here.
+      # Under affected:N, `--dependents` adds graph-selected tests to the pairs.
+      # Exact runs only supplied tests; sidecar is the default. `coverage-floor`
+      # reads this run's per-test coverage, so each selection runs once.
       #
       # `-n` only from 16 test files (SIDECAR_XDIST_MIN overrides): xdist's ~5s
       # startup lost below that on the 16-thread workstation at 5 workers.
@@ -677,8 +651,7 @@ repos:
         entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing pytest
         args: [--dependents, codedoctor.affected]
 
-      # Opt in locally with PRECOMMIT_MUTATION=1; unset or 0 is off, as for
-      # `PRECOMMIT_CODEGRAPH_*`. CI uses a non-required check. Over 741 commits
+      # Disable with SKIP=mutation. Findings fail the hook. Over 741 commits,
       # the 5% rate and cap of 4 mutate p50 3 / p90 4 functions (~29s / ~39s).
       - id: mutation-spool
         name: mutation-spool
@@ -709,7 +682,7 @@ repos:
         exclude: *mutation-exclude
         entry: >-
           uv --quiet run --frozen --group pre-commit python -m codedoctor.gate
-          run --when PRECOMMIT_MUTATION mutation -- codedoctor.mutation
+          run mutation -- codedoctor.mutation
           --function-sample-rate 0.05 --max-functions-sampled 4 --timeout-sec 900
           --explain --prefer-changed-in-pre-commit
 
