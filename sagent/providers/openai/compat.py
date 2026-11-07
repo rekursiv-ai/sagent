@@ -281,6 +281,7 @@ class OpenAICompatible(HasModels, AsyncResource):
         model: str,
         headers: Mapping[str, str],
         retry: bool = True,
+        recheck_quota: bool = False,
     ) -> AsyncIterator[dict[str, object]]:
         """Stream the reply to ``body``, retrying a short failure before the first event.
 
@@ -289,6 +290,7 @@ class OpenAICompatible(HasModels, AsyncResource):
           model: The model asked, as the catalog names it; its calls are paced.
           headers: Headers beyond the credentials.
           retry: Whether to retry failures before the first event.
+          recheck_quota: Recheck this account despite a cached hold.
 
         Yields:
           event: Each server-sent event, as JSON.
@@ -315,12 +317,18 @@ class OpenAICompatible(HasModels, AsyncResource):
                     credentials=first.pop() if first else None,
                 ) as response
             ):
-                await observed(gate, key, self._usage)
+                await observed(gate, key, wire.rate_limits(response.headers))
                 async for event in wire.events(response.aiter_lines()):
                     yield event
 
         retries = 4 if retry else 0
-        async for event in retried(attempt, gate=gate, key=key, retries=retries):
+        async for event in retried(
+            attempt,
+            gate=gate,
+            key=key,
+            retries=retries,
+            recheck_quota=recheck_quota,
+        ):
             yield event
 
     async def reply(
@@ -462,6 +470,7 @@ class OpenAIModel(AsyncResource):
             model=self.capability.model_id,
             headers=headers,
             retry=request.retry,
+            recheck_quota=request.recheck_quota,
         ):
             for chunk in reader.feed(event):
                 yield chunk

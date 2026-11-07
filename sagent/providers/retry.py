@@ -63,6 +63,7 @@ async def retried[T](
     gate: Gate,
     key: str,
     retries: int = 4,
+    recheck_quota: bool = False,
 ) -> AsyncIterator[T]:
     """Yield what ``stream`` yields, starting it again after a short early failure.
 
@@ -78,6 +79,7 @@ async def retried[T](
       key: The model and account the attempts are billed to, as ``account_key``.
       retries: The most attempts started again; ``0`` for a stream that cannot
         be, as one a process holds the conversation of.
+      recheck_quota: Clear this key's cached hold once for a user-requested retry.
 
     Yields:
       event: Each event of the attempt that streams.
@@ -89,6 +91,8 @@ async def retried[T](
         advised wait longer than 30 seconds, or after five attempts.
 
     """
+    if recheck_quota:
+        await asyncio.to_thread(gate.reset, key, clear_hold=True)
     attempt = 0
     while True:
         await _admitted(gate, key)

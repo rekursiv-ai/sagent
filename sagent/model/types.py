@@ -62,6 +62,9 @@ class Request:
     retry: bool = True
     """Allow transport retries before the first response event."""
 
+    recheck_quota: bool = False
+    """Recheck this account once despite a cached hold, at the user's request."""
+
     purpose: Literal["main", "compaction"] = "main"
     """Why the call is made: the agent's own turn, or a summary of its context."""
 

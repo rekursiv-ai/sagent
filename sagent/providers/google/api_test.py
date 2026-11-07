@@ -167,6 +167,29 @@ async def test_a_long_advised_wait_is_left_to_the_caller(slept: list[float]) -> 
 
 
 @pytest.mark.asyncio
+async def test_a_quota_recheck_reaches_google_after_an_external_reset(
+    slept: list[float],
+) -> None:
+    server = _Server(
+        replies=[
+            _failed(429, "RESOURCE_EXHAUSTED", headers={"retry-after": "432000"}),
+            _ok("restored"),
+            _ok("next"),
+        ],
+    )
+    async with _Served(server) as shared:
+        model = Google(resources=shared)["gemini-flash"]
+        with pytest.raises(RateLimitedError):
+            await _stream(model.stream(_REQUEST))
+        with pytest.raises(RateLimitedError, match="cooling down"):
+            await _stream(model.stream(_REQUEST))
+        await _stream(model.stream(replace(_REQUEST, recheck_quota=True)))
+        await _stream(model.stream(_REQUEST))
+    assert len(server.requests) == 3
+    assert slept == []
+
+
+@pytest.mark.asyncio
 async def test_a_wait_of_thirty_seconds_is_still_retried(slept: list[float]) -> None:
     server = _Server(
         replies=[

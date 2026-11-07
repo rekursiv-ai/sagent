@@ -307,6 +307,53 @@ async def test_a_reply_with_none_remaining_holds_the_account_before_a_429(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("fresh_headers", [False, True])
+async def test_a_quota_recheck_reaches_the_server_and_does_not_reuse_old_usage(
+    slept: list[float],
+    fresh_headers: bool,
+) -> None:
+    spent = {
+        "x-codex-primary-window-minutes": "10080",
+        "x-codex-primary-used-percent": "100",
+        "x-codex-primary-reset-after-seconds": "432000",
+    }
+    fresh = {**spent, "x-codex-primary-used-percent": "25"} if fresh_headers else {}
+    server = _Server(replies=[_ok(headers=spent), _ok(headers=fresh), _ok()])
+    async with _Served(server) as shared:
+        model = _Vendor(resources=shared)["default"]
+        await _stream(model)
+        with pytest.raises(RateLimitedError, match="cooling down"):
+            await _stream(model)
+        await _stream(model, replace(_REQUEST, recheck_quota=True))
+        await _stream(model)
+    assert len(server.requests) == 3
+    assert slept == []
+
+
+@pytest.mark.asyncio
+async def test_a_quota_recheck_that_is_still_limited_restores_the_hold(
+    slept: list[float],
+) -> None:
+    limited = _failed(429, "Spent", headers={"retry-after": "432000"})
+    server = _Server(
+        replies=[
+            limited,
+            _failed(429, "Still spent", headers={"retry-after": "432000"}),
+        ],
+    )
+    async with _Served(server) as shared:
+        model = _Vendor(resources=shared)["default"]
+        with pytest.raises(RateLimitedError, match="Spent"):
+            await _stream(model)
+        with pytest.raises(RateLimitedError, match="Still spent"):
+            await _stream(model, replace(_REQUEST, recheck_quota=True))
+        with pytest.raises(RateLimitedError, match="cooling down"):
+            await _stream(model)
+    assert len(server.requests) == 2
+    assert slept == []
+
+
+@pytest.mark.asyncio
 async def test_an_error_reply_raises_what_it_means(slept: list[float]) -> None:
     server = _Server(
         replies=[

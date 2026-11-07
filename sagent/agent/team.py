@@ -1014,6 +1014,12 @@ class _Precedence:
         # A login in use but signed out is not ranked; its failure moves it on.
         spent = dict(ranked).get(seat.serving)
         want = _first_live(ranked)
+        if want is None and self._agent.runtime.recheck_quota:
+            await logins.clear_spent(
+                seat.serving,
+                model=self._agent.model.capability.model_id,
+            )
+            return
         if not turn_start and spent is None:
             return
         if want is None or want == seat.serving:

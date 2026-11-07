@@ -568,6 +568,7 @@ class Runtime:
         # Whether a failed call ended the turn, so it waits; a new model, or a
         # ``Retry``, may get past the failure, and so calls again.
         self._failed = False
+        self.recheck_quota = False
         # The model the call in flight asked; a failure of one switched away from
         # says nothing of the model now in use.
         self._called_model: Model = model
@@ -1468,6 +1469,7 @@ class Runtime:
                         # Released from a failure's wait, or ending a suspension's:
                         # the gate calls the model for the turn.
                         case Retry():
+                            self.recheck_quota = True
                             self._end_suspension()
                             self._failed = False
                             awaiting_user = False
@@ -1579,6 +1581,7 @@ class Runtime:
                         # Input held for the running calls goes first. The user
                         # writing during a suspension asks to try now.
                         case UserMessage():
+                            self.recheck_quota = True
                             self._end_suspension()
                             if self.model_call is not None:
                                 self._mid_stream_queue.append(item)
@@ -2405,7 +2408,10 @@ class Runtime:
     async def _reply(self) -> Response:
         """Ask the model about the context; post its words as they arrive."""
         response = None
-        request = self.sending(self.request())
+        request = self.sending(
+            dataclasses.replace(self.request(), recheck_quota=self.recheck_quota),
+        )
+        self.recheck_quota = False
         snapshot = self.token_accounting.capture(request, model=self._called_model)
         # Only the first call after a compaction is told of it.
         self._compaction = ""

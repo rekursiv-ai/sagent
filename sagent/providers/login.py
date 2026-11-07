@@ -288,6 +288,21 @@ class Logins:
             ),
         )
 
+    async def clear_spent(self, account: str | None, *, model: str) -> None:
+        """Forget this model's stale quota before explicitly retrying its account."""
+        name = account or "default"
+        await self._edit(
+            lambda f: replace(
+                f,
+                spent=f.spent
+                | {
+                    name: tuple(
+                        mark for mark in f.spent.get(name, ()) if not mark.covers(model)
+                    ),
+                },
+            ),
+        )
+
     async def prefer(self, order: tuple[str, ...] | None) -> None:
         """Set the order to sign in by.
 

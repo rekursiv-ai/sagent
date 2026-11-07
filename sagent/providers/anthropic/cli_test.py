@@ -816,6 +816,24 @@ async def test_a_rate_limit_through_claude_holds_the_login_for_every_caller(
 
 
 @pytest.mark.asyncio
+async def test_a_quota_recheck_reaches_claude_despite_an_old_hold(
+    claude: _Stub,
+    shared: _Resources,
+) -> None:
+    claude.script(_said("restored"))
+    model = _model(shared)
+    key = f"claude@default/{model.capability.model_id}"
+    shared.gate.hold(key, until=time.time() + 432_000.0)
+    request = Request(records=(UserMessage(content="hi"),))
+    with pytest.raises(RateLimitedError, match="cooling down"):
+        await _stream(model, request)
+    response = _response(await _stream(model, replace(request, recheck_quota=True)))
+    assert response.records == (AssistantMessage(content="restored"),)
+    assert shared.gate.states()[key].held_until == 0.0
+    await model.aclose()
+
+
+@pytest.mark.asyncio
 async def test_a_window_still_allowed_says_nothing_of_the_wait(
     claude: _Stub,
     shared: _Resources,

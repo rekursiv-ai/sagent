@@ -268,6 +268,35 @@ async def test_a_hold_too_long_to_wait_refuses_without_sending(clock: _Clock) ->
 
 
 @pytest.mark.asyncio
+async def test_an_explicit_recheck_clears_only_its_keys_hold(clock: _Clock) -> None:
+    gate = FileGate()
+    gate.hold(_KEY, until=clock.now + 432_000.0)
+    gate.hold("other", until=clock.now + 432_000.0)
+    stream, made = _script(["ok"])
+    assert await _all(retried(stream, gate=gate, key=_KEY, recheck_quota=True)) == [
+        "ok",
+    ]
+    assert made == [0]
+    assert gate.states()[_KEY].held_until == 0.0
+    assert gate.states()["other"].held_until == clock.now + 432_000.0
+    assert clock.slept == []
+
+
+@pytest.mark.asyncio
+async def test_a_recheck_does_not_bypass_a_fresh_rate_limit(clock: _Clock) -> None:
+    gate = FileGate()
+    gate.hold(_KEY, until=clock.now + 432_000.0)
+    stream, made = _script(RateLimitedError("still spent", retry_after_sec=3_600.0))
+    with pytest.raises(RateLimitedError, match="still spent"):
+        await _all(retried(stream, gate=gate, key=_KEY, recheck_quota=True))
+    again, sent = _script(["never"])
+    with pytest.raises(RateLimitedError, match="cooling down"):
+        await _all(retried(again, gate=gate, key=_KEY))
+    assert (made, sent) == ([0], [])
+    assert clock.slept == []
+
+
+@pytest.mark.asyncio
 async def test_a_hold_as_long_as_the_wait_allows_is_sat_out(
     clock: _Clock,
     monkeypatch: pytest.MonkeyPatch,

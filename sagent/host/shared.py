@@ -209,10 +209,21 @@ class DaemonGate:
         if self._ask(GateCall(op="release_probe", key=key)) is None:
             self._files.release_probe(key)
 
-    def reset(self, key: str, *, forget: bool = False) -> None:
-        """Lift the lock a block drew on ``key``; ``forget`` also drops its pace."""
-        if self._ask(GateCall(op="reset", key=key, forget=forget)) is None:
-            self._files.reset(key, forget=forget)
+    def reset(
+        self,
+        key: str,
+        *,
+        forget: bool = False,
+        clear_hold: bool = False,
+    ) -> None:
+        """Lift a key's lock, optionally forgetting its pace or server hold."""
+        if (
+            self._ask(
+                GateCall(op="reset", key=key, forget=forget, clear_hold=clear_hold),
+            )
+            is None
+        ):
+            self._files.reset(key, forget=forget, clear_hold=clear_hold)
 
     def states(self) -> dict[str, GateState]:
         """Return every key the gate keeps, and its state, from the host's files."""
@@ -233,7 +244,7 @@ def _gate_answer(call: GateCall, gate: Gate) -> None:
         case "release_probe":
             gate.release_probe(call.key)
         case "reset":
-            gate.reset(call.key, forget=call.forget)
+            gate.reset(call.key, forget=call.forget, clear_hold=call.clear_hold)
         case "admitted":
             raise ValueError("A gate's admitted call waits; ServedGate answers it.")
 

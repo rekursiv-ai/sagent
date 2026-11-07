@@ -269,6 +269,7 @@ class GoogleCLIModel(AsyncResource):
             gate=self.provider.resources.gate,
             key=key,
             retries=0,
+            recheck_quota=request.recheck_quota,
         ):
             yield event
 

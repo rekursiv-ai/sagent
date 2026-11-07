@@ -239,6 +239,7 @@ class Google(HasModels, AsyncResource):
             attempt,
             gate=self.resources.gate,
             key=self.gate_key(model),
+            recheck_quota=request.recheck_quota,
         ):
             yield event
 

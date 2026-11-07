@@ -201,6 +201,7 @@ class Anthropic(HasModels, AsyncResource):
         model: str,
         betas: Sequence[str],
         headers: Mapping[str, str],
+        recheck_quota: bool = False,
     ) -> AsyncIterator[dict[str, object]]:
         """Stream the reply to ``body``, retrying a short failure before the first event.
 
@@ -209,6 +210,7 @@ class Anthropic(HasModels, AsyncResource):
           model: The model asked, as the catalog names it; its calls are paced.
           betas: Beta features this request needs, beyond ``self.betas``.
           headers: Headers beyond the credentials.
+          recheck_quota: Recheck this account despite a cached hold.
 
         Yields:
           event: Each server-sent event, as JSON.
@@ -227,11 +229,16 @@ class Anthropic(HasModels, AsyncResource):
                 betas=betas,
                 headers=headers,
             ) as response:
-                await observed(gate, key, self._usage)
+                await observed(gate, key, wire.rate_limits(response.headers))
                 async for event in wire.events(response.aiter_lines()):
                     yield event
 
-        async for event in retried(attempt, gate=gate, key=key):
+        async for event in retried(
+            attempt,
+            gate=gate,
+            key=key,
+            recheck_quota=recheck_quota,
+        ):
             yield event
 
     async def reply(
@@ -386,6 +393,7 @@ class AnthropicModel(AsyncResource):
             model=self.capability.model_id,
             betas=betas,
             headers=self.provider.headers(request),
+            recheck_quota=request.recheck_quota,
         ):
             chunk = reader.feed(event)
             if chunk is not None:
