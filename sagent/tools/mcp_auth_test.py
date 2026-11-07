@@ -94,6 +94,28 @@ async def test_tokens_and_client_are_kept_per_server_in_a_private_file() -> None
 
 
 @pytest.mark.asyncio
+async def test_sign_ins_are_the_files_that_record_the_servers_source() -> None:
+    token = OAuthToken(
+        access_token="a1",  # noqa: S106 -- A test's token, no secret.
+        token_type="Bearer",  # noqa: S106 -- The scheme's name, no secret.
+    )
+    elsewhere = McpServer(
+        name="web",
+        parameters=StreamableHttpParameters(url="https://h/mcp"),
+        source="/q/mcp.json",
+    )
+    for server in (_WEB, _OTHER, elsewhere):
+        await _storage(server).set_tokens(token)
+    folder = config_dir() / "rekursiv-ai" / "secrets" / "mcp"
+
+    assert mcp_auth.sign_ins("/p/mcp.json") == {_WEB.key: folder / f"{_WEB.key}.json"}
+    assert mcp_auth.sign_ins("/q/mcp.json") == {
+        elsewhere.key: folder / f"{elsewhere.key}.json",
+    }
+    assert mcp_auth.sign_ins("/r/mcp.json") == {}
+
+
+@pytest.mark.asyncio
 async def test_two_changes_at_once_keep_both() -> None:
     """Each change reads the file, then writes it; neither may write over the other."""
     storage = _storage()

@@ -38,6 +38,19 @@ def test_round_limit_names_rounds_and_cap() -> None:
     assert error.max_rounds == 5
 
 
+def test_local_time_is_the_local_date_as_date_prints_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TZ", "Pacific/Honolulu")
+    time.tzset()
+    try:
+        # 2026-10-31T16:00:00Z is 06:00 in Honolulu, which keeps no daylight time.
+        assert local_time(1_793_462_400.0) == "Sat Oct 31 06:00:00"
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
 def test_describe_omits_an_empty_message() -> None:
     assert describe(TimeoutError("")) == "TimeoutError"
 

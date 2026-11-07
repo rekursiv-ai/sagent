@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import re
 import shlex
@@ -11,6 +11,10 @@ import pytest
 
 from sagent.settings.exceptions import HelpRequestedError, SettingError
 from sagent.settings.flags import ActionParser, flags
+
+
+if TYPE_CHECKING:
+    import argparse
 
 
 _STATIC = frozenset({"--resume", "--tools", "--name", "--headless", "-h", "--help"})
@@ -133,6 +137,29 @@ def test_a_mistake_in_an_actions_arguments_raises_and_never_exits(
 def test_an_exit_argparse_asks_for_raises_instead() -> None:
     with pytest.raises(SettingError, match=r"^see sagent mcp add --help$"):
         _parser().exit()
+
+
+async def _added(parsed: argparse.Namespace) -> str:
+    added = cast(_Added, parsed)
+    return f"added {added.name} -> {added.target}"
+
+
+@pytest.mark.asyncio
+async def test_an_actions_setting_runs_on_what_it_parsed_or_returns_its_help() -> None:
+    parser = _parser()
+
+    setting = parser.setting(_added, name=("add",), help_short="add an MCP server")
+
+    assert (setting.name, setting.help_short, setting.cli) == (
+        ("add",),
+        "add an MCP server",
+        True,
+    )
+    assert setting.help_long == parser.format_help()
+    assert setting.usage == "[-h] [-e ENV] name target [args ...]"
+    assert setting.flags == {"-h", "--help", "-e", "--env"}
+    assert await setting.apply("srv npx") == "added srv -> npx"
+    assert await setting.apply("--help") == parser.format_help()
 
 
 def test_a_help_word_after_the_separator_is_an_argument() -> None:

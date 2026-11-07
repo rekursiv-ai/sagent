@@ -390,6 +390,21 @@ def test_bundled_theme_requires_all_semantic_roles() -> None:
         theme_module._bundled.__wrapped__("terminal")
 
 
+def test_a_bundled_preset_is_read_once_and_takes_its_missing_roles_from_terminal() -> (
+    None
+):
+    # Cached per process, so another file may have read every preset first.
+    theme_module._bundled.cache_clear()
+
+    dark = load_theme("dark")
+    terminal = load_theme("terminal")
+
+    assert set(dark.styles) == set(terminal.styles)
+    assert dark.styles["muted"] == terminal.styles["muted"]
+    assert dark.styles["accent"] != terminal.styles["accent"]
+    assert load_theme("dark") is dark
+
+
 def test_unknown_preset_reports_the_requested_base() -> None:
     path = _custom("preset: missing\nstyles: {}")
     with pytest.raises(ValueError, match="custom") as error:

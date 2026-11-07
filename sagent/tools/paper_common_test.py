@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from wesearch.paper.details import Listing
+from wesearch.paper.render import format_record
 from wesearch.paper.types import PaperRecord
 
 import pytest
@@ -79,6 +80,35 @@ def test_summary_ids_labels_whatever_was_passed(
 ) -> None:
     """A summary labels the call before it is checked, so it must not raise."""
     assert summary_ids(arguments) == label
+
+
+_PAPERS = [
+    PaperRecord(title="Attention", year=2017, abstract="a" * 50),
+    PaperRecord(title="Diffusion", doi="10.1/x"),
+]
+
+
+def test_a_listing_is_one_paper_per_line_with_each_abstract_cut() -> None:
+    text = listed(Listing(records=_PAPERS, complete=True), 10, more="exist")
+
+    assert text == "\n".join(format_record(r, abstract_chars=10) for r in _PAPERS)
+    assert "a" * 11 not in text
+
+
+@pytest.mark.parametrize("more", ["exist", "may exist"])
+def test_an_incomplete_listing_says_whether_more_exist(more: str) -> None:
+    text = listed(Listing(records=_PAPERS[:1], complete=False), None, more=more)
+
+    assert text == (
+        format_record(_PAPERS[0])
+        + f"\n... (more matches {more}; raise 'limit' to see them)"
+    )
+
+
+def test_an_empty_listing_says_so() -> None:
+    assert listed(Listing(records=[], complete=False), 5, more="exist") == (
+        "(no results)"
+    )
 
 
 def test_error_is_an_error_result() -> None:
