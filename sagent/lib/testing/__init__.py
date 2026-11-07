@@ -2,6 +2,7 @@
 
 - ``runner``: ``test_main``, the footer every ``*_test.py`` runs.
 - ``resources``: what a test process may use, wired in once by a conftest.
+- ``basetemp``: a private pytest basetemp per invocation, a rootdir plugin.
 - ``checks``: assertions and helpers a single test calls.
 """
 

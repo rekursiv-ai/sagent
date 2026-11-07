@@ -15,6 +15,8 @@ any test or package conftest imports NumPy or torch.
 
 from __future__ import annotations
 
+from typing import Final
+
 from sagent.lib.testing.resources import (
     cap_math_threads,
     isolate_user_dirs,
@@ -22,6 +24,10 @@ from sagent.lib.testing.resources import (
     pytest_configure,
 )
 
+
+# Honored only in the rootdir conftest: each invocation claims its own basetemp,
+# so concurrent sessions never clean up one another's directories.
+pytest_plugins: Final = ("sagent.lib.testing.basetemp",)
 
 __all__ = [
     "isolate_user_dirs",
