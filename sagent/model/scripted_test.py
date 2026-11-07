@@ -115,6 +115,23 @@ def test_every_model_shares_the_provider_and_starts_from_the_default() -> None:
     assert model.settings == capability.default
 
 
+def test_a_model_takes_only_settings_its_capability_offers() -> None:
+    capability = ModelCapability(
+        model_id="m",
+        thinking_effort=frozenset({"low", "high"}),
+        default=ModelSettings(thinking_effort="low"),
+    )
+    model = ScriptedProvider(capability=capability)["m"]
+    high = replace(capability.default, thinking_effort="high")
+
+    model.settings = high
+
+    assert model.settings == high
+    with pytest.raises(ValueError, match="thinking_effort"):
+        model.settings = replace(capability.default, thinking_effort="max")
+    assert model.settings == high
+
+
 def test_a_provider_given_models_serves_them_as_a_vendor_table_does() -> None:
     wide = ModelCapability(
         model_id="wide-1.0",
