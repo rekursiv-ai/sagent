@@ -634,6 +634,27 @@ async def test_of_an_accounts_windows_the_one_resetting_last_keeps_it(
 
 
 @pytest.mark.asyncio
+async def test_clearing_spent_quota_keeps_other_models_and_accounts(
+    tmp_path: Path,
+) -> None:
+    logins = Logins(tmp_path / "auth.json")
+    _save(logins, "default", "work")
+    until = time.time() + 432_000.0
+    for account in (None, "work"):
+        await logins.spend(
+            account,
+            Spent(window="weekly Opus", model="opus-5.5", until=until),
+        )
+    await logins.spend(None, Spent(window="", model="sonnet-5.5", until=until))
+    await logins.clear_spent(None, model="opus-5.5")
+    assert window(logins, "default", "opus-5.5", now=time.time()) is None
+    assert window(logins, "default", "sonnet-5.5", now=time.time()) is not None
+    assert window(logins, "work", "opus-5.5", now=time.time()) is not None
+    await logins.clear_spent("absent", model="opus-5.5")
+    assert window(logins, "work", "opus-5.5", now=time.time()) is not None
+
+
+@pytest.mark.asyncio
 async def test_a_window_resetting_now_is_spent_no_longer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

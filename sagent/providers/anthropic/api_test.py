@@ -273,6 +273,33 @@ async def test_a_reply_with_no_requests_left_holds_the_key_before_a_429(
     assert len(server.requests) == 2
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fresh_headers", [False, True])
+async def test_a_quota_recheck_uses_only_the_new_responses_limits(
+    slept: list[float],
+    fresh_headers: bool,
+) -> None:
+    spent = {
+        "anthropic-ratelimit-requests-remaining": "0",
+        "anthropic-ratelimit-requests-reset": "1970-01-17T13:46:40Z",
+    }
+    fresh = (
+        {**spent, "anthropic-ratelimit-requests-remaining": "10"}
+        if fresh_headers
+        else {}
+    )
+    server = _Server(replies=[_ok(headers=spent), _ok(headers=fresh), _ok()])
+    async with _Served(server) as shared:
+        model = Anthropic(resources=shared)["opus"]
+        await _stream(model)
+        with pytest.raises(RateLimitedError, match="cooling down"):
+            await _stream(model)
+        await _stream(model, replace(_REQUEST, recheck_quota=True))
+        await _stream(model)
+    assert len(server.requests) == 3
+    assert slept == []
+
+
 def test_two_keys_of_one_organization_are_paced_as_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

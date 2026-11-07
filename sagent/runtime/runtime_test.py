@@ -5070,6 +5070,22 @@ async def test_a_user_message_ends_a_rate_limit_suspension(
         assert h.runtime.service_suspended_until is None
     assert h.said(1) == ["go\n\ntry now"]
     assert h.answers() == ["ok"]
+    assert [request.recheck_quota for request in h.requests()] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_an_explicit_retry_rechecks_quota_only_once() -> None:
+    async with Harness(
+        RateLimitedError("spent", retry_after_sec=432_000),
+        reply(calls=[call("echo", "c1")]),
+        reply("ok"),
+        tools=[Gated()],
+    ) as h:
+        h.push(_user("go"))
+        await h.seen(ModelResponseError)
+        h.runtime.retry()
+        await h.seen(ModelIdle)
+    assert [request.recheck_quota for request in h.requests()] == [True, True, False]
 
 
 @pytest.mark.asyncio
@@ -5267,6 +5283,7 @@ async def test_a_peer_writing_during_a_suspension_waits_with_it(
         wake(*args)
         await h.seen(ModelIdle)
     assert h.said(1) == ["go\n\n[from peer]: still there?"]
+    assert [request.recheck_quota for request in h.requests()] == [True, False]
 
 
 @pytest.mark.asyncio

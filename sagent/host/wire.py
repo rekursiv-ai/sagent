@@ -291,6 +291,9 @@ class GateCall:
     forget: bool = False
     """For ``reset``."""
 
+    clear_hold: bool = False
+    """For ``reset`` when explicitly rechecking a server's hold."""
+
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class GateAnswer:

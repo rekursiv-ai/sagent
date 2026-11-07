@@ -294,6 +294,20 @@ async def test_an_answer_of_the_wrong_kind_is_refused(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("daemon", [False, True])
+async def test_an_explicit_reset_clears_the_same_hold_with_or_without_a_daemon(
+    tmp_path: Path,
+    daemon: bool,
+) -> None:
+    async with _daemon(tmp_path) as (_, address):
+        gate = DaemonGate(address if daemon else tmp_path / "absent.sock")
+        await asyncio.to_thread(gate.hold, "k", until=time.time() + 432_000.0)
+        await asyncio.to_thread(gate.reset, "k", clear_hold=True)
+        assert (await gate.admitted("k", _LONG)).admitted
+        assert FileGate().states()["k"].held_until == 0.0
+
+
+@pytest.mark.asyncio
 async def test_a_reset_keeps_the_pace_unless_told_to_forget(tmp_path: Path) -> None:
     async with _daemon(tmp_path) as (_, address):
         gate = DaemonGate(address)

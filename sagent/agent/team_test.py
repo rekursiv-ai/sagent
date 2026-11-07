@@ -1470,6 +1470,44 @@ async def test_a_turn_after_the_reset_goes_back_to_the_first_login(
 
 
 @pytest.mark.asyncio
+async def test_a_user_retry_clears_the_serving_logins_stale_quota(
+    tmp_path: Path,
+) -> None:
+    logins = _saved()
+    accounts = _Accounts()
+    accounts.script("default", _spent("weekly", wait_sec=432_000.0), reply("restored"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    try:
+        with pytest.raises(RateLimitedError):
+            await agent.send("hi")
+        assert window(logins, "default", "scripted", now=time.time()) is not None
+        assert await agent.send("try now") == "restored"
+        assert window(logins, "default", "scripted", now=time.time()) is None
+    finally:
+        await agent.aclose()
+    assert accounts.served == ["default", "default"]
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_users_first_call_rechecks_persisted_quota(
+    tmp_path: Path,
+) -> None:
+    logins = _saved()
+    await logins.spend(
+        None,
+        Spent(window="weekly", model="scripted", until=time.time() + 432_000.0),
+    )
+    accounts = _Accounts()
+    accounts.script("default", reply("restored"))
+    _, agent, _ = await _session(accounts, tmp_path)
+    try:
+        assert await agent.send(".") == "restored"
+        assert window(logins, "default", "scripted", now=time.time()) is None
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 async def test_a_short_throttle_is_waited_as_ever(tmp_path: Path) -> None:
     logins = _saved("personal")
     accounts = _Accounts()

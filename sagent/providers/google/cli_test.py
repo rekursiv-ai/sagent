@@ -740,6 +740,24 @@ async def test_a_spent_quota_holds_the_model_for_every_caller(
 
 
 @pytest.mark.asyncio
+async def test_a_quota_recheck_reaches_agy_despite_an_old_hold(
+    shared: _Resources,
+    stub: _Stub,
+) -> None:
+    stub.script([_INIT, *_said("restored")])
+    async with GoogleCLI(resources=shared) as provider:
+        model = provider["gemini-flash"]
+        key = f"google-cli@default/{model.capability.model_id}"
+        shared.gate.hold(key, until=time.time() + 432_000.0)
+        request = Request(records=_HELLO)
+        with pytest.raises(RateLimitedError, match="cooling down"):
+            await _stream(model, request)
+        response = _response(await _stream(model, replace(request, recheck_quota=True)))
+        assert response.records == (AssistantMessage(content="restored"),)
+        assert shared.gate.states()[key].held_until == 0.0
+
+
+@pytest.mark.asyncio
 async def test_agy_exiting_mid_turn_is_a_disconnect(
     shared: _Resources,
     stub: _Stub,
