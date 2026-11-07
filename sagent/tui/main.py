@@ -55,6 +55,10 @@ from wesearch.fetch import FetchSession
 from sagent.agent.agent import Agent, NoShrinker, default_system_prompt
 from sagent.agent.agents_md import AgentsMdConfig
 from sagent.agent.compactor import SummaryCompactor
+from sagent.agent.default_tools import (
+    built_in_tool_builders,
+    register_builtin_tool_classes,
+)
 from sagent.agent.pruner import Pruner
 from sagent.agent.team import Team
 from sagent.lib.files.owner_only import open_private
@@ -125,6 +129,35 @@ from sagent.tui.views import Views
 from sagent.tui.welcome import print_welcome
 
 
+# Keep the established eager imports above explicit. The tool modules have
+# circular Agent/Team dependencies, so changing their import order can alter
+# async resource cleanup; the shared registry owns construction, not preload.
+_BUILT_IN_TOOL_MODULES = (
+    AgentSelf,
+    AgentSend,
+    AgentSpawn,
+    BackgroundTask,
+    Bash,
+    Edit,
+    Glob,
+    Grep,
+    List,
+    Memory,
+    PaperAuthor,
+    PaperDetails,
+    PaperFetch,
+    PaperSearch,
+    PlayAudio,
+    Read,
+    Session,
+    Skill,
+    WebFetch,
+    WebSearch,
+    Write,
+)
+register_builtin_tool_classes(_BUILT_IN_TOOL_MODULES)
+
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 
@@ -182,6 +215,11 @@ def main() -> int:
 
     """
     argv = sys.argv[1:]
+    if argv and argv[0] == "vscode-server":
+        # Keep the server's provider imports out of the normal terminal startup.
+        from sagent.vscode.server import main as vscode_server  # noqa: PLC0415
+
+        return vscode_server(argv[1:])
     if argv and not argv[0].startswith("-"):
         command = _action(argv)
     else:
@@ -948,31 +986,7 @@ def _builders(
     session: FetchSession,
 ) -> dict[str, Callable[[], Tool]]:
     """Return how to build each built-in tool, by its name, in their default order."""
-    read, edit, grep, glob, ls = Read(), Edit(), Grep(), Glob(), List()
-    fetch = WebFetch(session=session)
-    return {
-        "Bash": lambda: Bash(peers=(read, edit, grep, glob, ls, fetch)),
-        "Read": lambda: read,
-        "Write": Write,
-        "Edit": lambda: edit,
-        "Grep": lambda: grep,
-        "Glob": lambda: glob,
-        "List": lambda: ls,
-        "WebSearch": lambda: WebSearch(session=session),
-        "WebFetch": lambda: fetch,
-        "PaperSearch": lambda: PaperSearch(session=session),
-        "PaperDetails": lambda: PaperDetails(session=session),
-        "PaperAuthor": lambda: PaperAuthor(session=session),
-        "PaperFetch": lambda: PaperFetch(session=session),
-        "Memory": lambda: Memory(directory=project_dir(cwd) / "memory"),
-        "PlayAudio": PlayAudio,
-        "AgentSpawn": lambda: AgentSpawn(team=team),
-        "AgentSend": lambda: AgentSend(team=team),
-        "AgentSelf": lambda: AgentSelf(team=team),
-        "Session": lambda: Session(team=team),
-        "Skill": Skill,
-        "BackgroundTask": BackgroundTask,
-    }
+    return built_in_tool_builders(cwd=cwd, team=team, session=session)
 
 
 def _chosen_tools(flags: Flags, *, known: Sequence[str]) -> list[str]:
