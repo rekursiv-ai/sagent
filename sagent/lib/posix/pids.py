@@ -69,8 +69,9 @@ def running(pid: int, *, proc: Path = Path("/proc")) -> bool:
     stat = proc / str(pid) / "stat"
     if proc.is_dir():
         try:
+            # A reaped zombie can briefly remain visible as dead (X or x).
             # From the last ``) ``: the name before it may hold one.
-            return stat.read_text().rsplit(") ", 1)[1][0] != "Z"
+            return stat.read_text().rsplit(") ", 1)[1][0] not in {"Z", "X", "x"}
         # Gone before the open, or reaped between the open and the read.
         except (FileNotFoundError, ProcessLookupError):
             return False

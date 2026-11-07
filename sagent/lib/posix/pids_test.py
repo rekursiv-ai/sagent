@@ -99,6 +99,17 @@ async def test_a_name_holding_a_parenthesis_does_not_hide_the_state(
         _ = await child.wait()
 
 
+@pytest.mark.parametrize("state", ["R", "S", "D", "T", "t", "I", "Z", "X", "x"])
+def test_process_state_distinguishes_living_from_zombie_and_dead(
+    tmp_path: Path,
+    state: str,
+) -> None:
+    (tmp_path / "42").mkdir()
+    (tmp_path / "42" / "stat").write_text(f"42 (a) b) {state} 1 42 42 0\n")
+
+    assert running(42, proc=tmp_path) == (state not in {"Z", "X", "x"})
+
+
 def test_a_process_reaped_while_its_state_is_read_has_exited(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
