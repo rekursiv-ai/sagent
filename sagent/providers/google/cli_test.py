@@ -1265,6 +1265,9 @@ class _Resources(AsyncResource):
 
     def __init__(self, *, stub: _Stub) -> None:
         self._shared = SharedResources()
+        self.gate = self._shared.gate
+        self.locks = self._shared.locks
+        self.ledger = self._shared.ledger
         self.mount = _Mount(stub=stub)
         self.server = _ToolServer(mounted=self.mount)
 

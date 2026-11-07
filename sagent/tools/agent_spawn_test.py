@@ -24,6 +24,7 @@ from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.team import ChildSpec, MessageKind, Team
 from sagent.model.capability import ModelCapability, ModelLimits, ModelSettings
 from sagent.model.cost import PriceCatalog, TokenCost, TokenCount
+from sagent.model.exceptions import OverloadedError, RateLimitedError
 from sagent.model.scripted import (
     Reply,
     ScriptedModel,
@@ -428,8 +429,35 @@ async def test_a_child_tells_its_parent_when_it_stops_but_not_after_its_spawn(
         content="[helper is idle] did more",
     )
     assert setup.team.awaited == set()
-    # The spawn's count of its run stops with the run.
-    assert not any(isinstance(o, agent_spawn._Tally) for o in child.runtime.observers)
+    # The spawn's count of its run, and its watch for a wait, stop with the run.
+    assert not any(
+        isinstance(o, agent_spawn._Tally | agent_spawn._DetachOnWait)
+        for o in child.runtime.observers
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_spawn_detaches_at_its_childs_first_quota_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Blocked in the call, the parent would read none of a week's wait."""
+    setup = _setup(tmp_path)
+    detached: list[asyncio.Task[None] | None] = []
+    monkeypatch.setattr(setup.parent.runtime, "detach", detached.append)
+    task = asyncio.create_task(asyncio.sleep(0))
+    waits = agent_spawn._DetachOnWait(parent=setup.parent, task=task)
+    for exception, attempt in (
+        (OverloadedError("busy"), 1),
+        (RateLimitedError("spent"), 1),
+        (RateLimitedError("spent"), 2),
+    ):
+        waits(
+            types.ModelCallSuspended(exception=exception, until=0.0, attempt=attempt),
+        )
+    await task
+
+    assert detached == [task]
 
 
 @pytest.mark.asyncio
@@ -855,7 +883,8 @@ async def test_a_child_and_a_watcher_inherit_every_setting_alike(
 _INHERITED = [
     f
     for f in fields(ToolContext)
-    if f.name in {"cwd", "root", "max_result_chars", "columns", "fetch_session"}
+    if f.name
+    in {"cwd", "root", "max_result_chars", "columns", "fetch_session", "locks"}
 ]
 _OWN = {"files", "label", "spill_dir"}
 

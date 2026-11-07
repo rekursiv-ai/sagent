@@ -19,11 +19,13 @@ if TYPE_CHECKING:
     from asyncio.subprocess import Process
     from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 
+    from wesearch.fetch.gate import Gate
+
     import httpx2
 
     from sagent.model.capability import ModelCapability, ModelSettings
     from sagent.model.types import Request, Response, TextChunk
-    from sagent.providers.login import Logins
+    from sagent.providers.login import Ledger, Locks, Logins
     from sagent.session.types import AnyToolResult, Attachment, ToolCall
     from sagent.tools.types import Tool
 
@@ -115,6 +117,15 @@ class ToolServer(Resource, Protocol):
 
 class ProviderResources(Resource, Protocol):
     """What every provider in a catalog shares; each opens on first use."""
+
+    gate: Gate
+    """Paces each account, and holds one a rate limit stopped, host-wide."""
+
+    locks: Locks
+    """The holds a login takes while it renews, and the logins ledger while edited."""
+
+    ledger: Ledger
+    """Where ``Logins`` keeps the accounts' order, sign-outs and spent windows."""
 
     @property
     def http(self) -> httpx2.AsyncClient:

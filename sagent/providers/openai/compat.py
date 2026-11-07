@@ -30,7 +30,7 @@ from treekle import json_dumps, json_loads
 from sagent.model.exceptions import AuthError, DisconnectedError, UnknownModelError
 from sagent.providers.openai import chat, responses, token_count, wire
 from sagent.providers.resources import SharedResources
-from sagent.providers.retry import retried
+from sagent.providers.retry import account_key, observed, retried
 from sagent.providers.table import HasModels, ModelTable
 from sagent.types import AsyncResource
 
@@ -147,6 +147,15 @@ class OpenAICompatible(HasModels, AsyncResource):
     def usage(self) -> tuple[UsageWindow, ...]:
         """Return the account's rate-limit windows, as last reported."""
         return self._usage
+
+    @property
+    def gate_key(self) -> str:
+        """Return the key every call to this account is paced by."""
+        endpoint = (
+            self._base_url or os.environ.get(self.base_url_variable, "") or self.url
+        )
+        key = self._api_key or os.environ.get(self.key_variable) or ""
+        return account_key(self.section, credential=f"{endpoint}\0{key}")
 
     def __getitem__(self, model: str) -> OpenAIModel:
         table = self.models() if self._models is None else self._models
@@ -289,7 +298,8 @@ class OpenAICompatible(HasModels, AsyncResource):
                 async for event in wire.events(response.aiter_lines()):
                     yield event
 
-        async for event in retried(attempt) if retry else attempt():
+        gate, key = self.resources.gate, self.gate_key
+        async for event in retried(attempt, gate=gate, key=key) if retry else attempt():
             yield event
 
     async def reply(
@@ -338,6 +348,7 @@ class OpenAICompatible(HasModels, AsyncResource):
                             body=_error_body(text),
                             headers=response.headers,
                         )
+                    await observed(self.resources.gate, self.gate_key, self._usage)
                     yield response
                     return
         except httpx2.TransportError as exc:

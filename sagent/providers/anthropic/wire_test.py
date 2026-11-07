@@ -1260,6 +1260,25 @@ def test_an_empty_account_is_billing_even_as_a_429(message: str) -> None:
     assert str(error) == message
 
 
+def test_a_spent_monthly_cap_is_billing_not_a_rate_limit() -> None:
+    # Retrying it, as a rate limit would be, fails until the month turns.
+    message = (
+        "You have reached your API usage limits: your organization has crossed"
+        " its monthly API usage threshold. You will regain access on 2026-12-01."
+    )
+    body = {
+        "type": "error",
+        "error": {
+            "type": "rate_limit_error",
+            "message": message,
+            "details": {"error_code": "enforced_spend_limit_reached"},
+        },
+    }
+    error = wire.to_exception(429, body=body, headers={})
+    assert isinstance(error, BillingError)
+    assert str(error) == message
+
+
 @pytest.mark.parametrize(
     ("status", "kind"),
     [(401, ""), (403, ""), (400, "authentication_error"), (400, "permission_error")],
@@ -1531,8 +1550,32 @@ def test_utilization_is_clamped_to_a_fraction(raw: str, utilization: float) -> N
         {"anthropic-ratelimit-unified-status": "rejected"},
     ],
 )
-def test_an_api_key_reply_reports_no_window(headers: dict[str, str]) -> None:
+def test_a_reply_with_no_bucket_reports_no_window(headers: dict[str, str]) -> None:
     assert wire.rate_limits(headers) == ()
+
+
+def test_an_api_keys_buckets_are_windows_spent_when_none_remain() -> None:
+    windows = wire.rate_limits(
+        {
+            "anthropic-ratelimit-requests-limit": "4000",
+            "anthropic-ratelimit-requests-remaining": "0",
+            "anthropic-ratelimit-requests-reset": "2026-11-06T21:00:30Z",
+            "anthropic-ratelimit-tokens-limit": "2000000",
+            "anthropic-ratelimit-tokens-remaining": "1500000",
+            "anthropic-ratelimit-tokens-reset": "not a time",
+            "anthropic-ratelimit-output-tokens-remaining": "7",
+        },
+    )
+    assert windows == (
+        UsageWindow(
+            label="requests",
+            utilization=1.0,
+            resets_at=datetime(2026, 11, 6, 21, 0, 30, tzinfo=UTC).timestamp(),
+            blocked=True,
+        ),
+        UsageWindow(label="tokens", utilization=0.25),
+        UsageWindow(label="output-tokens"),
+    )
 
 
 def test_fields_a_reply_leaves_out_read_as_empty() -> None:

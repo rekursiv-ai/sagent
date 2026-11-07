@@ -824,12 +824,14 @@ class _Dun:
             self._ended(f"[{self.label} failed] {describe(event.exception)}", owed)
         elif isinstance(event, types.ModelResponseCancelled):
             self._ended(f"[{self.label} halted]", owed)
-        # The run goes on after the wait: nothing it owes is answered for it.
+        # The run goes on after the wait: nothing it owes is answered for it. No
+        # spawn's result tells of the wait, so a spawned child's parent is told too.
         elif isinstance(event, types.ModelCallSuspended) and event.opens_a_quota_wait:
             self._tell_parent(
                 f"[{self.label} waiting until {local_time(event.until)}]"
                 f" {describe(event.exception)}",
                 owed,
+                spawn_tells=False,  # pragma: no mutate -- None is as false.
             )
         elif isinstance(event, types.AgentIdle) and self._worked:
             self._worked = False  # pragma: no mutate -- None is as false.
@@ -885,10 +887,18 @@ class _Dun:
             self.team.answer(self.label, said)
         self._tell_parent(said, owed)
 
-    def _tell_parent(self, said: str, owed: dict[str, str]) -> None:
+    def _tell_parent(
+        self,
+        said: str,
+        owed: dict[str, str],
+        *,
+        spawn_tells: bool = True,
+    ) -> None:
         """Tell the parent ``said``, unless it was answered, or a spawn tells it."""
         parent = self.team.parent(self.label)
-        if parent is None or parent in owed or self.label in self.team.awaited:
+        if parent is None or parent in owed:
+            return
+        if spawn_tells and self.label in self.team.awaited:
             return
         self.team.tell(self.label, parent, said)
 

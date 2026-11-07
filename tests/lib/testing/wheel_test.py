@@ -1,7 +1,7 @@
 """The package's built wheel installs alone and ships what it was built from.
 
-Ships to the root of every exported package and tests that package's own
-wheel, reading what it should hold from ``pyproject.toml``. In a checkout whose
+Ships to every exported package, under its root ``tests/``, and tests that
+package's own wheel, reading what it should hold from ``pyproject.toml``. In a checkout whose
 project is not a published package, as the monorepo's is not, it skips.
 """
 

@@ -12,9 +12,11 @@ from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated
 
 import asyncio
+import hashlib
 import os
 import uuid
 
+from sagent.lib.userdirs import state_dir
 from sagent.session.types import WriteResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
@@ -31,6 +33,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Write",
+    "file_lock_path",
     "write_file",
 ]
 
@@ -86,12 +89,26 @@ class Write:
 
         """
         a = parse(arguments, Write.Arguments)
-        return await asyncio.to_thread(
-            _write,
-            context,
-            context.path(a.file_path),
-            a.content,
-        )
+        path = context.path(a.file_path)
+        async with context.locks.held(file_lock_path(path)):
+            return await asyncio.to_thread(_write, context, path, a.content)
+
+
+def file_lock_path(path: Path) -> Path:
+    """Return the lock an agent holds on ``path`` while it checks, then writes it.
+
+    Held, no other agent's write lands between the check that the file is as the
+    agent saw it and the write, to be written over unseen.
+
+    Args:
+      path: The file, by any name; every name of one file is one lock.
+
+    Returns:
+      lock: A lock file in the user's state directory, never beside ``path``.
+
+    """
+    digest = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:32]
+    return state_dir() / "rekursiv-ai" / "sagent" / "file-locks" / f"{digest}.lock"
 
 
 def write_file(path: Path, data: bytes) -> None:

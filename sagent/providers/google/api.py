@@ -22,7 +22,7 @@ from sagent.model.exceptions import AuthError, DisconnectedError
 from sagent.providers import google
 from sagent.providers.google import wire
 from sagent.providers.resources import SharedResources
-from sagent.providers.retry import retried
+from sagent.providers.retry import account_key, retried
 from sagent.providers.table import HasModels
 from sagent.types import AsyncResource
 
@@ -97,6 +97,17 @@ class Google(HasModels, AsyncResource):
     def usage(self) -> tuple[UsageWindow, ...]:
         """Return ``()``: Gemini reports no rate-limit windows."""
         return ()
+
+    @property
+    def gate_key(self) -> str:
+        """Return the key every call to this account is paced by."""
+        key = (
+            self._api_key
+            or os.environ.get("GOOGLE_API_KEY")
+            or os.environ.get("GEMINI_API_KEY")
+            or ""
+        )
+        return account_key(self.section, credential=f"{self._base_url}\0{key}")
 
     def __getitem__(self, model: str) -> GoogleModel:
         table = self.models() if self._models is None else self._models
@@ -215,7 +226,11 @@ class Google(HasModels, AsyncResource):
                 async for event in wire.events(response.aiter_lines()):
                     yield self.unwrap(event)
 
-        async for event in retried(attempt):
+        async for event in retried(
+            attempt,
+            gate=self.resources.gate,
+            key=self.gate_key,
+        ):
             yield event
 
     async def reply(self, url: str, *, body: Mapping[str, object]) -> dict[str, object]:

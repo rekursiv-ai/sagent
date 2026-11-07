@@ -24,7 +24,7 @@ from sagent.model.exceptions import AuthError, DisconnectedError
 from sagent.providers import anthropic
 from sagent.providers.anthropic import wire
 from sagent.providers.resources import SharedResources
-from sagent.providers.retry import retried
+from sagent.providers.retry import account_key, observed, retried
 from sagent.providers.table import HasModels
 from sagent.providers.workload_identity import WorkloadIdentity
 from sagent.types import AsyncResource
@@ -110,6 +110,16 @@ class Anthropic(HasModels, AsyncResource):
     def usage(self) -> tuple[UsageWindow, ...]:
         """Return the account's rate-limit windows; ``()`` for an API key."""
         return self._usage
+
+    @property
+    def gate_key(self) -> str:
+        """Return the key every call to this account is paced by."""
+        # Anthropic limits an organization, not a key; a workload identity names its own.
+        return account_key(
+            self.section,
+            credential=os.environ.get("ANTHROPIC_API_KEY")
+            or os.environ.get("ANTHROPIC_ORGANIZATION_ID", ""),
+        )
 
     def __getitem__(self, model: str) -> AnthropicModel:
         capability, settings = self.models().resolve(model)
@@ -208,7 +218,11 @@ class Anthropic(HasModels, AsyncResource):
                 async for event in wire.events(response.aiter_lines()):
                     yield event
 
-        async for event in retried(attempt):
+        async for event in retried(
+            attempt,
+            gate=self.resources.gate,
+            key=self.gate_key,
+        ):
             yield event
 
     async def reply(
@@ -278,6 +292,7 @@ class Anthropic(HasModels, AsyncResource):
                             body=_error_body(text),
                             headers=response.headers,
                         )
+                    await observed(self.resources.gate, self.gate_key, self._usage)
                     yield response
                     return
         except httpx2.TransportError as exc:

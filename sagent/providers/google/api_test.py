@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import date
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, override
 
 from treekle import ReadError, json_dumps, json_loads
@@ -22,12 +21,12 @@ from sagent.model.exceptions import (
     UnknownModelError,
 )
 from sagent.model.types import Request, Response, TextChunk
-from sagent.providers import retry
 from sagent.providers.google import api, wire
 from sagent.providers.google.api import Google
 from sagent.providers.google.cli import GoogleCLI
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import ModelTable
+from sagent.providers.testing import paused_backoff
 from sagent.session.types import AssistantMessage, Attachment, UserMessage
 
 
@@ -50,13 +49,7 @@ def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record each backoff instead of waiting it out."""
-    waits: list[float] = []
-
-    async def sleep(delay_sec: float) -> None:
-        waits.append(delay_sec)
-
-    monkeypatch.setattr(retry, "asyncio", SimpleNamespace(sleep=sleep))
-    return waits
+    return paused_backoff(monkeypatch)
 
 
 @pytest.mark.asyncio

@@ -60,6 +60,7 @@ from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.pruner import Pruner
 from sagent.agent.team import Team
 from sagent.host import daemon
+from sagent.host.shared import DaemonGate, DaemonLedger, DaemonLocks
 from sagent.host.strings import ServeDirs
 from sagent.lib.asyncio_stalls import watch_stalls
 from sagent.lib.files.owner_only import open_private
@@ -762,11 +763,17 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
             state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
         )
         _ = await daemon.ensure(serve)
+        address = socket_address(serve.state / "daemon.sock")
+        # Every sagent on the host, and its providers and web fetches, pace and
+        # hold through the one daemon.
+        catalog.gate = fetch.gate = DaemonGate(address)
+        catalog.locks = DaemonLocks(address)
+        catalog.ledger = DaemonLedger(address)
         remote = RemoteSession(
             remotes,
             journal=path,
             team=team,
-            local_socket=socket_address(serve.state / "daemon.sock"),
+            local_socket=address,
         )
         # Before the servers connect: at a terminal, what they log must reach the
         # session's file, not overlay the screen.
@@ -784,7 +791,11 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
             model=model,
             tools=tools,
             journal=journal,
-            tool_context=ToolContext(cwd=cwd, fetch_session=fetch),
+            tool_context=ToolContext(
+                cwd=cwd,
+                fetch_session=fetch,
+                locks=catalog.locks,
+            ),
             interactive=interactive,
         )
         async with contextlib.AsyncExitStack() as stack:

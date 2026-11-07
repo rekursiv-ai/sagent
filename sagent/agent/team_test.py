@@ -1083,6 +1083,27 @@ def test_a_child_waiting_out_a_spent_quota_tells_its_parent_once(
     ]
 
 
+def test_a_spawned_child_waiting_out_a_quota_tells_its_parent_too(
+    tmp_path: Path,
+) -> None:
+    """A spawn's result tells of the child's stop, never of its wait."""
+    team = _family(tmp_path)
+    team.awaited.add("a")
+    a = team["a"].runtime
+    a.publish(
+        types.ModelCallSuspended(
+            exception=RateLimitedError("spent"),
+            until=_NOON + 5.0,
+            attempt=1,
+        ),
+    )
+    a.publish(types.ModelResponseError(exception=ValueError("down")))
+
+    assert _told(team["Agent"]) == [
+        ("a", "[a waiting until Wed Oct 28 12:00:05] RateLimitedError: spent"),
+    ]
+
+
 def test_a_run_that_says_nothing_tells_nothing_said_before_it(tmp_path: Path) -> None:
     team = _family(tmp_path)
     _complete_responses_and_idle(team["a"], reply("old news"))
@@ -1382,12 +1403,12 @@ async def test_a_turn_on_a_login_with_quota_keeps_its_model_and_reads_once(
     accounts.script("default", reply("served"))
     _, agent, _ = await _session(accounts, tmp_path)
     model = agent.model
-    reads: list[Path] = []
+    reads: list[str] = []
     raw = login_module._raw
 
-    def counted(ledger: Path) -> dict[str, dict[str, object]]:
-        reads.append(ledger)
-        return raw(ledger)
+    def counted(text: str) -> dict[str, dict[str, object]]:
+        reads.append(text)
+        return raw(text)
 
     monkeypatch.setattr(login_module, "_raw", counted)
     try:
@@ -1593,9 +1614,9 @@ async def test_the_ledger_is_read_off_the_event_loop(
     on_loop: list[bool] = []
     raw = login_module._raw
 
-    def watched(ledger: Path) -> dict[str, dict[str, object]]:
+    def watched(text: str) -> dict[str, dict[str, object]]:
         on_loop.append(threading.current_thread() is looping)
-        return raw(ledger)
+        return raw(text)
 
     monkeypatch.setattr(login_module, "_raw", watched)
     try:
@@ -1620,12 +1641,12 @@ async def test_a_call_reads_the_ledger_once_per_check(
     accounts = _Accounts()
     accounts.script("aaa", reply("from aaa"))
     _, agent, _ = await _session(accounts, tmp_path)
-    reads: list[Path] = []
+    reads: list[str] = []
     raw = login_module._raw
 
-    def counted(ledger: Path) -> dict[str, dict[str, object]]:
-        reads.append(ledger)
-        return raw(ledger)
+    def counted(text: str) -> dict[str, dict[str, object]]:
+        reads.append(text)
+        return raw(text)
 
     monkeypatch.setattr(login_module, "_raw", counted)
     try:

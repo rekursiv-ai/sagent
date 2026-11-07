@@ -27,6 +27,7 @@ from sagent.providers.openai import token_count, wire
 from sagent.providers.openai.api import OpenAI
 from sagent.providers.openai.lease import BorrowedLogin
 from sagent.providers.openai.login import ORIGINATOR, CodexLogin
+from sagent.providers.retry import account_key
 
 
 if TYPE_CHECKING:
@@ -81,7 +82,7 @@ class OpenAISub(OpenAI):
     ) -> None:
         super().__init__(name=name, resources=resources)
         self._account = account
-        self._logins = Logins(CodexLogin.default_path())
+        self._logins = Logins(CodexLogin.default_path(), shared=self.resources)
         self._login: _Login = (
             CodexLogin(self._logins.path(account), resources=self.resources)
             if lease is None
@@ -94,6 +95,11 @@ class OpenAISub(OpenAI):
     def logins(self) -> Logins:
         """Return every account kept beside ``codex``'s login."""
         return self._logins
+
+    @property
+    @override
+    def gate_key(self) -> str:
+        return account_key(self.section, account=self._account or "default")
 
     async def login(self, *, headless: bool = False) -> None:
         """Sign in through the browser, or with a device code when headless."""

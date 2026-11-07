@@ -21,12 +21,12 @@ from sagent.model.exceptions import (
     UnknownModelError,
 )
 from sagent.model.types import Request, Response, TextChunk
-from sagent.providers import retry
 from sagent.providers.anthropic import api, wire
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import AnthropicCLI
 from sagent.providers.catalog import listings
 from sagent.providers.resources import SharedResources
+from sagent.providers.testing import paused_backoff
 from sagent.providers.types import HasLogin, UsageWindow
 from sagent.session.types import AssistantMessage, Attachment, UserMessage
 
@@ -49,13 +49,7 @@ def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record each backoff instead of waiting it out."""
-    waits: list[float] = []
-
-    async def sleep(delay_sec: float) -> None:
-        waits.append(delay_sec)
-
-    monkeypatch.setattr(retry, "asyncio", SimpleNamespace(sleep=sleep))
-    return waits
+    return paused_backoff(monkeypatch)
 
 
 def _sse(*events: Mapping[str, object]) -> bytes:
@@ -261,6 +255,25 @@ async def test_retrying_stops_after_five_attempts(slept: list[float]) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_reply_with_no_requests_left_holds_the_key_before_a_429(
+    slept: list[float],
+) -> None:
+    # ``paused_backoff``'s clock reads 1_000_000; the bucket refills 20s later.
+    spent = {
+        "anthropic-ratelimit-requests-remaining": "0",
+        "anthropic-ratelimit-requests-reset": "1970-01-12T13:47:00Z",
+    }
+    server = _Server(replies=[_ok(headers=spent), _ok()])
+    async with _Served(server) as shared:
+        opus = Anthropic(resources=shared)["opus"]
+        await _stream(opus)
+        assert slept == []
+        await _stream(opus)
+    assert slept == [pytest.approx(20.0)]
+    assert len(server.requests) == 2
+
+
+@pytest.mark.asyncio
 async def test_a_long_advised_wait_is_left_to_the_caller(slept: list[float]) -> None:
     server = _Server(
         replies=[
@@ -282,7 +295,10 @@ async def test_a_long_advised_wait_is_left_to_the_caller(slept: list[float]) -> 
     )
     async with _Served(server) as shared:
         await _stream(Anthropic(resources=shared)["opus"])
-    assert slept == [30.0]
+    # The account's first 429 held it 31s for every caller: this one waits that
+    # out before it sends, then the 30s its own 429 advises.
+    assert slept == [31.0, 30.0]
+    assert len(server.requests) == 2
 
 
 @pytest.mark.asyncio

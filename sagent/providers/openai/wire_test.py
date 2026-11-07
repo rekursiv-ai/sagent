@@ -442,6 +442,33 @@ def test_a_spent_window_of_any_span_is_named(minutes: str, limit: str) -> None:
     assert error.limit == limit
 
 
+def test_a_ramp_too_fast_is_a_short_hold_not_a_spent_window() -> None:
+    # ``slow_down`` comes inside the per-minute limits; read as a spent window it
+    # would move the agent off an account that is fine in seconds.
+    body = {
+        "error": {
+            "message": "Your request rate increased too quickly.",
+            "type": "rate_limit_error",
+            "code": "slow_down",
+        },
+    }
+    error = wire.to_exception(429, body=body, headers={"retry-after": "3"})
+    assert isinstance(error, RateLimitedError)
+    assert (error.retry_after_sec, error.limit) == (3.0, "")
+
+
+def test_a_model_overload_is_no_rate_limit() -> None:
+    body = {
+        "error": {
+            "message": "The model is overloaded.",
+            "type": "service_unavailable_error",
+            "code": "server_is_overloaded",
+        },
+    }
+    error = wire.to_exception(503, body=body, headers={"retry-after": "2"})
+    assert isinstance(error, OverloadedError)
+
+
 @pytest.mark.parametrize("resource", ["requests", "tokens"])
 def test_an_api_keys_spent_window_names_no_login_limit(resource: str) -> None:
     """Only a ChatGPT login's windows have a span to name."""

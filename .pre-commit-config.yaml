@@ -30,6 +30,28 @@
 #   fires on a dirty tree) STASHES your changes -- a git mutation, and this
 #   worktree is shared.
 #
+#   Opt-in gates. Each value is a count; unset or 0 is off. `ops/env` exports
+#   the recommended counts:
+#
+#     export PRECOMMIT_CODEGRAPH_TYPECHECK=3
+#     export PRECOMMIT_CODEGRAPH_PYTEST=1
+#     export PRECOMMIT_BASEDPYRIGHT=1
+#     export PRECOMMIT_MUTATION=1
+#
+#   CODEGRAPH_TYPECHECK     Type-check the changed files plus their dependents
+#                           up to N import/call hops away.
+#   CODEGRAPH_PYTEST        Run the tests reaching the changed functions within
+#                           N hops, instead of only each file's paired test.
+#                           Depth 1 already has 100% median recall; deeper
+#                           mostly adds runtime.
+#   BASEDPYRIGHT            Run basedpyright alongside ty and pyrefly.
+#   MUTATION                Mutate a seeded 5% of the changed functions, at
+#                           most 4, and fail if a mutant survives their paired
+#                           tests, i.e. the tests do not check what the code
+#                           does. Any count turns it on; the sample is fixed.
+#
+#   Either CODEGRAPH variable also keeps the CodeGraph index synced. See
+#   `harvest-affected` and `mutation` below for measurements and details.
 #
 #   NUL-delimited, per AGENTS.md: a path containing a space becomes two
 #   arguments under `$(...)` or a bare `xargs`, and a rename record yields the
@@ -108,6 +130,10 @@
 fail_fast: false
 default_stages: [pre-commit]
 
+# ``commit-msg`` for the Copybarista-PR guard below: declared here, one
+# ``pre-commit install`` wires both hook types.
+default_install_hook_types: [pre-commit, commit-msg]
+
 repos:
 
   # === Pre-Commit Gates =======================================================
@@ -140,7 +166,12 @@ repos:
           (?x)^(
             uv\.lock
             |typings/
+            |(.*/)?typings/stubs/
+            |(.*/)?\.export/typings/
             |(.*/)?chrome/chrome_(desktop|android)_useragents\.txt
+            |(.*/)?uv\.public\.lock
+            |(.*/)?\.export/uv\.lock
+            |\.(claude|sagent)/sessions/
           )
 
       - id: check-merge-conflict
@@ -194,13 +225,101 @@ repos:
     hooks:
       # Worker counts. Every heavy hook below sizes its own pool with
       # `gate.workers`, which falls back to
-      # `tools.gate.worker_count.default_workers`, whose docstring derives the
+      # `worker_count.default_workers`, whose docstring derives the
       # formula, and runs below interactive priority. Overrides, most specific
       # first: `WORKERS_<HOOK_ID>` (`WORKERS_PYTEST_GLOBAL=1`),
       # then `WORKERS_DEFAULT`. Per hook is what CI needs: the integration tier
       # holds ~1.8 GB of torch/jax per worker and OOM-killed a 2-vCPU runner at
       # two, while a type checker on the same box wants more.
       #
+      # The formula's terms were fitted to these measured optima (`optimal` is
+      # the best `pytest -n`):
+      #
+      #   host                     nproc  phys  perf  optimal  imputed
+      #   laptop (Core Ultra 7 255H)  16    16     6        5        5
+      #   server (EPYC 9555)         128    64    64       24       24
+      #
+      # laptop: 5 -> 216s vs 6 -> 256s (653 slow tests, idle box); its 16 cores
+      # span three clock domains (6x5.1GHz, 8x4.4GHz, 2x2.5GHz), only the first
+      # counting as perf. server: 24 -> 105s vs 20 -> 113s (651 slow tests);
+      # uniform 3.25GHz, so perf == phys and `perf - 1` never binds. The floor
+      # of 2 binds only on a 2-vCPU runner, where xdist still beats serial
+      # (5.4s vs 6.4s). The server keeps its 24 unless under 48 GiB is free; the
+      # laptop keeps 5 unless under 10 GiB. Measured on a 24 GB M5 Pro (2026-10-01):
+      # with swap 92% full, inactive was 6.2 GiB but file-backed only 2.5 GiB;
+      # counting inactive allowed 3 workers, and a pre-commit run drove free
+      # memory to 53 MB.
+
+
+      - id: nbstripout
+        name: nbstripout
+        language: system
+        stages: [pre-commit]
+        types: [jupyter]
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.nbstripout
+        args:
+          - --drop-empty-cells
+          - --extra-keys
+          - >-
+            cell.metadata.heading_collapsed
+            metadata.accelerator
+            metadata.colab
+            metadata.interpreter
+            metadata.kernelspec
+            metadata.language_info.version
+            metadata.name
+            metadata.nbconvert_exporter
+            metadata.version
+        exclude: |
+          (?x)^(
+            typings/
+            |(.*/)?typings/stubs/
+            |(.*/)?\.export/typings/
+            |(.*/)?third_party/
+          )
+
+      # Writes each notebook's paired `.py`, so it runs before houselint and
+      # ruff, which then lint and format that output in the same pass.
+      - id: jupytext-sync
+        name: jupytext-sync
+        language: system
+        stages: [pre-commit]
+        files: \.ipynb$
+        entry: uv --quiet run --frozen --group pre-commit jupytext --sync --pre-commit-mode
+        exclude: |
+          (?x)^(
+            typings/
+            |(.*/)?typings/stubs/
+            |(.*/)?\.export/typings/
+            |(.*/)?third_party/
+          )
+
+      # Must precede ruff-check and ruff-format: `digits` and `staticmethod`
+      # rewrite, and either fix can change how the formatter wraps a line.
+      #
+      # One process for every rule. They read, decode, and parse each file
+      # exactly once between them, so a hook per rule buys nothing and costs
+      # an interpreter startup each (measured, 120 files, 3 rules: 0.81s ->
+      # 0.45s). Which rules run, fix, and skip which paths lives in
+      # `[tool.houselint]` of pyproject.toml, so a bare `houselint.py
+      # FILES` behaves exactly as this hook does.
+      #
+      # `require_serial: true`: pre-commit's own partitioning would fork
+      # cpu_count interpreters that each import the rules and re-read
+      # nothing in common, and it cannot size itself to the commit. The
+      # script pools internally instead, capped at the machine's worker count
+      # and sized to the file count (one worker per ~10 files) so a small
+      # commit stays serial. Measured on the 128-thread server, best of 3: 5 files 0.16s
+      # serial vs 0.30s pooled; 50 files 0.92s vs 0.50s; the full tree (4094
+      # files) 21.8s serial vs 1.46s at 24 workers.
+      - id: houselint
+        name: houselint
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        types_or: [python, jupyter]
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.lint
+
       - id: codespell
         name: codespell
         language: system
@@ -211,7 +330,10 @@ repos:
         exclude: |
           (?x)^(
             typings/
+            |(.*/)?typings/stubs/
+            |(.*/)?\.export/typings/
             |(.*/)?third_party/
+            |\.(claude|sagent)/sessions/
             |docs/symbols\.md
           )
 
@@ -253,6 +375,132 @@ repos:
 
   - repo: local
     hooks:
+      # The Copybarista-PR-Title/Body trailer is replayed into the PUBLIC export
+      # PR, which hard-fails on monorepo references (loop./loop/ ...) AFTER the
+      # commit is pushed and unrewritable. Runs that same forbidden-term check
+      # at commit-msg time, so a leak never reaches main.
+      - id: check-copybarista-pr-text
+        name: check-copybarista-pr-text
+        language: system
+        stages: [commit-msg]
+        always_run: true
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.export_leaks.check_pr_text
+
+  - repo: local
+    hooks:
+      # The CodeGraph indexes live in this host's `/opt/scratch/caches/codegraph`.
+      #
+      # Sole writer of the indexes `ty-check`, `pyrefly-check` and `pytest` below
+      # read: one backbone of origin/main shared by every worktree
+      # (`backbone/`, ~826 MB), and this worktree's overlay of only its own
+      # changes (`overlays/<name>-<hash>/`). Must stay ABOVE them: pre-commit
+      # runs hooks in file order.
+      #
+      # Indexes whatever is on disk, which is the tree being gated either way --
+      # the staged tree under the stashing `pre-commit run`, the working tree
+      # under `--files`/`--all-files`.
+      #
+      # Bootstraps the CLI, and starts a missing or stale backbone's build in
+      # the background, because both consumers degrade silently without the
+      # graph (no tests selected, no dependents checked). It is meant never to
+      # fail -- no network, no npm, and a locked index must not block a commit
+      # -- but an error raised while building the overlay still escapes it.
+      # Costs 0.13s no-op, 0.56s for one changed file.
+      #
+      # It makes no `.codegraph` in the worktree: that per-worktree copy of the
+      # backbone serves only the codegraph CLI and MCP server, and
+      # `codegraph_sync --cli` makes it on request (README).
+      #
+      # OPT-IN. Unset, this hook no-ops and both consumers use the same
+      # sidecar/changed-files scope an exported package gets; the graph engages
+      # only per consumer, under `PRECOMMIT_CODEGRAPH_PYTEST=<depth>` and
+      # `PRECOMMIT_CODEGRAPH_TYPECHECK=<depth>`, the reverse-dependency hops
+      # each walks; this sync runs when either is set. Measured choices are
+      # 1 and 3 respectively (see below and `pyrefly-check`). Off by default
+      # because it costs a 387 MB index, an npm install, and a resolver whose
+      # false-positive rate is 35% misresolved edges (see below) -- none of
+      # which a commit should depend on before someone has chosen it.
+      #
+      # Only a positive integer without a leading zero engages a consumer.
+      # Anything else -- `0`, `false`, empty, unset, `01`, a typo -- is off. An
+      # allowlist rather than a blocklist because the cost of guessing wrong is
+      # minutes to hours: the walk is superlinear in seed count (2.7s at 1 seed,
+      # 16.8s at 20, 101s at 60 on the 16-thread laptop), and `--all-files` is 4213 seeds.
+      #
+      # The gate was `[ -n "${PRECOMMIT_CODEGRAPH:-}" ]`, and `-n "0"` is TRUE,
+      # so `PRECOMMIT_CODEGRAPH=0` -- the spelling that reads as off -- was the
+      # one that left the graph on. `gate.positive` is the one allowlist.
+      #
+      # TWO SKIP TOKENS once opted in, because "don't re-index" and "don't use
+      # the index" differ and the wrong one is a silent downgrade:
+      #
+      #   SKIP=harvest-affected  the alias. Skips this hook AND makes both
+      #                          consumers ignore the index -- `affected.py`
+      #                          reads `$SKIP` and drops to depth 0, which
+      #                          reaches no edge, so each projection falls to its
+      #                          floor: the changed files for pyrefly, their
+      #                          paired sidecar tests for pytest.
+      #   SKIP=codegraph-sync    the id. Skips only the sync. The consumers keep
+      #                          querying whatever the last sync left, so a
+      #                          symbol added since has no `nodes` row and its
+      #                          own file falls back to the sidecar. For when the
+      #                          index is current and you want the 0.4s back.
+      #
+      # Reading `$SKIP` inside a hook is the only route to this: a hook cannot
+      # ask pre-commit whether a sibling ran, but the variable reaches every
+      # hook's environment.
+      #
+      # RE-MEASURING THE DEPTH. The table below is why `1` is the recommended
+      # value; re-derive it after a layout change, or when pre-push starts
+      # catching what this tier should have.
+      #
+      # Ground truth is the test files a commit edited ALONGSIDE its source --
+      # the author's own statement of what the change affected. Seed
+      # `affected.py` with each commit's source files and score its output
+      # against that commit's test files. Report PER-COMMIT MEDIANS, never
+      # pooled totals: five of sixty commits contributed 43% of all false
+      # positives, and micro-averaging let them set the headline.
+      #
+      # 2026-08-27, 60 commits of at most 10 source files, graph only:
+      #
+      #   depth  med prec  med recall  commits fully covered  med files
+      #       1     26.9%      100.0%                    67%          8
+      #       2     12.7%      100.0%                    67%         12
+      #       3      9.4%      100.0%                    68%         14
+      #
+      # Median recall is already 100% at depth 1; deeper only adds files. The
+      # precision column is a FLOOR, not a measurement -- 65% of the false
+      # positives do import a changed file, so they are real dependents the
+      # author simply did not need to edit. The other 35% are CodeGraph
+      # resolving a callee by name to a same-named symbol in an unimported
+      # module.
+      #
+      # Do NOT score with line-level seeding against a HEAD-built index: the
+      # `start_line` columns describe today's files, so rolling an old commit's
+      # hunks through them lands on whatever now occupies those offsets. That
+      # error is what made an earlier version of this table read 6% precision.
+      #
+      # Consumer wall time, median over 12 commits, is flat in depth (pytest
+      # 2.54/2.23/2.56s, basedpyright 1.99/2.53/2.57s for depths 1/2/3): process
+      # startup dominates and the query itself is 0.02-0.04s. Depth only bites
+      # when a changeset reaches a slow test, which the median hides -- seeded
+      # on one widely imported module alone, pytest went 0.84s/9.81s/7.70s.
+      #
+      # Unbounded depth is not an option: 59s for one file against 0.10s at
+      # depth 10, for 8% more coverage.
+      - id: codegraph-sync
+        name: codegraph-sync
+        # Two skip tokens, different blast radius. See the note above.
+        alias: harvest-affected
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        types: [python]
+        pass_filenames: false
+        entry: >-
+          uv --quiet run --frozen --group pre-commit python -m codedoctor.affected.codegraph_sync
+          --caches /opt/scratch/caches/codegraph
+
       # No official ty hook yet (https://github.com/astral-sh/ty/issues/269).
       # The `typecheck` module holds these gates: each runs once over the
       # files its `-spool` twin collected, sizes its own workers, and drops
@@ -272,7 +520,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.gate spool ty-check
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool ty-check
       - id: ty-check
         name: ty-check
         language: system
@@ -282,7 +530,11 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.typecheck ty-check
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.typecheck ty-check
+        # Widens to dependents `PRECOMMIT_CODEGRAPH_TYPECHECK` hops away, from
+        # the index `codegraph-sync` above keeps current.
+        args: [--dependents, codedoctor.affected]
+
       # Default type checker; `basedpyright` below is an additional opt-in.
       - id: pyrefly-check-spool
         name: pyrefly-check-spool
@@ -291,7 +543,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.gate spool pyrefly-check
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool pyrefly-check
       - id: pyrefly-check
         name: pyrefly-check
         language: system
@@ -301,7 +553,15 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.typecheck pyrefly-check
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.typecheck pyrefly-check
+        # Widens on its own only when `ty-check` was skipped. The fixer is one
+        # pyrefly run that also deletes each unnecessary `assert isinstance`.
+        args:
+          - --dependents
+          - codedoctor.affected
+          - --fixer
+          - codedoctor.assert_isinstance
+
       # Opt in with PRECOMMIT_BASEDPYRIGHT=1; unset or 0 is off.
       # Named files bypass pyproject's `[tool.basedpyright] exclude`, so the
       # twin's exclude mirrors it.
@@ -312,11 +572,14 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.gate spool basedpyright
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool basedpyright
         exclude: |
           (?x)^(
             typings/
+            |(.*/)?typings/stubs/
+            |(.*/)?\.export/typings/
             |(.*/)?third_party/
+            |website/rekursiv-ai\.github\.io/_site/
           )
       - id: basedpyright
         name: basedpyright
@@ -330,14 +593,44 @@ repos:
         types_or: [python, pyi]
         entry: >-
           env NODE_OPTIONS=--max-old-space-size=2048
-          uv --quiet run --frozen --group pre-commit python -m tools.typecheck
+          uv --quiet run --frozen --group pre-commit python -m codedoctor.typecheck
           basedpyright --when PRECOMMIT_BASEDPYRIGHT
+        # Widens as `ty-check` does; the fixer is one basedpyright run that
+        # also deletes each unnecessary `assert isinstance`.
+        args:
+          - --dependents
+          - codedoctor.affected
+          - --fixer
+          - codedoctor.assert_isinstance
+
   - repo: local
     hooks:
       # Each heavy hook below is a `-spool` twin, which collects pre-commit's
       # file chunks, then the hook, which runs once over all of them through
       # the `gate` or `testing` module at this machine's worker count.
       #
+      # One export is ~4.5s of mostly-subprocess work, so the pool scales on the
+      # children, not on Python: 8 packages went 27.2s serial -> 5.3s.
+      #
+      # No `files` filter: `touched_configs` picks the packages a change
+      # reaches. A `^loop/` filter skipped the website and every shared file a
+      # package copies (`ops/github/shared/`, this config, `.codespell-ignore`).
+      - id: check-export-leaks-spool
+        name: check-export-leaks-spool
+        # `run check-export-leaks` selects this twin too, so its spool exists.
+        alias: check-export-leaks
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool check-export-leaks
+      - id: check-export-leaks
+        name: check-export-leaks
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        pass_filenames: false
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate run check-export-leaks -- codedoctor.export_leaks
+
       # Runs the tests PAIRED with each changed file (`x_test.py`, `test_x.py`,
       # beside it or under `tests/`), then applies `fail_under` to the changed
       # sources alone. ~1s, versus the whole suite at pre-push. Green with no
@@ -345,6 +638,10 @@ repos:
       # gate. Exit 5 (nothing collected) passes: a selection whose every test
       # carries a deselected marker is not a failure.
       #
+      # `--dependents` adds the individual tests `PRECOMMIT_CODEGRAPH_PYTEST`
+      # hops from each changed file (1 recommended; see `harvest-affected`) to
+      # the pairs, which always run: `coverage-floor` below floors each file by
+      # them, from this run's per-test coverage, so they run once, here.
       #
       # `-n` only from 16 test files (SIDECAR_XDIST_MIN overrides): xdist's ~5s
       # startup lost below that on the 16-thread workstation at 5 workers.
@@ -364,7 +661,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types: [python]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.gate spool pytest
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool pytest
       - id: pytest
         name: pytest
         language: system
@@ -377,7 +674,69 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types: [python]
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.testing pytest
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing pytest
+        args: [--dependents, codedoctor.affected]
+
+      # Opt in locally with PRECOMMIT_MUTATION=1; unset or 0 is off, as for
+      # `PRECOMMIT_CODEGRAPH_*`. CI uses a non-required check. Over 741 commits
+      # the 5% rate and cap of 4 mutate p50 3 / p90 4 functions (~29s / ~39s).
+      - id: mutation-spool
+        name: mutation-spool
+        # `run mutation` selects this twin too, so its spool exists.
+        alias: mutation
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        types: [python]
+        exclude: &mutation-exclude |
+          (?x)^(
+            typings/
+            |(.*/)?typings/stubs/
+            |(.*/)?\.export/typings/
+            |(.*/)?third_party/
+          )
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool mutation
+      - id: mutation
+        name: mutation
+        language: system
+        # Local runs get the staged files; CI supplies the committed range.
+        stages: [pre-commit]
+        require_serial: true
+        pass_filenames: false
+        # Pre-commit otherwise hides successful-run diagnostics.
+        verbose: true
+        types: [python]
+        exclude: *mutation-exclude
+        entry: >-
+          uv --quiet run --frozen --group pre-commit python -m codedoctor.gate
+          run --when PRECOMMIT_MUTATION mutation -- codedoctor.mutation
+          --function-sample-rate 0.05 --max-functions-sampled 4 --timeout-sec 900
+          --explain --prefer-changed-in-pre-commit
+
+      # Each changed source under a floored package must be covered to 100% by
+      # its OWN sidecar tests -- the per-file form of the floor its exported
+      # package enforces; see the `coverage_floor` module. It runs no tests: it
+      # reads the coverage the `pytest` hook above recorded per test, so
+      # skipping `pytest` floors nothing. The package-wide total is still
+      # enforced at pre-push.
+      - id: coverage-floor-spool
+        name: coverage-floor-spool
+        # `run coverage-floor` selects this twin too, so its spool exists.
+        alias: coverage-floor
+        language: system
+        stages: [pre-commit]
+        require_serial: true
+        types: [python]
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool coverage-floor
+      - id: coverage-floor
+        name: coverage-floor
+        language: system
+        stages: [pre-commit]
+        types: [python]
+        require_serial: true
+        pass_filenames: false
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing coverage-floor
+
   # === Pre-Push Gates =========================================================
   #
   # To enable:  uv run pre-commit install --hook-type pre-push
@@ -419,7 +778,7 @@ repos:
         stages: [manual]
         entry: >-
           env NODE_OPTIONS=--max-old-space-size=2048
-          uv --quiet run --frozen --group pre-commit python -m tools.gate
+          uv --quiet run --frozen --group pre-commit python -m codedoctor.gate
           threaded basedpyright-global -- basedpyright --threads={workers}
 
       - id: pyrefly-check-global
@@ -429,7 +788,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         entry: >-
-          uv --quiet run --frozen --group pre-commit python -m tools.gate
+          uv --quiet run --frozen --group pre-commit python -m codedoctor.gate
           threaded pyrefly-check-global -- pyrefly check --threads={workers}
 
       - id: pytest-global
@@ -439,7 +798,9 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.testing tier pytest-global
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing tier pytest-global
+        args: [--plugin, codedoctor.testing.listing]
+
       - id: pytest-slow-global
         name: pytest-slow-global
         language: system
@@ -447,7 +808,9 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.testing tier pytest-slow-global
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing tier pytest-slow-global
+        args: [--plugin, codedoctor.testing.listing]
+
       - id: pytest-ci-smoke-global
         name: pytest-ci-smoke-global
         language: system
@@ -455,7 +818,9 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.testing tier pytest-ci-smoke-global
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing tier pytest-ci-smoke-global
+        args: [--plugin, codedoctor.testing.listing]
+
       - id: pytest-integration-global
         name: pytest-integration-global
         language: system
@@ -463,5 +828,8 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m tools.testing tier pytest-integration-global
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing tier pytest-integration-global
+        args: [--plugin, codedoctor.testing.listing]
+
+
 # NEVER EDIT THIS FILE!

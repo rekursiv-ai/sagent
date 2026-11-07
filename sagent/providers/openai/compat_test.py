@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, ClassVar, override
 
 from treekle import ReadError, json_dumps, json_loads
@@ -20,11 +19,16 @@ from sagent.model.exceptions import (
     UnknownModelError,
 )
 from sagent.model.types import Request, Response, TextChunk
-from sagent.providers import moonshot, retry
-from sagent.providers.openai import chat, token_count
-from sagent.providers.openai.compat import OpenAICompatible, OpenAIModel
+from sagent.providers import moonshot
+from sagent.providers.openai import chat, responses, token_count, wire
+from sagent.providers.openai.compat import (
+    OpenAICompatible,
+    OpenAIModel,
+    ResponsesCompatible,
+)
 from sagent.providers.resources import SharedResources
 from sagent.providers.table import ModelTable
+from sagent.providers.testing import paused_backoff
 from sagent.providers.types import UsageWindow
 from sagent.session.types import (
     AssistantMessage,
@@ -77,13 +81,7 @@ def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     """Record each backoff instead of waiting it out."""
-    waits: list[float] = []
-
-    async def sleep(delay_sec: float) -> None:
-        waits.append(delay_sec)
-
-    monkeypatch.setattr(retry, "asyncio", SimpleNamespace(sleep=sleep))
-    return waits
+    return paused_backoff(monkeypatch, wire)
 
 
 def _sse(*chunks: Mapping[str, object]) -> bytes:
@@ -203,6 +201,30 @@ async def test_closing_closes_only_resources_the_provider_made() -> None:
         assert not http.is_closed
 
 
+class _ResponsesVendor(ResponsesCompatible):
+    """A vendor serving the Responses protocol, as OpenAI, xAI and Azure do."""
+
+    section: ClassVar[str] = "moonshot"
+    package: ClassVar[ModuleType] = moonshot
+    url: ClassVar[str] = "https://api.vendor.test/v1"
+    key_variable: ClassVar[str] = "VENDOR_API_KEY"
+    temperature: ClassVar[float | None] = 0.5
+
+
+def test_a_responses_vendor_speaks_the_responses_protocol() -> None:
+    vendor = _ResponsesVendor()
+    model = vendor["default"]
+
+    assert vendor.path == "/responses"
+    assert vendor.encode(_REQUEST, model=model) == responses.encode(
+        _REQUEST,
+        capability=model.capability,
+        settings=model.settings,
+        temperature=0.5,
+    )
+    assert isinstance(vendor.reader(model=model), responses.StreamReader)
+
+
 @pytest.mark.asyncio
 async def test_stream_posts_the_request_and_yields_text_then_the_response() -> None:
     server = _Server(replies=[_ok()])
@@ -266,6 +288,22 @@ async def test_each_reply_updates_the_accounts_windows() -> None:
         # A reply that reports no window leaves the last report standing.
         await _stream(vendor["default"])
         assert vendor.usage == (window,)
+
+
+@pytest.mark.asyncio
+async def test_a_reply_with_none_remaining_holds_the_account_before_a_429(
+    slept: list[float],
+) -> None:
+    spent = {"x-ratelimit-remaining-requests": "0", "x-ratelimit-reset-requests": "20s"}
+    server = _Server(replies=[_ok(headers=spent), _ok()])
+    async with _Served(server) as shared:
+        vendor = _Vendor(resources=shared)
+        await _stream(vendor["default"])
+        assert slept == []
+        await _stream(vendor["default"])
+    # The second call waited out the window before it sent; no 429 was needed.
+    assert slept == [pytest.approx(20.0)]
+    assert len(server.requests) == 2
 
 
 @pytest.mark.asyncio

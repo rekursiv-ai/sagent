@@ -689,7 +689,7 @@ async def test_a_ledger_that_is_no_object_reads_as_empty_and_says_so(
     _ledger().write_text("[1]")
     with caplog.at_level(logging.WARNING, logger=login.__name__):
         assert logins.order() == ("default", "work")
-    assert caplog.messages == [f"{_ledger()} does not read; starting it afresh"]
+    assert caplog.messages == ["the logins ledger does not read; starting it afresh"]
 
 
 @pytest.mark.asyncio
@@ -886,12 +886,12 @@ def test_one_answer_reads_the_ledger_once(
     """Read once per account, the answer cost a read for each, and they could disagree."""
     logins = Logins(tmp_path / "auth.json")
     _save(logins, "default", "work", "home")
-    reads: list[Path] = []
+    reads: list[str] = []
     raw = login._raw
 
-    def counted(ledger: Path) -> dict[str, dict[str, object]]:
-        reads.append(ledger)
-        return raw(ledger)
+    def counted(text: str) -> dict[str, dict[str, object]]:
+        reads.append(text)
+        return raw(text)
 
     monkeypatch.setattr(login, "_raw", counted)
     if asked == "order":

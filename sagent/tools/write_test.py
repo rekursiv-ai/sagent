@@ -5,15 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import asyncio
 import os
 import stat
 
 import pytest
 
+from sagent.providers.login import FileLocks
 from sagent.session.types import UncategorizedToolResult, WriteResult
 from sagent.tools.read import Read
 from sagent.tools.types import ToolContext
-from sagent.tools.write import Write, write_file
+from sagent.tools.write import Write, file_lock_path, write_file
 
 
 if TYPE_CHECKING:
@@ -36,6 +38,29 @@ def test_writes_to_one_file_share_a_key_however_it_is_named(tmp_path: Path) -> N
 
 def test_the_schema_requires_the_path_and_the_content() -> None:
     assert Write.schema["required"] == ["file_path", "content"]
+
+
+@pytest.mark.asyncio
+async def test_a_write_waits_for_another_agents_hold_then_sees_its_change(
+    tmp_path: Path,
+) -> None:
+    """Held by another agent mid-edit, the file is checked only once that lands."""
+    path = tmp_path / "notes.md"
+    path.write_text("old")
+    context = ToolContext(cwd=tmp_path)
+    context.files.saw(path)
+    async with FileLocks().held(file_lock_path(tmp_path / "." / "notes.md")):
+        writing = asyncio.create_task(
+            Write().call(context, {"file_path": "notes.md", "content": "mine"}),
+        )
+        await asyncio.sleep(0.05)
+        assert not writing.done()
+        path.write_text("theirs")
+    result = await writing
+
+    assert result.is_error is True
+    assert "changed since it was read" in result.text()
+    assert path.read_text() == "theirs"
 
 
 @pytest.mark.asyncio
