@@ -5,15 +5,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import asyncio
 import os
 import stat
+import threading
 
 import pytest
 
 from sagent.session.types import EditResult, Splice, UncategorizedToolResult
+from sagent.tools import edit
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.edit import Edit
 from sagent.tools.types import ToolContext, parse
+from sagent.tools.write import write_file
 
 
 if TYPE_CHECKING:
@@ -376,6 +380,58 @@ async def _edit(
         },
     )
     assert result.call_id == ""
+    return result
+
+
+@pytest.mark.asyncio
+async def test_two_agents_editing_one_file_never_lose_an_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each agent knows the file as it read it; neither may write over the other.
+
+    The first agent's write is held while the second edits: unlocked, the
+    second's edit lands, then the first writes the file it read over it.
+    """
+    path = tmp_path / "a.py"
+    path.write_text("a = 1\nb = 1\n")
+    first, second = ToolContext(cwd=tmp_path), ToolContext(cwd=tmp_path)
+    first.files.saw(path)
+    second.files.saw(path)
+    writing, written = threading.Event(), threading.Event()
+
+    def held(target: Path, data: bytes) -> None:
+        if data.startswith(b"A"):
+            writing.set()
+            # Unlocked, the second edit finishes meanwhile; locked, it waits.
+            written.wait(0.2)
+        write_file(target, data)
+
+    monkeypatch.setattr(edit, "write_file", held)
+
+    async def run(context: ToolContext, old: str, new: str) -> EditResult:
+        arguments: dict[str, PlainTree] = {
+            "file_path": "a.py",
+            "old_string": old,
+            "new_string": new,
+        }
+        return _typed(await Edit().call(context, arguments))
+
+    one = asyncio.create_task(run(first, "a", "A"))
+    assert await asyncio.to_thread(writing.wait, 5)
+    two = asyncio.create_task(run(second, "b", "B"))
+    await asyncio.wait({two}, timeout=0.1)
+    written.set()
+    done, theirs = await one, await two
+
+    assert done.is_error is not True
+    told = theirs.is_error is True and "changed since it was read" in theirs.text()
+    assert told or path.read_text() == "A = 1\nB = 1\n"
+    assert path.read_text() in ("A = 1\nb = 1\n", "A = 1\nB = 1\n")
+
+
+def _typed(result: object) -> EditResult:
+    assert isinstance(result, EditResult)
     return result
 
 

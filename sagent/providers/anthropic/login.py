@@ -32,7 +32,6 @@ from sagent.lib.files.owner_only import write_private
 from sagent.lib.posix.child import Child
 from sagent.model.exceptions import AuthError
 from sagent.providers.login import (
-    file_lock,
     login_flow,
     open_browser,
     pasted_code,
@@ -142,7 +141,7 @@ class ClaudeLogin:
             },
         )
         plan = await self._plan(grant)
-        async with self._lock, file_lock(self._store.lock):
+        async with self._lock, self._resources.locks.held(self._store.lock):
             await self._save(grant, plan=plan)
 
     def _expiring(self) -> bool:
@@ -166,7 +165,7 @@ class ClaudeLogin:
     # of them holding a revoked token.
     async def _renew(self) -> None:
         """Rotate the token, under a lock every process on this login shares."""
-        async with file_lock(self._store.lock):
+        async with self._resources.locks.held(self._store.lock):
             before = self._access
             stored = await self._store.read()
             self._adopt(stored)

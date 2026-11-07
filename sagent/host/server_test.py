@@ -13,8 +13,10 @@ import os
 import shlex
 import signal
 import socket
+import time
 
 from treekle import PlainTree, json_loads
+from wesearch.fetch.gate import SitePolicy
 
 import pytest
 
@@ -37,7 +39,11 @@ from sagent.host.wire import (
     DaemonStatus,
     Describe,
     Described,
+    GateAnswer,
+    GateCall,
+    Held,
     Hello,
+    Hold,
     Note,
     Paused,
     Peers,
@@ -57,7 +63,7 @@ from sagent.tools.remote import RemoteSession, SavedRemote
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Awaitable, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
     from pathlib import Path
 
     from sagent.host.server import Host, HostStarter
@@ -134,6 +140,15 @@ def _call(call_id: str, tool: str = "Gate", **arguments: PlainTree) -> Call:
 
 async def _next(reader: asyncio.StreamReader) -> Message | None:
     return await asyncio.wait_for(received(reader), 5)
+
+
+async def _until(done: Callable[[], bool], *, timeout_sec: float = 5.0) -> None:
+    """Return once ``done()`` holds; fail after ``timeout_sec``, however loaded."""
+    for _ in range(int(timeout_sec / 0.01)):
+        if done():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError(f"not done within {timeout_sec}s")
 
 
 def test_missing_grants_have_no_modification_time(tmp_path: Path) -> None:
@@ -997,6 +1012,57 @@ async def test_owner_configures_the_existing_daemon_and_requests_upgrade(
         assert status.restarting
         assert server.stopping.is_set()
         writer.close()
+
+
+@pytest.mark.asyncio
+async def test_an_owner_calls_the_hosts_gate_through_the_daemon(
+    tmp_path: Path,
+) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    address = tmp_path / "daemon.sock"
+    async with Server(dirs, listen=[], local_socket=address):
+        reader, writer = await asyncio.open_unix_connection(address)
+        writer.write(encoded(GateCall(op="states")))
+        assert await _next(reader) == GateAnswer()
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_an_owner_that_hangs_up_mid_wait_leaves_no_waiter(
+    tmp_path: Path,
+) -> None:
+    """A caller gone stops the daemon's wait; no answer is written to it."""
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    address = tmp_path / "daemon.sock"
+    patient = SitePolicy(host="k", max_wait_sec=60.0)
+    async with Server(dirs, listen=[], local_socket=address) as server:
+        reader, writer = await asyncio.open_unix_connection(address)
+        writer.write(encoded(GateCall(op="hold", key="k", until=time.time() + 30.0)))
+        assert await _next(reader) == GateAnswer()
+        writer.close()
+        reader, writer = await asyncio.open_unix_connection(address)
+        writer.write(encoded(GateCall(op="admitted", key="k", policy=patient)))
+        await _until(lambda: server.waiting() == 1)
+        writer.close()
+        await _until(lambda: server.waiting() == 0)
+
+
+@pytest.mark.asyncio
+async def test_an_owner_holds_a_lock_until_it_hangs_up(tmp_path: Path) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    address = tmp_path / "daemon.sock"
+    name = str(tmp_path / "login.lock")
+    async with Server(dirs, listen=[], local_socket=address):
+        first, held = await asyncio.open_unix_connection(address)
+        held.write(encoded(Hold(name=name)))
+        assert await _next(first) == Held()
+        second, waiting = await asyncio.open_unix_connection(address)
+        waiting.write(encoded(Hold(name=name)))
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(received(second), 0.2)
+        held.close()
+        assert await _next(second) == Held()
+        waiting.close()
 
 
 @pytest.mark.parametrize(

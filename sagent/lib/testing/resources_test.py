@@ -6,7 +6,7 @@ from collections.abc import Callable
 from importlib import machinery, util
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import inspect
@@ -38,9 +38,6 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
-_CWD: Final = Path(__file__).resolve().parent
-
-
 @pytest.fixture(autouse=True)
 def fresh_call_graph() -> Iterator[None]:
     """Forget cached sources: each test writes its own modules under tmp_path."""
@@ -70,7 +67,11 @@ def _run_pytest(tmp_path: Path, *, bindings: int) -> subprocess.CompletedProcess
 
         __all__ = ["pytest_collection_modifyitems"]
         """,
-    ).format(root=str(_CWD.parents[2]))
+    ).format(
+        root=str(
+            Path(resources.__file__).resolve().parents[resources.__name__.count(".")],
+        ),
+    )
     package = tmp_path / "pkg"
     package.mkdir()
     (package / "conftest.py").write_text(conftest, encoding="utf-8")
@@ -736,6 +737,26 @@ def test_real_user_dirs_marker_restores_the_operators_directories(
         assert not resolved.is_relative_to(tmp_path_factory.getbasetemp()), (
             f"{helper.__name__} still resolved into a pytest tmp root"
         )
+
+
+def test_opting_out_allocates_no_root_and_repoints_nothing(
+    request: pytest.FixtureRequest,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The fixture body itself honors the marker, however the conftest wires it.
+
+    An export whose conftest does not re-export ``isolate_user_dirs`` never runs
+    it on the marked test above, so the opt-out is driven directly here.
+    """
+    cast(pytest.Item, request.node).add_marker(pytest.mark.real_user_dirs)
+    variables = [variable for _, variable in _HELPERS]
+    before = {variable: os.environ.get(variable) for variable in variables}
+    last_root = request.config.stash.get(resources._LAST_ROOT, None)
+
+    assert _allocate(request, tmp_path_factory, monkeypatch) is None
+    assert {variable: os.environ.get(variable) for variable in variables} == before
+    assert request.config.stash.get(resources._LAST_ROOT, None) == last_root
 
 
 def _allocate(

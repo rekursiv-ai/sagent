@@ -16,7 +16,10 @@ from typing import TYPE_CHECKING, Protocol, override
 import asyncio
 import contextlib
 
+from wesearch.fetch.gate import FileGate
+
 from sagent.lib.posix.child import Child
+from sagent.providers.login import FileLedger, FileLocks
 from sagent.providers.tool_server import McpToolServer
 from sagent.types import AsyncResource
 
@@ -25,7 +28,11 @@ if TYPE_CHECKING:
     from asyncio.subprocess import Process
     from collections.abc import Mapping, Sequence
 
+    from wesearch.fetch.gate import Gate
+
     import httpx2
+
+    from sagent.providers.login import Ledger, Locks
 else:
     from wrapt import lazy_import
 
@@ -132,9 +139,24 @@ class SubprocessPool(AsyncResource):
 
 
 class SharedResources(AsyncResource):
-    """An HTTP client, process pools, and a tool server, each opened on first use."""
+    """An HTTP client, process pools, and a tool server, each opened on first use.
+
+    Attributes:
+      gate: Paces each account and holds one a rate limit stopped, for every
+        caller on the host that shares its state.
+      locks: The holds a login takes while it renews, and the logins ledger
+        while edited.
+      ledger: Where ``Logins`` keeps what is not a login file.
+
+    Each defaults to the host's files; a daemon may serve all three, set before
+    the first call.
+
+    """
 
     def __init__(self) -> None:
+        self.gate: Gate = FileGate()
+        self.locks: Locks = FileLocks()
+        self.ledger: Ledger = FileLedger()
         self._http: httpx2.AsyncClient | None = None
         self._pools: dict[str, SubprocessPool] = {}
         self._tool_server: McpToolServer | None = None

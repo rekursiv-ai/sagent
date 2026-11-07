@@ -107,7 +107,7 @@ class AnthropicCLI(HasModels, AsyncResource):
         self._owns_resources = resources is None
         self._resources = SharedResources() if resources is None else resources
         self._account = account
-        self._logins = Logins(ClaudeLogin.default_path())
+        self._logins = Logins(ClaudeLogin.default_path(), shared=self._resources)
         self._login = ClaudeLogin(self._logins.path(account), resources=self._resources)
 
     @property

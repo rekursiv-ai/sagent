@@ -783,6 +783,24 @@ class Runtime:
             if not waiters and self._foreground_waiters.get(call_id) is waiters:
                 del self._foreground_waiters[call_id]
 
+    def detach(self, task: asyncio.Task[None] | None) -> None:
+        """Answer the waited-on call ``task`` runs with a stub, and let it run on.
+
+        As when it outlives ``detach_after_sec``: its real result arrives later.
+        Nothing happens when background runs are off, or no waited call runs there.
+
+        Args:
+          task: The task running the call, as ``asyncio.current_task()`` in it;
+            ``None``, outside any task, runs none.
+
+        """
+        if not self.allow_background:
+            return
+        for cid, held in self.running_tools.items():
+            if held is task and cid in self.cohort:
+                self.push(Detach(call_id=cid))
+                return
+
     # A resumed context's detached calls ran in a process that has ended, so no
     # result will follow; and a clean quit's cancellations are never committed.
     def settle_detached(self) -> None:

@@ -23,6 +23,11 @@ one, its attachments' bytes included.
       Ping     ◀─────────▶    Ping                      (each way, to stay alive)
       Bye      ──────────▶      ends the session
 
+An owner on the daemon's own socket may instead send one request, alone on its
+connection: ``DaemonControl`` (answered ``DaemonStatus``), ``GateCall``
+(``GateAnswer``), ``LedgerCall`` (``LedgerText``), or ``Hold`` (``Held``, the
+hold lasting until the connection closes).
+
 A client is sent a tool's digest, never its schema; it asks ``Describe`` only
 for a tool whose digest matches none of its own. A ``Note`` is acked as a
 ``Result`` is, and kept until then by whoever sent it, across a drop.
@@ -36,14 +41,15 @@ Typical usage example:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Final, Literal
 
 import asyncio
 import hashlib
 import json
 
 from treekle import PlainTree, json_loads, mutable
+from wesearch.fetch.gate import Admission, GateState, SitePolicy
 
 from sagent.agent.team import MessageKind
 from sagent.session.types import (
@@ -71,7 +77,13 @@ __all__ = [
     "DaemonStatus",
     "Describe",
     "Described",
+    "GateAnswer",
+    "GateCall",
+    "Held",
     "Hello",
+    "Hold",
+    "LedgerCall",
+    "LedgerText",
     "Message",
     "Note",
     "Pause",
@@ -85,6 +97,7 @@ __all__ = [
     "Tools",
     "ToolsChanged",
     "Welcome",
+    "decoded",
     "encoded",
     "ping",
     "received",
@@ -263,6 +276,61 @@ class DaemonStatus:
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class GateCall:
+    """An owner's call of the daemon's ``Gate``: ``op`` names the method."""
+
+    op: Literal["admit", "admitted", "trip", "hold", "release_probe", "reset", "states"]
+    """``admitted`` stays open until the caller is admitted, or refused."""
+
+    key: str = ""
+    policy: SitePolicy | None = None
+    """For ``admit``, ``admitted`` and ``trip``."""
+
+    until: float = 0.0
+    """For ``hold``."""
+
+    challenge_url: str = ""
+    """For ``trip``."""
+
+    forget: bool = False
+    """For ``reset``."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class GateAnswer:
+    """What a ``GateCall`` returned: an ``admit``'s admission, or the ``states``."""
+
+    admission: Admission = field(default_factory=Admission)
+    states: Mapping[str, GateState] = field(default_factory=dict[str, GateState])
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Hold:
+    """Take the daemon's hold on ``name``, a lock file; it ends as the connection does."""
+
+    name: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Held:
+    """The hold a ``Hold`` asked for is taken."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LedgerCall:
+    """Read the logins ledger; with ``text``, replace it first."""
+
+    text: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class LedgerText:
+    """The logins ledger's text, after a ``LedgerCall``."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class Pause:
     """Buffer worker output after acknowledging the daemon's handoff boundary."""
 
@@ -316,6 +384,12 @@ class Described:
 type Message = (
     DaemonControl
     | DaemonStatus
+    | GateCall
+    | GateAnswer
+    | Hold
+    | Held
+    | LedgerCall
+    | LedgerText
     | Hello
     | Welcome
     | Refused
@@ -339,6 +413,12 @@ type Message = (
 _KINDS: Final = (
     DaemonControl,
     DaemonStatus,
+    GateCall,
+    GateAnswer,
+    Hold,
+    Held,
+    LedgerCall,
+    LedgerText,
     Hello,
     Welcome,
     Refused,
@@ -388,6 +468,22 @@ async def received(reader: asyncio.StreamReader) -> Message | None:
     line = await reader.readline()
     if not line:
         return None
+    return decoded(line)
+
+
+def decoded(line: bytes) -> Message:
+    """Return the message one line holds.
+
+    Args:
+      line: One line, as ``encoded`` wrote it.
+
+    Returns:
+      message: The message.
+
+    Raises:
+      ValueError: The line is no message.
+
+    """
     message = stored_record(json_loads(line), Message, classes=_classes())
     assert isinstance(message, _KINDS)
     return message
@@ -398,5 +494,6 @@ def _classes() -> dict[str, type]:
     return {
         **record_classes(),
         ToolSpec.__name__: ToolSpec,
+        **{kind.__name__: kind for kind in (SitePolicy, Admission, GateState)},
         **{kind.__name__: kind for kind in _KINDS},
     }

@@ -584,7 +584,8 @@ class AgentSpawn:
         """Run ``child`` on the prompt to idle; it stays, its inbox open."""
         started = time.monotonic()
         tally = _Tally()
-        child.runtime.observers.append(tally)
+        waits = _DetachOnWait(parent=parent, task=asyncio.current_task())
+        child.runtime.observers.extend((tally, waits))
         self.team.awaited.add(label)
         try:
             reply, state = await _answer(child, a.prompt)
@@ -595,8 +596,9 @@ class AgentSpawn:
             raise
         finally:
             self.team.awaited.discard(label)
-            if tally in child.runtime.observers:
-                child.runtime.observers.remove(tally)
+            for observer in (tally, waits):
+                if observer in child.runtime.observers:
+                    child.runtime.observers.remove(observer)
             parent.runtime.publish(
                 types.ChildDoneEvent(
                     label=label,
@@ -766,6 +768,23 @@ class _Tally:
             self.tokens += event.response.tokens.total
             self.cost += event.response.spend.total
             self.calls += sum(isinstance(r, ToolCall) for r in event.response.records)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _DetachOnWait:
+    """Frees the parent of a spawn whose child began waiting out a spent quota.
+
+    The wait may last days, and a parent blocked in the call never reads its
+    child's reports: detached, it reads the wait now and the reply when it comes.
+    """
+
+    parent: Agent
+    task: asyncio.Task[None] | None
+
+    def __call__(self, event: types.RuntimeEvent) -> None:
+        """Detach the spawn's call at the child's first quota wait."""
+        if isinstance(event, types.ModelCallSuspended) and event.opens_a_quota_wait:
+            self.parent.runtime.detach(self.task)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

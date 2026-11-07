@@ -99,7 +99,7 @@ def data_dir(*, platform: str | None = None) -> Path:
     platform = platform or sys.platform
     if platform == "win32":
         return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")  # noqa: TID251 -- this module IS the userdirs layout.
-    if xdg_data_home := os.environ.get("XDG_DATA_HOME", ""):
+    if xdg_data_home := _env("XDG_DATA_HOME"):
         return Path(xdg_data_home)
     if platform == "darwin":
         return Path.home() / "Library" / "Application Support"  # noqa: TID251 -- this module IS the userdirs layout.
@@ -132,7 +132,7 @@ def config_dir(*, platform: str | None = None) -> Path:
     platform = platform or sys.platform
     if platform == "win32":
         return data_dir(platform=platform)
-    if xdg_config_home := os.environ.get("XDG_CONFIG_HOME", ""):
+    if xdg_config_home := _env("XDG_CONFIG_HOME"):
         return Path(xdg_config_home)
     if platform == "darwin":
         return data_dir(platform=platform)
@@ -166,7 +166,7 @@ def cache_dir(*, platform: str | None = None) -> Path:
     platform = platform or sys.platform
     if platform == "win32":
         return data_dir(platform=platform)
-    if xdg_cache_home := os.environ.get("XDG_CACHE_HOME", ""):
+    if xdg_cache_home := _env("XDG_CACHE_HOME"):
         return Path(xdg_cache_home)
     if platform == "darwin":
         return Path.home() / "Library" / "Caches"  # noqa: TID251 -- this module IS the userdirs layout.
@@ -201,7 +201,7 @@ def state_dir(*, platform: str | None = None) -> Path:
     platform = platform or sys.platform
     if platform == "win32":
         return data_dir(platform=platform)
-    if xdg_state_home := os.environ.get("XDG_STATE_HOME", ""):
+    if xdg_state_home := _env("XDG_STATE_HOME"):
         return Path(xdg_state_home)
     if platform == "darwin":
         return data_dir(platform=platform)
@@ -231,7 +231,7 @@ def base_dir_variables() -> dict[str, str]:
             "XDG_STATE_HOME",
             "LOCALAPPDATA",
         )
-        if (value := os.environ.get(name, ""))
+        if (value := _env(name))
     }
 
 
@@ -250,9 +250,14 @@ def runtime_dir_variables(*, logind: Path = Path("/run/user")) -> dict[str, str]
         found, as on macOS and Windows.
 
     """
-    if value := os.environ.get("XDG_RUNTIME_DIR", ""):
+    if value := _env("XDG_RUNTIME_DIR"):
         return {"XDG_RUNTIME_DIR": value}
     if sys.platform in {"darwin", "win32"}:
         return {}
     found = logind / str(os.getuid())
     return {"XDG_RUNTIME_DIR": str(found)} if found.is_dir() else {}
+
+
+def _env(name: str) -> str:
+    """Return ``name``'s value, or empty when unset: both read as unset, per spec."""
+    return os.environ.get(name, "")  # pragma: no mutate -- "" and None read alike.

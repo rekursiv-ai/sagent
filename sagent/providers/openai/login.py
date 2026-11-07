@@ -43,7 +43,6 @@ from treekle import ReadError, from_plain, json_dumps, json_loads
 from sagent.lib.files.owner_only import write_private
 from sagent.model.exceptions import AuthError
 from sagent.providers.login import (
-    file_lock,
     login_flow,
     open_browser,
     read_pasted_code,
@@ -239,7 +238,7 @@ class CodexLogin:
             verifier=verifier,
             issuer=ISSUER,
         )
-        async with self._lock, file_lock(self._file_lock):
+        async with self._lock, self._resources.locks.held(self._file_lock):
             await self._save(_issued(grant))
 
     async def sign_in_device(self, *, show: Callable[[str], object] = print) -> None:
@@ -261,7 +260,7 @@ class CodexLogin:
                 tokens = await poll_device_code(http, code)
                 if tokens is not None:
                     break
-        async with self._lock, file_lock(self._file_lock):
+        async with self._lock, self._resources.locks.held(self._file_lock):
             await self._save(tokens)
 
     async def sign_out(self) -> None:
@@ -295,7 +294,7 @@ class CodexLogin:
     # of them holding a revoked token.
     async def _renew(self) -> None:
         """Rotate the token, under a lock every process on this login shares."""
-        async with file_lock(self._file_lock):
+        async with self._resources.locks.held(self._file_lock):
             before = self._access
             tokens = await self._tokens()
             self._adopt(tokens)

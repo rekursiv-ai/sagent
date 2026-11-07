@@ -65,6 +65,8 @@ from treekle import PlainTree
 from wesearch.fetch import FetchSession
 from wesearch.fetch.session import default_session
 
+from sagent.providers.login import FileLocks, Locks
+
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator
@@ -435,6 +437,11 @@ class ToolContext:
     """The connections, cookies, browser and egress every web fetch reuses; whoever
     made it closes it. Unset, the process's shared one, whose files go where the
     user's data directory was when it was first made."""
+
+    locks: Locks = field(default_factory=FileLocks, repr=False)
+    """The holds a tool takes on a file while it checks and writes it, shared by
+    every agent on the host that takes the same: the host's files, unless a daemon
+    serves them."""
 
     @property
     def origin(self) -> Path:

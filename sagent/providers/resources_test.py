@@ -11,6 +11,8 @@ import asyncio
 import os
 import signal
 
+from wesearch.fetch.gate import FileGate
+
 import pytest
 
 from sagent.lib.posix.child import Child
@@ -311,6 +313,12 @@ async def test_each_shared_resource_opens_once_on_first_use() -> None:
         claude = shared.process_pool("claude")
         assert shared.process_pool("claude") is claude
         assert shared.process_pool("gemini") is not claude
+
+
+def test_providers_pace_their_accounts_by_the_hosts_files_unless_told() -> None:
+    gate = SharedResources().gate
+    gate.hold("openai-sub@work", until=5_000.0)
+    assert FileGate().states()["openai-sub@work"].held_until == 5_000.0
 
 
 def test_the_http_client_waits_out_a_stalled_connect_and_a_slow_stream() -> None:

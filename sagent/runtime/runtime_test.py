@@ -1302,6 +1302,31 @@ async def test_each_slow_group_is_detached_on_its_own() -> None:
         await until(lambda: len(tool.finished) == 2)
 
 
+@pytest.mark.parametrize("background", [True, False])
+@pytest.mark.asyncio
+async def test_a_call_detaches_by_the_task_that_runs_it(background: bool) -> None:
+    """A tool's own task asks it, as a spawn whose child began a long wait does."""
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        *_replies(4),
+        tools=[tool],
+    ) as h:
+        h.runtime.allow_background = background
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        h.runtime.detach(h.runtime.running_tools["t1"])
+        h.runtime.detach(asyncio.create_task(asyncio.sleep(0)))
+        if background:
+            await h.seen(ModelIdle)
+            assert [r.stub for r in h.results("t1")] == ["pending"]
+        else:
+            await spin()
+            assert h.runtime.cohort == {"t1"}
+        tool.release.set()
+        await until(lambda: bool(tool.finished))
+
+
 @pytest.mark.asyncio
 async def test_a_detach_of_a_call_no_longer_waited_on_does_nothing() -> None:
     async with Harness(reply("ok")) as h:

@@ -406,7 +406,9 @@ def to_exception(
         return ContextOverflowError(text)
     if kind == "invalid_request_error" and _blocked(lower):
         return RefusedError(text)
-    if _out_of_credit(lower):
+    # A spent monthly cap is a 429 too, with no ``retry-after``, until the month turns.
+    spent_cap = _object(fields.get("details")).get("error_code")
+    if spent_cap == "enforced_spend_limit_reached" or _out_of_credit(lower):
         return BillingError(text)
     if status in (401, 403) or kind in ("authentication_error", "permission_error"):
         return AuthError(text)
@@ -434,12 +436,30 @@ def rate_limits(headers: Mapping[str, str]) -> tuple[UsageWindow, ...]:
       headers: The reply's headers.
 
     Returns:
-      windows: The 5-hour and 7-day windows reported; ``()`` for an API key.
+      windows: A subscription's 5-hour and 7-day windows; an API key's
+        ``requests``, ``tokens``, ``input-tokens`` and ``output-tokens`` buckets,
+        each spent when none remain; ``()`` when none is reported.
 
     """
     lower = {key.lower(): value for key, value in headers.items()}
     overall = lower.get("anthropic-ratelimit-unified-status")
     windows: list[UsageWindow] = []
+    for bucket in ("requests", "tokens", "input-tokens", "output-tokens"):
+        prefix = f"anthropic-ratelimit-{bucket}"
+        limit = _number(lower.get(f"{prefix}-limit"))
+        remaining = _number(lower.get(f"{prefix}-remaining"))
+        if remaining is None:
+            continue
+        windows.append(
+            UsageWindow(
+                label=bucket,
+                utilization=min(max(1.0 - remaining / limit, 0.0), 1.0)
+                if limit is not None and limit > 0
+                else None,
+                resets_at=_instant(lower.get(f"{prefix}-reset")),
+                blocked=remaining <= 0,
+            ),
+        )
     for label in ("5h", "7d"):
         prefix = f"anthropic-ratelimit-unified-{label}"
         utilization = _number(lower.get(f"{prefix}-utilization"))
@@ -788,6 +808,16 @@ def _limit(lower: Mapping[str, str]) -> str:
         if claim is not None and claim.startswith(f"{window}_"):
             return f"{name} {claim.removeprefix(f'{window}_').capitalize()}"
     return ""
+
+
+def _instant(raw: str | None) -> float | None:
+    """Return an RFC 3339 time, as an API key's bucket resets, in epoch seconds."""
+    if raw is None:
+        return None
+    try:
+        return datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return None
 
 
 def _number(raw: str | None) -> float | None:

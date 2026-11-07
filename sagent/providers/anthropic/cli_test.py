@@ -1104,6 +1104,9 @@ class _Resources(AsyncResource):
         pool: ProcessPool | None = None,
     ) -> None:
         self._shared = SharedResources()
+        self.gate = self._shared.gate
+        self.locks = self._shared.locks
+        self.ledger = self._shared.ledger
         self._client = http
         self._pool = pool
         self.server = _ToolServer()

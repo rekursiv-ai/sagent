@@ -1,17 +1,24 @@
-"""What sign-in tests share: a free loopback port, and a browser's visit to one.
+"""What provider tests share: a free loopback port, a browser's visit, quick retries.
 
 Typical usage example:
 
   port = free_port()
   assert await visit(port, "/callback?code=c&state=s") == 200
+  waits = paused_backoff(monkeypatch)            # each retry's wait, unslept
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Protocol
 
 import asyncio
 import socket
+
+from wesearch.fetch import gate
+
+from sagent.providers import retry
 
 
 if TYPE_CHECKING:
@@ -26,6 +33,7 @@ __all__ = [
     "bound_port",
     "first_live",
     "free_port",
+    "paused_backoff",
     "refuse_browsers",
     "send",
     "visit",
@@ -74,6 +82,46 @@ def refuse_browsers(monkeypatch: pytest.MonkeyPatch, *modules: ModuleType) -> No
 
     for module in modules:
         monkeypatch.setattr(module, "open_browser", refused)
+
+
+def paused_backoff(
+    monkeypatch: pytest.MonkeyPatch,
+    *clocked: ModuleType,
+) -> list[float]:
+    """Make each retry's wait pass at once on a clock of its own; return the waits.
+
+    The account gate and the retries read one clock, which only the waits move,
+    so a hold the gate keeps lifts when it is waited out; jitter is off, so each
+    wait is the one advised.
+
+    Args:
+      monkeypatch: The test's.
+      clocked: Further modules whose ``time`` reads the same clock -- a wire that
+        dates a reset the gate then holds to.
+
+    Returns:
+      waits: Each wait, in seconds, in the order waited.
+
+    """
+    waits: list[float] = []
+    clock = [1_000_000.0]
+
+    async def sleep(delay_sec: float) -> None:
+        waits.append(delay_sec)
+        clock[0] += delay_sec
+
+    now = SimpleNamespace(time=lambda: clock[0])
+    paused = SimpleNamespace(sleep=sleep, to_thread=asyncio.to_thread)
+    monkeypatch.setattr(retry, "asyncio", paused)
+    monkeypatch.setattr(gate, "asyncio", paused)
+    for module in (retry, gate, *clocked):
+        monkeypatch.setattr(module, "time", now)
+    monkeypatch.setattr(
+        retry,
+        "ACCOUNT_POLICY",
+        replace(retry.ACCOUNT_POLICY, jitter_sec=0.0),
+    )
+    return waits
 
 
 def bound_port(bound: Bound) -> int:

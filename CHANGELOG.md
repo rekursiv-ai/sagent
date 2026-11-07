@@ -3,6 +3,33 @@
 All notable sagent changes are documented here. This project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Fixed
+
+- A rate limit one agent meets holds back every agent on the host calling the
+  same account, until the server's advised time; agents on another account, or
+  another provider, are not held. A reply whose headers report a spent window,
+  or no requests or tokens left, holds the account until it resets, before any
+  429. Agents waiting in the daemon are woken at once when another's 429 holds
+  the account, or its lock lifts.
+- A spawned child that begins waiting out a spent quota detaches its spawn: the
+  parent is told of the wait at once, and gets the child's reply when it comes.
+- Two agents editing one file, in one session or several, no longer lose an
+  edit: the second is told the file changed since it read it.
+- Anthropic's spent monthly spend cap (`enforced_spend_limit_reached`) is a
+  billing error, never retried.
+
+### Changed
+
+- The rate gate, the holds a login takes while it renews, the holds on files
+  being edited, and the logins ledger are protocols: `Gate`, `Locks`, `Ledger`.
+  Each defaults to the host's files; a session the daemon serves reaches all
+  four through the daemon's socket (`sagent.host.shared`), which keeps them in
+  the same files, so a process with no daemon shares one state with it.
+- `Logins(default, shared=...)` takes where it keeps its ledger and holds;
+  `ToolContext.locks` the holds Edit and Write take.
+
 ## 0.2.3 - 2026-11-06
 
 ### Changed

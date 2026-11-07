@@ -28,7 +28,7 @@ from sagent.tools.command_analyzer import (
 )
 from sagent.tools.display import DisplaySpec, ToolDisplay
 from sagent.tools.types import json_schema, parse
-from sagent.tools.write import write_file
+from sagent.tools.write import file_lock_path, write_file
 
 
 if TYPE_CHECKING:
@@ -139,14 +139,16 @@ class Edit:
           result: Each replacement made, or why none was.
 
         """
-        return await asyncio.to_thread(_edit, context, parse(arguments, Edit.Arguments))
+        a = parse(arguments, Edit.Arguments)
+        async with context.locks.held(file_lock_path(context.path(a.file_path))):
+            return await asyncio.to_thread(_edit, context, a)
 
 
 def _edit(
     context: ToolContext,
     a: Edit.Arguments,
 ) -> EditResult:
-    """Make the replacement ``a`` asks for."""
+    """Make the replacement ``a`` asks for, if the file is as the model last saw it."""
     path = context.path(a.file_path)
     # ``str.replace("", ...)`` inserts between every character.
     if not a.old_string:
