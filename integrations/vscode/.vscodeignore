@@ -1,0 +1,10 @@
+.gitignore
+.vscode/**
+src/**
+webview/**
+*.ts
+tsconfig*.json
+vite.config.ts
+package-lock.json
+node_modules/**
+out/**/*.map

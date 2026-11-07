@@ -1,0 +1,33 @@
+{
+  "folders": [
+    {
+      "name": "Sagent",
+      "path": ".."
+    }
+  ],
+  "settings": {
+    "sagent.model": "openai-sub/default",
+    "sagent.command": "uv",
+    "sagent.commandArguments": [
+      "run",
+      "--frozen",
+      "--no-dev",
+      "python",
+      "-m",
+      "sagent",
+      "vscode-server"
+    ],
+    "workbench.secondarySideBar.defaultVisibility": "visible",
+    "workbench.colorCustomizations": {
+      "titleBar.activeBackground": "#1565C0",
+      "titleBar.activeForeground": "#FFFFFF",
+      "titleBar.inactiveBackground": "#0D47A1",
+      "titleBar.inactiveForeground": "#D6E4FF",
+      "activityBar.background": "#0D47A1",
+      "activityBar.foreground": "#FFFFFF",
+      "statusBar.background": "#1565C0",
+      "statusBar.foreground": "#FFFFFF"
+    },
+    "window.title": "Sagent F5 Host — ${activeEditorShort} — ${rootName}"
+  }
+}

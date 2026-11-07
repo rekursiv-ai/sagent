@@ -1,0 +1,199 @@
+{
+  "name": "sagent-vscode",
+  "displayName": "Sagent",
+  "description": "A native VS Code interface for the Sagent coding agent.",
+  "version": "0.1.0",
+  "publisher": "rekursiv-ai",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rekursiv-ai/sagent.git",
+    "directory": "integrations/vscode"
+  },
+  "engines": {
+    "vscode": "^1.106.0"
+  },
+  "extensionKind": [
+    "workspace"
+  ],
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:sagent.chat",
+    "onView:sagent.chatSecondary",
+    "onView:sagent.sessions",
+    "onView:sagent.sessionsSecondary",
+    "onView:sagent.swarm",
+    "onView:sagent.swarmSecondary",
+    "onCommand:sagent.open",
+    "onCommand:sagent.newSession",
+    "onCommand:sagent.renameSession",
+    "onCommand:sagent.selectSession",
+    "onCommand:sagent.selectAgent"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "sagent.open",
+        "title": "Sagent: Open"
+      },
+      {
+        "command": "sagent.newSession",
+        "title": "Sagent: New Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "sagent.renameSession",
+        "title": "Rename Session"
+      },
+      {
+        "command": "sagent.selectSession",
+        "title": "Sagent: Open Session"
+      },
+      {
+        "command": "sagent.selectAgent",
+        "title": "Sagent: Focus Agent"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "sagent",
+          "title": "Sagent",
+          "icon": "./media/sagent.png"
+        }
+      ],
+      "secondarySidebar": [
+        {
+          "id": "sagentSecondary",
+          "title": "Sagent",
+          "icon": "./media/sagent.png"
+        }
+      ]
+    },
+    "views": {
+      "sagent": [
+        {
+          "id": "sagent.sessions",
+          "name": "Sessions",
+          "type": "tree"
+        },
+        {
+          "id": "sagent.chat",
+          "name": "Chat",
+          "type": "webview"
+        },
+        {
+          "id": "sagent.swarm",
+          "name": "Swarm",
+          "type": "tree"
+        }
+      ],
+      "sagentSecondary": [
+        {
+          "id": "sagent.sessionsSecondary",
+          "name": "Sessions",
+          "type": "tree"
+        },
+        {
+          "id": "sagent.chatSecondary",
+          "name": "Chat",
+          "type": "webview"
+        },
+        {
+          "id": "sagent.swarmSecondary",
+          "name": "Swarm",
+          "type": "tree"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Sagent",
+      "properties": {
+        "sagent.command": {
+          "type": "string",
+          "default": "sagent",
+          "description": "Executable used to start the Sagent VS Code server."
+        },
+        "sagent.commandArguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "vscode-server"
+          ],
+          "description": "Arguments passed to the Sagent server executable."
+        },
+        "sagent.model": {
+          "type": "string",
+          "default": "google-cli/gemini-flash-3.8",
+          "description": "Initial Sagent model name; the session may recall its own model. Defaults to Google CLI Gemini 3.8 Flash."
+        },
+        "sagent.allowedProviders": {
+          "type": "string",
+          "default": "",
+          "description": "Optional comma-separated provider allow-list passed to Sagent."
+        },
+        "sagent.tools": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Optional Sagent built-in tool names; an empty list uses Sagent's default set."
+        }
+      }
+    },
+    "menus": {
+      "view/item/context": [
+        {
+          "command": "sagent.renameSession",
+          "when": "view == sagent.sessions && viewItem == sagentSession"
+        },
+        {
+          "command": "sagent.renameSession",
+          "when": "view == sagent.sessionsSecondary && viewItem == sagentSession"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "sagent.newSession",
+          "when": "view == sagent.sessions || view == sagent.sessionsSecondary",
+          "group": "navigation@1"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "npm run compile:webview && npm run compile:extension",
+    "compile:extension": "tsc -p ./",
+    "compile:webview": "vite build --config vite.config.ts",
+    "check": "tsc -p ./ --noEmit && tsc -p webview/tsconfig.json --noEmit",
+    "package": "npm run check && npm run compile",
+    "vscode:prepublish": "npm run package",
+    "vsix": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.4",
+    "@types/node": "^20.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@types/vscode": "^1.106.0",
+    "@vitejs/plugin-react": "^5.1.1",
+    "@vscode/vsce": "^4.0.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tailwindcss": "^4.3.4",
+    "typescript": "^5.0.0",
+    "vite": "^7.2.2"
+  },
+  "dependencies": {
+    "@vscode/codicons": "^0.0.46-24",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "remark-gfm": "^4.0.1"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run Sagent Extension",
+      "type": "extensionHost",
+      "request": "launch",
+      "args": [
+        "${workspaceFolder}/.vscode/sagent-f5.code-workspace",
+        "--extensionDevelopmentPath=${workspaceFolder}/integrations/vscode"
+      ],
+      "outFiles": [
+        "${workspaceFolder}/integrations/vscode/out/**/*.js"
+      ],
+      "preLaunchTask": "sagent-vscode: compile"
+    }
+  ]
+}
