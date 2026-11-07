@@ -216,7 +216,14 @@ class DaemonGate:
         forget: bool = False,
         clear_hold: bool = False,
     ) -> None:
-        """Lift a key's lock, optionally forgetting its pace or server hold."""
+        """Lift a key's lock, optionally forgetting its pace or server hold.
+
+        Args:
+          key: What is paced.
+          forget: Also drop its pace and file once no hold is left.
+          clear_hold: Clear the server hold for an explicit recheck.
+
+        """
         if (
             self._ask(
                 GateCall(op="reset", key=key, forget=forget, clear_hold=clear_hold),
