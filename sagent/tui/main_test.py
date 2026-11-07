@@ -305,14 +305,21 @@ def no_stall_thread(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(main, "watch_stalls", _no_stalls)
 
 
+# Autouse: a shell running sagent sets these, and an allow list naming a provider
+# the export strips fails every test that builds the real catalog.
+@pytest.fixture(autouse=True)
+def no_sagent_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the shell's ``SAGENT_*`` settings out of every test."""
+    for name in ("SAGENT_PROVIDER", "SAGENT_ALLOW_PROVIDERS", "SAGENT_LOG_LEVEL"):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture
 def script(monkeypatch: pytest.MonkeyPatch) -> _Script:
     """Make ``main`` build its catalog from a script, never a real provider."""
     made = _Script()
     monkeypatch.setattr(main, "ModelCatalog", made.catalog)
     monkeypatch.setenv("SAGENT_PROVIDER", "scripted")
-    monkeypatch.delenv("SAGENT_ALLOW_PROVIDERS", raising=False)
-    monkeypatch.delenv("SAGENT_LOG_LEVEL", raising=False)
     return made
 
 
@@ -376,11 +383,7 @@ def _journal(
     return path
 
 
-def test_the_flags_default_to_a_fresh_interactive_session(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    for name in ("SAGENT_PROVIDER", "SAGENT_ALLOW_PROVIDERS", "SAGENT_LOG_LEVEL"):
-        monkeypatch.delenv(name, raising=False)
+def test_the_flags_default_to_a_fresh_interactive_session() -> None:
     flags = _flags()
     assert flags.allow_providers == ""
     assert (flags.system_prompt, flags.append_system_prompt) == (None, "")
@@ -1304,8 +1307,7 @@ def test_login_takes_the_providers_allowed_as_a_session_does(
     allow: tuple[str, ...],
 ) -> None:
     """``sagent login --account work --allow-providers acli`` signs in to acli."""
-    monkeypatch.delenv("SAGENT_ALLOW_PROVIDERS", raising=False)
-    monkeypatch.delenv("SAGENT_PROVIDER", raising=False)
+    monkeypatch.delenv("SAGENT_PROVIDER")
     _argv(monkeypatch, "login", "--account", "work", *allow, "--headless")
     assert main.main() == 0
     provider = script.providers["signing"]
