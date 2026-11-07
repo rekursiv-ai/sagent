@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from wesearch.paper.details import Listing
+from wesearch.paper.types import PaperRecord
+
 import pytest
 
 from sagent.session.types import PaperSearchResult
-from sagent.tools.paper_common import error, paper_ids, summary_ids
+from sagent.tools.paper_common import error, listed, paper_ids, summary_ids
 
 
 if TYPE_CHECKING:
@@ -84,6 +87,38 @@ def test_error_is_an_error_result() -> None:
         shown="boom",
         is_error=True,
     )
+
+
+@pytest.mark.parametrize("complete", [False, True])
+def test_listed_returns_no_results_for_an_empty_listing(complete: bool) -> None:
+    assert listed(Listing(records=[], complete=complete), None, more="exist") == (
+        "(no results)"
+    )
+
+
+@pytest.mark.parametrize("abstract_chars", [None, 2])
+@pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.parametrize("more", ["exist", "may exist"])
+def test_listed_joins_records_and_marks_only_incomplete_results(
+    abstract_chars: int | None,
+    complete: bool,
+    more: str,
+) -> None:
+    listing = Listing(
+        records=[
+            PaperRecord(title="First", abstract="abcd"),
+            PaperRecord(title="Second"),
+        ],
+        complete=complete,
+    )
+    abstract = "abcd" if abstract_chars is None else "ab..."
+    expected = (
+        f"[no-id] First - unknown, ?, ?\n    abstract:\n    {abstract}\n"
+        "[no-id] Second - unknown, ?, ?"
+    )
+    if not complete:
+        expected += f"\n... (more matches {more}; raise 'limit' to see them)"
+    assert listed(listing, abstract_chars, more=more) == expected
 
 
 if __name__ == "__main__":

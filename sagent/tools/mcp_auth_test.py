@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, cast, override
+from unittest.mock import Mock, call
 from urllib.parse import parse_qs, urlencode, urlparse
 
 import asyncio
@@ -782,6 +783,40 @@ async def _protected(authority: _Authority | None = None) -> AsyncGenerator[str]
         yield url
     finally:
         switch.current = _Authority()
+
+
+class TestSignIns:
+    """Exercise directory discovery without the OAuth server integration fixture."""
+
+    def test_only_json_files_recording_the_requested_source_are_returned(self) -> None:
+        directory = config_dir() / "rekursiv-ai" / "secrets" / "mcp"
+        assert mcp_auth.sign_ins("/p/mcp.json") == {}
+        directory.mkdir(parents=True)
+        matching = directory / "mine.json"
+        matching.write_text('{"source": "/p/mcp.json"}', encoding="utf-8")
+        (directory / "other.json").write_text('{"source": "/other"}', encoding="utf-8")
+        (directory / "unsourced.json").write_text("{}", encoding="utf-8")
+        (directory / "ignored.txt").write_text("not json", encoding="utf-8")
+        assert mcp_auth.sign_ins("/p/mcp.json") == {"mine": matching}
+
+    def test_a_listed_file_disappearing_does_not_hide_other_sign_ins(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        directory = config_dir() / "rekursiv-ai" / "secrets" / "mcp"
+        directory.mkdir(parents=True)
+        vanished, kept = directory / "a.json", directory / "b.json"
+        vanished.touch()
+        kept.touch()
+        load = Mock(side_effect=[FileNotFoundError, {"source": "/p/mcp.json"}])
+        monkeypatch.setattr(mcp_auth, "_load", load)
+        assert mcp_auth.sign_ins("/p/mcp.json") == {"b": kept}
+        assert load.call_args_list == [call(vanished), call(kept)]
+
+    @pytest.fixture(scope="class")
+    @classmethod
+    def _serving(cls) -> None:
+        """Directory-only tests need no OAuth server; existing tests still use theirs."""
 
 
 if __name__ == "__main__":
