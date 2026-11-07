@@ -3,22 +3,17 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-from sagent.host import strings
-from sagent.host.server import Server
-from sagent.host.strings import Address, ServeDirs
-from sagent.host.testing import LocalHost
+from sagent.host.strings import ConnectionString
 from sagent.settings.harvest import harvest
-from sagent.tools.read import Read
-from sagent.tools.remote import SavedRemote, saved
+from sagent.tools.remote import Endpoint, SavedRemote, saved
 from sagent.tools.remote_settings import RemoteSettings
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from sagent.settings.types import Setting
 
 
@@ -71,26 +66,45 @@ async def test_a_bad_url_is_a_setting_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_says_which_answer(tmp_path: Path) -> None:
+async def test_list_says_which_answer() -> None:
     actions = _actions(connect_sec=0.5)
     assert await actions["remote.list"].apply("") == (
         "No servers. Save one with `sagent remote add`; see its --help."
     )
-    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    async with Server(
-        dirs,
-        listen=[Address(host="127.0.0.1", port=0)],
-        tools=("Read",),
-        name="gpu1",
-        start_host=LocalHost(tools={"Read": Read()}),
-    ) as server:
-        (made,) = await strings.add(dirs)
-        _ = await actions["remote.add"].apply(made.url)
-        _ = await actions["remote.add"].apply(f"sagent://127.0.0.1:1/{_PIN}/t")
+    _ = await actions["remote.add"].apply(f"sagent://127.0.0.1:7777/{_PIN}/one")
+    _ = await actions["remote.add"].apply(f"sagent://127.0.0.1:1/{_PIN}/two")
+    wait_up, wait_down = AsyncMock(), AsyncMock()
+    up = Mock(
+        spec=Endpoint,
+        string=ConnectionString.from_url(saved()[0].url),
+        up=True,
+        tools={"Read": "digest"},
+        until=wait_up,
+    )
+    down = Mock(
+        spec=Endpoint,
+        string=ConnectionString.from_url(saved()[1].url),
+        up=False,
+        error="connection refused",
+        until=wait_down,
+    )
+    session = Mock(endpoints=Mock(return_value={"gpu1": up, "127.0.0.1": down}))
+    enter, exit_session = AsyncMock(return_value=session), AsyncMock()
+    lifecycle = MagicMock(__aenter__=enter, __aexit__=exit_session)
+    with patch(
+        "sagent.tools.remote_settings.RemoteSession",
+        return_value=lifecycle,
+    ) as build:
         listed = (await actions["remote.list"].apply("")).splitlines()
-        port = server.ports[0]
-    assert listed[0] == f"gpu1  127.0.0.1:{port}  up: Read"
-    assert listed[1].startswith("127.0.0.1  127.0.0.1:1  down: ")
+    build.assert_called_once_with(saved(), retry_sec=0.5)
+    wait_up.assert_awaited_once()
+    wait_down.assert_awaited_once()
+    enter.assert_awaited_once()
+    exit_session.assert_awaited_once()
+    assert listed == [
+        "gpu1  127.0.0.1:7777  up: Read",
+        "127.0.0.1  127.0.0.1:1  down: connection refused",
+    ]
 
 
 if __name__ == "__main__":

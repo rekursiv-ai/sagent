@@ -435,25 +435,25 @@ def test_reply_budget_leaves_room_for_token_estimation_error(tmp_path: Path) -> 
     assert room == 249_036 - 7_554
 
 
-@pytest.mark.parametrize(("image_mib", "due"), [(20, True), (18, False)])
+@pytest.mark.parametrize(("image_bytes", "due"), [(20, True), (18, False)])
 def test_images_near_the_vendors_byte_ceiling_make_compaction_due(
     tmp_path: Path,
-    image_mib: int,
+    image_bytes: int,
     due: bool,
 ) -> None:
-    """As base64, 20 MiB is 26.7 MiB, past 80% of 32 MiB; 18 MiB is 24 MiB, short."""
+    """Base64 sends 20 bytes as 26.7, past 80% of 32; 18 becomes 24, short."""
     capability = replace(
         _capability(window=1_000_000),
         limits=ModelLimits(
             max_request_tokens=1_000_000,
             max_response_tokens=8_000,
-            max_request_bytes=32 * 1024 * 1024,
+            max_request_bytes=32,
         ),
     )
     _, agent = _agent(tmp_path, capability=capability)
-    image = Attachment(mime_descriptor="image/png", data=b"\0" * (image_mib << 20))
-    agent.session.append(_user("look", image))
-    _ = agent.runtime.append_history(reply("ok", tokens=TokenCount(request=2_000)))
+    image = Attachment(mime_descriptor="image/png", data=b"\0" * image_bytes)
+    agent.session.append(_user("", image))
+    _ = agent.runtime.append_history(reply("", tokens=TokenCount(request=2_000)))
     compactor = SummaryCompactor(agent)
 
     assert compactor._held() < compactor.trigger_tokens()
@@ -462,7 +462,7 @@ def test_images_near_the_vendors_byte_ceiling_make_compaction_due(
 
 def test_a_window_of_unknown_size_is_never_due(tmp_path: Path) -> None:
     _, agent = _agent(tmp_path, capability=_capability(window=0, response=0))
-    agent.session.append(_user("x" * 100_000))
+    agent.session.append(_user("x"))
 
     assert not SummaryCompactor(agent).should_run()
 
@@ -486,15 +486,15 @@ def _tooled(tmp_path: Path, *, tools: Sequence[_Wait]) -> SummaryCompactor:
 def test_an_unbilled_context_counts_the_tool_schemas_it_sends(tmp_path: Path) -> None:
     """A resumed or new session has no bill yet; its estimate must hold the tools."""
     plain = _tooled(tmp_path, tools=())
-    tooled = _tooled(tmp_path, tools=(_Wait(description="d" * 40_000),))
+    tooled = _tooled(tmp_path, tools=(_Wait(description="d" * 40),))
 
-    assert tooled._held() - plain._held() >= 40_000 // 4
+    assert tooled._held() - plain._held() >= 40 // 4
 
 
 def test_a_billed_context_counts_the_tool_schemas_once(tmp_path: Path) -> None:
     """The bill holds the tools already, so the estimate adds none."""
     plain = _tooled(tmp_path, tools=())
-    tooled = _tooled(tmp_path, tools=(_Wait(description="d" * 40_000),))
+    tooled = _tooled(tmp_path, tools=(_Wait(description="d" * 40),))
     for compactor in (plain, tooled):
         _ = compactor._agent.runtime.append_history(
             reply("ok", tokens=TokenCount(request=5_000)),
@@ -1483,7 +1483,7 @@ async def test_an_unverified_summary_is_one_call(tmp_path: Path) -> None:
 async def test_a_compaction_brings_back_no_file_the_model_read(tmp_path: Path) -> None:
     _, agent = _agent(tmp_path, _SUMMARY)
     read = tmp_path / "encode.rs"
-    _ = read.write_text("fn encode() {}\n" * 20_000)
+    _ = read.write_text("fn encode() {}\n")
     agent.runtime.tool_context.files.saw(read)
 
     splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
@@ -2391,11 +2391,11 @@ def test_an_unbilled_context_counts_each_tools_schema(tmp_path: Path) -> None:
     plain = _tooled(tmp_path, tools=())
     schema: dict[str, PlainTree] = {
         "type": "object",
-        "properties": {"x": {"description": "d" * 40_000}},
+        "properties": {"x": {"description": "d" * 40}},
     }
     tooled = _tooled(tmp_path, tools=(_Wait(schema=schema),))
 
-    assert tooled._held() - plain._held() >= 40_000 // 4
+    assert tooled._held() - plain._held() >= 40 // 4
 
 
 @pytest.mark.asyncio

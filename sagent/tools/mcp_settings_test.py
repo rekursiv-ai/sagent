@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-
-import sys
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 from treekle import PlainTree, json_dumps, json_loads
 
@@ -18,7 +17,6 @@ from sagent.tools import mcp_settings
 from sagent.tools.mcp import McpServer, servers
 from sagent.tools.mcp_auth import McpTokenStorage
 from sagent.tools.mcp_settings import McpSettings
-from sagent.tools.testing import SHOUT_SERVER
 
 
 if TYPE_CHECKING:
@@ -202,27 +200,34 @@ async def test_list_and_get_show_each_server_and_how_it_connected(
     tmp_path: Path,
 ) -> None:
     assert (await _run(tmp_path, "list")).startswith("No MCP servers. Add one with")
-    script = tmp_path / "server.py"
-    script.write_text(SHOUT_SERVER)
-    await _run(tmp_path, "add", f"good -- {sys.executable} -I -S {script}")
+    await _run(tmp_path, "add", "good -- server-command --flag")
     await _run(
         tmp_path,
         "add-json",
         """off '{"url": "https://h/mcp", "disabled": true, "description": "docs"}'""",
     )
-    assert (await _run(tmp_path, "list")).splitlines() == [
-        "good  stdio  every_request  connected, 1 tool",
-        "off   http   every_request  disabled",
-    ]
-    assert (await _run(tmp_path, "get", "good")).splitlines() == [
-        "good  stdio  every_request  connected, 1 tool",
-        f"  command: {sys.executable} -I -S {script}",
-    ]
-    assert (await _run(tmp_path, "get", "off")).splitlines() == [
-        "off  http  every_request  disabled",
-        "  url: https://h/mcp",
-        "  docs",
-    ]
+    good, off = servers(tmp_path)
+    session = Mock(
+        status=Mock(return_value={"good": "connected, 1 tool", "off": "disabled"}),
+    )
+    enter, exit_session = AsyncMock(return_value=session), AsyncMock()
+    lifecycle = MagicMock(__aenter__=enter, __aexit__=exit_session)
+    with patch.object(mcp_settings, "McpSession", return_value=lifecycle) as build:
+        assert (await _run(tmp_path, "list")).splitlines() == [
+            "good  stdio  every_request  connected, 1 tool",
+            "off   http   every_request  disabled",
+        ]
+        assert (await _run(tmp_path, "get", "good")).splitlines() == [
+            "good  stdio  every_request  connected, 1 tool",
+            "  command: server-command --flag",
+        ]
+        assert (await _run(tmp_path, "get", "off")).splitlines() == [
+            "off  http  every_request  disabled",
+            "  url: https://h/mcp",
+            "  docs",
+        ]
+    assert build.call_args_list == [call([good, off]), call([good]), call([off])]
+    assert enter.await_count == exit_session.await_count == 3
     with pytest.raises(
         SettingError,
         match="No MCP server 'nope'; configured: good, off",
@@ -236,11 +241,18 @@ async def test_list_reads_the_config_flags_too(tmp_path: Path) -> None:
     config = json_dumps(
         {"mcpServers": {"only": {"url": "https://h", "disabled": True}}},
     )
-    said = await _run(
-        tmp_path,
-        "list",
-        f"--strict-mcp-config --mcp-config '{config}'",
+    session = Mock(status=Mock(return_value={"only": "disabled"}))
+    lifecycle = MagicMock(
+        __aenter__=AsyncMock(return_value=session),
+        __aexit__=AsyncMock(),
     )
+    with patch.object(mcp_settings, "McpSession", return_value=lifecycle) as build:
+        said = await _run(
+            tmp_path,
+            "list",
+            f"--strict-mcp-config --mcp-config '{config}'",
+        )
+    build.assert_called_once_with(servers(tmp_path, flags=[config], strict=True))
     assert said == "only  http  every_request  disabled"
 
 

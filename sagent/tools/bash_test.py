@@ -465,15 +465,16 @@ async def test_output_past_bash_s_own_cap_is_cut_and_spilled_whole(
     tmp_path: Path,
 ) -> None:
     context = ToolContext(cwd=tmp_path, spill_dir=tmp_path / "session")
-    result = await Bash().call(
+    tool = Bash(max_result_chars=200)
+    result = await tool.call(
         context,
-        _arguments("for i in $(seq 1 10000); do echo line-$i-padding; done"),
+        _arguments("for i in $(seq 1 14); do echo line-$i-padding; done"),
     )
-    assert len(result.stdout) <= Bash().max_result_chars
+    assert len(result.stdout) <= tool.max_result_chars
     spilled = re.search(r"; full output: (\S+)\)\n$", result.stdout)
     assert spilled is not None
     whole = await asyncio.to_thread(Path(spilled[1]).read_text, encoding="utf-8")
-    assert whole.splitlines() == [f"line-{i}-padding" for i in range(1, 10_001)]
+    assert whole.splitlines() == [f"line-{i}-padding" for i in range(1, 15)]
     # A short name, as the model reads it in every cut result.
     assert re.fullmatch(r"bash-[0-9a-f]{8}\.txt", Path(spilled[1]).name)
 

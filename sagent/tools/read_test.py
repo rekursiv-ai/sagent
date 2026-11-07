@@ -769,9 +769,8 @@ async def test_a_read_unchanged_since_the_last_is_said_so_for_no_call(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("caps", [range(100), range(100, 150), range(150, 200)])
-async def test_a_cut_read_never_passes_its_cap(tmp_path: Path, caps: range) -> None:
-    # 10,000 lines: resuming at the last adds the digit the note must fit.
+async def test_a_cut_read_never_passes_its_cap(tmp_path: Path) -> None:
+    # Resuming at 10,000 adds the digit the note must fit.
     (tmp_path / "f").write_text("".join(f"{i}\n" for i in range(10_000)))
     numbered = [f"{n}\t{n - 1}\n" for n in range(9_990, 10_001)]
 
@@ -780,17 +779,19 @@ async def test_a_cut_read_never_passes_its_cap(tmp_path: Path, caps: range) -> N
         note = f"\n... ({left:,} more lines. Use offset={resume} to continue.)"
         return "".join(numbered[:kept]) + note
 
-    # From the least that holds one line and its note.
-    for cap in range(max(len(cut(1)), caps.start), caps.stop):
+    whole = "".join(numbered)
+    thresholds = [*(len(cut(k)) for k in range(1, 11)), len(whole)]
+    caps = {threshold + delta for threshold in thresholds for delta in (-1, 0, 1)}
+    for cap in sorted(c for c in caps if c >= len(cut(1))):
         context = ToolContext(cwd=tmp_path, max_result_chars=cap)
         text = (await Read().call(context, {"file_path": "f", "offset": 9_990})).text()
         assert len(text) <= cap, cap
-        # As many lines as fit beside the note: one more would not.
         kept = text.count("\t")
         if kept < 11:
             assert text == cut(kept), cap
             assert kept == 10 or len(cut(kept + 1)) > cap, cap
-    # Below that, the one line is kept anyway: a result is never empty.
+        else:
+            assert text == whole, cap
     context = ToolContext(cwd=tmp_path, max_result_chars=len(cut(1)) - 1)
     result = await Read().call(context, {"file_path": "f", "offset": 9_990})
     assert result.text() == cut(1)

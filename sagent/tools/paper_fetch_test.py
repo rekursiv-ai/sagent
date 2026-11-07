@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import importlib
+import runpy
 
 from wesearch.fetch import FetchSession
 from wesearch.paper.errors import PaperError
@@ -39,27 +39,28 @@ def test_the_description_is_read_as_utf8_whatever_the_locale(
 ) -> None:
     """The asset holds an em dash, which a Latin-1 locale would read as three letters."""
     real = Path.read_text
+    descriptions: list[str] = []
 
     def latin1_default(
         self: Path,
         encoding: str | None = None,
         errors: str | None = None,
     ) -> str:
-        return real(
-            self,
-            encoding=encoding or "latin-1",
-            errors=errors,
-        )
+        text = real(self, encoding=encoding or "latin-1", errors=errors)
+        if self.name == "paperfetch.md":
+            descriptions.append(text)
+        return text
 
-    monkeypatch.setattr(Path, "read_text", latin1_default)
-    try:
-        importlib.reload(paper_fetch)
-        description = paper_fetch.PaperFetch.description
-    finally:
-        monkeypatch.undo()
-        importlib.reload(paper_fetch)
+    with monkeypatch.context() as local:
+        local.setattr(Path, "read_text", latin1_default)
+        _ = runpy.run_path(
+            paper_fetch.__file__ or "",
+            run_name=f"{paper_fetch.__name__}_fresh",
+        )
+    (description,) = descriptions
     assert "\u2014" in description
     assert "â€" not in description
+    assert paper_fetch.PaperFetch is PaperFetch
 
 
 def test_summary_names_the_ids() -> None:

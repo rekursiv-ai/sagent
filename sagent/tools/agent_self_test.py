@@ -7,8 +7,8 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, override
 
-import importlib
 import math
+import runpy
 
 import pytest
 
@@ -478,10 +478,13 @@ def test_the_description_reads_as_utf8_whatever_the_locale(
     asked = _Asked()
     with monkeypatch.context() as patched:
         patched.setattr(Path, "read_text", asked)
-        _ = importlib.reload(agent_self)
-    _ = importlib.reload(agent_self)
+        _ = runpy.run_path(
+            agent_self.__file__ or "",
+            run_name=f"{agent_self.__name__}_fresh",
+        )
 
     assert asked.encodings["agentself.md"] == "utf-8"
+    assert agent_self.AgentSelf is AgentSelf
 
 
 @dataclass(slots=True, kw_only=True)

@@ -371,9 +371,9 @@ async def test_a_short_write_is_finished_not_dropped(
 
     records = [UserMessage(content="a" * 100), UserMessage(content="b")]
     async with JsonlJournal(path) as journal:
-        monkeypatch.setattr(os, "write", halfway)
-        journal.append(*records)
-        monkeypatch.undo()
+        with monkeypatch.context() as local:
+            local.setattr(os, "write", halfway)
+            journal.append(*records)
     async with JsonlJournal(path) as journal:
         assert list(journal) == records
 
@@ -434,10 +434,10 @@ async def test_a_write_that_makes_no_progress_raises(
         return 0
 
     async with JsonlJournal(tmp_path / "s.jsonl") as journal:
-        monkeypatch.setattr(os, "write", stuck)
-        with pytest.raises(OSError, match="wrote nothing"):
-            journal.append(UserMessage(content="a"))
-        monkeypatch.undo()
+        with monkeypatch.context() as local:
+            local.setattr(os, "write", stuck)
+            with pytest.raises(OSError, match="wrote nothing"):
+                journal.append(UserMessage(content="a"))
 
 
 @pytest.mark.asyncio

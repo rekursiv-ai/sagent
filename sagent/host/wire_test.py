@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import asyncio
 import re
 import secrets
-import socket
 
 from treekle import PlainTree, json_dumps, json_loads
 
@@ -186,16 +186,16 @@ def test_a_spec_is_the_same_however_its_schema_was_read() -> None:
 
 @pytest.mark.asyncio
 async def test_ping_says_ping_until_cancelled() -> None:
-    theirs, ours = socket.socketpair()
-    reader, mine = await asyncio.open_unix_connection(sock=ours)
-    _theirs_reader, writer = await asyncio.open_unix_connection(sock=theirs)
-    pinging = asyncio.create_task(ping(writer, every_sec=0))
-    assert [await received(reader), await received(reader)] == [Ping(), Ping()]
-    pinging.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await pinging
-    writer.close()
-    mine.close()
+    write = Mock()
+    writer = Mock(spec=asyncio.StreamWriter, write=write)
+    sleep = AsyncMock(side_effect=[None, None, asyncio.CancelledError])
+    with (
+        patch("sagent.host.wire.asyncio.sleep", sleep),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        await ping(writer, every_sec=2.5)
+    assert sleep.await_args_list == [call(2.5), call(2.5), call(2.5)]
+    assert write.call_args_list == [call(encoded(Ping())), call(encoded(Ping()))]
 
 
 if __name__ == "__main__":

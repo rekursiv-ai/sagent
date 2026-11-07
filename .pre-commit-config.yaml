@@ -206,7 +206,7 @@ repos:
   # Validates uv.lock matches pyproject.toml (no network needed).
   # Run `uv lock` manually when changing dependencies.
   - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: 0.13.6
+    rev: 0.13.7
     hooks:
 
       - id: uv-lock
@@ -331,7 +331,7 @@ repos:
           )
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.17.3
+    rev: v0.17.4
     hooks:
       # Exclusions defined in pyproject.toml.
       #
@@ -354,12 +354,14 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi, jupyter]
+
       - id: ruff-check
         name: ruff-check
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi, jupyter]
         args: [--fix, --extend-select, COM812]
+
       - id: ruff-format
         name: ruff-format
         stages: [pre-commit]
@@ -497,6 +499,7 @@ repos:
         require_serial: true
         types_or: [python, pyi]
         entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool ty-check
+
       - id: ty-check
         name: ty-check
         language: system
@@ -519,6 +522,7 @@ repos:
         require_serial: true
         types_or: [python, pyi]
         entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool pyrefly-check
+
       - id: pyrefly-check
         name: pyrefly-check
         language: system
@@ -556,6 +560,7 @@ repos:
             |(.*/)?third_party/
             |website/rekursiv-ai\.github\.io/_site/
           )
+
       - id: basedpyright
         name: basedpyright
         language: system
@@ -598,6 +603,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool check-export-leaks
+
       - id: check-export-leaks
         name: check-export-leaks
         language: system
@@ -636,6 +642,7 @@ repos:
         require_serial: true
         types: [python]
         entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool pytest
+
       - id: pytest
         name: pytest
         language: system
@@ -669,6 +676,7 @@ repos:
             |(.*/)?third_party/
           )
         entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool mutation
+
       - id: mutation
         name: mutation
         language: system
@@ -701,10 +709,12 @@ repos:
         require_serial: true
         types: [python]
         entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool coverage-floor
+
       - id: coverage-floor
         name: coverage-floor
         language: system
         stages: [pre-commit]
+        verbose: true
         types: [python]
         require_serial: true
         pass_filenames: false

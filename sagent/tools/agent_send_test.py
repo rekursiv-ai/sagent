@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import asyncio
-import importlib
 import logging
 import re
+import runpy
 
 import pytest
 
@@ -506,10 +506,13 @@ def test_the_description_reads_as_utf8_whatever_the_locale(
     asked = _Asked()
     with monkeypatch.context() as patched:
         patched.setattr(Path, "read_text", asked)
-        _ = importlib.reload(agent_send)
-    _ = importlib.reload(agent_send)
+        _ = runpy.run_path(
+            agent_send.__file__ or "",
+            run_name=f"{agent_send.__name__}_fresh",
+        )
 
     assert asked.encodings["agentsend.md"] == "utf-8"
+    assert agent_send.AgentSend is AgentSend
 
 
 @dataclass(slots=True, kw_only=True)
