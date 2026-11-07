@@ -10,13 +10,15 @@ all of this; the public tree has no such root, so without it a session test
 reads and writes the real per-user directories.
 
 The math-thread caps run here, at the root, because this conftest loads before
-any test or package conftest imports NumPy or torch.
+any test or package conftest imports NumPy or torch. The Hypothesis budgets the
+monorepo's root conftest loads are loaded here too, before any property test draws.
 """
 
 from __future__ import annotations
 
 from typing import Final
 
+from sagent.lib.testing.hypothesis_profiles import configure_hypothesis
 from sagent.lib.testing.resources import (
     cap_math_threads,
     isolate_user_dirs,
@@ -37,3 +39,4 @@ __all__ = [
 
 
 cap_math_threads()
+configure_hypothesis()
