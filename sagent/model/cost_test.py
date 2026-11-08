@@ -336,8 +336,10 @@ def test_a_tier_priced_nowhere_raises() -> None:
 
 
 def test_an_empty_catalog_raises_rather_than_billing_zero() -> None:
+    catalog = PriceCatalog()
+    assert catalog.service_tiers == frozenset()
     with pytest.raises(KeyError):
-        _ = PriceCatalog()["auto", 1, date.min]
+        _ = catalog["auto", 1, date.min]
 
 
 def test_a_request_before_any_price_raises() -> None:

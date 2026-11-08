@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, Mock
 
 import asyncio
 import logging
@@ -40,21 +43,22 @@ from sagent.session.types import (
     AgentToAgentMessage,
     BashResult,
     ReadResult,
+    ToolErrorResult,
 )
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.bash import Bash
 from sagent.tools.read import Read
-from sagent.tools.types import ToolContext
+from sagent.tools.remote import RemoteSession
+from sagent.tools.types import Tool, ToolContext
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Sequence
+    from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
     from pathlib import Path
 
     from treekle import PlainTree
 
     from sagent.host.wire import Message
-    from sagent.tools.types import Tool
 
 
 def _team() -> Team:
@@ -69,12 +73,13 @@ def _agent(tmp_path: Path, tools: Sequence[Tool] = ()) -> Agent:
     )
 
 
+@asynccontextmanager
 async def _host(
     tmp_path: Path,
     team: Team | None = None,
     stood: list[list[str]] | None = None,
 ) -> AsyncGenerator[tuple[asyncio.StreamReader, asyncio.StreamWriter]]:
-    """Serve Read, Bash and AgentSend for ``team``; ``stood`` gets each stand-in's tools."""
+    """Serve in-memory messages; never open sockets or start the application."""
     team = team if team is not None else _team()
 
     def stand_in(tools: Sequence[Tool]) -> Agent:
@@ -82,22 +87,35 @@ async def _host(
             stood.append([t.name for t in tools])
         return _agent(tmp_path, tools)
 
-    theirs, ours = socket.socketpair()
-    reader, writer = await asyncio.open_unix_connection(sock=ours, limit=MAX_LINE_BYTES)
-    host_reader, host_writer = await asyncio.open_unix_connection(sock=theirs)
-    served = asyncio.create_task(
-        serve(
-            host_reader,
-            host_writer,
-            tools={"Read": Read(), "Bash": Bash(), "AgentSend": AgentSend(team=team)},
-            new_context=lambda label: ToolContext(cwd=tmp_path, label=label),
-            team=team,
-            stand_in=stand_in,
+    reader, host_reader = asyncio.StreamReader(), asyncio.StreamReader()
+    writer = cast(
+        asyncio.StreamWriter,
+        Mock(
+            write=host_reader.feed_data,
+            close=host_reader.feed_eof,
+            write_eof=host_reader.feed_eof,
         ),
     )
-    yield reader, writer
-    writer.close()
-    await served
+    host_writer = cast(asyncio.StreamWriter, Mock(write=reader.feed_data))
+    async with asyncio.TaskGroup() as tasks:
+        _ = tasks.create_task(
+            serve(
+                host_reader,
+                host_writer,
+                tools={
+                    "Read": Read(),
+                    "Bash": Bash(),
+                    "AgentSend": AgentSend(team=team),
+                },
+                new_context=lambda label: ToolContext(cwd=tmp_path, label=label),
+                team=team,
+                stand_in=stand_in,
+            ),
+        )
+        try:
+            yield reader, writer
+        finally:
+            host_reader.feed_eof()
 
 
 def _call(
@@ -121,120 +139,117 @@ async def _result(reader: asyncio.StreamReader) -> Result:
 
 @pytest.mark.asyncio
 async def test_the_host_says_its_tools_first(tmp_path: Path) -> None:
-    async for reader, _ in _host(tmp_path):
+    team = _team()
+    async with _host(tmp_path, team) as (reader, writer):
         tools = await received(reader)
+        assert len(team.changes) == 1
         assert isinstance(tools, Tools)
         assert list(tools.tools) == ["Read", "Bash", "AgentSend"]
         assert tools.tools["Read"].description == Read().description
-
-
-@pytest.mark.asyncio
-async def test_each_agent_keeps_its_own_directory(tmp_path: Path) -> None:
-    (tmp_path / "sub").mkdir()
-    async for reader, writer in _host(tmp_path):
-        _ = await received(reader)
         writer.write(
-            _call(
-                "1",
-                agent="a",
-                window="w",
-                tool="Bash",
-                command="cd sub",
-                description="d",
-            ),
+            encoded(Ack(id="missing"))
+            + encoded(Refused(id="missing", reason="withdrawn"))
+            + encoded(Pause())
+            + encoded(Resume()),
         )
-        _ = await _result(reader)
-        writer.write(
-            _call(
-                "2",
-                agent="a",
-                window="w",
-                tool="Bash",
-                command="pwd",
-                description="d",
-            ),
-        )
-        moved = await _result(reader)
-        writer.write(
-            _call(
-                "3",
-                agent="b",
-                window="w",
-                tool="Bash",
-                command="pwd",
-                description="d",
-            ),
-        )
-        stayed = await _result(reader)
-        assert isinstance(moved.record, BashResult)
-        assert isinstance(stayed.record, BashResult)
-        assert moved.record.stdout.strip() == str(tmp_path / "sub")
-        assert stayed.record.stdout.strip() == str(tmp_path)
+        assert await received(reader) == Paused()
+        writer.write(_call("barrier", agent="a", window="w", tool="Train"))
+        assert (await _result(reader)).id == "barrier"
+    assert team.changes == set()
 
 
-@pytest.mark.asyncio
-async def test_a_new_window_starts_at_home_knowing_no_file(tmp_path: Path) -> None:
+def test_contexts_are_kept_per_agent_and_reset_for_a_new_window(tmp_path: Path) -> None:
+    output = session._Output(writer=cast(asyncio.StreamWriter, Mock()))
+    calls = session._Calls(
+        writer=output,
+        tools={},
+        new_context=lambda label: ToolContext(cwd=tmp_path, label=label),
+        wire=session._Wire(writer=output, team=_team()),
+    )
+    first = Call(id="1", agent="a", window="w1", tool="Read", arguments={})
+    context = calls._context(first)
+    context.cwd = tmp_path / "sub"
     path = tmp_path / "a.txt"
-    path.write_text("hello\n")
-    async for reader, writer in _host(tmp_path):
-        _ = await received(reader)
-        reads: list[str] = []
-        for call_id, window in (("1", "w1"), ("2", "w1"), ("3", "w2")):
-            writer.write(
-                _call(
-                    call_id,
-                    agent="a",
-                    window=window,
-                    tool="Read",
-                    file_path=str(path),
-                ),
-            )
-            result = await _result(reader)
-            reads.append(result.record.text())
-        first, again, fresh = reads
-        assert "hello" in first
-        assert "hello" not in again
-        assert "hello" in fresh
+    path.write_text("x")
+    context.files.saw(path)
+
+    assert calls._context(first) is context
+    assert context.cwd == tmp_path / "sub"
+    assert path in context.files
+    other = calls._context(replace(first, agent="b"))
+    assert other is not context
+    assert other.label == "b"
+    assert other.cwd == tmp_path
+    assert path not in other.files
+    fresh = calls._context(replace(first, window="w2"))
+    assert fresh is not context
+    assert fresh.label == "a"
+    assert fresh.cwd == tmp_path
+    assert path not in fresh.files
+    assert calls._context(replace(first, window="w2")) is fresh
+    assert calls._context(replace(first, agent="b")) is other
 
 
 @pytest.mark.asyncio
 async def test_a_failure_and_an_unknown_tool_are_results(tmp_path: Path) -> None:
-    async for reader, writer in _host(tmp_path):
-        _ = await received(reader)
-        writer.write(_call("1", agent="a", window="w", tool="Read"))
-        failed = await _result(reader)
-        writer.write(_call("2", agent="a", window="w", tool="Train"))
-        unknown = await _result(reader)
-        assert failed.record.is_error is True
-        assert "file_path" in failed.record.text()
-        assert unknown.record.text() == "Unknown tool: Train"
+    context = ToolContext(cwd=tmp_path)
+    call = Call(id="1", agent="a", window="w", tool="Read", arguments={"x": 1})
+    run = AsyncMock(side_effect=ValueError("bad input"))
+    tool = Mock(spec=Read, call=run)
+
+    failed = await session._result(cast(Tool, tool), context, call=call)
+    unknown = await session._result(None, context, call=replace(call, tool="Train"))
+
+    assert failed == ToolErrorResult(
+        call_id="",
+        content="ValueError: bad input",
+        is_error=True,
+    )
+    assert unknown == ToolErrorResult(
+        call_id="",
+        content="Unknown tool: Train",
+        is_error=True,
+    )
+    run.assert_awaited_once_with(context, call.arguments)
 
 
 @pytest.mark.asyncio
-async def test_the_end_of_input_cancels_what_runs(tmp_path: Path) -> None:
-    async for reader, writer in _host(tmp_path):
+async def test_the_end_of_input_cancels_what_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+    cleaned: list[bool] = []
+
+    async def run(
+        context: ToolContext,
+        arguments: Mapping[str, PlainTree],
+    ) -> BashResult:
+        del context, arguments
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaned.append(True)
+        raise AssertionError("The call must be cancelled.")
+
+    monkeypatch.setattr(Bash, "call", AsyncMock(side_effect=run))
+    async with _host(tmp_path) as (reader, writer):
         _ = await received(reader)
-        writer.write(
-            _call(
-                "1",
-                agent="a",
-                window="w",
-                tool="Bash",
-                command="sleep 30",
-                description="d",
-            ),
-        )
+        writer.write(_call("1", agent="a", window="w", tool="Bash"))
+        await started.wait()
         writer.write_eof()
         cancelled = await _result(reader)
-        assert cancelled.record.stub == "cancelled"
+        assert (cancelled.id, cancelled.record.stub) == ("1", "cancelled")
+        assert cleaned == [True]
 
 
 @pytest.mark.asyncio
 async def test_a_call_cancelled_before_it_starts_is_answered(tmp_path: Path) -> None:
-    async for reader, writer in _host(tmp_path):
+    async with _host(tmp_path) as (reader, writer):
         _ = await received(reader)
         call = _call("1", agent="a", window="w", tool="Read", file_path="a.txt")
-        writer.write(call + encoded(Cancel(id="1")))
+        writer.write(encoded(Cancel(id="missing")) + call + encoded(Cancel(id="1")))
         cancelled = await _result(reader)
         assert (cancelled.id, cancelled.record.stub) == ("1", "cancelled")
 
@@ -247,7 +262,7 @@ async def _said(reader: asyncio.StreamReader) -> Message | None:
 async def test_an_agent_here_and_the_caller_message_each_other(tmp_path: Path) -> None:
     team = _team()
     _ = team.join(_agent(tmp_path), label="w")
-    async for reader, writer in _host(tmp_path, team):
+    async with _host(tmp_path, team) as (reader, writer):
         _ = await received(reader)
         writer.write(
             encoded(
@@ -289,7 +304,7 @@ async def test_a_note_from_the_caller_reaches_an_agent_here(
 ) -> None:
     team = _team()
     _ = team.join(_agent(tmp_path), label="w")
-    async for reader, writer in _host(tmp_path, team):
+    async with _host(tmp_path, team) as (reader, writer):
         _ = await received(reader)
         writer.write(
             encoded(Note(id="n1", sender="x", recipient="w", content="go", kind="ask"))
@@ -316,7 +331,7 @@ async def test_a_child_of_the_caller_takes_only_the_tools_granted(
     tmp_path: Path,
 ) -> None:
     team, stood = _team(), list[list[str]]()
-    async for reader, writer in _host(tmp_path, team, stood):
+    async with _host(tmp_path, team, stood) as (reader, writer):
         _ = await received(reader)
         writer.write(
             encoded(
@@ -351,113 +366,148 @@ def test_a_child_of_a_caller_takes_after_this_machine_s_default_agent(
     assert agent.runtime.tool_context.cwd == tmp_path
 
 
+def test_main_passes_the_parsed_socket_tools_and_spill_to_its_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[int, str, Path]] = []
+
+    async def run(flags: session.Flags) -> None:
+        seen.append((flags.fd, flags.tools, flags.spill))
+
+    monkeypatch.setattr(session, "_main", run)
+
+    assert main(["--fd", "17", "--tools", "Read", "--spill", str(tmp_path)]) == 0
+    assert seen == [(17, "Read", tmp_path)]
+
+
 @pytest.mark.asyncio
-async def test_main_serves_on_the_socket_it_is_given(
+async def test_main_wires_the_socket_contexts_tools_and_shared_gate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "a.txt").write_text("from main\n")
-    theirs, ours = socket.socketpair()
-    argv = ["--fd", str(theirs.detach()), "--tools", "Read", "--spill", str(tmp_path)]
-    running = asyncio.ensure_future(asyncio.to_thread(main, argv))
-    reader, writer = await asyncio.open_unix_connection(sock=ours, limit=MAX_LINE_BYTES)
-    tools = await asyncio.wait_for(received(reader), 5)
-    assert isinstance(tools, Tools)
-    assert list(tools.tools) == ["Read"]
-    writer.write(_call("1", agent="a", window="w", tool="Read", file_path="a.txt"))
-    result = await _result(reader)
-    assert isinstance(result.record, ReadResult)
-    assert "from main" in (result.record.content or "")
-    writer.write_eof()
-    assert await asyncio.wait_for(running, 5) == 0
-    writer.close()
+    catalog = ModelCatalog(factories={})
+    host_team = Team(catalog=catalog)
+    fetch = FetchSession()
+    remote = RemoteSession((), team=host_team)
+    gate = DaemonGate(tmp_path / "daemon.sock")
+    opening: list[str] = []
+    closing: list[str] = []
+
+    @asynccontextmanager
+    async def resource[T](name: str, value: T) -> AsyncGenerator[T]:
+        opening.append(name)
+        try:
+            yield value
+        finally:
+            closing.append(name)
+
+    catalog_factory = Mock(return_value=resource("catalog", catalog))
+    team_factory = Mock(return_value=resource("team", host_team))
+    fetch_factory = Mock(return_value=resource("fetch", fetch))
+    remote_factory = Mock(return_value=resource("remote", remote))
+    monkeypatch.setattr(session, "ModelCatalog", catalog_factory)
+    monkeypatch.setattr(session, "Team", team_factory)
+    monkeypatch.setattr(session, "FetchSession", fetch_factory)
+    monkeypatch.setattr(session, "RemoteSession", remote_factory)
+    monkeypatch.setattr(session, "host_gate", Mock(return_value=gate))
+    monkeypatch.setattr(session, "saved", Mock(return_value=()))
+    handle = object()
+    socket_factory = Mock(return_value=handle)
+    monkeypatch.setattr(socket, "socket", socket_factory)
+    reader = asyncio.StreamReader()
+    writer = Mock(
+        spec=asyncio.StreamWriter,
+        close=partial(closing.append, "writer"),
+    )
+    connect = AsyncMock(return_value=(reader, writer))
+    monkeypatch.setattr(asyncio, "open_unix_connection", connect)
+    tool = Read()
+    build_read, unused = Mock(return_value=tool), Mock()
+    builders = Mock(return_value={"Read": build_read, "Unused": unused})
+    monkeypatch.setattr(session, "builders", builders)
+    parent = _agent(tmp_path)
+    stand_in_factory = Mock(return_value=parent)
+    monkeypatch.setattr(session, "_stand_in", stand_in_factory)
+    contexts: list[ToolContext] = []
+    context_factories: list[Callable[[str], ToolContext]] = []
+
+    async def served(
+        incoming: asyncio.StreamReader,
+        outgoing: asyncio.StreamWriter,
+        *,
+        tools: Mapping[str, Tool],
+        new_context: Callable[[str], ToolContext],
+        team: Team,
+        stand_in: Callable[[Sequence[Tool]], Agent],
+    ) -> None:
+        assert incoming is reader
+        assert outgoing is writer
+        assert tools == {"Read": tool}
+        assert team is host_team
+        monkeypatch.chdir(tmp_path.parent)
+        context_factories.append(new_context)
+        contexts.append(new_context("kid"))
+        assert stand_in([tool]) is parent
+
+    serving = AsyncMock(side_effect=served)
+    monkeypatch.setattr(session, "serve", serving)
+    flags = Mock(fd=17, tools=",Read,,", spill=tmp_path / "spill")
+
+    await session._main(flags)
+
+    socket_factory.assert_called_once_with(fileno=17)
+    connect.assert_awaited_once_with(sock=handle, limit=MAX_LINE_BYTES)
+    catalog_factory.assert_called_once_with()
+    team_factory.assert_called_once_with(catalog=catalog)
+    fetch_factory.assert_called_once_with()
+    remote_factory.assert_called_once_with((), team=host_team)
+    builders.assert_called_once_with(cwd=tmp_path, team=host_team, remote=remote)
+    build_read.assert_called_once_with()
+    unused.assert_not_called()
+    serving.assert_awaited_once()
+    assert catalog.gate is fetch.gate is gate
+    (context,) = contexts
+    assert context.cwd == tmp_path
+    assert context.label == "kid"
+    assert context.spill_dir == tmp_path / "spill"
+    assert context.fetch_session is fetch
+    stand_in_factory.assert_called_once_with(
+        [tool],
+        catalog=catalog,
+        new_context=context_factories[0],
+    )
+    assert opening == ["catalog", "team", "fetch", "remote"]
+    assert closing == ["remote", "fetch", "team", "catalog", "writer"]
 
 
-def test_main_paces_its_agents_and_fetches_through_the_daemon(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """An agent spawned here bills the same accounts as every other sagent."""
-    monkeypatch.chdir(tmp_path)
-    gates: list[object] = []
+def test_handoff_buffers_results_and_agent_messages_until_resumed() -> None:
+    lines: list[bytes] = []
+    output = session._Output(
+        writer=cast(asyncio.StreamWriter, Mock(write=lines.append)),
+    )
+    held = [
+        encoded(Result(id="1", record=ReadResult(call_id="", content="read"))),
+        encoded(
+            Note(id="n", sender="kid", recipient="caller", content="held", kind="ask"),
+        ),
+        encoded(Peers(labels=("kid",))),
+    ]
+    output.write(b"before\n")
+    output.pause()
+    for line in held:
+        output.write(line)
+    assert lines == [b"before\n", encoded(Paused())]
+    assert output.held == held
 
-    async def served(*args: object, **kwargs: object) -> None:
-        del args
-        stand_in = kwargs["stand_in"]
-        new_context = kwargs["new_context"]
-        assert isinstance(stand_in, partial)
-        assert isinstance(new_context, partial)
-        catalog = cast(object, stand_in.keywords["catalog"])
-        fetch = cast(object, new_context.keywords["fetch_session"])
-        assert isinstance(catalog, ModelCatalog)
-        assert isinstance(fetch, FetchSession)
-        gates.extend((catalog.gate, fetch.gate))
+    output.resume()
+    output.write(b"after\n")
+    output.resume()
 
-    monkeypatch.setattr(session, "serve", served)
-    theirs, ours = socket.socketpair()
-    argv = ["--fd", str(theirs.detach()), "--tools", "Read", "--spill", str(tmp_path)]
-    try:
-        assert main(argv) == 0
-    finally:
-        ours.close()
-    assert [type(gate) for gate in gates] == [DaemonGate, DaemonGate]
-    assert gates[0] is gates[1]
-
-
-@pytest.mark.asyncio
-async def test_handoff_buffers_results_and_agent_messages_until_resumed(
-    tmp_path: Path,
-) -> None:
-    team = _team()
-    _ = team.join(_agent(tmp_path), label="kid")
-    async for reader, writer in _host(tmp_path, team):
-        assert isinstance(await _said(reader), Tools)
-        writer.write(encoded(Pause()))
-        assert await _said(reader) == Paused()
-        writer.write(
-            _call(
-                "1",
-                agent="a",
-                window="w",
-                tool="Bash",
-                command="pwd",
-                description="d",
-            ),
-        )
-        writer.write(
-            encoded(
-                Call(
-                    id="send",
-                    agent="kid",
-                    window="w",
-                    tool="AgentSend",
-                    arguments={"to": "caller", "content": "held"},
-                    address_book=("caller",),
-                ),
-            ),
-        )
-        with pytest.raises(TimeoutError):
-            _ = await asyncio.wait_for(received(reader), 0.05)
-        writer.write(encoded(Resume()))
-        messages = [await _said(reader) for _ in range(4)]
-        assert any(
-            isinstance(m, Result) and m.id == "1" and m.record.is_error is not True
-            for m in messages
-        )
-        assert any(isinstance(m, Note) and m.content == "held" for m in messages)
-        assert any(isinstance(m, Peers) and m.labels == ("kid",) for m in messages)
-        writer.write(
-            _call(
-                "2",
-                agent="a",
-                window="w",
-                tool="Bash",
-                command="pwd",
-                description="d",
-            ),
-        )
-        assert (await _result(reader)).id == "2"
+    assert lines == [b"before\n", encoded(Paused()), *held, b"after\n"]
+    assert output.held == []
+    assert output.paused is False
 
 
 @pytest.mark.asyncio
@@ -466,7 +516,7 @@ async def test_directory_withdrawal_preserves_private_routes_and_acknowledges_no
 ) -> None:
     team = _team()
     team.join(_agent(tmp_path), label="kid")
-    async for reader, writer in _host(tmp_path, team):
+    async with _host(tmp_path, team) as (reader, writer):
         assert isinstance(await _said(reader), Tools)
         writer.write(
             encoded(
@@ -504,13 +554,16 @@ async def test_directory_withdrawal_preserves_private_routes_and_acknowledges_no
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("sender_present", [False, True], ids=["gone", "present"])
 async def test_a_hosted_sender_is_told_when_the_directory_refuses_its_note(
     tmp_path: Path,
+    *,
+    sender_present: bool,
 ) -> None:
     team = _team()
     kid = _agent(tmp_path)
     team.join(kid, label="kid")
-    async for reader, writer in _host(tmp_path, team):
+    async with _host(tmp_path, team) as (reader, writer):
         assert isinstance(await _said(reader), Tools)
         writer.write(
             encoded(
@@ -528,24 +581,27 @@ async def test_a_hosted_sender_is_told_when_the_directory_refuses_its_note(
         note = await _said(reader)
         assert isinstance(note, Note)
         assert isinstance(await _said(reader), Result)
+        if not sender_present:
+            assert team.leave("kid") is kid
+            assert await _said(reader) == Peers(labels=())
         writer.write(encoded(Refused(id=note.id, reason="withdrawn")))
         writer.write(
             _call(
                 "barrier",
                 agent="a",
                 window="w",
-                tool="Bash",
-                command="pwd",
-                description="d",
+                tool="Train",
             ),
         )
         assert (await _result(reader)).id == "barrier"
         assert team.owes("caller#s") == {}
-        assert any(
-            isinstance(m, AgentToAgentMessage)
-            and m.content is not None
-            and "withdrawn" in m.content
+        notices = [
+            (m.sender, m.content)
             for m in kid.runtime.inbox.drain_nowait()
+            if isinstance(m, AgentToAgentMessage)
+        ]
+        assert notices == (
+            [("caller#s", "[message refused] withdrawn")] if sender_present else []
         )
 
 

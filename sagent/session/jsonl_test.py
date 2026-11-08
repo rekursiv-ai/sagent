@@ -379,12 +379,13 @@ async def test_a_short_write_is_finished_not_dropped(
 
 
 @pytest.mark.parametrize(
-    ("batch", "kept"),
+    ("batch", "kept", "torn"),
     [
-        ([UserMessage(content="torn" * 10)], 1),
-        ([UserMessage(content="x"), UserMessage(content="y" * 200)], 2),
+        ([UserMessage(content="t")], 1, True),
+        ([UserMessage(content="x"), UserMessage(content="yyy")], 2, True),
+        ([UserMessage(content="x"), UserMessage(content="y")], 2, False),
     ],
-    ids=["torn-line", "whole-line-then-torn"],
+    ids=["torn-line", "whole-line-then-torn", "whole-line-only"],
 )
 @pytest.mark.asyncio
 async def test_a_write_that_fails_partway_leaves_later_records_numbered(
@@ -392,14 +393,16 @@ async def test_a_write_that_fails_partway_leaves_later_records_numbered(
     monkeypatch: pytest.MonkeyPatch,
     batch: list[UserMessage],
     kept: int,
+    torn: bool,
 ) -> None:
     """A full disk can take part of a batch before it raises; the rest still reads."""
     path = tmp_path / "s.jsonl"
     write = os.write
 
-    def half_then_full(fd: int, data: bytes | memoryview) -> int:
+    def part_then_full(fd: int, data: bytes | memoryview) -> int:
         monkeypatch.setattr(os, "write", full)
-        return write(fd, bytes(data[: len(data) // 2]))
+        stop = len(data) // 2 if torn else len(record_line(batch[0]))
+        return write(fd, bytes(data[:stop]))
 
     def full(fd: int, data: bytes | memoryview) -> int:
         del fd, data
@@ -407,7 +410,7 @@ async def test_a_write_that_fails_partway_leaves_later_records_numbered(
 
     async with JsonlJournal(path) as journal:
         journal.append(UserMessage(content="before"))
-        monkeypatch.setattr(os, "write", half_then_full)
+        monkeypatch.setattr(os, "write", part_then_full)
         with pytest.raises(OSError, match="No space"):
             journal.append(*batch)
         monkeypatch.setattr(os, "write", write)
@@ -416,8 +419,14 @@ async def test_a_write_that_fails_partway_leaves_later_records_numbered(
 
         assert whole[0] == UserMessage(content="before")
         assert whole[1:kept] == batch[: kept - 1]
-        assert isinstance(whole[kept], IncompleteRecord)
-        assert whole[kept + 1 :] == [UserMessage(content="a"), UserMessage(content="b")]
+        if torn:
+            assert isinstance(whole[kept], IncompleteRecord)
+        else:
+            assert path.read_bytes() == b"".join(map(record_line, whole))
+        assert whole[kept + int(torn) :] == [
+            UserMessage(content="a"),
+            UserMessage(content="b"),
+        ]
         assert len(journal) == len(whole)
         assert [list(journal.history(start=n)) for n in range(len(whole))] == [
             whole[n:] for n in range(len(whole))

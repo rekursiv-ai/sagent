@@ -6,10 +6,11 @@ from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import patch
 
 import asyncio
 
-from treekle import json_dumps, json_loads
+from treekle import ReadError, json_dumps, json_loads
 
 import httpx2
 import pytest
@@ -18,6 +19,7 @@ from sagent.model.exceptions import AuthError, DisconnectedError
 from sagent.model.types import Request, Response
 from sagent.providers.catalog import ModelCatalog
 from sagent.providers.ollama.api import Ollama
+from sagent.providers.openai import wire
 from sagent.providers.replicate import api
 from sagent.providers.replicate.api import Replicate
 from sagent.providers.resources import SharedResources
@@ -55,7 +57,7 @@ async def test_prediction_polls_to_completion_without_following_sse(
         {
             "status": "starting",
             "urls": {
-                "get": "https://api.replicate.com/v1/predictions/p1",
+                "get": "https://api.replicate.com/v1/predictions/pA-_1",
                 "stream": "https://attacker.example/steal",
             },
         },
@@ -73,18 +75,22 @@ async def test_prediction_polls_to_completion_without_following_sse(
         events = [
             event
             async for event in provider["default"].stream(
-                Request(records=(UserMessage(content="hi"),)),
+                Request(records=(UserMessage(content="hi"),), max_response_tokens=23),
             )
         ]
     assert waits == [0.5]
     assert [request.method for request in seen] == ["POST", "GET", "GET"]
     assert all(request.headers["authorization"] == "Bearer test" for request in seen)
     assert str(seen[0].url) == "https://api.replicate.com/v1/predictions"
-    assert seen[0].headers["Cancel-After"] == "10m"
-    assert (
-        json_loads(seen[0].content, dict[str, object])["version"]
-        == "meta/meta-llama-3-8b-instruct"
+    assert all(request.headers["Cancel-After"] == "10m" for request in seen)
+    assert all(
+        request.headers["content-type"] == "application/json" for request in seen
     )
+    assert [request.content for request in seen[1:]] == [b"", b""]
+    assert json_loads(seen[0].content) == {
+        "version": "meta/meta-llama-3-8b-instruct",
+        "input": {"prompt": "User: hi", "system_prompt": "", "max_tokens": 23},
+    }
     response = events[-1]
     assert isinstance(response, Response)
     assert response.records == (AssistantMessage(content="hello world"),)
@@ -158,10 +164,38 @@ async def test_missing_counts_cannot_silently_report_free_generation() -> None:
             await anext(provider.events({}, model="m", headers={}))
 
 
+@pytest.mark.parametrize("status", [300, 307, 401])
 @pytest.mark.asyncio
-async def test_http_errors_are_classified() -> None:
-    provider, _ = _provider(httpx2.Response(401, content=b"unauthorized"))
-    with pytest.raises(AuthError):
+async def test_http_errors_forward_status_body_and_headers_without_redirects(
+    status: int,
+) -> None:
+    reply = httpx2.Response(
+        status,
+        content=b"unauthorized",
+        headers={"location": "https://attacker.example/steal", "retry-after": "7"},
+    )
+    provider, seen = _provider(reply, {"status": "succeeded"})
+    error = AuthError("refused")
+    with (
+        patch.object(wire, "to_exception", return_value=error) as classify,
+        pytest.raises(AuthError, match="refused") as raised,
+    ):
+        async with provider:
+            await provider.prediction("https://api.replicate.com/v1/predictions/p1")
+    assert raised.value is error
+    classify.assert_called_once_with(status, body="unauthorized", headers=reply.headers)
+    assert [str(request.url) for request in seen] == [
+        "https://api.replicate.com/v1/predictions/p1",
+    ]
+
+
+@pytest.mark.parametrize("reply", [{"output": "hello"}, {"status": 7}])
+@pytest.mark.asyncio
+async def test_prediction_validates_status_at_the_response_boundary(
+    reply: dict[str, object],
+) -> None:
+    provider, _ = _provider(reply)
+    with pytest.raises(ReadError):
         async with provider:
             await provider.prediction("https://api.replicate.com/v1/predictions/p1")
 
@@ -252,7 +286,10 @@ def _provider(
         )
 
     resources = SharedResources()
-    resources._http = httpx2.AsyncClient(transport=httpx2.MockTransport(answer))
+    resources._http = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(answer),
+        follow_redirects=True,
+    )
     provider = Replicate(
         api_key="test",
         models=ModelTable(rows=(row,), roles={"default": row.model_id}),

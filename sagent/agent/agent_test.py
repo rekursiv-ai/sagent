@@ -78,6 +78,8 @@ if TYPE_CHECKING:
         Agent as AgentProtocol,
         Journal,
     )
+    from sagent.providers.types import Model
+    from sagent.runtime.tape import ContextSplice, TapeRecord, TapeRef
     from sagent.runtime.types import ModelContextEvent
 
 
@@ -889,18 +891,39 @@ def test_a_pruner_that_prunes_is_asked_by_the_runtime(tmp_path: Path) -> None:
     assert agent.runtime.prune == pruner.prune
 
 
-def test_a_summary_compactor_is_the_runtimes(tmp_path: Path) -> None:
+class _UnsizedCompactor(NoShrinker):
+    """A compactor that leaves reply sizing to the model."""
+
+    async def compact(
+        self,
+        tape: Sequence[TapeRecord],
+        context: Sequence[ModelContextEvent],
+        model: Model,
+        mint_ref: Callable[[], TapeRef],
+        custom_instructions: str | None = None,
+    ) -> ContextSplice:
+        del tape, context, model, mint_ref, custom_instructions
+        raise AssertionError("Construction must not compact the session.")
+
+
+@pytest.mark.parametrize("factory", [SummaryCompactor, _UnsizedCompactor])
+def test_a_compactor_is_wired_with_optional_reply_sizing(
+    tmp_path: Path,
+    factory: type[SummaryCompactor | _UnsizedCompactor],
+) -> None:
     agent = Agent(
         model=ScriptedProvider()["scripted"],
         tool_context=ToolContext(cwd=tmp_path),
-        compactor=SummaryCompactor,
+        compactor=factory,
     )
 
     compactor = agent.session.compactor
-    assert isinstance(compactor, SummaryCompactor)
+    assert isinstance(compactor, (SummaryCompactor, _UnsizedCompactor))
     assert agent.runtime.compactor is compactor
     assert agent.runtime.compact_due == compactor.should_run
-    assert agent.runtime.reply_room == compactor.reply_room
+    assert agent.runtime.reply_room == (
+        compactor.reply_room if isinstance(compactor, SummaryCompactor) else None
+    )
 
 
 @pytest.mark.asyncio

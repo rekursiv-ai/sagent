@@ -325,7 +325,7 @@ class TestSubmit:
         async def run() -> bytes:
             async with _cat() as term:
                 _ = await term.submit("hello")
-                return await _read_until(term, b"hello", 5.0)
+                return await _read_until(term, b"^[[201~", 5.0)
 
         seen = asyncio.run(run())
         assert b"^[[200~" in seen

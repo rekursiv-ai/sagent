@@ -80,7 +80,7 @@ class _Summarize:
 
 
 def _model(summarize: _Summarize) -> tuple[ScriptedProvider, ScriptedModel]:
-    provider = ScriptedProvider(replies=[summarize] * 2_000)
+    provider = ScriptedProvider(replies=[summarize] * 64)
     return provider, provider["scripted"]
 
 
@@ -94,7 +94,7 @@ def _tokens(text: str) -> int:
     return len(text) // 4
 
 
-def _document(chunks: int = 200, chunk_chars: int = 1_000) -> tuple[str, set[str]]:
+def _document(chunks: int = 12, chunk_chars: int = 200) -> tuple[str, set[str]]:
     """Return a head, ``chunks`` marked lines, and a tail; and the markers."""
     markers = [f"M{i:04d}" for i in range(chunks)]
     middle = "".join(f"{m} {'d' * (chunk_chars - 6)}\n" for m in markers)
@@ -102,7 +102,7 @@ def _document(chunks: int = 200, chunk_chars: int = 1_000) -> tuple[str, set[str
 
 
 async def _fold(model: ScriptedModel, text: str) -> str:
-    return await fold(text, model=model, max_tokens=6_000, call_tokens=6_000)
+    return await fold(text, model=model, max_tokens=200, call_tokens=400)
 
 
 @pytest.mark.asyncio
@@ -124,20 +124,29 @@ async def test_a_text_that_fits_is_returned_untouched(max_tokens: int) -> None:
 
 @pytest.mark.asyncio
 async def test_the_fold_fits_its_budget_and_keeps_head_and_tail_verbatim() -> None:
-    provider, model = _model(_Summarize())
+    provider = ScriptedProvider(replies=[_costly] * 8)
     text, markers = _document()
+    spent: list[float] = []
 
-    out = await _fold(model, text)
+    out = await fold(
+        text,
+        model=provider["scripted"],
+        max_tokens=200,
+        call_tokens=400,
+        spent=spent.append,
+    )
 
-    assert _tokens(out) <= 6_000
+    assert _tokens(out) <= 200
     assert out.startswith(_HEAD)
     assert out.endswith(_TAIL)
     assert set(_MARKER.findall(out)) == markers
     assert "[summary of the omitted middle of this message]\n" in out
     assert "\n[end of summary]" in out
     assert provider.requests
+    assert spent == [0.01] * len(provider.requests)
     for request in provider.requests:
         prompt = _prompt(request)
+        assert _tokens(prompt) <= 400
         content = prompt.split("<content>\n", 1)[1].removesuffix("\n</content>\n")
         words = max(1, math.floor(max(1, _tokens(content) // 4) * 0.75))
         assert prompt.startswith(
@@ -151,41 +160,15 @@ def _costly(request: Request) -> Response:
 
 
 @pytest.mark.asyncio
-async def test_each_summary_call_reports_what_it_cost() -> None:
-    provider = ScriptedProvider(replies=[_costly] * 2_000)
-    text, _ = _document()
-    spent: list[float] = []
-
-    _ = await fold(
-        text,
-        model=provider["scripted"],
-        max_tokens=6_000,
-        call_tokens=6_000,
-        spent=spent.append,
-    )
-
-    assert spent == [0.01] * len(provider.requests)
-
-
-@pytest.mark.asyncio
-async def test_no_call_is_larger_than_the_per_call_budget() -> None:
-    provider, model = _model(_Summarize())
-    text, _ = _document()
-
-    _ = await _fold(model, text)
-
-    assert all(_tokens(_prompt(r)) <= 6_000 for r in provider.requests)
-
-
-@pytest.mark.asyncio
 async def test_a_single_line_larger_than_one_call_is_cut_mid_line() -> None:
     provider, model = _model(_Summarize())
-    markers = [f"M{i:04d}" for i in range(40)]
-    text = _HEAD + "".join(f"{m} {'d' * 994} " for m in markers) + _TAIL
+    markers = [f"M{i:04d}" for i in range(12)]
+    text = _HEAD + "".join(f"{m} {'d' * 194} " for m in markers) + _TAIL
 
     out = await _fold(model, text)
 
-    assert all(_tokens(_prompt(r)) <= 6_000 for r in provider.requests)
+    assert provider.requests
+    assert all(_tokens(_prompt(r)) <= 400 for r in provider.requests)
     assert set(_MARKER.findall(out)) == set(markers)
 
 
@@ -197,7 +180,7 @@ async def test_summaries_that_still_overflow_are_folded_again() -> None:
 
     out = await _fold(model, text)
 
-    assert _tokens(out) <= 6_000
+    assert _tokens(out) <= 200
     assert set(_MARKER.findall(out)) == markers
     assert any("summary of:" in _prompt(r) for r in provider.requests)
 
@@ -225,20 +208,21 @@ async def test_a_failed_summary_is_asked_again(
 
 @pytest.mark.asyncio
 async def test_a_chunk_the_provider_rejects_as_too_long_is_halved() -> None:
-    provider, model = _model(_Summarize(overflow_over_chars=8_000))
+    provider, model = _model(_Summarize(overflow_over_chars=1_000))
     text, markers = _document()
 
     out = await _fold(model, text)
 
     assert set(_MARKER.findall(out)) == markers
-    assert any(len(_prompt(r)) <= 8_000 for r in provider.requests)
+    assert any(len(_prompt(r)) > 1_000 for r in provider.requests)
+    assert any(len(_prompt(r)) <= 1_000 for r in provider.requests)
 
 
 @pytest.mark.asyncio
 async def test_a_transient_failure_counts_as_a_failed_attempt() -> None:
     summarize = _Summarize()
-    provider = ScriptedProvider(replies=[OverloadedError("busy"), *[summarize] * 100])
-    text, markers = _document(chunks=40)
+    provider = ScriptedProvider(replies=[OverloadedError("busy"), *[summarize] * 8])
+    text, markers = _document(chunks=8)
 
     out = await _fold(provider["scripted"], text)
 
@@ -248,9 +232,9 @@ async def test_a_transient_failure_counts_as_a_failed_attempt() -> None:
 @pytest.mark.asyncio
 async def test_attempts_are_honored_at_every_halving() -> None:
     provider, model = _model(_Summarize(empty_calls=frozenset({0, 1})))
-    text, markers = _document(chunks=40)
+    text, markers = _document(chunks=8)
 
-    out = await fold(text, model=model, max_tokens=6_000, call_tokens=6_000, attempts=1)
+    out = await fold(text, model=model, max_tokens=200, call_tokens=400, attempts=1)
 
     assert set(_MARKER.findall(out)) == markers
     first, second, third = (
@@ -262,14 +246,14 @@ async def test_attempts_are_honored_at_every_halving() -> None:
 @pytest.mark.asyncio
 async def test_each_call_carries_the_prompt_and_its_word_budget() -> None:
     provider, model = _model(_Summarize())
-    text, _ = _document(chunks=40)
-    text = text.replace("M0020 ", "M0020 {{words}} ", 1)
+    text, _ = _document(chunks=8)
+    text = text.replace("M0004 ", "M0004 {{words}} ", 1)
 
     _ = await fold(
         text,
         model=model,
-        max_tokens=6_000,
-        call_tokens=6_000,
+        max_tokens=200,
+        call_tokens=400,
         prompt="Say it in {{words}} words. <content>{{content}}</content>",
         shrink=2,
         words_per_token=0.5,
@@ -283,13 +267,13 @@ async def test_each_call_carries_the_prompt_and_its_word_budget() -> None:
         content = prompt.split("<content>", 1)[1].removesuffix("</content>")
         words = math.floor(_tokens(content) // 2 * 0.5)
         assert prompt.startswith(f"Say it in {words} words. <content>")
-    assert any("M0020 {{words}}" in _prompt(r) for r in provider.requests)
+    assert any("M0004 {{words}}" in _prompt(r) for r in provider.requests)
 
 
 @pytest.mark.asyncio
 async def test_summaries_that_never_shrink_raise() -> None:
     _, model = _model(_Summarize(echo=True))
-    text, _ = _document(chunks=30)
+    text, _ = _document(chunks=8)
 
     with pytest.raises(FoldError, match="could not be summarized or split"):
         _ = await _fold(model, text)
@@ -297,8 +281,8 @@ async def test_summaries_that_never_shrink_raise() -> None:
 
 @pytest.mark.asyncio
 async def test_every_attempt_coming_back_empty_raises() -> None:
-    _, model = _model(_Summarize(empty_calls=frozenset(range(2_000))))
-    text, _ = _document(chunks=30)
+    _, model = _model(_Summarize(empty_calls=frozenset(range(64))))
+    text, _ = _document(chunks=8)
 
     with pytest.raises(FoldError, match="could not be summarized or split"):
         _ = await _fold(model, text)
@@ -380,14 +364,14 @@ async def test_joined_summaries_add_no_words_to_the_model_replies(
 @pytest.mark.asyncio
 async def test_a_head_line_longer_than_the_edge_is_cut_mid_line() -> None:
     _, model = _model(_Summarize())
-    markers = [f"M{i:04d}" for i in range(40)]
-    text = "x" * 20_000 + "\n" + "".join(f"{m} {'d' * 994}\n" for m in markers)
+    markers = [f"M{i:04d}" for i in range(12)]
+    text = "x" * 1_000 + "\n" + "".join(f"{m} {'d' * 194}\n" for m in markers)
 
     out = await _fold(model, text)
 
-    assert _tokens(out) <= 6_000
+    assert _tokens(out) <= 200
     assert out.startswith("x" * 100)
-    assert "x" * 3_001 not in out
+    assert "x" * 101 not in out
     assert set(_MARKER.findall(out)) == set(markers)
 
 
@@ -563,7 +547,7 @@ async def test_an_attempt_uses_only_finished_assistant_text(
 @pytest.mark.asyncio
 async def test_a_rate_limited_model_is_asked_no_more_than_its_attempts() -> None:
     provider = ScriptedProvider(
-        replies=[RateLimitedError("slow down", retry_after_sec=0.0)] * 1_000,
+        replies=[RateLimitedError("slow down", retry_after_sec=0.0)] * 3,
     )
     text, _ = _document(chunks=4)
 
@@ -572,7 +556,7 @@ async def test_a_rate_limited_model_is_asked_no_more_than_its_attempts() -> None
             text,
             model=provider["scripted"],
             max_tokens=200,
-            call_tokens=6_000,
+            call_tokens=400,
         )
 
     assert len(provider.requests) == 3

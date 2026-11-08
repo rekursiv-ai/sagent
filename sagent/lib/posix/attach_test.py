@@ -519,7 +519,6 @@ class _Shell:
         self._process = subprocess.Popen(  # noqa: S603 -- Only this test's helper source and descriptors.
             [
                 sys.executable,
-                "-S",
                 "-c",
                 (
                     "import asyncio, os, signal, sys, termios\n"
