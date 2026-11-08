@@ -11,9 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 import asyncio
 import base64
-import fcntl
 import hashlib
-import os
 import stat
 import time
 
@@ -250,25 +248,50 @@ async def test_renew_adopts_a_token_another_process_rotated(auth: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_renew_waits_for_another_process_holding_the_login(auth: Path) -> None:
+async def test_renew_waits_for_lock_admission_before_exchanging_tokens(
+    auth: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     _store(
         auth,
         {"access_token": _token("a"), "refresh_token": "r1", "account_id": "x"},
     )
+    requested, admitted = asyncio.Event(), asyncio.Event()
+
+    async def enter() -> None:
+        requested.set()
+        await admitted.wait()
+
+    entered = AsyncMock(side_effect=enter)
+    exited = AsyncMock(return_value=False)
+    locked = Mock(return_value=Mock(__aenter__=entered, __aexit__=exited))
+    monkeypatch.setattr(login, "file_lock", locked)
     fresh = _token("fresh")
     server = _Server(replies=[_reply({"access_token": fresh, "refresh_token": "r2"})])
     async with _Served(server) as shared:
         codex = CodexLogin(auth, resources=shared)
         await codex.token()
-        held = _hold(auth.with_suffix(".json.lock"))
         renewing = asyncio.create_task(codex.renew())
-        await asyncio.sleep(0.05)
-        assert not renewing.done()
-        assert server.requests == []
-        os.close(held)
-        await renewing
-        assert await codex.token() == (fresh, "x")
+        try:
+            await requested.wait()
+            locked.assert_called_once_with(auth.with_suffix(".json.lock"))
+            assert not renewing.done()
+            assert server.requests == []
+            exited.assert_not_awaited()
+            admitted.set()
+            await renewing
+            assert await codex.token() == (fresh, "x")
+        finally:
+            renewing.cancel()
+            await asyncio.gather(renewing, return_exceptions=True)
+    entered.assert_awaited_once_with()
+    exited.assert_awaited_once_with(None, None, None)
     assert len(server.requests) == 1
+    assert _tokens(auth) == {
+        "access_token": fresh,
+        "refresh_token": "r2",
+        "account_id": "x",
+    }
 
 
 @pytest.mark.asyncio
@@ -979,13 +1002,6 @@ def test_the_account_of_tokens_reads_the_id_token_first() -> None:
     )
 
     assert codex_account(tokens) == CodexAccount(plan="pro", email="i@x.test")
-
-
-def _hold(lock: Path) -> int:
-    """Take the login's lock, as another process renewing it would."""
-    held = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
-    fcntl.flock(held, fcntl.LOCK_EX)
-    return held
 
 
 @dataclass(slots=True, kw_only=True)
