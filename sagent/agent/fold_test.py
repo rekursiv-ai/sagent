@@ -280,12 +280,30 @@ async def test_summaries_that_never_shrink_raise() -> None:
 
 
 @pytest.mark.asyncio
-async def test_every_attempt_coming_back_empty_raises() -> None:
-    _, model = _model(_Summarize(empty_calls=frozenset(range(64))))
-    text, _ = _document(chunks=8)
+@pytest.mark.parametrize(
+    ("chunk", "prompts"),
+    [("x", ["x", "x"]), ("xy", ["xy", "xy", "x", "x"])],
+)
+async def test_every_attempt_coming_back_empty_raises(
+    chunk: str,
+    prompts: list[str],
+) -> None:
+    provider = ScriptedProvider(replies=[reply()] * len(prompts))
+    invocation = agent_fold._Call(
+        model=provider["scripted"],
+        call_tokens=1,
+        shrink=4,
+        attempts=2,
+        words_per_token=0.75,
+        spent=lambda _: None,
+        tag=lambda request: request,
+        prompt="{{content}}",
+    )
 
     with pytest.raises(FoldError, match="could not be summarized or split"):
-        _ = await _fold(model, text)
+        _ = await agent_fold._summarize(chunk, call=invocation)
+
+    assert [_prompt(request) for request in provider.requests] == prompts
 
 
 @pytest.mark.asyncio

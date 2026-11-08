@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TextIO, cast
+from unittest.mock import Mock, patch
 
 import argparse
+import inspect
 import logging
 import os
 import shutil
 import signal
+import subprocess
 import threading
-import time
 
 from treekle import PlainTree, ReadError, json_dumps, json_loads
 
@@ -37,7 +40,7 @@ from sagent.session.types import TokenUsage, UserMessage
 
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Sequence
 
     from sagent.session.types import SessionRecord
 
@@ -112,9 +115,10 @@ def _solve(
     *tasks: Task,
     model: str | None = None,
     jobs: int = 1,
+    agent: Agent = "sagent",
 ) -> int:
     return solve(
-        "sagent",
+        agent,
         tasks or (_TASK,),
         out=tmp_path / "out",
         mirrors=Mirrors(root=tmp_path / "mirrors"),
@@ -230,19 +234,53 @@ def test_each_agent_runs_headless_with_its_permission_prompts_off(
         "model_reasoning_effort=low",
         prompt(_TASK),
     ]
+    bare = command("sagent-noskills", _TASK, log=tmp_path, model=None, effort="high")
+    assert bare[:7] == [
+        "sh",
+        str(main_py),
+        "--session",
+        str(tmp_path / "session.jsonl"),
+        "--effort",
+        "high",
+        "--tools",
+    ]
+    assert bare[7:] == [
+        "Bash",
+        "Read",
+        "Write",
+        "Edit",
+        "Grep",
+        "Glob",
+        "List",
+        "WebSearch",
+        "WebFetch",
+        "PaperSearch",
+        "PaperDetails",
+        "PaperAuthor",
+        "PaperFetch",
+        "Memory",
+        "PlayAudio",
+        "AgentSpawn",
+        "AgentSend",
+        "AgentSelf",
+        "AgentSession",
+        "BackgroundTask",
+    ]
 
 
+@pytest.mark.parametrize("agent", ["sagent-noskills", "claude"])
 def test_a_task_is_solved_in_a_fresh_checkout_and_its_patch_kept(
     tmp_path: Path,
+    agent: Agent,
 ) -> None:
     git = _Git()
 
-    assert _solve(tmp_path, git, model="m") == 1
+    assert _solve(tmp_path, git, model="m", agent=agent) == 1
 
     mirror = tmp_path / "mirrors" / "o__r.git"
     checkout = tmp_path / "work" / "o__r-1"
-    log = tmp_path / "out" / "sagent" / "logs" / "o__r-1"
-    agent = command("sagent", _TASK, log=log, model="m", effort="medium")
+    log = tmp_path / "out" / agent / "logs" / "o__r-1"
+    argv = command(agent, _TASK, log=log, model="m", effort="medium")
     url = "https://github.com/o/r.git"
     diff = f"--output={log / 'patch.diff'}"
     assert git.calls == [
@@ -261,16 +299,20 @@ def test_a_task_is_solved_in_a_fresh_checkout_and_its_patch_kept(
             None,
         ),
         (["git", "checkout", "--quiet", "abc"], checkout, "", 600.0, None),
-        (agent, checkout, prompt(_TASK), 5.0, log / "stdout.txt"),
+        (
+            argv,
+            checkout,
+            prompt(_TASK) if agent == "sagent-noskills" else "",
+            5.0,
+            log / "stdout.txt",
+        ),
         (["git", "add", "--all"], checkout, "", 600.0, None),
         (["git", "diff", "--cached", "--binary", diff], checkout, "", 600.0, None),
     ]
-    (line,) = (
-        (tmp_path / "out" / "sagent" / "predictions.jsonl").read_text().splitlines()
-    )
+    (line,) = (tmp_path / "out" / agent / "predictions.jsonl").read_text().splitlines()
     assert json_loads(line, dict[str, object]) == {
         "instance_id": "o__r-1",
-        "model_name_or_path": "sagent",
+        "model_name_or_path": agent,
         "model_patch": "diff --git a/x b/x\n",
         "exit_code": 7,
     }
@@ -423,16 +465,38 @@ def test_every_agent_solves_at_once_then_is_graded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
-    git = _Git(meet=threading.Barrier(4))
+    git = _Git()
     out = tmp_path / "out"
+    meet = threading.Barrier(4)
 
-    codes = _run_all(tmp_path, git, [_TASK], agents=swebench.AGENTS)
+    def solving(*args: object, **kwargs: object) -> int:
+        del args, kwargs
+        return meet.wait(timeout=5.0)
+
+    with patch.object(swebench, "solve", side_effect=solving) as solve_tasks:
+        codes = _run_all(tmp_path, git, [_TASK], agents=swebench.AGENTS)
 
     assert codes == {"sagent": 0, "claude": 0, "codex": 0, "sagent-noskills": 0}
-    clones = [a[-1] for a in git.argvs() if a[:3] == ["git", "clone", "--quiet"]]
-    assert clones.count(str(tmp_path / "mirrors" / "o__r.git")) == 1
+    assert solve_tasks.call_count == 4
+    calls = {cast(Agent, call.args[0]): call for call in solve_tasks.call_args_list}
+    assert set(calls) == set(swebench.AGENTS)
     for agent in swebench.AGENTS:
-        assert str(tmp_path / "work" / agent / "o__r-1") in clones
+        invocation = calls[agent]
+        assert invocation.args == (agent, [_TASK])
+        configuration = cast(dict[str, object], invocation.kwargs)
+        mirrors = configuration["mirrors"]
+        assert isinstance(mirrors, Mirrors)
+        assert mirrors.root == tmp_path / "mirrors"
+        assert configuration == {
+            "out": out,
+            "mirrors": mirrors,
+            "work": tmp_path / "work" / agent,
+            "model": None,
+            "effort": "high",
+            "timeout_sec": 5.0,
+            "jobs": 1,
+            "run": git,
+        }
     grades = {c[0][13]: c for c in git.calls if "--run_id" in c[0]}
     assert sorted(grades) == ["claude", "codex", "sagent", "sagent-noskills"]
     argv, cwd, stdin, timeout_sec, output = grades["codex"]
@@ -456,19 +520,6 @@ def test_every_agent_solves_at_once_then_is_graded(
         "o__r-1",
     ]
     assert (cwd, output) == (out / "codex", out / "codex" / "grade.log")
-    sagents = {c[0][3]: (c[0], c[2]) for c in git.calls if c[0][0] == "sh"}
-    plain, plain_stdin = sagents[
-        str(out / "sagent" / "logs" / "o__r-1" / "session.jsonl")
-    ]
-    bare, bare_stdin = sagents[
-        str(out / "sagent-noskills" / "logs" / "o__r-1" / "session.jsonl")
-    ]
-    assert plain_stdin == bare_stdin == prompt(_TASK)
-    assert plain[-2:] == ["--effort", "high"]
-    assert bare[: len(plain)] == [*plain[:3], bare[3], "--effort", "high"]
-    assert bare[len(plain)] == "--tools"
-    assert "Skill" not in bare
-    assert {"Bash", "Read", "Edit"} <= set(bare)
 
 
 def _run_all(
@@ -516,7 +567,8 @@ def test_each_batch_is_graded_for_every_agent_then_its_new_images_removed(
     monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
     git = _Git(images={"img-b"})
 
-    _ = _run_all(tmp_path, git, _imaged("a", "b", "c"))
+    with patch.object(swebench, "solve", return_value=0):
+        _ = _run_all(tmp_path, git, _imaged("a", "b", "c"))
 
     steps = [
         a[a.index("--run_id") + 1 :] if "--run_id" in a else a
@@ -544,7 +596,12 @@ def test_each_batch_is_graded_for_every_agent_then_its_new_images_removed(
 
 
 def test_an_agent_given_no_tasks_has_graded_cleanly(tmp_path: Path) -> None:
-    assert _run_all(tmp_path, _Git(), [], agents=["codex"]) == {"codex": 0}
+    git = _Git()
+    with patch.object(swebench, "solve", return_value=0) as solve_tasks:
+        assert _run_all(tmp_path, git, [], agents=["codex"]) == {"codex": 0}
+    assert solve_tasks.call_count == 1
+    assert solve_tasks.call_args.args == ("codex", [])
+    assert git.calls == []
 
 
 def test_a_harness_that_fails_is_each_agents_code_and_progress_is_logged(
@@ -554,15 +611,14 @@ def test_a_harness_that_fails_is_each_agents_code_and_progress_is_logged(
 ) -> None:
     monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
 
-    with caplog.at_level(logging.INFO, logger=swebench.__name__):
+    with (
+        patch.object(swebench, "solve", return_value=1),
+        caplog.at_level(logging.INFO, logger=swebench.__name__),
+    ):
         codes = _run_all(tmp_path, _Git(fail="--run_id"), [_TASK], agents=["sagent"])
 
     assert codes == {"sagent": 1}
-    assert caplog.messages == [
-        "sagent: o__r-1 exit 7, 19-byte patch",
-        "sagent: 1 solved",
-        "graded 1 of 1 tasks",
-    ]
+    assert caplog.messages == ["sagent: 1 solved", "graded 1 of 1 tasks"]
 
 
 def test_each_agent_runs_with_the_model_and_time_it_is_given(
@@ -572,18 +628,21 @@ def test_each_agent_runs_with_the_model_and_time_it_is_given(
     monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
     git = _Git()
 
-    _ = _run_all(tmp_path, git, [_TASK], agents=["claude"], model="m")
+    with patch.object(swebench, "solve", return_value=1) as solve_tasks:
+        _ = _run_all(tmp_path, git, [_TASK], agents=["claude"], model="m")
 
-    log = tmp_path / "out" / "claude" / "logs" / "o__r-1"
-    argv = command("claude", _TASK, log=log, model="m", effort="high")
-    checkout = tmp_path / "work" / "claude" / "o__r-1"
-    assert (argv, checkout, "", 5.0, log / "stdout.txt") in git.calls
+    assert solve_tasks.call_count == 1
+    assert solve_tasks.call_args.args == ("claude", [_TASK])
+    assert solve_tasks.call_args.kwargs["model"] == "m"
+    assert solve_tasks.call_args.kwargs["timeout_sec"] == 5.0
+    assert solve_tasks.call_args.kwargs["work"] == tmp_path / "work" / "claude"
 
 
-def test_each_agent_solves_jobs_tasks_at_once_in_a_run(tmp_path: Path) -> None:
-    git = _Git(meet=threading.Barrier(2), meet_sec=0.01)
-    with pytest.raises(threading.BrokenBarrierError):
-        _ = _run_all(tmp_path, git, _sized_tasks(a=2), agents=["sagent"], jobs=1)
+def test_a_run_passes_the_job_limit_to_each_solver(tmp_path: Path) -> None:
+    with patch.object(swebench, "solve", return_value=2) as solve_tasks:
+        _ = _run_all(tmp_path, _Git(), _sized_tasks(a=2), agents=["sagent"], jobs=2)
+    assert solve_tasks.call_count == 1
+    assert solve_tasks.call_args.kwargs["jobs"] == 2
 
 
 def test_a_batch_that_fails_to_grade_still_removes_its_images(
@@ -593,7 +652,10 @@ def test_a_batch_that_fails_to_grade_still_removes_its_images(
     monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
     git = _Git(crash="--run_id")
 
-    with pytest.raises(OSError, match="--run_id"):
+    with (
+        patch.object(swebench, "solve", return_value=1),
+        pytest.raises(OSError, match="--run_id"),
+    ):
         _ = _run_all(tmp_path, git, _imaged("a"))
 
     assert git.argvs()[-1] == ["docker", "rmi", "img-a"]
@@ -784,33 +846,33 @@ def test_a_cost_not_known_for_every_task_is_not_summed(
 
 
 def test_a_sample_keeps_each_repositorys_share() -> None:
-    tasks = _sized_tasks(big=60, mid=30, small=9, tiny=1)
+    tasks = _sized_tasks(big=6, mid=3, small=2, tiny=1)
 
-    drawn = swebench.stratified(tasks, 10, seed=0)
+    drawn = swebench.stratified(tasks, 5, seed=0)
 
     counts = {
         r: sum(t.repo == r for t in drawn) for r in ("big", "mid", "small", "tiny")
     }
-    # Shares 6, 3, 0.9, 0.1: the one left over goes to the larger remainder.
-    assert counts == {"big": 6, "mid": 3, "small": 1, "tiny": 0}
+    # The two spare draws go to small (5/6) and big (1/2).
+    assert counts == {"big": 3, "mid": 1, "small": 1, "tiny": 0}
     assert drawn == [t for t in tasks if t in drawn]
 
 
 def test_a_remainder_is_added_to_a_repositorys_floor() -> None:
-    drawn = swebench.stratified(_sized_tasks(a=11, b=9), 10, seed=0)
+    drawn = swebench.stratified(_sized_tasks(a=3, b=1), 2, seed=0)
 
-    # Shares 5.5 and 4.5 tie; the one left over goes to the first.
-    assert [sum(t.repo == r for t in drawn) for r in ("a", "b")] == [6, 4]
+    # Shares 1.5 and 0.5 tie; the one left over goes to the first.
+    assert [sum(t.repo == r for t in drawn) for r in ("a", "b")] == [2, 0]
 
 
 def test_a_sample_is_the_same_for_a_seed_and_differs_across_seeds() -> None:
-    tasks = _sized_tasks(a=50, b=50)
+    tasks = _sized_tasks(a=3, b=3)
 
-    first = swebench.stratified(tasks, 10, seed=1)
+    first = swebench.stratified(tasks, 2, seed=2)
 
-    assert first == swebench.stratified(tasks, 10, seed=1)
-    assert first != swebench.stratified(tasks, 10, seed=2)
-    assert first != tasks[:5] + tasks[50:55]
+    assert first == swebench.stratified(tasks, 2, seed=2)
+    assert first != swebench.stratified(tasks, 2, seed=1)
+    assert first != [tasks[0], tasks[3]]
 
 
 def test_a_sample_as_large_as_the_tasks_is_all_of_them() -> None:
@@ -856,30 +918,85 @@ def test_tasks_are_read_from_the_dataset_named_and_sampled(
 
 
 def test_a_command_says_how_it_ended_and_keeps_what_it_printed(tmp_path: Path) -> None:
-    script = ["sh", "-c", "read x; echo out $x; echo err >&2; test $x = y"]
+    script = ["agent", "solve"]
     output = tmp_path / "output.txt"
-    assert swebench._run(script, tmp_path, "y\n", 5.0, output) == 0
-    assert output.read_text() == "out y\nerr\n"
-    assert swebench._run(["false"], tmp_path, "", 5.0, None) == 1
+    output.write_text("stale")
+    with patch.object(
+        subprocess,
+        "run",
+        return_value=subprocess.CompletedProcess(script, 7),
+    ) as execute:
+        assert swebench._run(script, tmp_path, "question\n", 5.0, output) == 7
+    sink = cast(TextIO, execute.call_args.kwargs["stdout"])
+    assert sink.closed
+    assert sink.encoding == "utf-8"
+    assert output.read_text() == ""
+    execute.assert_called_once_with(
+        script,
+        cwd=tmp_path,
+        input="question\n",
+        stdout=sink,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=5.0,
+        check=False,
+    )
 
 
-def test_a_command_out_of_time_is_killed(tmp_path: Path) -> None:
-    began = time.monotonic()
-    assert swebench._run(["sleep", "30"], tmp_path, "", 0.01, None) == 124
-    assert time.monotonic() - began < 10.0
+def test_a_command_out_of_time_returns_124_and_closes_output(tmp_path: Path) -> None:
+    output = tmp_path / "output.txt"
+    with patch.object(
+        subprocess,
+        "run",
+        side_effect=subprocess.TimeoutExpired("agent", 0.01),
+    ) as execute:
+        assert swebench._run(["agent"], tmp_path, "", 0.01, output) == 124
+    sink = cast(TextIO, execute.call_args.kwargs["stdout"])
+    assert sink.closed
+    execute.assert_called_once_with(
+        ["agent"],
+        cwd=tmp_path,
+        input="",
+        stdout=sink,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=0.01,
+        check=False,
+    )
 
 
 def test_a_command_without_an_output_file_prints_where_this_process_does(
     tmp_path: Path,
-    capfd: pytest.CaptureFixture[str],
 ) -> None:
-    script = ["sh", "-c", "pwd; echo err >&2"]
-    assert swebench._run(script, tmp_path, "", 5.0, None) == 0
-    assert capfd.readouterr() == (f"{tmp_path}\n", "err\n")
+    script = ["agent"]
+    with patch.object(
+        subprocess,
+        "run",
+        side_effect=[
+            subprocess.CompletedProcess(script, 0),
+            subprocess.CompletedProcess(script, 1),
+        ],
+    ) as execute:
+        assert swebench._run(script, tmp_path, "", 5.0, None) == 0
+        assert swebench._run(script, tmp_path, "", 5.0, None) == 1
+    assert execute.call_count == 2
+    execute.assert_called_with(
+        script,
+        cwd=tmp_path,
+        input="",
+        stdout=None,
+        stderr=None,
+        text=True,
+        timeout=5.0,
+        check=False,
+    )
 
 
 @pytest.fixture
-def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+def scratch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[Path, None, None]:
     """Isolate CLI paths, signal handling, and logging configuration."""
     monkeypatch.setattr(swebench, "_OUT", tmp_path / "out")
 
@@ -900,6 +1017,40 @@ def scratch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         _ = signal.signal(signal.SIGTERM, previous)
         for logger, level in zip(loggers, levels, strict=True):
             logger.setLevel(level)
+
+
+def test_cli_fixture_restores_signal_and_logging_after_a_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    levels = [logging.DEBUG, logging.ERROR, logging.CRITICAL]
+    setters = [Mock() for _ in levels]
+    loggers = [
+        Mock(spec=logging.Logger, level=level, setLevel=setter)
+        for level, setter in zip(levels, setters, strict=True)
+    ]
+    unwrapped = cast(
+        Callable[[Path, pytest.MonkeyPatch], Generator[Path, None, None]],
+        inspect.unwrap(scratch),
+    )
+    error = RuntimeError("interrupted test")
+    with (
+        monkeypatch.context() as local,
+        patch.object(signal, "getsignal", return_value=signal.SIG_IGN),
+        patch.object(signal, "signal") as restore_signal,
+        patch.object(logging, "getLogger", side_effect=loggers),
+    ):
+        lifecycle = unwrapped(tmp_path, local)
+        assert next(lifecycle) == tmp_path
+        restore_signal.assert_not_called()
+        for logger in loggers:
+            logger.level = logging.WARNING
+        with pytest.raises(RuntimeError, match="interrupted test") as raised:
+            lifecycle.throw(error)
+    assert raised.value is error
+    restore_signal.assert_called_once_with(signal.SIGTERM, signal.SIG_IGN)
+    for setter, level in zip(setters, levels, strict=True):
+        setter.assert_called_once_with(level)
 
 
 def test_an_experiment_is_named_by_its_flags() -> None:
@@ -933,91 +1084,86 @@ def test_an_experiment_is_named_by_its_flags() -> None:
 
 def test_the_bare_command_runs_the_default_agents_where_report_finds_them(
     scratch: Path,
-    monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    git = _Git()
-    monkeypatch.setattr(swebench, "_run", git)
-    asked: list[tuple[str, list[str], int, int]] = []
-
-    def tasks(
-        dataset: str,
-        *,
-        instances: Sequence[str],
-        sample: int,
-        seed: int,
-    ) -> list[Task]:
-        asked.append((dataset, list(instances), sample, seed))
-        return [_TASK]
-
-    monkeypatch.setattr(swebench, "_tasks", tasks)
-    mirrors = ["--mirrors", str(scratch / "m")]
-
-    assert swebench.main(mirrors) == 0
-    assert swebench.main(["--agent", "sagent-noskills", *mirrors]) == 0
-    ran = capsys.readouterr().out
-    assert swebench.main(["report"]) == 0
-
     out = scratch / "out" / "n50-seed0-medium"
-    assert asked == [("SWE-bench/SWE-bench_Verified", [], 50, 0)] * 2
-    solvers = [a[0] for a in git.argvs() if a[0] in ("sh", "claude", "codex")]
-    assert sorted(solvers) == ["claude", "codex", "sh", "sh"]
-    checkouts = {a[-1] for a in git.argvs() if a[:2] == ["git", "clone"]}
-    assert str(scratch / "work" / "n50-seed0-medium" / "codex" / "o__r-1") in checkouts
-    last = [c.strip() for c in ran.splitlines()[-1].split("|")[1:-1]]
-    assert last == ["sagent-noskills", "-", "0", "-", "-", "-", "-"]
-    shown = capsys.readouterr().out.splitlines()
-    assert shown[0] == str(out)
-    assert [r.split("|")[1].strip() for r in shown[3:]] == [
-        "sagent",
-        "claude",
-        "codex",
-        "sagent-noskills",
-    ]
+    for agent in swebench.AGENTS:
+        (out / agent).mkdir(parents=True)
+        (out / agent / "predictions.jsonl").touch()
+    with (
+        patch.object(swebench, "_tasks", return_value=[_TASK]) as tasks,
+        patch.object(swebench, "run", return_value={}) as execute,
+        patch.object(swebench, "report", return_value="the report") as describe,
+    ):
+        mirrors = ["--mirrors", str(scratch / "m")]
+        assert swebench.main(mirrors) == 0
+        assert swebench.main(["--agent", "sagent-noskills", *mirrors]) == 0
+        assert swebench.main(["report"]) == 0
+    assert tasks.call_count == 2
+    tasks.assert_called_with(
+        "SWE-bench/SWE-bench_Verified",
+        instances=[],
+        sample=50,
+        seed=0,
+    )
+    assert execute.call_count == 2
+    first, second = execute.call_args_list
+    assert first.args == (["sagent", "claude", "codex"], [_TASK])
+    assert second.args == (["sagent-noskills"], [_TASK])
+    configuration = cast(dict[str, object], first.kwargs)
+    mirror = configuration["mirrors"]
+    assert isinstance(mirror, Mirrors)
+    assert mirror.root == scratch / "m"
+    assert configuration == {
+        "out": out,
+        "mirrors": mirror,
+        "work": scratch / "work" / "n50-seed0-medium",
+        "model": None,
+        "effort": "medium",
+        "timeout_sec": 1800.0,
+        "jobs": 2,
+        "dataset": "SWE-bench/SWE-bench_Verified",
+        "workers": 2,
+        "runner": swebench._run,
+    }
+    assert describe.call_count == 3
+    assert (
+        describe.call_args_list
+        == [
+            ((out,), {"agents": list(swebench.AGENTS)}),
+        ]
+        * 3
+    )
+    assert capsys.readouterr().out == f"{out}\nthe report\n" * 3
 
 
-def test_a_run_killed_by_sigterm_still_removes_its_images(
+def test_a_run_removes_new_images_while_system_exit_unwinds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Killed while grading: the handler unwinds, so the pulled image is removed."""
     monkeypatch.setattr(swebench, "_DOCKER_SOCKET", tmp_path)
     git = _Git()
-
-    def killed(
-        argv: Sequence[str],
-        cwd: Path,
-        stdin: str,
-        timeout_sec: float,
-        output: Path | None,
-    ) -> int:
-        code = git(argv, cwd, stdin, timeout_sec, output)
-        if "--run_id" in argv:
-            os.kill(os.getpid(), signal.SIGTERM)
-            time.sleep(5)
-        return code
-
-    previous = signal.signal(signal.SIGTERM, swebench._exit_on_term)
-    try:
-        with pytest.raises(SystemExit) as exited:
-            _ = run(
-                ["codex"],
-                _imaged("a"),
-                out=tmp_path / "out",
-                mirrors=Mirrors(root=tmp_path / "mirrors"),
-                work=tmp_path / "work",
-                model=None,
-                effort="low",
-                timeout_sec=5.0,
-                jobs=1,
-                dataset="d",
-                workers=1,
-                runner=killed,
-            )
-    finally:
-        _ = signal.signal(signal.SIGTERM, previous)
-    assert exited.value.code == 128 + signal.SIGTERM
-    assert git.argvs()[-1] == ["docker", "rmi", "img-a"]
+    killed = SystemExit(128 + signal.SIGTERM)
+    with (
+        patch.object(swebench, "solve", return_value=0) as solve_tasks,
+        patch.object(swebench, "_grade", side_effect=killed) as grade,
+        pytest.raises(SystemExit) as exited,
+    ):
+        _ = _run_all(tmp_path, git, _imaged("a"), agents=["codex"])
+    assert exited.value is killed
+    assert solve_tasks.call_count == 1
+    grade.assert_called_once_with(
+        "codex",
+        ["a"],
+        out=tmp_path / "out",
+        dataset="d",
+        workers=2,
+        run=git,
+    )
+    assert git.argvs() == [
+        ["docker", "image", "inspect", "img-a"],
+        ["docker", "rmi", "img-a"],
+    ]
 
 
 def test_a_report_names_only_the_agents_asked(

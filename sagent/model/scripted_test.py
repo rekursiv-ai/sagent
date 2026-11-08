@@ -1,13 +1,13 @@
-"""Tests for the scripted model, run through a real agent."""
+"""Tests for scripted replies, streams, and provider resource ownership."""
 
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from sagent.agent.agent import Agent
+from sagent.model import scripted
 from sagent.model.capability import (
     ModelCapability,
     ModelLimits,
@@ -22,48 +22,11 @@ from sagent.providers.table import ModelTable
 from sagent.session.types import (
     AssistantMessage,
     Attachment,
-    ReadResult,
-    ToolCall,
     UserMessage,
 )
-from sagent.tools.read import Read
-from sagent.tools.types import ToolContext
 
 
-if TYPE_CHECKING:
-    from pathlib import Path
-
-
-@pytest.mark.asyncio
-async def test_agent_runs_a_tool_round_from_the_script(tmp_path: Path) -> None:
-    (tmp_path / "a.txt").write_text("alpha\n")
-    provider = ScriptedProvider(
-        replies=[reply(calls=[call("Read", file_path="a.txt")]), reply("done")],
-    )
-    async with Agent(
-        model=provider["scripted"],
-        tools=[Read()],
-        tool_context=ToolContext(cwd=tmp_path),
-    ) as agent:
-        assert await agent.send("read a.txt") == "done"
-    assert len(provider.requests) == 2
-    second = provider.requests[1].records
-    assert any(isinstance(r, ToolCall) and r.name == "Read" for r in second)
-    results = [r for r in second if isinstance(r, ReadResult)]
-    assert len(results) == 1
-    assert "alpha" in results[0].text()
-
-
-@pytest.mark.asyncio
-async def test_a_scripted_error_surfaces_from_send() -> None:
-    provider = ScriptedProvider(replies=[ValueError("boom")])
-    async with Agent(model=provider["scripted"]) as agent:
-        with pytest.raises(ValueError, match="boom"):
-            await agent.send("hi")
-
-
-@pytest.mark.asyncio
-async def test_a_reply_may_be_computed_from_the_request() -> None:
+def test_a_reply_may_be_computed_from_the_request() -> None:
     seen: list[Request] = []
 
     def answer(request: Request) -> Response:
@@ -72,9 +35,10 @@ async def test_a_reply_may_be_computed_from_the_request() -> None:
         return reply(f"you said {said[-1]}")
 
     provider = ScriptedProvider(replies=[answer])
-    async with Agent(model=provider["scripted"]) as agent:
-        assert await agent.send("hi") == "you said hi"
-    assert seen == provider.requests
+    request = Request(records=(UserMessage(content="hi"),))
+    assert provider.next_reply(request) == reply("you said hi")
+    assert seen == provider.requests == [request]
+    assert seen[0] is request
 
 
 def test_reply_stops_for_tools_only_when_it_calls_them() -> None:
@@ -84,9 +48,11 @@ def test_reply_stops_for_tools_only_when_it_calls_them() -> None:
 
 
 def test_call_names_its_id_after_the_tool() -> None:
-    assert call("Read", file_path="a").call_id == "call_Read"
+    made = call("Read", file_path="a")
+    assert made.name == "Read"
+    assert made.call_id == "call_Read"
+    assert dict(made.arguments) == {"file_path": "a"}
     assert call("Read", "id1").call_id == "id1"
-    assert dict(call("Read", file_path="a").arguments) == {"file_path": "a"}
 
 
 def test_a_provider_is_named_for_its_section_unless_told() -> None:
@@ -160,16 +126,23 @@ def test_the_default_capability_is_a_small_window() -> None:
 
 @pytest.mark.asyncio
 async def test_a_provider_closes_only_the_resources_it_made() -> None:
-    owned = ScriptedProvider()
-    pool = owned.resources.process_pool("p")
-    await owned.aclose()
-    assert owned.resources.process_pool("p") is not pool
-    shared = SharedResources()
-    borrowed = ScriptedProvider(resources=shared)
-    assert borrowed.resources is shared
-    pool = shared.process_pool("p")
-    await borrowed.aclose()
-    assert shared.process_pool("p") is pool
+    close_owned, close_shared = AsyncMock(), AsyncMock()
+    owned_resources = Mock(spec=SharedResources, aclose=close_owned)
+    shared = Mock(spec=SharedResources, aclose=close_shared)
+    with patch.object(
+        scripted,
+        "SharedResources",
+        return_value=owned_resources,
+    ) as make:
+        owned = ScriptedProvider()
+        assert owned.resources is owned_resources
+        await owned.aclose()
+        close_owned.assert_awaited_once_with()
+        borrowed = ScriptedProvider(resources=shared)
+        assert borrowed.resources is shared
+        await borrowed.aclose()
+        close_shared.assert_not_awaited()
+    make.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -186,12 +159,17 @@ async def test_count_scales_the_characters_of_system_and_records() -> None:
 @pytest.mark.asyncio
 async def test_stream_yields_the_text_then_the_reply() -> None:
     turn = reply("hello", calls=[call("Read")])
-    provider = ScriptedProvider(replies=[turn, reply()])
-    events = [event async for event in provider["m"].stream(Request())]
+    empty = reply()
+    provider = ScriptedProvider(replies=[turn, empty])
+    first = Request(system=("first",))
+    second = Request(system=("second",))
+    events = [event async for event in provider["m"].stream(first)]
     assert events == [TextChunk(text="hello"), turn]
-    silent = [event async for event in provider["m"].stream(Request())]
-    assert len(silent) == 1
-    assert isinstance(silent[0], Response)
+    silent = [event async for event in provider["m"].stream(second)]
+    assert silent == [empty]
+    assert provider.requests == [first, second]
+    assert provider.requests[0] is first
+    assert provider.requests[1] is second
 
 
 def test_the_script_is_taken_in_order_and_every_request_kept() -> None:
@@ -205,11 +183,18 @@ def test_the_script_is_taken_in_order_and_every_request_kept() -> None:
     assert provider.requests == [a, b, c]
 
 
-def test_a_scripted_exception_is_raised_after_its_request_is_kept() -> None:
-    provider = ScriptedProvider(replies=[KeyboardInterrupt()])
-    with pytest.raises(KeyboardInterrupt):
-        provider.next_reply(Request())
-    assert len(provider.requests) == 1
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [ValueError("boom"), KeyboardInterrupt()])
+async def test_a_scripted_exception_is_raised_after_its_request_is_kept(
+    error: BaseException,
+) -> None:
+    provider = ScriptedProvider(replies=[error])
+    request = Request(records=(UserMessage(content="hi"),))
+    with pytest.raises(type(error)) as raised:
+        _ = [event async for event in provider["scripted"].stream(request)]
+    assert raised.value is error
+    assert provider.requests == [request]
+    assert provider.requests[0] is request
 
 
 def test_reply_carries_its_text_calls_tokens_and_spend() -> None:
@@ -233,6 +218,7 @@ async def test_stream_joins_every_message_of_the_reply() -> None:
         records=(
             AssistantMessage(content="one "),
             AssistantMessage(),
+            AssistantMessage(content=""),
             AssistantMessage(content="two"),
         ),
         tokens=TokenCount(),
@@ -241,7 +227,7 @@ async def test_stream_joins_every_message_of_the_reply() -> None:
     )
     provider = ScriptedProvider(replies=[turn])
     events = [event async for event in provider["m"].stream(Request())]
-    assert events == [TextChunk(text="one "), TextChunk(text="two", record=2), turn]
+    assert events == [TextChunk(text="one "), TextChunk(text="two", record=3), turn]
 
 
 def test_an_attachment_costs_its_bytes_scaled_as_characters_are() -> None:

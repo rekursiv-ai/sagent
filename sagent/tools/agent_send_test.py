@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import asyncio
 import logging
@@ -73,7 +74,7 @@ def test_the_summary_names_the_target_and_the_words(
     arguments: dict[str, str],
     summary: str,
 ) -> None:
-    send = AgentSend(team=_team(tmp_path))
+    send = AgentSend(team=Mock(spec=Team))
 
     assert send.summary(arguments) == summary
     assert send.serialize_key(_context(tmp_path), arguments) is None
@@ -247,7 +248,7 @@ async def test_a_root_kept_from_spawning_starts_no_watcher(tmp_path: Path) -> No
 
 def test_sends_to_the_parent_go_one_at_a_time(tmp_path: Path) -> None:
     # Two in one reply from a root would otherwise race to start two watchers.
-    send = AgentSend(team=_team(tmp_path))
+    send = AgentSend(team=Mock(spec=Team))
     context = _context(tmp_path)
 
     assert send.serialize_key(context, {"to": "parent", "content": "a"}) == "parent"
@@ -485,8 +486,8 @@ def test_what_is_owed_to_two_is_listed_in_turn(tmp_path: Path) -> None:
     )
 
 
-def test_a_summary_keeps_the_message_s_trailing_spaces(tmp_path: Path) -> None:
-    send = AgentSend(team=_team(tmp_path))
+def test_a_summary_keeps_the_message_s_trailing_spaces() -> None:
+    send = AgentSend(team=Mock(spec=Team))
     assert send.summary({"to": "b", "content": "x  \n"}) == "AgentSend →b\nx  "
 
 

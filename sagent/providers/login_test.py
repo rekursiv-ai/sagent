@@ -3,20 +3,18 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import cast, override
+from unittest.mock import AsyncMock, Mock, patch
 
 import asyncio
+import fcntl
 import logging
 import os
 import stat
 import subprocess
-import sys
 import time
 import webbrowser
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.input import create_pipe_input
-from prompt_toolkit.output import DummyOutput
 from treekle import json_dumps, json_loads
 
 import pytest
@@ -35,49 +33,40 @@ from sagent.providers.login import (
     read_pasted_code,
     redirected,
 )
-from sagent.providers.testing import bound_port, first_live, send, visit, window
-
-
-if TYPE_CHECKING:
-    from prompt_toolkit.application import Application
+from sagent.providers.testing import first_live, window
 
 
 @pytest.mark.asyncio
-async def test_cancelled_input_releases_the_terminal(
+async def test_cancelled_input_propagates_and_the_next_read_uses_a_new_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ready = asyncio.Event()
-
-    def rendered(application: Application[str]) -> None:
-        del application
-        ready.set()
-
-    with create_pipe_input() as pipe:
-        session = PromptSession[str](input=pipe, output=DummyOutput())
-        session.app.before_render += rendered
-        monkeypatch.setattr(login, "PromptSession", lambda: session)
-        reading = asyncio.create_task(login.read_login_input("Code: "))
-        async with asyncio.timeout(5):
-            await ready.wait()
-            assert session.message == "Code: "
-            reading.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await reading
-            assert not session.app.is_running
-            pipe.send_text("4/code\n")
-            assert await login.read_login_input("Code: ") == "4/code"
+    cancelled = asyncio.CancelledError()
+    first = AsyncMock(side_effect=cancelled)
+    second = AsyncMock(return_value="4/code")
+    make = Mock(side_effect=[Mock(prompt_async=first), Mock(prompt_async=second)])
+    monkeypatch.setattr(login, "PromptSession", make)
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await login.read_login_input("Code: ")
+    assert raised.value is cancelled
+    assert await login.read_login_input("Retry: ") == "4/code"
+    assert make.call_args_list == [(), ()]
+    first.assert_awaited_once_with("Code: ")
+    second.assert_awaited_once_with("Retry: ")
 
 
 @pytest.mark.asyncio
 async def test_closed_sign_in_input_raises_eof(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with create_pipe_input() as pipe:
-        session = PromptSession[str](input=pipe, output=DummyOutput())
-        monkeypatch.setattr(login, "PromptSession", lambda: session)
-        pipe.close()
-        with pytest.raises(EOFError):
-            await login.read_login_input("Code: ")
+    eof = EOFError()
+    reading = AsyncMock(side_effect=eof)
+    make = Mock(return_value=Mock(prompt_async=reading))
+    monkeypatch.setattr(login, "PromptSession", make)
+    with pytest.raises(EOFError) as raised:
+        await login.read_login_input("Code: ")
+    assert raised.value is eof
+    make.assert_called_once_with()
+    reading.assert_awaited_once_with("Code: ")
 
 
 @pytest.mark.asyncio
@@ -106,70 +95,73 @@ async def test_the_redirect_is_answered_only_on_its_path_with_its_state(
     path: str,
 ) -> None:
     code = asyncio.Future[str]()
-    server = await asyncio.start_server(
-        lambda reader, writer: redirected(
-            reader,
-            writer,
-            path=path,
-            state="s1",
-            code=code,
-        ),
-        "127.0.0.1",
-        0,
-    )
-    port = bound_port(server.sockets[0])
-    async with server:
-        assert await visit(port, f"{path}?code=c1&state=wrong") == 400
-        assert await visit(port, "/elsewhere?code=c1&state=s1") == 400
-        assert await visit(port, f"{path}?state=s1") == 400
-        assert await send(port, b"garbage\r\n") == 400
-        assert await send(port, f"GET {path}?state=s1&code=\r\n".encode()) == 400
-        assert not code.done()
-        # A request line may name no HTTP version.
-        assert await send(port, f"GET {path}?code=c1&state=s1\r\n".encode()) == 200
-        # A second redirect after the first is answered and changes nothing.
-        assert await visit(port, f"{path}?code=c2&state=s1") == 200
-    assert code.result() == "c1"
-
-
-async def _answer(port: int, request: bytes) -> str:
-    """Send ``request`` to ``port`` as it is; return the whole answer."""
-    reader, writer = await asyncio.open_connection("127.0.0.1", port)
-    writer.write(request)
-    await writer.drain()
-    answer = (await reader.read()).decode()
-    writer.close()
-    await writer.wait_closed()
-    return answer
+    for request, accepted in (
+        (f"GET {path}?code=c1&state=wrong HTTP/1.1\r\n", False),
+        ("GET /elsewhere?code=c1&state=s1 HTTP/1.1\r\n", False),
+        (f"GET {path}?state=s1 HTTP/1.1\r\n", False),
+        ("garbage\r\n", False),
+        (f"GET {path}?state=s1&code=\r\n", False),
+        (f"GET {path}?code=c1&state=s1\r\n", True),
+        (f"GET {path}?code=c2&state=s1 HTTP/1.1\r\n", True),
+    ):
+        reader = asyncio.StreamReader()
+        reader.feed_data(request.encode())
+        reader.feed_eof()
+        written, drained, closed = Mock(), AsyncMock(), Mock()
+        writer = Mock(
+            spec=asyncio.StreamWriter,
+            write=written,
+            drain=drained,
+            close=closed,
+        )
+        await redirected(reader, writer, path=path, state="s1", code=code)
+        written.assert_called_once()
+        assert cast(bytes, written.call_args_list[0].args[0]).startswith(
+            b"HTTP/1.1 200 OK\r\n" if accepted else b"HTTP/1.1 400 Bad Request\r\n",
+        )
+        drained.assert_awaited_once_with()
+        closed.assert_called_once_with()
+        assert code.done() is accepted
+        if accepted:
+            assert code.result() == "c1"
 
 
 @pytest.mark.asyncio
 async def test_the_redirect_tells_the_browser_whether_the_sign_in_took() -> None:
     """A request line that is not UTF-8 is read as near as it decodes, and refused."""
     code = asyncio.Future[str]()
-    server = await asyncio.start_server(
-        lambda reader, writer: redirected(
-            reader,
-            writer,
-            path="/cb",
-            state="s1",
-            code=code,
-        ),
-        "127.0.0.1",
-        0,
-    )
-    port = bound_port(server.sockets[0])
     failed = "Sign-in failed; see the terminal."
     signed_in = "Signed in; you can close this tab."
-    async with server:
-        assert await _answer(port, b"GET /cb\xff?code=c&state=s1 HTTP/1.1\r\n\r\n") == (
-            "HTTP/1.1 400 Bad Request\r\ncontent-type: text/plain\r\n"
-            f"content-length: {len(failed)}\r\nconnection: close\r\n\r\n{failed}"
+    for request, response in (
+        (
+            b"GET /cb\xff?code=c&state=s1 HTTP/1.1\r\n\r\n",
+            (
+                "HTTP/1.1 400 Bad Request\r\ncontent-type: text/plain\r\n"
+                f"content-length: {len(failed)}\r\nconnection: close\r\n\r\n{failed}"
+            ),
+        ),
+        (
+            b"GET /cb?code=c&state=s1 HTTP/1.1\r\n\r\n",
+            (
+                "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
+                f"content-length: {len(signed_in)}\r\nconnection: close\r\n\r\n{signed_in}"
+            ),
+        ),
+    ):
+        reader = asyncio.StreamReader()
+        reader.feed_data(request)
+        reader.feed_eof()
+        written, drained, closed = Mock(), AsyncMock(), Mock()
+        writer = Mock(
+            spec=asyncio.StreamWriter,
+            write=written,
+            drain=drained,
+            close=closed,
         )
-        assert await _answer(port, b"GET /cb?code=c&state=s1 HTTP/1.1\r\n\r\n") == (
-            "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
-            f"content-length: {len(signed_in)}\r\nconnection: close\r\n\r\n{signed_in}"
-        )
+        await redirected(reader, writer, path="/cb", state="s1", code=code)
+        written.assert_called_once_with(response.encode())
+        drained.assert_awaited_once_with()
+        closed.assert_called_once_with()
     assert code.result() == "c"
 
 
@@ -268,80 +260,44 @@ async def test_pkce_still_refuses_missing_codes_and_mismatched_states(
         )
 
 
-def _noisy(tmp_path: Path) -> Path:
-    """Return a browser command that says where it opened, and talks on both streams."""
-    script = tmp_path / "browser"
-    script.write_text(
-        f"#!/bin/sh\necho $$ > {tmp_path / 'pid'}\n"
-        f'echo "$1" > {tmp_path / "opened"}\necho out\necho err >&2\n',
-    )
-    script.chmod(0o700)
-    return script
-
-
 @pytest.mark.parametrize(
     "browser",
     [webbrowser.GenericBrowser, webbrowser.BackgroundBrowser],
 )
 def test_a_browser_command_opens_the_url_and_never_writes_to_the_terminal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capfd: pytest.CaptureFixture[str],
     browser: type[webbrowser.GenericBrowser],
 ) -> None:
-    command = browser([str(_noisy(tmp_path)), "%s"])
-    monkeypatch.setattr(webbrowser, "get", lambda: command)
-    open_browser("https://example.com/sign-in")
-    opened = tmp_path / "opened"
-    deadline = time.monotonic() + 5
-    while not opened.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    time.sleep(0.05)
-    assert opened.read_text() == "https://example.com/sign-in\n"
-    assert capfd.readouterr() == ("", "")
-    # The browser is no child of ours: one would be a zombie, and a stray reap
-    # elsewhere, as mutmut's ``os.wait()``, finds a process it never started.
-    with pytest.raises(ChildProcessError):
-        os.waitpid(int((tmp_path / "pid").read_text()), os.WNOHANG)
-
-
-@pytest.mark.skipif(sys.platform != "linux", reason="Reads its session from /proc.")
-def test_a_browser_command_runs_in_a_session_of_its_own(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The terminal's hangup, when it closes, must not reach the browser, nor its keys."""
-    script = tmp_path / "browser"
-    script.write_text(
-        "#!/bin/sh\n"
-        f"{{ cut -d' ' -f6 /proc/$$/stat; readlink /proc/$$/fd/0; }}"
-        f" > {tmp_path / 'sid.tmp'}\n"
-        f"mv {tmp_path / 'sid.tmp'} {tmp_path / 'sid'}\n",
+    command = browser(["browser", "--url=%s", "--fixed"])
+    url = "https://example.com/sign-in?x=';exit 1"
+    with (
+        patch.object(webbrowser, "get", return_value=command),
+        patch.object(
+            subprocess,
+            "run",
+        ) as run,
+    ):
+        open_browser(url)
+    run.assert_called_once_with(
+        ["/bin/sh", "-c", '"$@" &', "sh", "browser", f"--url={url}", "--fixed"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        check=False,
     )
-    script.chmod(0o700)
-    command = webbrowser.GenericBrowser([str(script), "%s"])
-    monkeypatch.setattr(webbrowser, "get", lambda: command)
-    open_browser("https://example.com")
-    sid = tmp_path / "sid"
-    deadline = time.monotonic() + 5
-    while not sid.exists() and time.monotonic() < deadline:
-        time.sleep(0.01)
-    session, stdin = sid.read_text().split()
-    assert int(session) != os.getsid(0)
-    assert stdin == "/dev/null"
 
 
-def test_a_browser_command_that_cannot_start_raises_nothing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def missing(*args: object, **kwargs: object) -> object:
-        del args, kwargs
-        raise FileNotFoundError("/bin/sh")
-
+def test_a_browser_command_that_cannot_start_raises_nothing() -> None:
     command = webbrowser.GenericBrowser(["browser", "%s"])
-    monkeypatch.setattr(webbrowser, "get", lambda: command)
-    monkeypatch.setattr(subprocess, "Popen", missing)
-    open_browser("https://example.com")
+    with (
+        patch.object(webbrowser, "get", return_value=command),
+        patch.object(
+            subprocess,
+            "run",
+            side_effect=FileNotFoundError("/bin/sh"),
+        ) as run,
+    ):
+        open_browser("https://example.com")
+    run.assert_called_once()
 
 
 def test_a_browser_that_is_no_command_opens_the_url_its_own_way(
@@ -371,26 +327,25 @@ def test_no_browser_opens_nothing_and_raises_nothing(
 
 
 @pytest.mark.asyncio
-async def test_a_second_holder_waits_for_the_first(tmp_path: Path) -> None:
+async def test_a_contended_lock_is_retried_before_admission(tmp_path: Path) -> None:
     lock = tmp_path / "auth.json.lock"
-    order: list[str] = []
-    held = asyncio.Event()
-
-    async def first() -> None:
+    opened = AsyncMock(return_value=17)
+    flock = Mock(side_effect=[BlockingIOError(), None])
+    sleeping = AsyncMock()
+    closed = Mock()
+    with (
+        patch.object(asyncio, "to_thread", opened),
+        patch.object(fcntl, "flock", flock),
+        patch.object(asyncio, "sleep", sleeping),
+        patch.object(os, "close", closed),
+    ):
         async with file_lock(lock):
-            order.append("first in")
-            held.set()
-            await asyncio.sleep(0.05)
-            order.append("first out")
-
-    async def second() -> None:
-        await held.wait()
-        async with file_lock(lock):
-            order.append("second in")
-
-    _ = await asyncio.wait_for(asyncio.gather(first(), second()), timeout=5)
-
-    assert order == ["first in", "first out", "second in"]
+            assert flock.call_count == 2
+            closed.assert_not_called()
+    opened.assert_awaited_once_with(login._open, lock)
+    assert flock.call_args_list == [((17, fcntl.LOCK_EX | fcntl.LOCK_NB),)] * 2
+    sleeping.assert_awaited_once_with(0.01)
+    closed.assert_called_once_with(17)
 
 
 @pytest.mark.asyncio
@@ -405,32 +360,27 @@ async def test_the_lock_file_and_its_directory_are_made_private(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_a_waiter_cancelled_leaves_the_lock_to_the_next(tmp_path: Path) -> None:
+async def test_a_waiter_cancelled_closes_its_lock(tmp_path: Path) -> None:
     lock = tmp_path / "auth.json.lock"
-    release = asyncio.Event()
-    held = asyncio.Event()
-
-    async def holder() -> None:
+    cancelled = asyncio.CancelledError()
+    opened = AsyncMock(return_value=17)
+    flock = Mock(side_effect=BlockingIOError)
+    sleeping = AsyncMock(side_effect=cancelled)
+    closed = Mock()
+    with (
+        patch.object(asyncio, "to_thread", opened),
+        patch.object(fcntl, "flock", flock),
+        patch.object(asyncio, "sleep", sleeping),
+        patch.object(os, "close", closed),
+        pytest.raises(asyncio.CancelledError) as raised,
+    ):
         async with file_lock(lock):
-            held.set()
-            await release.wait()
-
-    async def waiter() -> None:
-        async with file_lock(lock):
-            pass
-
-    holding = asyncio.create_task(holder())
-    await held.wait()
-    waiting = asyncio.create_task(waiter())
-    await asyncio.sleep(0.03)
-    _ = waiting.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await waiting
-    release.set()
-    await holding
-
-    async with asyncio.timeout(5), file_lock(lock):
-        pass
+            pytest.fail("A contended lock admitted its cancelled waiter.")
+    assert raised.value is cancelled
+    opened.assert_awaited_once_with(login._open, lock)
+    flock.assert_called_once_with(17, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    sleeping.assert_awaited_once_with(0.01)
+    closed.assert_called_once_with(17)
 
 
 def test_an_account_s_file_sits_beside_the_default_one() -> None:

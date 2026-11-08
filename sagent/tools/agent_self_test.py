@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, override
+from unittest.mock import Mock
 
 import math
 import runpy
@@ -87,7 +88,7 @@ def test_the_summary_names_the_keys_set(
     arguments: dict[str, PlainTree],
     summary: str,
 ) -> None:
-    _, _, tool = _setup(tmp_path)
+    tool = AgentSelf(team=Mock(spec=Team))
 
     assert tool.summary(arguments) == summary
     assert tool.serialize_key(ToolContext(cwd=tmp_path), arguments) == "*"

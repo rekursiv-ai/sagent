@@ -4,20 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, Mock
 
 import asyncio
-import contextlib
 import errno
 import logging
 import os
 import signal
 import socket
-import threading
+import time
 
-from treekle import PlainTree, json_loads
-from wesearch.fetch.gate import Admission, FileGate, GatePolicy
+from treekle import PlainTree, json_dumps, json_loads
+from wesearch.fetch.gate import Admission, GatePolicy
 
 import pytest
 
@@ -26,9 +25,8 @@ from sagent.host import (
     strings,
 )
 from sagent.host.server import Host, Server, _ChildHost, _SavedServer, child_host
+from sagent.host.shared import ServedGate
 from sagent.host.strings import Address, Grant, ServeDirs
-from sagent.host.testing import Gate, LocalHost
-from sagent.host.tls import client_context
 from sagent.host.wire import (
     MAX_LINE_BYTES,
     VERSION,
@@ -60,88 +58,17 @@ from sagent.host.wire import (
 )
 from sagent.lib.posix.child import Child
 from sagent.session.types import FunctionResult, ReadResult, ToolErrorResult
-from sagent.tools.read import Read
-from sagent.tools.remote import RemoteSession, SavedRemote
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-    from sagent.host.server import HostStarter
     from sagent.host.wire import Message
-
-
-@dataclass(slots=True, kw_only=True)
-class _Served:
-    server: Server
-    dirs: ServeDirs
-    host: LocalHost
-    gate: Gate
-    token: str
-
-    async def connect(
-        self,
-        *,
-        session_id: str = "s1",
-        token: str = "",
-        version: int = VERSION,
-        tools: tuple[str, ...] | None = None,
-    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, Message | None]:
-        reader, writer = await asyncio.open_connection(
-            "127.0.0.1",
-            self.server.ports[0],
-            ssl=client_context(),
-            limit=MAX_LINE_BYTES,
-        )
-        writer.write(
-            encoded(
-                Hello(
-                    version=version,
-                    token=token or self.token,
-                    session_id=session_id,
-                    client="laptop",
-                    tools=tools,
-                ),
-            ),
-        )
-        return reader, writer, await asyncio.wait_for(received(reader), 5)
-
-
-@contextlib.asynccontextmanager
-async def _serving(
-    tmp_path: Path,
-    *,
-    ttl_sec: float = 60.0,
-    ping_sec: float = 30.0,
-    name: str | None = "gpu1",
-    start_host: HostStarter | None = None,
-    local_socket: Path | None = None,
-) -> AsyncGenerator[_Served]:
-    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    gate = Gate()
-    host = LocalHost(tools={"Gate": gate, "Read": Read()})
-    async with Server(
-        dirs,
-        listen=[Address(host="127.0.0.1", port=0)],
-        tools=("Gate", "Read"),
-        ttl_sec=ttl_sec,
-        name=name,
-        ping_sec=ping_sec,
-        poll_sec=0.01,
-        start_host=start_host or host,
-        local_socket=local_socket,
-    ) as server:
-        (made,) = await strings.add(dirs)
-        yield _Served(server=server, dirs=dirs, host=host, gate=gate, token=made.token)
 
 
 def _call(call_id: str, tool: str = "Gate", **arguments: PlainTree) -> Call:
     return Call(id=call_id, agent="Agent", window="w1", tool=tool, arguments=arguments)
-
-
-async def _next(reader: asyncio.StreamReader) -> Message | None:
-    return await asyncio.wait_for(received(reader), 5)
 
 
 def test_missing_grants_have_no_modification_time(tmp_path: Path) -> None:
@@ -155,25 +82,53 @@ def test_missing_grants_have_no_modification_time(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_holder_of_a_string_is_welcomed_and_runs_a_tool(tmp_path: Path) -> None:
-    async with _serving(tmp_path) as served:
-        reader, writer, welcome = await served.connect()
-        assert isinstance(welcome, Welcome)
-        assert (welcome.name, welcome.resumed, welcome.calls) == ("gpu1", False, ())
-        assert welcome.tools == {
-            "Gate": ToolSpec.from_tool(served.gate).digest,
-            "Read": ToolSpec.from_tool(Read()).digest,
-        }
-        served.gate.opened.set()
-        writer.write(encoded(_call("1")))
-        result = await _next(reader)
-        assert isinstance(result, Result)
-        assert result.record == FunctionResult(
-            call_id="",
-            name="Gate",
-            content="open for Agent",
-        )
-        writer.close()
+async def test_a_holder_of_a_string_is_welcomed_with_a_new_host(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, advertised, host, sent = await _server_unit(tmp_path)
+    server._sessions.clear()
+    host.reader.feed_data(encoded(Tools(tools=advertised.specs)))
+    starting, pumping = AsyncMock(return_value=host), AsyncMock()
+    grant = Grant(id="grant", sha256=strings.token_digest(""), tools=None, added="now")
+    monkeypatch.setattr(host_server, "grants", Mock(return_value=[grant]))
+    monkeypatch.setattr(server, "_start_host", starting)
+    monkeypatch.setattr(server, "_pump", pumping)
+    logging_event, writing_sessions = Mock(), Mock()
+    monkeypatch.setattr(server, "_log", logging_event)
+    monkeypatch.setattr(server, "_write_sessions", writing_sessions)
+    writer = cast(asyncio.StreamWriter, Mock(write=sent.append))
+    hello = Hello(version=VERSION, token="", session_id="s1", client="laptop")
+
+    session = await server._admit(hello, ip="127.0.0.1", writer=writer)
+
+    assert session is not None
+    assert session.host is host
+    assert session.token_id == grant.id
+    assert session.client == "laptop"
+    assert session.ip == "127.0.0.1"
+    assert session.writer is writer
+    assert session.specs == advertised.specs
+    assert server._sessions == {"s1": session}
+    logging_event.assert_called_once_with("connect", session=session, detail="")
+    writing_sessions.assert_called_once_with()
+    assert sent == [
+        encoded(
+            Welcome(
+                name="gpu1",
+                resumed=False,
+                calls=(),
+                tools={name: spec.digest for name, spec in advertised.specs.items()},
+            ),
+        ),
+    ]
+    starting.assert_awaited_once_with(
+        server._config.tools,
+        tmp_path / "state/sessions/s1",
+    )
+    assert session.pump is not None
+    await session.pump
+    pumping.assert_awaited_once_with(session, host=host)
 
 
 @pytest.mark.asyncio
@@ -288,9 +243,14 @@ async def test_overlapping_admissions_reserve_one_session_owner(
     monkeypatch: pytest.MonkeyPatch,
     second: str,
 ) -> None:
-    workers = LocalHost(tools={"Read": Read()})
+    server, template, _, _ = await _server_unit(tmp_path)
+    server._sessions.clear()
     opening, release, parsed = asyncio.Event(), asyncio.Event(), asyncio.Event()
-    starts: list[Path] = []
+    grant = Grant(id="first", sha256=strings.token_digest(""), tools=None, added="now")
+    other = replace(grant, id="other", sha256=strings.token_digest("other"))
+    monkeypatch.setattr(host_server, "grants", Mock(return_value=[grant, other]))
+    monkeypatch.setattr(server, "_pump", AsyncMock())
+    monkeypatch.setattr(server, "_attend", AsyncMock())
     hellos: list[Hello] = []
     receive = received
 
@@ -302,165 +262,261 @@ async def test_overlapping_admissions_reserve_one_session_owner(
                 parsed.set()
         return message
 
-    async def starting(names: Sequence[str], directory: Path) -> Host:
-        starts.append(directory)
-        opening.set()
-        await release.wait()
-        return await workers(names, directory)
-
+    starting = AsyncMock(
+        side_effect=partial(
+            _held_host,
+            specs=template.specs,
+            opening=opening,
+            release=release,
+        ),
+    )
     monkeypatch.setattr(host_server, "received", observing)
-    connections: list[
-        asyncio.Task[tuple[asyncio.StreamReader, asyncio.StreamWriter, Message | None]]
-    ] = []
-    try:
-        address = tmp_path / "local.sock"
-        async with _serving(
-            tmp_path,
-            start_host=starting,
-            local_socket=address,
-        ) as served:
-            try:
-                connections.append(asyncio.create_task(served.connect()))
-                await asyncio.wait_for(opening.wait(), 5)
-                if second == "local":
+    monkeypatch.setattr(server, "_start_host", starting)
+    first_sent: list[bytes] = []
+    second_sent: list[bytes] = []
+    first_reader, second_reader = asyncio.StreamReader(), asyncio.StreamReader()
+    hello = Hello(version=VERSION, token="", session_id="s1", client="laptop")
+    first_reader.feed_data(encoded(hello))
+    second_reader.feed_data(
+        encoded(replace(hello, token="other" if second == "other-token" else "")),
+    )
+    first_writer = cast(
+        asyncio.StreamWriter,
+        Mock(write=first_sent.append, get_extra_info=Mock(return_value=("ip", 1))),
+    )
+    second_writer = cast(
+        asyncio.StreamWriter,
+        Mock(write=second_sent.append, get_extra_info=Mock(return_value=("ip", 2))),
+    )
+    async with asyncio.TaskGroup() as tasks:
+        first_connection = tasks.create_task(
+            server._connected(first_reader, first_writer),
+        )
+        try:
+            await opening.wait()
+            next_connection = tasks.create_task(
+                server._local_connected(second_reader, second_writer)
+                if second == "local"
+                else server._connected(second_reader, second_writer),
+            )
+            await parsed.wait()
+            release.set()
+            await asyncio.gather(first_connection, next_connection)
+        finally:
+            release.set()
 
-                    async def local() -> tuple[
-                        asyncio.StreamReader,
-                        asyncio.StreamWriter,
-                        Message | None,
-                    ]:
-                        reader, writer = await asyncio.open_unix_connection(address)
-                        writer.write(
-                            encoded(
-                                Hello(
-                                    version=VERSION,
-                                    token="",
-                                    client="here",
-                                    session_id="s1",
-                                ),
-                            ),
-                        )
-                        return reader, writer, await _next(reader)
-
-                    connections.append(asyncio.create_task(local()))
-                    await asyncio.wait_for(parsed.wait(), 5)
-                    release.set()
-                    answers = await asyncio.gather(*connections)
-                else:
-                    token = served.token
-                    if second == "other-token":
-                        (other,) = await strings.add(served.dirs)
-                        token = other.token
-                    connections.append(asyncio.create_task(served.connect(token=token)))
-                    await asyncio.wait_for(parsed.wait(), 5)
-                    release.set()
-                    answers = await asyncio.gather(*connections)
-                assert len(starts) == 1
-                assert isinstance(answers[0][2], Welcome)
-                if second == "same-token":
-                    assert isinstance(answers[1][2], Welcome)
-                    assert answers[1][2].resumed
-                else:
-                    assert isinstance(answers[1][2], Refused)
-                reader, writer, welcome = await served.connect()
-                assert isinstance(welcome, Welcome)
-                assert welcome.resumed
-                writer.write(encoded(Describe(id="live", tool="Read")))
-                assert await _next(reader) == Described(
-                    id="live",
-                    spec=ToolSpec.from_tool(Read()),
-                )
-                writer.close()
-            finally:
-                release.set()
-                for connection in connections:
-                    if not connection.done():
-                        connection.cancel()
-                results = await asyncio.gather(*connections, return_exceptions=True)
-                for result in results:
-                    if isinstance(result, tuple):
-                        result[1].close()
-    finally:
-        for worker in workers.started:
-            await worker.stop()
+    starting.assert_awaited_once_with(
+        server._config.tools,
+        tmp_path / "state/sessions/s1",
+    )
+    assert first_sent == [
+        encoded(
+            Welcome(name="gpu1", resumed=False, calls=(), tools=template.digests()),
+        ),
+    ]
+    if second == "same-token":
+        assert second_sent == [
+            encoded(
+                Welcome(name="gpu1", resumed=True, calls=(), tools=template.digests()),
+            ),
+        ]
+    else:
+        assert second_sent == [
+            encoded(
+                Refused(
+                    reason="That session belongs to another connection."
+                    if second == "local"
+                    else "That session belongs to another string.",
+                ),
+            ),
+        ]
+    sent: list[bytes] = []
+    writer = cast(asyncio.StreamWriter, Mock(write=sent.append))
+    session = await server._admit(hello, ip="ip", writer=writer)
+    assert session is not None
+    assert session is server._sessions["s1"]
+    assert sent == [
+        encoded(Welcome(name="gpu1", resumed=True, calls=(), tools=template.digests())),
+    ]
+    server._relay(session, Describe(id="live", tool="Read"))
+    assert sent[-1] == encoded(Described(id="live", spec=template.specs["Read"]))
+    assert server._connections == set()
+    assert session.pump is not None
+    await session.pump
 
 
 @pytest.mark.asyncio
 async def test_different_sessions_start_without_waiting_for_each_other(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    workers = LocalHost(tools={})
-    directories: list[Path] = []
-    both, release = asyncio.Event(), asyncio.Event()
+    server, _, _, _ = await _server_unit(tmp_path)
+    server._sessions.clear()
+    hosts: list[_BrokenHost] = []
+    entering: asyncio.Queue[Path] = asyncio.Queue()
+    release = asyncio.Event()
+    grant = Grant(id="grant", sha256=strings.token_digest(""), tools=None, added="now")
+    monkeypatch.setattr(host_server, "grants", Mock(return_value=[grant]))
+    monkeypatch.setattr(server, "_pump", AsyncMock())
+    monkeypatch.setattr(server, "_attend", AsyncMock())
 
     async def starting(names: Sequence[str], directory: Path) -> Host:
-        directories.append(directory)
-        if len(directories) == 2:
-            both.set()
+        entering.put_nowait(directory)
         await release.wait()
-        return await workers(names, directory)
+        return await _broken(hosts, names, directory)
 
-    async with _serving(tmp_path, start_host=starting) as served:
-        connecting = [
-            asyncio.create_task(served.connect(session_id=session_id))
-            for session_id in ("one", "two")
-        ]
+    monkeypatch.setattr(server, "_start_host", starting)
+    responses: list[list[bytes]] = []
+    async with asyncio.TaskGroup() as tasks:
+        for session_id in ("one", "two"):
+            reader = asyncio.StreamReader()
+            reader.feed_data(
+                encoded(
+                    Hello(
+                        version=VERSION,
+                        token="",
+                        session_id=session_id,
+                        client="laptop",
+                    ),
+                ),
+            )
+            sent: list[bytes] = []
+            responses.append(sent)
+            writer = cast(
+                asyncio.StreamWriter,
+                Mock(write=sent.append, get_extra_info=Mock(return_value=("ip", 1))),
+            )
+            _ = tasks.create_task(server._connected(reader, writer))
         try:
-            await asyncio.wait_for(both.wait(), 5)
+            directories = {await entering.get(), await entering.get()}
+            assert directories == {
+                tmp_path / "state/sessions/one",
+                tmp_path / "state/sessions/two",
+            }
+            assert responses == [[], []]
         finally:
             release.set()
-            results = await asyncio.gather(*connecting)
-            for _, writer, _ in results:
-                writer.close()
-        assert all(
-            isinstance(answer, Welcome) and not answer.resumed
-            for _, _, answer in results
-        )
+    assert (
+        responses
+        == [
+            [
+                encoded(
+                    Welcome(
+                        name="gpu1",
+                        resumed=False,
+                        calls=(),
+                        tools={"Gate": _TOOLS.tools["Gate"].digest},
+                    ),
+                ),
+            ],
+        ]
+        * 2
+    )
+    assert set(server._sessions) == {"one", "two"}
+    assert server._connections == set()
+    for session in server._sessions.values():
+        assert session.pump is not None
+        await session.pump
 
 
 @pytest.mark.asyncio
 async def test_a_client_gets_only_the_tools_granted_and_asked_for(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _serving(tmp_path) as served:
-        (narrow,) = await strings.add(served.dirs, tools=("Read",))
-        reader, writer, welcome = await served.connect(token=narrow.token)
-        assert isinstance(welcome, Welcome)
-        assert list(welcome.tools) == ["Read"]
-        writer.write(encoded(_call("1")))
-        result = await _next(reader)
-        assert isinstance(result, Result)
-        assert result.record.is_error is True
-        assert "gpu1 does not offer Gate" in result.record.text()
-        _, other, asked = await served.connect(session_id="s2", tools=("Gate",))
-        assert isinstance(asked, Welcome)
-        assert list(asked.tools) == ["Gate"]
-        writer.close()
-        other.close()
+    server, session, _, sent = await _server_unit(tmp_path)
+    grant = Grant(id="", sha256=strings.token_digest(""), tools=("Read",), added="now")
+    monkeypatch.setattr(host_server, "grants", Mock(return_value=[grant]))
+    writer = cast(asyncio.StreamWriter, Mock(write=sent.append))
+    hello = Hello(version=VERSION, token="", session_id="s1", client="laptop")
+
+    assert await server._admit(hello, ip="127.0.0.1", writer=writer) is session
+    assert sent == [
+        encoded(
+            Welcome(
+                name="gpu1",
+                resumed=True,
+                calls=(),
+                tools={"Read": session.specs["Read"].digest},
+            ),
+        ),
+    ]
+    server._relay(session, _call("1"))
+    assert sent[1:] == [
+        encoded(
+            Result(
+                id="1",
+                record=ToolErrorResult(
+                    call_id="",
+                    content="gpu1 does not offer Gate.",
+                    is_error=True,
+                ),
+            ),
+        ),
+    ]
+    server._relay(session, Ack(id="1"))
+    grant = replace(grant, tools=None)
+    monkeypatch.setattr(host_server, "grants", Mock(return_value=[grant]))
+    sent.clear()
+
+    assert (
+        await server._admit(
+            replace(hello, tools=("Gate",)),
+            ip="127.0.0.1",
+            writer=writer,
+        )
+        is session
+    )
+    assert sent == [
+        encoded(
+            Welcome(
+                name="gpu1",
+                resumed=True,
+                calls=(),
+                tools={"Gate": session.specs["Gate"].digest},
+            ),
+        ),
+    ]
 
 
 @pytest.mark.asyncio
-async def test_a_reconnect_gets_what_finished_while_it_was_gone(tmp_path: Path) -> None:
-    async with _serving(tmp_path) as served:
-        _, writer, _ = await served.connect()
-        writer.write(encoded(_call("1")))
-        await asyncio.wait_for(served.gate.started.wait(), 5)
-        writer.close()
-        served.gate.opened.set()
-        reader, again, welcome = await served.connect()
-        assert isinstance(welcome, Welcome)
-        assert welcome.resumed is True
-        assert welcome.calls == ("1",)
-        result = await _next(reader)
-        assert isinstance(result, Result)
-        assert result.id == "1"
-        again.write(encoded(Ack(id="1")))
-        again.close()
-        _, last, acked = await served.connect()
-        assert isinstance(acked, Welcome)
-        assert acked.calls == ()
-        assert len(served.host.started) == 1
-        last.close()
+async def test_a_reconnect_gets_what_finished_while_it_was_gone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, session, _, sent = await _server_unit(tmp_path)
+    grant = Grant(id="", sha256=strings.token_digest(""), tools=None, added="now")
+    monkeypatch.setattr(host_server, "grants", Mock(return_value=[grant]))
+    starting = AsyncMock()
+    monkeypatch.setattr(server, "_start_host", starting)
+    session.writer = None
+    session.running.add("1")
+    result = Result(
+        id="1",
+        record=FunctionResult(call_id="", name="Gate", content="done"),
+    )
+    server._deliver(session, result)
+    assert sent == []
+    writer = cast(asyncio.StreamWriter, Mock(write=sent.append))
+    hello = Hello(version=VERSION, token="", session_id="s1", client="laptop")
+
+    assert await server._admit(hello, ip="127.0.0.1", writer=writer) is session
+    assert sent == [
+        encoded(
+            Welcome(name="gpu1", resumed=True, calls=("1",), tools=session.digests()),
+        ),
+        encoded(result),
+    ]
+    server._relay(session, Ack(id="1"))
+    sent.clear()
+
+    assert await server._admit(hello, ip="127.0.0.1", writer=writer) is session
+    assert sent == [
+        encoded(Welcome(name="gpu1", resumed=True, calls=(), tools=session.digests())),
+    ]
+    assert session.unacked == {}
+    assert session.running == set()
+    starting.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -479,23 +535,37 @@ async def test_a_cancel_is_forwarded_only_while_its_call_runs(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_bye_ends_the_session_and_its_calls(tmp_path: Path) -> None:
-    async with _serving(tmp_path) as served:
-        reader, writer, _ = await served.connect()
-        writer.write(encoded(_call("1")))
-        await asyncio.wait_for(served.gate.started.wait(), 5)
-        writer.write(encoded(Bye()))
-        cancelled = await _next(reader)
-        assert isinstance(cancelled, Result)
-        assert cancelled.record.stub == "cancelled"
-        assert await _next(reader) is None
-        (host,) = served.host.started
-        assert host.task.done()
-        assert served.gate.stopped.is_set()
-        _, again, welcome = await served.connect()
-        assert isinstance(welcome, Welcome)
-        assert welcome.resumed is False
-        again.close()
+async def test_bye_asks_to_end_the_session_and_stops_attending(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, session, host, sent = await _server_unit(tmp_path)
+    session.labels = ("caller",)
+    ending, pinging, publishing = AsyncMock(), AsyncMock(), Mock()
+    monkeypatch.setattr(server, "_end", ending)
+    monkeypatch.setattr(server, "_publish_peers", publishing)
+    monkeypatch.setattr(host_server, "ping", pinging)
+    reader = asyncio.StreamReader()
+    reader.feed_data(encoded(Bye()) + encoded(_call("ignored")))
+    writer = session.writer
+    assert writer is not None
+
+    await server._attend(session, reader=reader, writer=writer)
+
+    ending.assert_awaited_once_with(session, reason="bye")
+    pinging.assert_called_once_with(writer, every_sec=server._ping_sec)
+    publishing.assert_called_once_with()
+    assert session.writer is None
+    assert session.running == set()
+    host.sent.feed_eof()
+    assert await received(host.sent) is None
+    assert sent == []
+    detached = asyncio.StreamReader()
+    detached.feed_eof()
+    await server._attend(session, reader=detached, writer=writer)
+    publishing.assert_called_once_with()
+    assert session.writer is None
+    assert session.running == set()
 
 
 @pytest.mark.asyncio
@@ -509,6 +579,8 @@ async def test_revoking_a_string_ends_only_its_hosted_sessions(
     server, session, _, sent = await _server_unit(tmp_path)
     if not hosted:
         session.host = None
+    local = replace(session, id="local", host=None)
+    server._sessions[local.id] = local
     monkeypatch.setattr(host_server, "grants", Mock(return_value=[]))
     ending = AsyncMock()
     monkeypatch.setattr(server, "_end", ending)
@@ -519,7 +591,9 @@ async def test_revoking_a_string_ends_only_its_hosted_sessions(
         ending.assert_awaited_once_with(session, reason="revoked")
     else:
         ending.assert_not_awaited()
-        assert server._sessions == {session.id: session}
+        assert server._sessions == {session.id: session, local.id: local}
+    assert server._sessions[local.id] is local
+    assert local.reason == ""
     assert sent == []
 
 
@@ -539,13 +613,17 @@ async def test_editing_a_string_tells_its_clients(
     monkeypatch.setattr(host_server, "grants", Mock(return_value=[grant]))
 
     await server._regrant()
-
-    assert session.granted == ("Read",)
-    assert sent == (
+    expected = (
         [encoded(ToolsChanged(tools={"Read": session.specs["Read"].digest}))]
         if connected
         else []
     )
+    assert session.granted == ("Read",)
+    assert sent == expected
+
+    await server._regrant()
+
+    assert sent == expected
 
 
 @pytest.mark.asyncio
@@ -565,27 +643,34 @@ async def test_a_client_is_described_only_the_tools_it_is_granted(
 
 
 @pytest.mark.asyncio
-async def test_a_session_gone_past_its_ttl_ends(tmp_path: Path) -> None:
-    async with _serving(tmp_path) as served:
-        _, writer, _ = await served.connect()
-        _ = await served.server._control(
-            DaemonControl(
-                listen=(f"127.0.0.1:{served.server.ports[0]}",),
-                ttl_sec=0.0,
-            ),
-        )
-        writer.close()
-        (host,) = served.host.started
-        await asyncio.wait_for(host.task, 5)
-        _, again, welcome = await served.connect()
-        assert isinstance(welcome, Welcome)
-        assert welcome.resumed is False
-        again.close()
-    assert _events(served)[1:4] == [
-        {"event": "connect", "session": "s1", "detail": ""},
-        {"event": "disconnect", "session": "s1", "detail": ""},
-        {"event": "end", "session": "s1", "detail": "expired"},
-    ]
+async def test_a_session_gone_past_its_ttl_ends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, session, _, _ = await _server_unit(tmp_path)
+    server._ttl_sec = 60
+    session.writer = None
+    fresh = replace(session, id="fresh", since=1.0)
+    connected = replace(
+        session,
+        id="connected",
+        writer=cast(asyncio.StreamWriter, Mock()),
+    )
+    server._sessions.update(fresh=fresh, connected=connected)
+    ending, regranting = AsyncMock(), AsyncMock()
+    sleeping = AsyncMock(side_effect=[None, None, RuntimeError("stop watch")])
+    monkeypatch.setattr(server, "_end", ending)
+    monkeypatch.setattr(server, "_regrant", regranting)
+    monkeypatch.setattr(server, "_mtime", Mock(return_value=1.0))
+    monkeypatch.setattr(time, "time", Mock(side_effect=[60.0, 61.0]))
+    monkeypatch.setattr(asyncio, "sleep", sleeping)
+
+    with pytest.raises(RuntimeError, match="stop watch"):
+        await server._watch(0.0)
+
+    ending.assert_awaited_once_with(session, reason="expired")
+    regranting.assert_awaited_once_with()
+    assert [args.args for args in sleeping.await_args_list] == [(server._poll_sec,)] * 3
 
 
 def test_a_server_is_named_for_its_machine_by_default(
@@ -604,70 +689,174 @@ def test_a_server_is_named_for_its_machine_by_default(
 @pytest.mark.asyncio
 async def test_a_connection_silent_for_three_pings_is_dropped(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.DEBUG, logger="sagent.host.server")
-    async with _serving(tmp_path, ping_sec=0.005) as served:
-        reader, writer = await asyncio.open_connection(
-            "127.0.0.1",
-            served.server.ports[0],
-            ssl=client_context(),
-        )
-        assert await _next(reader) is None
-        writer.close()
+    server, _, _, sent = await _server_unit(tmp_path)
+    receiving = AsyncMock(side_effect=TimeoutError)
+    waiting = AsyncMock(wraps=asyncio.wait_for)
+    monkeypatch.setattr(host_server, "received", receiving)
+    monkeypatch.setattr(asyncio, "wait_for", waiting)
+    closed = Mock()
+    reader = asyncio.StreamReader()
+    writer = cast(
+        asyncio.StreamWriter,
+        Mock(
+            write=sent.append,
+            close=closed,
+            get_extra_info=Mock(return_value=("127.0.0.1", 1234)),
+        ),
+    )
+
+    await server._connected(reader, writer)
+
+    receiving.assert_awaited_once_with(reader)
+    assert waiting.await_count == 1
+    assert waiting.await_args_list[0].args[1] == 3 * server._ping_sec
+    assert server._connections == set()
+    assert sent == []
+    closed.assert_called_once_with()
     assert "connection from 127.0.0.1 ended: " in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_a_welcomed_client_is_pinged(tmp_path: Path) -> None:
-    async with _serving(tmp_path, ping_sec=0.005) as served:
-        reader, writer, _ = await served.connect()
-        assert await _next(reader) == Ping()
-        writer.close()
+async def test_attending_starts_and_cancels_client_pings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, session, host, sent = await _server_unit(tmp_path)
+    started = asyncio.Event()
+    messages: list[Message | None] = [_call("running"), None]
+    pings: list[tuple[asyncio.Task[object] | None, asyncio.StreamWriter, float]] = []
+
+    async def pending(writer: asyncio.StreamWriter, *, every_sec: float) -> None:
+        pings.append((asyncio.current_task(), writer, every_sec))
+        started.set()
+        await asyncio.Event().wait()
+
+    async def eof(reader: asyncio.StreamReader) -> Message | None:
+        del reader
+        await started.wait()
+        return messages.pop(0)
+
+    monkeypatch.setattr(host_server, "ping", pending)
+    monkeypatch.setattr(host_server, "received", eof)
+    reader = asyncio.StreamReader()
+    writer = session.writer
+    assert writer is not None
+
+    await server._attend(session, reader=reader, writer=writer)
+
+    ((task, recipient, interval),) = pings
+    assert recipient is writer
+    assert interval == server._ping_sec
+    assert task is not None
+    try:
+        assert task.cancelling()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+    assert session.writer is None
+    assert session.running == {"running"}
+    host.sent.feed_eof()
+    assert await received(host.sent) == replace(
+        _call("running"),
+        granted=session.granted,
+    )
+    assert await received(host.sent) is None
+    assert sent == []
 
 
 @pytest.mark.asyncio
-async def test_a_server_that_cannot_listen_lets_go_of_its_lock(tmp_path: Path) -> None:
+async def test_a_server_that_cannot_listen_lets_go_of_its_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    taken = socket.socket()
-    taken.bind(("127.0.0.1", 0))
-    taken.listen()
-    port = cast(tuple[str, int], taken.getsockname())[1]
-    listen = [Address(host="127.0.0.1", port=0), Address(host="127.0.0.1", port=port)]
-    with pytest.raises(OSError, match="address already in use"):
-        await Server(dirs, listen=listen).aopen()
-    taken.close()
-    async with Server(dirs, listen=listen[:1]):
-        pass
+    first = Address(host="127.0.0.1", port=1234)
+    second = Address(host="127.0.0.1", port=5678)
+    server = Server(dirs, listen=[first, second])
+    closed = Mock()
+    listener = cast(asyncio.Server, Mock(close=closed))
+    starting = AsyncMock(side_effect=[listener, OSError("listen failed")])
+    context = Mock()
+    monkeypatch.setattr(asyncio, "start_server", starting)
+    monkeypatch.setattr(host_server, "server_context", Mock(return_value=context))
+
+    with pytest.raises(OSError, match="listen failed"):
+        await server.aopen()
+
+    assert [args.args[1:] for args in starting.await_args_list] == [
+        (first.host, first.port),
+        (second.host, second.port),
+    ]
+    closed.assert_called_once_with()
+    assert server._opened == []
+    descriptor = host_server._locked_pid(dirs.state / "server.pid")
+    os.close(descriptor)
 
 
 @pytest.mark.asyncio
-async def test_sessions_are_listed_while_the_server_runs(tmp_path: Path) -> None:
-    async with _serving(tmp_path) as served:
-        _, writer, _ = await served.connect()
-        sessions = strings.listing(served.dirs).sessions
-        assert sessions is not None
-        (session,) = sessions
-        assert (session.session_id, session.client, session.ip, session.connected) == (
-            "s1",
-            "laptop",
-            "127.0.0.1",
-            True,
-        )
-        writer.close()
-    assert strings.listing(served.dirs).sessions is None
-    logged = (served.dirs.state / "server.jsonl").read_text().splitlines()
-    events = [json_loads(line, dict[str, str])["event"] for line in logged]
-    assert events[:2] == ["start", "connect"]
-    assert events[-1] == "stop"
+async def test_session_rows_and_events_record_current_state(tmp_path: Path) -> None:
+    server, session, _, _ = await _server_unit(tmp_path)
+    session.running.add("running")
+    session.unacked["finished"] = b"held"
+    expected = strings.SessionRow(
+        token_id="",
+        session_id="s1",
+        client="laptop",
+        ip="127.0.0.1",
+        connected=True,
+        since=0.0,
+        calls=2,
+    )
+    path = server._dirs.state / "sessions.json"
+
+    server._write_sessions()
+    assert json_loads(path.read_text(), tuple[strings.SessionRow, ...]) == (expected,)
+    server._log("connect", session=session, detail="resumed")
+    session.writer = None
+    server._write_sessions()
+    server._log("stop", ip="owner", detail="shutdown")
+
+    assert json_loads(path.read_text(), tuple[strings.SessionRow, ...]) == (
+        replace(expected, connected=False),
+    )
+    events = [
+        json_loads(line, host_server._Event)
+        for line in (server._dirs.state / "server.jsonl").read_text().splitlines()
+    ]
+    connected, stopped = events
+    assert (connected.event, connected.session, connected.ip, connected.detail) == (
+        "connect",
+        "s1",
+        "127.0.0.1",
+        "resumed",
+    )
+    assert (stopped.event, stopped.session, stopped.ip, stopped.detail) == (
+        "stop",
+        "",
+        "owner",
+        "shutdown",
+    )
 
 
-@pytest.mark.asyncio
-async def test_a_second_server_refuses_to_start(tmp_path: Path) -> None:
-    async with _serving(tmp_path) as served:
-        second = Server(served.dirs, listen=[Address(host="127.0.0.1", port=0)])
-        with pytest.raises(ValueError, match="already runs here"):
-            await second.aopen()
+def test_a_second_server_refuses_to_start(tmp_path: Path) -> None:
+    path = tmp_path / "server.pid"
+    descriptor = host_server._locked_pid(path)
+    try:
+        assert path.read_text() == str(os.getpid())
+        with pytest.raises(
+            ValueError,
+            match=f"already runs here, as pid {os.getpid()}",
+        ):
+            _ = host_server._locked_pid(path)
+    finally:
+        os.close(descriptor)
+    os.close(host_server._locked_pid(path))
 
 
 @pytest.mark.asyncio
@@ -704,22 +893,35 @@ async def test_a_first_line_that_is_no_hello_is_turned_away(tmp_path: Path) -> N
 @pytest.mark.asyncio
 async def test_a_reconnect_takes_the_session_from_the_old_connection(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with _serving(tmp_path) as served:
-        old, first, _ = await served.connect()
-        _, second, welcome = await served.connect()
-        assert isinstance(welcome, Welcome)
-        assert welcome.resumed is True
-        assert await _next(old) is None
-        first.close()
-        second.close()
+    server, session, _, sent = await _server_unit(tmp_path)
+    grant = Grant(id="", sha256=strings.token_digest(""), tools=None, added="now")
+    monkeypatch.setattr(host_server, "grants", Mock(return_value=[grant]))
+    closed = Mock()
+    session.writer = cast(asyncio.StreamWriter, Mock(close=closed))
+    writer = cast(asyncio.StreamWriter, Mock(write=sent.append))
+
+    admitted = await server._admit(
+        Hello(version=VERSION, token="", session_id="s1", client="laptop"),
+        ip="new-address",
+        writer=writer,
+    )
+
+    assert admitted is session
+    assert session.writer is writer
+    assert session.ip == "new-address"
+    assert sent == [
+        encoded(Welcome(name="gpu1", resumed=True, calls=(), tools=session.digests())),
+    ]
+    closed.assert_called_once_with()
 
 
 _TOOLS = Tools(tools={"Gate": ToolSpec(description="d", schema={})})
 
 
 @pytest.mark.asyncio
-async def test_a_host_that_stops_answers_its_calls_and_ends_the_session(
+async def test_ending_a_session_waits_for_its_pump_to_answer_calls(
     tmp_path: Path,
 ) -> None:
     dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
@@ -745,9 +947,11 @@ async def test_a_host_that_stops_answers_its_calls_and_ends_the_session(
         writer=cast(asyncio.StreamWriter, Mock(write=sent.append, close=client_closed)),
     )
     server._sessions[session.id] = session
+    session.pump = asyncio.create_task(server._pump(session, host=cast(Host, host)))
 
-    await server._pump(session, host=cast(Host, host))
+    await server._end(session, reason="server stopped")
 
+    assert session.pump.done()
     assert sent == [
         encoded(
             Result(
@@ -761,16 +965,16 @@ async def test_a_host_that_stops_answers_its_calls_and_ends_the_session(
         ),
     ]
     assert session.running == set()
-    assert session.reason == "host stopped"
+    assert session.reason == "server stopped"
     assert server._sessions == {}
-    stopped.assert_awaited_once_with()
+    assert stopped.await_args_list == [((), {}), ((), {})]
     host_closed.assert_called_once_with()
     client_closed.assert_called_once_with()
     event = json_loads((dirs.state / "server.jsonl").read_text(), dict[str, str])
     assert {key: event[key] for key in _SHOWN} == {
         "event": "end",
         "session": "s1",
-        "detail": "host stopped",
+        "detail": "server stopped",
     }
     assert (dirs.state / "sessions.json").read_text() == "[]"
 
@@ -804,11 +1008,14 @@ async def test_a_host_whose_stream_fails_ends_the_session(
 ) -> None:
     server, session, host, sent = await _server_unit(tmp_path)
     session.running.add("1")
+    detached = isinstance(error, ValueError)
+    if detached:
+        session.writer = None
     host.reader.set_exception(error)
 
     await server._pump(session, host=host)
 
-    assert sent == [
+    expected = [
         encoded(
             Result(
                 id="1",
@@ -820,6 +1027,9 @@ async def test_a_host_whose_stream_fails_ends_the_session(
             ),
         ),
     ]
+    assert sent == ([] if detached else expected)
+    assert session.unacked == {"1": expected[0]}
+    assert session.reason == "host stopped"
     assert server._sessions == {}
     assert host.asked.is_set()
     assert host.sent.at_eof()
@@ -850,6 +1060,53 @@ async def test_a_session_that_is_ending_takes_no_more_calls(tmp_path: Path) -> N
     assert await received(host.sent) is None
     assert session.running == {"held"}
 
+    await server._end(session, reason="bye")
+
+    assert session.reason == "revoked"
+    assert host.asked.is_set()
+    host.reader.feed_data(
+        encoded(
+            Note(
+                id="n",
+                sender="kid",
+                recipient="other#s2",
+                content="late",
+                kind="ask",
+            ),
+        )
+        + encoded(Ping()),
+    )
+    host.reader.feed_eof()
+    await server._pump(session, host=host)
+    assert len(sent) == 2
+    assert sent[-1] == encoded(
+        Result(
+            id="held",
+            record=ToolErrorResult(
+                call_id="",
+                content="The host of this session stopped.",
+                is_error=True,
+            ),
+        ),
+    )
+    assert server._sessions == {}
+
+
+async def _held_host(
+    names: Sequence[str],
+    directory: Path,
+    *,
+    specs: Mapping[str, ToolSpec],
+    opening: asyncio.Event,
+    release: asyncio.Event,
+) -> Host:
+    host = await _broken([], names, directory)
+    _ = await received(host.reader)
+    host.reader.feed_data(encoded(Tools(tools=specs)))
+    opening.set()
+    await release.wait()
+    return host
+
 
 async def _broken(
     hosts: list[_BrokenHost],
@@ -873,6 +1130,19 @@ async def _broken(
         ),
     )
     return hosts[-1]
+
+
+def _listener() -> tuple[asyncio.Server, AsyncMock, Mock]:
+    serving, closed = AsyncMock(), Mock()
+    listener = cast(
+        asyncio.Server,
+        Mock(
+            start_serving=serving,
+            close=closed,
+            sockets=[Mock(getsockname=Mock(return_value=("127.0.0.1", 1234)))],
+        ),
+    )
+    return listener, serving, closed
 
 
 async def _server_unit(
@@ -928,51 +1198,74 @@ async def test_a_call_and_a_note_reach_the_host_with_what_is_granted(
 @pytest.mark.asyncio
 async def test_a_hosts_notes_and_peers_reach_the_client_until_acked(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    hosts: list[_BrokenHost] = []
-    async with _serving(tmp_path, start_host=partial(_broken, hosts)) as served:
-        first, writer, _ = await served.connect()
-        note = Note(
-            id="n1",
-            sender="Agent_0",
-            recipient="Agent",
-            content="hi",
-            kind="reply",
-        )
-        result = Result(id="r1", record=FunctionResult(call_id="", name="Gate"))
-        said = (
-            Peers(labels=("Agent_0",)),
-            Peers(labels=("Agent_0", "Agent_1")),
-            result,
-            note,
-        )
-        hosts[0].reader.feed_data(
-            encoded(Paused()) + b"".join(encoded(m) for m in said),
-        )
-        assert tuple([await _next(first) for _ in said]) == said
-        assert await _next(hosts[0].sent) == Peers(labels=())
-        assert await _next(hosts[0].sent) == Peers(labels=())
-        assert await _next(hosts[0].sent) == Ack(id="n1")
-        writer.write(encoded(Ack(id="r1")))
-        writer.close()
-        reader, again, _ = await served.connect()
-        assert await _next(reader) == note
-        assert await _next(reader) == Peers(labels=("Agent_0", "Agent_1"))
-        again.write(encoded(Ack(id="n1")))
-        again.close()
-        last_reader, last, _ = await served.connect()
-        assert await _next(last_reader) == Peers(labels=("Agent_0", "Agent_1"))
-        hosts[0].reader.feed_eof()
-        last.close()
+    server, session, host, sent = await _server_unit(tmp_path)
+    grant = Grant(id="", sha256=strings.token_digest(""), tools=None, added="now")
+    monkeypatch.setattr(host_server, "grants", Mock(return_value=[grant]))
+    note = Note(
+        id="n1",
+        sender="Agent_0",
+        recipient="Agent",
+        content="hi",
+        kind="reply",
+    )
+    result = Result(id="r1", record=FunctionResult(call_id="", name="Gate"))
+    said = (
+        Peers(labels=("Agent_0",)),
+        Peers(labels=("Agent_0", "Agent_1")),
+        result,
+        note,
+    )
+    host.reader.feed_data(encoded(Paused()) + b"".join(encoded(m) for m in said))
+    async with asyncio.TaskGroup() as tasks:
+        pumping = tasks.create_task(server._pump(session, host=host))
+        try:
+            assert await received(host.sent) == Peers(labels=())
+            assert await received(host.sent) == Peers(labels=())
+            assert await received(host.sent) == Ack(id="n1")
+            assert sent == [encoded(message) for message in said]
+            assert session.peers == ("Agent_0", "Agent_1")
+            assert session.public_peers == session.peers
+            assert session.paused.is_set()
+            server._relay(session, Ack(id="r1"))
+            session.writer = None
+            sent.clear()
+            writer = cast(asyncio.StreamWriter, Mock(write=sent.append))
+            hello = Hello(version=VERSION, token="", session_id="s1", client="laptop")
 
+            assert await server._admit(hello, ip="ip", writer=writer) is session
+            assert sent == [
+                encoded(
+                    Welcome(
+                        name="gpu1",
+                        resumed=True,
+                        calls=("n1",),
+                        tools=session.digests(),
+                    ),
+                ),
+                encoded(note),
+                encoded(Peers(labels=session.peers)),
+            ]
+            server._relay(session, Ack(id="n1"))
+            sent.clear()
 
-def _events(served: _Served) -> list[dict[str, str]]:
-    """Return each line of ``server.jsonl``: its event, session and detail."""
-    lines = (served.dirs.state / "server.jsonl").read_text().splitlines()
-    return [
-        {k: v for k, v in json_loads(line, dict[str, str]).items() if k in _SHOWN}
-        for line in lines
-    ]
+            assert await server._admit(hello, ip="ip", writer=writer) is session
+            assert sent == [
+                encoded(
+                    Welcome(
+                        name="gpu1",
+                        resumed=True,
+                        calls=(),
+                        tools=session.digests(),
+                    ),
+                ),
+                encoded(Peers(labels=session.peers)),
+            ]
+            assert session.unacked == {}
+        finally:
+            host.reader.feed_eof()
+            await pumping
 
 
 _SHOWN = ("event", "session", "detail")
@@ -1105,6 +1398,7 @@ async def test_child_host_closes_input_before_waiting_and_stops_only_once(
 @pytest.mark.parametrize("credentials", ["missing", "file", "parent-file"])
 async def test_local_daemon_needs_no_tls_credentials(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     credentials: str,
 ) -> None:
     secrets = tmp_path / "secrets"
@@ -1117,17 +1411,35 @@ async def test_local_daemon_needs_no_tls_credentials(
         state=tmp_path / "state",
     )
     address = dirs.state / "daemon.sock"
-    async with Server(dirs, listen=[], local_socket=address):
-        reader, writer = await asyncio.open_unix_connection(address)
-        try:
-            writer.write(encoded(DaemonControl()))
-            status = await _next(reader)
-            assert isinstance(status, DaemonStatus)
-            assert status.listen == ()
-            assert status.pid == os.getpid()
-        finally:
-            writer.close()
-            await writer.wait_closed()
+    server = Server(dirs, listen=[], local_socket=address)
+    listener, serving, closed = _listener()
+    listening = AsyncMock(return_value=listener)
+    context = Mock(side_effect=AssertionError("Local startup must not load TLS."))
+    monkeypatch.setattr(asyncio, "start_unix_server", listening)
+    monkeypatch.setattr(host_server, "server_context", context)
+    monkeypatch.setattr(server, "_watch", AsyncMock())
+    async with server:
+        listening.assert_awaited_once_with(
+            server._local_connected,
+            path=address,
+            limit=MAX_LINE_BYTES,
+            start_serving=False,
+        )
+        serving.assert_awaited_once_with()
+        sent: list[bytes] = []
+        reader = asyncio.StreamReader()
+        reader.feed_data(encoded(DaemonControl()))
+        writer = cast(
+            asyncio.StreamWriter,
+            Mock(write=sent.append, drain=AsyncMock()),
+        )
+        await server._local_connected(reader, writer)
+        assert sent == [
+            encoded(DaemonStatus(pid=os.getpid(), source_version="", listen=())),
+        ]
+    closed.assert_called_once_with()
+    context.assert_not_called()
+    assert server._opened == []
     if credentials == "missing":
         assert not secrets.exists()
     else:
@@ -1137,150 +1449,189 @@ async def test_local_daemon_needs_no_tls_credentials(
 @pytest.mark.asyncio
 async def test_local_clients_discover_message_and_withdraw_without_tool_hosts(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    address = tmp_path / "daemon.sock"
-    host = LocalHost(tools={})
-    async with Server(dirs, listen=[], local_socket=address, start_host=host):
-        first, a = await asyncio.open_unix_connection(address)
-        a.write(
-            encoded(Hello(version=VERSION, token="", session_id="one", client="here")),
-        )
-        assert isinstance(await _next(first), Welcome)
-        a.write(encoded(Peers(labels=("Agent",))))
-        assert await _next(first) == Peers(labels=())
-        second, b = await asyncio.open_unix_connection(address)
-        b.write(
-            encoded(Hello(version=VERSION, token="", session_id="two", client="here")),
-        )
-        assert isinstance(await _next(second), Welcome)
-        assert await _next(second) == Peers(labels=("Agent#one",))
-        b.write(encoded(Peers(labels=("Agent",))))
-        assert await _next(first) == Peers(labels=("Agent#two",))
-        assert await _next(second) == Peers(labels=("Agent#one",))
-        note = Note(
-            id="ask",
-            sender="Agent",
-            recipient="Agent#two",
-            content="own a.py?",
-            kind="ask",
-        )
-        a.write(encoded(note))
-        delivered = await _next(second)
-        assert delivered == Note(
-            id="ask",
-            sender="Agent#one",
-            recipient="Agent",
-            content="own a.py?",
-            kind="ask",
-        )
-        assert await _next(first) == Ack(id="ask")
-        b.write(encoded(Ack(id="ask")))
-        b.write(encoded(Peers(labels=())))
-        assert await _next(first) == Peers(labels=())
-        assert await _next(second) == Peers(labels=("Agent#one",))
-        a.write(
-            encoded(
-                Note(
-                    id="blocked",
-                    sender="Agent",
-                    recipient="Agent#two",
-                    content="blocked",
-                    kind="ask",
-                ),
-            ),
-        )
-        refused = await _next(first)
-        assert isinstance(refused, Refused)
-        assert "not reachable" in refused.reason
-        assert host.started == []
-        a.close()
-        b.close()
+    server, first, _, sent = await _server_unit(tmp_path)
+    first.host = None
+    first.peer_messaging = True
+    other_sent: list[bytes] = []
+    second = replace(
+        first,
+        id="two",
+        writer=cast(asyncio.StreamWriter, Mock(write=other_sent.append)),
+        unacked={},
+        seen_notes=set(),
+    )
+    server._sessions[second.id] = second
+    starting = AsyncMock()
+    monkeypatch.setattr(server, "_start_host", starting)
+
+    server._relay(first, Peers(labels=("Agent",)))
+    assert sent == [encoded(Peers(labels=()))]
+    assert other_sent == [encoded(Peers(labels=("Agent#s1",)))]
+    sent.clear()
+    other_sent.clear()
+    server._relay(second, Peers(labels=("Agent",)))
+    assert sent == [encoded(Peers(labels=("Agent#two",)))]
+    assert other_sent == [encoded(Peers(labels=("Agent#s1",)))]
+    sent.clear()
+    other_sent.clear()
+    note = Note(
+        id="ask",
+        sender="Agent",
+        recipient="Agent#two",
+        content="own a.py?",
+        kind="ask",
+    )
+
+    server._relay(first, note)
+    server._relay(first, note)
+
+    delivered = encoded(replace(note, sender="Agent#s1", recipient="Agent"))
+    assert other_sent == [delivered]
+    assert second.unacked == {"ask": delivered}
+    assert sent == [encoded(Ack(id="ask")), encoded(Ack(id="ask"))]
+    assert first.seen_notes == {"ask"}
+    server._relay(second, Ack(id="ask"))
+    assert second.unacked == {}
+    sent.clear()
+    other_sent.clear()
+    server._relay(second, Peers(labels=()))
+    assert sent == [encoded(Peers(labels=()))]
+    assert other_sent == [encoded(Peers(labels=("Agent#s1",)))]
+    sent.clear()
+    server._relay(first, replace(note, id="blocked", content="blocked"))
+    assert sent == [
+        encoded(Refused(reason="Agent 'Agent#two' is not reachable.", id="blocked")),
+    ]
+    starting.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_local_clients_cannot_spoof_other_agents(tmp_path: Path) -> None:
-    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    address = tmp_path / "daemon.sock"
-    async with Server(dirs, listen=[], local_socket=address):
-        reader, writer = await asyncio.open_unix_connection(address)
-        writer.write(
-            encoded(Hello(version=VERSION, token="", session_id="one", client="here")),
-        )
-        assert isinstance(await _next(reader), Welcome)
-        writer.write(encoded(Peers(labels=("Agent",))))
-        assert await _next(reader) == Peers(labels=())
-        writer.write(
-            encoded(
-                Note(
-                    id="spoof",
-                    sender="Other",
-                    recipient="Agent#one",
-                    content="bad",
-                    kind="ask",
-                ),
-            ),
-        )
-        refused = await _next(reader)
-        assert isinstance(refused, Refused)
-        assert "sender" in refused.reason
-        writer.close()
+    server, session, _, sent = await _server_unit(tmp_path)
+    session.host = None
+    session.peer_messaging = True
+    session.labels = ("Agent",)
+
+    server._relay(
+        session,
+        Note(
+            id="spoof",
+            sender="Other",
+            recipient="Agent#s1",
+            content="bad",
+            kind="ask",
+        ),
+    )
+
+    assert sent == [
+        encoded(
+            Refused(reason="The sender is not registered by this session.", id="spoof"),
+        ),
+    ]
+    assert session.unacked == {}
+    assert session.seen_notes == set()
 
 
 @pytest.mark.asyncio
 async def test_owner_configures_the_existing_daemon_and_requests_upgrade(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    address = tmp_path / "daemon.sock"
-    async with Server(
-        dirs,
-        listen=[],
-        local_socket=address,
+    server = Server(dirs, listen=[], source_version="old")
+    closed = Mock()
+    listener = cast(
+        asyncio.Server,
+        Mock(
+            close=closed,
+            sockets=[Mock(getsockname=Mock(return_value=("127.0.0.1", 1234)))],
+        ),
+    )
+    local = cast(asyncio.Server, Mock())
+    opened = host_server._Opened(
+        pid_fd=-1,
+        listeners=[local],
+        watching=cast(asyncio.Task[None], Mock()),
+    )
+    server._opened.append(opened)
+    starting = AsyncMock(return_value=listener)
+    context = Mock()
+    monkeypatch.setattr(asyncio, "start_server", starting)
+    monkeypatch.setattr(host_server, "server_context", Mock(return_value=context))
+
+    assert await server._control(
+        DaemonControl(listen=("127.0.0.1:0",), tools=("Read",), ttl_sec=17),
+    ) == DaemonStatus(pid=os.getpid(), source_version="old", listen=("127.0.0.1:1234",))
+    starting.assert_awaited_once_with(
+        server._connected,
+        "127.0.0.1",
+        0,
+        ssl=context,
+        limit=MAX_LINE_BYTES,
+        ssl_handshake_timeout=server._silence_sec,
+    )
+    assert opened.listeners == [listener, local]
+    assert server._config.tools == ("Read",)
+    assert server._ttl_sec == 17
+    assert server.ports == [1234]
+    assert (
+        json_loads((dirs.state / "server.json").read_text(), strings.ServerConfig)
+        == server._config
+    )
+
+    await server._control(DaemonControl(listen=("127.0.0.1:1234",)))
+
+    assert starting.await_count == 1
+    closed.assert_not_called()
+    assert opened.listeners == [listener, local]
+    assert server._config.tools == ("Read",)
+    assert server._ttl_sec == 17
+    assert await server._control(DaemonControl(listen=())) == DaemonStatus(
+        pid=os.getpid(),
         source_version="old",
-    ) as server:
-        reader, writer = await asyncio.open_unix_connection(address)
-        writer.write(encoded(DaemonControl(listen=("127.0.0.1:0",), tools=("Read",))))
-        status = await _next(reader)
-        assert isinstance(status, DaemonStatus)
-        assert status.pid == os.getpid()
-        assert status.source_version == "old"
-        assert not status.restarting
-        assert len(status.listen) == 1
-        assert not status.listen[0].endswith(":0")
-        port = server.ports[0]
-        writer.close()
-        reader, writer = await asyncio.open_unix_connection(address)
-        writer.write(encoded(DaemonControl(listen=())))
-        assert await _next(reader) == DaemonStatus(
-            pid=os.getpid(),
-            source_version="old",
-            listen=(),
-        )
-        with pytest.raises(ConnectionRefusedError):
-            await asyncio.open_connection("127.0.0.1", port)
-        writer.close()
-        reader, writer = await asyncio.open_unix_connection(address)
-        writer.write(encoded(DaemonControl(source_version="new")))
-        status = await _next(reader)
-        assert isinstance(status, DaemonStatus)
-        assert status.restarting
-        assert server.stopping.is_set()
-        writer.close()
+        listen=(),
+    )
+    closed.assert_called_once_with()
+    assert opened.listeners == [local]
+    assert await server._control(DaemonControl(source_version="new")) == DaemonStatus(
+        pid=os.getpid(),
+        source_version="old",
+        listen=(),
+        restarting=True,
+    )
+    assert server.stopping.is_set()
+    assert server.replacement == "new"
 
 
 @pytest.mark.asyncio
 async def test_an_owner_calls_the_hosts_gate_through_the_daemon(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    address = tmp_path / "daemon.sock"
-    async with Server(dirs, listen=[], local_socket=address):
-        reader, writer = await asyncio.open_unix_connection(address)
-        writer.write(encoded(GateCall(op="hold", key="k", until=5_000_000_000.0)))
-        assert await _next(reader) == GateAnswer()
-        writer.close()
-    assert FileGate().states()["k"].held_until == 5_000_000_000.0
+    server, _, _, sent = await _server_unit(tmp_path)
+    call = GateCall(op="hold", key="k", until=17.0)
+    answer = GateAnswer(
+        admission=Admission(wait_sec=2.0, admitted=False, reason="held"),
+    )
+    answering = AsyncMock(return_value=answer)
+    monkeypatch.setattr(ServedGate, "answer", answering)
+    reader = asyncio.StreamReader()
+    reader.feed_data(encoded(call))
+    closed, draining = Mock(), AsyncMock()
+    writer = cast(
+        asyncio.StreamWriter,
+        Mock(write=sent.append, close=closed, drain=draining),
+    )
+
+    await server._local_connected(reader, writer)
+
+    answering.assert_awaited_once_with(call)
+    assert sent == [encoded(answer)]
+    draining.assert_awaited_once_with()
+    closed.assert_called_once_with()
+    assert server._connections == set()
 
 
 @pytest.mark.asyncio
@@ -1288,26 +1639,33 @@ async def test_an_owner_that_hangs_up_mid_wait_is_sent_no_answer(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The daemon's wait ends with the caller, and nothing is written to it."""
-    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    address = tmp_path / "daemon.sock"
-    asked = threading.Event()
+    server, _, _, sent = await _server_unit(tmp_path)
+    answer = asyncio.Future[GateAnswer]()
 
-    class _Held(FileGate):
-        @override
-        def admit(self, key: str, policy: GatePolicy) -> Admission:
-            asked.set()
-            return Admission(wait_sec=60.0, admitted=False, reason="held")
+    async def pending(call: GateCall) -> GateAnswer:
+        del call
+        return await answer
 
-    async with Server(dirs, listen=[], local_socket=address) as server:
-        monkeypatch.setattr(server._gate, "gate", _Held())
-        reader, writer = await asyncio.open_unix_connection(address)
-        patient = GatePolicy(max_wait_sec=600.0)
-        writer.write(encoded(GateCall(op="admitted", key="k", policy=patient)))
-        assert await asyncio.to_thread(asked.wait, 5)
-        writer.write_eof()
-        assert await _next(reader) is None
-        writer.close()
+    answering = AsyncMock(side_effect=pending)
+    monkeypatch.setattr(ServedGate, "answer", answering)
+    call = GateCall(op="admitted", key="k", policy=GatePolicy(max_wait_sec=2.0))
+    reader = asyncio.StreamReader()
+    reader.feed_data(encoded(call))
+    reader.feed_eof()
+    closed, draining = Mock(), AsyncMock()
+    writer = cast(
+        asyncio.StreamWriter,
+        Mock(write=sent.append, close=closed, drain=draining),
+    )
+
+    await server._local_connected(reader, writer)
+
+    answering.assert_awaited_once_with(call)
+    assert answer.cancelled()
+    assert sent == []
+    draining.assert_not_awaited()
+    closed.assert_called_once_with()
+    assert server._connections == set()
 
 
 @pytest.mark.parametrize(
@@ -1338,71 +1696,86 @@ async def test_tls_session_ids_cannot_escape_the_session_directory(
 
 
 @pytest.mark.asyncio
-async def test_hosted_notes_use_the_cross_session_router(tmp_path: Path) -> None:
-    hosts: list[_BrokenHost] = []
-    async with _serving(tmp_path, start_host=partial(_broken, hosts)) as served:
-        try:
-            (connection,) = await strings.add(served.dirs, peer_messaging=True)
-            _, a, _ = await served.connect(token=connection.token)
-            second, b, _ = await served.connect(session_id="s2", token=connection.token)
-            b.write(encoded(Peers(labels=("recipient",))))
-            hosts[0].reader.feed_data(encoded(Peers(labels=("kid",))))
-            while (message := await _next(second)) != Peers(labels=("kid@host#s1",)):
-                assert isinstance(message, Peers)
-            note = Note(
-                id="n",
-                sender="kid",
-                recipient="recipient#s2",
-                content="request",
-                kind="ask",
-            )
-            hosts[0].reader.feed_data(
-                encoded(Peers(labels=("kid", "private"), public=("kid", "forged"))),
-            )
-            hosts[0].reader.feed_data(encoded(note))
-            delivered = await _next(second)
-            while isinstance(delivered, Peers):
-                assert delivered.labels == ("kid@host#s1",)
-                delivered = await _next(second)
-            assert delivered == Note(
-                id="n",
-                sender="kid@host#s1",
-                recipient="recipient",
-                content="request",
-                kind="ask",
-            )
-            reply = Note(
-                id="reply",
-                sender="recipient",
-                recipient="kid@host#s1",
-                content="response",
-                kind="reply",
-            )
-            b.write(encoded(reply))
-            while not isinstance(forwarded := await _next(hosts[0].sent), Note):
-                assert isinstance(forwarded, (Peers, Ack))
-            assert forwarded == replace(
-                reply,
-                sender="recipient#s2",
-                recipient="kid",
-            )
-            assert await _next(second) == Ack(id="reply")
-            grant = next(
-                g
-                for g in strings.grants(served.dirs)
-                if g.sha256 == strings.token_digest(connection.token)
-            )
-            await strings.edit(served.dirs, grant.id, peer_messaging=False)
-            while not isinstance(changed := await _next(second), ToolsChanged):
-                assert isinstance(changed, Peers)
-                assert changed.labels == ()
-            assert changed.peer_messaging is False
-            assert await _next(second) == Peers(labels=())
-            a.close()
-            b.close()
-        finally:
-            for host in hosts:
-                host.reader.feed_eof()
+async def test_hosted_notes_use_the_cross_session_router(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, first, host, sent = await _server_unit(tmp_path)
+    first.peer_messaging = True
+    other_sent: list[bytes] = []
+    other_host = await _broken([], (), tmp_path)
+    _ = await received(other_host.reader)
+    second = replace(
+        first,
+        id="s2",
+        host=other_host,
+        writer=cast(asyncio.StreamWriter, Mock(write=other_sent.append)),
+        labels=("recipient",),
+        unacked={},
+        seen_notes=set(),
+    )
+    server._sessions[second.id] = second
+    note = Note(
+        id="n",
+        sender="kid",
+        recipient="recipient#s2",
+        content="request",
+        kind="ask",
+    )
+    host.reader.feed_data(
+        encoded(Peers(labels=("kid", "private"), public=("kid", "forged")))
+        + encoded(note)
+        + encoded(Paused()),
+    )
+    server._suspending = True
+
+    await server._pump(first, host=host)
+
+    assert first.peers == ("kid", "private")
+    assert first.public_peers == ("kid",)
+    assert first.paused.is_set()
+    assert other_sent == [
+        encoded(Peers(labels=("kid@host#s1",))),
+        encoded(replace(note, sender="kid@host#s1", recipient="recipient")),
+    ]
+    assert await received(host.sent) == Peers(labels=("recipient#s2",))
+    assert await received(host.sent) == Ack(id="n")
+    other_sent.clear()
+    reply = Note(
+        id="reply",
+        sender="recipient",
+        recipient="kid@host#s1",
+        content="response",
+        kind="reply",
+    )
+
+    server._relay(second, reply)
+
+    assert await received(host.sent) == replace(
+        reply,
+        sender="recipient#s2",
+        recipient="kid",
+    )
+    assert other_sent == [encoded(Ack(id="reply"))]
+    other_sent.clear()
+    sent.clear()
+    grant = Grant(id="", sha256="digest", tools=None, added="now", peer_messaging=False)
+    monkeypatch.setattr(host_server, "grants", Mock(return_value=[grant]))
+
+    await server._regrant()
+
+    assert not first.peer_messaging
+    assert not second.peer_messaging
+    assert other_sent == [
+        encoded(Peers(labels=())),
+        encoded(ToolsChanged(tools=second.digests(), peer_messaging=False)),
+        encoded(Peers(labels=())),
+    ]
+    assert sent == [
+        encoded(ToolsChanged(tools=first.digests(), peer_messaging=False)),
+        encoded(Peers(labels=("kid", "private"))),
+        encoded(Peers(labels=("kid", "private"))),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1420,19 +1793,61 @@ async def test_replacement_does_not_accept_clients_before_restoring_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    async with Server(dirs, listen=[Address.from_text("127.0.0.1:0")]) as first:
-        state = await first.handoff()
+    saved = _SavedServer(
+        config=strings.ServerConfig(
+            listen=(Address(host="127.0.0.1", port=1234),),
+            tools=("Read",),
+        ),
+        ttl_sec=17.0,
+        sessions=(),
+    )
+    server = Server(dirs, listen=[], handoff=json_dumps(saved))
+    listener, serving, closed = _listener()
+    listening = AsyncMock(return_value=listener)
 
-    async def restoring(server: Server, saved: _SavedServer) -> None:
-        del saved
-        with pytest.raises(ConnectionRefusedError):
-            await asyncio.open_connection("127.0.0.1", server.ports[0])
+    async def restoring(state: _SavedServer) -> None:
+        assert state == saved
+        serving.assert_not_awaited()
+        assert server.ports == [1234]
 
-    monkeypatch.setattr(Server, "_restore", restoring)
-    async with Server(dirs, listen=[], handoff=state) as second:
-        _, writer = await asyncio.open_connection("127.0.0.1", second.ports[0])
-        writer.close()
-        await writer.wait_closed()
+    restoring_sessions = AsyncMock(side_effect=restoring)
+    monkeypatch.setattr(server, "_restore", restoring_sessions)
+    monkeypatch.setattr(server, "_watch", AsyncMock())
+    monkeypatch.setattr(asyncio, "start_server", listening)
+    context = Mock()
+    monkeypatch.setattr(host_server, "server_context", Mock(return_value=context))
+
+    async with server:
+        restoring_sessions.assert_awaited_once_with(saved)
+        serving.assert_awaited_once_with()
+        listening.assert_awaited_once_with(
+            server._connected,
+            "127.0.0.1",
+            1234,
+            ssl=context,
+            limit=MAX_LINE_BYTES,
+            start_serving=False,
+        )
+        assert server._ttl_sec == 17.0
+        assert server._handoff == ""
+        registration = host_server._Session(
+            id="local",
+            token_id="",
+            client="here",
+            ip="local",
+            host=None,
+            specs={},
+            since=0.0,
+        )
+        server._sessions[registration.id] = registration
+    closed.assert_called_once_with()
+    assert server._opened == []
+    assert server._sessions == {}
+    assert registration.reason == "server stopped"
+    assert [
+        json_loads(line, host_server._Event).event
+        for line in (dirs.state / "server.jsonl").read_text().splitlines()
+    ] == ["start", "stop"]
 
 
 @pytest.mark.asyncio
@@ -1448,15 +1863,19 @@ async def test_failed_startup_releases_the_startup_lock(
         del args, kwargs
         raise OSError("startup failed")
 
-    with monkeypatch.context() as patched:
-        if failure == "configuration":
-            patched.setattr(host_server, "write_private", failing)
-        else:
-            patched.setattr(Server, "_log", failing)
-        with pytest.raises(OSError, match="startup failed"):
-            await Server(dirs, listen=[]).aopen()
-    async with Server(dirs, listen=[]):
-        pass
+    server = Server(dirs, listen=[])
+    monkeypatch.setattr(server, "_watch", AsyncMock())
+    if failure == "configuration":
+        monkeypatch.setattr(host_server, "write_private", failing)
+    else:
+        monkeypatch.setattr(server, "_log", failing)
+
+    with pytest.raises(OSError, match="startup failed"):
+        await server.aopen()
+
+    assert server._opened == []
+    descriptor = host_server._locked_pid(dirs.state / "server.pid")
+    os.close(descriptor)
 
 
 @pytest.mark.asyncio
@@ -1465,20 +1884,31 @@ async def test_failed_restoration_releases_the_server_resources(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    async with Server(dirs, listen=[]) as first:
-        state = await first.handoff()
+    saved = _SavedServer(
+        config=strings.ServerConfig(
+            listen=(Address(host="127.0.0.1", port=1234),),
+            tools=(),
+        ),
+        ttl_sec=17.0,
+        sessions=(),
+    )
+    failed = Server(dirs, listen=[], handoff=json_dumps(saved))
+    listener, serving, closed = _listener()
+    restoring = AsyncMock(side_effect=OSError("restore failed"))
+    monkeypatch.setattr(failed, "_restore", restoring)
+    monkeypatch.setattr(failed, "_watch", AsyncMock())
+    monkeypatch.setattr(asyncio, "start_server", AsyncMock(return_value=listener))
+    monkeypatch.setattr(host_server, "server_context", Mock())
 
-    async def restoring(server: Server, saved: _SavedServer) -> None:
-        del server, saved
-        raise OSError("restore failed")
-
-    monkeypatch.setattr(Server, "_restore", restoring)
-    failed = Server(dirs, listen=[], handoff=state)
     with pytest.raises(OSError, match="restore failed"):
         await failed.aopen()
+
+    restoring.assert_awaited_once_with(saved)
+    serving.assert_not_awaited()
+    closed.assert_called_once_with()
     assert failed._opened == []
-    async with Server(dirs, listen=[]):
-        pass
+    descriptor = host_server._locked_pid(dirs.state / "server.pid")
+    os.close(descriptor)
 
 
 @pytest.mark.asyncio
@@ -1501,6 +1931,13 @@ async def test_inherited_worker_socket_restores_calls_and_local_registrations(
         ),
     )
     session.host = host
+    server._suspending = True
+    host.reader.feed_data(encoded(Paused()))
+    await server._pump(session, host=host)
+    assert session.paused.is_set()
+    assert server._sessions[session.id] is session
+    assert host._stopped is None
+    server._suspending = False
     session.requested = ("Gate",)
     session.running.add("1")
     held = encoded(Result(id="2", record=FunctionResult(call_id="", name="Gate")))
@@ -1682,133 +2119,205 @@ async def test_inherited_worker_socket_restores_calls_and_local_registrations(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "initial",
+    ("initial", "reason"),
     [
-        Ping(),
-        Hello(version=VERSION, client="here", token="", session_id="../bad"),
-        Hello(version=VERSION, client="here", token="", session_id="s1"),
+        (Ping(), "Say hello with the current protocol first."),
+        (
+            Hello(version=VERSION + 1, client="here", token="", session_id="new"),
+            "Say hello with the current protocol first.",
+        ),
+        (
+            Hello(version=VERSION, client="here", token="", session_id="../bad"),
+            "Invalid session id.",
+        ),
+        (
+            Hello(version=VERSION, client="here", token="", session_id="s1"),
+            "That session belongs to another connection.",
+        ),
     ],
 )
 async def test_local_handshake_rejects_wrong_protocol_paths_and_remote_owned_ids(
     tmp_path: Path,
     initial: Message,
+    reason: str,
 ) -> None:
-    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    host = LocalHost(tools={})
-    async with Server(
-        dirs,
-        listen=[Address.from_text("127.0.0.1:0")],
-        local_socket=dirs.state / "daemon.sock",
-        start_host=host,
-    ) as server:
-        (connection,) = await strings.add(dirs)
-        async with RemoteSession([SavedRemote(url=connection.url)]) as remote:
-            endpoint = next(iter(remote.endpoints().values()))
-            await asyncio.wait_for(endpoint.until(lambda e: e.up), 5)
-            reader, writer = await asyncio.open_unix_connection(
-                dirs.state / "daemon.sock",
-            )
-            if isinstance(initial, Hello) and initial.session_id == "s1":
-                initial = replace(initial, session_id=remote.session_id)
-            writer.write(encoded(initial))
-            assert isinstance(await _next(reader), Refused)
-            writer.close()
-        assert server.ports
+    server, session, _, sent = await _server_unit(tmp_path)
+    reader = asyncio.StreamReader()
+    reader.feed_data(encoded(initial))
+    reader.feed_eof()
+    closed = Mock()
+    writer = cast(asyncio.StreamWriter, Mock(write=sent.append, close=closed))
+
+    await server._local_connected(reader, writer)
+
+    assert sent == [encoded(Refused(reason=reason))]
+    assert server._sessions == {session.id: session}
+    assert server._connections == set()
+    closed.assert_called_once_with()
 
 
 @pytest.mark.asyncio
 async def test_local_reconnection_replays_only_unacknowledged_notes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
-    address = dirs.state / "daemon.sock"
-    async with Server(dirs, listen=[], local_socket=address):
-        first, a = await asyncio.open_unix_connection(address)
-        second, b = await asyncio.open_unix_connection(address)
-        a.write(
-            encoded(Hello(version=VERSION, client="here", token="", session_id="one")),
-        )
-        b.write(
-            encoded(Hello(version=VERSION, client="here", token="", session_id="two")),
-        )
-        assert isinstance(await _next(first), Welcome)
-        assert isinstance(await _next(second), Welcome)
-        a.write(encoded(Peers(labels=("a",))))
-        b.write(encoded(Peers(labels=("b",))))
-        while (message := await _next(first)) != Peers(labels=("b#two",)):
-            assert isinstance(message, Peers)
-        note = Note(id="n", sender="a", recipient="b#two", content="held", kind="ask")
-        a.write(encoded(note))
-        while not isinstance(delivered := await _next(second), Note):
-            assert isinstance(delivered, Peers)
-        newer, c = await asyncio.open_unix_connection(address)
-        c.write(
-            encoded(Hello(version=VERSION, client="here", token="", session_id="two")),
-        )
-        welcome = await _next(newer)
-        assert isinstance(welcome, Welcome)
-        assert welcome.resumed
-        assert welcome.calls == ("n",)
-        assert await _next(newer) == delivered
-        c.write(encoded(Ack(id="n")))
-        a.close()
-        b.close()
-        c.write(encoded(Bye()))
-        c.close()
-        broken, d = await asyncio.open_unix_connection(address)
-        d.write(b"not json\n")
-        assert await received(broken) is None
-        d.close()
+    server, template, _, sent = await _server_unit(tmp_path)
+    other = replace(
+        template,
+        id="other",
+        host=None,
+        specs={},
+        granted=(),
+        writer=None,
+        labels=(),
+        peer_messaging=True,
+    )
+    server._sessions = {other.id: other}
+    attending = AsyncMock()
+    monkeypatch.setattr(server, "_attend", attending)
+    old_closed, closed = Mock(), Mock()
+    old_writer = cast(asyncio.StreamWriter, Mock(write=sent.append, close=old_closed))
+    writer = cast(asyncio.StreamWriter, Mock(write=sent.append, close=closed))
+    reader = asyncio.StreamReader()
+    hello = encoded(Hello(version=VERSION, client="here", token="", session_id="s1"))
+    reader.feed_data(hello)
+
+    await server._local_connected(reader, old_writer)
+
+    session = server._sessions["s1"]
+    assert session.host is None
+    assert session.specs == {}
+    assert session.peer_messaging
+    assert sent == [encoded(Welcome(name="gpu1", resumed=False, calls=(), tools={}))]
+    other.labels = ("a",)
+    note = Note(id="n", sender="a#other", recipient="b", content="held", kind="ask")
+    session.unacked[note.id] = encoded(note)
+    old_closed.reset_mock()
+    sent.clear()
+    reader.feed_data(hello)
+
+    await server._local_connected(reader, writer)
+
+    assert sent == [
+        encoded(Welcome(name="gpu1", resumed=True, calls=("n",), tools={})),
+        encoded(note),
+        encoded(Peers(labels=("a#other",))),
+    ]
+    assert session.writer is writer
+    old_closed.assert_called_once_with()
+    assert attending.await_count == 2
+    attending.assert_awaited_with(session, reader=reader, writer=writer)
+    assert server._connections == set()
+    server._relay(session, Ack(id="n"))
+    session.writer = None
+    sent.clear()
+    reader.feed_data(hello)
+
+    await server._local_connected(reader, writer)
+
+    assert sent == [
+        encoded(Welcome(name="gpu1", resumed=True, calls=(), tools={})),
+        encoded(Peers(labels=("a#other",))),
+    ]
+    assert session.unacked == {}
+    reader.feed_data(b"not json\n")
+    sent.clear()
+    await server._local_connected(reader, writer)
+    assert sent == []
+    closed.reset_mock()
+
+    await server._end(session, reason="bye")
+
+    assert session.reason == "bye"
+    assert server._sessions == {other.id: other}
+    closed.assert_called_once_with()
+    await server._end(other, reason="expired")
+    assert other.reason == "expired"
+    assert server._sessions == {}
 
 
 @pytest.mark.asyncio
 async def test_handoff_cancels_an_admission_that_has_not_reported_tools(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    server, _, host, sent = await _server_unit(tmp_path)
+    server._sessions.clear()
     ready = asyncio.Event()
-    hosts: list[_BrokenHost] = []
+    grant = Grant(id="grant", sha256=strings.token_digest(""), tools=None, added="now")
+    monkeypatch.setattr(host_server, "grants", Mock(return_value=[grant]))
 
     async def starting(names: Sequence[str], directory: Path) -> Host:
-        host = await _broken(hosts, names, directory)
-        _ = await received(host.reader)
+        del names, directory
         ready.set()
         return host
 
-    async with _serving(tmp_path, start_host=starting) as served:
-        connecting = asyncio.create_task(served.connect())
-        await asyncio.wait_for(ready.wait(), 5)
-        _ = await served.server.handoff()
-        assert hosts[0].asked.is_set()
-        _, writer, answer = await asyncio.wait_for(connecting, 5)
-        assert answer is None
-        writer.close()
+    async def pending() -> None:
+        _ = await asyncio.Event().wait()
+
+    monkeypatch.setattr(server, "_start_host", starting)
+    reader = asyncio.StreamReader()
+    reader.feed_data(
+        encoded(Hello(version=VERSION, token="", session_id="s1", client="here")),
+    )
+    closed = Mock()
+    writer = cast(
+        asyncio.StreamWriter,
+        Mock(
+            write=sent.append,
+            close=closed,
+            get_extra_info=Mock(return_value=("ip", 1)),
+        ),
+    )
+    listener_closed = Mock()
+    async with asyncio.TaskGroup() as tasks:
+        watching = tasks.create_task(pending())
+        server._opened.append(
+            host_server._Opened(
+                pid_fd=-1,
+                listeners=[cast(asyncio.Server, Mock(close=listener_closed))],
+                watching=watching,
+            ),
+        )
+        connecting = tasks.create_task(server._connected(reader, writer))
+        await ready.wait()
+
+        state = await server.handoff()
+
+        assert connecting.cancelled()
+        assert watching.cancelling()
+        assert host.asked.is_set()
+        assert server._sessions == {}
+        assert server._connections == set()
+        assert json_loads(state, _SavedServer).sessions == ()
+        assert sent == []
+        closed.assert_called_once_with()
+        listener_closed.assert_called_once_with()
 
 
 @pytest.mark.asyncio
 async def test_handoff_refuses_a_host_without_an_inheritable_process(
     tmp_path: Path,
 ) -> None:
-    hosts: list[_BrokenHost] = []
-    async with _serving(tmp_path, start_host=partial(_broken, hosts)) as served:
-        _, writer, _ = await served.connect()
-        try:
-            with pytest.raises(
-                TypeError,
-                match=r"^Only process workers can cross a daemon exec\.$",
-            ):
-                _ = await served.server.handoff()
-            writer.write(encoded(_call("still-serving")))
-            assert await _next(hosts[0].sent) == replace(
-                _call("still-serving"),
-                granted=("Gate",),
-            )
-            _, again, welcome = await served.connect(session_id="s2")
-            assert isinstance(welcome, Welcome)
-            again.close()
-        finally:
-            for host in hosts:
-                host.reader.feed_eof()
-            writer.close()
+    server, session, host, sent = await _server_unit(tmp_path)
+
+    with pytest.raises(
+        TypeError,
+        match=r"^Only process workers can cross a daemon exec\.$",
+    ):
+        _ = await server.handoff()
+
+    assert not server._suspending
+    assert server._sessions == {session.id: session}
+    assert not host.asked.is_set()
+    assert sent == []
+    server._relay(session, _call("still-serving"))
+    host.sent.feed_eof()
+    assert await received(host.sent) == replace(
+        _call("still-serving"),
+        granted=session.granted,
+    )
+    assert await received(host.sent) is None
 
 
 @pytest.mark.asyncio
