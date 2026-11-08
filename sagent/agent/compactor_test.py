@@ -21,6 +21,7 @@ import pytest
 from sagent.agent.agent import Agent, spent
 from sagent.agent.compactor import (
     SummaryCompactor,
+    _asset,
     _request_tokens,
     halve,
     summary_tokens,
@@ -2934,22 +2935,32 @@ async def test_every_prefix_call_reserves_reply_room_and_charges_the_agent(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("chars", range(40_000, 60_000, 400))
+@pytest.mark.parametrize("offset", [-1, 0, 1], ids=["below", "at", "above"])
 async def test_an_audits_request_and_its_summary_fit_the_window(
     tmp_path: Path,
-    chars: int,
+    offset: int,
 ) -> None:
     """As the trigger requires: ``B + s + p ≤ R`` and ``B + s + p + S(B) ≤ C``."""
-    window = 14_000
+    window = 4_000
     provider, agent, compactor = _auditing(
         tmp_path,
-        *[_Answer(summary="s")] * 4,
+        *[_Answer(summary="s")] * 2,
         window=window,
     )
+    fixed = (
+        sum(
+            len(_asset(name))
+            for name in ("compactor_system", "compactor_session_audit")
+        )
+        / 4
+    )
+    body_tokens = int(compactor._room(fixed)) + offset
+    chars = 4 * body_tokens - len("L1 USER: ") - len("L2 AGENT: ok")
     _hold(agent, (_user("a" * chars), _turn("ok")))
 
     _ = await _compact(compactor, agent, agent.runtime.context().messages)
 
+    assert len(provider.requests) == (2 if offset > 0 else 1)
     audit = _instruction(provider.requests[-1])
     body, _, session = audit.rpartition("\n\n<session>\n")
     lines = session.removesuffix("\n</session>").splitlines()

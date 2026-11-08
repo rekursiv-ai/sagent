@@ -227,6 +227,24 @@ async def test_a_turns_routing_token_is_sent_back_within_that_turn_only() -> Non
     assert sent == [None, "tok-1", None]
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"request_kind": "turn", "thread_id": "a"},
+        {"request_kind": "turn", "turn_id": "a:1"},
+    ],
+)
+def test_an_unidentified_reply_keeps_no_turn_routing_state(
+    metadata: dict[str, str],
+) -> None:
+    sub = OpenAISub()
+    sub.answered(
+        {"session-id": "s", "x-codex-turn-metadata": json_dumps(metadata)},
+        {"x-codex-turn-state": "unidentified"},
+    )
+    assert sub._turn_states == {}
+
+
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("auth")
 async def test_no_temperature_is_sent_even_to_a_model_that_cannot_reason() -> None:
