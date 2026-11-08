@@ -8,9 +8,11 @@ from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, Mock
 
 import asyncio
+import contextlib
 import errno
 import logging
 import os
+import shlex
 import signal
 import socket
 import time
@@ -27,6 +29,8 @@ from sagent.host import (
 from sagent.host.server import Host, Server, _ChildHost, _SavedServer, child_host
 from sagent.host.shared import ServedGate
 from sagent.host.strings import Address, Grant, ServeDirs
+from sagent.host.testing import Gate, LocalHost
+from sagent.host.tls import client_context
 from sagent.host.wire import (
     MAX_LINE_BYTES,
     VERSION,
@@ -49,6 +53,7 @@ from sagent.host.wire import (
     Refused,
     Result,
     Resume,
+    Streams,
     Tools,
     ToolsChanged,
     ToolSpec,
@@ -58,17 +63,82 @@ from sagent.host.wire import (
 )
 from sagent.lib.posix.child import Child
 from sagent.session.types import FunctionResult, ReadResult, ToolErrorResult
+from sagent.tools.read import Read
+from sagent.tools.remote import Link, RemoteSession
 
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import AsyncGenerator, Mapping, Sequence
     from pathlib import Path
 
+    from sagent.host.server import HostStarter
     from sagent.host.wire import Message
 
 
 def _call(call_id: str, tool: str = "Gate", **arguments: PlainTree) -> Call:
     return Call(id=call_id, agent="Agent", window="w1", tool=tool, arguments=arguments)
+
+
+@dataclass(slots=True, kw_only=True)
+class _Served:
+    server: Server
+    dirs: ServeDirs
+    host: LocalHost
+    gate: Gate
+    token: str
+
+    async def connect(
+        self,
+    ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, Message | None]:
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1",
+            self.server.ports[0],
+            ssl=client_context(),
+            limit=MAX_LINE_BYTES,
+        )
+        writer.write(
+            encoded(
+                Hello(
+                    version=VERSION,
+                    token=self.token,
+                    session_id="s1",
+                    client="laptop",
+                    tools=None,
+                ),
+            ),
+        )
+        return reader, writer, await asyncio.wait_for(received(reader), 5)
+
+
+@contextlib.asynccontextmanager
+async def _serving(tmp_path: Path) -> AsyncGenerator[_Served]:
+    """Yield a server that listens for TLS on localhost, with one string added."""
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    gate = Gate()
+    host = LocalHost(tools={"Gate": gate, "Read": Read()})
+    async with Server(
+        dirs,
+        listen=[Address(host="127.0.0.1", port=0)],
+        tools=("Gate", "Read"),
+        name="gpu1",
+        poll_sec=0.01,
+        start_host=host,
+    ) as server:
+        (made,) = await strings.add(dirs)
+        yield _Served(server=server, dirs=dirs, host=host, gate=gate, token=made.token)
+
+
+async def _next(reader: asyncio.StreamReader) -> Message | None:
+    return await asyncio.wait_for(received(reader), 5)
+
+
+def _events(served: _Served) -> list[dict[str, str]]:
+    """Return each line of ``server.jsonl``: its event, session and detail."""
+    lines = (served.dirs.state / "server.jsonl").read_text().splitlines()
+    return [
+        {k: v for k, v in json_loads(line, dict[str, str]).items() if k in _SHOWN}
+        for line in lines
+    ]
 
 
 def test_missing_grants_have_no_modification_time(tmp_path: Path) -> None:
@@ -100,7 +170,7 @@ async def test_a_holder_of_a_string_is_welcomed_with_a_new_host(
     writer = cast(asyncio.StreamWriter, Mock(write=sent.append))
     hello = Hello(version=VERSION, token="", session_id="s1", client="laptop")
 
-    session = await server._admit(hello, ip="127.0.0.1", writer=writer)
+    session = await server._admit(hello, peer="127.0.0.1", writer=writer, grant=None)
 
     assert session is not None
     assert session.host is host
@@ -189,8 +259,9 @@ async def test_a_bad_hello_is_refused(
 
     admitted = await server._admit(
         hello,
-        ip="127.0.0.1",
+        peer="127.0.0.1",
         writer=cast(asyncio.StreamWriter, Mock(write=sent.append)),
+        grant=None,
     )
 
     assert admitted is None
@@ -226,8 +297,9 @@ async def test_a_session_of_another_string_is_refused(
 
     admitted = await server._admit(
         Hello(version=VERSION, token="", session_id="s1", client="laptop"),
-        ip="127.0.0.1",
+        peer="127.0.0.1",
         writer=cast(asyncio.StreamWriter, Mock(write=sent.append)),
+        grant=None,
     )
 
     assert admitted is None
@@ -332,7 +404,7 @@ async def test_overlapping_admissions_reserve_one_session_owner(
         ]
     sent: list[bytes] = []
     writer = cast(asyncio.StreamWriter, Mock(write=sent.append))
-    session = await server._admit(hello, ip="ip", writer=writer)
+    session = await server._admit(hello, peer="ip", writer=writer, grant=None)
     assert session is not None
     assert session is server._sessions["s1"]
     assert sent == [
@@ -430,7 +502,10 @@ async def test_a_client_gets_only_the_tools_granted_and_asked_for(
     writer = cast(asyncio.StreamWriter, Mock(write=sent.append))
     hello = Hello(version=VERSION, token="", session_id="s1", client="laptop")
 
-    assert await server._admit(hello, ip="127.0.0.1", writer=writer) is session
+    assert (
+        await server._admit(hello, peer="127.0.0.1", writer=writer, grant=None)
+        is session
+    )
     assert sent == [
         encoded(
             Welcome(
@@ -462,8 +537,9 @@ async def test_a_client_gets_only_the_tools_granted_and_asked_for(
     assert (
         await server._admit(
             replace(hello, tools=("Gate",)),
-            ip="127.0.0.1",
+            peer="127.0.0.1",
             writer=writer,
+            grant=None,
         )
         is session
     )
@@ -500,7 +576,10 @@ async def test_a_reconnect_gets_what_finished_while_it_was_gone(
     writer = cast(asyncio.StreamWriter, Mock(write=sent.append))
     hello = Hello(version=VERSION, token="", session_id="s1", client="laptop")
 
-    assert await server._admit(hello, ip="127.0.0.1", writer=writer) is session
+    assert (
+        await server._admit(hello, peer="127.0.0.1", writer=writer, grant=None)
+        is session
+    )
     assert sent == [
         encoded(
             Welcome(name="gpu1", resumed=True, calls=("1",), tools=session.digests()),
@@ -510,7 +589,10 @@ async def test_a_reconnect_gets_what_finished_while_it_was_gone(
     server._relay(session, Ack(id="1"))
     sent.clear()
 
-    assert await server._admit(hello, ip="127.0.0.1", writer=writer) is session
+    assert (
+        await server._admit(hello, peer="127.0.0.1", writer=writer, grant=None)
+        is session
+    )
     assert sent == [
         encoded(Welcome(name="gpu1", resumed=True, calls=(), tools=session.digests())),
     ]
@@ -594,6 +676,39 @@ async def test_revoking_a_string_ends_only_its_hosted_sessions(
         assert server._sessions == {session.id: session, local.id: local}
     assert server._sessions[local.id] is local
     assert local.reason == ""
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_regrant_leaves_a_session_with_no_host_alone(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server, session, _, sent = await _server_unit(tmp_path)
+    session.host = None
+    monkeypatch.setattr(host_server, "grants", Mock(return_value=[]))
+    ending = AsyncMock()
+    monkeypatch.setattr(server, "_end", ending)
+
+    await server._regrant()
+
+    ending.assert_not_awaited()
+    assert sent == []
+
+
+@pytest.mark.asyncio
+async def test_a_host_that_pauses_while_the_server_suspends_ends_its_pump(
+    tmp_path: Path,
+) -> None:
+    server, session, host, sent = await _server_unit(tmp_path)
+    server._suspending = True
+    later = Result(id="r1", record=FunctionResult(call_id="", name="Gate"))
+    host.reader.feed_data(encoded(Paused()) + encoded(later))
+
+    async with asyncio.timeout(5):
+        await server._pump(session, host=cast(Host, host))
+
+    assert session.paused.is_set()
     assert sent == []
 
 
@@ -904,8 +1019,9 @@ async def test_a_reconnect_takes_the_session_from_the_old_connection(
 
     admitted = await server._admit(
         Hello(version=VERSION, token="", session_id="s1", client="laptop"),
-        ip="new-address",
+        peer="new-address",
         writer=writer,
+        grant=None,
     )
 
     assert admitted is session
@@ -915,6 +1031,21 @@ async def test_a_reconnect_takes_the_session_from_the_old_connection(
         encoded(Welcome(name="gpu1", resumed=True, calls=(), tools=session.digests())),
     ]
     closed.assert_called_once_with()
+
+
+# Not sh: dash redirects no descriptor above 9.
+def _shell(script: str, *, first: Message) -> HostStarter:
+    """Return a host that says ``first``, then runs ``script``, in bash."""
+    said = shlex.quote(encoded(first).decode().rstrip("\n"))
+    return partial(
+        child_host,
+        command=(
+            "bash",
+            "-c",
+            f'exec 3<&"$2"; printf "%s\\n" {said} >&3; {script}',
+            "bash",
+        ),
+    )
 
 
 _TOOLS = Tools(tools={"Gate": ToolSpec(description="d", schema={})})
@@ -1170,6 +1301,8 @@ async def _server_unit(
         listen=[],
         name="gpu1",
     )
+    # As ``aopen`` leaves it: a server never opened is closing, and opens no session.
+    server._closing = False
     server._sessions[session.id] = session
     return server, session, host, sent
 
@@ -1234,7 +1367,10 @@ async def test_a_hosts_notes_and_peers_reach_the_client_until_acked(
             writer = cast(asyncio.StreamWriter, Mock(write=sent.append))
             hello = Hello(version=VERSION, token="", session_id="s1", client="laptop")
 
-            assert await server._admit(hello, ip="ip", writer=writer) is session
+            assert (
+                await server._admit(hello, peer="ip", writer=writer, grant=None)
+                is session
+            )
             assert sent == [
                 encoded(
                     Welcome(
@@ -1250,7 +1386,10 @@ async def test_a_hosts_notes_and_peers_reach_the_client_until_acked(
             server._relay(session, Ack(id="n1"))
             sent.clear()
 
-            assert await server._admit(hello, ip="ip", writer=writer) is session
+            assert (
+                await server._admit(hello, peer="ip", writer=writer, grant=None)
+                is session
+            )
             assert sent == [
                 encoded(
                     Welcome(
@@ -1684,8 +1823,9 @@ async def test_tls_session_ids_cannot_escape_the_session_directory(
 
     admitted = await server._admit(
         Hello(version=VERSION, token="", session_id=session_id, client="laptop"),
-        ip="127.0.0.1",
+        peer="127.0.0.1",
         writer=cast(asyncio.StreamWriter, Mock(write=sent.append)),
+        grant=None,
     )
 
     assert admitted is None
@@ -2345,6 +2485,607 @@ async def test_reaping_kills_a_worker_that_ignores_its_input_eof(
     await host_server._reap(123)
     assert killed == [(123, signal.SIGKILL)]
     assert reaped == [(123, 0)]
+
+
+_GRANT = Grant(id="tok_relay", sha256="x", tools=None, added="2026-11-06")
+
+
+@contextlib.asynccontextmanager
+async def _adopting(
+    tmp_path: Path,
+    *,
+    start_host: HostStarter | None = None,
+) -> AsyncGenerator[_Served]:
+    """Yield a server that listens nowhere; its connections come by ``adopt``."""
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    gate = Gate()
+    host = LocalHost(tools={"Gate": gate, "Read": Read()})
+    async with Server(
+        dirs,
+        listen=[],
+        tools=("Gate", "Read"),
+        poll_sec=0.01,
+        start_host=start_host or host,
+    ) as server:
+        yield _Served(server=server, dirs=dirs, host=host, gate=gate, token="")
+
+
+async def _adopt(
+    served: _Served,
+    *,
+    version: int = VERSION,
+    grant: Grant = _GRANT,
+) -> tuple[
+    asyncio.StreamReader,
+    asyncio.StreamWriter,
+    Message | None,
+    asyncio.Task[None],
+]:
+    """Adopt one end of a socket pair, say hello with no token on the other."""
+    near, far = socket.socketpair()
+    server_streams = await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES)
+    reader, writer = await asyncio.open_connection(sock=far, limit=MAX_LINE_BYTES)
+    adopted = asyncio.create_task(
+        served.server.adopt(server_streams, peer="relay:tok", grant=grant),
+    )
+    writer.write(
+        encoded(
+            Hello(
+                version=version,
+                token="",
+                session_id="s1",
+                client="laptop",
+                tools=None,
+            ),
+        ),
+    )
+    return reader, writer, await _next(reader), adopted
+
+
+@pytest.mark.asyncio
+async def test_adopt_serves_a_connection_with_no_token(tmp_path: Path) -> None:
+    async with _adopting(tmp_path) as served:
+        reader, writer, welcome, adopted = await _adopt(served)
+        assert isinstance(welcome, Welcome)
+        assert welcome.resumed is False
+        assert sorted(welcome.tools) == ["Gate", "Read"]
+        sessions = strings.listing(served.dirs).sessions
+        assert sessions is not None
+        assert [row.ip for row in sessions] == ["relay:tok"]
+        writer.write(encoded(Bye()))
+        await asyncio.wait_for(adopted, 5)
+        assert await _next(reader) is None
+        writer.close()
+
+
+@pytest.mark.parametrize(
+    "start_host",
+    [
+        pytest.param(AsyncMock(side_effect=OSError("no program")), id="no-program"),
+        pytest.param(_shell("exit 0", first=Bye()), id="says-no-tools"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_host_that_will_not_start_is_said_though_the_adoption_ends_clean(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    start_host: HostStarter,
+) -> None:
+    async with _adopting(tmp_path, start_host=start_host) as served:
+        _, writer, said, adopted = await _adopt(served)
+        assert said is None
+        await asyncio.wait_for(adopted, 5)
+        writer.close()
+    [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert "The host of session s1 did not start" in warning.getMessage()
+
+
+@pytest.mark.asyncio
+async def test_adopt_still_refuses_another_version(tmp_path: Path) -> None:
+    async with _adopting(tmp_path) as served:
+        _, writer, refused, adopted = await _adopt(served, version=VERSION + 1)
+        assert isinstance(refused, Refused)
+        assert "upgrade sagent here" in refused.reason
+        await asyncio.wait_for(adopted, 5)
+        assert served.host.started == []
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_an_adopted_session_resumes_across_a_drop(tmp_path: Path) -> None:
+    async with _adopting(tmp_path) as served:
+        _, first, _, dropped = await _adopt(served)
+        first.write(encoded(_call("1")))
+        await asyncio.wait_for(served.gate.started.wait(), 5)
+        first.close()
+        await asyncio.wait_for(dropped, 5)
+        _, second, welcome, adopted = await _adopt(served)
+        assert isinstance(welcome, Welcome)
+        assert welcome.resumed is True
+        assert welcome.calls == ("1",)
+        assert len(served.host.started) == 1
+        second.close()
+        await asyncio.wait_for(adopted, 5)
+
+
+@pytest.mark.asyncio
+async def test_a_real_endpoint_through_adopt(tmp_path: Path) -> None:
+    (tmp_path / "a.txt").write_text("hello\n")
+    async with _adopting(tmp_path) as served:
+        adopted: list[asyncio.Task[None]] = []
+
+        async def dial() -> Streams:
+            near, far = socket.socketpair()
+            adopted.append(
+                asyncio.create_task(
+                    served.server.adopt(
+                        await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES),
+                        peer="relay:tok",
+                        grant=_GRANT,
+                    ),
+                ),
+            )
+            return await asyncio.open_connection(sock=far, limit=MAX_LINE_BYTES)
+
+        async with RemoteSession(
+            [Link(dial=dial, where="relay")],
+            client="laptop",
+            retry_sec=0.01,
+        ) as session:
+            (endpoint,) = session.endpoints().values()
+            async with asyncio.timeout(5):
+                await endpoint.until(lambda e: e.up)
+                result = await endpoint.call(
+                    agent="Agent",
+                    window="w1",
+                    tool="Read",
+                    arguments={"file_path": str(tmp_path / "a.txt")},
+                )
+        assert isinstance(result, ReadResult)
+        assert "hello" in (result.content or "")
+
+
+@pytest.mark.asyncio
+async def test_a_listening_server_still_refuses_an_empty_token(tmp_path: Path) -> None:
+    async with _serving(tmp_path) as served:
+        reader, writer = await asyncio.open_connection(
+            "127.0.0.1",
+            served.server.ports[0],
+            ssl=client_context(),
+            limit=MAX_LINE_BYTES,
+        )
+        writer.write(
+            encoded(
+                Hello(
+                    version=VERSION,
+                    token="",
+                    session_id="s1",
+                    client="x",
+                    tools=None,
+                ),
+            ),
+        )
+        refused = await _next(reader)
+        assert isinstance(refused, Refused)
+        assert "No string of this server holds that token" in refused.reason
+        assert served.host.started == []
+        writer.close()
+
+
+@pytest.mark.asyncio
+async def test_a_second_grant_cannot_take_an_adopted_session(tmp_path: Path) -> None:
+    async with _adopting(tmp_path) as served:
+        _, first, welcome, held = await _adopt(served)
+        assert isinstance(welcome, Welcome)
+        other = Grant(id="tok_other", sha256="y", tools=None, added="2026-11-06")
+        reader, second, refused, rejected = await _adopt(served, grant=other)
+        assert isinstance(refused, Refused)
+        assert "belongs to another string" in refused.reason
+        await asyncio.wait_for(rejected, 5)
+        assert await _next(reader) is None
+        assert not held.done()
+        first.close()
+        second.close()
+        await asyncio.wait_for(held, 5)
+
+
+@pytest.mark.asyncio
+async def test_a_server_never_opened_adopts_nothing(tmp_path: Path) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    server = Server(dirs, listen=[], tools=("Read",), start_host=LocalHost(tools={}))
+    near, far = socket.socketpair()
+    streams = await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES)
+    reader, writer = await asyncio.open_connection(sock=far, limit=MAX_LINE_BYTES)
+    await asyncio.wait_for(server.adopt(streams, peer="relay:tok", grant=_GRANT), 5)
+    refused = await _next(reader)
+    assert isinstance(refused, Refused)
+    assert refused.reason == "The server is stopping."
+    writer.close()
+
+
+@pytest.mark.asyncio
+async def test_a_closed_server_opens_again_and_adopts(tmp_path: Path) -> None:
+    async with _adopting(tmp_path) as served:
+        pass
+    await served.server.aopen()
+    try:
+        _, writer, welcome, adopted = await _adopt(served)
+        assert isinstance(welcome, Welcome)
+        writer.write(encoded(Bye()))
+        await asyncio.wait_for(adopted, 5)
+        writer.close()
+    finally:
+        await served.server.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_closed_server_adopts_nothing(tmp_path: Path) -> None:
+    async with _adopting(tmp_path) as served:
+        pass
+    near, far = socket.socketpair()
+    streams = await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES)
+    await asyncio.wait_for(
+        served.server.adopt(streams, peer="relay:tok", grant=_GRANT),
+        5,
+    )
+    reader, writer = await asyncio.open_connection(sock=far, limit=MAX_LINE_BYTES)
+    refused = await _next(reader)
+    assert isinstance(refused, Refused)
+    assert refused.reason == "The server is stopping."
+    assert await _next(reader) is None
+    writer.close()
+    assert served.host.started == []
+
+
+@pytest.mark.asyncio
+async def test_closing_cancels_an_adoption_still_waiting_for_its_hello(
+    tmp_path: Path,
+) -> None:
+    async with _adopting(tmp_path) as served:
+        near, far = socket.socketpair()
+        streams = await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES)
+        waiting = asyncio.create_task(
+            served.server.adopt(streams, peer="relay:tok", grant=_GRANT),
+        )
+        await asyncio.sleep(0.05)
+    assert waiting.done()
+    far.close()
+    assert served.host.started == []
+
+
+@pytest.mark.asyncio
+async def test_a_hello_arriving_as_the_server_stops_opens_no_host(
+    tmp_path: Path,
+) -> None:
+    async with _adopting(tmp_path) as served:
+        near, far = socket.socketpair()
+        streams = await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES)
+        reader, writer = await asyncio.open_connection(sock=far, limit=MAX_LINE_BYTES)
+        adopted = asyncio.create_task(
+            served.server.adopt(streams, peer="relay:tok", grant=_GRANT),
+        )
+        await asyncio.sleep(0.05)
+        served.server._closing = True
+        writer.write(
+            encoded(
+                Hello(
+                    version=VERSION,
+                    token="",
+                    session_id="s1",
+                    client="laptop",
+                    tools=None,
+                ),
+            ),
+        )
+        refused = await _next(reader)
+        assert isinstance(refused, Refused)
+        assert "stopping" in refused.reason
+        await asyncio.wait_for(adopted, 5)
+        assert served.host.started == []
+        writer.close()
+        served.server._closing = False
+
+
+@pytest.mark.asyncio
+async def test_a_failed_adoption_raises_to_its_caller(tmp_path: Path) -> None:
+    async def failing(*_: object) -> Host:
+        raise RuntimeError("no host")
+
+    async with _adopting(tmp_path, start_host=failing) as served:
+        near, far = socket.socketpair()
+        streams = await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES)
+        far_streams = await asyncio.open_connection(sock=far, limit=MAX_LINE_BYTES)
+        far_streams[1].write(
+            encoded(
+                Hello(
+                    version=VERSION,
+                    token="",
+                    session_id="s1",
+                    client="laptop",
+                    tools=None,
+                ),
+            ),
+        )
+        with pytest.raises(RuntimeError, match="no host"):
+            await asyncio.wait_for(
+                served.server.adopt(streams, peer="relay:tok", grant=_GRANT),
+                5,
+            )
+        far_streams[1].close()
+
+
+@pytest.mark.asyncio
+async def test_adding_a_string_does_not_end_an_adopted_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with _adopting(tmp_path) as served:
+        reader, writer, welcome, adopted = await _adopt(served)
+        assert isinstance(welcome, Welcome)
+        regranted = asyncio.Event()
+        regrant = served.server._regrant
+
+        async def regranting() -> None:
+            await regrant()
+            regranted.set()
+
+        monkeypatch.setattr(served.server, "_regrant", regranting)
+        _ = await strings.add(served.dirs)
+        await asyncio.wait_for(regranted.wait(), 5)
+        assert not adopted.done()
+        sessions = strings.listing(served.dirs).sessions
+        assert sessions is not None
+        assert [row.connected for row in sessions] == [True]
+        writer.close()
+        await asyncio.wait_for(adopted, 5)
+        del reader
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_snapshot", [False, True])
+async def test_an_adopted_session_crosses_a_handoff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    old_snapshot: bool,
+) -> None:
+    """A snapshot with no ``adopted`` restores; one with it is spared the revoke."""
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    workers = LocalHost(tools={"Gate": Gate()})
+    originals: list[_ChildHost] = []
+
+    async def start(tools: Sequence[str], directory: Path) -> Host:
+        running = await workers(tools, directory)
+        host = _ChildHost(
+            child=None,
+            pid=123,
+            reader=running.reader,
+            writer=running.writer,
+        )
+        originals.append(host)
+        return host
+
+    def waitpid(pid: int, options: int) -> tuple[int, int]:
+        del options
+        return pid, 0
+
+    monkeypatch.setattr(os, "waitpid", waitpid)
+    first = Server(dirs, listen=[], tools=["Gate"], start_host=start)
+    await first.aopen()
+    reader, writer, welcome, adopted = await _adopt(
+        _Served(
+            server=first,
+            dirs=dirs,
+            host=workers,
+            gate=Gate(),
+            token="",
+        ),
+    )
+    assert isinstance(welcome, Welcome)
+    state = await first.handoff()
+    await asyncio.wait_for(adopted, 5)
+    saved = json_loads(state, dict[str, PlainTree])
+    sessions = cast("list[dict[str, PlainTree]]", saved["sessions"])
+    assert [row["adopted"] for row in sessions] == [True]
+    if old_snapshot:
+        for row in sessions:
+            del row["adopted"]
+        state = json_dumps(saved)
+    first._sessions.clear()
+    for host in originals:
+        host.writer.close()
+    await first.aclose()
+    writer.close()
+    del reader
+    second = Server(dirs, listen=[], tools=["Gate"], handoff=state)
+    await second.aopen()
+    try:
+        restored = second._sessions.get("s1")
+        if old_snapshot:
+            # No record of an adoption: the session falls back to a string's rules,
+            # and none of this server's strings is ``tok_relay``.
+            assert restored is None
+        else:
+            assert restored is not None
+            assert restored.adopted
+    finally:
+        await second.aclose()
+
+
+@pytest.mark.asyncio
+async def test_a_relay_link_resumes_a_dropped_call_and_removal_ends_the_session(
+    tmp_path: Path,
+) -> None:
+    async with _adopting(tmp_path) as served:
+        adopted: list[asyncio.Task[None]] = []
+        clients: list[asyncio.StreamWriter] = []
+
+        async def dial() -> Streams:
+            near, far = socket.socketpair()
+            adopted.append(
+                asyncio.create_task(
+                    served.server.adopt(
+                        await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES),
+                        peer="relay:tok",
+                        grant=_GRANT,
+                    ),
+                ),
+            )
+            streams = await asyncio.open_connection(sock=far, limit=MAX_LINE_BYTES)
+            clients.append(streams[1])
+            return streams
+
+        async with RemoteSession(
+            [Link(dial=dial, where="relay")],
+            client="laptop",
+            retry_sec=0.01,
+        ) as session:
+            (endpoint,) = session.endpoints().values()
+            async with asyncio.timeout(5):
+                await endpoint.until(lambda e: e.up)
+                calling = asyncio.create_task(
+                    endpoint.call(
+                        agent="Agent",
+                        window="w1",
+                        tool="Gate",
+                        arguments={},
+                    ),
+                )
+                await served.gate.started.wait()
+                clients[0].close()
+                await endpoint.until(lambda e: len(clients) == 2 and e.up)
+                served.gate.opened.set()
+                result = await calling
+            assert result.is_error is not True
+            sessions = strings.listing(served.dirs).sessions
+            assert sessions is not None
+            assert [row.connected for row in sessions] == [True]
+            session.set_links([])
+            async with asyncio.timeout(5):
+                await asyncio.gather(*adopted)
+            assert strings.listing(served.dirs).sessions == ()
+        assert len(adopted) == 2
+
+
+def _hello_line() -> bytes:
+    return encoded(
+        Hello(version=VERSION, token="", session_id="s1", client="laptop", tools=None),
+    )
+
+
+@pytest.mark.asyncio
+async def test_closing_answers_a_call_in_flight_on_a_token_connection(
+    tmp_path: Path,
+) -> None:
+    async with _serving(tmp_path) as served:
+        reader, writer, _ = await served.connect()
+        writer.write(encoded(_call("1")))
+        await asyncio.wait_for(served.gate.started.wait(), 5)
+    cancelled = await _next(reader)
+    assert isinstance(cancelled, Result)
+    assert (cancelled.id, cancelled.record.stub) == ("1", "cancelled")
+    assert await _next(reader) is None
+    assert [e["event"] for e in _events(served)] == ["start", "connect", "end", "stop"]
+    writer.close()
+
+
+@pytest.mark.asyncio
+async def test_closing_answers_a_call_in_flight_on_an_adopted_connection(
+    tmp_path: Path,
+) -> None:
+    async with _adopting(tmp_path) as served:
+        reader, writer, _, adopted = await _adopt(served)
+        writer.write(encoded(_call("1")))
+        await asyncio.wait_for(served.gate.started.wait(), 5)
+    cancelled = await _next(reader)
+    assert isinstance(cancelled, Result)
+    assert (cancelled.id, cancelled.record.stub) == ("1", "cancelled")
+    assert await _next(reader) is None
+    await asyncio.wait_for(adopted, 5)
+    assert [e["event"] for e in _events(served)] == ["start", "connect", "end", "stop"]
+    writer.close()
+
+
+@pytest.mark.asyncio
+async def test_a_suspended_server_does_not_adopt(tmp_path: Path) -> None:
+    async with _adopting(tmp_path) as served:
+        snapshot = await served.server.handoff()
+        near, far = socket.socketpair()
+        streams = await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES)
+        reader, writer = await asyncio.open_connection(sock=far, limit=MAX_LINE_BYTES)
+        await asyncio.wait_for(
+            served.server.adopt(streams, peer="relay:tok", grant=_GRANT),
+            5,
+        )
+        refused = await _next(reader)
+        assert isinstance(refused, Refused)
+        assert refused.reason == "The server is stopping."
+        assert await _next(reader) is None
+        writer.close()
+        await served.server.resume(snapshot)
+        _, again, welcome, adopted = await _adopt(served)
+        assert isinstance(welcome, Welcome)
+        again.close()
+        await asyncio.wait_for(adopted, 5)
+
+
+@pytest.mark.asyncio
+async def test_a_hello_arriving_while_suspended_opens_no_host(tmp_path: Path) -> None:
+    async with _adopting(tmp_path) as served:
+        snapshot = await served.server.handoff()
+        near, far = socket.socketpair()
+        streams = await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES)
+        reader, writer = await asyncio.open_connection(sock=far, limit=MAX_LINE_BYTES)
+        writer.write(_hello_line())
+        await asyncio.wait_for(
+            served.server._serve_connection(
+                streams,
+                peer="relay:tok",
+                grant=_GRANT,
+            ),
+            5,
+        )
+        refused = await _next(reader)
+        assert isinstance(refused, Refused)
+        assert "stopping" in refused.reason
+        assert served.host.started == []
+        writer.close()
+        await served.server.resume(snapshot)
+
+
+@pytest.mark.asyncio
+async def test_closing_ends_a_session_that_opened_while_connections_were_cancelled(
+    tmp_path: Path,
+) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    local = LocalHost(tools={"Gate": Gate(), "Read": Read()})
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def stubborn(names: Sequence[str], directory: Path) -> Host:
+        entered.set()
+        with contextlib.suppress(asyncio.CancelledError):
+            await release.wait()
+        return await local(names, directory)
+
+    server = Server(dirs, listen=[], tools=("Gate", "Read"), start_host=stubborn)
+    await server.aopen()
+    near, far = socket.socketpair()
+    streams = await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES)
+    reader, writer = await asyncio.open_connection(sock=far, limit=MAX_LINE_BYTES)
+    adopted = asyncio.create_task(
+        server.adopt(streams, peer="relay:tok", grant=_GRANT),
+    )
+    writer.write(_hello_line())
+    await asyncio.wait_for(entered.wait(), 5)
+    closing = asyncio.create_task(server.aclose())
+    assert isinstance(await _next(reader), Welcome)
+    writer.close()
+    await asyncio.wait_for(closing, 5)
+    await asyncio.wait_for(adopted, 5)
+    (host,) = local.started
+    assert host.task.done()
+    logged = (dirs.state / "server.jsonl").read_text().splitlines()
+    events = [json_loads(line, dict[str, str])["event"] for line in logged]
+    assert events[-2:] == ["end", "stop"]
 
 
 if __name__ == "__main__":

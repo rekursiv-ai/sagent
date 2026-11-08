@@ -189,6 +189,11 @@ class _Setup:
     seen: list[RuntimeEvent]
 
 
+def _this_process() -> str:
+    """Return how a refusal names this process as a lock's holder; only Linux knows."""
+    return f"pid {os.getpid()}" if Path("/proc/locks").exists() else "another process"
+
+
 def _setup(
     tmp_path: Path,
     *replies: Reply,
@@ -1572,7 +1577,7 @@ async def test_a_child_that_cannot_be_rebuilt_is_skipped(
     )
     assert gone.startswith("not resuming agent 'gone': unknown provider 'other'")
     assert locked == (
-        f"not resuming agent 'locked': Journal {held} is open in pid {os.getpid()}."
+        f"not resuming agent 'locked': Journal {held} is open in {_this_process()}."
     )
 
 
@@ -2026,7 +2031,7 @@ async def test_a_watcher_that_cannot_open_is_refused_or_skipped_on_resume(
         r.getMessage() for r in caplog.records if r.name == agent_spawn.__name__
     )
     assert skipped == (
-        f"not resuming watcher 'watcher': Journal {held} is open in pid {os.getpid()}."
+        f"not resuming watcher 'watcher': Journal {held} is open in {_this_process()}."
     )
 
 

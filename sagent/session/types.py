@@ -31,7 +31,7 @@ from typing import (
     override,
 )
 
-from treekle import PlainTree, from_plain, immutable, to_plain
+from treekle import PlainTree, ReadError, from_plain, immutable, to_plain
 
 from sagent.model.capability import SummaryKind, ThinkingEffort
 
@@ -264,6 +264,12 @@ class ToolResult:
     context_id: int | None = None
     timestamp: str | None = None
     call_id: str
+    wire_id: str = ""
+    """The id a call run on another machine went by on the wire, which a relay
+    between logs it by; ``""`` for a call run here. Not ``call_id``: the model's ids
+    are unique only within one agent's window, and a machine serves every agent of
+    a session."""
+
     is_error: bool | None = None
     stub: (
         Literal[
@@ -1044,12 +1050,17 @@ def stored_record(
       ReadError: ``plain`` does not read as ``target``.
 
     """
-    return from_plain(
-        _renamed(plain),
-        target,
-        classes=classes or record_classes(),
-        default_concrete_types=CONCRETE_TYPES,
-    )
+    try:
+        return from_plain(
+            _renamed(plain),
+            target,
+            classes=classes or record_classes(),
+            default_concrete_types=CONCRETE_TYPES,
+        )
+    # Treekle sets each field a tagged record holds, so one its class lacks fails
+    # on the class's slots; it does not read, as a field of no tagged record.
+    except AttributeError as error:
+        raise ReadError(str(error)) from error
 
 
 # ``WebSearchResults`` is now ``WebSearchResult``, which named one of its hits; a hit is

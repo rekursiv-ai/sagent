@@ -67,7 +67,7 @@ from sagent.runtime.exceptions import describe
 from sagent.runtime.types import Markers
 from sagent.session.types import ToolErrorResult, ToolResult
 from sagent.tools.builtin import builders
-from sagent.tools.remote import RemoteSession, saved
+from sagent.tools.remote import RemoteSession, saved, tls_link
 from sagent.tools.types import ToolContext
 
 
@@ -431,7 +431,7 @@ async def _main(flags: Flags) -> None:
         ModelCatalog() as catalog,
         Team(catalog=catalog) as team,
         FetchSession() as fetch,
-        RemoteSession(saved(), team=team) as remote,
+        RemoteSession(tuple(tls_link(r) for r in saved()), team=team) as remote,
     ):
         # An agent spawned here bills the same accounts as every sagent on the host.
         catalog.gate = fetch.gate = host_gate()

@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
-from sagent.host.strings import ConnectionString
 from sagent.settings.harvest import harvest
-from sagent.tools.remote import Endpoint, SavedRemote, saved
+from sagent.tools.remote import Endpoint, Link, SavedRemote, saved
 from sagent.tools.remote_settings import RemoteSettings
 
 
@@ -76,14 +75,14 @@ async def test_list_says_which_answer() -> None:
     wait_up, wait_down = AsyncMock(), AsyncMock()
     up = Mock(
         spec=Endpoint,
-        string=ConnectionString.from_url(saved()[0].url),
+        where="127.0.0.1:7777",
         up=True,
         tools={"Read": "digest"},
         until=wait_up,
     )
     down = Mock(
         spec=Endpoint,
-        string=ConnectionString.from_url(saved()[1].url),
+        where="127.0.0.1:1",
         up=False,
         error="connection refused",
         until=wait_down,
@@ -96,7 +95,13 @@ async def test_list_says_which_answer() -> None:
         return_value=lifecycle,
     ) as build:
         listed = (await actions["remote.list"].apply("")).splitlines()
-    build.assert_called_once_with(saved(), retry_sec=0.5)
+    build.assert_called_once()
+    links = cast(list[Link], build.call_args.args[0])
+    assert [(link.where, link.token) for link in links] == [
+        ("127.0.0.1:7777", "one"),
+        ("127.0.0.1:1", "two"),
+    ]
+    assert build.call_args.kwargs == {"retry_sec": 0.5}
     wait_up.assert_awaited_once()
     wait_down.assert_awaited_once()
     enter.assert_awaited_once()

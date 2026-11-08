@@ -25,7 +25,7 @@ from sagent.host.strings import ConnectionString
 from sagent.lib.files.owner_only import write_private
 from sagent.lib.userdirs import config_dir
 from sagent.settings.flags import ActionParser
-from sagent.tools.remote import RemoteSession, SavedRemote, saved
+from sagent.tools.remote import RemoteSession, SavedRemote, saved, tls_link
 
 
 if TYPE_CHECKING:
@@ -97,7 +97,10 @@ class RemoteSettings:
         kept = saved()
         if not kept:
             return "No servers. Save one with `sagent remote add`; see its --help."
-        async with RemoteSession(kept, retry_sec=self.connect_sec) as session:
+        async with RemoteSession(
+            [tls_link(r) for r in kept],
+            retry_sec=self.connect_sec,
+        ) as session:
             # Each answers, or fails to, within ``connect_sec``; one still trying
             # then is listed as down.
             with contextlib.suppress(TimeoutError):
@@ -106,7 +109,7 @@ class RemoteSettings:
                         await endpoint.until(lambda e: e.tried)
             named = session.endpoints()
             return "\n".join(
-                f"{name}  {e.string.host}:{e.string.port}  "
+                f"{name}  {e.where}  "
                 + (
                     f"up: {', '.join(e.tools) or 'no tools'}"
                     if e.up

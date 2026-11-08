@@ -31,6 +31,9 @@ A client is sent a tool's digest, never its schema; it asks ``Describe`` only
 for a tool whose digest matches none of its own. A ``Note`` is acked as a
 ``Result`` is, and kept until then by whoever sent it, across a drop.
 
+A reader ignores a field its class lacks, at any depth, so a newer peer may add
+one; a message or class it does not know still fails the line.
+
 Typical usage example:
 
   writer.write(encoded(Call(id="1", agent="a", window="w", tool="Bash", arguments={})))
@@ -39,11 +42,12 @@ Typical usage example:
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final, Literal
+from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass, field, is_dataclass
+from typing import TYPE_CHECKING, Final, Literal, cast, get_args, get_type_hints
 
 import asyncio
+import functools
 import hashlib
 import json
 
@@ -76,6 +80,7 @@ __all__ = [
     "DaemonStatus",
     "Describe",
     "Described",
+    "Dial",
     "GateAnswer",
     "GateCall",
     "Hello",
@@ -88,9 +93,11 @@ __all__ = [
     "Refused",
     "Result",
     "Resume",
+    "Streams",
     "ToolSpec",
     "Tools",
     "ToolsChanged",
+    "UnreadLineError",
     "Welcome",
     "decoded",
     "encoded",
@@ -110,6 +117,13 @@ PING_SEC: Final = 30.0
 
 SILENT_PINGS: Final = 3
 """How many pings a peer may miss before it is taken for gone."""
+
+
+type Streams = tuple[asyncio.StreamReader, asyncio.StreamWriter]
+"""A connection to a server, whatever carries it."""
+
+type Dial = Callable[[], Awaitable[Streams]]
+"""Open a connection; a failure to is an ``OSError``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -416,6 +430,15 @@ def encoded(message: Message) -> bytes:
     return (json.dumps(stored_plain(message, classes=_classes())) + "\n").encode()
 
 
+class UnreadLineError(ValueError):
+    """A line that is no message here, read past; ``__cause__`` says why."""
+
+    def __init__(self, message: str, *, id: str | None) -> None:
+        super().__init__(message)
+        self.id = id
+        """The string ``id`` the line names as plain JSON; ``None`` for none."""
+
+
 async def received(reader: asyncio.StreamReader) -> Message | None:
     """Return the next message ``reader`` holds; ``None`` once the peer has closed.
 
@@ -426,13 +449,17 @@ async def received(reader: asyncio.StreamReader) -> Message | None:
       message: The message; ``None`` at the end of the stream.
 
     Raises:
-      ValueError: A line is no message.
+      UnreadLineError: A line is no message; the reader is past it.
+      ValueError: A line is over the reader's limit.
 
     """
     line = await reader.readline()
     if not line:
         return None
-    return decoded(line)
+    try:
+        return decoded(line)
+    except ValueError as error:
+        raise UnreadLineError(str(error), id=_named(line)) from error
 
 
 def decoded(line: bytes) -> Message:
@@ -444,13 +471,67 @@ def decoded(line: bytes) -> Message:
     Returns:
       message: The message.
 
+    A field this sagent's class lacks, as a newer peer's, is left unread.
+
     Raises:
       ValueError: The line is no message.
 
     """
-    message = stored_record(json_loads(line), Message, classes=_classes())
+    classes = _classes()
+    try:
+        plain = _known(json_loads(line), None, classes=classes)
+        message = stored_record(plain, Message, classes=classes)
+    except RecursionError as error:
+        raise ValueError("The line is nested too deep.") from error
     assert isinstance(message, _KINDS)
     return message
+
+
+def _known(
+    plain: PlainTree,
+    implied: type | None,
+    *,
+    classes: Mapping[str, type],
+) -> PlainTree:
+    """Return ``plain`` without the fields its classes lack, however deep."""
+    if isinstance(plain, list):
+        return [_known(item, implied, classes=classes) for item in plain]
+    if not isinstance(plain, Mapping):
+        return plain
+    tag = plain.get("py/object")
+    kind = classes.get(tag) if isinstance(tag, str) else None
+    if kind is None and not any(key.startswith("py/") for key in plain):
+        kind = implied
+    if kind is None:
+        return plain
+    hints = _hints(kind)
+    return {
+        key: _known(value, _implied(hints.get(key)), classes=classes)
+        for key, value in plain.items()
+        if key in hints or key == "py/object"
+    }
+
+
+# Resolving a class's hints costs as much as reading the rest of its record.
+@functools.cache
+def _hints(kind: type) -> dict[str, object]:
+    """Return the type of each field of ``kind``."""
+    return cast("dict[str, object]", get_type_hints(kind))
+
+
+# Treekle tags a record only where its field's type does not already name its class:
+# ``X``, ``X | None``, or ``tuple[X, ...]``. ``Mapping[str, ToolSpec]`` names
+# ``str`` first; only a host the server started itself sends one.
+def _implied(hint: object) -> type | None:
+    """Return the record class a field of type ``hint`` holds untagged, if any."""
+    return next(
+        (
+            arg
+            for arg in (hint, *get_args(hint)[:1])
+            if isinstance(arg, type) and is_dataclass(arg)
+        ),
+        None,
+    )
 
 
 def _classes() -> dict[str, type]:
@@ -461,3 +542,15 @@ def _classes() -> dict[str, type]:
         **{kind.__name__: kind for kind in (GatePolicy, Admission)},
         **{kind.__name__: kind for kind in _KINDS},
     }
+
+
+def _named(line: bytes) -> str | None:
+    """Return the string ``id`` that ``line`` names as plain JSON; ``None`` for none."""
+    try:
+        plain = cast(object, json.loads(line))
+    except (ValueError, RecursionError):
+        return None
+    named = (
+        cast(dict[str, object], plain).get("id") if isinstance(plain, dict) else None
+    )
+    return named if isinstance(named, str) else None
