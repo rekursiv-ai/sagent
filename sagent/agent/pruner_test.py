@@ -471,22 +471,24 @@ def test_with_no_policy_to_prune_by_nothing_is_planned(
     assert not pruner.prune()
 
 
-def test_a_file_named_deep_in_frozen_arguments_is_in_use(tmp_path: Path) -> None:
-    context = _context(
-        tmp_path,
-        *_read("a", _P),
-        *_turns(requests=4),
-        ToolCall(
-            call_id="m",
-            name="MultiEdit",
-            arguments={"edits": [{"files": [_P]}]},
+def test_a_file_named_deep_in_frozen_arguments_is_in_use() -> None:
+    context = [
+        ReadResult(call_id="a", path=_P),
+        ReadResult(call_id="numeric", path="2"),
+        reply("before"),
+        reply(
+            calls=[
+                ToolCall(
+                    call_id="m",
+                    name="MultiEdit",
+                    arguments={"edits": [{"metadata": [2], "files": [_P]}]},
+                ),
+            ],
         ),
-        UncategorizedToolResult(call_id="m", content="done"),
-        *_turns(requests=1),
-    )
-    at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
+        reply("after"),
+    ]
 
-    assert idle(context)[at["a"]] == reads(context)[at["m"]]
+    assert idle(context) == [1, 3, 2, 1, 0]
 
 
 @pytest.mark.parametrize(("named", "kept"), [(_P, True), ("/repo/other.py", False)])

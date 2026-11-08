@@ -2,59 +2,89 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, Mock, call, patch
 
 import asyncio
+import socket
 
 import pytest
 
+from sagent.host import testing
 from sagent.host.testing import Gate, LocalHost
-from sagent.host.wire import Call, Result, Tools, encoded, received
-from sagent.session.types import ReadResult
-from sagent.tools.read import Read
+from sagent.host.wire import MAX_LINE_BYTES
 from sagent.tools.types import ToolContext
-from sagent.tools.write import Write
 
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["", "error", "cancel"])
 async def test_a_host_serves_the_tools_named_at_home_in_its_directory(
     tmp_path: Path,
+    failure: str,
 ) -> None:
-    (tmp_path / "a.txt").write_text("home\n")
-    start = LocalHost(tools={"Read": Read(), "Write": Write()})
-    host = await start(["Read", "Bash"], tmp_path)
-    try:
-        assert start.started == [host]
-        tools = await asyncio.wait_for(received(host.reader), 5)
-        assert isinstance(tools, Tools)
-        assert list(tools.tools) == ["Read"]
-        host.writer.write(
-            encoded(
-                Call(
-                    id="1",
-                    agent="a",
-                    window="w",
-                    tool="Read",
-                    arguments={"file_path": "a.txt"},
-                ),
-            ),
-        )
-        result = await asyncio.wait_for(received(host.reader), 5)
-        assert isinstance(result, Result)
-        assert isinstance(result.record, ReadResult)
-        assert "home" in (result.record.content or "")
-    finally:
+    theirs, ours = Mock(spec=socket.socket), Mock(spec=socket.socket)
+    reader, host_reader = asyncio.StreamReader(), asyncio.StreamReader()
+    eof, close = Mock(), Mock()
+    writer = Mock(spec=asyncio.StreamWriter, write_eof=eof)
+    host_writer = Mock(spec=asyncio.StreamWriter, close=close)
+    connect = AsyncMock(side_effect=[(reader, writer), (host_reader, host_writer)])
+    error = OSError("host failed")
+    serving = AsyncMock(
+        side_effect=error
+        if failure == "error"
+        else (asyncio.CancelledError() if failure == "cancel" else None),
+    )
+    gate = Gate()
+    model, agent = Mock(), Mock()
+    with (
+        patch.object(socket, "socketpair", return_value=(theirs, ours)),
+        patch.object(asyncio, "open_unix_connection", connect),
+        patch.object(testing, "serve", serving),
+        patch.object(testing, "ScriptedProvider", return_value={"scripted": model}),
+        patch.object(testing, "Agent", return_value=agent) as make_agent,
+    ):
+        start = LocalHost(tools={"Gate": gate, "unused": Gate()})
+        host = await start(["Gate", "missing"], tmp_path)
         try:
-            await host.stop()
+            assert start.started == [host]
+            assert host.reader is reader
+            assert host.writer is writer
+            if failure == "error":
+                with pytest.raises(OSError, match="host failed") as caught:
+                    await host.stop()
+                assert caught.value is error
+            else:
+                await host.stop()
+            assert host.task.done()
+            eof.assert_called_once_with()
+            close.assert_called_once_with()
+            assert connect.await_args_list == [
+                call(sock=ours, limit=MAX_LINE_BYTES),
+                call(sock=theirs, limit=MAX_LINE_BYTES),
+            ]
+            serving.assert_awaited_once()
+            request = serving.await_args_list[0]
+            assert request.args == (host_reader, host_writer)
+            assert set(request.kwargs) == {"tools", "new_context", "team", "stand_in"}
+            assert request.kwargs["tools"] == {"Gate": gate}
+            assert request.kwargs["team"] is start.team
+            assert request.kwargs["stand_in"] is start.stand_in
+            context = cast(
+                "Callable[[str], ToolContext]",
+                request.kwargs["new_context"],
+            )
+            made = context("a")
+            assert (made.cwd, made.label) == (tmp_path, "a")
+            assert start.stand_in([gate]) is agent
+            make_agent.assert_called_once_with(model=model, tools=[gate])
         finally:
-            host.writer.close()
-            await host.writer.wait_closed()
-    assert host.task.done()
-    assert await received(host.reader) is None
+            host.task.cancel()
+            await asyncio.gather(host.task, return_exceptions=True)
 
 
 @pytest.mark.asyncio

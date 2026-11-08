@@ -5,7 +5,8 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, cast, override
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 import asyncio
@@ -13,7 +14,6 @@ import base64
 import fcntl
 import hashlib
 import os
-import socket
 import stat
 import time
 
@@ -38,12 +38,7 @@ from sagent.providers.openai.login import (
     revoke_refresh_token,
 )
 from sagent.providers.resources import SharedResources
-from sagent.providers.testing import (
-    bound_port,
-    free_port,
-    refuse_browsers,
-    visit,
-)
+from sagent.providers.testing import refuse_browsers
 
 
 if TYPE_CHECKING:
@@ -407,123 +402,18 @@ async def test_lend_hands_out_the_token_held_and_renews_one_refused(auth: Path) 
     assert len(server.requests) == 1
 
 
-@dataclass(slots=True, kw_only=True)
-class _Paster:
-    """Answers the paste prompt with the redirect for the sign-in it was shown."""
-
-    pasted: Callable[[str, str], str]
-    shown: list[str] = field(default_factory=list[str])
-
-    def show(self, text: str) -> None:
-        self.shown.append(text)
-
-    async def input(self, prompt: str = "") -> str:
-        del prompt
-        query = parse_qs(urlparse(_shown_url(self.shown)).query)
-        return self.pasted(query["state"][0], query["code_challenge"][0])
-
-
-def _shown_url(shown: list[str]) -> str:
-    return next(
-        line.strip()
-        for text in shown
-        for line in text.splitlines()
-        if "authorize?" in line
-    )
-
-
-def _stale(state: str, challenge: str) -> str:
-    del state, challenge
-    return "the-code#another-state"
-
-
-def _hashed(state: str, challenge: str) -> str:
-    del challenge
-    return f"the-code#{state}"
-
-
-def _no_code(state: str, challenge: str) -> str:
-    del challenge
-    return f"http://localhost:1455/auth/callback?state={state}"
-
-
-@dataclass(slots=True, kw_only=True)
-class _Listened:
-    """Where each sign-in asked to listen, and the port it was given."""
-
-    hosts: list[str | None] = field(default_factory=list[str | None])
-    ports: list[int | None] = field(default_factory=list[int | None])
-    bound: list[int] = field(default_factory=list[int])
-
-
-@pytest.fixture(autouse=True)
-def listened(monkeypatch: pytest.MonkeyPatch) -> _Listened:
-    """Listen on a free port where a sign-in asks for the one ``codex`` registered."""
-    seen = _Listened()
-    real = asyncio.start_server
-
-    async def start_server(
-        callback: Callable[
-            [asyncio.StreamReader, asyncio.StreamWriter],
-            Awaitable[None] | None,
-        ],
-        host: str | None = None,
-        port: int | None = None,
-    ) -> asyncio.Server:
-        seen.hosts.append(host)
-        seen.ports.append(port)
-        server = await real(callback, host, 0 if port == 1455 else port)
-        seen.bound.append(bound_port(server.sockets[0]))
-        return server
-
-    monkeypatch.setattr(asyncio, "start_server", start_server)
-    return seen
-
-
-def _no_browser(url: str) -> bool:
-    raise AssertionError(url)
-
-
-async def _pasted_c(prompt: str = "") -> str:
-    """Paste sign-in ``s``'s code ``c``."""
-    del prompt
-    return "c#s"
-
-
 _LINK = "Sign in to ChatGPT in your browser:\n\n  {}\n"
-_ANYWHERE = (
-    "Open it in a browser anywhere, then paste the address it was sent to,"
-    " though it fails to load:\n"
-)
-
-
-@pytest.fixture
-def paste_after_browser(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Skip the browser wait so the manual fallback can be exercised."""
-
-    async def timeout(code: asyncio.Future[str], **limits: float) -> str:
-        del code, limits
-        raise TimeoutError
-
-    monkeypatch.setattr(asyncio, "wait_for", timeout)
-    monkeypatch.setattr(login, "open_browser", _nowhere)
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("paste_after_browser")
-async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
+async def test_sign_in_exchanges_the_authorization_code_and_stores_the_login(
     auth: Path,
     monkeypatch: pytest.MonkeyPatch,
-    listened: _Listened,
 ) -> None:
-    challenges: list[str] = []
-
-    def pasted(state: str, challenge: str) -> str:
-        challenges.append(challenge)
-        return f"http://localhost:1455/auth/callback?code=the-code&state={state}"
-
-    paster = _Paster(pasted=pasted)
-    monkeypatch.setattr("sagent.providers.login.read_login_input", paster.input)
+    authorization = AsyncMock(return_value="the-code")
+    monkeypatch.setattr(login, "_code", authorization)
+    shown: list[str] = []
+    show = shown.append
     access = _token("signed-in", account="acct-9")
     server = _Server(
         replies=[
@@ -532,16 +422,12 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
     )
     async with _Served(server) as shared:
         codex = CodexLogin(auth, resources=shared)
-        await codex.sign_in(show=paster.show)
+        await codex.sign_in(show=show)
         assert await codex.token() == (access, "acct-9")
-    assert (listened.hosts, listened.ports) == (["127.0.0.1"], [1455])
-    assert paster.shown == [
-        _LINK.format(_shown_url(paster.shown)),
-        (
-            "No browser came back. Paste the address it was sent to, though it fails"
-            " to load:\n"
-        ),
-    ]
+    authorization.assert_awaited_once()
+    url = cast(str, authorization.await_args_list[0].args[0])
+    assert authorization.await_args_list[0].args == (url,)
+    assert shown == []
     (sent,) = server.requests
     assert str(sent.url) == "https://auth.openai.com/oauth/token"
     assert set(from_plain(sent.extensions["timeout"], dict[str, float]).values()) == {
@@ -558,8 +444,7 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
         "client_id": _CLIENT,
     }
     expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-    assert challenges == [expected.rstrip(b"=").decode()]
-    parsed = urlparse(_shown_url(paster.shown))
+    parsed = urlparse(url)
     assert f"{parsed.scheme}://{parsed.netloc}{parsed.path}" == (
         "https://auth.openai.com/oauth/authorize"
     )
@@ -569,7 +454,7 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
         "response_type": "code",
         "redirect_uri": "http://localhost:1455/auth/callback",
         "scope": "openid profile email offline_access api.connectors.read api.connectors.invoke",
-        "code_challenge": challenges[0],
+        "code_challenge": expected.rstrip(b"=").decode(),
         "code_challenge_method": "S256",
         "state": params["state"],
         "codex_cli_simplified_flow": "true",
@@ -577,6 +462,12 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
         "originator": "codex_cli_rs",
     }
     assert len(params["state"]) == 43
+    authorization.assert_awaited_once_with(
+        url,
+        state=params["state"],
+        show=show,
+        headless=False,
+    )
     assert _tokens(auth) == {
         "access_token": access,
         "refresh_token": "r",
@@ -587,172 +478,145 @@ async def test_sign_in_exchanges_a_pasted_redirect_and_stores_the_login(
     assert (auth.parent / "auth.json.lock").exists()
 
 
-@pytest.mark.parametrize(
-    ("pasted", "message"),
-    [(_stale, "belongs to another sign-in"), (_no_code, "holds no sign-in code")],
-)
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("paste_after_browser")
-async def test_a_pasted_code_must_belong_to_this_sign_in(
+async def test_refused_authorization_neither_exchanges_nor_stores_tokens(
     auth: Path,
     monkeypatch: pytest.MonkeyPatch,
-    pasted: Callable[[str, str], str],
-    message: str,
 ) -> None:
-    paster = _Paster(pasted=pasted)
-    monkeypatch.setattr("sagent.providers.login.read_login_input", paster.input)
+    refused = AuthError("wrong state")
+    authorization = AsyncMock(side_effect=refused)
+    monkeypatch.setattr(login, "_code", authorization)
     server = _Server(replies=[])
     async with _Served(server) as shared:
-        with pytest.raises(AuthError, match=message):
-            await CodexLogin(auth, resources=shared).sign_in(show=paster.show)
+        with pytest.raises(AuthError) as raised:
+            await CodexLogin(auth, resources=shared).sign_in(show=lambda _: None)
+    assert raised.value is refused
+    authorization.assert_awaited_once()
     assert server.requests == []
+    assert not await asyncio.to_thread(auth.exists)
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("paste_after_browser")
-async def test_a_pasted_code_and_state_alone_are_enough(
-    auth: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    paster = _Paster(pasted=_hashed)
-    monkeypatch.setattr("sagent.providers.login.read_login_input", paster.input)
-    server = _Server(
-        replies=[_reply({"access_token": _token("x"), "refresh_token": "r"})],
-    )
-    async with _Served(server) as shared:
-        await CodexLogin(auth, resources=shared).sign_in(show=paster.show)
-    assert _form(server.requests[0])["code"] == "the-code"
-
-
-@pytest.mark.asyncio
-async def test_sign_in_takes_the_browsers_code_without_a_paste(
-    auth: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    listened: _Listened,
-) -> None:
-    opened: list[str] = []
-    visits: list[asyncio.Task[int]] = []
-
-    def open_in_browser(url: str) -> bool:
-        opened.append(url)
-        state = parse_qs(urlparse(url).query)["state"][0]
-        target = f"/auth/callback?code=from-browser&state={state}"
-        visits.append(asyncio.create_task(visit(listened.bound[0], target)))
-        return True
-
-    async def no_paste(prompt: str = "") -> str:
-        raise AssertionError(prompt)
-
-    monkeypatch.setattr(login, "open_browser", open_in_browser)
-    monkeypatch.setattr("sagent.providers.login.read_login_input", no_paste)
-    server = _Server(
-        replies=[_reply({"access_token": _token("x"), "refresh_token": "r"})],
-    )
+async def test_the_browser_redirects_back_with_the_code() -> None:
+    entered, exited = AsyncMock(), AsyncMock(return_value=False)
+    server = Mock(spec=asyncio.Server, __aenter__=entered, __aexit__=exited)
+    listening = AsyncMock(return_value=server)
+    waiting = AsyncMock(return_value="c1")
+    pasted = AsyncMock()
+    redirected = AsyncMock()
+    opened = Mock()
     shown: list[str] = []
-    async with _Served(server) as shared:
-        await CodexLogin(auth, resources=shared).sign_in(show=shown.append)
-    assert _form(server.requests[0])["code"] == "from-browser"
-    assert [await visited for visited in visits] == [200]
-    assert shown == [_LINK.format(*opened)]
-    assert (listened.hosts, listened.ports) == (["127.0.0.1"], [1455])
-
-
-@pytest.mark.asyncio
-async def test_the_browser_redirects_back_with_the_code(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    port = free_port()
-    opened: list[str] = []
-    visits: list[asyncio.Task[int]] = []
-
-    def open_in_browser(url: str) -> bool:
-        opened.append(url)
-        loop = asyncio.get_running_loop()
-        visits.extend(
-            loop.create_task(visit(port, target))
-            for target in (
-                "/auth/callback?code=c1&state=wrong",
-                "/auth/callback?code=c1&state=s1",
-            )
-        )
-        return True
-
-    monkeypatch.setattr(login, "open_browser", open_in_browser)
-    shown: list[str] = []
-    code = await login._code(
-        "https://sign.in",
-        state="s1",
-        show=shown.append,
-        headless=False,
-        port=port,
-    )
-    assert code == "c1"
-    assert opened == ["https://sign.in"]
-    assert shown == [_LINK.format("https://sign.in")]
-    assert [await visit for visit in visits] == [400, 200]
-
-
-@pytest.mark.asyncio
-async def test_a_browser_that_never_redirects_gives_way_to_a_paste(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    waited: list[dict[str, float]] = []
-
-    async def wait_for(code: asyncio.Future[str], **limits: float) -> str:
-        del code
-        waited.append(limits)
-        raise TimeoutError
-
-    monkeypatch.setattr(login, "open_browser", _nowhere)
-    monkeypatch.setattr(asyncio, "wait_for", wait_for)
-    monkeypatch.setattr("sagent.providers.login.read_login_input", _pasted_c)
-    shown: list[str] = []
-    code = await login._code(
-        "https://sign.in",
-        state="s",
-        show=shown.append,
-        headless=False,
-        port=free_port(),
-    )
-    assert code == "c"
-    # Five minutes, then the paste: the link was shown once already.
-    assert waited == [{"timeout": 300.0}]
-    assert shown == [
-        _LINK.format("https://sign.in"),
-        (
-            "No browser came back. Paste the address it was sent to, though it fails"
-            " to load:\n"
-        ),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_a_browser_sign_in_gives_way_when_its_port_is_taken(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(login, "open_browser", _no_browser)
-    monkeypatch.setattr("sagent.providers.login.read_login_input", _pasted_c)
-    shown: list[str] = []
-    with socket.socket() as taken:
-        taken.bind(("127.0.0.1", 0))
-        taken.listen(1)
+    with (
+        patch.object(asyncio, "start_server", listening),
+        patch.object(asyncio, "wait_for", waiting),
+        patch.object(login, "open_browser", opened),
+        patch.object(login, "read_pasted_code", pasted),
+        patch.object(login, "redirected", redirected),
+    ):
         code = await login._code(
-            "https://x",
-            state="s",
+            "https://sign.in",
+            state="s1",
             show=shown.append,
             headless=False,
-            port=bound_port(taken),
+            port=4321,
+        )
+        listening.assert_awaited_once()
+        assert listening.await_args_list[0].args[1:] == ("127.0.0.1", 4321)
+        assert listening.await_args_list[0].kwargs == {}
+        callback = cast(
+            Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]],
+            listening.await_args_list[0].args[0],
+        )
+        reader, writer = asyncio.StreamReader(), Mock(spec=asyncio.StreamWriter)
+        await callback(reader, writer)
+    assert code == "c1"
+    opened.assert_called_once_with("https://sign.in")
+    assert shown == [_LINK.format("https://sign.in")]
+    waiting.assert_awaited_once()
+    pending = cast(asyncio.Future[str], waiting.await_args_list[0].args[0])
+    waiting.assert_awaited_once_with(pending, timeout=300.0)
+    redirected.assert_awaited_once_with(
+        reader,
+        writer,
+        path="/auth/callback",
+        state="s1",
+        code=pending,
+    )
+    pasted.assert_not_awaited()
+    entered.assert_awaited_once_with()
+    exited.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headless", [False, True])
+async def test_a_browser_that_never_redirects_gives_way_to_a_paste(
+    headless: bool,
+) -> None:
+    entered, exited = AsyncMock(), AsyncMock(return_value=False)
+    server = Mock(spec=asyncio.Server, __aenter__=entered, __aexit__=exited)
+    listening = AsyncMock(return_value=server)
+    waiting = AsyncMock(side_effect=TimeoutError)
+    pasted = AsyncMock(return_value="c")
+    opened = Mock()
+    shown: list[str] = []
+    show = shown.append
+    with (
+        patch.object(asyncio, "start_server", listening),
+        patch.object(asyncio, "wait_for", waiting),
+        patch.object(login, "open_browser", opened),
+        patch.object(login, "read_pasted_code", pasted),
+    ):
+        code = await login._code(
+            "https://sign.in",
+            state="s",
+            show=show,
+            headless=headless,
         )
     assert code == "c"
-    assert shown == [_LINK.format("https://x"), _ANYWHERE]
+    assert shown == [_LINK.format("https://sign.in")]
+    listening.assert_awaited_once()
+    assert listening.await_args_list[0].args[1:] == ("127.0.0.1", 1455)
+    pasted.assert_awaited_once_with(state="s", show=show, browser_tried=not headless)
+    if headless:
+        opened.assert_not_called()
+        waiting.assert_not_awaited()
+    else:
+        opened.assert_called_once_with("https://sign.in")
+        waiting.assert_awaited_once()
+        pending = cast(asyncio.Future[str], waiting.await_args_list[0].args[0])
+        waiting.assert_awaited_once_with(pending, timeout=300.0)
+    entered.assert_awaited_once_with()
+    exited.assert_awaited_once_with(None, None, None)
+
+
+@pytest.mark.asyncio
+async def test_a_browser_sign_in_gives_way_when_its_port_is_taken() -> None:
+    listening = AsyncMock(side_effect=OSError("port taken"))
+    pasted = AsyncMock(return_value="c")
+    opened = Mock()
+    shown: list[str] = []
+    show = shown.append
+    with (
+        patch.object(asyncio, "start_server", listening),
+        patch.object(login, "open_browser", opened),
+        patch.object(login, "read_pasted_code", pasted),
+    ):
+        code = await login._code("https://x", state="s", show=show, headless=False)
+    assert code == "c"
+    assert shown == [_LINK.format("https://x")]
+    listening.assert_awaited_once()
+    assert listening.await_args_list[0].args[1:] == ("127.0.0.1", 1455)
+    pasted.assert_awaited_once_with(state="s", show=show, browser_tried=False)
+    opened.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_sign_in_device_polls_until_the_code_is_approved(
     auth: Path,
     monkeypatch: pytest.MonkeyPatch,
-    listened: _Listened,
 ) -> None:
+    authorization = AsyncMock()
+    monkeypatch.setattr(login, "_code", authorization)
     waits: list[float] = []
     real_sleep = asyncio.sleep
 
@@ -790,7 +654,7 @@ async def test_sign_in_device_polls_until_the_code_is_approved(
         "Open https://auth.openai.com/codex/device and enter the code ABCD-1234.\n",
     ]
     assert waits == [3.0, 3.0, 3.0]
-    assert listened.hosts == []
+    authorization.assert_not_awaited()
     # Fifteen minutes to approve it.
     assert limits == [900.0]
     assert (auth.parent / "auth.json.lock").exists()
@@ -1115,12 +979,6 @@ def test_the_account_of_tokens_reads_the_id_token_first() -> None:
     )
 
     assert codex_account(tokens) == CodexAccount(plan="pro", email="i@x.test")
-
-
-def _nowhere(url: str) -> bool:
-    """Open ``url`` in a browser that never comes back."""
-    del url
-    return True
 
 
 def _hold(lock: Path) -> int:
