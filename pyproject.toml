@@ -294,8 +294,8 @@ do_not_mutate_patterns = [
     '^\s*(description|formatter_class)=[\w.]+,?\s*$',
 ]
 
-[tool.houselint]
-# Each key defaults the `houselint` flag of that name;
+[tool.codedoctor.lint]
+# Each key defaults the `codedoctor lint` flag of that name;
 # the command line overrides it. Globs are relative to this file's directory, and a
 # glob without `/` names a basename in any directory. `GLOBS = RULES` is ruff's
 # per-file-ignores; a bare glob skips the file for every rule unopened.

@@ -176,7 +176,7 @@ repos:
         name: check-yaml
         stages: [pre-commit]
         language: system
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.yamlcheck
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor yamlcheck
 
       - id: check-toml
         name: check-toml
@@ -251,7 +251,7 @@ repos:
         language: system
         stages: [pre-commit]
         types: [jupyter]
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.nbstripout
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor nbstripout
         args:
           - --drop-empty-cells
           - --extra-keys
@@ -273,7 +273,7 @@ repos:
             |(.*/)?third_party/
           )
 
-      # Writes each notebook's paired `.py`, so it runs before houselint and
+      # Writes each notebook's paired `.py`, so it runs before codedoctor lint and
       # ruff, which then lint and format that output in the same pass.
       - id: jupytext-sync
         name: jupytext-sync
@@ -296,7 +296,7 @@ repos:
       # exactly once between them, so a hook per rule buys nothing and costs
       # an interpreter startup each (measured, 120 files, 3 rules: 0.81s ->
       # 0.45s). Which rules run, fix, and skip which paths lives in
-      # `[tool.houselint]` of pyproject.toml, so a bare `houselint.py
+      # `[tool.codedoctor.lint]` of pyproject.toml, so a bare `codedoctor lint
       # FILES` behaves exactly as this hook does.
       #
       # `require_serial: true`: pre-commit's own partitioning would fork
@@ -307,13 +307,13 @@ repos:
       # commit stays serial. Measured on the 128-thread server, best of 3: 5 files 0.16s
       # serial vs 0.30s pooled; 50 files 0.92s vs 0.50s; the full tree (4094
       # files) 21.8s serial vs 1.46s at 24 workers.
-      - id: houselint
-        name: houselint
+      - id: codedoctor-lint
+        name: codedoctor lint
         language: system
         stages: [pre-commit]
         require_serial: true
         types_or: [python, jupyter]
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.lint
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor lint
 
       - id: codespell
         name: codespell
@@ -381,7 +381,7 @@ repos:
         language: system
         stages: [commit-msg]
         always_run: true
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.export_leaks.check_pr_text
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor check-pr-text
 
   - repo: local
     hooks:
@@ -478,7 +478,7 @@ repos:
         types: [python]
         pass_filenames: false
         entry: >-
-          uv --quiet run --frozen --group pre-commit python -m codedoctor.affected.codegraph_sync
+          uv --quiet run --frozen --group pre-commit python -m codedoctor codegraph-sync
           --caches /opt/scratch/caches/codegraph
 
       # No official ty hook yet (https://github.com/astral-sh/ty/issues/269).
@@ -500,7 +500,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool ty-check
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor gate spool ty-check
 
       - id: ty-check
         name: ty-check
@@ -512,7 +512,7 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.typecheck ty-check
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor typecheck ty-check
         # Resolved affected:N scopes read the index maintained above.
         args: [--dependents, codedoctor.affected]
 
@@ -524,7 +524,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool pyrefly-check
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor gate spool pyrefly-check
 
       - id: pyrefly-check
         name: pyrefly-check
@@ -536,7 +536,7 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.typecheck pyrefly-check
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor typecheck pyrefly-check
         # Widens on its own only when `ty-check` was skipped. The fixer is one
         # pyrefly run that also deletes each unnecessary `assert isinstance`.
         args:
@@ -555,7 +555,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types_or: [python, pyi]
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool basedpyright
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor gate spool basedpyright
         exclude: |
           (?x)^(
             typings/
@@ -577,7 +577,7 @@ repos:
         types_or: [python, pyi]
         entry: >-
           env NODE_OPTIONS=--max-old-space-size=2048
-          uv --quiet run --frozen --group pre-commit python -m codedoctor.typecheck
+          uv --quiet run --frozen --group pre-commit python -m codedoctor typecheck
           basedpyright
         # Widens as `ty-check` does; the fixer is one basedpyright run that
         # also deletes each unnecessary `assert isinstance`.
@@ -606,7 +606,7 @@ repos:
         language: system
         stages: [pre-commit]
         require_serial: true
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool check-export-leaks
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor gate spool check-export-leaks
 
       - id: check-export-leaks
         name: check-export-leaks
@@ -614,7 +614,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         pass_filenames: false
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate run check-export-leaks -- codedoctor.export_leaks
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor gate run check-export-leaks -- codedoctor.export_leaks
 
       # Runs the tests PAIRED with each changed file (`x_test.py`, `test_x.py`,
       # beside it or under `tests/`), then applies `fail_under` to the changed
@@ -645,7 +645,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types: [python]
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool pytest
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor gate spool pytest
 
       - id: pytest
         name: pytest
@@ -659,7 +659,7 @@ repos:
         # See `superseded-at-pre-push` at the head of the Pre-Push Gates section.
         alias: superseded-at-pre-push
         types: [python]
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing pytest
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor testing pytest
         args: [--dependents, codedoctor.affected]
 
       # Disable with SKIP=mutation. Findings fail the hook. Over 741 commits,
@@ -679,7 +679,7 @@ repos:
             |(.*/)?\.export/typings/
             |(.*/)?third_party/
           )
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool mutation
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor gate spool mutation
 
       - id: mutation
         name: mutation
@@ -693,7 +693,7 @@ repos:
         types: [python]
         exclude: *mutation-exclude
         entry: >-
-          uv --quiet run --frozen --group pre-commit python -m codedoctor.gate
+          uv --quiet run --frozen --group pre-commit python -m codedoctor gate
           run mutation -- codedoctor.mutation
           --function-sample-rate 0.05 --max-functions-sampled 4 --timeout-sec 900
           --explain --prefer-changed-in-pre-commit
@@ -712,7 +712,7 @@ repos:
         stages: [pre-commit]
         require_serial: true
         types: [python]
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.gate spool coverage-floor
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor gate spool coverage-floor
 
       - id: coverage-floor
         name: coverage-floor
@@ -722,7 +722,7 @@ repos:
         types: [python]
         require_serial: true
         pass_filenames: false
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing coverage-floor
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor testing coverage-floor
 
   # === Pre-Push Gates =========================================================
   #
@@ -765,7 +765,7 @@ repos:
         stages: [manual]
         entry: >-
           env NODE_OPTIONS=--max-old-space-size=2048
-          uv --quiet run --frozen --group pre-commit python -m codedoctor.gate
+          uv --quiet run --frozen --group pre-commit python -m codedoctor gate
           threaded basedpyright-global -- basedpyright --threads={workers}
 
       - id: pyrefly-check-global
@@ -775,7 +775,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         entry: >-
-          uv --quiet run --frozen --group pre-commit python -m codedoctor.gate
+          uv --quiet run --frozen --group pre-commit python -m codedoctor gate
           threaded pyrefly-check-global -- pyrefly check --threads={workers}
 
       - id: pytest-global
@@ -785,7 +785,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing tier pytest-global
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor testing tier pytest-global
         args: [--plugin, codedoctor.testing.listing]
 
       - id: pytest-slow-global
@@ -795,7 +795,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing tier pytest-slow-global
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor testing tier pytest-slow-global
         args: [--plugin, codedoctor.testing.listing]
 
       - id: pytest-ci-smoke-global
@@ -805,7 +805,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing tier pytest-ci-smoke-global
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor testing tier pytest-ci-smoke-global
         args: [--plugin, codedoctor.testing.listing]
 
       - id: pytest-integration-global
@@ -815,7 +815,7 @@ repos:
         pass_filenames: false
         stages: [pre-push]
         verbose: true
-        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor.testing tier pytest-integration-global
+        entry: uv --quiet run --frozen --group pre-commit python -m codedoctor testing tier pytest-integration-global
         args: [--plugin, codedoctor.testing.listing]
 
 
