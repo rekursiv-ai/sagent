@@ -138,24 +138,48 @@ async def _result(reader: asyncio.StreamReader) -> Result:
 
 
 @pytest.mark.asyncio
-async def test_the_host_says_its_tools_first(tmp_path: Path) -> None:
-    team = _team()
-    async with _host(tmp_path, team) as (reader, writer):
-        tools = await received(reader)
-        assert len(team.changes) == 1
+async def test_the_host_says_its_tools_first_and_ignores_unhandled_messages() -> None:
+    reader, outgoing = asyncio.StreamReader(), asyncio.StreamReader()
+    writer = Mock(spec=asyncio.StreamWriter, write=outgoing.feed_data)
+    changes: set[Callable[[], None]] = set()
+    team = Mock(spec=Team, changes=changes)
+    read, bash = Read(), Bash()
+    context, stand_in = Mock(), Mock()
+    serving = asyncio.create_task(
+        serve(
+            reader,
+            writer,
+            tools={"Read": read, "Bash": bash},
+            new_context=context,
+            team=team,
+            stand_in=stand_in,
+        ),
+    )
+    try:
+        tools = await _said(outgoing)
+        assert len(changes) == 1
         assert isinstance(tools, Tools)
-        assert list(tools.tools) == ["Read", "Bash", "AgentSend"]
-        assert tools.tools["Read"].description == Read().description
-        writer.write(
-            encoded(Ack(id="missing"))
+        assert list(tools.tools) == ["Read", "Bash"]
+        assert tools.tools["Read"].description == read.description
+        assert tools.tools["Read"].schema == read.schema
+        assert tools.tools["Bash"].description == bash.description
+        assert tools.tools["Bash"].schema == bash.schema
+        reader.feed_data(
+            encoded(Tools(tools={}))
+            + encoded(Ack(id="missing"))
             + encoded(Refused(id="missing", reason="withdrawn"))
             + encoded(Pause())
             + encoded(Resume()),
         )
-        assert await received(reader) == Paused()
-        writer.write(_call("barrier", agent="a", window="w", tool="Train"))
-        assert (await _result(reader)).id == "barrier"
-    assert team.changes == set()
+        assert await _said(outgoing) == Paused()
+    finally:
+        reader.feed_eof()
+        await serving
+    assert changes == set()
+    outgoing.feed_eof()
+    assert await _said(outgoing) is None
+    context.assert_not_called()
+    stand_in.assert_not_called()
 
 
 def test_contexts_are_kept_per_agent_and_reset_for_a_new_window(tmp_path: Path) -> None:
@@ -352,18 +376,24 @@ async def test_a_child_of_the_caller_takes_only_the_tools_granted(
 
 
 def test_a_child_of_a_caller_takes_after_this_machine_s_default_agent(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(session, "default_provider", lambda: "scripted")
-    agent = session._stand_in(
-        [Read()],
-        catalog=ModelCatalog(factories={"scripted": ScriptedProvider}),
-        new_context=lambda label: ToolContext(cwd=tmp_path, label=label),
-    )
-    assert list(agent.tools) == ["Read"]
-    assert agent.model.provider.name == "scripted"
-    assert agent.runtime.tool_context.cwd == tmp_path
+    provider = Mock(return_value="scripted")
+    model, context, agent = Mock(), Mock(), Mock()
+    named, selected = Mock(return_value="work"), Mock(return_value=model)
+    catalog = Mock(spec=ModelCatalog, model=selected)
+    catalog.name = named
+    new_context = Mock(return_value=context)
+    built = Mock(return_value=agent)
+    monkeypatch.setattr(session, "default_provider", provider)
+    monkeypatch.setattr(session, "Agent", built)
+    tools = [Read()]
+    assert session._stand_in(tools, catalog=catalog, new_context=new_context) is agent
+    provider.assert_called_once_with()
+    named.assert_called_once_with("scripted")
+    selected.assert_called_once_with("default", current="work")
+    new_context.assert_called_once_with("")
+    built.assert_called_once_with(model=model, tools=tools, tool_context=context)
 
 
 def test_main_passes_the_parsed_socket_tools_and_spill_to_its_runner(
@@ -387,10 +417,10 @@ async def test_main_wires_the_socket_contexts_tools_and_shared_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    catalog = ModelCatalog(factories={})
-    host_team = Team(catalog=catalog)
-    fetch = FetchSession()
-    remote = RemoteSession((), team=host_team)
+    catalog = cast(ModelCatalog, Mock(spec=ModelCatalog))
+    host_team = Mock(spec=Team)
+    fetch = cast(FetchSession, Mock(spec=FetchSession))
+    remote = Mock(spec=RemoteSession)
     gate = DaemonGate(tmp_path / "daemon.sock")
     opening: list[str] = []
     closing: list[str] = []
@@ -427,7 +457,7 @@ async def test_main_wires_the_socket_contexts_tools_and_shared_gate(
     build_read, unused = Mock(return_value=tool), Mock()
     builders = Mock(return_value={"Read": build_read, "Unused": unused})
     monkeypatch.setattr(session, "builders", builders)
-    parent = _agent(tmp_path)
+    parent = Mock(spec=Agent)
     stand_in_factory = Mock(return_value=parent)
     monkeypatch.setattr(session, "_stand_in", stand_in_factory)
     contexts: list[ToolContext] = []

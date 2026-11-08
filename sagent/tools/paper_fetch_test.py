@@ -17,7 +17,7 @@ from wesearch.paper.errors import PaperError
 
 import pytest
 
-from sagent.lib.userdirs import cache_dir
+from sagent.lib.userdirs import base_dir_variables, cache_dir
 from sagent.tools import paper_fetch
 from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.types import ToolContext
@@ -38,6 +38,7 @@ def test_the_description_is_read_as_utf8_whatever_the_locale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The asset holds an em dash, which a Latin-1 locale would read as three letters."""
+    isolated = base_dir_variables()
     real = Path.read_text
     descriptions: list[str] = []
 
@@ -57,6 +58,7 @@ def test_the_description_is_read_as_utf8_whatever_the_locale(
             paper_fetch.__file__ or "",
             run_name=f"{paper_fetch.__name__}_fresh",
         )
+    assert base_dir_variables() == isolated
     (description,) = descriptions
     assert "\u2014" in description
     assert "â€" not in description

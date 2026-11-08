@@ -455,50 +455,70 @@ async def test_a_login_publishes_its_client_and_tokens_only_after_successful_cle
     assert await storage.read() == (new if succeeds else old)
 
 
+def _shared(
+    kept: mcp_auth._MemoryStorage,
+    *,
+    valid: bool = True,
+) -> mcp_auth._Shared:
+    return mcp_auth._Shared(
+        auth=Mock(
+            spec=OAuthClientProvider,
+            context=Mock(
+                current_tokens=None,
+                token_expiry_time=None,
+                is_token_valid=Mock(return_value=valid),
+            ),
+        ),
+        storage=Mock(
+            spec=McpTokenStorage,
+            read=AsyncMock(return_value=kept),
+            locked=Mock(return_value=nullcontext()),
+        ),
+    )
+
+
 @pytest.mark.asyncio
 async def test_a_session_refused_after_another_renewed_takes_the_renewal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(time, "time", lambda: 100.0)
     old, new = _kept(), _kept("new", expires_at=200.0)
-    await _storage().save(new)
-    shared = await _session()
+    shared = _shared(new)
     context = shared.auth.context
+    context.current_tokens = old.tokens
+    context.token_expiry_time = 90.0
+    entering, leaving = AsyncMock(), AsyncMock(return_value=False)
+    locked = Mock(
+        return_value=MagicMock(__aenter__=entering, __aexit__=leaving),
+    )
+
+    def admitted() -> mcp_auth._MemoryStorage:
+        assert entering.await_count == leaving.await_count + 1
+        return new
+
+    reading = AsyncMock(side_effect=admitted)
+    monkeypatch.setattr(shared.storage, "locked", locked)
+    monkeypatch.setattr(shared.storage, "read", reading)
     async with shared._renewing(old.tokens):
         assert context.current_tokens == new.tokens
         assert context.token_expiry_time == 200.0
-        assert context.is_token_valid()
     async with shared._renewing(new.tokens):
+        assert context.current_tokens == new.tokens
         assert context.token_expiry_time == 99.0
-        assert not context.is_token_valid()
-
-
-@pytest.mark.asyncio
-async def test_two_sessions_take_the_same_renewal_instead_of_spending_the_old_token(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(time, "time", lambda: 100.0)
-    old, new = _kept(expires_at=99.0), _kept("new", expires_at=200.0)
-    await _storage().save(old)
-    first, second = await _session(), await _session()
-    async with first._renewing(old.tokens):
-        assert first.auth.context.current_tokens == old.tokens
-        assert not first.auth.context.is_token_valid()
-        await _storage().save(new)
-    async with second._renewing(old.tokens):
-        assert second.auth.context.current_tokens == new.tokens
-        assert second.auth.context.is_token_valid()
+    assert locked.call_args_list == [call(), call()]
+    assert reading.await_args_list == [call(), call()]
+    assert entering.await_count == leaving.await_count == 2
 
 
 @pytest.mark.asyncio
 async def test_empty_storage_does_not_replace_the_sdks_current_tokens() -> None:
     kept = _kept()
-    await _storage().save(kept)
-    shared = await _session()
+    shared = _shared(mcp_auth._MemoryStorage())
     shared.auth.context.current_tokens = kept.tokens
-    await _storage().save(mcp_auth._MemoryStorage())
+    shared.auth.context.token_expiry_time = 200.0
     async with shared._renewing(None):
         assert shared.auth.context.current_tokens == kept.tokens
+        assert shared.auth.context.token_expiry_time == 200.0
 
 
 @pytest.mark.asyncio
@@ -509,9 +529,9 @@ async def test_a_refused_request_closes_the_sdk_flow_before_one_expired_retry(
 ) -> None:
     monkeypatch.setattr(time, "time", lambda: 100.0)
     kept = _kept(expires_at=200.0)
-    await _storage().save(kept)
-    shared = await _session()
+    shared = _shared(kept)
     shared.auth.context.current_tokens = kept.tokens
+    shared.auth.context.token_expiry_time = 200.0
     seen: list[tuple[float | None, int]] = []
     closed: list[bool] = []
     answered: list[int] = []
@@ -548,10 +568,9 @@ async def test_expiry_reloads_storage_before_forwarding_sdk_exchange_responses(
 ) -> None:
     monkeypatch.setattr(time, "time", lambda: 100.0)
     old, new = _kept(expires_at=99.0), _kept("new", expires_at=200.0)
-    await _storage().save(old)
-    shared = await _session()
+    shared = _shared(new, valid=False)
     shared.auth.context.current_tokens = old.tokens
-    await _storage().save(new)
+    shared.auth.context.token_expiry_time = 99.0
     exchange = httpx2.Request("POST", "https://authority/token")
     answered: list[int] = []
     closed = Mock()

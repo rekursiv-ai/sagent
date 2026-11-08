@@ -4,8 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from typing import Literal
-
-import asyncio
+from unittest.mock import Mock
 
 import pytest
 
@@ -14,7 +13,7 @@ from sagent.model.cost import TokenCost, TokenCount
 from sagent.model.exceptions import RateLimitedError
 from sagent.model.scripted import ScriptedProvider, reply
 from sagent.runtime import types
-from sagent.runtime.runtime import Await, Runtime
+from sagent.runtime.runtime import Runtime
 from sagent.session.types import UserMessage
 from sagent.tui import status
 from sagent.tui.status import Status, count, elapsed
@@ -41,9 +40,20 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
     return fake
 
 
+def _runtime(*, capability: ModelCapability | None = None) -> Mock:
+    return Mock(
+        spec=Runtime,
+        model=ScriptedProvider(capability=capability)["scripted"],
+        cohort=set[str](),
+        running_tools={},
+        jobs={},
+        inbox=Mock(gate_armed=False),
+        service_suspended_until=None,
+    )
+
+
 def _status(*, wait_after_sec: float = 15.0) -> Status:
-    runtime = Runtime(model=ScriptedProvider()["scripted"])
-    return Status(runtime, wait_after_sec=wait_after_sec, spinner="abcd")
+    return Status(_runtime(), wait_after_sec=wait_after_sec, spinner="abcd")
 
 
 def _complete(
@@ -115,8 +125,7 @@ def test_nothing_shows_before_the_first_call() -> None:
 
 
 def test_a_resumed_session_s_spend_shows_from_the_start(clock: _Clock) -> None:
-    runtime = Runtime(model=ScriptedProvider()["scripted"])
-    line = Status(runtime, spend=1.25)
+    line = Status(_runtime(), spend=1.25)
     assert line.frame() == "[0s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $1.25]"
     _call(line, clock, sec=2.0, event=_complete(spend=0.5))
     assert line.frame() == "[2s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $1.75]"
@@ -176,15 +185,14 @@ def test_a_context_size_chosen_is_the_window_shown(clock: _Clock) -> None:
     model = line.runtime.model
     model.settings = replace(
         model.settings,
-        context_size=model.capability.prices[100_000],
+        context_size=model.capability.prices[1],
     )
-    _call(line, clock, sec=1.0, event=_complete(TokenCount(cache_write=25_000)))
-    assert " 25%↔)" in line.frame()
+    _call(line, clock, sec=1.0, event=_complete(TokenCount(cache_write=1)))
+    assert " 100%↔)" in line.frame()
 
 
 def test_a_model_with_no_window_shows_no_fill(clock: _Clock) -> None:
-    runtime = Runtime(model=ScriptedProvider(capability=ModelCapability())["s"])
-    line = Status(runtime)
+    line = Status(_runtime(capability=ModelCapability()))
     _call(line, clock, sec=1.0, event=_complete(TokenCount(request=5)))
     assert line.frame() == "[1s 5↑ 0↓ 0↟ 0↡ (0%↡) $0.00]"
 
@@ -245,10 +253,10 @@ def test_an_ended_call_counts_what_it_was_billed_not_what_it_streamed(
 ) -> None:
     line = _status()
     line(types.ModelCallStarted())
-    line(types.ModelResponsePartial(text="x" * 400))
+    line(types.ModelResponsePartial(text="xxxxxxxx"))
     clock.mono += 1.0
-    line(_complete(TokenCount(response=100)))
-    assert line.frame() == "[1s 0↑ 100↓ 0↟ 0↡ (0%↡ 0%↔) $0.00]"
+    line(_complete(TokenCount(response=3)))
+    assert line.frame() == "[1s 0↑ 3↓ 0↟ 0↡ (0%↡ 0%↔) $0.00]"
 
 
 def test_a_new_call_starts_its_estimate_from_zero() -> None:
@@ -261,7 +269,7 @@ def test_a_new_call_starts_its_estimate_from_zero() -> None:
 
 
 def test_the_defaults_wait_fifteen_seconds_and_spin_braille(clock: _Clock) -> None:
-    line = Status(Runtime(model=ScriptedProvider()["scripted"]))
+    line = Status(_runtime())
     line(types.ModelCallStarted())
     clock.mono += 14.5
     assert line.frame() == "⠹ [14s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00]"
@@ -288,26 +296,23 @@ def test_a_finished_child_adds_nothing_its_charges_did_not(clock: _Clock) -> Non
 def test_the_wait_shows_only_once_the_call_runs_past_the_threshold(
     clock: _Clock,
 ) -> None:
-    line = _status(wait_after_sec=15.0)
-    _call(line, clock, sec=100.0, event=_complete())
+    line = _status(wait_after_sec=2.0)
+    _call(line, clock, sec=3.0, event=_complete())
     line(types.ModelCallStarted())
-    clock.mono += 14.5
+    clock.mono += 1.5
     assert line.frame().endswith("$0.00]")
     clock.mono += 0.5
     assert line.frame().endswith("$0.00; waiting on model.]")
 
 
-@pytest.mark.asyncio
-async def test_running_tools_are_the_wait() -> None:
+def test_running_tools_are_the_wait() -> None:
     line = _status(wait_after_sec=0.0)
     line(types.ModelCallStarted())
     line.runtime.cohort.add("c1")
     assert line.frame() == "a [0s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; waiting on tools.]"
     line.runtime.cohort.clear()
-    task = asyncio.create_task(asyncio.sleep(0))
-    line.runtime.running_tools["c2"] = task
+    line.runtime.running_tools["c2"] = Mock()
     assert line.frame().endswith("; waiting on tools.]")
-    await task
 
 
 def test_tools_running_after_the_reply_spin_and_name_the_wait(clock: _Clock) -> None:
@@ -337,30 +342,25 @@ def test_calls_in_the_background_are_counted(
     line = _status()
     _call(line, clock, sec=1.0, event=_complete())
     jobs = {"a": _Job(state="detached"), "b": _Job(state="sleeping")}
-
-    def held(runtime: Runtime) -> dict[str, _Job]:
-        del runtime
-        return jobs
-
-    monkeypatch.setattr(Runtime, "jobs", property(held))
+    monkeypatch.setattr(line.runtime, "jobs", jobs)
     assert line.frame() == "[1s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; 2 in background.]"
     jobs["c"] = _Job(state="running")
     assert line.frame() == "[1s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; 2 in background.]"
-    line.runtime.inbox.push_front(Await(types=(UserMessage,)))
+    line.runtime.inbox = Mock(gate_armed=True)
     assert line.frame().endswith("; waiting for input. 2 in background.]")
 
 
 def test_an_armed_gate_waits_for_input_at_once() -> None:
     line = _status()
     line(types.ModelCallStarted())
-    line.runtime.inbox.push_front(Await(types=(UserMessage,)))
+    line.runtime.inbox = Mock(gate_armed=True)
     assert line.frame() == "a [0s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; waiting for input.]"
 
 
 def test_an_armed_gate_shows_while_idle(clock: _Clock) -> None:
     line = _status()
     _call(line, clock, sec=2.0, event=_complete())
-    line.runtime.inbox.push_front(Await(types=(UserMessage,)))
+    line.runtime.inbox = Mock(gate_armed=True)
     assert line.frame() == "[2s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; waiting for input.]"
 
 
@@ -382,7 +382,7 @@ def test_a_suspension_counts_down_on_the_wall_clock_and_stops_the_call(
     clock.mono += 50.0
     assert line.frame() == "[10s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; retrying in 1m 5s.]"
     clock.wall += 65.0
-    line.runtime.inbox.push_front(Await(types=(UserMessage,)))
+    line.runtime.inbox = Mock(gate_armed=True)
     assert line.frame() == "[10s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; waiting for input.]"
 
 
@@ -390,7 +390,7 @@ def test_compaction_spins_and_outranks_an_armed_gate(clock: _Clock) -> None:
     line = _status()
     _call(line, clock, sec=3.0, event=_complete())
     line(types.CompactStarted())
-    line.runtime.inbox.push_front(Await(types=(UserMessage,)))
+    line.runtime.inbox = Mock(gate_armed=True)
     clock.mono += 0.3
     assert line.frame() == "b [3s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00; compacting.]"
 

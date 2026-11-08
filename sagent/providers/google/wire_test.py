@@ -5,18 +5,16 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, tzinfo
 from typing import TYPE_CHECKING, Self, override
+from unittest.mock import Mock, call
 
 import base64
-import hashlib
-import io
 import logging
 
-from PIL import Image
 from treekle import from_plain, json_dumps
 
-import pypdfium2 as pdfium
 import pytest
 
+from sagent.model import image
 from sagent.model.capability import ModelLimits, ModelSettings
 from sagent.model.cost import TokenCount
 from sagent.model.exceptions import (
@@ -49,7 +47,7 @@ from sagent.tools.display import ToolDisplay
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping, Sequence
+    from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 
     from treekle import PlainTree
 
@@ -61,6 +59,20 @@ if TYPE_CHECKING:
     )
     from sagent.session.types import AnyToolResult, SessionRecord
     from sagent.tools.types import ToolContext
+
+
+@pytest.fixture(autouse=True)
+def isolated_uploads(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    def shrink(data: bytes, *, max_edge_px: int, max_bytes: int) -> tuple[bytes, str]:
+        del max_edge_px, max_bytes
+        return data, "image/png"
+
+    wire._upload.cache_clear()
+    monkeypatch.setattr(image, "shrink", shrink)
+    try:
+        yield
+    finally:
+        wire._upload.cache_clear()
 
 
 def test_a_user_message_is_one_user_content_and_nothing_else() -> None:
@@ -99,7 +111,7 @@ def test_an_empty_user_message_sends_one_empty_part(content: str | None) -> None
 def test_images_and_pdfs_ride_inline_and_other_attachments_are_left_out(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    png, pdf = _png(4, 4), b"%PDF-1.4 tiny"
+    png, pdf = b"image", b"pdf"
     message = UserMessage(
         content="look",
         attachments=(
@@ -118,29 +130,28 @@ def test_images_and_pdfs_ride_inline_and_other_attachments_are_left_out(
     assert caplog.messages == ["Gemini reads no text/plain attachment; leaving it out."]
 
 
-def test_an_image_is_shrunk_to_the_model_limits() -> None:
-    capability = _capability(limits=ModelLimits(max_image_edge_px=2))
-    message = UserMessage(
-        attachments=(Attachment(mime_descriptor="image/png", data=_png(4, 4)),),
+@pytest.mark.parametrize(("edge", "bytes_limit"), [(2, 0), (0, 3), (2, 3)])
+def test_an_image_upload_forwards_both_limits_and_uses_the_returned_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+    edge: int,
+    bytes_limit: int,
+) -> None:
+    shrunk = Mock(return_value=(b"new", "image/webp"))
+    monkeypatch.setattr(image, "shrink", shrunk)
+    capability = _capability(
+        limits=ModelLimits(max_image_edge_px=edge, max_image_bytes=bytes_limit),
     )
-    inline = _first_part(_contents(message, capability=capability))["inlineData"]
-    assert inline["mimeType"] == "image/webp"
-    data = base64.b64decode(from_plain(inline["data"], str))
-    assert Image.open(io.BytesIO(data)).size == (2, 2)
-
-
-def test_a_byte_limit_alone_also_shrinks() -> None:
-    data = _png(64, 64, noisy=True)
-    capability = _capability(limits=ModelLimits(max_image_bytes=len(data) // 2))
     message = UserMessage(
-        attachments=(Attachment(mime_descriptor="image/png", data=data),),
+        attachments=(Attachment(mime_descriptor="image/png", data=b"image"),),
     )
-    part = _first_part(_contents(message, capability=capability))
-    assert part["inlineData"]["mimeType"] == "image/webp"
+    assert _first_part(_contents(message, capability=capability)) == {
+        "inlineData": {"mimeType": "image/webp", "data": "bmV3"},
+    }
+    shrunk.assert_called_once_with(b"image", max_edge_px=edge, max_bytes=bytes_limit)
 
 
 def test_a_conversation_with_calls_results_and_signatures() -> None:
-    png = _png(4, 4)
+    png = b"image"
     contents = _contents(
         UserMessage(content="run ls"),
         Thinking(content="hmm"),
@@ -244,20 +255,29 @@ def test_another_agents_words_are_attributed() -> None:
     ]
 
 
-def test_another_agents_and_a_cleared_historys_images_are_shrunk_too() -> None:
+def test_another_agents_and_a_cleared_historys_images_are_shrunk_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shrunk = Mock(return_value=(b"new", "image/webp"))
+    monkeypatch.setattr(image, "shrink", shrunk)
     capability = _capability(limits=ModelLimits(max_image_edge_px=2))
-    image = (Attachment(mime_descriptor="image/png", data=_png(4, 4)),)
+    attachments = (Attachment(mime_descriptor="image/png", data=b"image"),)
     contents = _contents(
-        AgentToAgentMessage(sender="lead", attachments=image),
-        ContextClear(history=(UserMessage(attachments=image),)),
+        AgentToAgentMessage(sender="lead", attachments=attachments),
+        ContextClear(history=(UserMessage(attachments=attachments),)),
         capability=capability,
     )
-    parts = from_plain(contents[0]["parts"], list[object])[1:]
-    images = [from_plain(part, dict[str, dict[str, str]]) for part in parts]
-    assert [image["inlineData"]["mimeType"] for image in images] == [
-        "image/webp",
-        "image/webp",
+    assert contents == [
+        {
+            "role": "user",
+            "parts": [
+                {"text": "[from lead]: "},
+                {"inlineData": {"mimeType": "image/webp", "data": "bmV3"}},
+                {"inlineData": {"mimeType": "image/webp", "data": "bmV3"}},
+            ],
+        },
     ]
+    shrunk.assert_called_once_with(b"image", max_edge_px=2, max_bytes=0)
 
 
 def test_a_context_clear_sends_its_summary_then_its_history() -> None:
@@ -436,61 +456,93 @@ def test_an_effort_the_wire_cannot_say_is_refused(
         _encoded_thinking(capability, settings)
 
 
-def test_the_estimate_is_text_over_characters_per_token_plus_image_tiles() -> None:
+def test_the_estimate_is_text_over_characters_per_token_plus_image_tiles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sized = Mock(return_value=(769, 2))
+    paged = Mock(return_value=((2.0, 3.0),) * 3)
+    monkeypatch.setattr(image, "size", sized)
+    monkeypatch.setattr(image, "pages", paged)
     capability = _capability()
-    text = {"parts": [{"text": "x" * 400}]}
+    text = {"parts": [{"text": "text"}]}
     assert wire.estimate(text, capability=capability) == int(
         len(json_dumps(text)) / 4.0,
     )
-    wide = _inline("image/png", _png(800, 10))
-    pdf = _inline("application/pdf", b"%PDF-1.4")
-    body = {"parts": [{"text": "x" * 400}, {"nested": [wide, "s"]}, pdf]}
+    wide = _inline("image/png", b"image")
+    pdf = _inline("application/pdf", b"pdf")
+    body = {"parts": [{"text": "text"}, {"nested": [wide, "s"]}, pdf]}
     # The inline bytes are no text; the image is two 768-pixel tiles wide.
     dropped = {
         "parts": [
-            {"text": "x" * 400},
+            {"text": "text"},
             {"nested": [dict[str, object](), "s"]},
             dict[str, object](),
         ],
     }
     assert wire.estimate(body, capability=capability) == (
-        int(len(json_dumps(dropped)) / 4.0) + 2 * 258
+        int(len(json_dumps(dropped)) / 4.0) + (2 + 3) * 258
     )
+    sized.assert_called_once_with(b"image", max_edge_px=0)
+    paged.assert_called_once_with(b"pdf")
 
 
 @pytest.mark.parametrize(("width", "tiles"), [(768, 1), (769, 2), (1537, 3)])
-def test_tiles_are_768_pixels_wide(width: int, tiles: int) -> None:
+def test_tiles_are_768_pixels_wide(
+    monkeypatch: pytest.MonkeyPatch,
+    width: int,
+    tiles: int,
+) -> None:
+    sized = Mock(return_value=(width, 2))
+    monkeypatch.setattr(image, "size", sized)
     capability = _capability()
-    wide = {"parts": [_inline("image/png", _png(width, 1))]}
+    wide = {"parts": [_inline("image/png", b"wide")]}
     base = wire.estimate({"parts": [dict[str, object]()]}, capability=capability)
     assert wire.estimate(wide, capability=capability) == base + tiles * 258
+    sized.assert_called_once_with(b"wide", max_edge_px=0)
 
 
-def test_a_small_image_is_one_tile_and_a_tall_one_two() -> None:
+def test_a_small_image_is_one_tile_and_a_tall_one_two(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sized = Mock(side_effect=[(2, 3), (2, 769)])
+    monkeypatch.setattr(image, "size", sized)
     capability = _capability()
-    small = {"parts": [_inline("image/png", _png(768, 4))]}
-    tall = {"parts": [_inline("image/png", _png(10, 769))]}
+    small = {"parts": [_inline("image/png", b"small")]}
+    tall = {"parts": [_inline("image/png", b"tall")]}
     base = wire.estimate({"parts": [dict[str, object]()]}, capability=capability)
     assert wire.estimate(small, capability=capability) == base + 258
     assert wire.estimate(tall, capability=capability) == base + 2 * 258
+    assert sized.call_args_list == [
+        call(b"small", max_edge_px=0),
+        call(b"tall", max_edge_px=0),
+    ]
 
 
-def test_each_images_tiles_add_up() -> None:
+def test_each_images_tiles_add_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    sized = Mock(side_effect=[(2, 3), (769, 2)])
+    monkeypatch.setattr(image, "size", sized)
     capability = _capability()
     two = {
-        "parts": [_inline("image/png", _png(4, 4)), _inline("image/png", _png(4, 4))],
+        "parts": [_inline("image/png", b"small"), _inline("image/png", b"wide")],
     }
     empty = {"parts": [dict[str, object](), dict[str, object]()]}
     assert wire.estimate(two, capability=capability) == (
-        wire.estimate(empty, capability=capability) + 2 * 258
+        wire.estimate(empty, capability=capability) + (1 + 2) * 258
     )
+    assert sized.call_args_list == [
+        call(b"small", max_edge_px=0),
+        call(b"wide", max_edge_px=0),
+    ]
 
 
-def test_an_inline_pdf_is_258_tokens_a_page() -> None:
+def test_an_inline_pdf_is_258_tokens_a_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    paged = Mock(return_value=((2.0, 3.0),) * 3)
+    monkeypatch.setattr(image, "pages", paged)
     capability = _capability()
-    pdf = {"parts": [_inline("application/pdf", _pdf(3))]}
+    pdf = {"parts": [_inline("application/pdf", b"pdf")]}
     base = wire.estimate({"parts": [dict[str, object]()]}, capability=capability)
     assert wire.estimate(pdf, capability=capability) == base + 3 * 258
+    paged.assert_called_once_with(b"pdf")
 
 
 def test_inline_data_without_an_image_is_no_tile() -> None:
@@ -1148,41 +1200,43 @@ async def _lines(lines: Sequence[str]) -> AsyncIterator[str]:
         yield line
 
 
-def _png(width: int, height: int, *, noisy: bool = False) -> bytes:
-    if noisy:
-        pixels = hashlib.shake_256(b"noise").digest(width * height * 3)
-        image = Image.frombytes("RGB", (width, height), pixels)
-    else:
-        image = Image.new("RGB", (width, height), "red")
-    out = io.BytesIO()
-    image.save(out, format="PNG")
-    return out.getvalue()
-
-
-def _pdf(pages: int) -> bytes:
-    doc = pdfium.PdfDocument.new()
-    for _ in range(pages):
-        _ = doc.new_page(612, 792)
-    out = io.BytesIO()
-    doc.save(out)
-    return out.getvalue()
-
-
 @pytest.mark.parametrize(
-    ("attachment", "tokens"),
+    ("mime", "pixels", "edge", "pages", "tokens"),
     [
-        (Attachment(mime_descriptor="image/png", data=_png(1600, 800)), 258 * 3 * 2),
-        (Attachment(mime_descriptor="image/png", data=_png(300, 200)), 258),
-        (Attachment(mime_descriptor="application/pdf", data=_pdf(3)), 258 * 3),
-        (Attachment(mime_descriptor="text/plain", data=b"x" * 4_000), 0),
+        ("image/png", (1537, 769), 0, 0, 258 * 3 * 2),
+        ("image/png", (2, 3), 3, 0, 258),
+        ("application/pdf", (2, 3), 0, 3, 258 * 3),
+        ("text/plain", (2, 3), 0, 0, 0),
     ],
     ids=["tiled-image", "small-image", "pdf", "unsent"],
 )
 def test_an_attachment_bills_258_per_tile_or_page(
-    attachment: Attachment,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    mime: str,
+    pixels: tuple[int, int],
+    edge: int,
+    pages: int,
     tokens: int,
 ) -> None:
-    assert wire.attachment_tokens(attachment, limits=ModelLimits()) == tokens
+    sized = Mock(return_value=pixels)
+    paged = Mock(return_value=((2.0, 3.0),) * pages)
+    monkeypatch.setattr(image, "size", sized)
+    monkeypatch.setattr(image, "pages", paged)
+    attachment = Attachment(mime_descriptor=mime, data=b"attachment")
+    assert (
+        wire.attachment_tokens(
+            attachment,
+            limits=ModelLimits(max_image_edge_px=edge),
+        )
+        == tokens
+    )
+    assert sized.call_args_list == (
+        [call(b"attachment", max_edge_px=edge)] if mime.startswith("image/") else []
+    )
+    assert paged.call_args_list == (
+        [call(b"attachment")] if mime == "application/pdf" else []
+    )
 
 
 def _b64(data: bytes) -> str:

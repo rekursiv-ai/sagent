@@ -254,9 +254,12 @@ def test_a_parameter_the_docstring_leaves_out_is_described_by_nothing() -> None:
 
 def test_the_args_section_ends_at_the_margin_and_keeps_colons_in_a_note() -> None:
     def ratio(a: str, b: str) -> str:
-        """Ratio.
+        return a + b
+
+    ratio.__doc__ = """Ratio.
 
         Args:
+           A continuation before any argument is ignored.
          a: As x:y, one space in.
          b: The other: also x:y.
 
@@ -264,7 +267,6 @@ def test_the_args_section_ends_at_the_margin_and_keeps_colons_in_a_note() -> Non
           the ratio.
 
         """
-        return a + b
 
     assert tool(ratio).schema["properties"] == {
         "a": {"type": "string", "description": "As x:y, one space in."},

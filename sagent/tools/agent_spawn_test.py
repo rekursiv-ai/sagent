@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, fields, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, override
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import asyncio
 import logging
@@ -297,36 +298,39 @@ def test_the_summary_says_what_kind_of_child_and_its_task(
     arguments: dict[str, PlainTree],
     summary: str,
 ) -> None:
-    setup = _setup(tmp_path)
+    spawn = AgentSpawn(team=Mock(spec=Team))
 
-    assert setup.spawn.summary(arguments) == summary
-    assert setup.spawn.serialize_key(ToolContext(cwd=tmp_path), arguments) is None
+    assert spawn.summary(arguments) == summary
+    assert spawn.serialize_key(ToolContext(cwd=tmp_path), arguments) is None
 
 
 def test_the_reminder_lists_the_children_who_owes_whom_and_a_leaf(
     tmp_path: Path,
 ) -> None:
-    setup = _setup(tmp_path)
-    for label in ("leaf", "asked", "asker"):
-        _ = setup.team.join(
-            Agent(
-                model=ScriptedProvider()["scripted"],
-                tool_context=ToolContext(cwd=tmp_path),
-            ),
-            label=label,
-            parent="Agent",
-            max_depth=0,
-        )
-    _ = setup.team.join(
-        Agent(model=ScriptedProvider()["scripted"], tool_context=ToolContext()),
-        label="kid",
-        parent="leaf",
+    debts: dict[str, dict[str, str]] = {
+        "Agent": {"asker": "may I?"},
+        "asked": {"Agent": "how goes it?"},
+        "asker": {},
+        "leaf": {},
+        "kid": {},
+    }
+    children: dict[str, list[str]] = {
+        "Agent": ["leaf", "asked", "asker"],
+        "leaf": ["kid"],
+        "kid": [],
+    }
+    spawning = {"Agent": True, "leaf": False, "kid": False}
+    team = MagicMock(
+        spec=Team,
+        __contains__=Mock(side_effect=debts.__contains__),
+        owes=Mock(side_effect=debts.__getitem__),
+        children=Mock(side_effect=children.__getitem__),
+        can_spawn=Mock(side_effect=spawning.__getitem__),
     )
-    setup.team.send("Agent", "asked", "how goes it?")
-    setup.team.send("asker", "Agent", "may I?")
+    spawn = AgentSpawn(team=team)
 
     def said(label: str) -> str:
-        return setup.spawn.reminder(ToolContext(cwd=tmp_path, label=label))
+        return spawn.reminder(ToolContext(cwd=tmp_path, label=label))
 
     assert said("Agent") == (
         "Your children: leaf, asked (owes you a reply), asker (you owe it a reply)."
@@ -442,16 +446,12 @@ async def test_a_child_tells_its_parent_when_it_stops_but_not_after_its_spawn(
 
 
 @pytest.mark.asyncio
-async def test_a_spawn_detaches_at_its_childs_first_quota_wait(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_a_spawn_detaches_at_its_childs_first_quota_wait() -> None:
     """Blocked in the call, the parent would read none of a week's wait."""
-    setup = _setup(tmp_path)
     detached: list[asyncio.Task[None] | None] = []
-    monkeypatch.setattr(setup.parent.runtime, "detach", detached.append)
+    parent = Mock(spec=Agent, runtime=Mock(detach=detached.append))
     task = asyncio.create_task(asyncio.sleep(0))
-    waits = agent_spawn._DetachOnWait(parent=setup.parent, task=task)
+    waits = agent_spawn._DetachOnWait(parent=parent, task=task)
     for exception, attempt in (
         (OverloadedError("busy"), 1),
         (RateLimitedError("spent"), 1),
@@ -1073,15 +1073,28 @@ async def test_a_child_of_a_journaled_parent_keeps_its_own_journal(
 async def test_a_label_of_anything_but_plain_characters_starts_no_child(
     tmp_path: Path,
     label: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async with JsonlJournal(tmp_path / "parent" / "journal.jsonl") as journal:
-        setup = _setup(tmp_path, reply("done"), journal=journal)
+    parent = Mock(spec=Agent)
+    members = {"Agent": parent}
+    team = MagicMock(
+        spec=Team,
+        __contains__=Mock(side_effect=members.__contains__),
+        __getitem__=Mock(side_effect=members.__getitem__),
+        can_spawn=Mock(return_value=True),
+    )
+    model, start = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(AgentSpawn, "_model", model)
+    monkeypatch.setattr(AgentSpawn, "_start", start)
 
-        with pytest.raises(ValueError, match=r"^A label is 1 to 64 letters, digits"):
-            _ = await _spawn(setup, tmp_path, {"prompt": "go", "label": label})
+    with pytest.raises(ValueError, match=r"^A label is 1 to 64 letters, digits"):
+        _ = await AgentSpawn(team=team).call(
+            ToolContext(cwd=tmp_path, label="Agent"),
+            {"prompt": "go", "label": label},
+        )
 
-    assert list(setup.team) == ["Agent"]
-    assert [p.name for p in (tmp_path / "parent").iterdir()] == ["journal.jsonl"]
+    model.assert_not_awaited()
+    start.assert_not_awaited()
 
 
 @pytest.mark.asyncio

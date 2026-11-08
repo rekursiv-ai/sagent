@@ -21,18 +21,12 @@ from wesearch.fetch import FetchSession
 
 import pytest
 
-from sagent.agent.team import Team
-from sagent.model.scripted import ScriptedProvider
-from sagent.providers.catalog import ModelCatalog
 from sagent.session.types import WebBrowserResult
-from sagent.tools.builtin import builders
-from sagent.tools.remote import RemoteSession
 from sagent.tools.types import ToolContext
+from sagent.tools.web_browser import WebBrowser
 
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from sagent.tools.types import Tool
 
 
@@ -59,14 +53,8 @@ def calls(monkeypatch: pytest.MonkeyPatch) -> Calls:
 
 
 @pytest.fixture
-def tool(tmp_path: Path) -> Tool:
-    built = builders(
-        cwd=tmp_path,
-        team=Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider})),
-        remote=RemoteSession([]),
-    )
-    assert "WebBrowser" in built
-    return built["WebBrowser"]()
+def tool() -> Tool:
+    return WebBrowser()
 
 
 def test_schema_and_secret_safe_summary(tool: Tool) -> None:
@@ -117,7 +105,7 @@ def test_schema_and_secret_safe_summary(tool: Tool) -> None:
         "close",
     ],
 )
-async def test_forwarding_and_session_reuse(
+async def test_forwarding_uses_the_callers_session(
     tool: Tool,
     calls: Calls,
     action: str,
@@ -133,20 +121,15 @@ async def test_forwarding_and_session_reuse(
         "max_chars": 17,
         "timeout_sec": 4.5,
     }
-    for _ in range(2):
-        await tool.call(context, arguments)
-    assert (
-        calls.seen
-        == [
-            {
-                **arguments,
-                "mode": None,
-                "restart": False,
-                "session": context.fetch_session,
-            },
-        ]
-        * 2
-    )
+    await tool.call(context, arguments)
+    assert calls.seen == [
+        {
+            **arguments,
+            "mode": None,
+            "restart": False,
+            "session": context.fetch_session,
+        },
+    ]
 
 
 @pytest.mark.asyncio

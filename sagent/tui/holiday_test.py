@@ -11,6 +11,7 @@ import time
 
 import pytest
 
+from sagent.lib.userdirs import base_dir_variables
 from sagent.tui import holiday
 from sagent.tui.holiday import Icon, holidays, icon_rows, todays_holiday
 
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 @pytest.fixture
 def zone(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], None]]:
     """Set the process's local time zone, as a user's machine would have it."""
+    isolated = base_dir_variables()
     try:
         with monkeypatch.context() as local:
 
@@ -33,6 +35,7 @@ def zone(monkeypatch: pytest.MonkeyPatch) -> Iterator[Callable[[str], None]]:
             yield to
     finally:
         time.tzset()
+        assert base_dir_variables() == isolated
 
 
 @pytest.fixture

@@ -11,9 +11,8 @@ from rich.style import Style
 
 import pytest
 
-from sagent.lib.userdirs import config_dir
 from sagent.tui.markdown import TightMarkdown, stable_boundary
-from sagent.tui.theme import load_theme
+from sagent.tui.theme import Theme, load_theme
 from sagent.tui.types import Sticky
 
 
@@ -83,28 +82,23 @@ _AGREES_WITH_RICH = [
 
 
 @pytest.mark.parametrize("text", _AGREES_WITH_RICH)
-@pytest.mark.parametrize("hyperlinks", [True, False])
-def test_it_matches_rich_but_for_a_leading_blank_line(
-    text: str,
-    hyperlinks: bool,
-) -> None:
-    assert _tight(text, hyperlinks=hyperlinks) == _rich(
-        text,
-        hyperlinks=hyperlinks,
-    ).lstrip("\n")
+def test_it_matches_rich_but_for_a_leading_blank_line(text: str) -> None:
+    assert _tight(text) == _rich(text).lstrip("\n")
 
 
 @pytest.mark.parametrize("text", ["- item one\n- item two\n", "> a quote\n"])
 def test_a_list_or_quote_that_opens_the_text_gets_no_blank_line(text: str) -> None:
-    assert _rich(text).startswith("\n")
-    assert not _tight(text).startswith("\n")
-    assert _bare(_tight(text)) == _bare(_rich(text)[1:])
+    rich, tight = _rich(text), _tight(text)
+    assert rich.startswith("\n")
+    assert not tight.startswith("\n")
+    assert _bare(tight) == _bare(rich[1:])
 
 
 @pytest.mark.parametrize("text", ["- a\n\n> b\n", "- item\n\n> quote\n"])
 def test_blocks_after_the_first_keep_their_blank_line(text: str) -> None:
-    assert _bare(_tight(text)) == _bare(_rich(text).lstrip("\n"))
-    assert "\n\n" in _tight(text)
+    tight = _tight(text)
+    assert _bare(tight) == _bare(_rich(text).lstrip("\n"))
+    assert "\n\n" in tight
 
 
 def test_a_leading_html_block_keeps_the_blank_line_after_it() -> None:
@@ -127,8 +121,10 @@ def test_kbd_is_styled_and_other_inline_html_is_dropped() -> None:
 
 
 def test_a_link_without_hyperlinks_shows_its_url() -> None:
-    assert _rows("[click](https://example.com)\n", hyperlinks=False) == (
-        "click (https://example.com)\n"
+    text = "[click](https://example.com)\n"
+    assert _rows(text, hyperlinks=False) == "click (https://example.com)\n"
+    assert _ansi(TightMarkdown(text, hyperlinks=False)) == _ansi(
+        Markdown(text, hyperlinks=False),
     )
 
 
@@ -304,15 +300,19 @@ def test_terminal_code_inherits_terminal_background(language: str) -> None:
 
 @pytest.mark.parametrize("language", ["python", "text", "unknown-language"])
 def test_custom_theme_reaches_prose_inline_and_fenced_code(language: str) -> None:
-    themes = config_dir() / "rekursiv-ai" / "sagent" / "themes"
-    themes.mkdir(parents=True)
-    (themes / "custom.yaml").write_text(
-        "preset: terminal\nstyles:\n  text: magenta\n  keyword: blue\n  number: cyan\n",
+    theme = Theme(
+        "custom",
+        {
+            **load_theme("terminal").styles,
+            "text": Style.parse("magenta"),
+            "keyword": Style.parse("blue"),
+            "number": Style.parse("cyan"),
+        },
     )
     console = Console(file=io.StringIO(), color_system="truecolor")
     markdown = TightMarkdown(
         f"ordinary `inline`\n\n```{language}\nsample\n```",
-        theme=load_theme("custom"),
+        theme=theme,
     )
     segments = list(console.render(markdown))
     for word in ("ordinary", "inline", "sample"):
@@ -323,21 +323,24 @@ def test_custom_theme_reaches_prose_inline_and_fenced_code(language: str) -> Non
             and segment.style.color == Style.parse("magenta").color
             for segment in selected
         )
-    assert console.get_style("markdown.code") != load_theme("custom").style("code")
+    assert console.get_style("markdown.code") != theme.style("code")
 
 
 def test_fenced_and_inline_lexers_use_semantic_token_roles() -> None:
-    themes = config_dir() / "rekursiv-ai" / "sagent" / "themes"
-    themes.mkdir(parents=True)
-    (themes / "syntax.yaml").write_text(
-        "preset: terminal\nstyles:\n  keyword: magenta\n  number: cyan\n",
+    theme = Theme(
+        "syntax",
+        {
+            **load_theme("terminal").styles,
+            "keyword": Style.parse("magenta"),
+            "number": Style.parse("cyan"),
+        },
     )
     console = Console(file=io.StringIO(), color_system="truecolor")
     segments = list(
         console.render(
             TightMarkdown(
                 "`return 1`\n\n```python\nreturn 1\n```",
-                theme=load_theme("syntax"),
+                theme=theme,
                 inline_code_lexer="python",
             ),
         ),

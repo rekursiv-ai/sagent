@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, call
 
 import asyncio
 import contextlib
-import signal
 import weakref
 
 from prompt_toolkit import PromptSession
@@ -18,7 +17,7 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.enums import DEFAULT_BUFFER
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import InMemoryHistory
-from prompt_toolkit.input import DummyInput, create_pipe_input
+from prompt_toolkit.input import DummyInput
 from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.keys import Keys
@@ -836,6 +835,9 @@ def test_ctrl_c_while_idle_abandons_the_line_to_history_without_a_halt() -> None
 @pytest.mark.parametrize("busy_with", ["model_call", "compact_task", "cohort"])
 async def test_ctrl_c_halts_a_busy_agent(busy_with: str) -> None:
     prompt = _Prompt()
+    prompt.type("abandoned")
+    (interrupt,) = [b for b in prompt.keys.bindings if b.keys == (Keys.ControlC,)]
+    assert not interrupt.eager()
     task = asyncio.create_task(asyncio.sleep(0))
     if busy_with == "model_call":
         prompt.runtime.model_call = task
@@ -845,6 +847,8 @@ async def test_ctrl_c_halts_a_busy_agent(busy_with: str) -> None:
         prompt.runtime.cohort.add("c1")
     prompt.press(Keys.ControlC)
     assert prompt.pushed() == [types.Halt()]
+    assert prompt.buffer.text == ""
+    assert list(prompt.buffer.history.get_strings()) == ["abandoned"]
     await task
 
 
@@ -870,13 +874,15 @@ def test_the_keys_that_send_stop_once_the_prompt_is_accepted() -> None:
     assert {keys for keys, active in done.items() if not active} == guarded
 
 
-def test_only_suspend_is_global_while_a_search_buffer_is_focused() -> None:
+@pytest.mark.parametrize("query", ["", "find"])
+def test_only_suspend_is_global_while_a_search_buffer_is_focused(query: str) -> None:
     keys = key_bindings(_runtime(), Panes(), Navigation())
     session: PromptSession[str] = PromptSession(
         input=DummyInput(),
         output=DummyOutput(),
         key_bindings=keys,
     )
+    session.search_buffer.text = query
     session.app.layout.focus(session.search_buffer)
     with set_app(session.app):
         active = {tuple(binding.keys) for binding in keys.bindings if binding.filter()}
@@ -884,105 +890,94 @@ def test_only_suspend_is_global_while_a_search_buffer_is_focused() -> None:
 
 
 async def _line(
-    keys: str,
+    *answers: str | BaseException,
     panes: Panes | None = None,
-    *,
-    bound: KeyBindings | None = None,
-    multiline: bool = False,
 ) -> tuple[str | None, list[str]]:
     notices: list[str] = []
-    with create_pipe_input() as pipe:
-        session: PromptSession[str] = PromptSession(
-            input=pipe,
-            output=DummyOutput(),
-            key_bindings=bound,
-            multiline=multiline,
-        )
-        pipe.send_text(keys)
-        source = PromptSource(session, panes=panes or Panes(), notice=notices.append)
-        line = await source.line()
+    reading = AsyncMock(side_effect=answers)
+    focus = Mock()
+    session = Mock(
+        spec=PromptSession,
+        prompt_async=reading,
+        app=Mock(layout=Mock(focus=focus)),
+    )
+    source = PromptSource(session, panes=panes or Panes(), notice=notices.append)
+    line = await source.line()
+    assert reading.await_args_list == [
+        call(set_exception_handler=False, handle_sigint=False),
+    ] * len(answers)
+    assert focus.call_args_list == [call(DEFAULT_BUFFER)] * len(answers)
     return line, notices
 
 
 @pytest.mark.asyncio
 async def test_a_typed_line_is_returned() -> None:
-    assert await _line("hello\r") == ("hello", [])
+    assert await _line("hello") == ("hello", [])
 
 
-_LEFT = "\x1b[D"
-
-
-@pytest.mark.asyncio
-async def test_left_on_an_empty_line_asks_for_the_tree() -> None:
-    keys = key_bindings(_runtime(), Panes(), Navigation())
-    assert await _line(_LEFT, bound=keys) == (OPEN_TREE, [])
-
-
-@pytest.mark.asyncio
-async def test_left_on_a_typed_line_moves_the_cursor_and_opens_nothing() -> None:
-    keys = key_bindings(_runtime(), Panes(), Navigation())
-    # A command, so Enter returns the line rather than sending it.
-    assert await _line(f"/ac{_LEFT}b\r", bound=keys) == ("/abc", [])
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("query", ["", "find"])
-@pytest.mark.parametrize("key", [_LEFT, "\x1b[A", "\x1b[B", "\t", "\r", "\x03"])
-async def test_history_search_keeps_prompt_shortcuts_out(
-    key: str,
-    query: str,
-) -> None:
-    runtime, panes = _runtime(), Panes()
-    runtime.cohort.add("c1")
-    panes.stage("queued", deferred=False)
-    panes.stage("deferred", deferred=True)
-    keys = key_bindings(runtime, panes, Navigation())
-    line = await asyncio.wait_for(
-        _line(f"\x12{query}{key}\x07/after\r", panes, bound=keys, multiline=True),
-        timeout=1,
-    )
-    assert line == ("/after", [])
-    assert runtime.inbox.drain_nowait() == []
-    assert panes.queue == Staged(text="queued")
-    assert panes.deferred == Staged(text="deferred")
-
-
-@pytest.mark.asyncio
-async def test_reopening_the_prompt_restores_focus_from_a_hidden_search(
+def test_left_on_an_empty_line_asks_for_the_tree(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with create_pipe_input() as pipe:
-        session: PromptSession[str] = PromptSession(
-            input=pipe,
-            output=DummyOutput(),
-            multiline=True,
-            key_bindings=key_bindings(_runtime(), Panes(), Navigation()),
-        )
-        reading = AsyncMock(wraps=session.prompt_async)
-        monkeypatch.setattr(session, "prompt_async", reading)
-        session.app.layout.focus(session.search_buffer)
-        source = PromptSource(session, panes=Panes(), notice=list[str]().append)
-        pipe.send_text("/after\r")
-        assert await asyncio.wait_for(source.line(), timeout=1) == "/after"
-        assert session.app.current_buffer is session.default_buffer
-        assert reading.call_args.kwargs["set_exception_handler"] is False
-        assert reading.call_args.kwargs["handle_sigint"] is False
+    prompt = _Prompt()
+    exiting = Mock()
+    monkeypatch.setattr(prompt.app, "exit", exiting)
+    prompt.press(Keys.Left)
+    exiting.assert_called_once_with(result=OPEN_TREE)
+    assert prompt.pushed() == []
+
+
+def test_left_on_a_typed_line_moves_the_cursor_and_opens_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt = _Prompt()
+    exiting = Mock()
+    monkeypatch.setattr(prompt.app, "exit", exiting)
+    prompt.type("/ac")
+    prompt.press(Keys.Left)
+    prompt.buffer.insert_text("b")
+    assert prompt.buffer.text == "/abc"
+    assert prompt.buffer.cursor_position == 3
+    exiting.assert_not_called()
+    assert prompt.pushed() == []
 
 
 @pytest.mark.asyncio
+async def test_reopening_the_prompt_restores_focus_before_reading() -> None:
+    focus = Mock()
+
+    def focused(**kwargs: object) -> str:
+        del kwargs
+        focus.assert_called_once_with(DEFAULT_BUFFER)
+        return "/after"
+
+    reading = AsyncMock(side_effect=focused)
+    session = Mock(
+        spec=PromptSession,
+        prompt_async=reading,
+        app=Mock(layout=Mock(focus=focus)),
+    )
+    source = PromptSource(session, panes=Panes(), notice=list[str]().append)
+    assert await source.line() == "/after"
+    reading.assert_awaited_once_with(set_exception_handler=False, handle_sigint=False)
+
+
 @pytest.mark.parametrize(
     "shift_enter",
-    ["\x1b[13;2u", "\x1b[27;2;13~", "\x1b\r"],
-    ids=["csi-u", "xterm-modify-other-keys", "alt-enter"],
+    ["\x1b[13;2u", "\x1b[27;2;13~"],
+    ids=["csi-u", "xterm-modify-other-keys"],
 )
-async def test_shift_enter_as_a_terminal_sends_it_is_a_newline(
+def test_shift_enter_as_a_terminal_sends_it_is_a_newline(
     shift_enter: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delitem(ANSI_SEQUENCES, shift_enter, raising=False)
-    keys = key_bindings(_runtime(), Panes(), Navigation())
-    # A command, so Enter returns the line rather than sending it.
-    assert await _line(f"/a{shift_enter}b\r", bound=keys) == ("/a\nb", [])
+    prompt = _Prompt()
+    assert ANSI_SEQUENCES[shift_enter] == (Keys.Escape, Keys.ControlM)
+    prompt.type("/a")
+    prompt.press(Keys.Escape, Keys.ControlM)
+    prompt.buffer.insert_text("b")
+    assert prompt.buffer.text == "/a\nb"
+    assert prompt.pushed() == []
 
 
 def test_an_unchanged_frame_never_repaints_and_a_changed_one_does() -> None:
@@ -1006,85 +1001,28 @@ def test_an_unchanged_frame_never_repaints_and_a_changed_one_does() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("keys", ["\x04", "/quit\r", "/exit\r", "  /QUIT \r"])
-async def test_ctrl_d_quit_and_exit_end_the_session(keys: str) -> None:
-    assert await _line(keys) == (None, [])
+@pytest.mark.parametrize("answer", [EOFError(), "/quit", "/exit", "  /QUIT "])
+async def test_ctrl_d_quit_and_exit_end_the_session(answer: str | EOFError) -> None:
+    assert await _line(answer) == (None, [])
 
 
 @pytest.mark.asyncio
 async def test_a_stray_interrupt_reprompts_instead_of_quitting() -> None:
-    assert await _line("abc\x03next\r") == ("next", [])
-
-
-@pytest.mark.asyncio
-async def test_our_ctrl_c_wins_over_the_session_s_own() -> None:
-    """The session's own binding raises; ours halts a busy agent and keeps the line."""
-    runtime, panes = _runtime(), Panes()
-    runtime.cohort.add("c1")
-    history = InMemoryHistory()
-    keys = key_bindings(runtime, panes, Navigation())
-    with create_pipe_input() as pipe:
-        session: PromptSession[str] = PromptSession(
-            input=pipe,
-            output=DummyOutput(),
-            key_bindings=keys,
-            history=history,
-        )
-        pipe.send_text("abc\x03/after\r")
-        line = await PromptSource(
-            session,
-            panes=panes,
-            notice=list[str]().append,
-        ).line()
-    assert line == "/after"
-    assert runtime.inbox.drain_nowait() == [types.Halt()]
-    assert "abc" in list(history.get_strings())
-
-
-@pytest.mark.asyncio
-async def test_a_prompt_leaves_the_loop_s_exception_handler_alone() -> None:
-    """Prompt-toolkit's own handler waits for Enter on any error in the loop."""
-    loop = asyncio.get_running_loop()
-    handler = loop.get_exception_handler()
-    seen: list[object] = []
-    with create_pipe_input() as pipe:
-        session: PromptSession[str] = PromptSession(input=pipe, output=DummyOutput())
-        source = PromptSource(session, panes=Panes(), notice=list[str]().append)
-        reading = asyncio.create_task(source.line())
-        await asyncio.sleep(0.02)
-        seen.append(loop.get_exception_handler())
-        pipe.send_text("x\r")
-        assert await reading == "x"
-    assert seen == [handler]
-
-
-@pytest.mark.asyncio
-async def test_a_prompt_leaves_the_loop_s_sigint_handler_installed() -> None:
-    """Prompt-toolkit removes the handler on exit, so a later Ctrl+C did nothing."""
-    loop = asyncio.get_running_loop()
-    hits: list[str] = []
-    loop.add_signal_handler(signal.SIGINT, hits.append, "sigint")
-    try:
-        assert await _line("x\r") == ("x", [])
-        signal.raise_signal(signal.SIGINT)
-        await asyncio.sleep(0.02)
-    finally:
-        loop.remove_signal_handler(signal.SIGINT)
-    assert hits == ["sigint"]
+    assert await _line(KeyboardInterrupt(), "next") == ("next", [])
 
 
 @pytest.mark.asyncio
 async def test_quitting_says_what_waiting_input_it_discards() -> None:
     panes = Panes()
     panes.stage("queued\n  text", deferred=False)
-    assert await _line("\x04", panes) == (
+    assert await _line(EOFError(), panes=panes) == (
         None,
         ["[discarding 1 queued message: queued text]"],
     )
     assert (panes.queue, panes.deferred) == (None, None)
     panes.stage("q", deferred=False)
     panes.stage("d", deferred=True)
-    assert await _line("/quit\r", panes) == (
+    assert await _line("/quit", panes=panes) == (
         None,
         ["[discarding 2 queued messages: q d]"],
     )

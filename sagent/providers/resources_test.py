@@ -1,413 +1,393 @@
-"""Tests for what providers share: process pools, one HTTP client, one tool server."""
+"""Unit tests for process admission, spawn options, and shared-resource ownership."""
 
 from __future__ import annotations
 
-from asyncio import AbstractEventLoop, Task
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, Mock, call
 
 import asyncio
-import os
-import signal
 
-from wesearch.fetch.gate import FileGate
-
+import httpx2
 import pytest
 
 from sagent.lib.posix.child import Child
-from sagent.providers.resources import SharedResources, SubprocessPool
-from sagent.providers.tool_server import McpToolServer
+from sagent.providers import resources
+from sagent.providers.resources import SharedResources, SubprocessPool, close_all
 
 
 if TYPE_CHECKING:
-    from asyncio.subprocess import Process
-    from collections.abc import Mapping, Sequence
-    from pathlib import Path
-
-
-# Logs its pid, then waits for a line on stdin, as ``claude`` does.
-_WAITS = 'echo $$ >> "$0"; read line'
-
-
-def _argv(log: Path, script: str = _WAITS) -> list[str]:
-    return ["sh", "-c", script, str(log)]
-
-
-# Polled: the state is another process's, which no ``asyncio.Event`` can see.
-async def _started(log: Path, *, count: int) -> list[int]:
-    """Wait until ``count`` processes have logged their pids, and return them."""
-    async with asyncio.timeout(5.0):
-        while True:
-            pids = _pids(log)
-            if len(pids) >= count:
-                return pids
-            await asyncio.sleep(0.002)
-
-
-def _pids(log: Path) -> list[int]:
-    return [int(line) for line in log.read_text().split()] if log.exists() else []
-
-
-async def _gone(pid: int) -> None:
-    """Wait until ``pid`` has exited and been reaped."""
-    async with asyncio.timeout(5.0):
-        while True:
-            if not _alive(pid):
-                return
-            await asyncio.sleep(0.002)
-
-
-def _alive(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
+    from collections.abc import Mapping
 
 
 @pytest.mark.asyncio
-async def test_acquire_hands_out_the_spare_started_ahead(tmp_path: Path) -> None:
-    log = tmp_path / "pids"
-    async with SubprocessPool() as pool:
-        first = await pool.acquire(_argv(log), env={})
-        started = await _started(log, count=2)
-        assert first.pid in started
-        (spare,) = set(started) - {first.pid}
-        second = await pool.acquire(_argv(log), env={})
-        assert second.pid == spare
-        # Taking the spare starts the next one.
-        assert len(await _started(log, count=3)) == 3
-
-
-@pytest.mark.asyncio
-async def test_a_spare_serves_only_its_own_command_line_and_environment(
-    tmp_path: Path,
-) -> None:
-    log = tmp_path / "pids"
-    async with SubprocessPool() as pool:
-        await pool.acquire(_argv(log), env={"ACCOUNT": "a"})
-        before = await _started(log, count=2)
-        other = await pool.acquire(_argv(log), env={"ACCOUNT": "b"})
-        assert other.pid not in before
-        renamed = await pool.acquire([*_argv(log), "extra"], env={"ACCOUNT": "a"})
-        assert renamed.pid not in before
-
-
-@pytest.mark.asyncio
-async def test_a_spare_that_died_is_replaced(tmp_path: Path) -> None:
-    log = tmp_path / "pids"
-    async with SubprocessPool() as pool:
-        first = await pool.acquire(_argv(log), env={})
-        (spare,) = set(await _started(log, count=2)) - {first.pid}
-        os.kill(spare, signal.SIGKILL)
-        await _gone(spare)
-        second = await pool.acquire(_argv(log), env={})
-        assert second.pid not in (first.pid, spare)
-        assert second.returncode is None
-
-
-@pytest.mark.asyncio
-async def test_release_stops_a_running_process(tmp_path: Path) -> None:
-    async with SubprocessPool() as pool:
-        process = await pool.acquire(_argv(tmp_path / "pids"), env={})
-        await pool.release(process)
-        assert process.returncode is not None
-        # Releasing what has already exited does nothing.
-        await pool.release(process)
-
-
-@pytest.mark.asyncio
-async def test_release_terminates_a_process_with_no_stdin() -> None:
-    process = await asyncio.create_subprocess_exec(
-        "sleep",
-        "5",
-        stdin=asyncio.subprocess.DEVNULL,
-    )
-    await SubprocessPool().release(process)
-    assert process.returncode == -signal.SIGTERM
-
-
-@pytest.mark.asyncio
-async def test_release_kills_a_process_that_ignores_sigterm(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("argv", "env", "reused"),
+    [
+        (["cli", "chat"], {"ACCOUNT": "work", "OTHER": "value"}, True),
+        (["cli", "chat"], {"OTHER": "value", "ACCOUNT": "work"}, True),
+        (["cli", "chat"], {"ACCOUNT": "other", "OTHER": "value"}, False),
+        (["cli", "chat", "extra"], {"ACCOUNT": "work", "OTHER": "value"}, False),
+    ],
+    ids=["same", "environment-order", "other-account", "other-command"],
+)
+async def test_acquire_reuses_only_its_command_and_environment_and_replaces_the_spare(
     monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+    env: Mapping[str, str],
+    reused: bool,
 ) -> None:
-    clock = _grace_clock(monkeypatch)
-    stubborn = "trap '' TERM; echo $$ >> \"$0\"; exec tail -f /dev/null"
-    log = tmp_path / "pids"
-    async with SubprocessPool(grace_sec=0.05) as pool:
-        process = await pool.acquire(_argv(log, stubborn), env={})
-        # Two: the spare logs to the same file, and may log first. Then its trap is set.
-        await _started(log, count=2)
-        await pool.release(process)
-        assert process.returncode == -signal.SIGKILL
-        assert clock.sent == [signal.SIGTERM, signal.SIGKILL]
-
-
-@pytest.mark.asyncio
-async def test_release_stops_the_jobs_a_process_started(tmp_path: Path) -> None:
-    """``claude`` runs tools and servers of its own, in the session it leads."""
-    log = tmp_path / "pids"
-    with_a_job = 'echo $$ >> "$0"; sleep 60 & echo $! > "$0.$$"; read line'
-    async with SubprocessPool() as pool:
-        process = await pool.acquire(_argv(log, with_a_job), env={})
-        (job,) = await _started(log.with_name(f"{log.name}.{process.pid}"), count=1)
-        await asyncio.wait_for(pool.release(process), timeout=5)
-        assert process.returncode is not None
-        await _gone(job)
-
-
-@pytest.mark.asyncio
-async def test_a_cancelled_release_still_stops_the_process(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    clock = _grace_clock(monkeypatch)
-    stubborn = "trap '' TERM; echo $$ >> \"$0\"; exec tail -f /dev/null"
-    log = tmp_path / "pids"
-    async with SubprocessPool(grace_sec=0.05) as pool:
-        process = await pool.acquire(_argv(log, stubborn), env={})
-        # Two: the spare logs to the same file, and may log first.
-        await _started(log, count=2)
-        releasing = asyncio.create_task(pool.release(process))
-        clock.cancelling = releasing
-        with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(releasing, timeout=5)
-        assert process.returncode == -signal.SIGKILL
-        assert clock.sent == [signal.SIGTERM, signal.SIGKILL]
-
-
-@pytest.mark.asyncio
-async def test_closing_stops_every_process_and_spare(tmp_path: Path) -> None:
-    log = tmp_path / "pids"
+    first, spare, replacement, successor = [Mock(returncode=None) for _ in range(4)]
+    spawn = AsyncMock(side_effect=[first, spare, replacement, successor])
     pool = SubprocessPool()
-    processes = [
-        await pool.acquire(_argv(log), env={}),
-        await pool.acquire(_argv(log, f"{_WAITS}; : other"), env={}),
+    monkeypatch.setattr(pool, "_spawn", spawn)
+    original = {"ACCOUNT": "work", "OTHER": "value"}
+    async with pool:
+        assert await pool.acquire(["cli", "chat"], env=original) is first
+        assert len(pool._spares) == 1
+        assert await next(iter(pool._spares.values())) is spare
+        assert await pool.acquire(argv, env=env) is (spare if reused else replacement)
+    assert pool._spares == {}
+    assert spawn.await_args_list == [
+        call(["cli", "chat"], env=original),
+        call(["cli", "chat"], env=original),
+        *([call(argv, env=env)] * (1 if reused else 2)),
     ]
-    pids = await _started(log, count=4)
-    await pool.aclose()
-    assert all(process.returncode is not None for process in processes)
-    assert [pid for pid in pids if _alive(pid)] == []
 
 
 @pytest.mark.asyncio
-async def test_a_line_far_past_asyncios_default_limit_is_read_whole(
-    tmp_path: Path,
-) -> None:
-    """Claude's stream-json lines carry whole tool inputs and outputs."""
-    long_line = "head -c 1048576 /dev/zero | tr '\\0' a; echo; read line"
-    async with SubprocessPool() as pool:
-        process = await pool.acquire(_argv(tmp_path / "pids", long_line), env={})
-        assert process.stdout is not None
-        line = await process.stdout.readline()
-    assert len(line) == 1024 * 1024 + 1
-
-
-@pytest.mark.asyncio
-async def test_a_process_runs_in_the_environment_given(tmp_path: Path) -> None:
-    """The spare started ahead too, which the next acquire takes."""
-    out = tmp_path / "env"
-    script = 'printf %s "$ACCOUNT" > "$0.$$"; read line'
-    async with SubprocessPool() as pool:
-        for _ in range(2):
-            process = await pool.acquire(
-                ["sh", "-c", script, str(out)],
-                env={"ACCOUNT": "work"},
-            )
-            assert process.stdin is not None
-            process.stdin.write(b"\n")
-            await process.wait()
-            assert (tmp_path / f"env.{process.pid}").read_text() == "work"
-
-
-@pytest.mark.asyncio
-async def test_a_released_process_is_stopped_with_the_pools_grace(
-    tmp_path: Path,
+@pytest.mark.parametrize("status", [0, -9])
+async def test_a_dead_spare_is_released_before_its_replacement_starts(
     monkeypatch: pytest.MonkeyPatch,
+    status: int,
 ) -> None:
-    """Five seconds by default; closing the pool stops none a second time."""
-    graces: list[float] = []
-    stop = Child.stop
-
-    async def recorded(child: Child) -> int:
-        graces.append(child.grace_sec)
-        return await stop(child)
-
-    monkeypatch.setattr(Child, "stop", recorded)
+    first, spare, replacement, successor = [Mock(returncode=None) for _ in range(4)]
+    spare.returncode = status
+    calls = Mock()
+    spawn = AsyncMock(side_effect=[first, spare, replacement, successor])
+    release = AsyncMock()
+    calls.attach_mock(spawn, "spawn")
+    calls.attach_mock(release, "release")
     pool = SubprocessPool()
-    process = await pool.acquire(_argv(tmp_path / "pids"), env={})
-    assert process.stdin is not None
-    process.stdin.write(b"\n")
-    await pool.release(process)
-    assert graces == [5.0]
-    await pool.aclose()
-    assert graces == [5.0, 5.0], "the spare, and nothing released already"
-
-
-@pytest.mark.asyncio
-async def test_a_process_runs_in_its_own_session_without_our_stderr(
-    tmp_path: Path,
-    capfd: pytest.CaptureFixture[str],
-) -> None:
-    """Our terminal's signals and screen are not claude's to share."""
-    noisy = 'echo noise >&2; echo $$ >> "$0"; read line'
-    log = tmp_path / "pids"
-    async with SubprocessPool() as pool:
-        process = await pool.acquire(_argv(log, noisy), env={})
-        await _started(log, count=2)
-        assert os.getsid(process.pid) == process.pid
-        assert os.getsid(process.pid) != os.getsid(0)
-    assert "noise" not in capfd.readouterr().err
+    monkeypatch.setattr(pool, "_spawn", spawn)
+    monkeypatch.setattr(pool, "release", release)
+    async with pool:
+        assert await pool.acquire(["cli"], env={}) is first
+        assert await pool.acquire(["cli"], env={}) is replacement
+    assert calls.mock_calls == [
+        ("spawn", (["cli"],), {"env": {}}),
+        ("spawn", (["cli"],), {"env": {}}),
+        ("release", (spare,), {}),
+        ("spawn", (["cli"],), {"env": {}}),
+        ("spawn", (["cli"],), {"env": {}}),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_a_spare_that_failed_to_start_is_replaced(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Its binary gone as it starts, the next acquire starts one afresh."""
-    starts = [0]
-    async with SubprocessPool() as pool:
-        spawn = pool._spawn
-
-        async def fails_second(
-            argv: Sequence[str],
-            *,
-            env: Mapping[str, str],
-        ) -> Process:
-            starts[0] += 1
-            if starts[0] == 2:
-                raise FileNotFoundError(argv[0])
-            return await spawn(argv, env=env)
-
-        monkeypatch.setattr(pool, "_spawn", fails_second)
-        first = await pool.acquire(_argv(tmp_path / "pids"), env={})
-        second = await pool.acquire(_argv(tmp_path / "pids"), env={})
-        assert second.pid != first.pid
-        assert second.returncode is None
-    assert starts[0] == 4
-
-
-@pytest.mark.asyncio
-async def test_closing_with_a_spare_that_failed_to_start(tmp_path: Path) -> None:
-    script = tmp_path / "claude"
-    script.write_text(
-        f"#!/bin/sh\n{_WAITS}\n".replace('"$0"', f'"{tmp_path / "pids"}"'),
+    first, replacement, successor = [Mock(returncode=None) for _ in range(3)]
+    spawn = AsyncMock(
+        side_effect=[first, FileNotFoundError("cli"), replacement, successor],
     )
-    script.chmod(0o700)
     pool = SubprocessPool()
-    first = await pool.acquire([str(script)], env={})
-    script.unlink()
-    await pool.aclose()
-    assert first.returncode is not None
+    monkeypatch.setattr(pool, "_spawn", spawn)
+    async with pool:
+        assert await pool.acquire(["cli"], env={}) is first
+        assert await pool.acquire(["cli"], env={}) is replacement
+    assert spawn.await_args_list == [call(["cli"], env={})] * 4
 
 
 @pytest.mark.asyncio
-async def test_each_shared_resource_opens_once_on_first_use() -> None:
-    async with SharedResources() as shared:
-        assert shared.http is shared.http
-        assert isinstance(shared.tool_server, McpToolServer)
-        assert shared.tool_server is shared.tool_server
-        claude = shared.process_pool("claude")
-        assert shared.process_pool("claude") is claude
-        assert shared.process_pool("gemini") is not claude
-
-
-def test_providers_pace_their_accounts_by_the_hosts_files_unless_told() -> None:
-    gate = SharedResources().gate
-    gate.hold("openai-sub@work", until=5_000.0)
-    assert FileGate().states()["openai-sub@work"].held_until == 5_000.0
-
-
-def test_the_http_client_waits_out_a_stalled_connect_and_a_slow_stream() -> None:
-    timeout = (
-        SharedResources().http.build_request("GET", "http://x").extensions["timeout"]
-    )
-    assert timeout == {"connect": 30.0, "read": 600.0, "write": 600.0, "pool": 600.0}
-
-
-@pytest.mark.asyncio
-async def test_closing_closes_what_was_opened_and_the_next_use_reopens(
-    tmp_path: Path,
-) -> None:
-    shared = SharedResources()
-    client = shared.http
-    server = shared.tool_server
-    process = await shared.process_pool("claude").acquire(
-        _argv(tmp_path / "pids"),
-        env={},
-    )
-    await shared.aclose()
-    assert client.is_closed
-    assert process.returncode is not None
-    assert shared.http is not client
-    assert shared.tool_server is not server
-    await shared.aclose()
-
-
-@pytest.mark.asyncio
-async def test_a_pool_failing_to_close_leaves_none_of_the_rest_open(
-    tmp_path: Path,
+async def test_a_failed_initial_start_propagates_without_scheduling_a_spare(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    shared = SharedResources()
-    client = shared.http
-    process = await shared.process_pool("b").acquire(_argv(tmp_path / "pids"), env={})
-    monkeypatch.setattr(shared.process_pool("a"), "aclose", _refuses)
-    with pytest.raises(RuntimeError, match=r"^the pool would not close$"):
-        await shared.aclose()
-    assert process.returncode is not None
-    assert client.is_closed
+    error = FileNotFoundError("cli")
+    spawn = AsyncMock(side_effect=error)
+    pool = SubprocessPool()
+    monkeypatch.setattr(pool, "_spawn", spawn)
+    with pytest.raises(FileNotFoundError) as caught:
+        await pool.acquire(["cli"], env={})
+    assert caught.value is error
+    spawn.assert_awaited_once_with(["cli"], env={})
+    assert pool._spares == {}
 
 
 @pytest.mark.asyncio
-async def test_closing_what_was_never_used_is_a_no_op() -> None:
-    await SharedResources().aclose()
+async def test_spawn_forwards_the_command_environment_and_stream_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = Mock()
+    started = AsyncMock(return_value=Mock(process=process))
+    monkeypatch.setattr(Child, "start", started)
+    pool = SubprocessPool()
+    env = {"ACCOUNT": "work"}
+    assert await pool._spawn(["cli", "chat"], env=env) is process
+    assert pool._live == {process}
+    started.assert_awaited_once_with(
+        "cli",
+        "chat",
+        group=True,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        env=env,
+        limit=16 * 1024 * 1024,
+    )
 
 
-async def _refuses() -> NoReturn:
-    raise RuntimeError("the pool would not close")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("has_stdin", [False, True])
+@pytest.mark.parametrize("grace", [None, 0.05])
+async def test_release_forgets_and_closes_the_process_before_delegating_its_stop(
+    monkeypatch: pytest.MonkeyPatch,
+    has_stdin: bool,
+    grace: float | None,
+) -> None:
+    pool = SubprocessPool() if grace is None else SubprocessPool(grace_sec=grace)
+    closed = Mock()
+    stdin = Mock(close=closed) if has_stdin else None
+    process = Mock(stdin=stdin)
+    pool._live.add(process)
+    stop = AsyncMock()
+
+    def stopped_child(**options: object) -> Mock:
+        del options
+        assert process not in pool._live
+        return Mock(stop=stop)
+
+    child = Mock(side_effect=stopped_child)
+    calls = Mock()
+    calls.attach_mock(closed, "close")
+    calls.attach_mock(child, "child")
+    calls.attach_mock(stop, "stop")
+    monkeypatch.setattr(resources, "Child", child)
+    assert await pool.release(process) is None
+    assert pool._live == set()
+    await pool.aclose()
+    await pool.release(process)
+    one_release: list[tuple[str, tuple[object, ...], dict[str, object]]] = [
+        *([("close", (), {})] if has_stdin else []),
+        (
+            "child",
+            (),
+            {
+                "process": process,
+                "group": True,
+                "grace_sec": 5.0 if grace is None else grace,
+            },
+        ),
+        ("stop", (), {}),
+    ]
+    assert calls.mock_calls == one_release * 2
 
 
-@dataclass(slots=True, kw_only=True)
-class _GraceClock:
-    """Expire the real grace timer after TERM, without delaying signal delivery."""
-
-    loop: AbstractEventLoop
-    time: Callable[[], float]
-    signal: Callable[[Child, int], None]
-    offset: float = 0.0
-    cancelling: Task[None] | None = None
-    sent: list[int] = field(default_factory=list)
-
-    def now(self) -> float:
-        return self.time() + self.offset
-
-    def send(self, child: Child, sig: int) -> None:
-        self.signal(child, sig)
-        self.sent.append(sig)
-        if sig == signal.SIGTERM:
-            self.loop.call_soon(self.expire, child.grace_sec)
-
-    def expire(self, seconds: float) -> None:
-        if self.cancelling is not None:
-            self.cancelling.cancel()
-            self.cancelling = None
-        self.offset += seconds
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [RuntimeError("stop"), asyncio.CancelledError()])
+async def test_release_propagates_stop_failure_after_forgetting_and_closing(
+    monkeypatch: pytest.MonkeyPatch,
+    error: BaseException,
+) -> None:
+    pool = SubprocessPool()
+    closed = Mock()
+    process = Mock(stdin=Mock(close=closed))
+    pool._live.add(process)
+    stopped = AsyncMock(side_effect=error)
+    monkeypatch.setattr(resources, "Child", Mock(return_value=Mock(stop=stopped)))
+    with pytest.raises(type(error)) as caught:
+        await pool.release(process)
+    assert caught.value is error
+    assert pool._live == set()
+    closed.assert_called_once_with()
+    stopped.assert_awaited_once_with()
 
 
-def _grace_clock(monkeypatch: pytest.MonkeyPatch) -> _GraceClock:
-    loop = asyncio.get_running_loop()
-    clock = _GraceClock(loop=loop, time=loop.time, signal=Child._signal)
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_spare", [False, True])
+async def test_closing_awaits_each_spare_and_releases_every_live_process(
+    monkeypatch: pytest.MonkeyPatch,
+    failed_spare: bool,
+) -> None:
+    pool = SubprocessPool()
+    first, second = Mock(), Mock()
+    pool._live.add(first)
+    ready, finish = asyncio.Event(), asyncio.Event()
+    spawning = asyncio.create_task(
+        _pending_spare(pool, second, ready=ready, finish=finish),
+    )
+    pool._spares[(("cli",), ())] = spawning
+    if failed_spare:
+        failed = asyncio.create_task(_failed_spare())
+        pool._spares[(("missing",), ())] = failed
+    released: list[Mock] = []
 
-    def send(child: Child, sig: int) -> None:
-        clock.send(child, sig)
+    def release(process: Mock) -> None:
+        pool._live.discard(process)
+        released.append(process)
 
-    monkeypatch.setattr(loop, "time", clock.now)
-    monkeypatch.setattr(Child, "_signal", send)
-    return clock
+    monkeypatch.setattr(pool, "release", AsyncMock(side_effect=release))
+    spares = tuple(pool._spares.values())
+    closing = asyncio.create_task(pool.aclose())
+    try:
+        await ready.wait()
+        assert not closing.done()
+        assert not spawning.cancelled()
+        finish.set()
+        await closing
+        assert set(released) == {first, second}
+        assert len(released) == 2
+        assert pool._spares == {}
+        assert pool._live == set()
+    finally:
+        finish.set()
+        await asyncio.gather(closing, *spares, return_exceptions=True)
+
+
+async def _pending_spare(
+    pool: SubprocessPool,
+    process: Mock,
+    *,
+    ready: asyncio.Event,
+    finish: asyncio.Event,
+) -> Mock:
+    ready.set()
+    await finish.wait()
+    pool._live.add(process)
+    return process
+
+
+async def _failed_spare() -> Mock:
+    raise FileNotFoundError("cli")
+
+
+@pytest.mark.asyncio
+async def test_closing_continues_after_a_process_has_already_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pool = SubprocessPool()
+    first, second = Mock(), Mock()
+    pool._live.update([first, second])
+
+    def gone(process: Mock) -> None:
+        pool._live.discard(process)
+        raise ProcessLookupError
+
+    released = AsyncMock(side_effect=gone)
+    monkeypatch.setattr(pool, "release", released)
+    await pool.aclose()
+    assert released.await_count == 2
+    assert {args.args[0] for args in released.await_args_list} == {first, second}
+    assert pool._live == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [None, RuntimeError("pool")])
+async def test_shared_resources_open_lazily_close_in_order_and_reopen(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: RuntimeError | None,
+) -> None:
+    gate = Mock()
+    gates = Mock(return_value=gate)
+    client, reopened_client, server, reopened_server = [Mock() for _ in range(4)]
+    first, second, reopened_pool = [Mock() for _ in range(3)]
+    clients = Mock(side_effect=[client, reopened_client])
+    servers = Mock(side_effect=[server, reopened_server])
+    pools = Mock(side_effect=[first, second, reopened_pool])
+    monkeypatch.setattr(resources, "FileGate", gates)
+    monkeypatch.setattr(httpx2, "AsyncClient", clients)
+    monkeypatch.setattr(resources, "McpToolServer", servers)
+    monkeypatch.setattr(resources, "SubprocessPool", pools)
+    shared = SharedResources()
+    assert shared.gate is gate
+    gates.assert_called_once_with()
+    for factory in (clients, servers, pools):
+        factory.assert_not_called()
+    assert shared.http is shared.http is client
+    assert shared.tool_server is shared.tool_server is server
+    assert shared.process_pool("a") is shared.process_pool("a") is first
+    assert shared.process_pool("b") is second
+    assert pools.call_args_list == [call(), call()]
+    servers.assert_called_once_with()
+    clients.assert_called_once_with(
+        timeout=httpx2.Timeout(600.0, connect=30.0),
+    )
+    closed = Mock()
+
+    def cleared() -> None:
+        assert shared._pools == {}
+        assert shared._http is shared._tool_server is None
+
+    first_close = AsyncMock(side_effect=cleared)
+    second_close = AsyncMock(side_effect=failure)
+    server_close, client_close = AsyncMock(), AsyncMock()
+    for obj, closer, name in (
+        (first, first_close, "first"),
+        (second, second_close, "second"),
+        (server, server_close, "server"),
+        (client, client_close, "client"),
+    ):
+        obj.aclose = closer
+        closed.attach_mock(closer, name)
+    if failure is None:
+        await shared.aclose()
+    else:
+        with pytest.raises(RuntimeError) as caught:
+            await shared.aclose()
+        assert caught.value is failure
+    assert closed.mock_calls == [
+        ("first", (), {}),
+        ("second", (), {}),
+        ("server", (), {}),
+        ("client", (), {}),
+    ]
+    await shared.aclose()
+    assert closed.mock_calls == [
+        ("first", (), {}),
+        ("second", (), {}),
+        ("server", (), {}),
+        ("client", (), {}),
+    ]
+    assert shared.http is reopened_client
+    assert shared.tool_server is reopened_server
+    assert shared.process_pool("a") is reopened_pool
+    assert clients.call_count == servers.call_count == 2
+    assert pools.call_count == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [None, ValueError("close"), asyncio.CancelledError()])
+async def test_close_all_preserves_order_and_continues_after_failure(
+    error: BaseException | None,
+) -> None:
+    calls = Mock()
+    first, second = AsyncMock(side_effect=error), AsyncMock()
+    calls.attach_mock(first, "first")
+    calls.attach_mock(second, "second")
+    opened = [Mock(aclose=first), Mock(aclose=second)]
+    if error is None:
+        await close_all(opened)
+    else:
+        with pytest.raises(type(error)) as caught:
+            await close_all(opened)
+        assert caught.value is error
+    assert calls.mock_calls == [("first", (), {}), ("second", (), {})]
+
+
+@pytest.mark.asyncio
+async def test_a_later_close_failure_retains_the_earlier_error_as_context() -> None:
+    earlier, later = ValueError("first"), RuntimeError("second")
+    last = AsyncMock()
+    with pytest.raises(RuntimeError) as caught:
+        await close_all(
+            [
+                Mock(aclose=AsyncMock(side_effect=earlier)),
+                Mock(aclose=AsyncMock(side_effect=later)),
+                Mock(aclose=last),
+            ],
+        )
+    assert caught.value is later
+    assert later.__context__ is earlier
+    last.assert_awaited_once_with()
 
 
 if __name__ == "__main__":

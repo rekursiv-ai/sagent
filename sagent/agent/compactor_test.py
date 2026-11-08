@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, override
+from unittest.mock import AsyncMock, Mock
 
 import asyncio
 import logging
@@ -22,7 +23,9 @@ from sagent.agent.agent import Agent, spent
 from sagent.agent.compactor import (
     SummaryCompactor,
     _asset,
+    _jobs_note,
     _request_tokens,
+    _summary,
     halve,
     summary_tokens,
 )
@@ -42,6 +45,8 @@ from sagent.model.scripted import (
 )
 from sagent.model.types import Request, Response, TextChunk
 from sagent.runtime import types
+from sagent.runtime.context import ResolvedContext
+from sagent.runtime.tape import ReferrableTapeEvent, TapeRef
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.recording import RecordingJournal
 from sagent.session.types import (
@@ -60,7 +65,7 @@ from sagent.session.types import (
 )
 from sagent.tools.display import ToolDisplay
 from sagent.tools.read import Read
-from sagent.tools.skill import Skill
+from sagent.tools.skill import Skill, SkillInfo
 from sagent.tools.types import ToolContext
 
 
@@ -68,6 +73,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 
     from sagent.model.capability import ThinkingEffort
+    from sagent.providers.types import Model
     from sagent.runtime.tape import ContextSplice
     from sagent.runtime.types import ModelContextEvent
     from sagent.session.types import SessionRecord
@@ -254,15 +260,17 @@ def test_an_empty_body_needs_no_summary() -> None:
     assert summary_tokens(0) == 0.0
 
 
-def test_too_few_attempts_are_refused(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path)
-
+def test_too_few_attempts_are_refused() -> None:
     with pytest.raises(ValueError, match="max_attempts"):
-        _ = SummaryCompactor(agent, max_attempts=0)
+        _ = SummaryCompactor(Mock(spec=Agent), max_attempts=0)
 
 
-def test_the_trigger_is_the_largest_body_whose_summary_fits(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path, capability=_capability(window=1_000_000))
+def test_the_trigger_is_the_largest_body_whose_summary_fits() -> None:
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider(capability=_capability(window=1_000_000))["scripted"],
+        runtime=Mock(system=()),
+    )
     compactor = SummaryCompactor(agent)
     room = 1_000_000 - compactor._prompt_tokens()
     trigger = int(compactor.trigger_tokens())
@@ -271,64 +279,62 @@ def test_the_trigger_is_the_largest_body_whose_summary_fits(tmp_path: Path) -> N
     assert trigger + 1 + summary_tokens(trigger + 1) > room
 
 
-def test_a_1m_window_compacts_at_95_percent_and_holds_5_percent_for_the_summary(
-    tmp_path: Path,
-) -> None:
-    trigger = _trigger(tmp_path, window=1_000_000)
+def test_a_1m_window_compacts_at_95_percent_and_holds_5_percent_for_the_summary() -> (
+    None
+):
+    trigger = _trigger(window=1_000_000)
 
     assert summary_tokens(trigger) > 48_000
     assert 0.95 * 1_000_000 < trigger < 0.96 * 1_000_000
 
 
 def _trigger(
-    tmp_path: Path,
     *,
     window: int,
     response: int = 0,
     context: int = 0,
 ) -> float:
     capability = _capability(window=window, response=response, context=context)
-    _, agent = _agent(tmp_path, capability=capability)
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider(capability=capability)["scripted"],
+        runtime=Mock(system=()),
+    )
     return SummaryCompactor(agent).trigger_tokens()
 
 
 def test_a_compaction_is_due_once_the_body_reaches_the_trigger(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, agent = _agent(tmp_path, capability=_capability(window=100_000))
+    agent = Mock(spec=Agent, model=ScriptedProvider()["scripted"])
     compactor = SummaryCompactor(agent)
-    # Unbilled, the request holds the agent's tools beside the message.
-    body = math.ceil(compactor.trigger_tokens()) - 1 - compactor._tool_tokens()
-    agent.session.append(_user("x" * 4 * body))
+    monkeypatch.setattr(compactor, "trigger_tokens", Mock(return_value=16.0))
+    monkeypatch.setattr(compactor, "_held", Mock(side_effect=[15, 16]))
+
     assert not compactor.should_run()
-
-    agent.session.append(_user("x" * 8))
-
     assert compactor.should_run()
 
 
-def test_the_reply_limit_holds_back_none_of_the_window(tmp_path: Path) -> None:
+def test_the_reply_limit_holds_back_none_of_the_window() -> None:
     """A reply gets the room left; the vendor's ceiling on it reserves nothing."""
-    assert _trigger(tmp_path, window=1_000_000, response=128_000) == _trigger(
-        tmp_path,
-        window=1_000_000,
-    )
+    assert _trigger(window=1_000_000, response=128_000) == _trigger(window=1_000_000)
 
 
-def test_a_shared_window_holds_back_the_summarys_room(tmp_path: Path) -> None:
+def test_a_shared_window_holds_back_the_summarys_room() -> None:
     """With output apart, input alone bounds it; shared, the summary needs room."""
-    shared = _trigger(tmp_path, window=272_000)
-    apart = _trigger(tmp_path, window=272_000, context=1_050_000)
+    shared = _trigger(window=272_000)
+    apart = _trigger(window=272_000, context=1_050_000)
 
     assert apart - shared == pytest.approx(summary_tokens(shared), abs=2)
 
 
-def test_with_output_apart_the_input_limit_alone_bounds_the_trigger(
-    tmp_path: Path,
-) -> None:
-    _, agent = _agent(
-        tmp_path,
-        capability=_capability(window=272_000, context=1_050_000),
+def test_with_output_apart_the_input_limit_alone_bounds_the_trigger() -> None:
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider(
+            capability=_capability(window=272_000, context=1_050_000),
+        )["scripted"],
+        runtime=Mock(system=()),
     )
     compactor = SummaryCompactor(agent)
     fixed = compactor._system_tokens() + compactor._prompt_tokens()
@@ -336,10 +342,10 @@ def test_with_output_apart_the_input_limit_alone_bounds_the_trigger(
     assert compactor.trigger_tokens() + fixed == 272_000
 
 
-def test_the_system_prompt_comes_out_of_the_trigger(tmp_path: Path) -> None:
-    capability = _capability(window=100_000)
-    _, plain = _agent(tmp_path, capability=capability)
-    _, prompted = _agent(tmp_path, capability=capability, system_prompt="s" * 4_000)
+def test_the_system_prompt_comes_out_of_the_trigger() -> None:
+    model = ScriptedProvider(capability=_capability(window=100_000))["scripted"]
+    plain = Mock(spec=Agent, model=model, runtime=Mock(system=()))
+    prompted = Mock(spec=Agent, model=model, runtime=Mock(system=("s" * 40,)))
     plain_held, prompted_held = (
         trigger + summary_tokens(trigger)
         for trigger in (
@@ -351,24 +357,23 @@ def test_the_system_prompt_comes_out_of_the_trigger(tmp_path: Path) -> None:
     assert plain_held - prompted_held == pytest.approx(system, abs=2)
 
 
-def test_the_models_chosen_size_is_a_smaller_window(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path, capability=_capability(window=1_000_000))
-    agent.model.settings = replace(
-        agent.model.settings,
-        context_size=agent.model.capability.prices[272_000],
+def test_the_models_chosen_size_is_a_smaller_window() -> None:
+    model = ScriptedProvider(capability=_capability(window=1_000_000))["scripted"]
+    agent = Mock(spec=Agent, model=model, runtime=Mock(system=()))
+    model.settings = replace(
+        model.settings,
+        context_size=model.capability.prices[272_000],
     )
 
-    assert SummaryCompactor(agent).trigger_tokens() == _trigger(
-        tmp_path,
-        window=272_000,
-    )
+    assert SummaryCompactor(agent).trigger_tokens() == _trigger(window=272_000)
 
 
-def test_a_one_token_size_is_a_size(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path)
-    agent.model.settings = replace(
-        agent.model.settings,
-        context_size=agent.model.capability.prices[1],
+def test_a_one_token_size_is_a_size() -> None:
+    model = ScriptedProvider()["scripted"]
+    agent = Mock(spec=Agent, model=model, runtime=Mock(system=()))
+    model.settings = replace(
+        model.settings,
+        context_size=model.capability.prices[1],
     )
     assert SummaryCompactor(agent).trigger_tokens() == 0
 
@@ -395,7 +400,7 @@ def test_a_one_token_size_is_a_size(tmp_path: Path) -> None:
     ],
 )
 def test_the_reply_may_hold_what_the_window_leaves(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     window: int,
     context: int,
     truncates: bool | None,
@@ -412,25 +417,31 @@ def test_the_reply_may_hold_what_the_window_leaves(
         model_id="scripted",
         limits=limits,
     )
-    _, agent = _agent(tmp_path, capability=capability)
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider(capability=capability)["scripted"],
+        runtime=Mock(system=("sys!",)),
+    )
     compactor = SummaryCompactor(agent)
-    agent.session.append(_user("hi"))
-    _ = agent.runtime.append_history(reply("ok", tokens=TokenCount(request=1_000)))
-    _ = agent.runtime.append_history(_user("y" * 40))
+    monkeypatch.setattr(compactor, "_held", Mock(return_value=1_009))
 
     assert compactor.reply_room() == room
 
 
-def test_reply_budget_leaves_room_for_token_estimation_error(tmp_path: Path) -> None:
-    _, agent = _agent(
-        tmp_path,
-        capability=_capability(window=262_144, response=262_144),
+def test_reply_budget_leaves_room_for_token_estimation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider(
+            capability=_capability(window=262_144, response=262_144),
+        )["scripted"],
+        runtime=Mock(system=()),
     )
-    agent.runtime.tools.clear()
-    agent.runtime.system = ()
-    agent.session.append(_user("x" * (7_554 * 4)))
+    compactor = SummaryCompactor(agent)
+    monkeypatch.setattr(compactor, "_held", Mock(return_value=7_554))
 
-    room = SummaryCompactor(agent).reply_room()
+    room = compactor.reply_room()
 
     assert 7_690 + room <= 262_144
     assert room == 249_036 - 7_554
@@ -438,104 +449,107 @@ def test_reply_budget_leaves_room_for_token_estimation_error(tmp_path: Path) -> 
 
 @pytest.mark.parametrize(("image_bytes", "due"), [(20, True), (18, False)])
 def test_images_near_the_vendors_byte_ceiling_make_compaction_due(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     image_bytes: int,
     due: bool,
 ) -> None:
     """Base64 sends 20 bytes as 26.7, past 80% of 32; 18 becomes 24, short."""
     capability = replace(
-        _capability(window=1_000_000),
+        _capability(),
         limits=ModelLimits(
-            max_request_tokens=1_000_000,
-            max_response_tokens=8_000,
+            max_request_tokens=32,
             max_request_bytes=32,
         ),
     )
-    _, agent = _agent(tmp_path, capability=capability)
     image = Attachment(mime_descriptor="image/png", data=b"\0" * image_bytes)
-    agent.session.append(_user("", image))
-    _ = agent.runtime.append_history(reply("", tokens=TokenCount(request=2_000)))
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider(capability=capability)["scripted"],
+        runtime=Mock(
+            system=(),
+            context=Mock(return_value=Mock(messages=(_user("", image),))),
+        ),
+    )
     compactor = SummaryCompactor(agent)
+    monkeypatch.setattr(compactor, "_held", Mock(return_value=0))
+    monkeypatch.setattr(compactor, "trigger_tokens", Mock(return_value=16.0))
 
-    assert compactor._held() < compactor.trigger_tokens()
     assert compactor.should_run() is due
 
 
-def test_a_window_of_unknown_size_is_never_due(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path, capability=_capability(window=0, response=0))
-    agent.session.append(_user("x"))
-
-    assert not SummaryCompactor(agent).should_run()
-
-
-def _tooled(tmp_path: Path, *, tools: Sequence[_Wait]) -> SummaryCompactor:
-    """Return the compactor of an agent offering ``tools``, its context one message."""
-    provider = ScriptedProvider(capability=_capability())
-    agent = Agent(
-        model=provider["scripted"],
-        tools=tools,
-        tool_context=ToolContext(cwd=tmp_path),
-        system_prompt="",
-        compactor=SummaryCompactor,
-    )
-    agent.session.append(_user("hi"))
-    compactor = agent.session.compactor
-    assert isinstance(compactor, SummaryCompactor)
-    return compactor
-
-
-def test_an_unbilled_context_counts_the_tool_schemas_it_sends(tmp_path: Path) -> None:
-    """A resumed or new session has no bill yet; its estimate must hold the tools."""
-    plain = _tooled(tmp_path, tools=())
-    tooled = _tooled(tmp_path, tools=(_Wait(description="d" * 40),))
-
-    assert tooled._held() - plain._held() >= 40 // 4
-
-
-def test_a_billed_context_counts_the_tool_schemas_once(tmp_path: Path) -> None:
-    """The bill holds the tools already, so the estimate adds none."""
-    plain = _tooled(tmp_path, tools=())
-    tooled = _tooled(tmp_path, tools=(_Wait(description="d" * 40),))
-    for compactor in (plain, tooled):
-        _ = compactor._agent.runtime.append_history(
-            reply("ok", tokens=TokenCount(request=5_000)),
-        )
-
-    assert tooled._held() == plain._held()
-
-
-def test_the_last_replys_billed_size_counts_with_what_came_after(
-    tmp_path: Path,
+def test_a_window_of_unknown_size_is_never_due(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, agent = _agent(tmp_path, capability=_capability(window=100_000))
-    compactor = SummaryCompactor(agent)
-    trigger = math.ceil(compactor.trigger_tokens())
-    agent.session.append(_user("hi"))
-    _ = agent.runtime.append_history(
-        reply("ok", tokens=TokenCount(request=trigger - 10)),
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider(capability=_capability(window=0, response=0))[
+            "scripted"
+        ],
+        runtime=Mock(system=()),
     )
-    _ = agent.runtime.append_history(_user("y" * 36))
+    compactor = SummaryCompactor(agent)
+    monkeypatch.setattr(compactor, "_held", Mock(return_value=1))
+
     assert not compactor.should_run()
 
-    _ = agent.runtime.append_history(_user("y" * 4))
 
-    assert compactor.should_run()
+def _tooled(
+    *,
+    tools: Sequence[_Wait],
+    history: Sequence[ModelContextEvent] = (),
+    system: Sequence[str] = (),
+) -> SummaryCompactor:
+    """Return the real estimator over supplied tools and resolved context."""
+    messages = [_user("hi"), *history]
+    tape = tuple(
+        ReferrableTapeEvent(ref=TapeRef(session_id="s", ordinal=i), event=entry)
+        for i, entry in enumerate(messages)
+    )
+    context = ResolvedContext(
+        messages=messages,
+        origins=[record.ref for record in tape],
+        version=len(tape),
+    )
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider()["scripted"],
+        runtime=Mock(
+            tools={tool.name: tool for tool in tools},
+            system=system,
+            tape=tape,
+            context=Mock(return_value=context),
+            token_accounting=Mock(has_measurements=False),
+        ),
+    )
+    return SummaryCompactor(agent)
 
 
-def test_a_billed_size_counts_the_system_prompt_once(tmp_path: Path) -> None:
+def test_an_unbilled_context_counts_the_tool_schemas_it_sends() -> None:
+    """A resumed or new session has no bill yet; its estimate must hold the tools."""
+    plain = _tooled(tools=(_Wait(description=""),))
+    tooled = _tooled(tools=(_Wait(description="d" * 40),))
+
+    assert tooled._held() - plain._held() == 40 // 4
+
+
+def test_a_billed_context_counts_the_tool_schemas_once() -> None:
+    """The bill holds the tools already, so the estimate adds none."""
+    history = (reply("ok", tokens=TokenCount(request=23)),)
+    plain = _tooled(tools=(), history=history)
+    tooled = _tooled(tools=(_Wait(description="d" * 40),), history=history)
+
+    assert tooled._held() == plain._held() == 23
+
+
+def test_a_billed_size_counts_the_system_prompt_once() -> None:
     """The billed request holds the system prompt, which the trigger sets aside."""
-    _, agent = _agent(
-        tmp_path,
-        capability=_capability(window=100_000),
-        system_prompt="s" * 400,
+    compactor = _tooled(
+        tools=(),
+        system=("sys!",),
+        history=(reply("ok", tokens=TokenCount(request=23)),),
     )
-    compactor = SummaryCompactor(agent)
-    system = compactor._system_tokens()
-    below = system + int(compactor.trigger_tokens()) - 1
-    assert system > 0
-    agent.session.append(_user("hi"))
-    _ = agent.runtime.append_history(reply("ok", tokens=TokenCount(request=below)))
-    assert not compactor.should_run()
+
+    assert compactor._held() == 22
 
 
 @pytest.mark.asyncio
@@ -614,6 +628,9 @@ def test_an_attachment_since_the_bill_counts_what_the_model_says(
     attached = _request_tokens(model, (billed, carrier((image,))))
 
     assert attached - bare == model.attachment_tokens(image) > 0
+    assert _request_tokens(model, (carrier((image,)),)) == (
+        40 // 4 + model.attachment_tokens(image)
+    )
 
 
 @pytest.mark.asyncio
@@ -643,53 +660,48 @@ async def test_the_summary_replaces_the_history_without_its_analysis(
     assert _texts(_sent(request)) == _texts(_records(_HISTORY))
     assert _instruction(request).startswith("CRITICAL: Produce plain text exclusively.")
     assert _instruction(request).rstrip().endswith("causing task failure.")
+    assert "<user_guidance>" not in _instruction(request)
 
 
-@pytest.mark.asyncio
-async def test_a_proactive_continuation_tells_the_model_to_carry_on(
-    tmp_path: Path,
-) -> None:
-    _, agent = _agent(tmp_path, _SUMMARY)
+def test_a_proactive_continuation_tells_the_model_to_carry_on() -> None:
+    compactor = SummaryCompactor(Mock(spec=Agent), proactive=True)
 
-    splice = await _compact(SummaryCompactor(agent, proactive=True), agent, _HISTORY)
+    (message,) = compactor._resumed("Summary:\nthe gist", direction="from", to_keep=[])
 
-    assert "Summary:\nthe gist\n\nContinue working autonomously." in _lead(splice)
-    assert "Resume work immediately" not in _lead(splice)
+    assert isinstance(message, UserMessage)
+    assert "Summary:\nthe gist\n\nContinue working autonomously." in (
+        message.content or ""
+    )
+    assert "Resume work immediately" not in (message.content or "")
 
 
-@pytest.mark.asyncio
-async def test_a_summary_quoting_a_template_slot_stays_literal(tmp_path: Path) -> None:
-    _, agent = _agent(
-        tmp_path,
-        reply("<summary>use {{resume}} and {{recent}}</summary>"),
+def test_a_summary_quoting_a_template_slot_stays_literal() -> None:
+    compactor = SummaryCompactor(Mock(spec=Agent))
+
+    (message,) = compactor._resumed(
+        "Summary:\nuse {{resume}} and {{recent}}",
+        direction="from",
+        to_keep=[],
     )
 
-    splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
-
-    assert "use {{resume}} and {{recent}}" in _lead(splice)
-
-
-@pytest.mark.asyncio
-async def test_a_custom_prompt_replaces_the_default_body(tmp_path: Path) -> None:
-    provider, agent = _agent(tmp_path, _SUMMARY)
-
-    _ = await _compact(SummaryCompactor(agent, prompt="CUSTOM BODY"), agent, _HISTORY)
-
-    instruction = _instruction(provider.requests[0])
-    assert "CUSTOM BODY" in instruction
-    assert "Generate a comprehensive recap" not in instruction
+    assert isinstance(message, UserMessage)
+    assert "use {{resume}} and {{recent}}" in (message.content or "")
 
 
-@pytest.mark.asyncio
-async def test_a_custom_partial_prompt_is_used_when_a_tail_is_kept(
-    tmp_path: Path,
-) -> None:
-    provider, agent = _agent(tmp_path, _SUMMARY)
-    compactor = SummaryCompactor(agent, partial_prompt="PARTIAL BODY", keep_recent=1)
+def test_a_custom_prompt_replaces_the_default_body() -> None:
+    compactor = SummaryCompactor(Mock(spec=Agent), prompt="CUSTOM BODY")
 
-    _ = await _compact(compactor, agent, (*_HISTORY, _user("next")))
+    assert compactor._body(to_keep=False, direction="from") == "CUSTOM BODY"
 
-    assert "PARTIAL BODY" in _instruction(provider.requests[0])
+
+def test_a_custom_partial_prompt_is_used_when_a_tail_is_kept() -> None:
+    compactor = SummaryCompactor(
+        Mock(spec=Agent),
+        partial_prompt="PARTIAL BODY",
+        keep_recent=1,
+    )
+
+    assert compactor._body(to_keep=True, direction="from") == "PARTIAL BODY"
 
 
 @pytest.mark.asyncio
@@ -720,16 +732,8 @@ async def test_a_reply_that_is_no_summary_preserves_history(
     assert agent.runtime.context().messages == before
 
 
-@pytest.mark.asyncio
-async def test_a_finished_summary_missing_its_closing_tag_is_kept(
-    tmp_path: Path,
-) -> None:
-    _, agent = _agent(tmp_path, reply("<summary>all of it"))
-
-    splice = await _compact(SummaryCompactor(agent), agent, _HISTORY)
-
-    assert splice.strategy == "summary"
-    assert "Summary:\nall of it\nResume work" in _lead(splice)
+def test_a_finished_summary_missing_its_closing_tag_is_kept() -> None:
+    assert _summary(reply("<summary>all of it")) == "Summary:\nall of it"
 
 
 @pytest.mark.asyncio
@@ -764,12 +768,16 @@ async def test_the_summary_call_asks_for_no_more_than_the_window_leaves(
     )
     compactor = SummaryCompactor(agent, model=other["scripted"])
 
-    for chars in (20_000, 24_000):
-        _ = await _compact(compactor, agent, (_user("x" * chars), _turn("ok")))
+    for chars in (4, 8):
+        history = (_user("x" * chars), _turn("ok"))
+        splice = await _compact(compactor, agent, history)
+        assert splice.strategy == "summary"
+        assert _sent(other.requests[-1]) == _records(history)
 
+    assert len(other.requests) == 2
     short, long = (asked.max_response_tokens for asked in other.requests)
     assert 0 < long < short < 10_000
-    assert short - long == 4_000 // 4
+    assert short - long == 4 // 4
     assert provider.requests == []
     for asked in other.requests:
         sent = agent.runtime.token_accounting.estimate_request(
@@ -962,7 +970,7 @@ async def test_an_overflow_keeps_results_whole_and_preserves_the_unselected_suff
     history = (
         _user("go"),
         _turn("", call("Read", "c1")),
-        _result("c1", "r" * 20_000),
+        _result("c1", "result"),
         _turn("ok"),
     )
 
@@ -1015,11 +1023,11 @@ async def test_a_summary_that_overflows_every_attempt_errors_with_bounded_calls(
     tmp_path: Path,
     attempts: int | None,
 ) -> None:
-    provider, agent = _agent(tmp_path, *[ContextOverflowError("too long")] * 5)
+    provider, agent = _agent(tmp_path, *[ContextOverflowError("too long")] * 3)
     history = (
         _user("go"),
         _turn("", call("Read", "c1")),
-        _result("c1", "r" * 20_000),
+        _result("c1", "result"),
         _turn("ok"),
     )
     compactor = (
@@ -1036,8 +1044,9 @@ async def test_a_summary_that_overflows_every_attempt_errors_with_bounded_calls(
         _ = await _compact(compactor, agent, history)
 
     assert len(provider.requests) == expected
-    first = _texts(_sent(provider.requests[0]))[1]
-    assert first == "r" * 20_000
+    assert [_sent(request) for request in provider.requests] == [
+        _records(history[:taken]) for taken in (4, 3, 1)[:expected]
+    ]
 
 
 @pytest.mark.asyncio
@@ -1149,22 +1158,6 @@ async def test_the_size_before_is_the_last_bill_plus_what_followed_it(
     assert splice.token_before == 750_000 + 40 // 4
 
 
-@pytest.mark.asyncio
-async def test_another_model_can_write_the_summary(tmp_path: Path) -> None:
-    provider, agent = _agent(tmp_path)
-    other = ScriptedProvider(replies=[_SUMMARY])
-
-    splice = await _compact(
-        SummaryCompactor(agent, model=other["scripted"]),
-        agent,
-        _HISTORY,
-    )
-
-    assert splice.strategy == "summary"
-    assert provider.requests == []
-    assert len(other.requests) == 1
-
-
 class _Wordless(ScriptedModel):
     """A model whose stream breaks its contract: words, and then no reply."""
 
@@ -1175,65 +1168,94 @@ class _Wordless(ScriptedModel):
 
 
 @pytest.mark.asyncio
-async def test_a_stream_that_ends_without_a_reply_is_an_error(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path)
+async def test_a_stream_that_ends_without_a_reply_is_an_error() -> None:
     provider = ScriptedProvider()
     wordless = _Wordless(
         provider=provider,
         capability=provider.capability,
         settings=provider.capability.default,
     )
+    request = Request(records=(_user("go"),))
+    observe = Mock()
+    charge = Mock()
+    agent = Mock(
+        spec=Agent,
+        charge=charge,
+        runtime=Mock(
+            sending=Mock(return_value=request),
+            token_accounting=Mock(observe=observe),
+        ),
+    )
 
     with pytest.raises(
         RuntimeError,
         match=r"^The model ended its stream without a reply\.$",
     ):
-        _ = await _compact(SummaryCompactor(agent, model=wordless), agent, _HISTORY)
+        _ = await SummaryCompactor(agent)._stream(wordless, request)
+
+    observe.assert_not_called()
+    charge.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_a_kept_head_that_is_all_there_is_leads_with_the_notes(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider, agent = _agent(tmp_path)
-    _start_a_job(agent)
+    compactor = _noting(monkeypatch)
+    fits = Mock(return_value=True)
+    prefixes = AsyncMock(return_value=((), ""))
+    monkeypatch.setattr(compactor, "_fits_payload", fits)
+    monkeypatch.setattr(compactor, "_prefixes", prefixes)
     only = _turn("all there is")
 
-    splice = await _compact(
-        SummaryCompactor(agent, keep_recent=5, direction="up_to"),
-        agent,
+    payload, strategy, reason, kept = await compactor._summarize(
+        compactor._agent.model,
         [only],
+        "",
+        keep=5,
     )
 
-    assert splice.fallback_reason == "nothing to summarize"
-    assert provider.requests == []
-    assert splice.payload[1:] == (only,)
-    assert _lead(splice).startswith("Active background tasks")
+    assert strategy == "summary_fallback"
+    assert reason == "nothing to summarize"
+    assert kept == 1
+    assert payload == (
+        _user(
+            "Active background tasks (re-surfaced post-compaction):\n"
+            "- [w1] Wait: running (2s since started)",
+        ),
+        only,
+    )
+    fits.assert_called_once_with(payload, [only])
+    prefixes.assert_not_awaited()
 
 
-def _skilled(
+def _restoring(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     *bodies: tuple[str, str],
-    window: int = 20_000,
-) -> Agent:
-    """Return an agent whose Skill tool finds each ``(name, body)`` in ``tmp_path``."""
-    for name, body in bodies:
-        home = tmp_path / ".sagent" / "skills" / name
-        home.mkdir(parents=True)
-        (home / "SKILL.md").write_text(
-            f"---\nname: {name}\ndescription: d\n---\n{body}\n",
-            encoding="utf-8",
+) -> tuple[SummaryCompactor, Mock]:
+    """Keep restoration real with discovered skills and a 64-token trigger."""
+    found = [
+        SkillInfo(
+            name=name,
+            description="",
+            body=body,
+            source="project",
+            path=tmp_path / name / "SKILL.md",
         )
-    provider = ScriptedProvider(
-        replies=[_SUMMARY, _SUMMARY],
-        capability=_capability(window=window),
+        for name, body in bodies
+    ]
+    discover = Mock(return_value=found)
+    tool = Mock(spec=Skill, discover=discover)
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider()["scripted"],
+        tools={"Skill": tool},
+        runtime=Mock(tool_context=ToolContext(cwd=tmp_path), jobs={}),
     )
-    return Agent(
-        model=provider["scripted"],
-        tools=[Skill(user_dir=tmp_path / "user")],
-        tool_context=ToolContext(cwd=tmp_path),
-        compactor=SummaryCompactor,
-    )
+    compactor = SummaryCompactor(agent)
+    monkeypatch.setattr(compactor, "trigger_tokens", Mock(return_value=64.0))
+    return compactor, discover
 
 
 def _loaded(name: str, call_id: str) -> list[ModelContextEvent]:
@@ -1246,72 +1268,96 @@ def _loaded(name: str, call_id: str) -> list[ModelContextEvent]:
     ]
 
 
-@pytest.mark.asyncio
-async def test_a_skill_loaded_before_compaction_is_restored_through_each_one(
+def test_a_skill_loaded_before_compaction_is_restored_through_each_one(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    agent = _skilled(tmp_path, ("tdd", "Write the test first."), ("old", "Old."))
-    history = [*_loaded("old", "c0"), *_loaded("tdd", "c1")]
-
-    first = await _compact(SummaryCompactor(agent), agent, history)
-    second = await _compact(
-        SummaryCompactor(agent),
-        agent,
-        [*first.payload, _turn("ok")],
+    compactor, discover = _restoring(
+        tmp_path,
+        monkeypatch,
+        ("tdd", "Test first."),
+        ("old", "Old."),
     )
+    monkeypatch.setattr(compactor, "trigger_tokens", Mock(return_value=128.0))
+    history = [*_loaded("old", "c0"), *_loaded("tdd", "c1")]
+    summary = (_user("Summary:\nthe gist"),)
 
-    for lead in (_lead(first), _lead(second)):
-        assert (
-            "Skills loaded before compaction, restored:\n\n"
-            "<skill name='tdd' source='project'>\nWrite the test first.\n</skill>"
-            in lead
-        )
-        assert lead.index("name='tdd'") < lead.index("name='old'")
+    first = compactor._enrich(summary, history=history)
+    second = compactor._enrich(summary, history=[*first, _turn("ok")])
+
+    expected = UserMessage(
+        content=(
+            "Summary:\nthe gist\n\nSkills loaded before compaction, restored:\n\n"
+            "<skill name='tdd' source='project'>\nTest first.\n</skill>\n\n"
+            "<skill name='old' source='project'>\nOld.\n</skill>"
+        ),
+        extra={"skills": ["tdd", "old"]},
+    )
+    assert first == second == (expected,)
+    assert discover.call_count == 2
+    discover.assert_called_with(tmp_path)
 
 
-@pytest.mark.asyncio
-async def test_a_skill_block_the_user_pasted_is_no_skill_loaded(tmp_path: Path) -> None:
+def test_a_skill_block_the_user_pasted_is_no_skill_loaded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A handoff quoting a restored skill names it; the agent never loaded it."""
-    agent = _skilled(tmp_path, ("tdd", "Write the test first."))
+    compactor, discover = _restoring(tmp_path, monkeypatch, ("tdd", "Test first."))
     pasted = _user(
         "Last session's summary:\n"
-        "<skill name='tdd' source='project'>\nWrite the test first.\n</skill>",
+        "<skill name='tdd' source='project'>\nTest first.\n</skill>",
     )
 
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, [pasted, _turn("ok")]))
+    assert compactor._skills_note([pasted, _turn("ok")]) == ("", [])
+    discover.assert_not_called()
 
-    assert "Skills loaded before compaction" not in lead
 
-
-@pytest.mark.asyncio
-async def test_a_skill_too_long_to_restore_is_named_not_cut(tmp_path: Path) -> None:
-    agent = _skilled(tmp_path, ("big", "x" * 40_000), ("small", "Short."))
+def test_a_skill_too_long_to_restore_is_named_not_cut(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compactor, discover = _restoring(
+        tmp_path,
+        monkeypatch,
+        ("big", "x" * 24),
+        ("small", "Short."),
+    )
     history = [*_loaded("big", "c0"), *_loaded("small", "c1")]
 
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, history))
+    note, restored = compactor._skills_note(history)
 
-    assert "Short." in lead
-    assert "x" * 100 not in lead
-    assert (
-        "</skill>\n\nSkills loaded before compaction but too long to restore;"
+    assert note == (
+        "Skills loaded before compaction, restored:\n\n"
+        "<skill name='small' source='project'>\nShort.\n</skill>"
+        "\n\nSkills loaded before compaction but too long to restore;"
         " re-load with Skill: big."
-    ) in lead
+    )
+    assert restored == ["small"]
+    discover.assert_called_once_with(tmp_path)
 
 
-@pytest.mark.asyncio
-async def test_a_skill_deleted_since_it_loaded_is_not_restored(tmp_path: Path) -> None:
-    agent = _skilled(tmp_path, ("tdd", "Write the test first."))
+def test_a_skill_deleted_since_it_loaded_is_not_restored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compactor, _ = _restoring(tmp_path, monkeypatch, ("tdd", "Test first."))
     history = [*_loaded("gone", "c0"), *_loaded("tdd", "c1")]
 
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, history))
+    assert compactor._skills_note(history) == (
+        (
+            "Skills loaded before compaction, restored:\n\n"
+            "<skill name='tdd' source='project'>\nTest first.\n</skill>"
+        ),
+        ["tdd"],
+    )
 
-    assert "name='tdd'" in lead
-    assert "gone" not in lead
 
-
-@pytest.mark.asyncio
-async def test_a_skill_that_failed_to_load_is_not_restored(tmp_path: Path) -> None:
-    agent = _skilled(tmp_path, ("tdd", "Write the test first."))
+def test_a_skill_that_failed_to_load_is_not_restored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compactor, discover = _restoring(tmp_path, monkeypatch, ("tdd", "Test first."))
     history = [
         _user("go"),
         _turn("", call("Skill", "c1", skill="tdd")),
@@ -1319,52 +1365,70 @@ async def test_a_skill_that_failed_to_load_is_not_restored(tmp_path: Path) -> No
         _turn("done"),
     ]
 
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, history))
+    assert compactor._skills_note(history) == ("", [])
+    discover.assert_not_called()
 
-    assert "<skill" not in lead
 
-
-@pytest.mark.asyncio
-async def test_the_notes_join_the_first_user_message_past_a_kept_turn(
-    tmp_path: Path,
+def test_the_notes_join_the_first_user_message_past_a_kept_turn(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, agent = _agent(tmp_path, _SUMMARY)
-    _start_a_job(agent)
+    compactor = _noting(monkeypatch)
     head = _turn("kept head")
 
-    splice = await _compact(
-        SummaryCompactor(agent, keep_recent=1, direction="up_to"),
-        agent,
-        [head, _user("summarized"), _turn("this too")],
+    payload = compactor._enrich(
+        (head, _user("Summary:\nthe gist")),
+        history=_HISTORY,
     )
 
-    assert splice.payload[0] == head
-    last = splice.payload[1]
-    assert isinstance(last, UserMessage)
-    assert "Summary:\nthe gist" in (last.content or "")
-    assert (last.content or "").endswith("- [w1] Wait: running (0s since started)")
+    assert payload == (
+        head,
+        _user(
+            "Summary:\nthe gist\n\n"
+            "Active background tasks (re-surfaced post-compaction):\n"
+            "- [w1] Wait: running (2s since started)",
+        ),
+    )
+    assert payload[0] is head
 
 
-def _start_a_job(agent: Agent) -> None:
-    """Have ``agent``'s runtime hold one call still running."""
-    agent.runtime._started["w1"] = (ToolCall(call_id="w1", name="Wait"), time.time())
+def _noting(monkeypatch: pytest.MonkeyPatch) -> SummaryCompactor:
+    """Return the real compactor with one supplied job and a fixed clock."""
+    monkeypatch.setattr(time, "time", Mock(return_value=12.0))
+    job = Mock(
+        spec=types.Job,
+        call=ToolCall(call_id="w1", name="Wait"),
+        state="running",
+        started=10.0,
+    )
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider()["scripted"],
+        tools={},
+        runtime=Mock(jobs={"w1": job}),
+    )
+    return SummaryCompactor(agent, direction="up_to")
 
 
 @dataclass(slots=True, kw_only=True)
 class _EffortSeen:
-    """Answer with a summary, noting the effort the model was set to."""
+    """Supply a summary outcome, noting the selected model's effort."""
 
-    agent: Agent
-    answer: Reply = _SUMMARY
+    failure: Exception | None = None
     seen: list[str] = field(default_factory=list)
 
-    def __call__(self, request: Request) -> Response:
-        del request
-        self.seen.append(self.agent.model.settings.thinking_effort)
-        if isinstance(self.answer, BaseException):
-            raise self.answer
-        assert isinstance(self.answer, Response)
-        return self.answer
+    async def __call__(
+        self,
+        model: Model,
+        history: list[ModelContextEvent],
+        instructions: str,
+        *,
+        keep: int,
+    ) -> tuple[tuple[ModelContextEvent, ...], str, str, int]:
+        del history, instructions, keep
+        self.seen.append(model.settings.thinking_effort)
+        if self.failure is not None:
+            raise self.failure
+        return ((_user("Summary:\ngist"),), "summary", "", 0)
 
 
 @pytest.mark.asyncio
@@ -1374,71 +1438,110 @@ class _EffortSeen:
     ids=["lowered", "not-offered", "not-lower"],
 )
 async def test_the_summary_runs_at_a_lower_effort_then_restores_it(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     effort: ThinkingEffort,
     during: str,
 ) -> None:
-    provider = ScriptedProvider(
+    model = ScriptedProvider(
         capability=_capability(efforts=frozenset({"none", "low", "high", "max"})),
-    )
-    agent = Agent(
-        model=provider["scripted"],
-        tool_context=ToolContext(cwd=tmp_path),
-        system_prompt="",
-    )
-    agent.model.settings = replace(agent.model.settings, thinking_effort="high")
-    seen = _EffortSeen(agent=agent)
-    provider.replies.append(seen)
+    )["scripted"]
+    model.settings = replace(model.settings, thinking_effort="high")
+    compactor = SummaryCompactor(Mock(spec=Agent), effort=effort)
+    seen = _EffortSeen()
+    monkeypatch.setattr(compactor, "_summarize", AsyncMock(side_effect=seen.__call__))
 
-    _ = await _compact(SummaryCompactor(agent, effort=effort), agent, _HISTORY)
+    _ = await compactor.compact(
+        (),
+        _HISTORY,
+        model,
+        Mock(return_value=TapeRef(session_id="s", ordinal=0)),
+    )
 
     assert seen.seen == [during]
-    assert agent.model.settings.thinking_effort == "high"
+    assert model.settings.thinking_effort == "high"
 
 
 @pytest.mark.asyncio
-async def test_the_effort_is_restored_after_a_failure(tmp_path: Path) -> None:
-    provider = ScriptedProvider(
+async def test_the_effort_is_restored_after_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = ScriptedProvider(
         capability=_capability(efforts=frozenset({"none", "high"})),
-    )
-    agent = Agent(
-        model=provider["scripted"],
-        tool_context=ToolContext(cwd=tmp_path),
-        system_prompt="",
-    )
-    agent.model.settings = replace(agent.model.settings, thinking_effort="high")
-    seen = _EffortSeen(agent=agent, answer=ValueError("bad"))
-    provider.replies.append(seen)
+    )["scripted"]
+    model.settings = replace(model.settings, thinking_effort="high")
+    compactor = SummaryCompactor(Mock(spec=Agent), effort="none")
+    failure = ValueError("bad")
+    seen = _EffortSeen(failure=failure)
+    monkeypatch.setattr(compactor, "_summarize", AsyncMock(side_effect=seen.__call__))
 
-    with pytest.raises(ValueError, match="bad"):
-        _ = await _compact(SummaryCompactor(agent, effort="none"), agent, _HISTORY)
+    with pytest.raises(ValueError, match="bad") as raised:
+        _ = await compactor.compact(
+            (),
+            _HISTORY,
+            model,
+            Mock(return_value=TapeRef(session_id="s", ordinal=0)),
+        )
 
+    assert raised.value is failure
     assert seen.seen == ["none"]
-    assert agent.model.settings.thinking_effort == "high"
+    assert model.settings.thinking_effort == "high"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("second", "kept"),
+    ("second", "kept", "logged"),
     [
         (
             reply("<summary>the gist, with the file paths</summary>"),
             "the gist, with the file paths",
+            [],
         ),
-        (reply("IDENTICAL"), "the gist"),
-        (reply("no tags at all"), "the gist"),
-        (reply("<summary>   </summary>"), "the gist"),
-        (reply("<summary>better but cut", stop_reason="max_tokens"), "the gist"),
-        (ValueError("verifier down"), "the gist"),
-        (ContextOverflowError("too long"), "the gist"),
-        (reply("<summary>refused</summary>", stop_reason="refusal"), "the gist"),
-        (reply("<summary>tool call</summary>", calls=[call("Read", "c9")]), "the gist"),
+        (reply("IDENTICAL"), "the gist", []),
+        (reply("identical"), "the gist", []),
+        (reply(""), "the gist", []),
+        (
+            reply("no tags at all"),
+            "the gist",
+            ["verifier returned no usable summary; keeping the original"],
+        ),
+        (
+            reply("<summary>   </summary>"),
+            "the gist",
+            ["verifier returned no usable summary; keeping the original"],
+        ),
+        (
+            reply("<summary>better but cut", stop_reason="max_tokens"),
+            "the gist",
+            ["verifier's summary was cut off; keeping the original"],
+        ),
+        (
+            ValueError("verifier down"),
+            "the gist",
+            ["summary verification failed; using the original: verifier down"],
+        ),
+        (
+            ContextOverflowError("too long"),
+            "the gist",
+            ["summary verification failed; using the original: too long"],
+        ),
+        (
+            reply("<summary>refused</summary>", stop_reason="refusal"),
+            "the gist",
+            ["verifier returned no usable summary; keeping the original"],
+        ),
+        (
+            reply("<summary>tool call</summary>", calls=[call("Read", "c9")]),
+            "the gist",
+            ["verifier returned no usable summary; keeping the original"],
+        ),
     ],
     ids=[
         "improved",
         "identical",
-        "unparseable",
+        "identical-lowercase",
         "empty",
+        "unparseable",
+        "empty-tag",
         "cut-off",
         "failed",
         "overflowed",
@@ -1448,18 +1551,23 @@ async def test_the_effort_is_restored_after_a_failure(tmp_path: Path) -> None:
 )
 async def test_a_verified_summary_is_replaced_only_by_a_better_one(
     tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
     second: Reply,
     kept: str,
+    logged: list[str],
 ) -> None:
     provider, agent = _agent(tmp_path, _SUMMARY, second)
 
-    splice = await _compact(
-        SummaryCompactor(agent, verify_summary=True),
-        agent,
-        _HISTORY,
-    )
+    with caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"):
+        splice = await _compact(
+            SummaryCompactor(agent, verify_summary=True),
+            agent,
+            _HISTORY,
+        )
 
-    assert f"Summary:\n{kept}" in _lead(splice)
+    assert f"Summary:\n{kept}\nResume" in _lead(splice)
+    assert splice.fallback_reason == ""
+    assert [m for m in caplog.messages if "verif" in m] == logged
     assert len(provider.requests) == 2
     first, verification = provider.requests
     assert _sent(verification) == _sent(first)
@@ -1467,15 +1575,6 @@ async def test_a_verified_summary_is_replaced_only_by_a_better_one(
     assert verification.tools == first.tools
     probe = _instruction(verification)
     assert f"<previous_summary>\n{_SUMMARY_TEXT}\n</previous_summary>" in probe
-
-
-@pytest.mark.asyncio
-async def test_an_unverified_summary_is_one_call(tmp_path: Path) -> None:
-    provider, agent = _agent(tmp_path, _SUMMARY, _SUMMARY)
-
-    _ = await _compact(SummaryCompactor(agent), agent, _HISTORY)
-
-    assert len(provider.requests) == 1
 
 
 # The model reads again, in one turn, what it still needs: Write refuses a file not
@@ -1495,19 +1594,21 @@ async def test_a_compaction_brings_back_no_file_the_model_read(tmp_path: Path) -
     assert splice.token_after < 1_000
 
 
-@pytest.mark.asyncio
-async def test_thinking_counts_toward_the_token_estimate(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path, _SUMMARY)
+def test_thinking_counts_toward_the_token_estimate() -> None:
     thought = Response(
-        records=(Thinking(content="t" * 400), AssistantMessage(content="ok")),
+        records=(Thinking(content="tttt"), AssistantMessage(content="ok")),
         tokens=TokenCount(),
         spend=TokenCost(),
         stop_reason="end_turn",
     )
 
-    splice = await _compact(SummaryCompactor(agent), agent, [_user("go"), thought])
-
-    assert splice.token_before == (len("go") + 400 + len("ok")) // 4
+    assert (
+        _request_tokens(
+            ScriptedProvider()["scripted"],
+            (_user("go"), thought),
+        )
+        == (len("go") + 4 + len("ok")) // 4
+    )
 
 
 @dataclass(slots=True, kw_only=True)
@@ -1724,24 +1825,55 @@ async def test_a_resumed_agent_goes_on_counting_its_turns_and_compactions(
 
 
 @pytest.mark.asyncio
-async def test_run_without_instructions_asks_for_no_emphasis(tmp_path: Path) -> None:
-    provider, agent = _agent(tmp_path, _SUMMARY)
-    async with agent:
-        agent.session.append(_user("fix the bug"), AssistantMessage(content="fixed"))
+@pytest.mark.parametrize(
+    ("instructions", "failure"),
+    [
+        ("", None),
+        ("keep the plan", ValueError("no summary today")),
+        ("keep the plan", asyncio.CancelledError()),
+    ],
+    ids=["complete", "failed", "cancelled"],
+)
+async def test_run_waits_for_completion_and_restores_its_observers(
+    instructions: str,
+    failure: BaseException | None,
+) -> None:
+    registered: list[Callable[[types.RuntimeEvent], None]] = [Mock()]
+    requested = asyncio.Event()
 
-        await agent.session.compactor.run()
+    def push(event: types.RuntimeEvent) -> None:
+        del event
+        requested.set()
 
-    assert "<user_guidance>" not in _instruction(provider.requests[0])
-
-
-@pytest.mark.asyncio
-async def test_run_raises_what_the_compaction_raised(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path, ValueError("no summary today"))
-    async with agent:
-        agent.session.append(_user("fix the bug"), AssistantMessage(content="fixed"))
-
-        with pytest.raises(ValueError, match="no summary today"):
-            await agent.session.compactor.run()
+    pushed = Mock(side_effect=push)
+    agent = Mock(spec=Agent, runtime=Mock(observers=registered, push=pushed))
+    observers = tuple(registered)
+    running = asyncio.create_task(SummaryCompactor(agent).run(instructions))
+    try:
+        await requested.wait()
+        pushed.assert_called_once_with(types.Compact(args=instructions))
+        assert len(registered) == len(observers) + 1
+        observe = registered[-1]
+        observe(types.CompactStarted())
+        await asyncio.sleep(0)
+        assert not running.done()
+        if isinstance(failure, asyncio.CancelledError):
+            running.cancel()
+        elif failure is not None:
+            observe(types.CompactFailed(exception=failure, tape_len=0))
+        else:
+            observe(types.CompactComplete())
+        if failure is None:
+            await running
+        else:
+            with pytest.raises(type(failure)) as raised:
+                await running
+            if not isinstance(failure, asyncio.CancelledError):
+                assert raised.value is failure
+    finally:
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
+    assert tuple(registered) == observers
 
 
 @pytest.mark.asyncio
@@ -1910,7 +2042,7 @@ async def test_a_custom_model_effort_or_direction_keeps_the_original_frame(
 
 @dataclass(slots=True, kw_only=True)
 class _Wait:
-    """A tool that runs until the test ends."""
+    """A tool offering a configurable description and schema."""
 
     name: str = "Wait"
     description: str = "Wait."
@@ -1921,7 +2053,6 @@ class _Wait:
         },
     )
     display: ToolDisplay = field(default_factory=ToolDisplay)
-    started: asyncio.Event = field(default_factory=asyncio.Event)
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
         del arguments
@@ -1941,51 +2072,43 @@ class _Wait:
         arguments: Mapping[str, PlainTree],
     ) -> UncategorizedToolResult:
         del context, arguments
-        self.started.set()
-        await asyncio.Event().wait()
-        return UncategorizedToolResult(call_id="", content="never")
+        return UncategorizedToolResult(call_id="", content="")
 
 
-@pytest.mark.asyncio
-async def test_a_job_still_running_is_named_after_the_summary(tmp_path: Path) -> None:
-    wait = _Wait()
-    provider = ScriptedProvider(
-        replies=[reply(calls=[call("Wait", "w1")]), _SUMMARY, reply("resumed")],
+def test_a_job_still_running_is_named_after_the_summary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(time, "time", Mock(return_value=12.0))
+    job = Mock(
+        spec=types.Job,
+        call=ToolCall(call_id="w1", name="Wait"),
+        state="detached",
+        started=10.0,
     )
-    agent = Agent(
-        model=provider["scripted"],
-        tools=[wait],
-        tool_context=ToolContext(cwd=tmp_path),
-        system_prompt="",
-        compactor=SummaryCompactor,
+    agent = Mock(spec=Agent, tools={}, runtime=Mock(jobs={"w1": job}))
+
+    payload = SummaryCompactor(agent)._enrich(
+        (_user("Summary:\nthe gist"),),
+        history=_HISTORY,
     )
-    async with agent:
-        agent.runtime.push(UserMessage(content="wait for it"))
-        await wait.started.wait()
 
-        await agent.session.compactor.run()
-
-        first = next(iter(agent.session))
-    assert isinstance(first, UserMessage)
-    assert (
-        "Active background tasks (re-surfaced post-compaction):\n- [w1] Wait: detached ("
-        in (first.content or "")
+    assert payload == (
+        _user(
+            "Summary:\nthe gist\n\n"
+            "Active background tasks (re-surfaced post-compaction):\n"
+            "- [w1] Wait: detached (2s since started)",
+        ),
     )
 
 
-@pytest.mark.asyncio
-async def test_the_prompts_read_as_utf8_whatever_the_locale(
-    tmp_path: Path,
+def test_the_prompts_read_as_utf8_whatever_the_locale(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     latin1 = _Latin1()
     monkeypatch.setattr(Path, "read_text", latin1)
-    provider, agent = _agent(tmp_path, _SUMMARY)
 
-    _ = await _compact(SummaryCompactor(agent), agent, _HISTORY)
-
-    assert "your sole response \u2014 the task will fail" in _instruction(
-        provider.requests[0],
+    assert "your sole response \u2014 the task will fail" in _asset(
+        "compactor_no_tools",
     )
 
 
@@ -2276,17 +2399,18 @@ def test_a_body_the_size_of_the_context_holds_exactly_the_floor() -> None:
     ids=["one-token-window", "input-full-output-free"],
 )
 def test_a_window_the_prompts_fill_has_no_room_for_a_body(
-    tmp_path: Path,
     window: int,
     context: int,
 ) -> None:
-    assert _trigger(tmp_path, window=window, context=context) == 0
+    assert _trigger(window=window, context=context) == 0
 
 
-def test_the_trigger_holds_room_for_the_prompt_a_kept_part_asks(
-    tmp_path: Path,
-) -> None:
-    _, agent = _agent(tmp_path, capability=_capability(window=100_000))
+def test_the_trigger_holds_room_for_the_prompt_a_kept_part_asks() -> None:
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider(capability=_capability(window=100_000))["scripted"],
+        runtime=Mock(system=()),
+    )
 
     def trigger(**options: int | str) -> float:
         return SummaryCompactor(
@@ -2313,124 +2437,131 @@ def test_the_trigger_holds_room_for_the_prompt_a_kept_part_asks(
 
 @pytest.mark.parametrize(
     ("ceiling", "said", "due"),
-    [(1, 1, True), (10_000, 8_000, True), (10_000, 7_999, False)],
+    [(1, 1, True), (10, 8, True), (10, 7, False)],
     ids=["one-byte", "at-the-share", "below-it"],
 )
 def test_the_system_prompt_and_words_count_toward_the_byte_ceiling(
-    tmp_path: Path,
     ceiling: int,
     said: int,
     due: bool,
 ) -> None:
     """``said`` is the request's characters, the system prompt's included."""
     capability = replace(
-        _capability(window=1_000_000),
-        limits=ModelLimits(
-            max_request_tokens=1_000_000,
-            max_response_tokens=8_000,
-            max_request_bytes=ceiling,
+        _capability(),
+        limits=ModelLimits(max_request_tokens=16, max_request_bytes=ceiling),
+    )
+    agent = Mock(
+        spec=Agent,
+        model=ScriptedProvider(capability=capability)["scripted"],
+        runtime=Mock(
+            system=("s",),
+            context=Mock(return_value=Mock(messages=(_user("x" * (said - 1)),))),
         ),
     )
-    _, agent = _agent(tmp_path, capability=capability, system_prompt="s" * 400)
-    system = sum(map(len, agent.runtime.system))
-    assert system >= 400
-    agent.session.append(_user("x" * max(1, said - system)))
 
-    assert SummaryCompactor(agent).should_run() is due
+    assert SummaryCompactor(agent)._wire_bytes_due() is due
 
 
-def test_measured_reply_room_counts_the_prompt_without_response_tokens(
-    tmp_path: Path,
-) -> None:
-    _, agent = _agent(
-        tmp_path,
-        capability=_capability(window=100_000),
-        system_prompt="s" * 4_000,
+def test_measured_reply_room_counts_the_prompt_without_response_tokens() -> None:
+    model = ScriptedProvider(capability=_capability(window=100))["scripted"]
+    request = Request(system=("sys!",), records=(_user("hi"),))
+    requesting = Mock(return_value=request)
+    estimate = Mock(return_value=23)
+    agent = Mock(
+        spec=Agent,
+        model=model,
+        runtime=Mock(
+            system=request.system,
+            request=requesting,
+            token_accounting=Mock(has_measurements=True, estimate_request=estimate),
+        ),
     )
-    _hold(agent, (_user("hi"),))
-    accounting = agent.runtime.token_accounting
-    snapshot = accounting.capture(
-        agent.runtime.request(max_response_tokens=0),
-        model=agent.model,
+
+    assert SummaryCompactor(agent).reply_room() == 95 - 23
+    requesting.assert_called_once_with(max_response_tokens=0)
+    estimate.assert_called_once_with(request, model=model)
+
+
+def test_the_reply_room_counts_the_system_prompt_once() -> None:
+    compactor = _tooled(
+        tools=(),
+        system=("sys!",),
+        history=(reply("ok", tokens=TokenCount(request=23)), _user("yyyy")),
     )
-    _ = accounting.observe(snapshot, tokens=TokenCount(request=5_000, response=700))
 
-    assert SummaryCompactor(agent).reply_room() == 95_000 - 5_000
+    assert compactor.reply_room() == 190_000 - 23 - 4 // 4
 
 
-def test_the_reply_room_counts_the_system_prompt_once(tmp_path: Path) -> None:
-    _, agent = _agent(
-        tmp_path,
-        capability=_capability(window=100_000),
-        system_prompt="s" * 4_000,
+def test_a_bill_of_the_system_prompt_alone_holds_nothing_past_it() -> None:
+    compactor = _tooled(
+        tools=(),
+        system=("sys!",),
+        history=(reply("ok", tokens=TokenCount(request=1)),),
     )
-    compactor = SummaryCompactor(agent)
-    agent.session.append(_user("hi"))
-    _ = agent.runtime.append_history(reply("ok", tokens=TokenCount(request=5_000)))
-    _ = agent.runtime.append_history(_user("y" * 40))
-
-    assert compactor.reply_room() == 95_000 - 5_000 - 40 // 4
-
-
-def test_a_bill_of_the_system_prompt_alone_holds_nothing_past_it(
-    tmp_path: Path,
-) -> None:
-    _, agent = _agent(
-        tmp_path,
-        capability=_capability(window=100_000),
-        system_prompt="s" * 400,
-    )
-    compactor = SummaryCompactor(agent)
-    system = compactor._system_tokens()
-    agent.session.append(_user("hi"))
-    _ = agent.runtime.append_history(reply("ok", tokens=TokenCount(request=system)))
 
     assert compactor._held() == 0
 
 
-def test_an_unbilled_context_counts_each_tools_schema(tmp_path: Path) -> None:
-    plain = _tooled(tmp_path, tools=())
+def test_an_unbilled_context_counts_each_tools_schema() -> None:
+    plain = _tooled(
+        tools=(
+            _Wait(schema={"type": "object", "properties": {"x": {"description": ""}}}),
+        ),
+    )
     schema: dict[str, PlainTree] = {
         "type": "object",
         "properties": {"x": {"description": "d" * 40}},
     }
-    tooled = _tooled(tmp_path, tools=(_Wait(schema=schema),))
+    tooled = _tooled(tools=(_Wait(schema=schema),))
 
-    assert tooled._held() - plain._held() >= 40 // 4
+    assert tooled._held() - plain._held() == 40 // 4
 
 
-@pytest.mark.asyncio
-async def test_a_wordless_message_takes_the_jobs_note_alone(tmp_path: Path) -> None:
+def test_a_wordless_message_takes_the_jobs_note_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """It gains no ``None`` before the note, and names no skills."""
-    _, agent = _agent(tmp_path)
-    _start_a_job(agent)
-    image = Attachment(mime_descriptor="image/png", data=b"x" * 400)
+    compactor = _noting(monkeypatch)
+    image = Attachment(mime_descriptor="image/png", data=b"x")
+    message = UserMessage(attachments=(image,))
 
-    splice = await _compact(
-        SummaryCompactor(agent),
-        agent,
-        [UserMessage(attachments=(image,))],
+    payload = compactor._enrich((message,), history=(message,))
+
+    assert payload == (
+        UserMessage(
+            content=(
+                "Active background tasks (re-surfaced post-compaction):\n"
+                "- [w1] Wait: running (2s since started)"
+            ),
+            attachments=(image,),
+        ),
     )
 
-    first = splice.payload[0]
-    assert isinstance(first, UserMessage)
-    assert (first.content or "").startswith("Active background tasks")
-    assert first.extra == {}
-    assert splice.token_before == agent.model.attachment_tokens(image)
 
+def test_each_running_job_is_named_on_its_own_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(time, "time", Mock(return_value=12.0))
+    jobs = {
+        "w1": Mock(
+            spec=types.Job,
+            call=ToolCall(call_id="w1", name="Read"),
+            state="running",
+            started=9.0,
+        ),
+        "w2": Mock(
+            spec=types.Job,
+            call=ToolCall(call_id="w2", name="Write"),
+            state="sleeping",
+            started=11.0,
+        ),
+    }
 
-@pytest.mark.asyncio
-async def test_each_running_job_is_named_on_its_own_line(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path, _SUMMARY)
-    _start_a_job(agent)
-    agent.runtime._started["w2"] = (ToolCall(call_id="w2", name="Wait"), time.time())
-
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, _HISTORY))
-
-    assert (
-        "- [w1] Wait: running (0s since started)\n"
-        "- [w2] Wait: running (0s since started)"
-    ) in lead
+    assert _jobs_note(jobs) == (
+        "Active background tasks (re-surfaced post-compaction):\n"
+        "- [w1] Read: running (3s since started)\n"
+        "- [w2] Write: sleeping (1s since started)"
+    )
 
 
 @pytest.mark.asyncio
@@ -2563,52 +2694,40 @@ async def test_the_prompt_body_ends_where_its_additions_begin(tmp_path: Path) ->
     assert "PARTIAL\n\nNote: in this compaction the EARLIER messages" in head
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("answer", "kept"),
     [
         (
             "<analysis>draft <summary>old</summary></analysis><summary>real</summary>",
-            "Summary:\nreal\nResume",
+            "Summary:\nreal",
         ),
         (
             "<summary>the <analysis>aside</analysis>gist</summary>",
-            "Summary:\nthe gist\n",
+            "Summary:\nthe gist",
         ),
-        ("<summary>one\n\n\n\ntwo</summary>", "Summary:\none\n\ntwo\nResume"),
+        ("<summary>one\n\n\n\ntwo</summary>", "Summary:\none\n\ntwo"),
     ],
     ids=["draft-in-analysis", "analysis-in-summary", "blank-lines"],
 )
-async def test_the_summary_is_read_past_its_analysis_and_blank_lines(
-    tmp_path: Path,
+def test_the_summary_is_read_past_its_analysis_and_blank_lines(
     answer: str,
     kept: str,
 ) -> None:
-    _, agent = _agent(tmp_path, reply(answer))
-
-    assert kept in _lead(await _compact(SummaryCompactor(agent), agent, _HISTORY))
+    assert _summary(reply(answer)) == kept
 
 
-@pytest.mark.asyncio
-async def test_a_reply_with_no_summary_says_how_long_it_was(
-    tmp_path: Path,
+def test_a_reply_with_no_summary_says_how_long_it_was(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    _, agent = _agent(tmp_path, reply("I summarized nothing."))
-
-    with (
-        caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"),
-        pytest.raises(ContextOverflowError, match="summary failed after 1 attempts"),
-    ):
-        _ = await _compact(SummaryCompactor(agent, max_attempts=1), agent, _HISTORY)
+    with caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"):
+        assert _summary(reply("I summarized nothing.")) is None
 
     assert caplog.messages == [
         "compactor output has no usable <summary> (21 chars)",
     ]
 
 
-@pytest.mark.asyncio
-async def test_a_summary_said_in_parts_is_read_whole(tmp_path: Path) -> None:
+def test_a_summary_said_in_parts_is_read_whole() -> None:
     answer = Response(
         records=(
             AssistantMessage(content="<summary>the "),
@@ -2619,36 +2738,28 @@ async def test_a_summary_said_in_parts_is_read_whole(tmp_path: Path) -> None:
         spend=TokenCost(),
         stop_reason="end_turn",
     )
-    _, agent = _agent(tmp_path, answer)
 
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, _HISTORY))
-
-    assert "Summary:\nthe gist\n" in lead
+    assert _summary(answer) == "Summary:\nthe gist"
 
 
-@pytest.mark.asyncio
-async def test_a_calls_arguments_and_sealed_thinking_count_as_the_model_reads_them(
-    tmp_path: Path,
-) -> None:
-    _, agent = _agent(tmp_path, _SUMMARY)
+def test_a_calls_arguments_and_sealed_thinking_count_as_the_model_reads_them() -> None:
     turn = Response(
         records=(
             Thinking(encrypted="sealed"),
-            call("Read", "c1", file_path="p" * 400),
+            call("Read", "c1", file_path="pppp"),
         ),
         tokens=TokenCount(),
         spend=TokenCost(),
         stop_reason="tool_use",
     )
-    arguments = '{"file_path": "' + "p" * 400 + '"}'
 
-    splice = await _compact(
-        SummaryCompactor(agent),
-        agent,
-        [_user("go"), turn, _result("c1")],
+    assert (
+        _request_tokens(
+            ScriptedProvider()["scripted"],
+            (_user("go"), turn, _result("c1")),
+        )
+        == (len("go") + len('{"file_path": "pppp"}') + len("ok")) // 4
     )
-
-    assert splice.token_before == (len("go") + len(arguments) + len("ok")) // 4
 
 
 @pytest.mark.asyncio
@@ -2689,59 +2800,6 @@ async def test_an_overflow_shortens_to_the_previous_safe_tool_boundary(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("second", "logged"),
-    [
-        (reply("IDENTICAL"), []),
-        (reply("identical"), []),
-        (reply(""), []),
-        (
-            reply("no tags at all"),
-            ["verifier returned no usable summary; keeping the original"],
-        ),
-        (
-            reply("<summary>better but cut", stop_reason="max_tokens"),
-            ["verifier's summary was cut off; keeping the original"],
-        ),
-        (
-            ValueError("verifier down"),
-            ["summary verification failed; using the original: verifier down"],
-        ),
-        (
-            ContextOverflowError("too long"),
-            ["summary verification failed; using the original: too long"],
-        ),
-    ],
-    ids=[
-        "identical",
-        "identical-lowercase",
-        "empty",
-        "unparseable",
-        "cut-off",
-        "failed",
-        "overflowed",
-    ],
-)
-async def test_a_verification_says_why_it_kept_the_original(
-    tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
-    second: Reply,
-    logged: list[str],
-) -> None:
-    _, agent = _agent(tmp_path, _SUMMARY, second)
-
-    with caplog.at_level(logging.WARNING, logger="sagent.agent.compactor"):
-        splice = await _compact(
-            SummaryCompactor(agent, verify_summary=True),
-            agent,
-            _HISTORY,
-        )
-
-    assert "Summary:\nthe gist\n" in _lead(splice)
-    assert [m for m in caplog.messages if "verif" in m] == logged
-
-
-@pytest.mark.asyncio
 async def test_a_live_summary_asks_for_no_more_than_the_window_leaves(
     tmp_path: Path,
 ) -> None:
@@ -2757,108 +2815,132 @@ async def test_a_live_summary_asks_for_no_more_than_the_window_leaves(
     assert asked.max_response_tokens + held == 190_000
 
 
-@pytest.mark.asyncio
-async def test_restored_skills_with_no_message_to_join_ride_on_their_own(
+def test_restored_skills_with_no_message_to_join_ride_on_their_own(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The names ride on the note, so the next compaction restores them again."""
-    agent = _skilled(tmp_path, ("tdd", "Write the test first."))
-    head = await _compact(
-        SummaryCompactor(agent, keep_recent=5, direction="up_to"),
-        agent,
-        _loaded("tdd", "c1")[1:],
+    compactor, _ = _restoring(tmp_path, monkeypatch, ("tdd", "Test first."))
+    kept = _turn("kept")
+
+    first = compactor._enrich((kept,), history=_loaded("tdd", "c1"))
+    again = compactor._enrich((), history=[*first, _turn("ok")])
+
+    assert len(first) == 2
+    assert first[1] is kept
+    assert again == first[:1]
+    restored = first[0]
+    assert isinstance(restored, UserMessage)
+    assert restored.content == (
+        "Skills loaded before compaction, restored:\n\n"
+        "<skill name='tdd' source='project'>\nTest first.\n</skill>"
     )
-    assert head.fallback_reason == "nothing to summarize"
-
-    again = await _compact(
-        SummaryCompactor(agent),
-        agent,
-        [head.payload[0], _turn("ok")],
-    )
-
-    assert "<skill name='tdd' source='project'>" in _lead(again)
+    assert restored.extra == {"skills": ("tdd",)}
 
 
-@pytest.mark.asyncio
-async def test_a_newer_skill_since_deleted_leaves_the_older_restored(
+def test_a_newer_skill_since_deleted_leaves_the_older_restored(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    agent = _skilled(tmp_path, ("tdd", "Write the test first."))
+    compactor, _ = _restoring(tmp_path, monkeypatch, ("tdd", "Test first."))
     history = [*_loaded("tdd", "c0"), *_loaded("gone", "c1")]
 
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, history))
+    assert compactor._skills_note(history) == (
+        (
+            "Skills loaded before compaction, restored:\n\n"
+            "<skill name='tdd' source='project'>\nTest first.\n</skill>"
+        ),
+        ["tdd"],
+    )
 
-    assert "name='tdd'" in lead
 
-
-@pytest.mark.asyncio
-async def test_a_newer_skill_too_long_leaves_the_older_restored(
+def test_a_newer_skill_too_long_leaves_the_older_restored(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    agent = _skilled(tmp_path, ("big", "x" * 40_000), ("small", "Short."))
+    compactor, _ = _restoring(
+        tmp_path,
+        monkeypatch,
+        ("big", "x" * 24),
+        ("small", "Short."),
+    )
     history = [*_loaded("small", "c0"), *_loaded("big", "c1")]
 
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, history))
+    assert compactor._skills_note(history) == (
+        (
+            "Skills loaded before compaction, restored:\n\n"
+            "<skill name='small' source='project'>\nShort.\n</skill>"
+            "\n\nSkills loaded before compaction but too long to restore;"
+            " re-load with Skill: big."
+        ),
+        ["small"],
+    )
 
-    assert "Short." in lead
 
-
-@pytest.mark.asyncio
-async def test_skills_restored_share_one_quarter_of_the_window(
+def test_skills_restored_share_one_quarter_of_the_window(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Each fits alone; together they pass the quarter, so the older is named."""
-    agent = _skilled(tmp_path, ("old", "o" * 8_000), ("new", "n" * 8_000))
+    compactor, _ = _restoring(
+        tmp_path,
+        monkeypatch,
+        ("old", "o" * 16),
+        ("new", "n" * 16),
+    )
     history = [*_loaded("old", "c0"), *_loaded("new", "c1")]
 
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, history))
-
-    assert "name='new'" in lead
-    assert "name='old'" not in lead
-    assert lead.endswith("re-load with Skill: old.")
-
-
-@pytest.mark.asyncio
-async def test_a_skill_exactly_the_quarter_is_restored(tmp_path: Path) -> None:
-    window = next(
-        w
-        for w in range(20_000, 20_008)
-        if SummaryCompactor(_skilled(tmp_path, window=w)).trigger_tokens() % 4 == 0
+    assert compactor._skills_note(history) == (
+        "Skills loaded before compaction, restored:\n\n"
+        "<skill name='new' source='project'>\n" + "n" * 16 + "\n</skill>"
+        "\n\nSkills loaded before compaction but too long to restore;"
+        " re-load with Skill: old.",
+        ["new"],
     )
-    room = 0.25 * SummaryCompactor(_skilled(tmp_path, window=window)).trigger_tokens()
-    frame = len("<skill name='edge' source='project'>\n\n</skill>")
-    agent = _skilled(
-        tmp_path / "edge",
-        ("edge", "e" * (4 * int(room) - frame)),
-        window=window,
-    )
-    assert 0.25 * SummaryCompactor(agent).trigger_tokens() == room
-
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, _loaded("edge", "c0")))
-
-    assert "name='edge'" in lead
 
 
-@pytest.mark.asyncio
-async def test_skills_none_of_which_fit_are_named_with_no_restored_header(
+def test_a_skill_exactly_the_quarter_is_restored(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    agent = _skilled(tmp_path, ("big", "x" * 40_000), ("huge", "y" * 40_000))
+    frame = len("<skill name='edge' source='project'>\n\n</skill>")
+    body = "e" * (64 - frame)
+    compactor, _ = _restoring(tmp_path, monkeypatch, ("edge", body))
+
+    assert compactor._skills_note(_loaded("edge", "c0")) == (
+        (
+            "Skills loaded before compaction, restored:\n\n"
+            f"<skill name='edge' source='project'>\n{body}\n</skill>"
+        ),
+        ["edge"],
+    )
+
+
+def test_skills_none_of_which_fit_are_named_with_no_restored_header(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compactor, _ = _restoring(
+        tmp_path,
+        monkeypatch,
+        ("big", "x" * 24),
+        ("huge", "y" * 24),
+    )
     history = [*_loaded("big", "c0"), *_loaded("huge", "c1")]
 
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, history))
+    assert compactor._skills_note(history) == (
+        (
+            "Skills loaded before compaction but too long to restore;"
+            " re-load with Skill: huge, big."
+        ),
+        [],
+    )
 
-    assert "restored:" not in lead
-    assert lead.endswith("re-load with Skill: huge, big.")
 
+def test_without_the_skill_tool_no_skill_is_restored() -> None:
+    compactor = SummaryCompactor(Mock(spec=Agent, tools={}))
 
-@pytest.mark.asyncio
-async def test_without_the_skill_tool_no_skill_is_restored(tmp_path: Path) -> None:
-    _, agent = _agent(tmp_path, _SUMMARY)
-
-    lead = _lead(await _compact(SummaryCompactor(agent), agent, _loaded("tdd", "c0")))
-
-    assert "<skill" not in lead
+    assert compactor._skills_note(_loaded("tdd", "c0")) == ("", [])
 
 
 @pytest.mark.asyncio
@@ -3126,22 +3208,6 @@ async def test_prefix_summary_keeps_the_tool_result_and_attachment_unchanged(
     result = next(r for r in original.records if isinstance(r, ToolResult))
     assert result.text() == "body" * 10_000
     assert original.records[0] == _user("go", image)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("answer", [reply("no summary"), ContextOverflowError("full")])
-async def test_failed_compaction_leaves_history_intact(
-    tmp_path: Path,
-    answer: Reply,
-) -> None:
-    _, agent = _agent(tmp_path, *[answer] * 3)
-    _hold(agent, _HISTORY)
-    before = agent.runtime.context().messages
-
-    with pytest.raises(ContextOverflowError):
-        _ = await _live(agent, SummaryCompactor(agent))
-
-    assert agent.runtime.context().messages == before
 
 
 @pytest.mark.asyncio

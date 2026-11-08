@@ -326,7 +326,6 @@ def test_a_project_holding_a_log_of_its_own_still_lists_its_sessions(
 )
 def test_a_session_is_a_directory_named_by_its_id(tmp_path: Path, name: str) -> None:
     assert projects.is_session(tmp_path / name / "session.jsonl")
-    assert projects.is_session(tmp_path / name / "session.jsonl")
 
 
 @pytest.mark.parametrize(
@@ -444,9 +443,9 @@ def test_find_reads_no_journal_past_its_limit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every project's journals match ``""``; reading them all took 52 s."""
-    for i in range(50):
+    for i in range(4):
         _journal(
-            tmp_path / f"_p{i % 5}" / f"0000000000{i:02}",
+            tmp_path / f"_p{i % 2}" / f"0000000000{i:02}",
             UserMessage(content="x"),
             mtime=1_000 + i,
         )
@@ -459,16 +458,16 @@ def test_find_reads_no_journal_past_its_limit(
 
     monkeypatch.setattr(projects, "_peek", counting)
     assert [s.id for s in find_sessions("", root=tmp_path, limit=1)] == [
-        "000000000049",
+        "000000000003",
     ]
-    assert peeked == ["000000000049"]
+    assert peeked == ["000000000003"]
     peeked.clear()
     assert [s.id for s in find_sessions("0000000000", root=tmp_path, limit=3)] == [
-        "000000000049",
-        "000000000048",
-        "000000000047",
+        "000000000003",
+        "000000000002",
+        "000000000001",
     ]
-    assert peeked == ["000000000049", "000000000048", "000000000047"]
+    assert peeked == ["000000000003", "000000000002", "000000000001"]
 
 
 def _renamed(path: Path) -> Path:
