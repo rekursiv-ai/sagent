@@ -104,7 +104,7 @@ async def ensure(dirs: ServeDirs, *, version: str = "") -> DaemonStatus:
     version = version or fingerprint()
     fd = open_private(dirs.state / "daemon-start.lock", os.O_RDWR)
     try:
-        await asyncio.to_thread(fcntl.flock, fd, fcntl.LOCK_EX)
+        await _locked(fd)
         deadline = time.monotonic() + 30
         status: DaemonStatus | None = None
         process = None
@@ -225,6 +225,20 @@ async def _serve(dirs: ServeDirs, *, version: str, handoff: str = "") -> None:
                     logger.exception("Daemon replacement failed")
     finally:
         os.close(fd)
+
+
+async def _locked(fd: int) -> None:
+    """Take ``fd``'s exclusive lock, waiting on the event loop rather than a thread."""
+    # Not `to_thread(flock)`: a cancelled wait left that thread blocked in flock, and
+    # on macOS the close in `ensure`'s finally then blocks until flock returns, so
+    # cancelling a start hung the whole event loop until the lock came free.
+    while True:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            await asyncio.sleep(0.02)
+        else:
+            return
 
 
 def _spawn(dirs: ServeDirs, *, version: str) -> Popen[bytes]:

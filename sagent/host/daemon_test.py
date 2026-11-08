@@ -9,6 +9,7 @@ from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, override
+from unittest.mock import Mock
 
 import asyncio
 import contextlib
@@ -745,25 +746,37 @@ async def test_cancelled_startup_closes_its_lock_descriptor(
         opened = asyncio.Event()
         fds: list[int] = []
 
+        paths: list[Path] = []
+
         def opening(path: Path, flags: int) -> int:
             fd = open_private(path, flags)
+            paths.append(path)
             fds.append(fd)
             opened.set()
             return fd
 
         monkeypatch.setattr(daemon, "open_private", opening)
+        # Should the lock come free while `ensure` still waits, it must not start a
+        # real daemon: one per failed run outlived the test.
+        monkeypatch.setattr(daemon, "_spawn", Mock(side_effect=AssertionError))
+        threads = threading.active_count()
         starting = asyncio.create_task(ensure(dirs, version="test"))
-        await asyncio.wait_for(opened.wait(), 5)
-        starting.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await starting
         try:
-            with pytest.raises(OSError, match="Bad file descriptor"):
-                _ = os.fstat(fds[0])
+            await asyncio.wait_for(opened.wait(), 5)
+            await asyncio.sleep(0)
+            # A thread blocked in flock keeps the descriptor busy: closing it then
+            # blocks on macOS, and the event loop with it.
+            assert threading.active_count() == threads
         finally:
+            starting.cancel()
+            # Freed before the cancel is awaited, so a regression fails, not hangs.
             fcntl.flock(held, fcntl.LOCK_UN)
-            with contextlib.suppress(OSError):
-                os.close(fds[0])
+            with pytest.raises(asyncio.CancelledError):
+                await starting
+        # Every starter must contend for the one file the held lock is on.
+        assert paths == [dirs.state / "daemon-start.lock"]
+        with pytest.raises(OSError, match="Bad file descriptor"):
+            _ = os.fstat(fds[0])
 
 
 @pytest.mark.asyncio
