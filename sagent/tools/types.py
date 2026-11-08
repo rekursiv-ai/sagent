@@ -301,12 +301,12 @@ class FileTracker:
         path = path.resolve()
         # Stat before reading: a write landing between them then shows as a
         # change, never as the file the model saw.
-        mtime = path.stat().st_mtime
+        stamp = _stamp(path)
         data = path.read_bytes()
         # Re-inserted, so the order of ``_seen`` is the order of last sight.
         self._seen.pop(path, None)
         self._seen[path] = _Snapshot(
-            mtime=mtime,
+            stamp=stamp,
             digest=hashlib.sha256(data).hexdigest(),
             text=_text(data),
         )
@@ -366,7 +366,7 @@ class FileTracker:
         if snapshot is None:
             return False
         try:
-            if path.stat().st_mtime == snapshot.mtime:
+            if _stamp(path) == snapshot.stamp:
                 return False
             data = path.read_bytes()
         except FileNotFoundError:
@@ -511,13 +511,19 @@ class _Field:
 class _Snapshot:
     """A file as the model last saw it."""
 
-    mtime: float
+    stamp: tuple[int, int, int, int]
     digest: str
     text: str | None
     """The file's text, kept to diff against; ``None`` if too large or binary."""
 
     lines: object = None
     """Which lines the model was last shown, as ``showed`` recorded them."""
+
+
+def _stamp(path: Path) -> tuple[int, int, int, int]:
+    """Return file identity and nanosecond times without reading its bytes."""
+    info = path.stat()
+    return info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
 def _bound(value: PlainTree, f: _Field) -> None:

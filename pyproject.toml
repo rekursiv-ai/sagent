@@ -301,7 +301,7 @@ do_not_mutate_patterns = [
 # per-file-ignores; a bare glob skips the file for every rule unopened.
 select = "ALL"
 fix = "ALL"
-# Each export sets its own package for both.
+# Each export sets its own package and directory policy.
 set = ["import-alias.first-party=sagent", "test-footer.runner=sagent.lib.testing.runner"]
 exclude = [
     "**/third_party/** typings/** **/.export/typings/** **/torch-types/shed/**",

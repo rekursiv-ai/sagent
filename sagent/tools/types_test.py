@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated, Literal
+from unittest.mock import Mock
 
 import os
 
@@ -265,6 +266,22 @@ def test_a_seen_file_changes_when_its_bytes_do(tmp_path: Path) -> None:
     assert files.changed(f)
 
 
+def test_an_atomic_replacement_changes_even_with_the_same_mtime(tmp_path: Path) -> None:
+    f = tmp_path / "a.txt"
+    f.write_text("x")
+    before = f.stat()
+    files = FileTracker()
+    files.saw(f)
+    replacement = tmp_path / "replacement.txt"
+    replacement.write_text("y")
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    replacement.replace(f)
+
+    assert f.stat().st_mtime_ns == before.st_mtime_ns
+    assert f.stat().st_size == before.st_size
+    assert files.changed(f)
+
+
 def test_a_touch_that_keeps_every_byte_is_no_change(tmp_path: Path) -> None:
     f = tmp_path / "a.txt"
     f.write_text("")
@@ -274,16 +291,19 @@ def test_a_touch_that_keeps_every_byte_is_no_change(tmp_path: Path) -> None:
     assert not files.changed(f)
 
 
-def test_an_unmoved_mtime_is_trusted_without_reading_the_file(tmp_path: Path) -> None:
+def test_an_unchanged_stat_is_trusted_without_reading_the_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     f = tmp_path / "a.txt"
     f.write_text("x")
     files = FileTracker()
     files.saw(f)
-    f.chmod(0)
-    try:
-        assert not files.changed(f)
-    finally:
-        f.chmod(0o600)
+    reading = Mock(side_effect=AssertionError("unchanged files must not be read"))
+    monkeypatch.setattr(Path, "read_bytes", reading)
+
+    assert not files.changed(f)
+    reading.assert_not_called()
 
 
 def test_a_removed_file_has_changed(tmp_path: Path) -> None:

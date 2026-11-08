@@ -177,19 +177,33 @@ async def test_a_holder_of_a_string_is_welcomed_and_runs_a_tool(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_a_result_crosses_typed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("suspending", [False, True])
+async def test_a_pause_stops_output_only_during_handoff(
+    tmp_path: Path,
+    *,
+    suspending: bool,
+) -> None:
     server, session, host, sent = await _server_unit(tmp_path)
+    server._suspending = suspending
     result = Result(id="1", record=ReadResult(call_id="", content="hello\n"))
     session.running.add("1")
-    host.reader.feed_data(encoded(result))
+    host.reader.feed_data(encoded(Paused()) + encoded(result))
     host.reader.feed_eof()
 
     await server._pump(session, host=host)
 
-    assert sent == [encoded(result)]
-    assert session.unacked == {"1": encoded(result)}
-    assert session.running == set()
-    assert host.asked.is_set()
+    assert session.paused.is_set()
+    if suspending:
+        assert sent == []
+        assert session.unacked == {}
+        assert session.running == {"1"}
+        assert not host.asked.is_set()
+        assert await received(host.reader) == result
+    else:
+        assert sent == [encoded(result)]
+        assert session.unacked == {"1": encoded(result)}
+        assert session.running == set()
+        assert host.asked.is_set()
 
 
 @pytest.mark.parametrize(
@@ -485,18 +499,27 @@ async def test_bye_ends_the_session_and_its_calls(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_revoking_a_string_ends_its_sessions(
+@pytest.mark.parametrize("hosted", [False, True])
+async def test_revoking_a_string_ends_only_its_hosted_sessions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    hosted: bool,
 ) -> None:
     server, session, _, sent = await _server_unit(tmp_path)
+    if not hosted:
+        session.host = None
     monkeypatch.setattr(host_server, "grants", Mock(return_value=[]))
     ending = AsyncMock()
     monkeypatch.setattr(server, "_end", ending)
 
     await server._regrant()
 
-    ending.assert_awaited_once_with(session, reason="revoked")
+    if hosted:
+        ending.assert_awaited_once_with(session, reason="revoked")
+    else:
+        ending.assert_not_awaited()
+        assert server._sessions == {session.id: session}
     assert sent == []
 
 
