@@ -76,6 +76,7 @@ from sagent.host.wire import (
     Refused,
     Result,
     Resume,
+    Streams,
     Tools,
     ToolsChanged,
     ToolSpec,
@@ -232,6 +233,7 @@ class Server(AsyncResource):
         self.stopping = asyncio.Event()
         self._handoff = handoff
         self._suspending = False
+        self._closing = True
         self._connections: set[asyncio.Task[None]] = set()
         self._local_socket = local_socket
         self._dirs = dirs
@@ -254,6 +256,7 @@ class Server(AsyncResource):
 
     @override
     async def aopen(self) -> None:
+        self._closing = False
         saved = json_loads(self._handoff, _SavedServer) if self._handoff else None
         self._handoff = ""
         if saved is not None:
@@ -382,6 +385,7 @@ class Server(AsyncResource):
                             peer_messaging=session.peer_messaging,
                             labels=session.labels,
                             seen_notes=session.seen_notes,
+                            adopted=session.adopted,
                             fd=descriptor,
                             pid=pid,
                         ),
@@ -458,6 +462,7 @@ class Server(AsyncResource):
                 peer_messaging=state.peer_messaging,
                 labels=state.labels,
                 seen_notes=state.seen_notes,
+                adopted=state.adopted,
             )
             self._sessions[session.id] = session
             if host is not None:
@@ -468,11 +473,17 @@ class Server(AsyncResource):
 
     @override
     async def aclose(self) -> None:
+        self._closing = True
         opened = self._opened.pop()
         for listener in opened.listeners:
             listener.close()
         _ = opened.watching.cancel()
         try:
+            for session in list(self._sessions.values()):
+                await self._end(session, reason="server stopped")
+            for connection in tuple(self._connections):
+                _ = connection.cancel()
+            _ = await asyncio.gather(*self._connections, return_exceptions=True)
             for session in list(self._sessions.values()):
                 await self._end(session, reason="server stopped")
             self._log("stop")
@@ -716,20 +727,68 @@ class Server(AsyncResource):
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
-        """Serve one connection: admit its hello, then relay until it goes."""
+        """Serve one connection to a listener: its hello must carry a token."""
+        ip = str(cast(tuple[object, ...], writer.get_extra_info("peername"))[0])
+        await self._serve_connection((reader, writer), peer=ip, grant=None)
+
+    async def adopt(self, streams: Streams, *, peer: str, grant: Grant) -> None:
+        """Serve a connection its caller already authenticated, until it ends.
+
+        Only in-process code that has authenticated the peer may call this; no
+        listener and no line on the wire reaches it. The hello's token is not
+        checked, and ``grant`` says what the peer may use.
+
+        Args:
+          streams: The connection; closed when it ends.
+          peer: What logs and the sessions list call the peer.
+          grant: What the caller found the peer entitled to; a session it opens
+            belongs to ``grant.id``, so a later adoption under that id resumes it.
+
+        """
+        if self._closing or self._suspending:
+            streams[1].write(encoded(Refused(reason="The server is stopping.")))
+            self._log("reject", ip=peer, detail="stopping")
+            streams[1].close()
+            return
+        serving = asyncio.create_task(
+            self._serve_connection(streams, peer=peer, grant=grant),
+        )
+        try:
+            _ = await asyncio.wait([serving])
+        except asyncio.CancelledError:
+            _ = serving.cancel()
+            raise
+        if not serving.cancelled():
+            serving.result()
+
+    # ``grant`` is what the connection is entitled to; ``None`` means its hello's token
+    # must name a string of this server.
+    async def _serve_connection(
+        self,
+        streams: Streams,
+        *,
+        peer: str,
+        grant: Grant | None,
+    ) -> None:
+        """Admit one connection's hello, then relay until it goes."""
+        reader, writer = streams
         task = asyncio.current_task()
         assert isinstance(task, asyncio.Task)
         self._connections.add(task)
-        ip = str(cast(tuple[object, ...], writer.get_extra_info("peername"))[0])
         try:
             hello = await asyncio.wait_for(received(reader), self._silence_sec)
             session_id = hello.session_id if isinstance(hello, Hello) else ""
             async with self._admissions.setdefault(session_id, asyncio.Lock()):
-                session = await self._admit(hello, ip=ip, writer=writer)
+                session = await self._admit(
+                    hello,
+                    peer=peer,
+                    writer=writer,
+                    grant=grant,
+                )
             if session is not None:
                 await self._attend(session, reader=reader, writer=writer)
         except (OSError, ValueError) as e:
-            logger.debug("connection from %s ended: %s", ip, e)
+            logger.debug("connection from %s ended: %s", peer, e)
         finally:
             self._connections.discard(task)
             writer.close()
@@ -738,23 +797,38 @@ class Server(AsyncResource):
         self,
         hello: Message | None,
         *,
-        ip: str,
+        peer: str,
         writer: asyncio.StreamWriter,
+        grant: Grant | None,
     ) -> _Session | None:
         """Welcome ``hello``'s session, or refuse it; return the session welcomed."""
-        judged = self._judged(hello)
+        judged = self._judged(hello, grant=grant)
         if isinstance(judged, str) or not isinstance(hello, Hello):
             reason = judged if isinstance(judged, str) else "Say hello first."
             writer.write(encoded(Refused(reason=reason)))
-            self._log("reject", ip=ip, detail=reason)
+            self._log("reject", ip=peer, detail=reason)
             return None
         session = self._sessions.get(hello.session_id)
         resumed = session is not None
         if session is None:
-            session = await self._open(hello, grant=judged, ip=ip)
+            if self._closing or self._suspending:
+                writer.write(encoded(Refused(reason="The server is stopping.")))
+                self._log("reject", ip=peer, detail="stopping")
+                return None
+            try:
+                session = await self._open(hello, grant=judged, ip=peer)
+            except (OSError, ValueError) as e:
+                # The connection then ends as any other that fails: quietly.
+                logger.warning(
+                    "The host of session %.64s did not start; see its host.log: %.200r",
+                    hello.session_id,
+                    e,
+                )
+                raise
+            session.adopted = grant is not None
         elif session.writer is not None:
             session.writer.close()
-        session.ip, session.requested = ip, hello.tools
+        session.ip, session.requested = peer, hello.tools
         session.peer_messaging = judged.peer_messaging
         session.granted = _granted(session.specs, grant=judged, asked=hello.tools)
         session.writer, session.since = writer, time.time()
@@ -777,8 +851,9 @@ class Server(AsyncResource):
         self._write_sessions()
         return session
 
-    def _judged(self, hello: Message | None) -> Grant | str:
-        """Return the string ``hello``'s token names, or why it is turned away."""
+    # A ``grant`` is already authenticated; without one the token must name a string.
+    def _judged(self, hello: Message | None, *, grant: Grant | None) -> Grant | str:
+        """Return the string ``hello`` is entitled to, or why it is turned away."""
         if not isinstance(hello, Hello):
             return "Say hello first."
         if not _valid_session_id(hello.session_id):
@@ -789,11 +864,16 @@ class Server(AsyncResource):
                 f"The client speaks version {hello.version}, this server {VERSION}:"
                 f" upgrade sagent {older}."
             )
-        digest = token_digest(hello.token)
-        grant = next(
-            (g for g in grants(self._dirs) if hmac.compare_digest(g.sha256, digest)),
-            None,
-        )
+        if grant is None:
+            digest = token_digest(hello.token)
+            grant = next(
+                (
+                    g
+                    for g in grants(self._dirs)
+                    if hmac.compare_digest(g.sha256, digest)
+                ),
+                None,
+            )
         if grant is None:
             return "No string of this server holds that token; it may be revoked."
         session = self._sessions.get(hello.session_id)
@@ -987,7 +1067,7 @@ class Server(AsyncResource):
         """End each session whose string is revoked; tell each whose tools changed."""
         kept = {g.id: g for g in grants(self._dirs)}
         for session in list(self._sessions.values()):
-            if session.host is None:
+            if session.host is None or session.adopted:
                 continue
             grant = kept.get(session.token_id)
             if grant is None:
@@ -1086,6 +1166,9 @@ class _Session:
     public_peers: tuple[str, ...] = ()
     peer_messaging: bool = False
 
+    adopted: bool = False
+    """Whether its caller authenticated it, so no string on disk backs it."""
+
     reason: str = ""
     """Why it is ending; ``""`` until something ends it, or for a host that stopped."""
 
@@ -1122,6 +1205,7 @@ class _SavedSession:
     peer_messaging: bool
     labels: tuple[str, ...]
     seen_notes: set[str]
+    adopted: bool = False
     fd: int
     pid: int
 
@@ -1180,7 +1264,9 @@ class _ChildHost:
     # The end of its input first: the host cancels its calls, and each cleans up, as
     # a shell's process group must be ended by it; a signal first would strand them.
     async def _stop(self) -> None:
-        self.writer.write_eof()
+        # A host that has gone refuses it with ENOTCONN on macOS.
+        with contextlib.suppress(OSError):
+            self.writer.write_eof()
         if self.child is not None:
             with contextlib.suppress(TimeoutError):
                 _ = await asyncio.wait_for(self.child.exited(), timeout=10.0)

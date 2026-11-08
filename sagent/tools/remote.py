@@ -1,10 +1,11 @@
 """RemoteTool: run a tool on another machine's ``sagent host``, as it would run there.
 
-A ``RemoteSession`` holds one connection per saved string, each an
+A ``RemoteSession`` holds one connection per ``Link``, each an
 ``Endpoint`` that reconnects on its own: one session per process, which every
 agent's ``RemoteTool`` shares, as ``McpSession`` is shared. A call in flight
 when a connection drops waits for it to come back, and the server keeps the
-call, and its result, until then.
+call, and its result, until then; past ``GRACE_SEC`` the call fails, its outcome
+unknown.
 
 An agent a call spawns there joins this session's team as an outside member,
 so ``AgentSend`` reaches it, and it them, as it would an agent here. Each
@@ -13,7 +14,7 @@ machine knows the other's agents by label and machine: ``Agent_0@gpu1`` here,
 
 Typical usage example:
 
-  async with RemoteSession(saved(), team=team) as remote:
+  async with RemoteSession([tls_link(r) for r in saved()], team=team) as remote:
       tool = RemoteTool(remote=remote)
       await tool.call(context, {"endpoint": "gpu1", "tool": "Bash",
                                 "arguments": {"command": "nvidia-smi", ...}})
@@ -22,9 +23,9 @@ Typical usage example:
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib.resources import files
-from typing import TYPE_CHECKING, Annotated, override
+from typing import TYPE_CHECKING, Annotated, Final, override
 
 import asyncio
 import contextlib
@@ -48,13 +49,17 @@ from sagent.host.wire import (
     Cancel,
     Describe,
     Described,
+    Dial,
     Hello,
     Note,
     Peers,
+    Ping,
     Refused,
     Result,
+    Streams,
     ToolsChanged,
     ToolSpec,
+    UnreadLineError,
     Welcome,
     encoded,
     ping,
@@ -62,6 +67,7 @@ from sagent.host.wire import (
 )
 from sagent.lib.userdirs import config_dir
 from sagent.providers.catalog import ModelCatalog
+from sagent.runtime.exceptions import describe
 from sagent.session.types import AnyToolResult, RemoteToolResult
 from sagent.tools.display import ToolDisplay
 from sagent.tools.types import json_schema, parse
@@ -78,15 +84,32 @@ if TYPE_CHECKING:
 
 
 __all__ = [
+    "GRACE_SEC",
+    "MAX_RETRY_SEC",
     "Endpoint",
+    "Link",
     "RemoteSession",
     "RemoteTool",
     "SavedRemote",
+    "local_link",
     "saved",
+    "tls_link",
 ]
 
 
 logger = logging.getLogger(__name__)
+
+
+GRACE_SEC: Final = 600.0
+"""How long a call waits on a server out of contact, before it fails as unknown."""
+
+MAX_RETRY_SEC: Final = 30.0
+"""The longest an endpoint waits to redial by default, backing off from its
+``retry_sec``."""
+
+_UNKNOWN: Final = (
+    "This call may still be running there, or may have run: check before repeating it."
+)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -104,44 +127,144 @@ def saved() -> list[SavedRemote]:
     return json_loads(path.read_text(), list[SavedRemote]) if path.exists() else []
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Link:
+    """One way to reach a tool server, and what this client asks of it."""
+
+    dial: Dial
+    name: str = ""
+    """What listings call the server; ``""`` takes the server's own name."""
+
+    where: str = ""
+    """What listings call the way there: ``host:port``, or ``local``."""
+
+    token: str = ""
+    """What the server is shown to let this client in; ``""`` when the dial already
+    authenticated."""
+
+    tools: tuple[str, ...] | None = None
+    """The tools to ask for; ``None`` for every one granted."""
+
+    peer_messaging: bool = False
+    """Whether agents here and there may message each other, before the server says."""
+
+    bare_labels: bool = False
+    """Whether agents there share this machine, so labels carry no ``@machine``."""
+
+
+def tls_link(remote: SavedRemote) -> Link:
+    """Return the link to the server a saved string names.
+
+    Args:
+      remote: The string and the tools to ask for.
+
+    Returns:
+      link: Its dial refuses a server whose certificate the string does not pin,
+        so the token is sent to no other.
+
+    """
+    string = ConnectionString.from_url(remote.url)
+
+    async def dial() -> Streams:
+        reader, writer = await asyncio.open_connection(
+            string.host,
+            string.port,
+            ssl=client_context(),
+            limit=MAX_LINE_BYTES,
+        )
+        pinned = False
+        try:
+            pinned = peer_fingerprint(writer) == string.fingerprint
+        finally:
+            if not pinned:
+                writer.close()
+        if not pinned:
+            raise ConnectionError(
+                f"{string.host} showed a certificate its string does not pin.",
+            )
+        return reader, writer
+
+    return Link(
+        dial=dial,
+        where=f"{string.host}:{string.port}",
+        token=string.token,
+        tools=remote.tools,
+    )
+
+
+def local_link(path: Path) -> Link:
+    """Return the link to the daemon on this machine, which it reaches by socket.
+
+    Args:
+      path: The daemon's socket.
+
+    Returns:
+      link: A link that asks for no tools, and whose agents may message.
+
+    """
+
+    async def dial() -> Streams:
+        return await asyncio.open_unix_connection(path, limit=MAX_LINE_BYTES)
+
+    return Link(
+        dial=dial,
+        name="local",
+        where="local",
+        tools=(),
+        peer_messaging=True,
+        bare_labels=True,
+    )
+
+
+def _fail[T](waiter: asyncio.Future[T], error: Exception) -> None:
+    """Fail ``waiter``, unless its caller cancelled it this same turn."""
+    if not waiter.done():
+        waiter.set_exception(error)
+
+
 class Endpoint:
-    """One server, reached by one string: up or down, and the tools it grants.
+    """One server, reached by one link: up or down, and the tools it grants.
 
     It is also the relay to the agents there: each the host names joins
     ``team`` as an outside member, and a message to one is a ``Note``, kept
     until the server acks it.
 
     Args:
-      remote: The string and the tools to ask for.
+      link: The way to the server, and what to ask of it.
       session_id: This process's session, which a reconnect names.
       client: This machine, as the server lists it.
       team: The agents here, whom the agents there may message.
-      retry_sec: How long to wait between attempts to connect.
+      retry_sec: How long to wait to connect again, at first; each failed
+        attempt doubles it, to ``max_retry_sec``.
       ping_sec: How often to say something; a server silent three times as long
         is gone.
+      grace_sec: How long a call waits on a server out of contact.
+      max_retry_sec: The longest it waits to connect again.
 
     """
 
     def __init__(
         self,
-        remote: SavedRemote | None,
+        link: Link,
         *,
         session_id: str,
         client: str,
         team: Team,
         retry_sec: float,
         ping_sec: float,
-        local_socket: Path | None = None,
+        grace_sec: float = GRACE_SEC,
+        max_retry_sec: float = MAX_RETRY_SEC,
     ) -> None:
-        self.local_socket = local_socket
-        self._peer_messaging = local_socket is not None
-        self.string = (
-            ConnectionString(host="local", port=0, fingerprint="", token="")
-            if remote is None
-            else ConnectionString.from_url(remote.url)
-        )
-        self.name = self.string.host
-        """The server's machine once it has said so; until then the string's host."""
+        self._link = link
+        self._peer_messaging = link.peer_messaging
+        self._bare = link.bare_labels
+        """Whether labels go unsuffixed, as the agents on one machine know each other."""
+
+        self.key = link.name or link.where
+        """What names this link among a session's, as ``set_links`` compares them."""
+
+        self.name = link.name or link.where.rpartition(":")[0] or link.where
+        """The server's machine once it has said so; until then the link's host."""
 
         self.tools: Mapping[str, str] = {}
         """The tools granted: each name's ``ToolSpec.digest``."""
@@ -159,7 +282,6 @@ class Endpoint:
         self._specs: dict[str, ToolSpec] = {}
         self._describing: dict[str, asyncio.Future[ToolSpec | None]] = {}
 
-        self._requested = remote.tools if remote is not None else ()
         self._session_id = session_id
         self._client = client
         self._team = team
@@ -167,12 +289,23 @@ class Endpoint:
         self._notes: dict[str, Note] = {}
         self._seen_notes: set[str] = set()
         self._retry_sec = retry_sec
+        self._redial_sec = retry_sec
+        self._max_retry_sec = max_retry_sec
         self._ping_sec = ping_sec
         self._silence_sec = SILENT_PINGS * ping_sec
+        self._grace_sec = grace_sec
+        self._lost_at: float | None = None
+        """When contact was lost, while no ping since has restored it."""
+
         self._writer: asyncio.StreamWriter | None = None
         self._pending: dict[str, asyncio.Future[AnyToolResult]] = {}
         self._queued: list[Message] = []
         self._changed = asyncio.Condition()
+
+    @property
+    def where(self) -> str:
+        """Return what listings call the way there: ``host:port``, or ``local``."""
+        return self._link.where
 
     @property
     def up(self) -> bool:
@@ -189,16 +322,16 @@ class Endpoint:
         while True:
             try:
                 await self._serve()
-            # A timeout and a refusal are both an ``OSError``; a line no message, a
-            # ``ValueError``.
-            except (OSError, ValueError) as e:
+            # A timeout and a refusal are an ``OSError``, a line no message a
+            # ``ValueError``; a line this code mishandles must not end it either.
+            except Exception as e:  # noqa: BLE001 -- Each is why it is down; it redials.
                 self.error = str(e) or type(e).__name__
                 logger.debug("remote %s down: %s", self.name, self.error)
             else:
                 self.error = "the server closed the connection"
             self._writer, self.tried = None, True
             await self._note()
-            await asyncio.sleep(self._retry_sec)
+            await asyncio.sleep(self._out_of_contact())
 
     async def call(
         self,
@@ -219,11 +352,13 @@ class Endpoint:
           arguments: What the model passed it.
 
         Returns:
-          result: The tool's own result.
+          result: The tool's own result, or an error saying why there is none: the
+            endpoint lost the call while disconnected, or was out of contact past its
+            grace. Either way its ``wire_id`` is the id the call went by.
 
         Raises:
-          ValueError: The endpoint is down, does not offer ``tool``, or lost the
-            call while disconnected.
+          ValueError: The endpoint is down, or does not offer ``tool``; nothing was
+            sent.
 
         """
         if self._writer is None:
@@ -231,6 +366,9 @@ class Endpoint:
         if tool not in self.tools:
             offered = ", ".join(self.tools) or "none"
             raise ValueError(f"{self.name} does not offer {tool}; it offers {offered}.")
+        if not self._pending:
+            # An outage nothing waited on counts against no call made after it.
+            self._lost_at = None
         call_id = uuid.uuid4().hex
         result = self._pending[call_id] = asyncio.Future[AnyToolResult]()
         self._writer.write(
@@ -249,11 +387,20 @@ class Endpoint:
             ),
         )
         try:
-            return await result
+            record = await result
         except asyncio.CancelledError:
             self._pending.pop(call_id, None)
             self._send(Cancel(id=call_id))
             raise
+        except ValueError as error:
+            # Said as the runtime would say it, but named by the id it was sent by.
+            record = RemoteToolResult(
+                call_id="",
+                endpoint=self.name,
+                content=describe(error),
+                is_error=True,
+            )
+        return replace(record, wire_id=call_id)
 
     async def spec(self, tool: str) -> ToolSpec | None:
         """Return how ``tool`` is shown to the model there, asked once per digest.
@@ -314,6 +461,14 @@ class Endpoint:
         if self._writer is not None:
             self._writer.write(encoded(note))
 
+    def remove(self) -> None:
+        """Leave the server for good: fail each call waiting, say bye, drop its agents."""
+        for result in self._pending.values():
+            _fail(result, ValueError(f"{self.name} was removed from this session."))
+        self._pending.clear()
+        self.bye()
+        self._peered(())
+
     def bye(self) -> None:
         """Tell the server this session ends, and fail every call still waiting."""
         if self._writer is not None:
@@ -324,35 +479,19 @@ class Endpoint:
 
     async def _serve(self) -> None:
         """Connect once, and handle what the server says until it goes."""
-        connection = (
-            asyncio.open_unix_connection(self.local_socket, limit=MAX_LINE_BYTES)
-            if self.local_socket is not None
-            else asyncio.open_connection(
-                self.string.host,
-                self.string.port,
-                ssl=client_context(),
-                limit=MAX_LINE_BYTES,
-            )
+        reader, writer = await asyncio.wait_for(
+            self._link.dial(),
+            timeout=self._silence_sec,
         )
-        reader, writer = await asyncio.wait_for(connection, timeout=self._silence_sec)
         try:
-            # Checked before the token is sent: a server that is not the one
-            # pinned never sees it.
-            if (
-                self.local_socket is None
-                and peer_fingerprint(writer) != self.string.fingerprint
-            ):
-                raise ConnectionError(
-                    f"{self.string.host} showed a certificate its string does not pin.",
-                )
             writer.write(
                 encoded(
                     Hello(
                         version=VERSION,
-                        token=self.string.token,
+                        token=self._link.token,
                         session_id=self._session_id,
                         client=self._client,
-                        tools=self._requested,
+                        tools=self._link.tools,
                     ),
                 ),
             )
@@ -373,27 +512,43 @@ class Endpoint:
             writer.close()
             # A server keeps no question across a drop, as it keeps a call.
             for answer in self._describing.values():
-                answer.set_exception(ValueError(f"{self.name} went down while asked."))
+                _fail(answer, ValueError(f"{self.name} went down while asked."))
 
     def _welcome(self, answer: Message | None) -> None:
         """Take what the server said to the hello; fail each call it no longer holds."""
         if isinstance(answer, Refused):
-            raise ConnectionRefusedError(f"{self.string.host} refused: {answer.reason}")
+            raise ConnectionRefusedError(f"{self.name} refused: {answer.reason}")
         if not isinstance(answer, Welcome):
-            raise ConnectionError(f"{self.string.host} did not welcome this client.")
-        self.name, self.error = (
-            ("local" if self.local_socket is not None else answer.name),
-            "",
-        )
+            raise ConnectionError(f"{self.name} did not welcome this client.")
+        self.name, self.error = self._link.name or answer.name, ""
         self._granted(answer.tools)
-        self._peer_messaging = self.local_socket is not None or answer.peer_messaging
+        self._peer_messaging = self._link.peer_messaging or answer.peer_messaging
         # A new session's host has no agents yet.
         if not answer.resumed:
             self._peered(())
         for call_id in [c for c in self._pending if c not in answer.calls]:
-            self._pending.pop(call_id).set_exception(
-                ValueError(f"{self.name} lost this call while disconnected."),
+            _fail(
+                self._pending.pop(call_id),
+                ValueError(
+                    f"{self.name} lost this call while disconnected. {_UNKNOWN}",
+                ),
             )
+
+    def _out_of_contact(self) -> float:
+        """Fail each call waiting past the grace; return how long until the next redial."""
+        now = asyncio.get_running_loop().time()
+        if self._lost_at is None:
+            self._lost_at = now
+        # ``>`` would do as well: the clock never lands exactly on the grace.
+        elif now - self._lost_at >= self._grace_sec:  # pragma: no mutate
+            silent = f"{self.name} was out of contact for {self._grace_sec:g} seconds."
+            for result in self._pending.values():
+                _fail(result, ValueError(f"{silent} {_UNKNOWN}"))
+            self._pending.clear()
+            self._lost_at = now
+        wait_sec = min(self._redial_sec, self._lost_at + self._grace_sec - now)
+        self._redial_sec = min(2 * self._redial_sec, self._max_retry_sec)
+        return wait_sec
 
     async def _read(
         self,
@@ -401,9 +556,7 @@ class Endpoint:
         writer: asyncio.StreamWriter,
     ) -> None:
         """Handle each line until the server closes, or falls silent."""
-        while (
-            message := await asyncio.wait_for(received(reader), self._silence_sec)
-        ) is not None:
+        while (message := await self._next(reader, writer)) is not None:
             if isinstance(message, Result):
                 result = self._pending.pop(message.id, None)
                 if result is not None and not result.done():
@@ -416,7 +569,9 @@ class Endpoint:
                     self.publish()
                 await self._note()
             elif isinstance(message, Described) and message.id in self._describing:
-                self._describing[message.id].set_result(message.spec)
+                answer = self._describing[message.id]
+                if not answer.done():
+                    answer.set_result(message.spec)
             elif isinstance(message, Ack):
                 self._notes.pop(message.id, None)
             elif isinstance(message, Refused):
@@ -425,7 +580,7 @@ class Endpoint:
                     recipient = self._there(note.recipient)
                     sender = (
                         note.sender
-                        if self.local_socket is not None
+                        if self._bare
                         else note.sender.removesuffix(f"@{self._client}")
                     )
                     self._team.unreach(recipient)
@@ -444,6 +599,63 @@ class Endpoint:
             elif isinstance(message, Peers):
                 self._peered(message.labels)
                 await self._note()
+            elif isinstance(message, Ping):
+                # Only a ping restores contact: a Welcome, and what follows it, come
+                # as readily from a host whose next line cannot be read here.
+                self._lost_at, self._redial_sec = None, self._retry_sec
+
+    # A line that cannot be read here comes from a newer sagent there, which sends it
+    # again on every connect until it is acked: dropping the connection would end every
+    # reconnect too. A line that names no id still ends the connection.
+    async def _next(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> Message | None:
+        """Return the next line read here; answer each read past that names an id."""
+        while True:
+            try:
+                return await asyncio.wait_for(received(reader), self._silence_sec)
+            except UnreadLineError as error:
+                if error.id is None:
+                    raise
+                self._unread(error.id, error, writer)
+
+    def _unread(
+        self,
+        sent: str,
+        error: UnreadLineError,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        """Fail what waits on the line ``sent`` names, and ack it so it is not resent."""
+        # The error's type alone: what the line held may be a secret.
+        logger.warning(
+            "remote %s sent a line this sagent cannot read: id=%r error=%s",
+            self.name,
+            sent,
+            type(error.__cause__).__name__,
+        )
+        result = self._pending.pop(sent, None)
+        if result is not None and not result.done():
+            result.set_result(
+                RemoteToolResult(
+                    call_id="",
+                    endpoint=self.name,
+                    content=f"{self.name}'s sagent sent a result this sagent cannot "
+                    "read, so what the call did there is unknown here: check before "
+                    "repeating it, and update sagent where it is older.",
+                    is_error=True,
+                ),
+            )
+        if (answer := self._describing.get(sent)) is not None:
+            _fail(
+                answer,
+                ValueError(
+                    f"{self.name}'s sagent sent a description this sagent cannot "
+                    "read; update sagent where it is older.",
+                ),
+            )
+        writer.write(encoded(Ack(id=sent)))
 
     def _received(self, note: Note) -> None:
         """Put ``note`` before the agent here it names; log one for no agent."""
@@ -453,7 +665,7 @@ class Endpoint:
             self._team.receive(
                 sender=sender,
                 recipient=note.recipient
-                if self.local_socket is not None
+                if self._bare
                 else note.recipient.removesuffix(f"@{self._client}"),
                 content=note.content,
                 kind=note.kind,
@@ -488,11 +700,11 @@ class Endpoint:
 
     def _here(self, label: str) -> str:
         """Return the label of an agent here, as the host knows it."""
-        return label if self.local_socket is not None else f"{label}@{self._client}"
+        return label if self._bare else f"{label}@{self._client}"
 
     def _there(self, label: str) -> str:
         """Return the label of an agent there, as the team here knows it."""
-        return label if self.local_socket is not None else f"{label}@{self.name}"
+        return label if self._bare else f"{label}@{self.name}"
 
     def publish(self) -> None:
         """Publish participating local agents on the daemon connection."""
@@ -529,61 +741,85 @@ class Endpoint:
 
 
 class RemoteSession(AsyncResource):
-    """Every saved server this process may reach, each kept connected.
+    """Every server this process may reach, each kept connected.
 
     Args:
-      remotes: The strings, each one endpoint.
+      links: The ways there, each one endpoint.
       journal: The sagent session's journal, whose directory names the session
         to each server, so a resumed session takes up its calls there again;
         ``None``, for a session with none, names it as no other.
       team: The agents here, whom the agents there may message; ``None`` for
         none, as ``sagent remote list`` has.
       client: This machine, as servers list it.
-      retry_sec: How long each endpoint waits between attempts to connect.
+      retry_sec: How long each endpoint waits to connect again, at first.
       ping_sec: How often each endpoint says something to its server.
+      grace_sec: How long a call waits on a server out of contact.
+      max_retry_sec: The longest each endpoint waits to connect again.
 
     """
 
     def __init__(
         self,
-        remotes: Sequence[SavedRemote],
+        links: Sequence[Link],
         *,
         journal: Path | None = None,
         team: Team | None = None,
         client: str = "",
         retry_sec: float = 2.0,
         ping_sec: float = PING_SEC,
-        local_socket: Path | None = None,
+        grace_sec: float = GRACE_SEC,
+        max_retry_sec: float = MAX_RETRY_SEC,
     ) -> None:
         self.session_id = uuid.uuid4().hex if journal is None else journal.parent.name
         """What each server knows this session by."""
 
-        here = team if team is not None else Team(catalog=ModelCatalog(factories={}))
-        self._endpoints = [
-            Endpoint(
-                r,
-                session_id=self.session_id,
-                client=client or socket.gethostname(),
-                team=here,
-                retry_sec=retry_sec,
-                ping_sec=ping_sec,
-            )
-            for r in remotes
-        ]
-        self._team = here
-        if local_socket is not None:
-            self._endpoints.append(
-                Endpoint(
-                    None,
-                    session_id=self.session_id,
-                    client=client or socket.gethostname(),
-                    team=here,
-                    retry_sec=retry_sec,
-                    ping_sec=ping_sec,
-                    local_socket=local_socket,
-                ),
-            )
-        self._tasks: list[asyncio.Task[None]] = []
+        self._team = (
+            team if team is not None else Team(catalog=ModelCatalog(factories={}))
+        )
+        self._client = client or socket.gethostname()
+        self._retry_sec = retry_sec
+        self._ping_sec = ping_sec
+        self._grace_sec = grace_sec
+        self._max_retry_sec = max_retry_sec
+        self._endpoints = [self._endpoint(link) for link in links]
+        self._tasks: dict[Endpoint, asyncio.Task[None]] = {}
+        self._open = False
+
+    def _endpoint(self, link: Link) -> Endpoint:
+        return Endpoint(
+            link,
+            session_id=self.session_id,
+            client=self._client,
+            team=self._team,
+            retry_sec=self._retry_sec,
+            ping_sec=self._ping_sec,
+            grace_sec=self._grace_sec,
+            max_retry_sec=self._max_retry_sec,
+        )
+
+    def set_links(self, links: Sequence[Link]) -> None:
+        """Make ``links`` the ways there: start new names, end those gone.
+
+        A name kept stays connected, with the calls it has pending, on the link it
+        has.
+
+        Args:
+          links: Every way there now, each by its ``name`` or else its ``where``.
+
+        """
+        wanted = {link.name or link.where: link for link in links}
+        for endpoint in [e for e in self._endpoints if e.key not in wanted]:
+            self._endpoints.remove(endpoint)
+            endpoint.remove()
+            if (task := self._tasks.pop(endpoint, None)) is not None:
+                task.cancel()
+        kept = {e.key for e in self._endpoints}
+        for key, link in wanted.items():
+            if key not in kept:
+                endpoint = self._endpoint(link)
+                self._endpoints.append(endpoint)
+                if self._open:
+                    self._tasks[endpoint] = asyncio.create_task(endpoint.run())
 
     def endpoints(self) -> dict[str, Endpoint]:
         """Return each endpoint by name.
@@ -605,7 +841,8 @@ class RemoteSession(AsyncResource):
     @override
     async def aopen(self) -> None:
         self._team.changes.add(self.publish)
-        self._tasks = [asyncio.create_task(e.run()) for e in self._endpoints]
+        self._open = True
+        self._tasks = {e: asyncio.create_task(e.run()) for e in self._endpoints}
 
     def publish(self) -> None:
         """Publish local agent changes through each connection."""
@@ -614,17 +851,19 @@ class RemoteSession(AsyncResource):
 
     @override
     async def aclose(self) -> None:
+        self._open = False
         self._team.changes.discard(self.publish)
         for endpoint in self._endpoints:
             endpoint.bye()
         # A moment for each goodbye to leave before its connection is cut.
         await asyncio.sleep(0)
-        for task in self._tasks:
+        tasks = list(self._tasks.values())
+        for task in tasks:
             task.cancel()
-        for task in self._tasks:
+        for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        self._tasks = []
+        self._tasks.clear()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

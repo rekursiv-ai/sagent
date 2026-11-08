@@ -105,7 +105,7 @@ from sagent.tools.paper_details import PaperDetails
 from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.paper_search import PaperSearch
 from sagent.tools.read import Read
-from sagent.tools.remote import RemoteSession, RemoteTool, SavedRemote
+from sagent.tools.remote import Link, RemoteSession, RemoteTool, local_link
 from sagent.tools.types import ToolContext
 from sagent.tools.web_fetch import WebFetch
 from sagent.tools.web_search import WebSearch
@@ -122,7 +122,7 @@ from sagent.tui.views import Views
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Iterator, Sequence
     from subprocess import Popen
-    from typing import TextIO
+    from typing import IO, TextIO
 
     from prompt_toolkit import PromptSession
     from rich.console import Console
@@ -133,6 +133,7 @@ if TYPE_CHECKING:
         ProviderFactory,
         ProviderResources,
     )
+    from sagent.tools.remote import Link
     from sagent.tools.types import Tool
 
 
@@ -2092,19 +2093,13 @@ def test_a_session_is_named_to_remote_servers_by_its_journal(
     class _Opened(RemoteSession):
         def __init__(
             self,
-            remotes: Sequence[SavedRemote],
+            links: Sequence[Link],
             *,
             journal: Path | None = None,
             team: Team | None = None,
-            local_socket: Path | None = None,
         ) -> None:
             teams.append(team)
-            super().__init__(
-                remotes,
-                journal=journal,
-                team=team,
-                local_socket=local_socket,
-            )
+            super().__init__(links, journal=journal, team=team)
 
         @override
         async def aopen(self) -> None:
@@ -2139,17 +2134,27 @@ def test_the_cli_configures_its_daemon_connection_and_applies_peer_flags(
     offline_daemon: AsyncMock,
     participation: str,
 ) -> None:
+    linked: list[Path] = []
+
+    def recording_link(address: Path) -> Link:
+        linked.append(address)
+        return local_link(address)
+
+    monkeypatch.setattr(main, "local_link", recording_link)
+
     async def headless(agent: Agent, parsed: main.Flags) -> int:
         del parsed
         offline_daemon.assert_awaited_once()
         routing = agent.tools["RemoteTool"]
         assert isinstance(routing, RemoteTool)
-        (local,) = [
-            e for e in routing.remote.endpoints().values() if e.local_socket is not None
+        assert [
+            e.where for e in routing.remote.endpoints().values() if e.where == "local"
+        ] == ["local"]
+        assert linked == [
+            socket_address(
+                state_dir() / "rekursiv-ai" / "sagent" / "serve" / "daemon.sock",
+            ),
         ]
-        assert local.local_socket == socket_address(
-            state_dir() / "rekursiv-ai" / "sagent" / "serve" / "daemon.sock",
-        )
         own = agent.runtime.tool_context.label
         control = agent.tools["AgentSelf"]
         assert isinstance(control, AgentSelf)
@@ -4725,8 +4730,15 @@ async def test_a_host_that_does_not_start_says_where_to_look(
     assert capsys.readouterr().err == f"Error: the session's host {why}; see {log}\n"
 
 
+# Without ``/proc/locks``, as on macOS, the kernel names no holder, so ``main`` is told
+# this process holds the lock and its forked command runs under it.
 @contextlib.contextmanager
-def _holder(journal: Path, *, stubborn: bool = False) -> Generator[Popen[bytes]]:
+def _holder(
+    journal: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stubborn: bool = False,
+) -> Generator[Popen[bytes]]:
     """Yield a process with no terminal that holds ``journal``, running one command."""
     # Fork only the small interpreter, not the fully collected pytest heap.
     script = journal.parent / "holder.py"
@@ -4735,12 +4747,13 @@ def _holder(journal: Path, *, stubborn: bool = False) -> Generator[Popen[bytes]]
         "os.setsid()\n"
         "if sys.argv[2] == 'True':\n"
         "    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        "if os.fork() == 0:\n"
+        "pid = os.fork()\n"
+        "if pid == 0:\n"
         "    while True:\n"
         "        signal.pause()\n"
         "fd = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)\n"
         "fcntl.flock(fd, fcntl.LOCK_EX)\n"
-        "os.write(1, b'held')\n"
+        "os.write(1, b'held%d\\n' % pid)\n"
         "while True:\n"
         "    signal.pause()\n",
     )
@@ -4750,7 +4763,12 @@ def _holder(journal: Path, *, stubborn: bool = False) -> Generator[Popen[bytes]]
     ) as holder:
         try:
             assert holder.stdout is not None
-            assert holder.stdout.read(4) == b"held"
+            out: IO[bytes] = holder.stdout
+            assert out.read(4) == b"held"
+            command = int(out.readline())
+            if not Path("/proc/locks").exists():
+                monkeypatch.setattr(main, "lock_holder", partial(_named, holder.pid))
+                monkeypatch.setattr(main, "children", partial(_named, [command]))
             yield holder
         finally:
             with contextlib.suppress(ProcessLookupError):
@@ -4785,7 +4803,7 @@ async def test_kill_ends_the_holder_and_resumes_here(
     # the whole grace, so the deaf one is given a short one.
     grace = 0.005 if stubborn else 10.0
     monkeypatch.setattr(main, "_take_over", partial(main._take_over, term_sec=grace))
-    with _holder(journal, stubborn=stubborn) as holder:
+    with _holder(journal, monkeypatch, stubborn=stubborn) as holder:
         status = await _resume(journal, command=["sagent"])
         assert holder.wait(timeout=5) == -(9 if stubborn else 15)
 
@@ -4810,7 +4828,7 @@ async def test_quit_leaves_the_holder_running_and_starts_nothing(
     launched: list[Path] = []
     monkeypatch.setattr(main, "_ask", partial(_answer, [], "q"))
     monkeypatch.setattr(main, "launch", partial(_launched, launched))
-    with _holder(journal) as holder:
+    with _holder(journal, monkeypatch) as holder:
         status = await _resume(journal, command=["sagent"])
         assert holder.poll() is None
 
@@ -5110,7 +5128,7 @@ def test_ctrl_c_at_the_kill_prompt_quits_quietly_and_spares_the_holder(
     monkeypatch.chdir(tmp_path)
     journal = _journal(project_dir(tmp_path) / "000000000001", *_said("hello"))
     _argv(monkeypatch, "--resume", "000000000001")
-    with _holder(journal) as holder, _at_a_terminal(monkeypatch):
+    with _holder(journal, monkeypatch) as holder, _at_a_terminal(monkeypatch):
         assert main.main() == 130
         assert holder.poll() is None
     assert "Traceback" not in capsys.readouterr().err
@@ -5145,6 +5163,11 @@ def _launch_here(
 def _no_such_pid(journal: Path) -> int:
     del journal
     return _NO_SUCH_PID
+
+
+def _named[T](answer: T, ignored: object) -> T:
+    del ignored
+    return answer
 
 
 def _unnamed(journal: Path) -> None:

@@ -70,7 +70,7 @@ from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
 from sagent.session.types import AgentToAgentMessage, stored_record
 from sagent.tools.read import Read
-from sagent.tools.remote import RemoteSession, SavedRemote
+from sagent.tools.remote import RemoteSession, SavedRemote, local_link, tls_link
 
 
 if TYPE_CHECKING:
@@ -182,7 +182,6 @@ async def local_daemon(
         "asyncio",
         SimpleNamespace(
             sleep=tick,
-            to_thread=asyncio.to_thread,
             wait_for=asyncio.wait_for,
             open_unix_connection=asyncio.open_unix_connection,
             run=asyncio.run,
@@ -305,7 +304,7 @@ async def test_startup_reports_child_exit_without_waiting_for_deadline(
     monkeypatch.setattr(
         daemon,
         "asyncio",
-        SimpleNamespace(to_thread=asyncio.to_thread, sleep=sleep),
+        SimpleNamespace(sleep=sleep),
     )
     with pytest.raises(RuntimeError, match=f"exited with status {exit_code}") as exc:
         _ = await ensure(dirs, version="test")
@@ -314,6 +313,30 @@ async def test_startup_reports_child_exit_without_waiting_for_deadline(
     assert sleeps == [0.02]
     with (dirs.state / "daemon-start.lock").open() as held:
         fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+@pytest.mark.asyncio
+async def test_ensure_waits_on_the_start_lock_and_goes_on_once_it_is_free(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    ready = DaemonStatus(pid=123, source_version="new", listen=())
+    answers: list[DaemonStatus | OSError] = [ready, ready]
+    monkeypatch.setattr(daemon, "control", partial(_control_answers, answers=answers))
+    assert await ensure(dirs, version="new") == ready
+    # Listed, not stat'd: macOS folds case, so only a listing sees the exact name.
+    assert "daemon-start.lock" in [f.name for f in dirs.state.iterdir()]
+    held = open_private(dirs.state / "daemon-start.lock", os.O_RDWR)
+    fcntl.flock(held, fcntl.LOCK_EX)
+    try:
+        waiting = asyncio.create_task(ensure(dirs, version="new"))
+        done, _ = await asyncio.wait([waiting], timeout=0.05)
+        assert not done
+        assert answers == [ready]
+    finally:
+        os.close(held)
+    assert await asyncio.wait_for(waiting, 0.5) == ready
 
 
 @pytest.mark.asyncio
@@ -363,7 +386,7 @@ async def test_startup_retries_one_live_child_until_it_answers(
     monkeypatch.setattr(
         daemon,
         "asyncio",
-        SimpleNamespace(to_thread=asyncio.to_thread, sleep=sleep),
+        SimpleNamespace(sleep=sleep),
     )
     assert await ensure(dirs, version="new") == ready
     assert spawned == ["new"]
@@ -550,20 +573,18 @@ async def test_upgrade_preserves_accepted_remote_work_without_replaying_it(
         a, b = _local_team("a"), _local_team("b")
         async with (
             RemoteSession(
-                [SavedRemote(url=connection.url)],
+                [tls_link(SavedRemote(url=connection.url))],
                 client="fixture",
                 retry_sec=0.01,
             ) as remote,
             RemoteSession(
-                [],
+                [local_link(socket_address(dirs.state / "daemon.sock"))],
                 team=a,
-                local_socket=socket_address(dirs.state / "daemon.sock"),
                 retry_sec=0.01,
             ) as local_a,
             RemoteSession(
-                [],
+                [local_link(socket_address(dirs.state / "daemon.sock"))],
                 team=b,
-                local_socket=socket_address(dirs.state / "daemon.sock"),
                 retry_sec=0.01,
             ) as local_b,
         ):
@@ -643,7 +664,7 @@ async def test_failed_replacement_keeps_accepted_work_and_the_old_daemon(
         _ = await control(dirs, DaemonControl(listen=("127.0.0.1:0",), tools=("Gate",)))
         (connection,) = await strings.add(dirs)
         async with RemoteSession(
-            [SavedRemote(url=connection.url)],
+            [tls_link(SavedRemote(url=connection.url))],
             client="fixture",
             retry_sec=0.01,
         ) as remote:
@@ -1542,15 +1563,14 @@ async def test_independent_host_actions_share_one_persistent_daemon() -> None:
         local_team = _local_team("local")
         async with (
             RemoteSession(
-                [SavedRemote(url=url)],
+                [tls_link(SavedRemote(url=url))],
                 team=_local_team("tls"),
                 client="cli",
                 retry_sec=0.01,
             ) as remote,
             RemoteSession(
-                [],
+                [local_link(socket_address(dirs.state / "daemon.sock"))],
                 team=local_team,
-                local_socket=socket_address(dirs.state / "daemon.sock"),
                 retry_sec=0.01,
             ) as local,
         ):
@@ -1611,25 +1631,21 @@ async def test_reply_debts_survive_a_resumable_disconnect(
     a, b = _local_team("a"), _local_team("b")
     try:
         _ = await ensure(dirs, version="debts")
-        remotes: list[SavedRemote] = []
-        address: Path | None = socket_address(dirs.state / "daemon.sock")
+        links = [local_link(socket_address(dirs.state / "daemon.sock"))]
         if transport == "tls":
             _ = await control(dirs, DaemonControl(listen=("127.0.0.1:0",)))
             (connection,) = await strings.add(dirs, peer_messaging=True)
-            remotes = [SavedRemote(url=connection.url)]
-            address = None
+            links = [tls_link(SavedRemote(url=connection.url))]
         async with (
             RemoteSession(
-                remotes,
+                links,
                 team=a,
-                local_socket=address,
                 client="here",
                 retry_sec=100,
             ) as sender,
             RemoteSession(
-                remotes,
+                links,
                 team=b,
-                local_socket=address,
                 client="here",
                 retry_sec=100,
             ) as receiver,
@@ -1823,8 +1839,9 @@ async def test_worker_churn_releases_processes_descriptors_and_public_routes(
                         session_id=f"worker-{iteration}-{index}",
                         client="churn",
                     ),
-                    ip="127.0.0.1",
+                    peer="127.0.0.1",
                     writer=writer,
+                    grant=None,
                 )
                 assert session is not None
                 sessions.append(session)
@@ -1905,7 +1922,7 @@ async def test_tls_worker_batch_releases_descriptors_and_public_routes(
             sessions = [
                 await stack.enter_async_context(
                     RemoteSession(
-                        [SavedRemote(url=connection.url)],
+                        [tls_link(SavedRemote(url=connection.url))],
                         team=_local_team("worker"),
                         client="churn",
                         retry_sec=0.01,

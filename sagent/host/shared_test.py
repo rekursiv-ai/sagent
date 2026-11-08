@@ -9,14 +9,19 @@ from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 
 import asyncio
 import socket
+import time
 
 from wesearch.fetch.gate import Admission, FileGate, Gate, GatePolicy, GateState
 
 import pytest
 
 from sagent.host import shared
+from sagent.host.server import Server
 from sagent.host.shared import DaemonGate, ServedGate, _gate_answer, host_gate
+from sagent.host.strings import ServeDirs
+from sagent.host.testing import LocalHost
 from sagent.host.wire import GateAnswer, GateCall, Ping, encoded
+from sagent.lib.posix.sockets import socket_address
 from sagent.lib.userdirs import state_dir
 
 
@@ -104,6 +109,36 @@ def test_changes_reach_the_daemon_or_fall_back_to_the_host_files(
             ("reset", ("k",), {"forget": False, "clear_hold": True}),
         ]
     )
+
+
+@asynccontextmanager
+async def _daemon(tmp_path: Path) -> AsyncGenerator[Path]:
+    """Serve a daemon in this process; yield the socket it listens on."""
+    dirs = ServeDirs(secrets=tmp_path / "secrets", state=tmp_path / "state")
+    address = socket_address(tmp_path / "daemon.sock")
+    server = Server(
+        dirs,
+        listen=[],
+        local_socket=address,
+        start_host=LocalHost(tools={}),
+    )
+    async with server:
+        yield address
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("daemon", [False, True])
+async def test_a_plain_reset_keeps_a_server_hold_with_or_without_a_daemon(
+    tmp_path: Path,
+    *,
+    daemon: bool,
+) -> None:
+    until = time.time() + 432_000.0
+    async with _daemon(tmp_path) as address:
+        gate = DaemonGate(address if daemon else tmp_path / "absent.sock")
+        await asyncio.to_thread(gate.hold, "k", until=until)
+        await asyncio.to_thread(gate.reset, "k")
+        assert FileGate().states()["k"].held_until == until
 
 
 async def _noted_wait(

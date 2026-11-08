@@ -102,7 +102,7 @@ from sagent.tools.agent_spawn import AgentSpawn
 from sagent.tools.builtin import TOOLS, builders
 from sagent.tools.mcp import McpServer, McpSession, servers
 from sagent.tools.mcp_settings import add_config_arguments
-from sagent.tools.remote import RemoteSession, saved
+from sagent.tools.remote import RemoteSession, local_link, saved, tls_link
 from sagent.tools.types import ToolContext
 from sagent.tui.console import ConsolePrinter, Screen, terminal_console
 from sagent.tui.prompt import (
@@ -765,10 +765,12 @@ async def _main(flags: Flags, *, given: Sequence[tuple[str, str]]) -> int:
         _ = await daemon.ensure(serve)
         catalog.gate = fetch.gate = host_gate()
         remote = RemoteSession(
-            remotes,
+            [
+                *(tls_link(r) for r in remotes),
+                local_link(socket_address(serve.state / "daemon.sock")),
+            ],
             journal=path,
             team=team,
-            local_socket=socket_address(serve.state / "daemon.sock"),
         )
         # Before the servers connect: at a terminal, what they log must reach the
         # session's file, not overlay the screen.

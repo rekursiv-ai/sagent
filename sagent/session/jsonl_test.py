@@ -301,6 +301,24 @@ async def test_an_unreadable_line_is_kept_as_incomplete(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_record_with_a_field_this_sagent_lacks_is_kept_as_incomplete(
+    tmp_path: Path,
+) -> None:
+    """A newer sagent's record is kept whole, never read with a field dropped."""
+    path = tmp_path / "s.jsonl"
+    newer = '{"py/object": "UserMessage", "content": "hi", "added_later": 1}'
+    async with JsonlJournal(path) as journal:
+        journal.append(UserMessage(content="a"))
+    with path.open("a") as file:
+        file.write(newer + "\n")
+    async with JsonlJournal(path) as journal:
+        assert list(journal) == [
+            UserMessage(content="a"),
+            IncompleteRecord(text=newer),
+        ]
+
+
+@pytest.mark.asyncio
 async def test_a_line_read_alone_is_the_record_the_journal_wrote(
     tmp_path: Path,
 ) -> None:

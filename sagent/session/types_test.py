@@ -251,6 +251,31 @@ def test_a_stored_record_is_read_as_the_class_asked_for() -> None:
         _ = stored_record(stored_plain(UserMessage(content="hi")), ToolCall)
 
 
+@pytest.mark.parametrize(
+    "plain",
+    [
+        {"py/object": "UserMessage", "content": "hi", "added_later": 1},
+        {
+            "py/object": "UserMessage",
+            "attachments": [{"mime_descriptor": "a", "data": "", "added_later": 1}],
+        },
+    ],
+)
+def test_a_record_with_a_field_its_class_lacks_does_not_read(
+    plain: dict[str, object],
+) -> None:
+    with pytest.raises(ReadError, match="added_later"):
+        _ = stored_record(plain)
+
+
+def test_a_result_keeps_the_id_its_call_went_by_on_the_wire() -> None:
+    """A journal written before ``wire_id`` reads it as ``""``."""
+    sent = ReadResult(call_id="toolu_1", wire_id="ab12", path="/a")
+    assert stored_record(json_loads(json.dumps(stored_plain(sent)))) == sent
+    old = {"py/object": "ReadResult", "call_id": "toolu_1", "path": "/a"}
+    assert stored_record(old) == replace(sent, wire_id="")
+
+
 def test_a_bare_tool_result_reads_as_nothing() -> None:
     assert ToolResult(call_id="1").text() == ""
     assert UncategorizedToolResult(call_id="1").text() == ""
