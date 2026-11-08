@@ -211,11 +211,9 @@ def cap_math_threads() -> None:
     AMD host, where MKL takes a generic path anyway, and broke an Intel one.
     MKL reads it at its first GEMM, so it must be set before any matmul runs.
 
-    ``OPENBLAS_CORETYPE`` is the same pin for NumPy's OpenBLAS, which picks its
-    kernel per CPU at load. Measured on an AMD engineering sample it picked
-    ``SkylakeX``, and a float64 SVD moved by one ULP from the golden that
-    ``Haswell`` and ``Zen`` reproduce. OpenBLAS reads it once at load, so it
-    must be set before NumPy imports.
+    OpenBLAS selects its kernel from the CPU's usable instruction set. Do not
+    set ``OPENBLAS_CORETYPE`` by default: forcing Haswell causes SIGILL on
+    CPUs without AVX, including Haswell-generation Pentiums.
 
     Numba's ``prange`` pool is ``NUMBA_NUM_THREADS`` wide, every CPU by
     default, so an xdist worker keeps two: under ``pytest -n 32`` unit tests of
@@ -260,7 +258,8 @@ def kernel_pins() -> dict[str, str]:
       pins: Each pinned variable's name and value.
 
     """
-    return {"MKL_CBWR": "COMPATIBLE", "OPENBLAS_CORETYPE": "Haswell"}
+    # OpenBLAS detects usable CPU instructions; a fixed core can cause SIGILL.
+    return {"MKL_CBWR": "COMPATIBLE"}
 
 
 @contextmanager

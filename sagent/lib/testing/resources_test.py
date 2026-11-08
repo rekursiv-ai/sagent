@@ -806,7 +806,7 @@ def test_unset_variables_get_one_thread_and_the_pinned_kernel(
 
     assert [os.environ[name] for name in names] == ["1"] * len(names)
     assert os.environ["MKL_CBWR"] == "COMPATIBLE"
-    assert os.environ["OPENBLAS_CORETYPE"] == "Haswell"
+    assert "OPENBLAS_CORETYPE" not in os.environ
     assert os.environ["OMP_WAIT_POLICY"] == "PASSIVE"
 
 
