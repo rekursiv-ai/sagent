@@ -15,7 +15,7 @@ import sys
 
 import pytest
 
-from sagent.lib.userdirs import data_dir
+from sagent.lib.userdirs import base_dir_variables, data_dir
 from sagent.session.types import SkillResult
 from sagent.tools import skill
 from sagent.tools.skill import Skill, SkillInfo
@@ -117,8 +117,10 @@ def test_the_skills_sagent_ships_are_found_last(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    isolated = base_dir_variables()
     monkeypatch.setattr(skill, "files", files)
     shipped = Skill(user_dir=tmp_path / "u")
+    assert base_dir_variables() == isolated
     assert shipped.builtin_dir == _CWD.parent / "skills"
     (watch,) = [s for s in shipped.discover(tmp_path) if s.name == "watch"]
     assert watch.source == "builtin"

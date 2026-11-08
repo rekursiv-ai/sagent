@@ -1,9 +1,4 @@
-"""Tests for Gemini through ``agy``, against a stub ``agy`` on PATH.
-
-The stub speaks whatever stream-json lines a test scripts: each line it reads plays
-the next numbered turn file, counted across every process, and ``WAIT name`` in a
-turn waits for a file our fake tool server writes when a held call is answered.
-"""
+"""Tests for Gemini's startup, conversation reuse, and in-memory stream parsing."""
 
 from __future__ import annotations
 
@@ -13,23 +8,20 @@ from datetime import UTC, date, datetime
 from functools import partial
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
-from typing import TYPE_CHECKING, Self, cast, override
+from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import asyncio
-import io
 import os
-import shutil
-import signal
 import stat
 import tempfile
-import time
 
-from PIL import Image
 from treekle import PlainTree, json_dumps, json_loads
 
 import pytest
 import pytest_asyncio
 
+from sagent.lib.posix.child import Child
 from sagent.model.cost import (
     PriceCatalog,
     PriceCondition,
@@ -45,7 +37,6 @@ from sagent.model.exceptions import (
 from sagent.model.types import Request, Response, TextChunk
 from sagent.providers.google import cli
 from sagent.providers.google.cli import GoogleCLI, GoogleCLIModel
-from sagent.providers.resources import SharedResources
 from sagent.session.types import (
     AgentToAgentMessage,
     AnyToolResult,
@@ -60,44 +51,17 @@ from sagent.session.types import (
     UserMessage,
 )
 from sagent.tools.display import ToolDisplay
-from sagent.types import AsyncResource
 
 
 if TYPE_CHECKING:
     from asyncio.subprocess import Process
-    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
-
-    import httpx2
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
     from sagent.model.capability import ThinkingEffort
-    from sagent.providers.types import ProcessPool, ToolMount
-    from sagent.tools.types import Tool, ToolContext
+    from sagent.providers.types import ToolMount
+    from sagent.session.types import SessionRecord
+    from sagent.tools.types import ToolContext
 
-
-_AGY = r"""#!/bin/sh
-dir=$(dirname "$0")
-trap 'exit 0' TERM
-while IFS= read -r line; do
-  if [ ! -e "$dir/argv.$$" ]; then
-    printf '%s\n' "$@" > "$dir/argv.$$"
-    env > "$dir/env.$$"
-    pwd > "$dir/cwd.$$"
-    cp -r "$HOME/.gemini" "$dir/gemini.$$"
-  fi
-  printf '%s %s\n' "$$" "$line" >> "$dir/said"
-  n=$(cat "$dir/count" 2>/dev/null || echo 0)
-  echo $((n + 1)) > "$dir/count"
-  [ -e "$dir/turn.$n" ] || continue
-  while IFS= read -r out; do
-    case "$out" in
-      "WAIT "*) f="$dir/${out#WAIT }"; while [ ! -e "$f" ]; do sleep 0.005; done ;;
-      "BARRIER "*) IFS= read -r barrier < "$dir/${out#BARRIER }" ;;
-      EXIT) exit 0 ;;
-      *) printf '%s\n' "$out" ;;
-    esac
-  done < "$dir/turn.$n"
-done
-"""
 
 _INIT = {"event": "init", "conversation_id": "c1", "init": {"tools": ["view_file"]}}
 
@@ -108,260 +72,236 @@ def private_temp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
 
 
-@pytest.fixture
-def stub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _Stub:
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    script = bin_dir / "agy"
-    script.write_text(_AGY)
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    return _Stub(dir=bin_dir)
-
-
 @pytest_asyncio.fixture
-async def shared(stub: _Stub) -> AsyncIterator[_Resources]:
-    async with _Resources(stub=stub) as resources:
-        yield resources
+async def agy_stream(
+    tmp_path: Path,
+) -> AsyncIterator[tuple[cli._Agy, asyncio.StreamReader]]:
+    stdout = asyncio.StreamReader()
+    agy = cli._Agy(
+        Mock(stdout=stdout),
+        home=tmp_path,
+        started_with=(),
+        quiet_sec=GoogleCLIModel.quiet_sec,
+    )
+    try:
+        yield agy, stdout
+    finally:
+        tasks: list[Awaitable[object]] = [
+            task for task in (agy._line, agy._call) if task is not None
+        ]
+        agy.close()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("headless", [True, False])
-@pytest.mark.parametrize("status", [0, 1])
-async def test_native_login_uses_the_terminal_and_propagates_failure(
-    stub: _Stub,
+@pytest.mark.parametrize(
+    "status",
+    [0, 7, None],
+    ids=["success", "failure", "cancelled"],
+)
+async def test_native_login_waits_in_the_child_context_before_reporting_status(
     monkeypatch: pytest.MonkeyPatch,
     headless: bool,
-    status: int,
+    status: int | None,
 ) -> None:
-    (stub.dir / "agy").write_text(
-        '#!/bin/sh\ndir=$(dirname "$0")\nprintf "%s\\n" "$@" > "$dir/login-argv"\n'
-        'env > "$dir/login-env"\nexit "$LOGIN_STATUS"\n',
+    waiting = asyncio.Event()
+    finished = asyncio.Future[int]()
+
+    async def wait() -> int:
+        waiting.set()
+        return await finished
+
+    waited = AsyncMock(side_effect=wait)
+    child = Mock(process=Mock(wait=waited))
+    entered = AsyncMock(return_value=child)
+    exited = AsyncMock(return_value=None)
+    started = AsyncMock(
+        return_value=MagicMock(__aenter__=entered, __aexit__=exited),
     )
-    monkeypatch.setenv("LOGIN_STATUS", str(status))
-    monkeypatch.setenv("NO_BROWSER", "inherited")
-    async with GoogleCLI() as provider:
-        if status:
-            with pytest.raises(AuthError, match=r"agy.*sign-in"):
-                await provider.login(headless=headless)
+    monkeypatch.setattr(Child, "start", started)
+    provider = GoogleCLI(resources=Mock())
+    running = asyncio.create_task(provider.login(headless=headless))
+    try:
+        await waiting.wait()
+        started.assert_awaited_once_with("agy", "acp", "--login")
+        entered.assert_awaited_once_with()
+        waited.assert_awaited_once_with()
+        exited.assert_not_awaited()
+        assert not running.done()
+        if status is None:
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError) as raised:
+                await running
+            exited.assert_awaited_once()
+            assert exited.await_args is not None
+            assert exited.await_args.args[:2] == (asyncio.CancelledError, raised.value)
         else:
-            await provider.login(headless=headless)
-    assert (stub.dir / "login-argv").read_text().splitlines() == ["acp", "--login"]
-    env = dict(
-        line.split("=", 1)
-        for line in (stub.dir / "login-env").read_text().splitlines()
-        if "=" in line
-    )
-    assert env["NO_BROWSER"] == os.environ["NO_BROWSER"] == "inherited"
-
-
-@pytest.mark.asyncio
-async def test_cancelling_native_login_reaps_its_process(
-    stub: _Stub,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    (stub.dir / "agy").write_text("#!/bin/sh\necho ready\nexec sleep 2\n")
-    ready = asyncio.Event()
-    started: list[Process] = []
-    monkeypatch.setattr(
-        asyncio,
-        "create_subprocess_exec",
-        partial(
-            _started_login,
-            ready=ready,
-            started=started,
-            real=asyncio.create_subprocess_exec,
-        ),
-    )
-    async with GoogleCLI() as provider:
-        task = asyncio.create_task(provider.login(headless=True))
-        async with asyncio.timeout(5):
-            await ready.wait()
-        (process,) = started
-        task.cancel()
-        async with asyncio.timeout(0.5):
-            with pytest.raises(asyncio.CancelledError):
-                await task
-        assert process.returncode is not None
-        with pytest.raises(ProcessLookupError):
-            os.kill(process.pid, 0)
-
-
-@pytest.mark.asyncio
-async def test_cancelled_native_login_kills_a_process_ignoring_term(
-    stub: _Stub,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    (stub.dir / "agy").write_text(
-        "#!/bin/sh\ntrap '' TERM\necho ready\nexec sleep 60\n",
-    )
-    ready = asyncio.Event()
-    started: list[Process] = []
-    monkeypatch.setattr(
-        asyncio,
-        "create_subprocess_exec",
-        partial(
-            _started_login,
-            ready=ready,
-            started=started,
-            real=asyncio.create_subprocess_exec,
-        ),
-    )
-    async with GoogleCLI() as provider:
-        task = asyncio.create_task(provider.login(headless=True))
-        async with asyncio.timeout(5):
-            await ready.wait()
-        (process,) = started
-        try:
-            task.cancel()
-            async with asyncio.timeout(3):
-                with pytest.raises(asyncio.CancelledError):
-                    await task
-            assert process.returncode == -signal.SIGKILL
-        finally:
-            if process.returncode is None:
-                process.kill()
-            await process.wait()
-
-
-async def _started_login(
-    *argv: str,
-    ready: asyncio.Event,
-    started: list[Process],
-    real: Callable[..., Awaitable[Process]],
-    **options: object,
-) -> Process:
-    process = await real(*argv, **{**options, "stdout": asyncio.subprocess.PIPE})
-    assert process.stdout is not None
-    assert await process.stdout.readline() == b"ready\n"
-    started.append(process)
-    ready.set()
-    return process
+            finished.set_result(status)
+            if status:
+                with pytest.raises(
+                    AuthError,
+                    match=r"^agy sign-in failed \(exit 7\)\.$",
+                ):
+                    await running
+            else:
+                await running
+            exited.assert_awaited_once_with(None, None, None)
+    finally:
+        running.cancel()
+        await asyncio.gather(running, return_exceptions=True)
 
 
 @pytest.mark.asyncio
 async def test_agy_runs_as_our_agent_in_a_home_of_its_own(
-    shared: _Resources,
-    stub: _Stub,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Our prompt is its agent's, our tools its only ones; its login is its own."""
     monkeypatch.setenv("GEMINI_API_KEY", "leak")
     monkeypatch.setenv("GOOGLE_API_KEY", "leak")
     monkeypatch.setenv("KEEP_ME", "1")
-    stub.script([_INIT, *_said("hi", tokens=(10, 2))])
-    provider = GoogleCLI(resources=shared)
+    drained = AsyncMock()
+    written = Mock()
+    process = Mock(stdin=Mock(spec=asyncio.StreamWriter, write=written, drain=drained))
+    acquired = AsyncMock(return_value=process)
+    released = AsyncMock()
+    pool = Mock(acquire=acquired, release=released)
+    pools = Mock(return_value=pool)
+    mount = Mock(url="http://127.0.0.1:1/mount")
+    mounted = AsyncMock(return_value=mount)
+    unmounted = AsyncMock()
+    resources = Mock(
+        process_pool=pools,
+        tool_server=Mock(mount=mounted, unmount=unmounted),
+    )
+    provider = GoogleCLI(resources=resources)
     model = provider["gemini-flash"]
     request = Request(
         system=("Be terse.", "", "Rules."),
-        records=_HELLO,
+        records=(
+            UserMessage(content="first"),
+            AssistantMessage(content="ok"),
+            SystemMessage(content="mind the tests"),
+            UserMessage(content="second"),
+        ),
         tools=(_Echo(),),
     )
-    await _stream(model, request)
-
-    assert stub.only("argv").splitlines() == [
-        "--agent",
-        "sagent",
-        "--input-format",
-        "stream-json",
-        "--output-format",
-        "stream-json",
-        "--disable-slash-commands",
-        "--model",
-        "gemini-3.8-flash-high",
-    ]
-    env = dict(
-        line.split("=", 1) for line in stub.only("env").splitlines() if "=" in line
-    )
-    home = Path(env["HOME"])
-    assert (env["KEEP_ME"], env["USERPROFILE"]) == ("1", env["HOME"])
-    assert not {"GEMINI_API_KEY", "GOOGLE_API_KEY"} & env.keys()
-    assert home.name.startswith("sagent-agy-")
-    assert stub.only("cwd") == str(home / "workdir")
-    gemini = stub.copied()
-    # ``agy`` lists an MCP tool by name alone; without its schema the model
-    # guesses the arguments, or spends a call reading the schema's file.
-    assert (gemini / "config" / "agents" / "sagent" / "agent.md").read_text() == (
-        "---\nname: sagent\ndescription: Answers as sagent asks, with sagent's tools.\n"
-        "mainAgent: true\ntools: []\n---\nBe terse.\n\nRules.\n\n"
-        "# Tools\n\n"
-        "Each tool is on the MCP server `sagent`; call it through call_mcp_tool,"
-        " with arguments as its input schema says. A relative path resolves"
-        " against sagent's working directory, not the workspace agy names.\n\n"
-        "## Echo\n\nSay the text back.\n\n"
-        'Input schema: {"type":"object","properties":{"text":{"type":"string"}}}\n'
-    )
-    assert json_loads((gemini / "config" / "mcp_config.json").read_text()) == {
-        "mcpServers": {"sagent": {"serverUrl": shared.mount.url}},
-    }
-    assert json_loads((gemini / "antigravity-cli" / "settings.json").read_text()) == {
-        "permissions": {"allow": ["mcp(sagent/*)"]},
-        "showTips": False,
-        "showFeedbackSurvey": False,
-    }
-    await provider.aclose()
+    try:
+        agy = await model._start(request, started_with=("selected",))
+        home = agy.home
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in {"GEMINI_API_KEY", "GOOGLE_API_KEY"}
+        }
+        env |= {"HOME": str(home), "USERPROFILE": str(home)}
+        acquired.assert_awaited_once_with(
+            [
+                "/bin/sh",
+                "-c",
+                'cd "$0" && exec "$@"',
+                str(home / "workdir"),
+                "agy",
+                "--agent",
+                "sagent",
+                "--input-format",
+                "stream-json",
+                "--output-format",
+                "stream-json",
+                "--disable-slash-commands",
+                "--model",
+                "gemini-3.8-flash-high",
+            ],
+            env=env,
+        )
+        mounted.assert_awaited_once_with()
+        assert pools.call_args_list == [call("agy")]
+        assert agy.process is process
+        assert agy.started_with == ("selected",)
+        assert provider._started == {model}
+        assert home.name.startswith("sagent-agy-")
+        written.assert_called_once_with(
+            json_dumps(
+                {
+                    "event": "user",
+                    "message": {
+                        "content": "User: first\n\nAssistant: ok\n\n"
+                        "<system-reminder>\nmind the tests\n</system-reminder>\n\nUser: second",
+                    },
+                },
+            ).encode()
+            + b"\n",
+        )
+        drained.assert_awaited_once_with()
+        gemini = home / ".gemini"
+        # ``agy`` lists an MCP tool by name alone; without its schema the model
+        # guesses the arguments, or spends a call reading the schema's file.
+        assert (gemini / "config" / "agents" / "sagent" / "agent.md").read_text() == (
+            "---\nname: sagent\ndescription: Answers as sagent asks, with sagent's tools.\n"
+            "mainAgent: true\ntools: []\n---\nBe terse.\n\nRules.\n\n"
+            "# Tools\n\n"
+            "Each tool is on the MCP server `sagent`; call it through call_mcp_tool,"
+            " with arguments as its input schema says. A relative path resolves"
+            " against sagent's working directory, not the workspace agy names.\n\n"
+            "## Echo\n\nSay the text back.\n\n"
+            'Input schema: {"type":"object","properties":{"text":{"type":"string"}}}\n'
+        )
+        assert json_loads((gemini / "config" / "mcp_config.json").read_text()) == {
+            "mcpServers": {"sagent": {"serverUrl": "http://127.0.0.1:1/mount"}},
+        }
+        assert json_loads(
+            (gemini / "antigravity-cli" / "settings.json").read_text(),
+        ) == {
+            "permissions": {"allow": ["mcp(sagent/*)"]},
+            "showTips": False,
+            "showFeedbackSurvey": False,
+        }
+    finally:
+        await provider.aclose()
+    released.assert_awaited_once_with(process)
+    unmounted.assert_awaited_once_with(mount)
     assert not await asyncio.to_thread(home.exists)
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("effort", ["low", "medium", "high"])
-async def test_the_effort_is_the_model_id_s_suffix(
-    shared: _Resources,
-    stub: _Stub,
-    effort: ThinkingEffort,
-) -> None:
+def test_the_effort_is_the_model_id_s_suffix(effort: ThinkingEffort) -> None:
     """``agy`` refuses ``--effort`` beside a suffixed id: the suffix is the effort."""
-    stub.script([_INIT, *_said("hi")])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
+    model = GoogleCLI(resources=Mock())["gemini-flash"]
     model.settings = replace(model.settings, thinking_effort=effort)
-    await _stream(model, Request(records=_HELLO))
-    assert stub.only("argv").splitlines()[-1] == f"gemini-3.8-flash-{effort}"
-    await model.provider.aclose()
+    assert model.command(Path("/workspace"))[-2:] == [
+        "--model",
+        f"gemini-3.8-flash-{effort}",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_a_first_turn_tells_the_conversation_and_streams_the_reply(
-    shared: _Resources,
-    stub: _Stub,
+async def test_a_turn_streams_the_reply_and_sums_its_step_usage(
+    agy_stream: tuple[cli._Agy, asyncio.StreamReader],
 ) -> None:
-    stub.script(
-        [
-            _INIT,
-            _step("user_input"),
-            _step("agent_response", text="good ", state="ACTIVE"),
-            _step("agent_response", text="day", usage=(30, 5, 20)),
-            _step("checkpoint", usage=(7, 1, 0)),
-            _result(),
-        ],
-    )
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    records = (
-        UserMessage(content="first"),
-        AssistantMessage(content="ok"),
-        SystemMessage(content="mind the tests"),
-        UserMessage(content="second"),
-    )
-    events = await _stream(model, Request(records=records))
-
-    assert stub.said() == [
-        {
-            "event": "user",
-            "message": {
-                "content": "User: first\n\nAssistant: ok\n\n"
-                "<system-reminder>\nmind the tests\n</system-reminder>\n\nUser: second",
-            },
-        },
+    agy, stdout = agy_stream
+    lines = [
+        _INIT,
+        _step("user_input"),
+        _step("agent_response", text="good ", state="ACTIVE"),
+        _step("agent_response", text="day", usage=(30, 5, 20)),
+        _step("checkpoint", usage=(7, 1, 0)),
+        _result(),
     ]
-    assert events[:-1] == [TextChunk(text="good "), TextChunk(text="day")]
-    response = _response(events)
+    stdout.feed_data("".join(json_dumps(line) + "\n" for line in lines).encode())
+    stdout.feed_eof()
+    turn = cli._Turn()
+
+    assert [chunk async for chunk in agy.read(turn, mount=Mock())] == [
+        TextChunk(text="good "),
+        TextChunk(text="day"),
+    ]
+    response = turn.response(capability=GoogleCLI.models()["gemini-flash-3.8"])
     assert response.records == (AssistantMessage(content="good day"),)
     assert response.stop_reason == "end_turn"
     # Each step's usage, summed: input, then output, then what the cache served.
     assert response.tokens == TokenCount(request=37, response=6, cache_read=20)
-    await model.provider.aclose()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "usage",
     [
@@ -372,157 +312,182 @@ async def test_a_first_turn_tells_the_conversation_and_streams_the_reply(
         ),
     ],
 )
-async def test_missing_or_null_input_tokens_count_as_zero(
-    shared: _Resources,
-    stub: _Stub,
+def test_missing_or_null_input_tokens_count_as_zero(
     usage: dict[str, int | None],
 ) -> None:
-    stub.script(
-        [
-            _INIT,
-            {
-                "event": "step_update",
-                "step_update": {
-                    "step_type": "agent_response",
-                    "text_delta": "hi",
-                    "usage": usage,
-                },
-            },
-            _result(),
-        ],
+    agy = cli._Agy(
+        Mock(),
+        home=Path("/nowhere"),
+        started_with=(),
+        quiet_sec=GoogleCLIModel.quiet_sec,
     )
-    async with GoogleCLI(resources=shared) as provider:
-        events = await _stream(provider["gemini-flash"], Request(records=_HELLO))
-
-    assert events[:-1] == [TextChunk(text="hi")]
-    response = _response(events)
-    assert response.records == (AssistantMessage(content="hi"),)
-    assert response.stop_reason == "end_turn"
-    assert response.tokens == TokenCount(request=0, response=2)
+    turn = cli._Turn()
+    assert agy._step(
+        {"step_type": "agent_response", "text_delta": "hi", "usage": usage},
+        turn=turn,
+    ) == TextChunk(text="hi")
+    assert turn.text == ["hi"]
+    assert agy._spent == TokenCount(request=0, response=2)
 
 
 @pytest.mark.asyncio
-async def test_the_next_user_message_goes_to_the_same_agy(
-    shared: _Resources,
-    stub: _Stub,
+@pytest.mark.parametrize(
+    ("held", "eligible", "worn", "answered", "restart"),
+    [
+        (False, True, False, True, False),
+        (True, True, False, True, False),
+        (True, True, False, False, True),
+        (True, False, False, True, True),
+        (True, True, True, True, False),
+        (False, True, True, True, True),
+    ],
+    ids=[
+        "new-message",
+        "held-result",
+        "late-result",
+        "mixed-message",
+        "held-worn",
+        "worn",
+    ],
+)
+async def test_stream_reuses_only_a_conversation_that_can_continue(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    held: bool,
+    eligible: bool,
+    worn: bool,
+    answered: bool,
+    restart: bool,
 ) -> None:
-    stub.script([_INIT, *_said("one")], _said("two"))
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    first = _response(await _stream(model, Request(records=_HELLO)))
-    records = (*_HELLO, *first.records, UserMessage(content="and now?"))
-    second = _response(await _stream(model, Request(records=records)))
-
-    assert second.records == (AssistantMessage(content="two"),)
-    assert len(stub.processes()) == 1
-    assert stub.said()[-1] == {"event": "user", "message": {"content": "and now?"}}
-    await model.provider.aclose()
-
-
-@pytest.mark.asyncio
-async def test_a_call_of_our_tools_is_held_and_its_result_continues_the_turn(
-    shared: _Resources,
-    stub: _Stub,
-) -> None:
-    call = ToolCall(call_id="c1", name="Echo", arguments={"text": "x"})
-    shared.mount.calls.put_nowait(call)
-    stub.script(
-        [
-            _INIT,
-            _step("agent_response", text="calling", usage=(10, 3, 0)),
-            _step("tool", state="ACTIVE", tool="call_mcp_tool"),
-            "WAIT answered.0",
-            _step("tool", tool="call_mcp_tool"),
-            _step("agent_response", text="done", usage=(15, 2, 10)),
-            _result(),
-        ],
-    )
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    request = Request(records=_HELLO, tools=(_Echo(),))
-    held = _response(await _stream(model, request))
-    assert held.records == (AssistantMessage(content="calling"), call)
-    # Each stream bills its own steps, so the last reply's count is one call's.
-    assert (held.stop_reason, held.tokens) == (
-        "tool_use",
-        TokenCount(request=10, response=3),
-    )
-
     result = UncategorizedToolResult(call_id="c1", content="x")
-    records = (*_HELLO, *held.records, result)
-    done = _response(await _stream(model, Request(records=records, tools=(_Echo(),))))
+    addition = (result,) if held else (UserMessage(content="and now?"),)
+    unseen = Mock(return_value=addition if eligible else None)
+    answered_call = AsyncMock(return_value=answered)
+    prompted = AsyncMock()
+    remembered = Mock()
+    previous_read = Mock(side_effect=_reply)
+    fresh_read = Mock(side_effect=_reply)
+    old = Mock(
+        held=(ToolCall(call_id="c1", name="Echo"),) if held else (),
+        unseen=unseen,
+        answer=answered_call,
+        prompt=prompted,
+        read=previous_read,
+        saw=remembered,
+    )
+    fresh_remembered = Mock()
+    fresh = Mock(read=fresh_read, saw=fresh_remembered)
+    offered = Mock()
+    mount = Mock(offer=offered)
+    model = GoogleCLI(resources=Mock())["gemini-flash"]
+    model._agy = old
+    model._mount = mount
 
-    assert shared.mount.answered == [(call, result)]
-    assert done.records == (AssistantMessage(content="done"),)
-    assert done.tokens == TokenCount(request=15, response=2, cache_read=10)
-    assert len(stub.processes()) == 1
-    assert shared.mount.offered[-1] == ("Echo",)
-    await model.provider.aclose()
+    async def start(request: Request, *, started_with: tuple[str, ...]) -> Mock:
+        del request, started_with
+        model._agy = fresh
+        return fresh
+
+    started = AsyncMock(side_effect=start)
+    worn_out = Mock(return_value=worn)
+    counted = AsyncMock(return_value=17)
+    monkeypatch.setattr(model, "_start", started)
+    monkeypatch.setattr(model, "_worn", worn_out)
+    monkeypatch.setattr(model, "count", counted)
+    request = Request(records=(*_HELLO, *addition), tools=(_Echo(),))
+
+    chunk, response = [event async for event in model._stream(request)]
+
+    assert chunk == TextChunk(text="reply")
+    assert isinstance(response, Response)
+    assert response.records == (AssistantMessage(content="reply"),)
+    assert response.tokens == TokenCount(request=15, response=2, cache_read=10)
+    assert response.stop_reason == "end_turn"
+    identity = (cli._digest(request.tools), "gemini-3.8-flash-high")
+    unseen.assert_called_once_with(request.records, started_with=identity)
+    offered.assert_called_once_with(request.tools)
+    assert started.await_args_list == (
+        [call(request, started_with=identity)] if restart else []
+    )
+    assert answered_call.await_args_list == (
+        [call(addition, mount=mount)] if held and eligible else []
+    )
+    assert prompted.await_args_list == (
+        [call("and now?")] if not held and not restart else []
+    )
+    assert worn_out.call_args_list == ([call(old)] if eligible and not held else [])
+    counted.assert_awaited_once_with(request)
+    assert previous_read.call_count == (0 if restart else 1)
+    assert fresh_read.call_count == (1 if restart else 0)
+    selected = fresh_read if restart else previous_read
+    assert selected.call_args is not None
+    assert selected.call_args.kwargs == {"mount": mount}
+    assert model._agy is (fresh if restart else old)
+    expected = [call(request.records, response=response, context_tokens=17)]
+    assert remembered.call_args_list == ([] if restart else expected)
+    assert fresh_remembered.call_args_list == (expected if restart else [])
 
 
 @pytest.mark.asyncio
 async def test_stdout_keeps_streaming_while_a_tool_call_has_not_arrived(
-    shared: _Resources,
-    stub: _Stub,
+    agy_stream: tuple[cli._Agy, asyncio.StreamReader],
 ) -> None:
-    barrier = stub.dir / "release-text"
-    os.mkfifo(barrier)
-    stub.script(
-        [
-            _INIT,
-            _step("tool", state="ACTIVE", tool="call_mcp_tool"),
-            "BARRIER release-text",
-            _step("agent_response", text="waiting", usage=(7, 2, 0)),
-        ],
-    )
-    chunks = asyncio.Queue[TextChunk]()
+    agy, stdout = agy_stream
+    calls = asyncio.Queue[ToolCall]()
+    received = AsyncMock(side_effect=calls.get)
+    mount = Mock(called=received)
+    lines = [
+        _step("tool", state="ACTIVE", tool="call_mcp_tool"),
+        _step("agent_response", text="waiting", usage=(7, 2, 0)),
+    ]
+    stdout.feed_data("".join(json_dumps(line) + "\n" for line in lines).encode())
+    turn = cli._Turn()
+    stream = agy.read(turn, mount=mount)
+    assert await anext(stream) == TextChunk(text="waiting")
+    received.assert_awaited_once_with()
+    assert agy._call is not None
+    assert not agy._call.done()
     call = ToolCall(call_id="c1", name="Echo", arguments={"text": "x"})
-    with os.fdopen(
-        os.open(barrier, os.O_RDWR | os.O_NONBLOCK),
-        "wb",
-        buffering=0,
-    ) as release:
-        async with GoogleCLI(resources=shared) as provider:
-            model = provider["gemini-flash"]
-            request = Request(records=_HELLO, tools=(_Echo(),))
-            async with asyncio.timeout(5), asyncio.TaskGroup() as group:
-                streamed = group.create_task(_stream(model, request, chunks=chunks))
-                await shared.mount.call_waiting.wait()
-                release.write(b"\n")
-                assert await chunks.get() == TextChunk(text="waiting")
-                shared.mount.calls.put_nowait(call)
-                events = await streamed
+    calls.put_nowait(call)
+    assert [chunk async for chunk in stream] == []
+    assert agy._spent == TokenCount()
 
-    assert events[:-1] == [TextChunk(text="waiting")]
-    response = _response(events)
+    response = turn.response(capability=GoogleCLI.models()["gemini-flash-3.8"])
     assert response.records == (AssistantMessage(content="waiting"), call)
     assert response.stop_reason == "tool_use"
     assert response.tokens == TokenCount(request=7, response=2)
+    stdout.feed_data(json_dumps(_result()).encode() + b"\n")
+    assert await agy._next(mount) == _result()
+    assert agy._call is None
+    received.assert_awaited_once_with()
 
 
-@pytest.mark.asyncio
-async def test_another_system_prompt_starts_a_fresh_agy(
-    shared: _Resources,
-    stub: _Stub,
-) -> None:
-    stub.script([_INIT, *_said("one")], [_INIT, *_said("two")])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    first = _response(await _stream(model, Request(system=("A",), records=_HELLO)))
-    records = (*_HELLO, *first.records, UserMessage(content="again"))
-    await _stream(model, Request(system=("B",), records=records))
+def test_another_system_prompt_cannot_reuse_the_conversation() -> None:
+    agy = cli._Agy(
+        Mock(),
+        home=Path("/nowhere"),
+        started_with=("A", "tools", "model"),
+        quiet_sec=GoogleCLIModel.quiet_sec,
+    )
+    agy.saw(
+        _HELLO,
+        response=Response(
+            records=(AssistantMessage(content="one"),),
+            tokens=TokenCount(),
+            spend=TokenCost(),
+            stop_reason="end_turn",
+        ),
+        context_tokens=0,
+    )
+    records = (*agy.seen.records, UserMessage(content="again"))
 
-    assert len(stub.processes()) == 2
-    assert stub.said()[-1]["message"] == {
-        "content": "User: hello\n\nAssistant: one\n\nUser: again",
-    }
-    await model.provider.aclose()
+    assert agy.unseen(records, started_with=("A", "tools", "model")) == [
+        UserMessage(content="again"),
+    ]
+    assert agy.unseen(records, started_with=("B", "tools", "model")) is None
 
 
-@pytest.mark.asyncio
-async def test_a_fresh_agy_hears_the_whole_conversation_as_a_transcript(
-    shared: _Resources,
-    stub: _Stub,
-) -> None:
-    stub.script([_INIT, *_said("ok")])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
+def test_a_fresh_agy_hears_the_whole_conversation_as_a_transcript() -> None:
     records = (
         ContextClear(summary="earlier", history=(UserMessage(content="before"),)),
         ContextClear(history=(UserMessage(content="kept"),)),
@@ -536,126 +501,153 @@ async def test_a_fresh_agy_hears_the_whole_conversation_as_a_transcript(
         TurnContext(cwd="/w"),
         UserMessage(content="go"),
     )
-    await _stream(model, Request(records=records))
 
-    assert stub.said()[0]["message"] == {
-        "content": "Summary of the conversation so far:\nearlier\n\n"
+    assert "\n\n".join(cli._transcript(records)) == (
+        "Summary of the conversation so far:\nearlier\n\n"
         "User: before\n\nUser: kept\n\nAgent lead: from a\n\nAgent: anon\n\n"
         "Assistant: ok\n\n"
         'Assistant called Echo as c0: {"text": "x"}\n\nc0 returned: x\n\n'
         "<system-reminder>\nWorking directory: /w\n</system-reminder>\n\n"
-        "User: go",
-    }
-    await model.provider.aclose()
+        "User: go"
+    )
 
 
-@pytest.mark.asyncio
-async def test_the_next_turn_says_each_new_message_its_own_way(
-    shared: _Resources,
-    stub: _Stub,
-) -> None:
-    stub.script([_INIT, *_said("one")], _said("two"))
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    first = _response(await _stream(model, Request(records=_HELLO)))
+def test_the_next_turn_says_each_new_message_its_own_way() -> None:
     records = (
-        *_HELLO,
-        *first.records,
         AgentToAgentMessage(content="hi", sender="lead"),
         AgentToAgentMessage(content="plain"),
         TurnContext(),
         TurnContext(cwd="/w"),
         UserMessage(content="go"),
     )
-    await _stream(model, Request(records=records))
 
-    assert stub.said()[-1]["message"] == {
-        "content": "[from lead]: hi\n\nplain\n\n"
-        "<system-reminder>\nWorking directory: /w\n</system-reminder>\n\ngo",
-    }
-    assert len(stub.processes()) == 1
-    await model.provider.aclose()
+    assert cli._said_text(records) == (
+        "[from lead]: hi\n\nplain\n\n"
+        "<system-reminder>\nWorking directory: /w\n</system-reminder>\n\ngo"
+    )
+    agy = cli._Agy(
+        cast("Process", object()),
+        home=Path("/nowhere"),
+        started_with=(),
+        quiet_sec=1.0,
+    )
+    agy.saw(
+        _HELLO,
+        response=Response(
+            records=(AssistantMessage(content="one"),),
+            tokens=TokenCount(),
+            spend=TokenCost(),
+            stop_reason="end_turn",
+        ),
+        context_tokens=0,
+    )
+    assert agy.unseen((*agy.seen.records, *records), started_with=()) == list(records)
 
 
-@pytest.mark.asyncio
-async def test_a_history_it_never_said_starts_a_fresh_agy(
-    shared: _Resources,
-    stub: _Stub,
-) -> None:
+def test_a_history_it_never_said_cannot_reuse_the_conversation() -> None:
     """Only results it waits for, or new user lines, go to a running ``agy``."""
-    stub.script([_INIT, *_said("one")], [_INIT, *_said("two")])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    first = _response(await _stream(model, Request(records=_HELLO)))
+    agy = cli._Agy(
+        Mock(),
+        home=Path("/nowhere"),
+        started_with=(),
+        quiet_sec=GoogleCLIModel.quiet_sec,
+    )
+    agy.saw(
+        _HELLO,
+        response=Response(
+            records=(AssistantMessage(content="one"),),
+            tokens=TokenCount(),
+            spend=TokenCost(),
+            stop_reason="end_turn",
+        ),
+        context_tokens=0,
+    )
     records = (
-        *_HELLO,
-        *first.records,
+        *agy.seen.records,
         AssistantMessage(content="put in"),
         UserMessage(content="again"),
     )
-    await _stream(model, Request(records=records))
 
-    assert len(stub.processes()) == 2
-    assert stub.said()[-1]["message"] == {
-        "content": "User: hello\n\nAssistant: one\n\nAssistant: put in\n\nUser: again",
-    }
-    await model.provider.aclose()
+    assert agy.unseen(records, started_with=()) is None
 
 
-@pytest.mark.asyncio
-async def test_a_call_no_longer_waiting_starts_a_fresh_agy(
-    shared: _Resources,
-    stub: _Stub,
+@pytest.mark.parametrize(
+    ("additions", "accepted"),
+    [
+        ((UncategorizedToolResult(call_id="c1", content="x"),), True),
+        (
+            (
+                SystemMessage(content="note"),
+                UncategorizedToolResult(call_id="c1", content="x"),
+                TurnContext(cwd="/work"),
+            ),
+            True,
+        ),
+        ((UncategorizedToolResult(call_id="wrong"),), False),
+        ((), False),
+        (
+            (
+                UncategorizedToolResult(call_id="c1"),
+                UncategorizedToolResult(call_id="c1"),
+            ),
+            False,
+        ),
+        (
+            (
+                UncategorizedToolResult(call_id="c1"),
+                UserMessage(content="and this"),
+            ),
+            False,
+        ),
+    ],
+    ids=["exact", "notes", "wrong-call", "missing", "duplicate", "new-message"],
+)
+def test_a_held_turn_accepts_only_its_exact_results_and_notes(
+    additions: tuple[SessionRecord, ...],
+    accepted: bool,
 ) -> None:
-    """A held call the server gave up on cannot take its result; a new agy hears it."""
-    call = ToolCall(call_id="c1", name="Echo", arguments={"text": "x"})
-    shared.mount.calls.put_nowait(call)
-    stub.script(
-        [_INIT, _step("tool", state="ACTIVE", tool="call_mcp_tool"), "WAIT never"],
-        [_INIT, *_said("redone")],
+    agy = cli._Agy(
+        Mock(),
+        home=Path("/nowhere"),
+        started_with=(),
+        quiet_sec=GoogleCLIModel.quiet_sec,
     )
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    request = Request(records=_HELLO, tools=(_Echo(),))
-    held = _response(await _stream(model, request))
-    shared.mount.late = True
-
-    result = UncategorizedToolResult(call_id="c1", content="x")
-    records = (*_HELLO, *held.records, result)
-    done = _response(await _stream(model, Request(records=records, tools=(_Echo(),))))
-
-    assert done.records == (AssistantMessage(content="redone"),)
-    assert len(stub.processes()) == 2
-    assert stub.said()[-1]["message"] == {
-        "content": 'User: hello\n\nAssistant called Echo as c1: {"text": "x"}\n\n'
-        "c1 returned: x",
-    }
-    await model.provider.aclose()
+    agy.saw(
+        _HELLO,
+        response=Response(
+            records=(ToolCall(call_id="c1", name="Echo"),),
+            tokens=TokenCount(),
+            spend=TokenCost(),
+            stop_reason="tool_use",
+        ),
+        context_tokens=0,
+    )
+    assert agy.unseen((*agy.seen.records, *additions), started_with=()) == (
+        list(additions) if accepted else None
+    )
 
 
 @pytest.mark.asyncio
-async def test_a_line_that_is_no_json_is_passed_over(
-    shared: _Resources,
-    stub: _Stub,
+@pytest.mark.parametrize("line", ["warning: not json", "[1]"])
+async def test_non_object_lines_are_passed_over(
+    agy_stream: tuple[cli._Agy, asyncio.StreamReader],
+    line: str,
 ) -> None:
-    stub.script([_INIT, "warning: not json", *_said("hi")])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    response = _response(await _stream(model, Request(records=_HELLO)))
-    assert response.records == (AssistantMessage(content="hi"),)
-    await model.provider.aclose()
+    agy, stdout = agy_stream
+    stdout.feed_data((line + "\n" + json_dumps(_result()) + "\n").encode())
+    stdout.feed_eof()
+    turn = cli._Turn()
+
+    assert [chunk async for chunk in agy.read(turn, mount=Mock())] == []
+    assert turn == cli._Turn()
 
 
-@pytest.mark.asyncio
-async def test_an_image_is_named_not_sent(shared: _Resources, stub: _Stub) -> None:
+def test_an_image_is_named_not_sent() -> None:
     """``agy`` takes text alone; the model is told an image was left out."""
-    stub.script([_INIT, *_said("ok")])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    image = Attachment(mime_descriptor="image/png", data=_png(2, 2))
-    await _stream(
-        model,
-        Request(records=(UserMessage(content="look", attachments=(image,)),)),
-    )
-    assert stub.said()[0]["message"] == {
-        "content": "User: look\n[an image/png attachment, which agy cannot send]",
-    }
-    await model.provider.aclose()
+    image = Attachment(mime_descriptor="image/png", data=b"not sent")
+    assert cli._transcript((UserMessage(content="look", attachments=(image,)),)) == [
+        "User: look\n[an image/png attachment, which agy cannot send]",
+    ]
 
 
 @pytest.mark.asyncio
@@ -668,19 +660,17 @@ async def test_an_image_is_named_not_sent(shared: _Resources, stub: _Stub) -> No
     ],
 )
 async def test_a_failed_turn_raises_what_agy_says(
-    shared: _Resources,
-    stub: _Stub,
+    agy_stream: tuple[cli._Agy, asyncio.StreamReader],
     error: str,
     kind: type[Exception],
 ) -> None:
-    stub.script([_INIT, _result(status="ERROR", error=error)])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
+    agy, stdout = agy_stream
+    stdout.feed_data(json_dumps(_result(status="ERROR", error=error)).encode() + b"\n")
+    stdout.feed_eof()
     with pytest.raises(kind, match=error):
-        await _stream(model, Request(records=_HELLO))
-    await model.provider.aclose()
+        _ = [chunk async for chunk in agy.read(cli._Turn(), mount=Mock())]
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("error", "wait_sec"),
     [
@@ -707,229 +697,263 @@ async def test_a_failed_turn_raises_what_agy_says(
         ("RESOURCE_EXHAUSTED: quota exceeded", 0),
     ],
 )
-async def test_a_spent_quota_waits_for_the_reset_agy_names(
-    shared: _Resources,
-    stub: _Stub,
+def test_a_spent_quota_waits_for_the_reset_agy_names(
     error: str,
-    wait_sec: int,
+    wait_sec: float,
 ) -> None:
     """Agy says when the quota resets; dropped, the wait was a backoff's guess."""
-    stub.script([_INIT, _result(status="ERROR", error=error)])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    with pytest.raises(RateLimitedError) as raised:
-        await _stream(model, Request(records=_HELLO))
-    assert raised.value.retry_after_sec == wait_sec
+    failure = cli._failure({"status": "ERROR", "error": error})
+    assert isinstance(failure, RateLimitedError)
+    assert failure.retry_after_sec == wait_sec
     # Only a quota that names its reset is the login's, spent for every model.
-    assert raised.value.limit == ("quota" if wait_sec else "")
-    await model.provider.aclose()
+    assert failure.limit == ("quota" if wait_sec else "")
 
 
 @pytest.mark.asyncio
-async def test_a_spent_quota_holds_the_model_for_every_caller(
-    shared: _Resources,
-    stub: _Stub,
+@pytest.mark.parametrize("recheck", [False, True])
+async def test_stream_forwards_pacing_and_stops_a_failed_or_cancelled_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    recheck: bool,
 ) -> None:
-    error = "RESOURCE_EXHAUSTED (code 429): Resets in 45s."
-    stub.script([_INIT, _result(status="ERROR", error=error)])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    with pytest.raises(RateLimitedError):
-        await _stream(model, Request(records=_HELLO))
-    held = shared.gate.states()[f"google-cli@default/{model.capability.model_id}"]
-    assert held.held_until > time.time() + 40.0
-    await model.provider.aclose()
+    failure = asyncio.CancelledError() if recheck else RateLimitedError("quota")
+
+    async def read(turn: cli._Turn, *, mount: ToolMount) -> AsyncIterator[TextChunk]:
+        del turn, mount
+        yield TextChunk(text="partial")
+        raise failure
+
+    async def pace(
+        operation: Callable[[], AsyncIterator[TextChunk | Response]],
+        **kwargs: object,
+    ) -> AsyncIterator[TextChunk | Response]:
+        del kwargs
+        async for event in operation():
+            yield event
+
+    gate = Mock()
+    offered = Mock()
+    mount = Mock(offer=offered)
+    model = GoogleCLI(resources=Mock(gate=gate))["gemini-flash"]
+    started = AsyncMock(return_value=Mock(read=read))
+    stopped = AsyncMock()
+    mounted = AsyncMock(return_value=mount)
+    paced = Mock(side_effect=pace)
+    monkeypatch.setattr(model, "_start", started)
+    monkeypatch.setattr(model, "_stop", stopped)
+    monkeypatch.setattr(model, "_mounted", mounted)
+    monkeypatch.setattr(cli, "retried", paced)
+    request = Request(
+        system=("rules",),
+        records=_HELLO,
+        tools=(_Echo(),),
+        recheck_quota=recheck,
+    )
+    stream = model.stream(request)
+
+    assert await anext(stream) == TextChunk(text="partial")
+    with pytest.raises(type(failure)) as raised:
+        await anext(stream)
+    assert raised.value is failure
+    stopped.assert_awaited_once_with()
+    started.assert_awaited_once_with(
+        request,
+        started_with=("rules", cli._digest(request.tools), "gemini-3.8-flash-high"),
+    )
+    offered.assert_called_once_with(request.tools)
+    mounted.assert_awaited_once_with()
+    paced.assert_called_once()
+    assert paced.call_args is not None
+    assert paced.call_args.kwargs == {
+        "gate": gate,
+        "key": "google-cli@default/gemini-flash-3.8",
+        "retries": 0,
+        "recheck_quota": recheck,
+    }
 
 
 @pytest.mark.asyncio
-async def test_a_quota_recheck_reaches_agy_despite_an_old_hold(
-    shared: _Resources,
-    stub: _Stub,
+@pytest.mark.parametrize("text", ["", "half"])
+async def test_agy_exiting_before_its_result_is_a_disconnect(
+    agy_stream: tuple[cli._Agy, asyncio.StreamReader],
+    text: str,
 ) -> None:
-    stub.script([_INIT, *_said("restored")])
-    async with GoogleCLI(resources=shared) as provider:
-        model = provider["gemini-flash"]
-        key = f"google-cli@default/{model.capability.model_id}"
-        shared.gate.hold(key, until=time.time() + 432_000.0)
-        request = Request(records=_HELLO)
-        with pytest.raises(RateLimitedError, match="cooling down"):
-            await _stream(model, request)
-        response = _response(await _stream(model, replace(request, recheck_quota=True)))
-        assert response.records == (AssistantMessage(content="restored"),)
-        assert shared.gate.states()[key].held_until == 0.0
-
-
-@pytest.mark.asyncio
-async def test_agy_exiting_mid_turn_is_a_disconnect(
-    shared: _Resources,
-    stub: _Stub,
-) -> None:
-    stub.script([_INIT, _step("agent_response", text="half", state="ACTIVE"), "EXIT"])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    with pytest.raises(DisconnectedError, match="agy exited"):
-        await _stream(model, Request(records=_HELLO))
-    await model.provider.aclose()
+    agy, stdout = agy_stream
+    if text:
+        stdout.feed_data(
+            (
+                json_dumps(_step("agent_response", text=text, state="ACTIVE")) + "\n"
+            ).encode(),
+        )
+    stdout.feed_eof()
+    turn = cli._Turn()
+    stream = agy.read(turn, mount=Mock())
+    if text:
+        assert await anext(stream) == TextChunk(text=text)
+    with pytest.raises(DisconnectedError, match=r"^agy exited before its answer$"):
+        await anext(stream)
+    assert turn.text == ([text] if text else [])
 
 
 @pytest.mark.asyncio
 async def test_agy_quiet_too_long_is_a_disconnect(
-    shared: _Resources,
-    stub: _Stub,
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(GoogleCLIModel, "quiet_sec", 0.05)
-    stub.script([_INIT, "WAIT never"])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    with pytest.raises(DisconnectedError, match=r"^agy went quiet for 0\.05 seconds$"):
-        await _stream(model, Request(records=_HELLO))
-    await model.provider.aclose()
-
-
-@pytest.mark.asyncio
-async def test_results_beside_a_new_message_start_a_fresh_agy(
-    shared: _Resources,
-    stub: _Stub,
-) -> None:
-    """A held call's results continue its turn only when they are all that is new."""
-    call = ToolCall(call_id="c1", name="Echo", arguments={"text": "x"})
-    shared.mount.calls.put_nowait(call)
-    stub.script(
-        [_INIT, _step("tool", state="ACTIVE", tool="call_mcp_tool")],
-        [_INIT, *_said("fresh")],
+    stdout = asyncio.StreamReader()
+    agy = cli._Agy(
+        Mock(stdout=stdout),
+        home=tmp_path,
+        started_with=(),
+        quiet_sec=GoogleCLIModel.quiet_sec,
     )
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    request = Request(records=_HELLO, tools=(_Echo(),))
-    held = _response(await _stream(model, request))
-    result = UncategorizedToolResult(call_id="c1", content="x")
-    records = (*_HELLO, *held.records, result, UserMessage(content="and this"))
-
-    done = _response(await _stream(model, Request(records=records, tools=(_Echo(),))))
-
-    assert done.records == (AssistantMessage(content="fresh"),)
-    assert len(stub.processes()) == 2
-    assert shared.mount.answered == []
-    await model.provider.aclose()
+    line = agy._line = asyncio.create_task(stdout.readline())
+    waited = AsyncMock(return_value=(set(), set()))
+    monkeypatch.setattr(asyncio, "wait", waited)
+    try:
+        with pytest.raises(
+            DisconnectedError,
+            match=r"^agy went quiet for 600 seconds$",
+        ):
+            await agy._next(Mock())
+        assert agy._line is line
+        waited.assert_awaited_once_with(
+            {line},
+            timeout=600.0,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        agy.close()
+        await asyncio.gather(line, return_exceptions=True)
 
 
 @pytest.mark.asyncio
-async def test_a_worn_agy_is_replaced_between_turns_not_within_one(
-    shared: _Resources,
-    stub: _Stub,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(GoogleCLIModel, "respawn_turns", 1)
-    call = ToolCall(call_id="c1", name="Echo", arguments={"text": "x"})
-    shared.mount.calls.put_nowait(call)
-    stub.script(
-        [
-            _INIT,
-            _step("tool", state="ACTIVE", tool="call_mcp_tool"),
-            "WAIT answered.0",
-            *_said("one"),
-        ],
-        [_INIT, *_said("two")],
+@pytest.mark.parametrize("late", [False, True])
+async def test_answer_forwards_only_results_in_record_order(late: bool) -> None:
+    first = ToolCall(call_id="first", name="Echo")
+    second = ToolCall(call_id="second", name="Echo")
+    first_result = UncategorizedToolResult(call_id="first", content="one")
+    second_result = UncategorizedToolResult(call_id="second", content="two")
+    agy = cli._Agy(
+        Mock(),
+        home=Path("/nowhere"),
+        started_with=(),
+        quiet_sec=1.0,
     )
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    tools = (_Echo(),)
-    held = _response(await _stream(model, Request(records=_HELLO, tools=tools)))
-    result = UncategorizedToolResult(call_id="c1", content="x")
-    records = (*_HELLO, *held.records, result)
-    first = _response(await _stream(model, Request(records=records, tools=tools)))
-    # The held call's result finished the first turn in its own agy.
-    assert len(stub.processes()) == 1
+    agy.saw(
+        _HELLO,
+        response=Response(
+            records=(first, second),
+            tokens=TokenCount(),
+            spend=TokenCost(),
+            stop_reason="tool_use",
+        ),
+        context_tokens=0,
+    )
+    answered = AsyncMock(side_effect=TimeoutError if late else None)
 
-    records = (*records, *first.records, UserMessage(content="next"))
-    second = _response(await _stream(model, Request(records=records, tools=tools)))
+    assert await agy.answer(
+        (
+            SystemMessage(content="note"),
+            second_result,
+            TurnContext(cwd="/work"),
+            first_result,
+        ),
+        mount=Mock(answer=answered),
+    ) is (not late)
 
-    assert second.records == (AssistantMessage(content="two"),)
-    assert len(stub.processes()) == 2
-    await model.provider.aclose()
+    expected = [call(second, second_result), call(first, first_result)]
+    assert answered.await_args_list == (expected[:1] if late else expected)
 
 
-@pytest.mark.asyncio
-async def test_a_tool_set_that_differs_in_its_schema_starts_a_fresh_agy(
-    shared: _Resources,
-    stub: _Stub,
-) -> None:
-    stub.script([_INIT, *_said("one")], [_INIT, *_said("two")])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    first = _response(await _stream(model, Request(records=_HELLO, tools=(_Echo(),))))
+def test_a_tool_schema_changes_the_session_identity() -> None:
+    original = _Echo()
     wider = _Echo(schema=MappingProxyType({"type": "object"}))
-    records = (*_HELLO, *first.records, UserMessage(content="again"))
 
-    await _stream(model, Request(records=records, tools=(wider,)))
-
-    assert len(stub.processes()) == 2
-    await model.provider.aclose()
-
-
-@pytest.mark.asyncio
-async def test_a_reply_that_is_json_but_no_object_is_passed_over(
-    shared: _Resources,
-    stub: _Stub,
-) -> None:
-    stub.script([_INIT, "[1]", *_said("hi")])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    response = _response(await _stream(model, Request(records=_HELLO)))
-    assert response.records == (AssistantMessage(content="hi"),)
-    await model.provider.aclose()
-
-
-@pytest.mark.asyncio
-async def test_agy_exiting_says_so_exactly(shared: _Resources, stub: _Stub) -> None:
-    stub.script([_INIT, "EXIT"])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
-    with pytest.raises(DisconnectedError, match=r"^agy exited before its answer$"):
-        await _stream(model, Request(records=_HELLO))
-    await model.provider.aclose()
+    assert cli._digest((original,)) == cli._digest((_Echo(),))
+    assert cli._digest((original,)) != cli._digest((wider,))
 
 
 @pytest.mark.asyncio
 async def test_steps_that_say_nothing_or_are_no_reply_add_no_text(
-    shared: _Resources,
-    stub: _Stub,
+    agy_stream: tuple[cli._Agy, asyncio.StreamReader],
 ) -> None:
-    stub.script(
-        [
-            _INIT,
-            _step("agent_response", state="ACTIVE"),
-            _step("planner", text="a plan"),
-            # A tool step that is done asks nothing of our server.
-            _step("tool", tool="view_file"),
-            {
-                "event": "step_update",
-                "step_update": {
-                    "step_type": "checkpoint",
-                    "usage": {"input_tokens": 4},
-                },
+    agy, stdout = agy_stream
+    lines = [
+        _INIT,
+        _step("agent_response", state="ACTIVE"),
+        _step("planner", text="a plan"),
+        # A tool step that is done asks nothing of our server.
+        _step("tool", tool="view_file"),
+        {
+            "event": "step_update",
+            "step_update": {
+                "step_type": "checkpoint",
+                "usage": {"input_tokens": 4},
             },
-            *_said("hi"),
-        ],
-    )
-    model = GoogleCLI(resources=shared)["gemini-flash"]
+        },
+        _step("user_input"),
+        _step("agent_response", text="hi", usage=(1, 1, 0)),
+        _result(),
+    ]
+    stdout.feed_data("".join(json_dumps(line) + "\n" for line in lines).encode())
+    stdout.feed_eof()
+    called = AsyncMock()
+    answered = AsyncMock()
+    turn = cli._Turn()
 
-    events = await _stream(model, Request(records=_HELLO))
-
-    assert events[:-1] == [TextChunk(text="hi")]
-    assert _response(events).tokens == TokenCount(request=5, response=1)
-    assert shared.mount.answered == []
-    await model.provider.aclose()
+    assert [
+        chunk
+        async for chunk in agy.read(
+            turn,
+            mount=Mock(called=called, answer=answered),
+        )
+    ] == [TextChunk(text="hi")]
+    assert turn.tokens == TokenCount(request=5, response=1)
+    called.assert_not_awaited()
+    answered.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_closing_lets_go_of_held_calls_and_tolerates_a_home_gone(
-    shared: _Resources,
-    stub: _Stub,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stub.script([_INIT, *_said("hi")])
-    model = GoogleCLI(resources=shared)["gemini-flash"]
+    released = AsyncMock()
+    pools = Mock(return_value=Mock(release=released))
+    cancelled = Mock()
+    mount = Mock(cancel=cancelled)
+    mounted = AsyncMock(return_value=mount)
+    unmounted = AsyncMock()
+    provider = GoogleCLI(
+        resources=Mock(
+            process_pool=pools,
+            tool_server=Mock(mount=mounted, unmount=unmounted),
+        ),
+    )
+    model = provider["gemini-flash"]
     await model.aclose()
-    await _stream(model, Request(records=_HELLO))
-    home = Path(stub.only("cwd")).parent
-    await asyncio.to_thread(shutil.rmtree, home)
-    before = shared.mount.cancelled
+    await model._mounted()
+    process = Mock()
+    agy = cli._Agy(
+        process,
+        home=tmp_path / "already-gone",
+        started_with=(),
+        quiet_sec=GoogleCLIModel.quiet_sec,
+    )
+    closed = Mock(wraps=agy.close)
+    monkeypatch.setattr(agy, "close", closed)
+    model._agy = agy
+    provider.started(model)
 
-    await model.provider.aclose()
+    await provider.aclose()
 
-    assert shared.mount.cancelled == before + 1
+    cancelled.assert_called_once_with()
+    closed.assert_called_once_with()
+    released.assert_awaited_once_with(process)
+    pools.assert_called_once_with("agy")
+    unmounted.assert_awaited_once_with(mount)
+    assert model._agy is None
+    assert model._mount is None
 
 
 @pytest.mark.parametrize(
@@ -1106,7 +1130,7 @@ def test_the_provider_serves_what_agy_offers() -> None:
 
 def test_an_attachment_costs_only_the_line_naming_it() -> None:
     model = GoogleCLI()["gemini-flash"]
-    picture = Attachment(mime_descriptor="image/png", data=_png(1600, 800))
+    picture = Attachment(mime_descriptor="image/png", data=b"not sent")
     named = "[an image/png attachment, which agy cannot send]"
     assert model.attachment_tokens(picture) == int(
         len(named) / model.capability.approx_chars_per_token,
@@ -1116,7 +1140,7 @@ def test_an_attachment_costs_only_the_line_naming_it() -> None:
 @pytest.mark.asyncio
 async def test_a_request_counts_as_the_text_agy_is_sent() -> None:
     model = GoogleCLI()["gemini-flash"]
-    picture = Attachment(mime_descriptor="image/png", data=_png(1600, 800))
+    picture = Attachment(mime_descriptor="image/png", data=b"not sent")
     plain = Request(system=("S",), records=(UserMessage(content="look"),))
     pictured = Request(
         system=("S",),
@@ -1129,11 +1153,31 @@ async def test_a_request_counts_as_the_text_agy_is_sent() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_provider_given_no_resources_closes_its_own() -> None:
-    provider = GoogleCLI()
-    client = provider.resources.http
+@pytest.mark.parametrize("owned", [False, True], ids=["shared", "owned"])
+async def test_a_provider_closes_started_models_before_only_its_own_resources(
+    monkeypatch: pytest.MonkeyPatch,
+    owned: bool,
+) -> None:
+    closed: list[str] = []
+    close_resources = AsyncMock(side_effect=partial(closed.append, "resources"))
+    resources = Mock(aclose=close_resources)
+    built = Mock(return_value=resources)
+    monkeypatch.setattr(cli, "SharedResources", built)
+    provider = GoogleCLI() if owned else GoogleCLI(resources=resources)
+    close_model = AsyncMock(side_effect=partial(closed.append, "model"))
+    model = Mock(spec=GoogleCLIModel, aclose=close_model)
+    provider.started(model)
+
+    assert provider.resources is resources
+    assert built.call_args_list == ([call()] if owned else [])
+    close_model.assert_not_awaited()
+    close_resources.assert_not_awaited()
+
     await provider.aclose()
-    assert client.is_closed
+
+    close_model.assert_awaited_once_with()
+    assert close_resources.await_args_list == ([call()] if owned else [])
+    assert closed == (["model", "resources"] if owned else ["model"])
 
 
 _HELLO: tuple[UserMessage, ...] = (UserMessage(content="hello"),)
@@ -1175,153 +1219,11 @@ def _result(*, status: str = "SUCCESS", error: str = "") -> dict[str, object]:
     return {"event": "result", "result": result}
 
 
-def _said(text: str, *, tokens: tuple[int, int] = (1, 1)) -> list[object]:
-    """Return the lines of a turn in which the model says ``text``."""
-    return [
-        _step("user_input"),
-        _step("agent_response", text=text, usage=(*tokens, 0)),
-        _result(),
-    ]
-
-
-async def _stream(
-    model: GoogleCLIModel,
-    request: Request,
-    *,
-    chunks: asyncio.Queue[TextChunk] | None = None,
-) -> list[TextChunk | Response]:
-    events: list[TextChunk | Response] = []
-    async for event in model.stream(request):
-        events.append(event)
-        if isinstance(event, TextChunk) and chunks is not None:
-            chunks.put_nowait(event)
-    return events
-
-
-def _response(events: Sequence[TextChunk | Response]) -> Response:
-    response = events[-1]
-    assert isinstance(response, Response)
-    return response
-
-
-def _png(width: int, height: int) -> bytes:
-    out = io.BytesIO()
-    Image.new("RGB", (width, height), "red").save(out, format="PNG")
-    return out.getvalue()
-
-
-@dataclass(slots=True, kw_only=True)
-class _Stub:
-    """The directory the stub ``agy`` runs from, and what it recorded there."""
-
-    dir: Path
-    next_turn: int = 0
-
-    def script(self, *turns: Sequence[object]) -> None:
-        """Write each turn, as the lines the stub prints for the next line it reads."""
-        for turn in turns:
-            lines = [
-                line if isinstance(line, str) else json_dumps(line) for line in turn
-            ]
-            (self.dir / f"turn.{self.next_turn}").write_text("\n".join(lines) + "\n")
-            self.next_turn += 1
-
-    def said(self) -> list[dict[str, object]]:
-        path = self.dir / "said"
-        lines = path.read_text().splitlines() if path.exists() else []
-        return [json_loads(line.partition(" ")[2], dict[str, object]) for line in lines]
-
-    def processes(self) -> list[Path]:
-        return sorted(self.dir.glob("argv.*"))
-
-    def only(self, kind: str) -> str:
-        (path,) = self.dir.glob(f"{kind}.*")
-        return (
-            path.read_text().removesuffix("\n") if kind == "cwd" else path.read_text()
-        )
-
-    def copied(self) -> Path:
-        """Return the copy of the ``.gemini`` the only process started with."""
-        (path,) = self.dir.glob("gemini.*")
-        return path
-
-
-@dataclass(slots=True, kw_only=True)
-class _Mount:
-    """Tools offered to the stub; a call answered writes the file it waits for."""
-
-    stub: _Stub
-    url: str = "http://127.0.0.1:1/mount"
-    calls: asyncio.Queue[ToolCall] = field(default_factory=asyncio.Queue[ToolCall])
-    call_waiting: asyncio.Event = field(default_factory=asyncio.Event)
-    offered: list[tuple[str, ...]] = field(default_factory=list[tuple[str, ...]])
-    answered: list[tuple[ToolCall, AnyToolResult]] = field(
-        default_factory=list[tuple[ToolCall, "AnyToolResult"]],
-    )
-    late: bool = False
-    """Whether a held call has stopped waiting, so answering it times out."""
-
-    cancelled: int = 0
-    """How many times every held call was let go."""
-
-    def offer(self, tools: Sequence[Tool]) -> None:
-        self.offered.append(tuple(tool.name for tool in tools))
-
-    async def called(self) -> ToolCall:
-        self.call_waiting.set()
-        return await self.calls.get()
-
-    async def answer(self, call: ToolCall, result: AnyToolResult) -> None:
-        if self.late:
-            raise TimeoutError
-        (self.stub.dir / f"answered.{len(self.answered)}").touch()
-        self.answered.append((call, result))
-
-    def cancel(self) -> None:
-        self.cancelled += 1
-
-
-class _ToolServer(AsyncResource):
-    """One mount, so a test can read what reached it."""
-
-    def __init__(self, *, mounted: _Mount) -> None:
-        self.mounted = mounted
-
-    async def mount(self) -> _Mount:
-        return self.mounted
-
-    async def unmount(self, mount: ToolMount) -> None:
-        del mount
-
-
-class _Resources(AsyncResource):
-    """Real process pools, beside a tool server that runs no MCP."""
-
-    def __init__(self, *, stub: _Stub) -> None:
-        self._shared = SharedResources()
-        self.gate = self._shared.gate
-        self.mount = _Mount(stub=stub)
-        self.server = _ToolServer(mounted=self.mount)
-
-    @property
-    def http(self) -> httpx2.AsyncClient:
-        return self._shared.http
-
-    def process_pool(self, name: str) -> ProcessPool:
-        assert name == "agy"
-        return self._shared.process_pool(name)
-
-    @property
-    def tool_server(self) -> _ToolServer:
-        return self.server
-
-    @override
-    async def aclose(self) -> None:
-        await self._shared.aclose()
-
-    @override
-    async def __aenter__(self) -> Self:
-        return self
+async def _reply(turn: cli._Turn, *, mount: ToolMount) -> AsyncIterator[TextChunk]:
+    del mount
+    turn.text.append("reply")
+    turn.tokens = TokenCount(request=15, response=2, cache_read=10)
+    yield TextChunk(text="reply")
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

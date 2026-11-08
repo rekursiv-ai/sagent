@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import asyncio
 import contextlib
@@ -58,12 +58,7 @@ from sagent.model.scripted import (
 )
 from sagent.providers.catalog import ModelCatalog
 from sagent.session.jsonl import JsonlJournal, read_record
-from sagent.session.types import (
-    AgentToAgentMessage,
-    AnyToolResult,
-    ReadResult,
-    RemoteToolResult,
-)
+from sagent.session.types import AnyToolResult, ReadResult, RemoteToolResult
 from sagent.tools import remote
 from sagent.tools.read import Read
 from sagent.tools.remote import (
@@ -119,15 +114,14 @@ async def connection() -> _Connection:
 
 
 @pytest.fixture
-def team(tmp_path: Path) -> Team:
-    members = Team(catalog=ModelCatalog(factories={}))
-    members.join(
-        Agent(
-            model=ScriptedProvider()["scripted"],
-            tool_context=ToolContext(cwd=tmp_path),
-        ),
+def team() -> MagicMock:
+    return MagicMock(
+        spec=Team,
+        __iter__=Mock(side_effect=lambda: iter(("Agent",))),
+        __contains__=Mock(side_effect={"Agent"}.__contains__),
+        changes=set(),
+        peer_messaging=Mock(return_value=True),
     )
-    return members
 
 
 _URL = f"sagent://gpu1:7777/SHA256:{'a' * 64}/t"
@@ -157,14 +151,6 @@ def _welcome(
     tools: Mapping[str, str] | None = None,
 ) -> Welcome:
     return Welcome(name="gpu1", resumed=resumed, calls=calls, tools=tools or {})
-
-
-def _told(team: Team) -> list[tuple[str | None, str | None]]:
-    return [
-        (m.sender, m.content)
-        for m in team["Agent"].runtime.inbox.drain_nowait()
-        if isinstance(m, AgentToAgentMessage)
-    ]
 
 
 @pytest.mark.asyncio
@@ -612,14 +598,24 @@ async def test_read_handles_tool_changes_and_ignores_unsolicited_frames(
         ToolsChanged(tools={"Train": "e"}, peer_messaging=True),
         None,
     ]
+
+    async def wait(
+        reading: Awaitable[Message | None],
+        seconds: float,
+    ) -> Message | None:
+        message = await reading
+        assert seconds == SILENT_PINGS * 0.5
+        return message
+
     receive = AsyncMock(side_effect=messages)
     monkeypatch.setattr(remote, "received", receive)
+    monkeypatch.setattr(asyncio, "wait_for", wait)
     await endpoint._read(connection.reader, connection.writer)
     assert endpoint.tools == {"Train": "e"}
     assert endpoint.changes == 1
     assert endpoint._peer_messaging
     assert connection.lines == [encoded(Peers(labels=("Agent@laptop",)))]
-    assert receive.await_count == len(messages)
+    assert receive.await_args_list == [call(connection.reader)] * len(messages)
     assert endpoint._silence_sec == SILENT_PINGS * 0.5
 
 
@@ -649,10 +645,12 @@ async def test_a_server_silent_past_its_pings_ends_the_read(
 async def test_duplicate_notes_are_delivered_once_and_acknowledged_every_time(
     endpoint: Endpoint,
     connection: _Connection,
-    team: Team,
+    team: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    receive = Mock(side_effect=[None, ValueError("gone")])
+    team.receive = receive
     note = Note(
         id="n",
         sender="w",
@@ -681,7 +679,10 @@ async def test_duplicate_notes_are_delivered_once_and_acknowledged_every_time(
     )
     with caplog.at_level(logging.WARNING, logger=remote.__name__):
         await endpoint._read(connection.reader, connection.writer)
-    assert _told(team) == [("w@gpu1", "seen")]
+    assert receive.call_args_list == [
+        call(sender="w@gpu1", recipient="Agent", content="seen", kind="reply"),
+        call(sender="w@gpu1", recipient="gone", content="hi", kind="ask"),
+    ]
     assert endpoint._seen_notes == {"n", "lost"}
     assert caplog.messages == ["note from w@gpu1 to 'gone', who is not here"]
     assert connection.lines == [
@@ -695,7 +696,7 @@ async def test_duplicate_notes_are_delivered_once_and_acknowledged_every_time(
 async def test_refusal_withdraws_the_peer_and_notifies_only_a_present_sender(
     endpoint: Endpoint,
     connection: _Connection,
-    team: Team,
+    team: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     *,
@@ -707,14 +708,14 @@ async def test_refusal_withdraws_the_peer_and_notifies_only_a_present_sender(
             team,
             local_link(socket_address(tmp_path / "daemon.sock")),
         )
-        team.join(team.leave("Agent"), label="Agent@laptop")
-    sender = "Agent@laptop"
+    sender = "Agent@laptop" if local else "Agent"
     recipient = "worker" if local else "worker@gpu1"
-    team.reach(recipient, relay=endpoint)
-    team.send(sender if local else "Agent", recipient, "look")
+    present = {sender} if sender_present else set[str]()
+    team.__contains__ = Mock(side_effect=present.__contains__)
+    withdraw, tell = Mock(), Mock()
+    team.unreach, team.tell = withdraw, tell
+    endpoint.send(sender=sender, recipient=recipient, content="look", kind="ask")
     (note,) = endpoint._notes.values()
-    if not sender_present:
-        team.leave(sender if local else "Agent")
     monkeypatch.setattr(
         remote,
         "received",
@@ -727,17 +728,16 @@ async def test_refusal_withdraws_the_peer_and_notifies_only_a_present_sender(
         ),
     )
     await endpoint._read(connection.reader, connection.writer)
-    assert recipient not in team.outside
-    assert team.owes(recipient) == {}
+    withdraw.assert_called_once_with(recipient)
     assert endpoint._notes == {}
     if sender_present:
-        label = sender if local else "Agent"
-        messages = team[label].runtime.inbox.drain_nowait()
-        assert [
-            (m.sender, m.content)
-            for m in messages
-            if isinstance(m, AgentToAgentMessage)
-        ] == [(recipient, "[message refused] withdrawn")]
+        tell.assert_called_once_with(
+            recipient,
+            recipient=sender,
+            content="[message refused] withdrawn",
+        )
+    else:
+        tell.assert_not_called()
     assert connection.lines == []
 
 
@@ -745,11 +745,13 @@ async def test_refusal_withdraws_the_peer_and_notifies_only_a_present_sender(
 async def test_peer_updates_replace_presence_without_stealing_local_labels(
     endpoint: Endpoint,
     connection: _Connection,
-    team: Team,
+    team: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    team.join(Agent(model=ScriptedProvider()["scripted"]), label="u@gpu1")
+    team.__contains__ = Mock(side_effect={"Agent", "u@gpu1"}.__contains__)
+    reach, withdraw = Mock(), Mock()
+    team.reach, team.unreach = reach, withdraw
     monkeypatch.setattr(
         remote,
         "received",
@@ -757,13 +759,19 @@ async def test_peer_updates_replace_presence_without_stealing_local_labels(
     )
     with caplog.at_level(logging.WARNING, logger=remote.__name__):
         await endpoint._read(connection.reader, connection.writer)
-    assert team.outside == ["v@gpu1"]
-    assert "u@gpu1" in team
+    assert reach.call_args_list == [
+        call("v@gpu1", relay=endpoint),
+        call("v@gpu1", relay=endpoint),
+    ]
+    withdraw.assert_called_once_with("u@gpu1")
+    assert endpoint._peers == ("v@gpu1",)
     assert caplog.messages == ["gpu1 has an agent 'u@gpu1', a label taken here"]
     endpoint._welcome(_welcome(resumed=True))
-    assert team.outside == ["v@gpu1"]
+    withdraw.assert_called_once_with("u@gpu1")
+    assert endpoint._peers == ("v@gpu1",)
     endpoint._welcome(_welcome())
-    assert team.outside == []
+    assert withdraw.call_args_list == [call("u@gpu1"), call("v@gpu1")]
+    assert endpoint._peers == ()
 
 
 @pytest.mark.parametrize("local", [False, True])
@@ -818,12 +826,13 @@ async def test_ack_forgets_only_the_matching_note(
 async def test_local_notes_preserve_a_recipient_with_a_machine_suffix(
     endpoint: Endpoint,
     connection: _Connection,
-    team: Team,
+    team: MagicMock,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     endpoint = _endpoint_on(team, local_link(socket_address(tmp_path / "daemon.sock")))
-    team.join(team.leave("Agent"), label="Agent@laptop")
+    receive = Mock()
+    team.receive = receive
     note = Note(
         id="n",
         sender="worker#other",
@@ -833,15 +842,17 @@ async def test_local_notes_preserve_a_recipient_with_a_machine_suffix(
     )
     monkeypatch.setattr(remote, "received", AsyncMock(side_effect=[note, None]))
     await endpoint._read(connection.reader, connection.writer)
-    messages = team["Agent@laptop"].runtime.inbox.drain_nowait()
-    assert [
-        (m.sender, m.content) for m in messages if isinstance(m, AgentToAgentMessage)
-    ] == [("worker#other", "hi")]
+    receive.assert_called_once_with(
+        sender="worker#other",
+        recipient="Agent@laptop",
+        content="hi",
+        kind="ask",
+    )
 
 
 @pytest.mark.asyncio
 async def test_session_owns_endpoint_tasks_and_removes_its_presence_listener(
-    team: Team,
+    team: MagicMock,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session = RemoteSession([], team=team)
@@ -866,10 +877,12 @@ async def test_session_owns_endpoint_tasks_and_removes_its_presence_listener(
     goodbye, publish = Mock(), Mock()
     monkeypatch.setattr(endpoint, "bye", goodbye)
     monkeypatch.setattr(endpoint, "publish", publish)
+    changes: set[Callable[[], None]] = set()
+    team.changes = changes
     session._endpoints = [endpoint]
     async with session:
         await started.wait()
-        assert session.publish in team.changes
+        assert session.publish in changes
         session.publish()
         publish.assert_called_once_with()
         owned = list(session._tasks.values())
@@ -877,7 +890,7 @@ async def test_session_owns_endpoint_tasks_and_removes_its_presence_listener(
     assert cancelled.is_set()
     assert all(task.done() for task in owned)
     assert session._tasks == {}
-    assert session.publish not in team.changes
+    assert session.publish not in changes
 
 
 def test_sessions_name_each_endpoint_and_the_resumed_conversation(
@@ -1913,7 +1926,8 @@ async def test_set_links_while_closing_starts_nothing(
 
 
 @pytest.mark.asyncio
-async def test_set_links_drops_the_agents_of_a_removed_name(team: Team) -> None:
+async def test_set_links_drops_the_agents_of_a_removed_name() -> None:
+    team = Team(catalog=ModelCatalog(factories={}))
     async with (
         _plain(peers=("Agent_0",)) as plain,
         _plain() as other,

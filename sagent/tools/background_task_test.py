@@ -264,7 +264,10 @@ async def test_list_without_jobs() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_shows_each_background_job() -> None:
+async def test_list_shows_each_background_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(time, "time", lambda: 100.0)
     table = FakeTable(
         listed={
             "fg": _job("Read", "running", 1),
@@ -296,9 +299,13 @@ async def test_cancel_cancels_the_job() -> None:
 
 
 @pytest.mark.asyncio
-async def test_foreground_returns_the_jobs_result() -> None:
+@pytest.mark.parametrize("listed", [False, True], ids=["completed", "live"])
+async def test_foreground_returns_the_jobs_result(listed: bool) -> None:
     real = UncategorizedToolResult(call_id="c1", content="done", is_error=True)
-    table = FakeTable(listed={"c1": _job("Bash", "sleeping", 0)}, results={"c1": real})
+    table = FakeTable(
+        listed={"c1": _job("Bash", "sleeping", 0)} if listed else {},
+        results={"c1": real},
+    )
     result = await BackgroundTask().manage(
         table,
         {"operation": "foreground", "id": "c1"},

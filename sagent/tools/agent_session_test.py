@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import partial
 from typing import TYPE_CHECKING, override
+from unittest.mock import Mock
 
 import asyncio
 import threading
@@ -32,6 +33,7 @@ from sagent.session.types import (
     UncategorizedToolResult,
     UserMessage,
 )
+from sagent.tools import agent_session
 from sagent.tools.agent_session import AgentSession
 from sagent.tools.types import ToolContext
 
@@ -133,7 +135,7 @@ def test_the_summary_names_the_action_and_edits_run_alone(
     summary: str,
     key: str | None,
 ) -> None:
-    _, tool = _setup(tmp_path)
+    tool = AgentSession(team=Mock(spec=Team))
     assert tool.summary(arguments) == summary
     assert tool.serialize_key(ToolContext(cwd=tmp_path), arguments) == key
 
@@ -201,8 +203,11 @@ async def test_an_empty_context_says_so(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_read_gives_each_entry_whole_once(tmp_path: Path) -> None:
-    _, tool = _setup(tmp_path)
+async def test_read_gives_each_entry_whole_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    agent, tool = _setup(tmp_path)
 
     text = await _ask(tool, tmp_path, {"action": "read", "ids": [6, 0, 6]})
     result = await _ask(tool, tmp_path, {"action": "read", "ids": [2]})
@@ -211,26 +216,28 @@ async def test_read_gives_each_entry_whole_once(tmp_path: Path) -> None:
         "#0 user message (2 chars): go\ngo\n\n"
         "#6 message from Agent_0 (9 chars): peer says\npeer says"
     )
-    assert result.startswith("#2 result of Read (4,000 chars): ")
+    assert result == f"#2 result of Read (4,000 chars): {'a' * 80}...\n{'a' * 4_000}"
+
+    failure = ValueError("invalid entry")
+    picked = Mock(side_effect=failure)
+    monkeypatch.setattr(agent_session, "_picked", picked)
+    with pytest.raises(ValueError, match="invalid entry") as caught:
+        await _ask(tool, tmp_path, {"action": "read", "ids": [2]})
+    assert caught.value is failure
+    picked.assert_called_once_with(agent.runtime.context().messages, (2,))
 
 
 @pytest.mark.parametrize(
     ("ids", "match"),
     [
         ([], r"^Name the entries in 'ids'; list shows them\.$"),
-        ([9], r"No entry #9; your context has 9\."),
-        ([-1], "No entry #-1"),
+        ([1], r"^No entry #1; your context has 1\.$"),
+        ([-1], r"^No entry #-1; your context has 1\.$"),
     ],
 )
-@pytest.mark.asyncio
-async def test_ids_must_name_entries(
-    tmp_path: Path,
-    ids: list[PlainTree],
-    match: str,
-) -> None:
-    _, tool = _setup(tmp_path)
+def test_ids_must_name_entries(ids: list[int], match: str) -> None:
     with pytest.raises(ValueError, match=match):
-        _ = await _ask(tool, tmp_path, {"action": "read", "ids": ids})
+        agent_session._picked([UserMessage(content="x")], ids)
 
 
 @pytest.mark.asyncio

@@ -6,6 +6,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast, override
+from unittest.mock import (
+    Mock,
+    call as mock_call,
+)
 
 import logging
 import time
@@ -48,7 +52,7 @@ from sagent.tools.read import Read
 from sagent.tools.write import Write
 from sagent.tui.recording import RecordingPrinter
 from sagent.tui.render import Scrollback, call_header, error_text, show_result
-from sagent.tui.types import CommandOutput, Header
+from sagent.tui.types import CommandOutput, Header, Printer
 
 
 if TYPE_CHECKING:
@@ -175,14 +179,23 @@ def test_held_prose_past_the_cap_renders_only_its_whole_lines() -> None:
     assert printer.said == [("markdown", "line one"), ("markdown", "line two")]
 
 
-def test_held_text_past_the_cap_renders_unfinished() -> None:
-    render, printer = _renderer(flush_chars=10)
-    render(types.ModelResponsePartial(text="```\n" + "x" * 6))
-    assert printer.said == []
+@pytest.mark.parametrize("tail", ["", "z"], ids=["empty-tail", "held-tail"])
+def test_held_text_past_the_cap_renders_unfinished(tail: str) -> None:
+    markdown, note = Mock(), Mock()
+    printer = Mock(spec=Printer, markdown=markdown, note=note, show_thinking=False)
+    render = Scrollback(printer, tools={}, flush_chars=4)
+    render(types.ModelResponsePartial(text="```\n"))
+    markdown.assert_not_called()
     render(types.ModelResponsePartial(text="y"))
-    assert printer.said == [("markdown", "```\nxxxxxxy")]
-    render(types.ModelResponsePartial(text="z"))
-    assert printer.said == [("markdown", "```\nxxxxxxy")]
+    markdown.assert_called_once_with("```\ny")
+    render(types.ModelResponsePartial(text=tail))
+    markdown.assert_called_once_with("```\ny")
+    render(types.CompactStarted())
+    assert markdown.call_args_list == [
+        mock_call("```\ny"),
+        *([mock_call(tail)] if tail else []),
+    ]
+    note.assert_called_once_with("[compacting history…]")
 
 
 @pytest.mark.parametrize(

@@ -9,8 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-import re
-
 from wesearch.fetch import FetchSession
 from wesearch.paper.authors import AuthorSearchResult
 from wesearch.paper.details import Listing
@@ -55,11 +53,13 @@ def test_summary_names_what_the_call_does(
     arguments: dict[str, PlainTree],
     label: str,
 ) -> None:
-    assert _tool().summary(arguments) == label
+    assert PaperAuthor().summary(arguments) == label
 
 
 def test_lookups_run_beside_anything(tmp_path: Path) -> None:
-    assert _tool().serialize_key(ToolContext(cwd=tmp_path), {"query": "x"}) is None
+    assert (
+        PaperAuthor().serialize_key(ToolContext(cwd=tmp_path), {"query": "x"}) is None
+    )
 
 
 @pytest.mark.asyncio
@@ -73,7 +73,7 @@ async def test_a_name_finds_authors_and_is_kept(
         "search_authors",
         AuthorSearchResult(records=[_ADA, _BOB], total=9),
     )
-    tool = _tool()
+    tool = PaperAuthor()
     first = await tool.call(
         ToolContext(cwd=tmp_path, fetch_session=session),
         {"query": " Ada ", "limit": 2},
@@ -100,7 +100,7 @@ async def test_a_name_that_finds_no_one_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _fake(monkeypatch, "search_authors", AuthorSearchResult(records=[], total=0))
-    result = await _tool().call(ToolContext(cwd=tmp_path), {"query": "Nobody"})
+    result = await PaperAuthor().call(ToolContext(cwd=tmp_path), {"query": "Nobody"})
     assert result.text() == "(no results)"
 
 
@@ -111,7 +111,7 @@ async def test_ids_are_looked_up_in_one_batch_and_kept_when_all_are_found(
 ) -> None:
     session = FetchSession()
     calls = _fake(monkeypatch, "author_metadata", [_ADA, _BOB])
-    tool = _tool()
+    tool = PaperAuthor()
     first = await tool.call(
         ToolContext(cwd=tmp_path, fetch_session=session),
         {"ids": "1741101, 2262347"},
@@ -136,10 +136,11 @@ async def test_an_id_not_found_says_so_and_is_asked_again(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _fake(monkeypatch, "author_metadata", [_ADA, None], [_ADA, None])
-    tool = _tool()
+    tool = PaperAuthor()
     for _ in range(2):
         result = await tool.call(ToolContext(cwd=tmp_path), {"ids": ["1741101", "9"]})
         assert result.text() == f"{format_author_block(_ADA)}\n\n9: not found"
+        assert result.call_id == ""
     assert len(calls) == 2
 
 
@@ -155,7 +156,7 @@ async def test_an_authors_papers_come_with_every_filter_and_are_kept(
         Listing(records=[_PAPER], complete=False),
         Listing(records=[], complete=True),
     )
-    tool = _tool()
+    tool = PaperAuthor()
     arguments: dict[str, PlainTree] = {
         "ids": "1741101",
         "operation": "papers",
@@ -197,7 +198,7 @@ async def test_a_complete_listing_has_no_notice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _fake(monkeypatch, "author_papers", Listing(records=[_PAPER], complete=True))
-    result = await _tool().call(
+    result = await PaperAuthor().call(
         ToolContext(cwd=tmp_path),
         {"ids": "1741101", "operation": "papers"},
     )
@@ -220,7 +221,7 @@ async def test_a_failed_lookup_is_an_error_and_is_not_kept(
     arguments: dict[str, PlainTree],
 ) -> None:
     calls = _fake(monkeypatch, name, PaperError("S2 is down"), PaperError("still down"))
-    tool = _tool()
+    tool = PaperAuthor()
     first = await tool.call(ToolContext(cwd=tmp_path), arguments)
     again = await tool.call(ToolContext(cwd=tmp_path), arguments)
     assert (first.is_error, first.text()) == (True, "S2 is down")
@@ -232,18 +233,21 @@ async def test_a_failed_lookup_is_an_error_and_is_not_kept(
 @pytest.mark.parametrize(
     ("arguments", "message"),
     [
-        ({}, "Set exactly one of 'query' or 'ids'."),
+        ({}, r"^Set exactly one of 'query' or 'ids'\.$"),
         ({"query": "  ", "ids": []}, "Set exactly one of 'query' or 'ids'."),
         ({"query": "Ada", "ids": "1741101"}, "Set exactly one of 'query' or 'ids'."),
         (
             {"query": "Ada", "operation": "papers"},
-            "'operation=papers' needs exactly one id",
+            r"^'operation=papers' needs exactly one id in 'ids'\.$",
         ),
         (
             {"ids": ["1", "2"], "operation": "papers"},
             "'operation=papers' needs exactly one id",
         ),
-        ({"ids": "1", "year_from": 2000}, "only apply to operation='papers'"),
+        (
+            {"ids": "1", "year_from": 2000},
+            r"^'year_from' / 'year_to' only apply to operation='papers'\.$",
+        ),
         ({"query": "Ada", "year_to": 2000}, "only apply to operation='papers'"),
         (
             {"ids": "1", "operation": "papers", "year_from": 2021, "year_to": 2020},
@@ -269,32 +273,8 @@ async def test_arguments_that_contradict_are_refused_before_any_lookup(
         for name in ("search_authors", "author_metadata", "author_papers")
     ]
     with pytest.raises(ValueError, match=message):
-        await _tool().call(ToolContext(cwd=tmp_path), arguments)
+        await PaperAuthor().call(ToolContext(cwd=tmp_path), arguments)
     assert calls == [[], [], []]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("arguments", "message"),
-    [
-        ({}, "Set exactly one of 'query' or 'ids'."),
-        (
-            {"query": "Ada", "operation": "papers"},
-            "'operation=papers' needs exactly one id in 'ids'.",
-        ),
-        (
-            {"ids": "1", "year_from": 2000},
-            "'year_from' / 'year_to' only apply to operation='papers'.",
-        ),
-    ],
-)
-async def test_each_contradiction_says_exactly_what_it_is(
-    tmp_path: Path,
-    arguments: dict[str, PlainTree],
-    message: str,
-) -> None:
-    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
-        await _tool().call(ToolContext(cwd=tmp_path), arguments)
 
 
 @pytest.mark.asyncio
@@ -313,7 +293,7 @@ async def test_each_lookup_is_kept_apart_from_the_others(
         "author_papers",
         Listing(records=[_PAPER, _PAPER], complete=True),
     )
-    tool = _tool()
+    tool = PaperAuthor()
     context = ToolContext(cwd=tmp_path)
     found = await tool.call(context, {"query": "1741101"})
     ada = await tool.call(context, {"ids": "1741101"})
@@ -342,7 +322,7 @@ async def test_another_id_or_abstract_cut_is_another_lookup(
         Listing(records=[_PAPER], complete=True),
         Listing(records=[_PAPER], complete=True),
     )
-    tool = _tool()
+    tool = PaperAuthor()
     context = ToolContext(cwd=tmp_path)
     ada = await tool.call(context, {"ids": "1741101"})
     bob = await tool.call(context, {"ids": "2262347"})
@@ -363,22 +343,12 @@ async def test_another_id_or_abstract_cut_is_another_lookup(
 
 
 @pytest.mark.asyncio
-async def test_a_partial_lookup_has_no_call_id(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _fake(monkeypatch, "author_metadata", [None])
-    result = await _tool().call(ToolContext(cwd=tmp_path), {"ids": "9"})
-    assert (result.text(), result.call_id) == ("9: not found", "")
-
-
-@pytest.mark.asyncio
 async def test_equal_years_bound_one_year(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = _fake(monkeypatch, "author_papers", Listing(records=[], complete=True))
-    await _tool().call(
+    await PaperAuthor().call(
         ToolContext(cwd=tmp_path),
         {"ids": "1", "operation": "papers", "year_from": 2020, "year_to": 2020},
     )
@@ -393,10 +363,6 @@ class _Call:
 
     args: tuple[object, ...]
     kwargs: dict[str, object]
-
-
-def _tool() -> PaperAuthor:
-    return PaperAuthor()
 
 
 def _fake(

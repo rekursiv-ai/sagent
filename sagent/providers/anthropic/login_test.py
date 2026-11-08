@@ -2,19 +2,17 @@
 
 from __future__ import annotations
 
+from asyncio.subprocess import Process
 from dataclasses import dataclass, field
-from functools import partial
-from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, NoReturn, override
+from typing import TYPE_CHECKING, cast, override
+from unittest.mock import AsyncMock, Mock, call
 from urllib.parse import parse_qs, urlparse
 
 import asyncio
 import base64
-import fcntl
 import getpass
 import hashlib
-import os
 import re
 import stat
 
@@ -23,6 +21,7 @@ from treekle import ReadError, from_plain, json_dumps, json_loads
 import httpx2
 import pytest
 
+from sagent.lib.posix.child import Child
 from sagent.model.exceptions import AuthError
 from sagent.providers.anthropic import login
 from sagent.providers.anthropic.login import ClaudeLogin
@@ -31,8 +30,8 @@ from sagent.providers.testing import refuse_browsers
 
 
 if TYPE_CHECKING:
-    from asyncio.subprocess import Process
     from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
 
 @pytest.fixture(autouse=True)
@@ -53,6 +52,14 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     now = [_NOW]
     monkeypatch.setattr(login, "time", SimpleNamespace(time=lambda: now[0]))
     return now
+
+
+@pytest.fixture
+def authorization(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Supply a browser code at the authorization boundary."""
+    authorized = AsyncMock(return_value=("the-code", "http://localhost:4321/callback"))
+    monkeypatch.setattr(login, "_browser_code", authorized)
+    return authorized
 
 
 def _store(
@@ -321,13 +328,17 @@ async def test_the_credentials_file_is_never_readable_by_others(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
-async def test_a_first_save_makes_a_private_directory(tmp_path: Path) -> None:
+async def test_a_first_save_makes_a_private_directory(
+    tmp_path: Path,
+    authorization: AsyncMock,
+) -> None:
     path = tmp_path / "home" / ".claude" / ".credentials.json"
     server = _Server(
         replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [httpx2.Response(500)]},
     )
     async with _Served(server) as shared:
-        await _sign_in(ClaudeLogin(path, resources=shared), browser=_Browser())
+        await ClaudeLogin(path, resources=shared).sign_in()
+    authorization.assert_awaited_once()
     assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
     lock = path.with_suffix(".lock")
     assert stat.S_IMODE(lock.stat().st_mode) == 0o600
@@ -335,28 +346,53 @@ async def test_a_first_save_makes_a_private_directory(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_another_process_holding_the_lock_is_waited_for(tmp_path: Path) -> None:
+async def test_refresh_waits_for_lock_admission_before_exchanging_tokens(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     path = tmp_path / ".credentials.json"
     _store(path, access="at-1", expires_in_sec=0.0)
+    requested, admitted = asyncio.Event(), asyncio.Event()
+
+    async def enter() -> None:
+        requested.set()
+        await admitted.wait()
+
+    entered = AsyncMock(side_effect=enter)
+    exited = AsyncMock(return_value=False)
+    locked = Mock(return_value=Mock(__aenter__=entered, __aexit__=exited))
+    monkeypatch.setattr(login, "file_lock", locked)
     server = _Server(replies={_GRANT_URL: [_granted("at-2")]})
-    fd = os.open(path.with_suffix(".lock"), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
-        async with _Served(server) as shared:
-            renewing = asyncio.ensure_future(
-                ClaudeLogin(path, resources=shared).token(),
+    async with _Served(server) as shared:
+        waiting = asyncio.create_task(requested.wait())
+        renewing = asyncio.create_task(ClaudeLogin(path, resources=shared).token())
+        try:
+            done, _ = await asyncio.wait(
+                (waiting, renewing),
+                return_when=asyncio.FIRST_COMPLETED,
             )
-            await asyncio.sleep(0.05)
+            assert waiting in done
+            locked.assert_called_once_with(path.with_suffix(".lock"))
             assert not renewing.done()
             assert server.requests == []
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            exited.assert_not_awaited()
+            admitted.set()
             assert await renewing == "at-2"
-    finally:
-        os.close(fd)
+        finally:
+            waiting.cancel()
+            renewing.cancel()
+            await asyncio.gather(waiting, renewing, return_exceptions=True)
+    entered.assert_awaited_once_with()
+    exited.assert_awaited_once_with(None, None, None)
+    assert len(server.requests) == 1
+    assert _oauth(path)["accessToken"] == "at-2"
 
 
 @pytest.mark.asyncio
-async def test_sign_in_takes_the_code_the_browser_brings_back(tmp_path: Path) -> None:
+async def test_sign_in_exchanges_the_authorized_code_and_stores_its_plan(
+    tmp_path: Path,
+    authorization: AsyncMock,
+) -> None:
     path = tmp_path / ".credentials.json"
     profile = {"organization": {"organization_type": "max", "rate_limit_tier": "t20"}}
     server = _Server(
@@ -365,26 +401,13 @@ async def test_sign_in_takes_the_code_the_browser_brings_back(tmp_path: Path) ->
             _PROFILE_URL: [httpx2.Response(200, content=json_dumps(profile).encode())],
         },
     )
-    browser = _Browser()
     shown: list[str] = []
     async with _Served(server) as shared:
-        await _sign_in(ClaudeLogin(path, resources=shared), browser=browser, show=shown)
-    (url,) = browser.opened
-    assert url in shown[0]
-    assert url.startswith("https://claude.com/cai/oauth/authorize?")
-    query = {key: values[0] for key, values in parse_qs(urlparse(url).query).items()}
-    redirect = query.pop("redirect_uri")
-    assert re.fullmatch(r"http://localhost:\d+/callback", redirect)
-    challenge, state = query.pop("code_challenge"), query.pop("state")
-    assert query == {
-        "code": "true",
-        "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e",
-        "response_type": "code",
-        "scope": "user:profile user:inference user:sessions:claude_code"
-        " user:mcp_servers user:file_upload",
-        "code_challenge_method": "S256",
-    }
-    query |= {"redirect_uri": redirect, "code_challenge": challenge, "state": state}
+        await ClaudeLogin(path, resources=shared).sign_in(show=shown.append)
+    authorization.assert_awaited_once()
+    assert authorization.await_args is not None
+    challenge, state = cast(tuple[str, str], authorization.await_args.args)
+    authorization.assert_awaited_once_with(challenge, state, show=shown.append)
     # 32 and 64 random bytes, base64url without padding.
     assert len(state) == 43
     grant, me = server.requests
@@ -394,15 +417,12 @@ async def test_sign_in_takes_the_code_the_browser_brings_back(tmp_path: Path) ->
     sent = _body(grant)
     assert sent["grant_type"] == "authorization_code"
     assert sent["code"] == "the-code"
-    assert sent["state"] == query["state"]
-    assert sent["redirect_uri"] == query["redirect_uri"]
+    assert sent["state"] == state
+    assert sent["redirect_uri"] == "http://localhost:4321/callback"
     verifier = sent["code_verifier"]
     assert isinstance(verifier, str)
     digest = hashlib.sha256(verifier.encode()).digest()
-    assert (
-        base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-        == query["code_challenge"]
-    )
+    assert base64.urlsafe_b64encode(digest).rstrip(b"=").decode() == challenge
     assert me.headers["authorization"] == "Bearer at-1"
     assert me.headers["anthropic-beta"] == "oauth-2025-04-20"
     assert _oauth(path) == {
@@ -422,83 +442,113 @@ async def test_sign_in_takes_the_code_the_browser_brings_back(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_sign_in_opens_the_browser_unless_told_not_to(
-    tmp_path: Path,
+async def test_browser_authorization_owns_its_loopback_listener(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Its callback listens on loopback alone: the code must not reach the network."""
-    hosts: list[str | None] = []
-    real = asyncio.start_server
-
-    async def recorded(
-        callback: Callable[
-            [asyncio.StreamReader, asyncio.StreamWriter],
-            Awaitable[None] | None,
-        ],
-        host: str | None = None,
-        port: int | None = None,
-    ) -> asyncio.Server:
-        hosts.append(host)
-        return await real(callback, host, port)
-
-    monkeypatch.setattr(asyncio, "start_server", recorded)
-    browser = _Browser()
-    server = _Server(
-        replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [httpx2.Response(500)]},
+    socket = Mock(getsockname=Mock(return_value=("127.0.0.1", 4321)))
+    entered, exited = AsyncMock(), AsyncMock(return_value=False)
+    server = Mock(
+        spec=asyncio.Server,
+        sockets=[socket],
+        __aenter__=entered,
+        __aexit__=exited,
     )
-    async with _Served(server) as shared:
-        claude_login = ClaudeLogin(tmp_path / ".credentials.json", resources=shared)
-        shown: list[str] = []
-        with pytest.MonkeyPatch.context() as patch:
-            patch.setattr(login, "open_browser", browser.open)
-            await claude_login.sign_in(show=shown.append)
-        await asyncio.gather(*browser.tasks)
-    assert len(browser.opened) == 1
-    assert hosts == ["127.0.0.1"]
+    start = AsyncMock(return_value=server)
+    waited = AsyncMock(return_value="the-code")
+    opened, shown = Mock(), Mock()
+    monkeypatch.setattr(asyncio, "start_server", start)
+    monkeypatch.setattr(asyncio, "wait_for", waited)
+    monkeypatch.setattr(login, "open_browser", opened)
+    assert await login._browser_code("challenge", "state", show=shown) == (
+        "the-code",
+        "http://localhost:4321/callback",
+    )
+    start.assert_awaited_once()
+    assert start.await_args is not None
+    callback, host = cast(tuple[object, str], start.await_args.args)
+    assert callable(callback)
+    assert host == "127.0.0.1"
+    opened.assert_called_once()
+    assert opened.call_args is not None
+    url = cast(str, opened.call_args.args[0])
+    assert url.startswith("https://claude.com/cai/oauth/authorize?")
+    assert parse_qs(urlparse(url).query) == {
+        "code": ["true"],
+        "client_id": ["9d1c250a-e61b-44d9-88ed-5944d1962f5e"],
+        "response_type": ["code"],
+        "redirect_uri": ["http://localhost:4321/callback"],
+        "scope": [
+            (
+                "user:profile user:inference user:sessions:claude_code"
+                " user:mcp_servers user:file_upload"
+            ),
+        ],
+        "code_challenge": ["challenge"],
+        "code_challenge_method": ["S256"],
+        "state": ["state"],
+    }
+    shown.assert_called_once_with(f"Sign in to Claude in your browser:\n\n  {url}\n")
+    waited.assert_awaited_once()
+    assert waited.await_args is not None
+    assert isinstance(waited.await_args.args[0], asyncio.Future)
+    assert waited.await_args.kwargs == {"timeout": 300.0}
+    entered.assert_awaited_once_with()
+    exited.assert_awaited_once_with(None, None, None)
 
 
 @pytest.mark.asyncio
-async def test_a_profile_that_is_not_an_object_is_an_error(tmp_path: Path) -> None:
+async def test_a_profile_that_is_not_an_object_is_an_error(
+    tmp_path: Path,
+    authorization: AsyncMock,
+) -> None:
     profile = httpx2.Response(200, content=b"[]")
     server = _Server(replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [profile]})
     async with _Served(server) as shared:
         with pytest.raises(ReadError):
-            await _sign_in(
-                ClaudeLogin(tmp_path / ".credentials.json", resources=shared),
-                browser=_Browser(),
-            )
+            await ClaudeLogin(
+                tmp_path / ".credentials.json",
+                resources=shared,
+            ).sign_in()
+    authorization.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_the_redirect_takes_only_this_sign_ins_callback(tmp_path: Path) -> None:
-    path = tmp_path / ".credentials.json"
-    server = _Server(
-        replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [httpx2.Response(500)]},
+async def test_browser_timeout_closes_its_listener_and_preserves_callback_wiring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered, exited = AsyncMock(), AsyncMock(return_value=False)
+    server = Mock(
+        spec=asyncio.Server,
+        sockets=[Mock(getsockname=Mock(return_value=("127.0.0.1", 4321)))],
+        __aenter__=entered,
+        __aexit__=exited,
     )
-    browser = _Browser(
-        visits=(
-            "GET /callback?code=forged&state=someone-else HTTP/1.1",
-            "GET /favicon.ico?code=forged&state={state} HTTP/1.1",
-            "GET /callback?state={state} HTTP/1.1",
-            "GET /\udcff?code=forged&state={state} HTTP/1.1",
-            "GARBAGE",
-            "GET /callback?code=the-code&state={state} HTTP/1.1",
-        ),
+    start = AsyncMock(return_value=server)
+    waited = AsyncMock(side_effect=TimeoutError)
+    redirected = AsyncMock()
+    monkeypatch.setattr(asyncio, "start_server", start)
+    monkeypatch.setattr(asyncio, "wait_for", waited)
+    monkeypatch.setattr(login, "open_browser", Mock())
+    monkeypatch.setattr(login, "redirected", redirected)
+    assert await login._browser_code("challenge", "state", show=Mock()) is None
+    assert start.await_args is not None
+    callback = cast(
+        "Callable[[asyncio.StreamReader, asyncio.StreamWriter], Awaitable[None]]",
+        start.await_args.args[0],
     )
-    async with _Served(server) as shared:
-        await _sign_in(ClaudeLogin(path, resources=shared), browser=browser)
-    assert browser.statuses == [400, 400, 400, 400, 400, 200]
-    failed = "Sign-in failed; see the terminal."
-    assert browser.replies[0] == (
-        "HTTP/1.1 400 Bad Request\r\ncontent-type: text/plain\r\n"
-        f"content-length: {len(failed)}\r\nconnection: close\r\n\r\n{failed}"
+    reader, writer = Mock(spec=asyncio.StreamReader), Mock(spec=asyncio.StreamWriter)
+    await callback(reader, writer)
+    assert waited.await_args is not None
+    redirected.assert_awaited_once_with(
+        reader,
+        writer,
+        path="/callback",
+        state="state",
+        code=waited.await_args.args[0],
     )
-    signed_in = "Signed in; you can close this tab."
-    assert browser.replies[-1] == (
-        "HTTP/1.1 200 OK\r\ncontent-type: text/plain\r\n"
-        f"content-length: {len(signed_in)}\r\nconnection: close\r\n\r\n{signed_in}"
-    )
-    assert _body(server.requests[0])["code"] == "the-code"
+    entered.assert_awaited_once_with()
+    exited.assert_awaited_once_with(None, None, None)
 
 
 @pytest.mark.parametrize(
@@ -510,14 +560,16 @@ async def test_the_redirect_takes_only_this_sign_ins_callback(tmp_path: Path) ->
 async def test_a_plan_the_profile_cannot_give_is_left_unsaid(
     tmp_path: Path,
     profile: httpx2.Response,
+    authorization: AsyncMock,
 ) -> None:
     path = tmp_path / ".credentials.json"
     _store(path, access="old", expires_in_sec=0.0)
     server = _Server(replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [profile]})
     async with _Served(server) as shared:
         claude_login = ClaudeLogin(path, resources=shared)
-        await _sign_in(claude_login, browser=_Browser())
+        await claude_login.sign_in()
         assert await claude_login.token() == "at-1"
+    authorization.assert_awaited_once()
     oauth = _oauth(path)
     assert oauth["subscriptionType"] == "max"  # Kept from before, not erased.
     assert "rateLimitTier" not in oauth
@@ -526,6 +578,7 @@ async def test_a_plan_the_profile_cannot_give_is_left_unsaid(
 @pytest.mark.asyncio
 async def test_a_plan_field_the_profile_omits_keeps_its_stored_value(
     tmp_path: Path,
+    authorization: AsyncMock,
 ) -> None:
     path = tmp_path / ".credentials.json"
     _store(path, access="old", expires_in_sec=0.0)
@@ -542,7 +595,8 @@ async def test_a_plan_field_the_profile_omits_keeps_its_stored_value(
         },
     )
     async with _Served(server) as shared:
-        await _sign_in(ClaudeLogin(path, resources=shared), browser=_Browser())
+        await ClaudeLogin(path, resources=shared).sign_in()
+    authorization.assert_awaited_once()
     oauth = _oauth(path)
     assert (oauth["subscriptionType"], oauth["rateLimitTier"]) == ("pro", "t5")
 
@@ -576,31 +630,28 @@ async def test_a_pasted_code_must_carry_this_sign_ins_state(
 async def test_sign_in_falls_back_to_a_pasted_code(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    authorization: AsyncMock,
 ) -> None:
     """Over ssh no browser reaches back, so the user pastes the code instead."""
+    authorization.return_value = None
+    pasted = AsyncMock(
+        return_value=("pasted", "https://platform.claude.com/oauth/code/callback"),
+    )
+    monkeypatch.setattr(login, "_pasted_code", pasted)
     path = tmp_path / ".credentials.json"
-    browser = _Browser(visits=())
-    waited = _Expired()
-    monkeypatch.setattr(asyncio, "wait_for", waited)
-    monkeypatch.setattr(login, "read_login_input", _Reader(browser=browser))
     server = _Server(
         replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [httpx2.Response(500)]},
     )
     shown: list[str] = []
     async with _Served(server) as shared:
-        await _sign_in(ClaudeLogin(path, resources=shared), browser=browser, show=shown)
-    assert [text.split(":")[0] for text in shown] == [
-        "Sign in to Claude in your browser",
-        "Open this, sign in, and paste the code it shows",
-    ]
-    assert waited.timeouts == [300.0]  # Five minutes for the browser.
-    challenges = [
-        parse_qs(urlparse(url).query)["code_challenge"]
-        for url in (browser.opened[0], *re.findall(r"https://\S+", shown[1]))
-    ]
-    assert challenges[0] == challenges[1]
+        await ClaudeLogin(path, resources=shared).sign_in(show=shown.append)
+    authorization.assert_awaited_once()
+    assert authorization.await_args is not None
+    challenge, state = cast(tuple[str, str], authorization.await_args.args)
+    pasted.assert_awaited_once_with(challenge, state, show=shown.append)
     sent = _body(server.requests[0])
     assert sent["code"] == "pasted"
+    assert sent["state"] == state
     assert sent["redirect_uri"] == "https://platform.claude.com/oauth/code/callback"
 
 
@@ -608,197 +659,174 @@ async def test_sign_in_falls_back_to_a_pasted_code(
 async def test_headless_sign_in_asks_for_the_code_without_the_browser(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    authorization: AsyncMock,
 ) -> None:
     path = tmp_path / ".credentials.json"
-    browser = _Browser(visits=())
-    waited = _Expired()
-    monkeypatch.setattr(asyncio, "wait_for", waited)
-    shown: list[str] = []
-    monkeypatch.setattr(
-        login,
-        "read_login_input",
-        _Reader(browser=browser, shown=shown),
+    pasted = AsyncMock(
+        return_value=("pasted", "https://platform.claude.com/oauth/code/callback"),
     )
+    monkeypatch.setattr(login, "_pasted_code", pasted)
+    shown: list[str] = []
     server = _Server(
         replies={_GRANT_URL: [_granted("at-1")], _PROFILE_URL: [httpx2.Response(500)]},
     )
     async with _Served(server) as shared:
-        await _sign_in(
-            ClaudeLogin(path, resources=shared),
-            browser=browser,
-            show=shown,
+        await ClaudeLogin(path, resources=shared).sign_in(
             headless=True,
+            show=shown.append,
         )
-    assert [text.split(":")[0] for text in shown] == [
-        "Open this, sign in, and paste the code it shows",
-    ]
-    assert browser.opened == []
-    assert waited.timeouts == []
+    authorization.assert_not_awaited()
     sent = _body(server.requests[0])
     assert sent["code"] == "pasted"
-    query = parse_qs(urlparse(shown[0].split()[-1]).query)
     verifier = sent["code_verifier"]
     assert isinstance(verifier, str)
     challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-    assert query["code_challenge"] == [challenge.rstrip(b"=").decode()]
+    pasted.assert_awaited_once_with(
+        challenge.rstrip(b"=").decode(),
+        sent["state"],
+        show=shown.append,
+    )
     assert sent["redirect_uri"] == "https://platform.claude.com/oauth/code/callback"
     assert _oauth(path)["accessToken"] == "at-1"
 
 
 @pytest.mark.asyncio
-async def test_the_macos_keychain_holds_the_login_claude_keeps(
+async def test_the_keychain_reads_only_claudes_oauth_entry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    keychain = _Keychain.installed(tmp_path, monkeypatch)
-    mcp = {"github|1": {"accessToken": "gh"}}
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(getpass, "getuser", lambda: "user")
     oauth = {"accessToken": "at-1", "refreshToken": "rt-at-1", "expiresAt": 0}
-    keychain.entry.write_text(json_dumps({"claudeAiOauth": oauth, "mcpOAuth": mcp}))
-    server = _Server(replies={_GRANT_URL: [_granted("at-2")]})
-    async with _Served(server) as shared:
-        assert await ClaudeLogin(resources=shared).token() == "at-2"
-    stored = _stored(keychain.entry)
-    assert stored["mcpOAuth"] == mcp
-    renewed = from_plain(stored["claudeAiOauth"], dict[str, object])
-    assert renewed["accessToken"] == "at-2"
-    # The renewal spent the refresh token the Keychain held.
-    assert _body(server.requests[0])["refresh_token"] == oauth["refreshToken"]
-    assert (tmp_path / ".claude" / ".credentials.lock").exists()
+    security = AsyncMock(
+        return_value=json_dumps(
+            {"claudeAiOauth": oauth, "mcpOAuth": {"github|1": {"accessToken": "gh"}}},
+        ),
+    )
+    monkeypatch.setattr(login, "_security", security)
+    keychain = login._Keychain()
+    assert keychain.lock == tmp_path / ".claude" / ".credentials.lock"
+    assert await keychain.read() == oauth
+    security.assert_awaited_once_with(
+        "find-generic-password",
+        "-a",
+        "user",
+        "-s",
+        "Claude Code-credentials",
+        "-w",
+    )
 
 
-@pytest.mark.asyncio
-async def test_the_default_file_named_on_macos_is_the_keychain_entry(
+def test_the_default_file_named_on_macos_is_the_keychain_entry(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A caller deriving every account's file from the default names it too."""
-    keychain = _Keychain.installed(tmp_path, monkeypatch)
-    oauth = {"accessToken": "at-k", "expiresAt": 10**15}
-    keychain.entry.write_text(json_dumps({"claudeAiOauth": oauth}))
-    async with _Served(_Server()) as shared:
-        login_ = ClaudeLogin(ClaudeLogin.default_path(), resources=shared)
-        assert await login_.token() == "at-k"
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(login, "platform", SimpleNamespace(system=lambda: "Darwin"))
+    keychain = Mock(spec=login._Keychain)
+    factory = Mock(return_value=keychain)
+    monkeypatch.setattr(login, "_Keychain", factory)
+    resources = Mock(spec=SharedResources)
+    for path in (None, ClaudeLogin.default_path()):
+        assert ClaudeLogin(path, resources=resources)._store is keychain
+    assert factory.call_args_list == [call(), call()]
 
 
 @pytest.mark.asyncio
-async def test_a_keychain_write_keeps_the_login_out_of_every_command_line(
-    tmp_path: Path,
+async def test_a_keychain_write_keeps_other_logins_and_secrets_off_argv(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Any local user can read a process's arguments while it runs."""
-    keychain = _Keychain.installed(tmp_path, monkeypatch)
-    oauth = {"accessToken": "at-1", "refreshToken": "rt-at-1", "expiresAt": 0}
-    keychain.entry.write_text(json_dumps({"claudeAiOauth": oauth}))
-    server = _Server(replies={_GRANT_URL: [_granted("at-2")]})
-    async with _Served(server) as shared:
-        await ClaudeLogin(resources=shared).token()
-    leaked = [call for call in keychain.calls() if any("at-2" in arg for arg in call)]
-    assert leaked == []
-    assert _oauth(keychain.entry)["refreshToken"] == "rt-at-2"
-    # Each read, before and after the write, says nothing on stdin.
-    assert (keychain.dir / "read-stdin").read_text() == ""
+    monkeypatch.setattr(getpass, "getuser", lambda: "user")
+    mcp = {"github|1": {"accessToken": "gh"}}
+    security = AsyncMock(
+        return_value=json_dumps(
+            {"claudeAiOauth": {"accessToken": "old"}, "mcpOAuth": mcp},
+        ),
+    )
+    monkeypatch.setattr(login, "_security", security)
+    oauth = {"accessToken": "at-2", "refreshToken": "rt-at-2"}
+    await login._Keychain().write(oauth)
+    secret = json_dumps({"claudeAiOauth": oauth, "mcpOAuth": mcp}).encode().hex()
+    assert security.await_args_list == [
+        call(
+            "find-generic-password",
+            "-a",
+            "user",
+            "-s",
+            "Claude Code-credentials",
+            "-w",
+        ),
+        call(
+            "-i",
+            commands=(
+                'add-generic-password -U -a "user" -s "Claude Code-credentials"'
+                f" -X {secret}\n"
+            ),
+        ),
+    ]
 
 
 @pytest.mark.asyncio
 async def test_an_empty_keychain_holds_no_login(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    capfd: pytest.CaptureFixture[str],
 ) -> None:
-    _Keychain.installed(tmp_path, monkeypatch)
-    server = _Server(replies={_GRANT_URL: [httpx2.Response(400)]})
-    async with _Served(server) as shared:
-        with pytest.raises(AuthError, match=_REVOKED):
-            await ClaudeLogin(resources=shared).token()
-    assert _body(server.requests[0])["refresh_token"] == ""
-    # The miss ``security`` reports is ours to handle, not the terminal's.
-    assert capfd.readouterr().err == ""
+    security = AsyncMock(return_value="")
+    monkeypatch.setattr(login, "_security", security)
+    assert await login._Keychain().read() == {}
+    security.assert_awaited_once()
 
 
+@pytest.mark.parametrize("outcome", ["success", "failed", "cancelled"])
 @pytest.mark.asyncio
-async def test_a_keychain_read_cancelled_midway_ends_security(
-    tmp_path: Path,
+async def test_security_owns_command_streams_and_child_cleanup(
     monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
 ) -> None:
-    """A ``security`` that hangs, on a locked Keychain, is not left behind."""
-    script = tmp_path / "security"
-    script.write_text(f'#!/bin/sh\necho $$ > "{tmp_path}/pid"\nexec sleep 60\n')
-    script.chmod(0o700)
-    monkeypatch.setattr(
-        asyncio,
-        "create_subprocess_exec",
-        partial(_security_at, stub=str(script), real=asyncio.create_subprocess_exec),
+    error = asyncio.CancelledError("cancelled") if outcome == "cancelled" else None
+    communicate = AsyncMock(return_value=(b" secret \n", b""), side_effect=error)
+    process = Mock(
+        spec=Process,
+        returncode=1 if outcome == "failed" else 0,
+        communicate=communicate,
     )
-    reading = asyncio.create_task(login._security(*login._find_entry(), "-w"))
-    async with asyncio.timeout(5):
-        while True:
-            pid = _text(tmp_path / "pid")
-            if pid:
-                break
-            await asyncio.sleep(0.01)
-    reading.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(reading, timeout=5)
-    async with asyncio.timeout(5):
-        while True:
-            if not _text(Path(f"/proc/{pid}/stat")):
-                break
-            await asyncio.sleep(0.01)
-
-
-@pytest.mark.asyncio
-async def test_a_failed_security_says_nothing_whatever_it_printed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    script = tmp_path / "security"
-    script.write_text("#!/bin/sh\necho partial\nexit 1\n")
-    script.chmod(0o700)
-    monkeypatch.setattr(
-        asyncio,
-        "create_subprocess_exec",
-        partial(_security_at, stub=str(script), real=asyncio.create_subprocess_exec),
+    enter, leave = AsyncMock(), AsyncMock(return_value=False)
+    child = AsyncMock(
+        spec=Child,
+        process=process,
+        __aenter__=enter,
+        __aexit__=leave,
     )
-    assert await login._security(*login._find_entry(), "-w") == ""
+    enter.return_value = child
+    start = AsyncMock(return_value=child)
+    monkeypatch.setattr(Child, "start", start)
 
+    if error is not None:
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await login._security("find", "--flag", commands="private")
+        assert raised.value is error
+        leave.assert_awaited_once()
+        assert leave.await_args is not None
+        assert leave.await_args.args[0] is asyncio.CancelledError
+        assert leave.await_args.args[1] is error
+    else:
+        assert await login._security("find", "--flag", commands="private") == (
+            "" if outcome == "failed" else "secret"
+        )
+        leave.assert_awaited_once_with(None, None, None)
 
-@pytest.mark.asyncio
-async def test_a_cancelled_security_deaf_to_term_is_killed_at_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Nothing it might still say is wanted, so it gets no grace."""
-    script = tmp_path / "security"
-    script.write_text(
-        f"#!/bin/sh\ntrap '' TERM\necho $$ > \"{tmp_path}/pid\"\n"
-        "while :; do sleep 0.01; done\n",
+    start.assert_awaited_once_with(
+        "/usr/bin/security",
+        "find",
+        "--flag",
+        grace_sec=0.0,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
     )
-    script.chmod(0o700)
-    monkeypatch.setattr(
-        asyncio,
-        "create_subprocess_exec",
-        partial(_security_at, stub=str(script), real=asyncio.create_subprocess_exec),
-    )
-    reading = asyncio.create_task(login._security(*login._find_entry(), "-w"))
-    async with asyncio.timeout(5):
-        while True:
-            if _text(tmp_path / "pid"):
-                break
-            await asyncio.sleep(0.01)
-    reading.cancel()
-    loop = asyncio.get_running_loop()
-    began = loop.time()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(reading, timeout=5)
-    assert loop.time() - began < 0.5
-
-
-def _text(path: Path) -> str:
-    """Return ``path``'s text, stripped; empty while it does not exist."""
-    try:
-        return path.read_text().strip()
-    except FileNotFoundError:
-        return ""
+    enter.assert_awaited_once_with()
+    communicate.assert_awaited_once_with(b"private")
 
 
 @pytest.mark.asyncio
@@ -806,12 +834,16 @@ async def test_a_named_login_on_a_mac_is_its_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    keychain = _Keychain.installed(tmp_path, monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(login, "platform", SimpleNamespace(system=lambda: "Darwin"))
+    keychain = Mock(spec=login._Keychain)
+    monkeypatch.setattr(login, "_Keychain", keychain)
     path = tmp_path / ".credentials-work.json"
     _store(path, access="at-work", expires_in_sec=3600.0)
     async with _Served(_Server()) as shared:
-        assert await ClaudeLogin(path, resources=shared).token() == "at-work"
-    assert not (keychain.dir / "calls").exists()
+        claude_login = ClaudeLogin(path, resources=shared)
+        keychain.assert_not_called()
+        assert await claude_login.token() == "at-work"
 
 
 @dataclass(slots=True, kw_only=True)
@@ -840,109 +872,6 @@ class _Typist:
         return self.answers.pop(0)
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _Reader:
-    """Stands in for ``input``: the user pastes the code the sign-in page shows."""
-
-    browser: _Browser
-    shown: list[str] = field(default_factory=list[str])
-
-    async def __call__(self, prompt: str) -> str:
-        del prompt
-        link = self.browser.opened[0] if self.browser.opened else self.shown[0]
-        state = parse_qs(urlparse(link.split()[-1]).query)["state"][0]
-        return f"pasted#{state}"
-
-
-# Answers as ``security`` does, for the one entry ``claude`` keeps, and refuses
-# any other command line: ``find-generic-password -w`` prints the entry, and
-# ``-i`` reads ``add-generic-password ... -X <hex>`` lines on stdin. Logs each
-# call's arguments, and each line it reads.
-_SECURITY = """#!/bin/sh
-dir=$(dirname "$0")
-printf '%s\\0' "$@" >> "$dir/calls"
-printf '\\n' >> "$dir/calls"
-if [ "$*" = "find-generic-password -a {user} -s Claude Code-credentials -w" ]; then
-  cat >> "$dir/read-stdin"
-  if [ -e "$dir/entry" ]; then cat "$dir/entry"; exit 0; fi
-  echo "security: The specified item could not be found in the keychain." >&2
-  exit 44
-fi
-[ "$*" = "-i" ] || exit 2
-while IFS= read -r line; do
-  printf '%s\\n' "$line" >> "$dir/said"
-  case "$line" in
-    'add-generic-password -U -a "{user}" -s "Claude Code-credentials" -X '*)
-      printf '%s' "${{line##* }}" | xxd -r -p > "$dir/entry" ;;
-    *) exit 2 ;;
-  esac
-done
-"""
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _Keychain:
-    """A stub ``security`` standing in for the macOS Keychain, with one entry."""
-
-    dir: Path
-
-    @classmethod
-    def installed(cls, home: Path, monkeypatch: pytest.MonkeyPatch) -> _Keychain:
-        """Make this a Mac whose ``/usr/bin/security`` is the stub, homed at ``home``."""
-        keychain = cls(dir=home / "keychain")
-        keychain.dir.mkdir()
-        script = keychain.dir / "security"
-        script.write_text(_SECURITY.format(user=getpass.getuser()))
-        script.chmod(0o700)
-        monkeypatch.setenv("HOME", str(home))
-        monkeypatch.setattr(login, "platform", SimpleNamespace(system=lambda: "Darwin"))
-        monkeypatch.setattr(
-            asyncio,
-            "create_subprocess_exec",
-            partial(
-                _security_at,
-                stub=str(script),
-                real=asyncio.create_subprocess_exec,
-            ),
-        )
-        return keychain
-
-    @property
-    def entry(self) -> Path:
-        return self.dir / "entry"
-
-    def calls(self) -> list[list[str]]:
-        lines = (self.dir / "calls").read_text().splitlines()
-        return [line.split("\0")[:-1] for line in lines]
-
-
-async def _security_at(
-    program: str,
-    *args: str,
-    stub: str,
-    real: Callable[..., Awaitable[Process]],
-    **kwargs: object,
-) -> Process:
-    """Run the stub wherever the code runs ``/usr/bin/security``."""
-    return await real(
-        stub if program == "/usr/bin/security" else program,
-        *args,
-        **kwargs,
-    )
-
-
-@dataclass(slots=True, kw_only=True)
-class _Expired:
-    """Stands in for ``asyncio.wait_for``: every wait runs out, and is noted."""
-
-    timeouts: list[float] = field(default_factory=list[float])
-
-    async def __call__(self, awaitable: Awaitable[object], **limits: float) -> NoReturn:
-        del awaitable
-        self.timeouts.append(limits["timeout"])
-        raise TimeoutError
-
-
 class _Served(SharedResources):
     """Shared resources whose HTTP client answers from ``handler``, never the network."""
 
@@ -961,58 +890,8 @@ class _Served(SharedResources):
         await self._client.aclose()
 
 
-@dataclass(slots=True, kw_only=True)
-class _Browser:
-    r"""Opens the sign-in page, and sends the redirect each request line of ``visits``.
-
-    A line's ``{state}`` is the sign-in's; ``\\udcff`` sends the byte 0xff.
-    """
-
-    visits: tuple[str, ...] = ("GET /callback?code=the-code&state={state} HTTP/1.1",)
-    opened: list[str] = field(default_factory=list[str])
-    replies: list[str] = field(default_factory=list[str])
-    tasks: list[asyncio.Task[None]] = field(default_factory=list["asyncio.Task[None]"])
-
-    @property
-    def statuses(self) -> list[int]:
-        return [int(reply.split()[1]) for reply in self.replies]
-
-    def open(self, url: str) -> bool:
-        self.opened.append(url)
-        self.tasks.append(asyncio.get_running_loop().create_task(self._visit(url)))
-        return True
-
-    async def _visit(self, url: str) -> None:
-        query = parse_qs(urlparse(url).query)
-        port = urlparse(query["redirect_uri"][0]).port
-        for visit in self.visits:
-            reader, writer = await asyncio.open_connection("127.0.0.1", port)
-            line = visit.format(state=query["state"][0])
-            writer.write(
-                f"{line}\r\nhost: localhost\r\n\r\n".encode(errors="surrogateescape"),
-            )
-            await writer.drain()
-            self.replies.append((await reader.read()).decode())
-            writer.close()
-            await writer.wait_closed()
-
-
 def _timeout(seconds: float) -> dict[str, float]:
     return dict.fromkeys(("connect", "read", "write", "pool"), seconds)
-
-
-async def _sign_in(
-    claude_login: ClaudeLogin,
-    *,
-    browser: _Browser,
-    show: list[str] | None = None,
-    headless: bool = False,
-) -> None:
-    shown = [] if show is None else show
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(login, "open_browser", browser.open)
-        await claude_login.sign_in(headless=headless, show=shown.append)
-    await asyncio.gather(*browser.tasks)
 
 
 if __name__ == "__main__":

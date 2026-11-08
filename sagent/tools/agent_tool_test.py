@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import partial
 from typing import TYPE_CHECKING, override
+from unittest.mock import MagicMock, Mock
 
 import asyncio
 
@@ -25,6 +26,7 @@ from sagent.session.types import (
 )
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_session import AgentSession
+from sagent.tools.agent_tool import target_agent
 from sagent.tools.types import ToolContext
 
 
@@ -34,7 +36,6 @@ if TYPE_CHECKING:
 
     from treekle import PlainTree
 
-    from sagent.agent.team import MessageKind
     from sagent.model.types import Request, Response, TextChunk
 
 
@@ -99,16 +100,42 @@ async def test_session_reads_reach_any_team_member(
     action: str,
     target: str,
 ) -> None:
-    team, _, session = _setup(tmp_path)
+    def resolve(pattern: str, *, by: str) -> list[str]:
+        del by
+        return {"parent": ["child"], "descendants": list[str]()}.get(pattern, [pattern])
+
+    label = "child" if target == "parent" else target
+    record = UserMessage(content=f"{label}'s words")
+    contexted = Mock(return_value=Mock(messages=[record]))
+    history = Mock(return_value=[record])
+    selected = Mock(
+        spec=Agent,
+        runtime=Mock(context=contexted),
+        session=Mock(history=history),
+    )
+    resolved = Mock(side_effect=resolve)
+    fetched = Mock(return_value=selected)
+    team = MagicMock(
+        spec=Team,
+        __contains__=Mock(side_effect={"grand", label}.__contains__),
+        resolve=resolved,
+        __getitem__=fetched,
+    )
     arguments: dict[str, PlainTree] = {
         "agent": target,
         "action": action,
         "ids": [0],
         "text": "words",
     }
-    result = await session.call(team["grand"].runtime.tool_context, arguments)
-    label = "child" if target == "parent" else target
+    result = await AgentSession(team=team).call(
+        ToolContext(cwd=tmp_path / "grand", label="grand"),
+        arguments,
+    )
     assert f"{label}'s words" in result.text()
+    resolved.assert_called_once_with(target, by="grand")
+    fetched.assert_called_once_with(label)
+    contexted.assert_called_once_with()
+    assert history.call_args_list == ([((), {})] if action == "search" else [])
 
 
 @pytest.mark.asyncio
@@ -166,30 +193,51 @@ async def test_state_changes_refuse_ancestors_siblings_and_peers(
     assert all(a.model.settings.thinking_effort == "none" for a in team.values())
 
 
-@pytest.mark.asyncio
-async def test_targeting_requires_a_calling_team_member(tmp_path: Path) -> None:
-    _, control, session = _setup(tmp_path)
-    for tool, arguments in (
-        (control, {"effort": "high"}),
-        (session, {"action": "list"}),
-    ):
+def test_targeting_requires_a_calling_team_member(tmp_path: Path) -> None:
+    contains = Mock(side_effect={"child"}.__contains__)
+    resolved = Mock(return_value=["child"])
+    fetched = Mock(return_value=Mock(spec=Agent))
+    team = MagicMock(
+        spec=Team,
+        __contains__=contains,
+        resolve=resolved,
+        __getitem__=fetched,
+    )
+    context = ToolContext(cwd=tmp_path, label="outsider")
+    for name in ("AgentSelf", "AgentSession"):
         with pytest.raises(
             ValueError,
-            match=rf"^{tool.name} needs a calling agent in the team\.$",
+            match=rf"^{name} needs a calling agent in the team\.$",
         ):
-            await tool.call(ToolContext(cwd=tmp_path, label="outsider"), arguments)
+            target_agent(team, context=context, name=name, agent="child")
+    assert contains.call_args_list == [(("outsider",), {}), (("outsider",), {})]
+    resolved.assert_not_called()
+    fetched.assert_not_called()
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("name", ["missing", "descendants"])
-async def test_targets_must_name_one_agent(tmp_path: Path, name: str) -> None:
-    team, control, session = _setup(tmp_path)
-    for tool, arguments in (
-        (control, {"agent": name, "diagnostics": True}),
-        (session, {"agent": name, "action": "list"}),
-    ):
-        with pytest.raises(ValueError, match=r"names .* agents"):
-            await tool.call(team["root"].runtime.tool_context, arguments)
+def test_targets_must_name_one_agent(tmp_path: Path, name: str) -> None:
+    labels: list[str] = [] if name == "missing" else ["child", "grand"]
+    resolved = Mock(return_value=labels)
+    fetched = Mock()
+    team = MagicMock(
+        spec=Team,
+        __contains__=Mock(return_value=True),
+        resolve=resolved,
+        __getitem__=fetched,
+    )
+    context = ToolContext(cwd=tmp_path, label="root")
+    for tool in ("AgentSelf", "AgentSession"):
+        with pytest.raises(
+            ValueError,
+            match=rf"^{name!r} names {len(labels)} agents; name one\.$",
+        ):
+            target_agent(team, context=context, name=tool, agent=name)
+    assert resolved.call_args_list == [
+        ((name,), {"by": "root"}),
+        ((name,), {"by": "root"}),
+    ]
+    fetched.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -378,29 +426,27 @@ async def test_switching_a_running_descendant_keeps_its_active_request_alive(
     assert team["root"].model is root_model
 
 
-class _NoRelay:
-    """Reject traffic to an outside agent."""
-
-    def send(
-        self,
-        *,
-        sender: str,
-        recipient: str,
-        content: str,
-        kind: MessageKind,
-    ) -> None:
-        raise AssertionError((sender, recipient, content, kind))
-
-
-@pytest.mark.asyncio
-async def test_session_target_must_be_local(tmp_path: Path) -> None:
-    team, _, session = _setup(tmp_path)
-    team.reach("far", relay=_NoRelay())
-    with pytest.raises(ValueError, match="not local"):
-        await session.call(
-            team["root"].runtime.tool_context,
-            {"agent": "far", "action": "list"},
+def test_session_target_must_be_local(tmp_path: Path) -> None:
+    contains = Mock(side_effect={"root", "child"}.__contains__)
+    resolved = Mock(return_value=["far"])
+    fetched = Mock()
+    team = MagicMock(
+        spec=Team,
+        __contains__=contains,
+        resolve=resolved,
+        __getitem__=fetched,
+    )
+    with pytest.raises(ValueError, match=r"^Agent 'far' is not local to this team\.$"):
+        target_agent(
+            team,
+            context=ToolContext(cwd=tmp_path, label="root"),
+            name="AgentSession",
+            agent="far",
+            reading=True,
         )
+    assert contains.call_args_list == [(("root",), {}), (("far",), {})]
+    resolved.assert_called_once_with("far", by="root")
+    fetched.assert_not_called()
 
 
 if __name__ == "__main__":

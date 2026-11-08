@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+from unittest.mock import Mock
 
 import os
 import time
 
 import pytest
 
+from sagent.tools import glob_tool
 from sagent.tools.command_analyzer import invocations
 from sagent.tools.glob_tool import Glob
 from sagent.tools.types import ToolContext, parse
@@ -140,31 +142,31 @@ async def test_a_malformed_pattern_is_an_error(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("window", "names", "note"),
     [
+        ({"max_results": 1}, ["f0"], "... (3 more; pass offset=1 to continue)"),
+        ({"offset": 3}, ["f3"], ""),
         (
-            {"max_results": 3},
-            ["f0", "f1", "f2"],
-            "... (7 more; pass offset=3 to continue)",
+            {"offset": 1, "max_results": 2},
+            ["f1", "f2"],
+            "... (1 more; pass offset=3 to continue)",
         ),
-        ({"offset": 8}, ["f8", "f9"], ""),
-        (
-            {"offset": 4, "max_results": 2},
-            ["f4", "f5"],
-            "... (4 more; pass offset=6 to continue)",
-        ),
-        ({"max_results": 10}, [f"f{i}" for i in range(10)], ""),
+        ({"max_results": 4}, ["f0", "f1", "f2", "f3"], ""),
     ],
 )
 async def test_a_window_pages_through_the_matches(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     window: dict[str, PlainTree],
     names: list[str],
     note: str,
 ) -> None:
-    for i in range(10):
-        (tmp_path / f"f{i}").write_text("")
+    matched = Mock(return_value=[tmp_path / f"f{i}" for i in range(4)])
+    monkeypatch.setattr(glob_tool, "glob", matched)
+
     shown = await _glob(tmp_path, pattern="f*", **window)
+
     rows = [str(tmp_path / name) for name in names] + ([note] if note else [])
     assert shown == "\n".join(rows)
+    matched.assert_called_once_with(tmp_path, "f*")
 
 
 @pytest.mark.asyncio
@@ -174,16 +176,30 @@ async def test_a_window_past_the_end_says_so(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_full_result_says_where_to_resume(tmp_path: Path) -> None:
-    for i in range(30):
-        (tmp_path / f"f{i:02d}").write_text("")
-    context = ToolContext(cwd=tmp_path, max_result_chars=len(str(tmp_path)) * 5 + 60)
-    result = await Glob().call(context, {"pattern": "f*"})
-    rows = result.text().splitlines()
-    kept = len(rows) - 1
-    assert 0 < kept < 30
-    assert rows[-1] == f"... ({30 - kept} more; pass offset={kept} to continue)"
+async def test_a_full_result_says_where_to_resume(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matched = Mock(return_value=[tmp_path / f"f{i}" for i in range(3)])
+    monkeypatch.setattr(glob_tool, "glob", matched)
+    context = ToolContext(
+        cwd=tmp_path,
+        max_result_chars=(
+            len(str(tmp_path / "f1"))
+            + 1
+            + len("\n... (3 more; pass offset=3 to continue)")
+        ),
+    )
+
+    result = await Glob().call(context, {"pattern": "f*", "offset": 1})
+
+    assert result.text() == (
+        f"{tmp_path / 'f1'}\n... (1 more; pass offset=2 to continue)"
+    )
     assert len(result.text()) <= context.max_result_chars
+    assert result.call_id == ""
+    assert result.is_error is None
+    matched.assert_called_once_with(tmp_path, "f*")
 
 
 @pytest.mark.asyncio

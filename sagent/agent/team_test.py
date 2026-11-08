@@ -8,6 +8,8 @@ from collections import deque
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, override
+from unittest import mock
+from unittest.mock import Mock
 
 import asyncio
 import contextlib
@@ -19,6 +21,7 @@ import pytest
 
 from sagent.agent.agent import Agent
 from sagent.agent.team import ChildSpec, MessageKind, Team
+from sagent.agent.types import Session
 from sagent.lib.userdirs import config_dir
 from sagent.model.exceptions import (
     AuthError,
@@ -38,6 +41,7 @@ from sagent.providers.catalog import ModelCatalog
 from sagent.providers.login import Logins, Spent
 from sagent.providers.testing import first_live, window
 from sagent.runtime import types
+from sagent.runtime.runtime import Runtime
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.types import (
     AgentToAgentMessage,
@@ -67,6 +71,28 @@ if TYPE_CHECKING:
 
 def _team() -> Team:
     return Team(catalog=ModelCatalog(factories={"scripted": ScriptedProvider}))
+
+
+def _member(
+    tmp_path: Path,
+    *,
+    standing: Sequence[UncategorizedRecord] = (),
+    stand: Mock | None = None,
+) -> Mock:
+    observers: list[Callable[[types.RuntimeEvent], None]] = []
+    return Mock(
+        spec=Agent,
+        session=Mock(
+            spec=Session,
+            standing=Mock(return_value=list(standing)),
+            stand=stand if stand is not None else Mock(),
+        ),
+        runtime=Mock(
+            spec=Runtime,
+            tool_context=ToolContext(cwd=tmp_path),
+            observers=observers,
+        ),
+    )
 
 
 def _agent(tmp_path: Path, team: Team | None = None) -> Agent:
@@ -102,7 +128,7 @@ def _readable(label: str) -> dict[str, PlainTree]:
 
 def test_a_root_is_agent_and_its_children_are_numbered(tmp_path: Path) -> None:
     team = _team()
-    root, first, second = _agent(tmp_path), _agent(tmp_path), _agent(tmp_path)
+    root, first, second = _member(tmp_path), _member(tmp_path), _member(tmp_path)
 
     labels = [
         team.join(root),
@@ -112,7 +138,8 @@ def test_a_root_is_agent_and_its_children_are_numbered(tmp_path: Path) -> None:
 
     assert labels == ["Agent", "Agent_0", "Agent_1"]
     assert team.child_label("Agent") == "Agent_2"
-    assert first.runtime.tool_context.label == "Agent_0"
+    assert [team[label].runtime.tool_context.label for label in labels] == labels
+    assert all(len(team[label].runtime.observers) == 1 for label in labels)
     assert dict(team) == {"Agent": root, "Agent_0": first, "Agent_1": second}
     assert len(team) == 3
     assert (team.parent("Agent"), team.parent("Agent_1")) == (None, "Agent")
@@ -120,22 +147,24 @@ def test_a_root_is_agent_and_its_children_are_numbered(tmp_path: Path) -> None:
 
 def test_a_label_left_free_is_given_again(tmp_path: Path) -> None:
     team = _team()
-    _ = team.join(_agent(tmp_path))
-    first = _agent(tmp_path)
+    _ = team.join(_member(tmp_path))
+    first = _member(tmp_path)
     _ = team.join(first, parent="Agent")
-    _ = team.join(_agent(tmp_path), parent="Agent")
+    _ = team.join(_member(tmp_path), parent="Agent")
 
-    assert team.leave("Agent_0") is first
+    left = team.leave("Agent_0")
+    assert left is first
     assert team.child_label("Agent") == "Agent_0"
     assert team.child_label(None) == "Agent"
     assert "Agent_0" not in team
+    assert left.runtime.observers == []
 
 
 def test_a_child_may_be_named(tmp_path: Path) -> None:
     team = _team()
-    _ = team.join(_agent(tmp_path))
+    _ = team.join(_member(tmp_path))
 
-    assert team.join(_agent(tmp_path), label="reviewer", parent="Agent") == "reviewer"
+    assert team.join(_member(tmp_path), label="reviewer", parent="Agent") == "reviewer"
     assert team.child_label("reviewer") == "reviewer_0"
 
 
@@ -153,10 +182,10 @@ def test_a_taken_label_or_an_unknown_parent_is_refused(
     match: str,
 ) -> None:
     team = _team()
-    _ = team.join(_agent(tmp_path))
+    _ = team.join(_member(tmp_path))
 
     with pytest.raises(ValueError, match=match):
-        _ = team.join(_agent(tmp_path), label=label, parent=parent)
+        _ = team.join(_member(tmp_path), label=label, parent=parent)
     assert list(team) == ["Agent"]
 
 
@@ -198,9 +227,9 @@ def test_a_depth_cap_holds_for_every_descendant(
     expected: tuple[bool, bool, bool],
 ) -> None:
     team = _team()
-    _ = team.join(_agent(tmp_path), max_depth=root_cap)
-    _ = team.join(_agent(tmp_path), label="child", parent="Agent", max_depth=child_cap)
-    _ = team.join(_agent(tmp_path), label="grandchild", parent="child")
+    _ = team.join(_member(tmp_path), max_depth=root_cap)
+    _ = team.join(_member(tmp_path), label="child", parent="Agent", max_depth=child_cap)
+    _ = team.join(_member(tmp_path), label="grandchild", parent="child")
 
     assert (
         team.can_spawn("Agent"),
@@ -213,15 +242,15 @@ def test_a_depth_cap_holds_for_every_descendant(
 async def test_stopping_a_child_closes_its_children_first(tmp_path: Path) -> None:
     team = _team()
     closed: list[str] = []
-    _ = team.join(_agent(tmp_path))
+    _ = team.join(_member(tmp_path))
     for label, parent in (("a", "Agent"), ("a1", "a"), ("b", "Agent")):
         _ = team.join(
-            _agent(tmp_path),
+            _member(tmp_path),
             label=label,
             parent=parent,
             closing=_closing(closed, label),
         )
-    _ = team.join(_agent(tmp_path), label="oneshot", parent="a")
+    _ = team.join(_member(tmp_path), label="oneshot", parent="a")
     assert team.persistent() == ["a", "a1", "b"]
     published: list[tuple[str, ...]] = []
     team.changes.add(lambda: published.append(tuple(team)))
@@ -246,21 +275,21 @@ async def test_closing_the_team_closes_its_persistent_children_newest_first(
 ) -> None:
     closed: list[str] = []
     async with _team() as team:
-        _ = team.join(_agent(tmp_path))
+        _ = team.join(_member(tmp_path))
         _ = team.join(
-            _agent(tmp_path),
+            _member(tmp_path),
             label="a",
             parent="Agent",
             closing=_closing(closed, "a"),
         )
         _ = team.join(
-            _agent(tmp_path),
+            _member(tmp_path),
             label="b",
             parent="Agent",
             closing=_closing(closed, "b", fail=True),
         )
         _ = team.join(
-            _agent(tmp_path),
+            _member(tmp_path),
             label="b1",
             parent="b",
             closing=_closing(closed, "b1"),
@@ -277,16 +306,16 @@ async def test_a_child_stopped_while_the_team_closes_is_closed_once(
 ) -> None:
     closed: list[str] = []
     async with _team() as team:
-        _ = team.join(_agent(tmp_path))
+        _ = team.join(_member(tmp_path))
         _ = team.join(
-            _agent(tmp_path),
+            _member(tmp_path),
             label="a",
             parent="Agent",
             closing=_closing(closed, "a"),
         )
         stopping = AsyncExitStack()
         stopping.push_async_callback(team.stop, "a")
-        _ = team.join(_agent(tmp_path), label="b", parent="Agent", closing=stopping)
+        _ = team.join(_member(tmp_path), label="b", parent="Agent", closing=stopping)
 
     assert closed == ["a"]
     assert list(team) == ["Agent"]
@@ -294,14 +323,14 @@ async def test_a_child_stopped_while_the_team_closes_is_closed_once(
 
 def test_a_spec_is_for_a_persistent_child_only(tmp_path: Path) -> None:
     team = _team()
-    _ = team.join(_agent(tmp_path))
+    _ = team.join(_member(tmp_path))
 
     refused = r"^Only a persistent child has a spec to stand\.$"
     with pytest.raises(ValueError, match=refused):
-        _ = team.join(_agent(tmp_path), parent="Agent", spec=_spec("x"))
+        _ = team.join(_member(tmp_path), parent="Agent", spec=_spec("x"))
     with pytest.raises(ValueError, match=refused):
         _ = team.join(
-            _agent(tmp_path),
+            _member(tmp_path),
             label="root2",
             closing=AsyncExitStack(),
             spec=_spec("x"),
@@ -313,80 +342,105 @@ async def test_a_persistent_childs_spec_stands_until_it_is_stopped(
     tmp_path: Path,
 ) -> None:
     team = _team()
-    root = _agent(tmp_path)
+    stand = Mock()
+    root = _member(tmp_path, stand=stand)
     _ = team.join(root)
     for label in ("a", "b"):
         _ = team.join(
-            _agent(tmp_path),
+            _member(tmp_path),
             label=label,
             parent="Agent",
             closing=AsyncExitStack(),
             spec=_spec(label),
         )
-    root.session.stand(
-        "other",
-        UncategorizedRecord(kind="note", payload=_readable("x")),
-    )
-    assert team.standing("Agent") == [_spec("a"), _spec("b")]
+    expected = [
+        mock.call(
+            f"agent:{label}",
+            UncategorizedRecord(
+                kind="persistent_agent",
+                payload={**_readable(label), "max_rounds": None, "max_depth": None},
+            ),
+        )
+        for label in ("a", "b")
+    ]
+    assert stand.call_args_list == expected
 
     await team.stop("a")
 
-    assert team.standing("Agent") == [_spec("b")]
+    assert stand.call_args_list == [*expected, mock.call("agent:a", None)]
 
 
 @pytest.mark.asyncio
 async def test_closing_the_team_leaves_the_specs_standing(tmp_path: Path) -> None:
-    root = _agent(tmp_path)
+    stand = Mock()
+    root = _member(tmp_path, stand=stand)
     async with _team() as team:
         _ = team.join(root)
         _ = team.join(
-            _agent(tmp_path),
+            _member(tmp_path),
             label="a",
             parent="Agent",
             closing=AsyncExitStack(),
             spec=_spec("a"),
         )
 
-    assert [r.payload["label"] for r in root.session.standing()] == ["a"]
+    stand.assert_called_once_with(
+        "agent:a",
+        UncategorizedRecord(
+            kind="persistent_agent",
+            payload={**_readable("a"), "max_rounds": None, "max_depth": None},
+        ),
+    )
+    assert list(team) == ["Agent"]
 
 
 def test_a_spec_joined_under_a_new_label_stands_only_under_that_one(
     tmp_path: Path,
 ) -> None:
     team = _team()
-    root = _agent(tmp_path)
+    stand = Mock()
+    root = _member(tmp_path, stand=stand)
     _ = team.join(root)
-    root.session.stand(
-        "agent:a",
-        UncategorizedRecord(kind="persistent_agent", payload=_readable("a")),
-    )
 
     _ = team.join(
-        _agent(tmp_path),
+        _member(tmp_path),
         label="a_0",
         parent="Agent",
         closing=AsyncExitStack(),
         spec=_spec("a"),
     )
 
-    assert team.standing("Agent") == [replace(_spec("a"), label="a_0")]
+    assert stand.call_args_list == [
+        mock.call("agent:a", None),
+        mock.call(
+            "agent:a_0",
+            UncategorizedRecord(
+                kind="persistent_agent",
+                payload={
+                    **_readable("a"),
+                    "label": "a_0",
+                    "max_rounds": None,
+                    "max_depth": None,
+                },
+            ),
+        ),
+    ]
 
 
 def test_a_spec_stood_after_other_records_is_found(tmp_path: Path) -> None:
     team = _team()
-    root = _agent(tmp_path)
-    _ = team.join(root)
-    root.session.stand("other", UncategorizedRecord(kind="note", payload={}))
-
     _ = team.join(
-        _agent(tmp_path),
-        label="a",
-        parent="Agent",
-        closing=AsyncExitStack(),
-        spec=_spec("a"),
+        _member(
+            tmp_path,
+            standing=(
+                UncategorizedRecord(kind="note", payload=_readable("x")),
+                UncategorizedRecord(kind="persistent_agent", payload=_readable("b")),
+                UncategorizedRecord(kind="persistent_agent", payload=_readable("a")),
+            ),
+        ),
     )
 
-    assert team.standing("Agent") == [_spec("a")]
+    assert team.standing("Agent") == [_spec("b"), _spec("a")]
 
 
 def test_a_spec_that_no_longer_reads_is_skipped(
@@ -394,13 +448,8 @@ def test_a_spec_that_no_longer_reads_is_skipped(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     team = _team()
-    root = _agent(tmp_path)
-    _ = team.join(root)
-    root.session.stand(
-        "agent:old",
-        UncategorizedRecord(kind="persistent_agent", payload={"label": "old"}),
-    )
-    (stood,) = root.session.standing()
+    stood = UncategorizedRecord(kind="persistent_agent", payload={"label": "old"})
+    _ = team.join(_member(tmp_path, standing=(stood,)))
 
     with caplog.at_level(logging.WARNING):
         assert team.standing("Agent") == []
@@ -426,12 +475,11 @@ def test_a_spec_stood_with_the_model_it_once_held_reads_as_today_s(
 ) -> None:
     """The child's settings now stand in its own journal; the model to start on stays."""
     team = _team()
-    root = _agent(tmp_path)
-    _ = team.join(root)
-    root.session.stand(
-        "agent:a",
-        UncategorizedRecord(kind="persistent_agent", payload={**_readable("a"), **old}),
+    stood = UncategorizedRecord(
+        kind="persistent_agent",
+        payload={**_readable("a"), **old},
     )
+    _ = team.join(_member(tmp_path, standing=(stood,)))
 
     assert team.standing("Agent") == [replace(_spec("a"), model=model)]
 
@@ -452,7 +500,7 @@ def _family(tmp_path: Path) -> Team:
 def test_a_relation_is_never_a_label(tmp_path: Path, label: str) -> None:
     team = _team()
     with pytest.raises(ValueError, match="names a relation"):
-        _ = team.join(_agent(tmp_path), label=label)
+        _ = team.join(_member(tmp_path), label=label)
 
 
 @pytest.mark.parametrize(
@@ -1142,33 +1190,31 @@ def test_a_root_and_a_child_whose_spawn_awaits_it_tell_no_one(tmp_path: Path) ->
     assert [_told(team[label]) for label in team] == [[], [], [], []]
 
 
-@pytest.mark.asyncio
-async def test_debts_stand_in_the_journal_and_come_back(tmp_path: Path) -> None:
-    path = tmp_path / "a.jsonl"
-    async with JsonlJournal(path) as journal:
-        team = _team()
-        _ = team.join(_agent(tmp_path))
-        agent = Agent(
-            model=ScriptedProvider()["scripted"],
-            tool_context=ToolContext(cwd=tmp_path),
-            journal=journal,
-        )
-        async with agent:
-            _ = team.join(agent, label="a", parent="Agent")
-            team.send("Agent", "a", "x")
-    async with JsonlJournal(path) as journal:
-        again = _team()
-        _ = again.join(_agent(tmp_path))
-        agent = Agent(
-            model=ScriptedProvider()["scripted"],
-            tool_context=ToolContext(cwd=tmp_path),
-            journal=journal,
-        )
-        async with agent:
-            _ = again.join(agent, label="a", parent="Agent")
-            assert again.owes("a") == {"Agent": "x"}
-            again.answer("a", "late")
-            assert again.owes("a") == {}
+def test_debts_stand_and_are_restored(tmp_path: Path) -> None:
+    team = _team()
+    stand = Mock()
+    _ = team.join(_member(tmp_path))
+    _ = team.join(_member(tmp_path, stand=stand), label="a", parent="Agent")
+    assert team.book("Agent", "a", "x") == "ask"
+    stood = UncategorizedRecord(kind="owed", payload={"Agent": "x"})
+    stand.assert_called_once_with("owed", stood)
+
+    again = _team()
+    restored = Mock()
+    _ = again.join(_member(tmp_path))
+    _ = again.join(
+        _member(tmp_path, standing=(stood,), stand=restored),
+        label="a",
+        parent="Agent",
+    )
+    assert again.owes("a") == {"Agent": "x"}
+    restored.assert_not_called()
+
+    again.answer("a", "late")
+
+    assert again.owes("a") == {}
+    restored.assert_called_once_with("owed", None)
+    assert stood.payload == {"Agent": "x"}
 
 
 @pytest.mark.asyncio
@@ -1176,18 +1222,22 @@ async def test_a_watcher_stands_in_the_journal_it_watches_until_stopped(
     tmp_path: Path,
 ) -> None:
     team = _team()
-    _ = team.join(_agent(tmp_path))
-    _ = team.join(_agent(tmp_path), label="watcher", closing=AsyncExitStack())
+    stand = Mock()
+    _ = team.join(_member(tmp_path, stand=stand))
+    _ = team.join(_member(tmp_path), label="watcher", closing=AsyncExitStack())
     team.watch("watcher", "Agent", journal="/j/watcher.jsonl")
+    stood = UncategorizedRecord(
+        kind="watcher",
+        payload={"label": "watcher", "journal": "/j/watcher.jsonl"},
+    )
+    stand.assert_called_once_with("watcher:watcher", stood)
 
-    (stood,) = team["Agent"].session.standing()
     await team.stop("watcher")
 
-    assert (stood.kind, stood.payload) == (
-        "watcher",
-        {"label": "watcher", "journal": "/j/watcher.jsonl"},
-    )
-    assert team["Agent"].session.standing() == []
+    assert stand.call_args_list == [
+        mock.call("watcher:watcher", stood),
+        mock.call("watcher:watcher", None),
+    ]
     assert team.resolve("parent", by="Agent") == []
 
 
@@ -1212,23 +1262,28 @@ def test_choices_roll_from_the_nearest_ancestor_and_go_with_their_agent(
     assert "a" not in team.choices
 
 
-@pytest.mark.asyncio
-async def test_choices_stand_in_the_journal_and_come_back(tmp_path: Path) -> None:
-    path = tmp_path / "a.jsonl"
-    for chosen in ("high", None):
-        async with JsonlJournal(path) as journal:
-            team = _team()
-            agent = Agent(
-                model=ScriptedProvider()["scripted"],
-                tool_context=ToolContext(cwd=tmp_path),
-                journal=journal,
-            )
-            async with agent:
-                _ = team.join(agent)
-                if chosen is not None:
-                    team.choose("Agent", "model.thinking.effort", chosen)
-                else:
-                    assert team.choices == {"Agent": {"model.thinking.effort": "high"}}
+def test_choices_stand_and_are_restored(tmp_path: Path) -> None:
+    team = _team()
+    stand = Mock()
+    _ = team.join(_member(tmp_path, stand=stand))
+    team.choose("Agent", "model.thinking.effort", "high")
+    stood = UncategorizedRecord(
+        kind="choices",
+        payload={"model.thinking.effort": "high"},
+    )
+    stand.assert_called_once_with("choices", stood)
+
+    again = _team()
+    restored = Mock()
+    _ = again.join(_member(tmp_path, standing=(stood,), stand=restored))
+    assert again.choices == {"Agent": {"model.thinking.effort": "high"}}
+    restored.assert_not_called()
+
+    again.choose("Agent", "model.thinking.effort", None)
+
+    assert again.choices == {"Agent": {}}
+    restored.assert_called_once_with("choices", None)
+    assert stood.payload == {"model.thinking.effort": "high"}
 
 
 @dataclass(slots=True, kw_only=True)
@@ -2221,6 +2276,10 @@ def test_outside_members_are_reached_by_name_and_never_taken(tmp_path: Path) -> 
         team.reach("Agent", relay=_Relayed())
     with pytest.raises(ValueError, match="'parent' is a member's label"):
         team.reach("parent", relay=_Relayed())
+    assert team.book("Agent", "far", "look") == "ask"
+    assert team.owes("far") == {"Agent": "look"}
+    team.unreach("far")
+    assert team.owes("far") == {}
     team.unreach("far")
     assert team.outside == ["Agent_0"]
     assert team.resolve("far", by="Agent") == []

@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from functools import partial
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, Mock
 
 import math
 import time
@@ -56,7 +57,7 @@ from sagent.tools.types import ToolContext
 
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Sequence
     from pathlib import Path
 
     from sagent.agent.types import Factory, Shrinker
@@ -156,14 +157,6 @@ def _shell(call_id: str, command: str) -> list[SessionRecord]:
             stdout="o" * 4000,
         ),
     ]
-
-
-def _context(tmp_path: Path, *records: SessionRecord) -> Sequence[ModelContextEvent]:
-    """Return the context of a session that said ``records``, one reply each call."""
-    agent, _, _ = _agent(tmp_path)
-    agent.session.append(UserMessage(content="go"), *records)
-    agent.session.append(AssistantMessage(content="done"))
-    return agent.runtime.context().messages
 
 
 def _ids(context: Sequence[ModelContextEvent], indices: Collection[int]) -> set[str]:
@@ -293,34 +286,41 @@ _P = "/home/me/repo/agent/x.py"
     ],
 )
 def test_a_result_is_superseded_once_all_it_showed_is_shown_again(
-    tmp_path: Path,
     records: list[SessionRecord],
     gone: set[str],
 ) -> None:
-    context = _context(tmp_path, *records)
+    context = [record for record in records if isinstance(record, ToolResult)]
 
     assert _ids(context, superseded(context)) == gone
 
 
-def test_a_result_is_idle_since_its_file_was_last_named(tmp_path: Path) -> None:
-    context = _context(
-        tmp_path,
-        *_read("a", _P),
-        *_turns(requests=4),
-        ToolCall(call_id="g", name="Grep", arguments={"pattern": "def", "path": _P}),
+def test_a_result_is_idle_since_its_file_was_last_named() -> None:
+    context = [
+        ReadResult(call_id="a", path=_P),
+        reply(calls=[ToolCall(call_id="g", name="Grep", arguments={"path": _P})]),
         UncategorizedToolResult(call_id="g", content="hit"),
-        *_turns(requests=2),
-        ToolCall(
-            call_id="s",
-            name="Bash",
-            arguments={"command": "sed -n 1p agent/x.py"},
+        reply(
+            calls=[
+                ToolCall(
+                    call_id="s",
+                    name="Bash",
+                    arguments={"command": "sed -n 1p agent/x.py"},
+                ),
+            ],
         ),
         UncategorizedToolResult(call_id="s", content="line"),
-        *_turns(requests=3),
-        ToolCall(call_id="e", name="Edit", arguments={"file_path": "/repo/y.py"}),
+        reply(
+            calls=[
+                ToolCall(
+                    call_id="e",
+                    name="Edit",
+                    arguments={"file_path": "/repo/y.py"},
+                ),
+            ],
+        ),
         EditResult(call_id="e", path="/repo/y.py"),
-        *_turns(requests=1),
-    )
+        reply("done"),
+    ]
     at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
     k = reads(context)
 
@@ -330,7 +330,7 @@ def test_a_result_is_idle_since_its_file_was_last_named(tmp_path: Path) -> None:
     assert quiet[at["a"]] == k[at["s"]] < k[at["g"]] < k[at["a"]]
     # A result with no file, or whose file nothing named again: since it came.
     assert quiet[at["g"]] == k[at["g"]]
-    assert quiet[at["e"]] == k[at["e"]] == 3
+    assert quiet[at["e"]] == k[at["e"]] == 1
 
 
 @pytest.mark.parametrize(
@@ -404,71 +404,71 @@ def _read_turn(
     ]
 
 
-def test_a_file_result_naming_no_file_is_idle_since_it_came(tmp_path: Path) -> None:
-    context = _context(
-        tmp_path,
-        ToolCall(call_id="e", name="Edit"),
+def test_a_file_result_naming_no_file_is_idle_since_it_came() -> None:
+    context = [
         EditResult(call_id="e", path=None),
-        *_turns(requests=2),
-        ToolCall(call_id="g", name="Grep", arguments={"pattern": "None"}),
+        reply(
+            calls=[ToolCall(call_id="g", name="Grep", arguments={"pattern": "None"})],
+        ),
         UncategorizedToolResult(call_id="g", content="hit"),
-        *_turns(requests=1),
-    )
+        reply("done"),
+    ]
     (at,) = (i for i, e in enumerate(context) if isinstance(e, EditResult))
 
     assert idle(context)[at] == reads(context)[at]
 
 
-def test_a_file_named_only_before_its_result_is_idle_since_it_came(
-    tmp_path: Path,
-) -> None:
-    context = _context(
-        tmp_path,
-        ToolCall(call_id="g", name="Grep", arguments={"path": _P}),
+def test_a_file_named_only_before_its_result_is_idle_since_it_came() -> None:
+    context = [
+        reply(calls=[ToolCall(call_id="g", name="Grep", arguments={"path": _P})]),
         UncategorizedToolResult(call_id="g", content="hit"),
-        *_turns(requests=2),
-        ToolCall(call_id="e", name="Edit"),
+        reply("editing"),
         EditResult(call_id="e", path=_P),
-        *_turns(requests=1),
-    )
+        reply("done"),
+    ]
     at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
 
     assert idle(context)[at["e"]] == reads(context)[at["e"]] < reads(context)[at["g"]]
 
 
-def test_a_file_result_after_one_naming_no_file_is_still_followed(
-    tmp_path: Path,
-) -> None:
-    context = _context(
-        tmp_path,
-        ToolCall(call_id="e", name="Edit"),
+def test_a_file_result_after_one_naming_no_file_is_still_followed() -> None:
+    context = [
         EditResult(call_id="e", path=None),
-        *_read("a", _P),
-        *_turns(requests=2),
-        ToolCall(call_id="g", name="Grep", arguments={"path": _P}),
+        ReadResult(call_id="a", path=_P),
+        reply(calls=[ToolCall(call_id="g", name="Grep", arguments={"path": _P})]),
         UncategorizedToolResult(call_id="g", content="hit"),
-        *_turns(requests=1),
-    )
+        reply("done"),
+    ]
     at = {e.call_id: i for i, e in enumerate(context) if isinstance(e, ToolResult)}
 
     assert idle(context)[at["a"]] == reads(context)[at["g"]] < reads(context)[at["a"]]
 
 
 @pytest.mark.parametrize("server", [False, True])
-def test_with_no_policy_to_prune_by_nothing_is_planned(
-    tmp_path: Path,
-    server: bool,
-) -> None:
-    agent, pruner, _ = _agent(tmp_path)
-    agent.model.settings = replace(
-        agent.model.settings,
-        pruning=PruningPolicy(keep_recent=0) if server else None,
-        manage_context_server_side=server,
+def test_with_no_policy_to_prune_by_nothing_is_planned(server: bool) -> None:
+    context = [ReadResult(call_id="a", content="x" * 64), reply("done")]
+    splice = Mock()
+    agent = Mock(
+        spec=Agent,
+        model=Mock(
+            settings=ModelSettings(
+                pruning=PruningPolicy(keep_recent=0) if server else None,
+                manage_context_server_side=server,
+            ),
+            capability=ModelCapability(limits=ModelLimits(max_request_tokens=16)),
+        ),
+        session=Mock(compactor=Mock(spec=NoShrinker)),
+        runtime=Mock(
+            observers=[],
+            context=Mock(return_value=Mock(messages=context)),
+            append_splice=splice,
+        ),
     )
-    agent.session.append(*_turns("x" * 40_000, requests=50))
+    pruner = Pruner(agent, stub="gone")
 
     assert not pruner.should_run()
     assert not pruner.prune()
+    splice.assert_not_called()
 
 
 def test_a_file_named_deep_in_frozen_arguments_is_in_use() -> None:
@@ -646,26 +646,52 @@ def test_an_hour_long_cache_prices_its_rewrite_at_the_hour_rate(tmp_path: Path) 
     ],
 )
 async def test_the_policy_says_which_results_may_go(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     policy: PruningPolicy | None,
     server: bool,
     kept: set[str],
 ) -> None:
-    agent, pruner, _ = _agent(tmp_path, price=None)
-    agent.model.settings = replace(
-        agent.model.settings,
-        pruning=policy,
-        manage_context_server_side=server,
+    async def schedule(work: Callable[[], Awaitable[None]]) -> None:
+        await work()
+
+    context = [
+        reply(
+            calls=[
+                ToolCall(call_id=f"c{i}", name="Memory" if i == 1 else "Read")
+                for i in range(4)
+            ],
+        ),
+        *(
+            UncategorizedToolResult(call_id=f"c{i}", content=str(i) * 2)
+            for i in range(4)
+        ),
+        reply("done"),
+    ]
+    scheduled = AsyncMock(side_effect=schedule)
+    runtime = Mock(
+        observers=[],
+        context=Mock(return_value=Mock(messages=context)),
+        schedule=scheduled,
     )
-    records = _turns("0" * 400, "1" * 400, "2" * 400, "3" * 400)
-    records[3] = ToolCall(call_id="c1", name="Memory")
-    async with agent:
-        agent.session.append(*records)
+    agent = Mock(
+        spec=Agent,
+        model=Mock(
+            settings=ModelSettings(pruning=policy, manage_context_server_side=server),
+        ),
+        runtime=runtime,
+    )
+    pruner = Pruner(agent, stub="_")
+    dropped = Mock()
+    monkeypatch.setattr(pruner_module, "drop", dropped)
 
-        # ``run`` drops every result allowed, unpriced or not.
-        await pruner.run()
+    await pruner.run()
 
-    assert {cid for cid, text in _results(agent).items() if text != _STUB} == kept
+    scheduled.assert_awaited_once()
+    dropped.assert_called_once_with(
+        runtime,
+        [i + 1 for i in range(4) if f"c{i}" not in kept],
+        stub="_",
+    )
 
 
 @pytest.mark.asyncio
@@ -1048,11 +1074,14 @@ def test_a_model_with_no_cache_has_none_to_go_cold(
 
 
 @pytest.mark.asyncio
-async def test_a_pruner_takes_no_instructions(tmp_path: Path) -> None:
-    _, pruner, _ = _agent(tmp_path)
+async def test_a_pruner_takes_no_instructions() -> None:
+    scheduled = AsyncMock()
+    pruner = Pruner(Mock(spec=Agent, runtime=Mock(observers=[], schedule=scheduled)))
 
     with pytest.raises(ValueError, match=r"^A pruner takes no instructions\.$"):
         await pruner.run("keep the plan")
+
+    scheduled.assert_not_awaited()
 
 
 if __name__ == "__main__":

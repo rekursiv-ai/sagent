@@ -16,6 +16,7 @@ from treekle import PlainTree, ReadError, json_loads
 
 import pytest
 
+from sagent.lib.userdirs import base_dir_variables
 from sagent.session import types
 from sagent.session.types import (
     AgentSpawnResult,
@@ -174,6 +175,7 @@ def _every_record() -> list[SessionRecord]:
 @pytest.fixture
 def pacific(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Run in Los Angeles' time zone."""
+    isolated = base_dir_variables()
     try:
         with monkeypatch.context() as local:
             local.setenv("TZ", "America/Los_Angeles")
@@ -181,6 +183,7 @@ def pacific(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
             yield
     finally:
         time.tzset()
+        assert base_dir_variables() == isolated
 
 
 @pytest.mark.usefixtures("pacific")
