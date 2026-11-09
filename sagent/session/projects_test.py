@@ -22,8 +22,10 @@ from sagent.session.projects import (
     find_sessions,
     latest_session,
     list_sessions,
+    merge_legacy_memories,
     new_session_path,
     project_dir,
+    repo_root,
     scope_dir,
     unused_session_path,
 )
@@ -518,6 +520,201 @@ def test_find_defaults_to_the_per_user_root() -> None:
     root = data_dir() / "rekursiv-ai" / "sagent" / "projects"
     path = _journal(root / "_w" / "feed00000000", UserMessage(content="a"))
     assert [s.path for s in find_sessions("fe")] == [path]
+
+
+def test_outside_a_repository_there_is_no_root(tmp_path: Path) -> None:
+    (tmp_path / "a").mkdir()
+    assert repo_root(tmp_path / "a" / "..") is None
+
+
+def test_a_git_directory_without_a_head_is_no_repository(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "a").mkdir()
+    assert repo_root(tmp_path / "a") is None
+
+
+def test_inside_a_repository_the_root_is_its_working_tree(tmp_path: Path) -> None:
+    _repository(tmp_path / "repo")
+    (tmp_path / "repo" / "sub").mkdir()
+    assert repo_root(tmp_path / "repo" / "sub") == tmp_path.resolve() / "repo"
+
+
+def test_every_worktree_shares_its_main_repositorys_root(tmp_path: Path) -> None:
+    main = tmp_path.resolve() / "main"
+    worktree = _worktree(main / ".git", tmp_path.resolve() / "wt")
+    (worktree / "sub").mkdir()
+    assert repo_root(worktree / "sub") == main
+
+
+def test_a_worktree_of_a_bare_repository_is_rooted_at_the_repository(
+    tmp_path: Path,
+) -> None:
+    bare = tmp_path.resolve() / "bare.git"
+    assert repo_root(_worktree(bare, tmp_path.resolve() / "wt")) == bare
+
+
+def test_a_submodule_is_its_own_repository(tmp_path: Path) -> None:
+    """A submodule's ``.git`` file points at a git dir with no ``commondir``."""
+    module = tmp_path.resolve() / "super" / "mod"
+    module.mkdir(parents=True)
+    store = tmp_path.resolve() / "super" / ".git" / "modules" / "mod"
+    store.mkdir(parents=True)
+    (module / ".git").write_text(f"gitdir: {store}\n")
+    assert repo_root(module) == module
+
+
+def test_a_worktree_file_naming_another_repository_is_not_followed(
+    tmp_path: Path,
+) -> None:
+    """A cloned repo writes its own ``.git`` file; it must not claim another's root."""
+    victim = tmp_path.resolve() / "victim"
+    _worktree(victim / ".git", tmp_path.resolve() / "real")
+    forged = tmp_path.resolve() / "evil" / "fake"
+    forged.mkdir(parents=True)
+    (forged / "commondir").write_text(f"{victim / '.git'}\n")
+    (forged / "gitdir").write_text(f"{forged.parent / '.git'}\n")
+    (forged.parent / ".git").write_text(f"gitdir: {forged}\n")
+    borrower = tmp_path.resolve() / "borrower"
+    borrower.mkdir()
+    (borrower / ".git").write_text(
+        f"gitdir: {victim / '.git' / 'worktrees' / 'real'}\n",
+    )
+    assert repo_root(forged.parent) == forged.parent
+    assert repo_root(borrower) == borrower
+
+
+@pytest.mark.parametrize(
+    "held",
+    [b"not a pointer\n", b"\xff\xfe"],
+    ids=["no-gitdir", "not-utf8"],
+)
+def test_a_git_file_that_points_nowhere_roots_its_own_directory(
+    tmp_path: Path,
+    held: bytes,
+) -> None:
+    (tmp_path / ".git").write_bytes(held)
+    assert repo_root(tmp_path) == tmp_path.resolve()
+
+
+def test_memories_kept_per_directory_fold_into_their_repository(
+    tmp_path: Path,
+) -> None:
+    repo, projects = _repository(tmp_path / "repo"), tmp_path / "projects"
+    store = _store(repo, root=projects, name="role", body="Leads.\n")
+    sub = _store(repo / "a" / "b", root=projects, name="testing", body="Use pytest.\n")
+    merge_legacy_memories(repo, root=projects)
+    assert (store / "feedback_testing.md").read_text() == "Use pytest.\n"
+    assert (store / "MEMORY.md").read_text() == (
+        "- [role](feedback_role.md) -- role\n"
+        "- [testing](feedback_testing.md) -- testing\n"
+    )
+    assert (sub / "feedback_testing.md").exists()
+    assert (store / ".legacy-migrated").exists()
+
+
+def test_a_merged_store_is_private_and_its_index_utf8_whatever_the_locale(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, projects = _repository(tmp_path / "repo"), tmp_path / "projects"
+    _store(repo / "a", root=projects, name="café", body="x\n")
+    real = Path.write_text
+
+    def latin1_default(
+        self: Path,
+        data: str,
+        encoding: str | None = None,
+        errors: str | None = None,
+        newline: str | None = None,
+    ) -> int:
+        return real(self, data, encoding or "latin-1", errors, newline)
+
+    monkeypatch.setattr(Path, "write_text", latin1_default)
+    merge_legacy_memories(repo, root=projects)
+    store = project_dir(repo, root=projects) / "memory"
+    assert (store / "MEMORY.md").read_bytes().decode() == (
+        "- [café](feedback_café.md) -- café\n"
+    )
+    assert store.stat().st_mode & 0o777 == 0o700
+
+
+def test_after_its_marker_a_repository_is_never_scanned_again(tmp_path: Path) -> None:
+    repo, projects = _repository(tmp_path / "repo"), tmp_path / "projects"
+    merge_legacy_memories(repo, root=projects)
+    _store(repo / "late", root=projects, name="late", body="x\n")
+    merge_legacy_memories(repo, root=projects)
+    store = project_dir(repo, root=projects) / "memory"
+    assert not (store / "feedback_late.md").exists()
+    assert (store / "MEMORY.md").read_text() == ""
+
+
+def test_a_memory_the_repository_already_holds_differently_is_kept_as_it_is(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    repo, projects = _repository(tmp_path / "repo"), tmp_path / "projects"
+    store = _store(repo, root=projects, name="role", body="Leads.\n")
+    _store(repo / "a", root=projects, name="role", body="Follows.\n")
+    _store(repo / "b", root=projects, name="role", body="Leads.\n")
+    with caplog.at_level(logging.WARNING):
+        merge_legacy_memories(repo, root=projects)
+    assert (store / "feedback_role.md").read_text() == "Leads.\n"
+    assert (store / "MEMORY.md").read_text() == "- [role](feedback_role.md) -- role\n"
+    assert "feedback_role.md" in caplog.text
+
+
+def test_only_the_repository_s_own_directories_fold_into_it(tmp_path: Path) -> None:
+    """A sibling sharing its name's start, or a repository nested in it, keeps its own."""
+    outer, projects = _repository(tmp_path / "repo"), tmp_path / "projects"
+    inner = _repository(outer / "vendored")
+    _store(tmp_path / "repo2", root=projects, name="sibling", body="x\n")
+    _store(inner / "sub", root=projects, name="inner", body="x\n")
+    merge_legacy_memories(outer, root=projects)
+    assert sorted(
+        p.name for p in (project_dir(outer, root=projects) / "memory").iterdir()
+    ) == [
+        ".legacy-migrated",
+        "MEMORY.md",
+    ]
+
+
+def test_an_index_that_cannot_be_read_folds_as_none(tmp_path: Path) -> None:
+    repo, projects = _repository(tmp_path / "repo"), tmp_path / "projects"
+    sub = _store(repo / "a", root=projects, name="role", body="x\n")
+    (sub / "MEMORY.md").write_bytes(b"\xff\xfe")
+    (sub / "nested").mkdir()
+    merge_legacy_memories(repo, root=projects)
+    store = project_dir(repo, root=projects) / "memory"
+    assert (store / "feedback_role.md").exists()
+    assert not (store / "nested").exists()
+    assert (store / "MEMORY.md").read_text() == ""
+
+
+def _store(cwd: Path, *, root: Path, name: str, body: str) -> Path:
+    """Write one memory, ``name``, where a session in ``cwd`` once kept memories."""
+    store = project_dir(cwd, root=root) / "memory"
+    store.mkdir(parents=True, exist_ok=True)
+    (store / f"feedback_{name}.md").write_text(body)
+    (store / "MEMORY.md").write_text(f"- [{name}](feedback_{name}.md) -- {name}\n")
+    return store
+
+
+def _repository(root: Path) -> Path:
+    """Make ``root`` a repository's working tree, as git recognizes one."""
+    (root / ".git").mkdir(parents=True)
+    (root / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    return root.resolve()
+
+
+def _worktree(common: Path, worktree: Path) -> Path:
+    """Lay out what ``git worktree add`` writes: ``worktree`` checked out of ``common``."""
+    entry = common / "worktrees" / worktree.name
+    entry.mkdir(parents=True)
+    worktree.mkdir(parents=True)
+    (entry / "commondir").write_text("../..\n")
+    (entry / "gitdir").write_text(f"{worktree / '.git'}\n")
+    (worktree / ".git").write_text(f"gitdir: {entry}\n")
+    return worktree
 
 
 if __name__ == "__main__":

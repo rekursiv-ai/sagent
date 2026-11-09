@@ -11,7 +11,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 from sagent.host.wire import ToolSpec
-from sagent.session.projects import project_dir
+from sagent.session.projects import (
+    merge_legacy_memories,
+    project_dir,
+    repo_root,
+)
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_session import AgentSession
@@ -89,7 +93,7 @@ def builders(
     """Return how to build each built-in tool, by its name, in their default order.
 
     Args:
-      cwd: The working directory, whose project keeps the memories.
+      cwd: The working directory; its repository's project keeps the memories.
       team: The agents the agent tools reach.
       remote: The servers ``RemoteTool`` reaches.
 
@@ -115,7 +119,7 @@ def builders(
         "PaperDetails": PaperDetails,
         "PaperAuthor": PaperAuthor,
         "PaperFetch": PaperFetch,
-        "Memory": lambda: Memory(directory=project_dir(cwd) / "memory"),
+        "Memory": lambda: Memory(directory=_memories(cwd)),
         "PlayAudio": PlayAudio,
         "AgentSpawn": lambda: AgentSpawn(team=team),
         "AgentSend": lambda: AgentSend(team=team),
@@ -131,3 +135,12 @@ def builders(
             local={name: ToolSpec.from_tool(build()) for name, build in local.items()},
         ),
     }
+
+
+def _memories(cwd: Path) -> Path:
+    """Return the memory directory of ``cwd``'s repository, else of ``cwd``."""
+    repo = repo_root(cwd)
+    if repo is None:
+        return project_dir(cwd) / "memory"
+    merge_legacy_memories(repo)
+    return project_dir(repo) / "memory"

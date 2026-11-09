@@ -58,6 +58,12 @@ type Kind = Literal[
 ]
 
 
+type Source = Literal[
+    "user",
+    "inferred",
+]
+
+
 @dataclass(slots=True, kw_only=True)
 class Memory:
     """Save or forget one persistent memory of this project.
@@ -76,6 +82,11 @@ class Memory:
         action: Annotated[Literal["save", "forget"], "What to do."]
         name: Annotated[str, "Short name; saving it again replaces it."]
         type: Annotated[Kind | None, "Required to save."] = None
+        source: Annotated[
+            Source | None,
+            "Required to save: `user` when the user said it, `inferred` when you"
+            " concluded it.",
+        ] = None
         description: Annotated[
             str,
             "One line for relevance matching; required to save.",
@@ -182,8 +193,10 @@ class Memory:
             return f"Forgot {', '.join(p.name for p in found)}."
         description = " ".join(a.description.split())
         content = a.content.strip()
-        if a.type is None or not description or not content:
-            raise ValueError("A save needs a type, a description, and content.")
+        if a.type is None or a.source is None or not description or not content:
+            raise ValueError(
+                "A save needs a type, a source, a description, and content.",
+            )
         stale = self._files(slug)
         _check_owner(stale, name, then="save it under that name, or another.")
         for path in stale:
@@ -191,7 +204,7 @@ class Memory:
         file = f"{a.type}_{slug}.md"
         (self.directory / file).write_text(
             f"---\nname: {_scalar(name)}\ndescription: {_scalar(description)}\n"
-            f"type: {a.type}\n---\n\n"
+            f"type: {a.type}\nsource: {a.source}\n---\n\n"
             f"{content}\n",
             encoding="utf-8",
         )

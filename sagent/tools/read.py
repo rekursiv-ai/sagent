@@ -10,7 +10,7 @@ Typical usage example:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from importlib.resources import files
 from typing import TYPE_CHECKING, Annotated, cast
 
@@ -19,6 +19,7 @@ import io
 import json
 import mimetypes
 import re
+import time
 
 from treekle import PlainTree, ReadError, from_plain, json_loads
 
@@ -35,6 +36,7 @@ from sagent.tools.command_analyzer import (
     sed_mutates,
 )
 from sagent.tools.display import ToolDisplay
+from sagent.tools.memory import Memory
 from sagent.tools.types import Arg, json_schema, parse
 
 
@@ -238,13 +240,17 @@ class Read:
                 content=f"[image: {path}]",
                 attachments=(Attachment(mime_descriptor=mime, data=path.read_bytes()),),
             )
-        return _read_text(
+        result = _read_text(
             context,
             path,
             offset=a.offset,
             limit=a.limit,
             last_lines=a.last_lines,
         )
+        age = _memory_age(path)
+        if age and result.content is not None:
+            return replace(result, content=age + result.content)
+        return result
 
     def _read_pdf(
         self,
@@ -463,6 +469,25 @@ def _read_text(
         path=str(path),
         content=body,
         ranges=() if whole else ((start + 1, kept),),
+    )
+
+
+# A model reasons about staleness from an age, not from a date it must subtract.
+def _memory_age(path: Path) -> str:
+    """Return how old ``path`` is when it is a memory over a day old, else ``""``."""
+    if (
+        path.suffix != ".md"
+        or path.name.partition("_")[0] not in Memory.kinds
+        or not (path.parent / "MEMORY.md").is_file()
+    ):
+        return ""
+    days = int(time.time() - path.stat().st_mtime) // 86_400
+    if days <= 1:
+        return ""
+    return (
+        f"[This memory is {days} days old. Memories are point-in-time observations,"
+        " not live state: claims about code behavior or file:line citations may be"
+        " outdated. Verify against current code before asserting as fact.]\n"
     )
 
 
