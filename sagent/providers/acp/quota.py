@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -62,8 +62,10 @@ def read_antigravity_token(custom_path: Path | None = None) -> str | None:
     paths: list[Path] = []
     if custom_path is not None:
         paths.append(custom_path)
-    paths.append(Path.home() / ".gemini" / "antigravity-cli" / "antigravity-oauth-token")
-    paths.append(Path.home() / ".gemini" / "antigravity" / "antigravity-oauth-token")
+    paths.append(
+        Path.home() / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+    )  # noqa: TID251 -- external antigravity CLI token path in user home
+    paths.append(Path.home() / ".gemini" / "antigravity" / "antigravity-oauth-token")  # noqa: TID251 -- external antigravity CLI token path in user home
     paths.append(data_dir().parent / "antigravity-cli" / "antigravity-oauth-token")
 
     for path in paths:
@@ -79,7 +81,7 @@ def read_antigravity_token(custom_path: Path | None = None) -> str | None:
                     return access_token
             elif isinstance(token_field, str) and token_field:
                 return token_field
-        except Exception:
+        except (OSError, ValueError, TypeError, KeyError):
             continue
     return None
 
@@ -135,7 +137,7 @@ async def fetch_acp_quota(
                 models_data = json_loads(models_resp.text, dict[str, Any])
                 raw_response["fetchAvailableModels"] = models_data
                 raw_models = models_data.get("models")
-                now = datetime.now(timezone.utc)
+                now = datetime.now(UTC)
                 if isinstance(raw_models, dict):
                     for model_id, model_info in raw_models.items():
                         if not isinstance(model_info, dict):
@@ -153,9 +155,9 @@ async def fetch_acp_quota(
                             if isinstance(reset_val, str) and reset_val:
                                 reset_str = reset_val
                                 try:
-                                    dt = datetime.fromisoformat(reset_val.replace("Z", "+00:00"))
+                                    dt = datetime.fromisoformat(reset_val)
                                     secs_until = max((dt - now).total_seconds(), 0.0)
-                                except Exception:
+                                except (ValueError, TypeError):
                                     pass
                         models_dict[model_id] = ModelQuota(
                             model_id=model_id,
@@ -166,7 +168,7 @@ async def fetch_acp_quota(
                         )
                 # Successful response received from this endpoint
                 break
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 -- network and parse errors fall through to the next endpoint
             logger.debug("Failed to query CCPA at %s: %s", base_url, error)
             continue
 
@@ -202,7 +204,11 @@ def format_acp_usage(
     # Put the active model or primary models first
     sorted_models = sorted(
         snapshot.models.values(),
-        key=lambda m: (m.model_id != current_model, m.remaining_fraction is None, m.model_id),
+        key=lambda m: (
+            m.model_id != current_model,
+            m.remaining_fraction is None,
+            m.model_id,
+        ),
     )
 
     primary_model_summary = ""
@@ -217,11 +223,17 @@ def format_acp_usage(
         )
         line = f"{m.display_name}: {pct_left} remaining{countdown}"
         lines.append(line)
-        if not primary_model_summary and (not current_model or current_model in m.model_id):
+        if not primary_model_summary and (
+            not current_model or current_model in m.model_id
+        ):
             primary_model_summary = f"{m.display_name}: {pct_left} left"
 
     if primary_model_summary:
-        summary = f"{snapshot.tier_name}: {primary_model_summary}" if snapshot.tier_name else primary_model_summary
+        summary = (
+            f"{snapshot.tier_name}: {primary_model_summary}"
+            if snapshot.tier_name
+            else primary_model_summary
+        )
     elif snapshot.tier_name:
         summary = f"Antigravity ({snapshot.tier_name})"
     else:

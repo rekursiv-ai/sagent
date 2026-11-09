@@ -30,6 +30,7 @@ from sagent.agent.team import Team
 from sagent.providers.catalog import ModelCatalog, default_provider
 from sagent.providers.types import HasLogin
 from sagent.runtime import types
+from sagent.server.commands import SagentCommandService
 from sagent.session.jsonl import JsonlJournal
 from sagent.session.projects import list_sessions, new_session_path, project_dir
 from sagent.session.types import (
@@ -45,7 +46,7 @@ from sagent.session.types import (
 )
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.skill import Skill
-from sagent.server.commands import SagentCommandService
+
 
 if TYPE_CHECKING:
     from treekle import PlainTree
@@ -106,8 +107,7 @@ class SagentServer:
         prompt_to_append = append_system_prompt or extra_prompt
         self.append_system_prompt = _resolve_prompt_text(prompt_to_append, cwd) or ""
         self.skill_directories = tuple(
-            path if path.is_absolute() else cwd / path
-            for path in skill_directories
+            path if path.is_absolute() else cwd / path for path in skill_directories
         )
         self.output = output
         self._resources: AsyncExitStack | None = None
@@ -607,7 +607,9 @@ class SagentServer:
                             "status": "running",
                         },
                     )
-        elif hasattr(types, "ToolCallStarted") and isinstance(event, types.ToolCallStarted):
+        elif (
+            tool_call_started_cls := getattr(types, "ToolCallStarted", None)
+        ) is not None and isinstance(event, tool_call_started_cls):
             source_agent = self._team[agent_label] if self._team else None
             tool = source_agent.tools.get(event.call.name) if source_agent else None
             summary = (
@@ -735,8 +737,14 @@ class SagentServer:
         """Return useful child details without flattening child state into the UI."""
         if isinstance(event, types.ModelResponsePartial | types.ModelResponseThinking):
             return {"text": event.text, "record": event.record}
-        if hasattr(types, "ToolCallStarted") and isinstance(event, types.ToolCallStarted):
-            return {"kind": "tool", "callId": event.call.call_id, "name": event.call.name}
+        if hasattr(types, "ToolCallStarted") and isinstance(
+            event, types.ToolCallStarted
+        ):
+            return {
+                "kind": "tool",
+                "callId": event.call.call_id,
+                "name": event.call.name,
+            }
         if isinstance(event, types.ModelResponseComplete):
             return {
                 "records": [
@@ -858,13 +866,19 @@ class SagentServer:
         provider_name = provider.name
         accounts = ["default"]
         if isinstance(provider, HasLogin):
-            accounts.extend(account for account in provider.logins.accounts() if account != "default")
+            accounts.extend(
+                account
+                for account in provider.logins.accounts()
+                if account != "default"
+            )
         acp_servers = ["agy"] if provider_name == "acp" else []
         current_acp_server = (
             getattr(model, "acp_server", "agy") if provider_name == "acp" else ""
         )
         context_sizes = tuple(
-            _context_size_payload(size, is_default=size == capability.default.context_size)
+            _context_size_payload(
+                size, is_default=size == capability.default.context_size
+            )
             for size in capability.prices.sizes(settings.service_tier)
         )
         return {
@@ -950,7 +964,9 @@ class SagentServer:
             },
         }
 
-    async def _set_model_settings(self, params: Mapping[str, object]) -> dict[str, object]:
+    async def _set_model_settings(
+        self, params: Mapping[str, object]
+    ) -> dict[str, object]:
         """Apply a supported settings change through Sagent's AgentSelf tool.
 
         AgentSelf owns model succession and capability validation. The VS Code
@@ -1291,7 +1307,9 @@ def _agent_model_identity(agent: Agent) -> dict[str, str]:
     }
 
 
-def _setting_values(capability: ModelCapability, name: ModelSettingName) -> list[object]:
+def _setting_values(
+    capability: ModelCapability, name: ModelSettingName
+) -> list[object]:
     """Return native JSON values from Sagent's capability catalog.
 
     ``typed_text`` is intentionally not used here: it formats values for the
@@ -1309,7 +1327,11 @@ def _context_size_payload(
     context_name = getattr(size, "context_name", None)
     tokens = getattr(size, "tokens", None)
     display_name = getattr(size, "display_name", None)
-    if not isinstance(context_name, str) or not isinstance(tokens, int) or not isinstance(display_name, str):
+    if (
+        not isinstance(context_name, str)
+        or not isinstance(tokens, int)
+        or not isinstance(display_name, str)
+    ):
         raise TypeError("invalid Sagent context size")
     return {
         "name": context_name,
@@ -1352,7 +1374,9 @@ def _model_settings_arguments(action: Mapping[str, object]) -> dict[str, object]
             raise ValueError(f"setting {name!r} is not writable through AgentSelf")
         if not isinstance(value, str):
             raise ValueError(f"setting {name!r} requires a string value")
-        return {name.rsplit(".", 1)[-1] if name.startswith("thinking.") else name: value}
+        return {
+            name.rsplit(".", 1)[-1] if name.startswith("thinking.") else name: value
+        }
     if action_type in {"select-scope", "refresh"}:
         return {}
     raise ValueError(f"unknown model settings action {action_type!r}")

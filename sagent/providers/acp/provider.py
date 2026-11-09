@@ -441,8 +441,7 @@ def _build_tool_result(
     fallback_call: ToolCall | None,
 ) -> AnyToolResult:
     call_id = str(
-        update.get("toolCallId")
-        or (fallback_call.call_id if fallback_call else "")
+        update.get("toolCallId") or (fallback_call.call_id if fallback_call else "")
     )
     name = str(update.get("name") or (fallback_call.name if fallback_call else "tool"))
     status = str(update.get("status") or "completed")

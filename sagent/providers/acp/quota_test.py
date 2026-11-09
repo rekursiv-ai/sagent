@@ -12,11 +12,12 @@ from sagent.providers.acp.quota import (
     ModelQuota,
     fetch_acp_quota,
     format_acp_usage,
-    read_antigravity_token,
 )
 
 
-def _mock_transport(models_data: dict[str, Any], tier_data: dict[str, Any]) -> httpx2.MockTransport:
+def _mock_transport(
+    models_data: dict[str, Any], tier_data: dict[str, Any]
+) -> httpx2.MockTransport:
     def handler(request: httpx2.Request) -> httpx2.Response:
         url = str(request.url)
         if "loadCodeAssist" in url:
@@ -57,7 +58,7 @@ async def test_fetch_acp_quota_extracts_tier_and_models() -> None:
 
     transport = _mock_transport(models_data, tier_data)
     async with httpx2.AsyncClient(transport=transport) as http:
-        snapshot = await fetch_acp_quota(http, token="mock-token")
+        snapshot = await fetch_acp_quota(http, token="mock-token")  # noqa: S106 -- test token
         assert snapshot is not None
         assert snapshot.tier_id == "free-tier"
         assert snapshot.tier_name == "Antigravity"
@@ -89,8 +90,14 @@ def test_format_acp_usage_formats_summary_and_lines() -> None:
     usage = format_acp_usage(snapshot, current_model="gemini-3.5-flash-lite")
     assert usage.provider == "acp"
     assert "Gemini 3.5 Flash Lite: 62.8% left" in usage.summary
-    assert any("Gemini 3.5 Flash Lite: 62.8% remaining (resets in 1h)" in line for line in usage.details)
-    assert any("Claude Sonnet 4.6 (Thinking): 100.0% remaining (resets in 2h)" in line for line in usage.details)
+    assert any(
+        "Gemini 3.5 Flash Lite: 62.8% remaining (resets in 1h)" in line
+        for line in usage.details
+    )
+    assert any(
+        "Claude Sonnet 4.6 (Thinking): 100.0% remaining (resets in 2h)" in line
+        for line in usage.details
+    )
 
 
 @pytest.mark.asyncio

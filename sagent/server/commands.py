@@ -29,10 +29,12 @@ if TYPE_CHECKING:
 __all__ = ["SagentCommandService"]
 
 # Terminal lifecycle commands that do not apply to an external RPC daemon:
-_TERMINAL_ONLY_COMMANDS = frozenset({
-    "quit",  # terminal lifecycle; daemon lifecycle is controlled via shutdown RPC
-    "exit",  # terminal lifecycle
-})
+_TERMINAL_ONLY_COMMANDS = frozenset(
+    {
+        "quit",  # terminal lifecycle; daemon lifecycle is controlled via shutdown RPC
+        "exit",  # terminal lifecycle
+    }
+)
 
 
 @dataclass(slots=True)
@@ -99,7 +101,9 @@ class SagentCommandService:
         # ``Commands.commands_for`` intentionally inherits the parent's output
         # callback for the TUI. Frontends need the selected agent on each
         # notification so command feedback stays attached to the right view.
-        commands.say = lambda result, agent_label=label: self._output(agent_label, result)
+        commands.say = lambda result, agent_label=label: self._output(
+            agent_label, result
+        )
         return commands
 
     async def descriptors(self, label: str) -> list[dict[str, object]]:
@@ -115,17 +119,22 @@ class SagentCommandService:
                 {
                     "name": name,
                     "kind": "action" if setting.value is None else "setting",
-                    "scope": setting.name[0] if setting.name[0] in {
+                    "scope": setting.name[0]
+                    if setting.name[0]
+                    in {
                         "model",
                         "runtime",
                         "screen",
                         "tool",
                         "mcp",
-                    } else "session",
+                    }
+                    else "session",
                     "helpShort": setting.help_short,
                     "helpLong": setting.help_long,
                     "usage": setting.usage,
-                    "options": [option for option in options if isinstance(option, str)],
+                    "options": [
+                        option for option in options if isinstance(option, str)
+                    ],
                     "readable": setting.value is not None,
                 },
             )

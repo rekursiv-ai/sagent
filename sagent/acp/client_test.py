@@ -172,7 +172,10 @@ async def test_acp_client_prompt_stream(
     client = AcpClient(command=stub_server_cmd, cwd=tmp_path)
     async with client:
         session = await client.new_session()
-        updates = [dict(update) async for update in client.prompt_stream(session, "Stream test")]
+        updates = [
+            dict(update)
+            async for update in client.prompt_stream(session, "Stream test")
+        ]
         assert len(updates) == 1
         assert updates[0].get("content") == "Echo: Stream test"
 
@@ -237,28 +240,34 @@ def test_permission_decision_helpers() -> None:
         bad_selected.to_json()
 
     # auto_allow with explicit allow option
-    decision1 = PermissionDecision.auto_allow({
-        "options": [
-            {"optionId": "opt-1", "kind": "reject_once"},
-            {"optionId": "opt-2", "kind": "allow_once"},
-        ]
-    })
+    decision1 = PermissionDecision.auto_allow(
+        {
+            "options": [
+                {"optionId": "opt-1", "kind": "reject_once"},
+                {"optionId": "opt-2", "kind": "allow_once"},
+            ]
+        }
+    )
     assert decision1.option_id == "opt-2"
 
     # auto_allow with optionId containing 'allow'
-    decision2 = PermissionDecision.auto_allow({
-        "options": [
-            {"optionId": "allow_edit", "name": "Allow edit"},
-        ]
-    })
+    decision2 = PermissionDecision.auto_allow(
+        {
+            "options": [
+                {"optionId": "allow_edit", "name": "Allow edit"},
+            ]
+        }
+    )
     assert decision2.option_id == "allow_edit"
 
     # auto_allow fallback to first option
-    decision3 = PermissionDecision.auto_allow({
-        "options": [
-            {"optionId": "custom_opt"},
-        ]
-    })
+    decision3 = PermissionDecision.auto_allow(
+        {
+            "options": [
+                {"optionId": "custom_opt"},
+            ]
+        }
+    )
     assert decision3.option_id == "custom_opt"
 
     # auto_allow with empty options cancels

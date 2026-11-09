@@ -29,7 +29,8 @@ type AcpUpdate = Mapping[str, Any]
 type UpdateHandler = Callable[[AcpUpdate], Awaitable[None] | None]
 type RequestHandler = Callable[[str, JsonObject], Awaitable[object] | object]
 type PermissionHandler = Callable[
-    [JsonObject], Awaitable[JsonObject | PermissionDecision] | JsonObject | PermissionDecision
+    [JsonObject],
+    Awaitable[JsonObject | PermissionDecision] | JsonObject | PermissionDecision,
 ]
 
 
@@ -46,7 +47,9 @@ class AcpAgentCapabilities:
     @property
     def load_session(self) -> bool:
         """Whether the agent supports resuming existing sessions."""
-        return self.raw.get("loadSession") is True or self.raw.get("load_session") is True
+        return (
+            self.raw.get("loadSession") is True or self.raw.get("load_session") is True
+        )
 
     @property
     def image_prompt(self) -> bool:
@@ -66,7 +69,9 @@ class AcpAgentCapabilities:
     @property
     def session_capabilities(self) -> Mapping[str, Any]:
         """Session-level capabilities advertised by the agent."""
-        caps: object = self.raw.get("sessionCapabilities") or self.raw.get("session_capabilities")
+        caps: object = self.raw.get("sessionCapabilities") or self.raw.get(
+            "session_capabilities"
+        )
         if isinstance(caps, Mapping):
             return cast(Mapping[str, Any], caps)
         return {}
@@ -256,12 +261,16 @@ class AcpClient:
             raise AcpError(msg)
         agent_caps: object = result.get("agentCapabilities")
         caps_mapping: Mapping[str, Any] = (
-            cast(Mapping[str, Any], agent_caps) if isinstance(agent_caps, Mapping) else {}
+            cast(Mapping[str, Any], agent_caps)
+            if isinstance(agent_caps, Mapping)
+            else {}
         )
         self.agent_capabilities = AcpAgentCapabilities(caps_mapping)
         agent_info: object = result.get("agentInfo")
         self.agent_info = (
-            cast(Mapping[str, Any], agent_info) if isinstance(agent_info, Mapping) else None
+            cast(Mapping[str, Any], agent_info)
+            if isinstance(agent_info, Mapping)
+            else None
         )
         return result
 
@@ -283,7 +292,9 @@ class AcpClient:
         if not isinstance(session_id, str) or not session_id:
             msg = "session/new returned no sessionId"
             raise AcpError(msg)
-        available_models, current_model_id, config_options = _parse_session_models_and_config(result)
+        available_models, current_model_id, config_options = (
+            _parse_session_models_and_config(result)
+        )
         return AcpSession(
             session_id=session_id,
             capabilities=self.agent_capabilities or AcpAgentCapabilities({}),
@@ -311,7 +322,9 @@ class AcpClient:
         returned_id = result.get("sessionId", session_id)
         if not isinstance(returned_id, str) or not returned_id:
             returned_id = session_id
-        available_models, current_model_id, config_options = _parse_session_models_and_config(result)
+        available_models, current_model_id, config_options = (
+            _parse_session_models_and_config(result)
+        )
         return AcpSession(
             session_id=returned_id,
             capabilities=self.agent_capabilities or AcpAgentCapabilities({}),
@@ -478,7 +491,9 @@ class AcpClient:
         if process is not None and process.returncode not in (None, 0):
             stderr_tail = "".join(self._stderr_buffer).strip()
             if stderr_tail:
-                err_msg = f"ACP agent exited with code {process.returncode}: {stderr_tail}"
+                err_msg = (
+                    f"ACP agent exited with code {process.returncode}: {stderr_tail}"
+                )
         error = AcpError(err_msg)
         for future in self._pending.values():
             if not future.done():
@@ -491,7 +506,9 @@ class AcpClient:
         if process is None or process.stdin is None:
             msg = "ACP client is not started"
             raise AcpError(msg)
-        process.stdin.write((json.dumps(message, separators=(",", ":")) + "\n").encode())
+        process.stdin.write(
+            (json.dumps(message, separators=(",", ":")) + "\n").encode()
+        )
         await process.stdin.drain()
 
     async def _read_stdout(self) -> None:
@@ -501,7 +518,9 @@ class AcpClient:
         try:
             async for raw in process.stdout:
                 typed_msg = _parse_json_message(raw)
-                if "id" in typed_msg and ("result" in typed_msg or "error" in typed_msg):
+                if "id" in typed_msg and (
+                    "result" in typed_msg or "error" in typed_msg
+                ):
                     self._resolve_response(typed_msg)
                     continue
                 method = typed_msg.get("method")
@@ -550,7 +569,9 @@ class AcpClient:
         else:
             result: object = message.get("result", {})
             result_dict: JsonObject = (
-                cast(JsonObject, result) if isinstance(result, dict) else {"value": result}
+                cast(JsonObject, result)
+                if isinstance(result, dict)
+                else {"value": result}
             )
             future.set_result(result_dict)
 

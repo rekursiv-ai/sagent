@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from io import StringIO
 from pathlib import Path
+from typing import Any
 
 import asyncio
 import os
@@ -16,7 +17,6 @@ import pytest
 
 from sagent.model.capability import ModelCapability
 from sagent.runtime import types
-from sagent.session.types import AssistantMessage, ShellCommandResult, ToolCall
 from sagent.server.server import (
     SagentServer,
     _model_settings_arguments,
@@ -24,9 +24,9 @@ from sagent.server.server import (
     _resolve_extra_prompt,
     _resolve_prompt_text,
     _setting_values,
-    main,
     serve,
 )
+from sagent.session.types import AssistantMessage, ShellCommandResult, ToolCall
 
 
 @pytest.mark.cli_python_subprocess
@@ -50,13 +50,17 @@ def test_module_entrypoint_uses_a_real_pipe(tmp_path: Path) -> None:
     try:
         process.stdin.write('{"id":1,"method":"initialize"}\n')
         process.stdin.flush()
-        initialize = json_loads(process.stdout.readline())
-        assert initialize["result"]["protocol"] == "sagent/v1"
+        initialize = json_loads(process.stdout.readline(), dict[str, Any])
+        init_result = initialize.get("result")
+        assert isinstance(init_result, dict)
+        assert init_result["protocol"] == "sagent/v1"
         process.stdin.write('{"id":2,"method":"shutdown"}\n')
         process.stdin.flush()
-        shutdown = json_loads(process.stdout.readline())
-        assert shutdown["result"]["stopped"] is True
-        stopped = json_loads(process.stdout.readline())
+        shutdown = json_loads(process.stdout.readline(), dict[str, Any])
+        shutdown_result = shutdown.get("result")
+        assert isinstance(shutdown_result, dict)
+        assert shutdown_result["stopped"] is True
+        stopped = json_loads(process.stdout.readline(), dict[str, Any])
         assert stopped["method"] == "sagent/stop"
         process.stdin.close()
         assert process.wait(timeout=5) == 0
@@ -95,13 +99,13 @@ async def test_protocol_serves_requests_until_shutdown(tmp_path: Path) -> None:
             "capabilities": {
                 "streaming": True,
                 "sessions": True,
-                    "team": True,
-                    "agentSessions": True,
-                    "modelSettings": True,
-                    "commands": True,
-                    "nativeWorkspace": True,
-                    "skills": True,
-                },
+                "team": True,
+                "agentSessions": True,
+                "modelSettings": True,
+                "commands": True,
+                "nativeWorkspace": True,
+                "skills": True,
+            },
         },
     }
     assert messages[1] == {"id": 2, "result": {"open": False, "agents": []}}
@@ -136,12 +140,19 @@ async def test_get_skills_discovers_configured_skill_roots(tmp_path: Path) -> No
         skill_directories=(skills,),
     )
 
-    messages = [json_loads(line) for line in outgoing.getvalue().splitlines()]
-    result = messages[0]["result"]
+    messages = [
+        json_loads(line, dict[str, Any]) for line in outgoing.getvalue().splitlines()
+    ]
+    result = messages[0].get("result")
+    assert isinstance(result, dict)
     assert "skills" in result
-    assert result["skills"][0]["name"] == "trax"
-    assert result["skills"][0]["description"] == "Track durable work."
-    assert result["skills"][0]["source"] == "user"
+    skills_list = result["skills"]
+    assert isinstance(skills_list, list)
+    skill_item = skills_list[0]
+    assert isinstance(skill_item, dict)
+    assert skill_item["name"] == "trax"
+    assert skill_item["description"] == "Track durable work."
+    assert skill_item["source"] == "user"
 
 
 def test_model_capability_values_keep_native_json_types() -> None:
@@ -205,7 +216,10 @@ def test_resolve_extra_prompt_reads_file_when_path_exists(tmp_path: Path) -> Non
 
 
 def test_resolve_extra_prompt_preserves_inline_string(tmp_path: Path) -> None:
-    assert _resolve_extra_prompt("Inline instructions.", tmp_path) == "Inline instructions."
+    assert (
+        _resolve_extra_prompt("Inline instructions.", tmp_path)
+        == "Inline instructions."
+    )
 
 
 def test_resolve_extra_prompt_handles_empty_string(tmp_path: Path) -> None:
@@ -258,7 +272,9 @@ async def test_server_observes_streaming_tool_call_and_result(tmp_path: Path) ->
         name="run_command",
         arguments={"CommandLine": "echo hello", "toolSummary": "Echo greeting"},
     )
-    server._observe(types.ToolCallStarted(call=call, title="echo hello"), "Agent")
+    tool_call_started_cls = getattr(types, "ToolCallStarted", None)
+    assert tool_call_started_cls is not None
+    server._observe(tool_call_started_cls(call=call, title="echo hello"), "Agent")
 
     notif1 = queue.get_nowait()
     assert notif1["method"] == "sagent/event"

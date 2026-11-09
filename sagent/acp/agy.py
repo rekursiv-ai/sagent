@@ -30,9 +30,6 @@ def find_agy_binary(command_entry: str = "agy") -> str:
     fallback = data_dir().parent / "bin" / command_entry
     if fallback.is_file() and os.access(fallback, os.X_OK):
         return str(fallback)
-    local_bin = Path.home() / ".local" / "bin" / command_entry
-    if local_bin.is_file() and os.access(local_bin, os.X_OK):
-        return str(local_bin)
     return command_entry
 
 
@@ -58,7 +55,10 @@ class AgyAcp:
         if base_cmd and base_cmd[0] == "agy":
             base_cmd[0] = find_agy_binary("agy")
         args: list[str] = list(base_cmd)
-        if self.dangerously_skip_permissions and "--dangerously-skip-permissions" not in args:
+        if (
+            self.dangerously_skip_permissions
+            and "--dangerously-skip-permissions" not in args
+        ):
             args.append("--dangerously-skip-permissions")
         if self.agent is not None and "--agent" not in args:
             args.extend(("--agent", self.agent))

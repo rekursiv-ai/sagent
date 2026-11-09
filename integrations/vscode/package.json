@@ -185,12 +185,15 @@
     "compile:extension": "tsc -p ./",
     "compile:webview": "vite build --config vite.config.ts",
     "check": "tsc -p ./ --noEmit && tsc -p webview/tsconfig.json --noEmit",
+    "test": "tsc -p ./ --noEmit && tsc -p webview/tsconfig.json --noEmit && tsc -p ./ && node --test \"out/host/conversationStore.test.js\" \"out/shared/**/*.test.js\"",
     "package": "npm run check && npm run compile",
     "vscode:prepublish": "npm run package",
     "vsix": "vsce package --no-dependencies"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.4",
+    "@types/dompurify": "^3.2.0",
+    "@types/katex": "^0.16.7",
     "@types/node": "^20.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.2.0",
@@ -205,8 +208,13 @@
   },
   "dependencies": {
     "@vscode/codicons": "^0.0.46-24",
+    "dompurify": "^3.3.0",
+    "katex": "^0.19.1",
+    "mermaid": "^11.14.0",
     "react-markdown": "^10.1.0",
     "rehype-highlight": "^7.0.2",
-    "remark-gfm": "^4.0.1"
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0"
   }
 }

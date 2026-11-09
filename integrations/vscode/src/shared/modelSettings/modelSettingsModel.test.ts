@@ -101,7 +101,10 @@ function snapshot(): ModelSettingsSnapshot {
 }
 
 test("projects native provider and model inventories without replacing them", () => {
-  const view = createModelSettingsViewModel(snapshot());
+  const view = createModelSettingsViewModel({
+    ...snapshot(),
+    writableSettings: ["context", ...snapshot().writableSettings],
+  });
 
   assert.deepEqual(view.providerOptions.map((option) => option.value), [
     "openai-sub",

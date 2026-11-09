@@ -16,7 +16,9 @@ from sagent.acp.agy import AgyAcp, find_agy_binary
 from sagent.acp.client import image_content, text_content
 
 
-def test_find_agy_binary_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_find_agy_binary_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     def _mock_which(_cmd: str) -> None:
         return None
 
@@ -89,7 +91,9 @@ async def test_agy_acp_live_text_prompt(tmp_path: Path) -> None:
     )
     assert result.stop_reason in ("end_turn", "completed")
     assert len(result.updates) > 0
-    full_text = "".join(_extract_text(cast(Mapping[str, object], u)) for u in result.updates)
+    full_text = "".join(
+        _extract_text(cast(Mapping[str, object], u)) for u in result.updates
+    )
     assert "PONG" in full_text
 
 
@@ -110,5 +114,7 @@ async def test_agy_acp_live_multimodal_image_prompt(tmp_path: Path) -> None:
         cwd=tmp_path,
     )
     assert result.stop_reason in ("end_turn", "completed")
-    full_text = "".join(_extract_text(cast(Mapping[str, object], u)) for u in result.updates)
+    full_text = "".join(
+        _extract_text(cast(Mapping[str, object], u)) for u in result.updates
+    )
     assert "1x1" in full_text or "pixel" in full_text.lower() or "1" in full_text
