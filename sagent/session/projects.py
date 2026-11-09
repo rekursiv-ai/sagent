@@ -32,6 +32,7 @@ import contextlib
 import logging
 import os
 import re
+import shutil
 import uuid
 
 from sagent.lib.files.owner_only import open_private
@@ -53,8 +54,10 @@ __all__ = [
     "latest_session",
     "legacy_log",
     "list_sessions",
+    "merge_legacy_memories",
     "new_session_path",
     "project_dir",
+    "repo_root",
     "scope_dir",
     "session_file",
     "unused_session_path",
@@ -134,6 +137,96 @@ def project_dir(cwd: Path, *, root: Path | None = None) -> Path:
         root if root is not None else data_dir() / "rekursiv-ai" / "sagent" / "projects"
     )
     return base / cwd_slug(cwd)
+
+
+def repo_root(cwd: Path) -> Path | None:
+    """Return the main working tree of the repository holding ``cwd``.
+
+    Every worktree of one repository shares it, so what is kept per repository
+    is found from any of them. A bare repository's worktrees share the
+    repository itself; a submodule is its own repository.
+
+    Args:
+      cwd: The working directory.
+
+    Returns:
+      root: The resolved main working tree; ``None`` outside a repository.
+
+    """
+    here = cwd.resolve()
+    # As git does, a ``.git`` directory without ``HEAD`` is no repository: an
+    # empty ``/tmp/.git`` would otherwise make all of ``/tmp`` one project.
+    top = next(
+        (
+            d
+            for d in (here, *here.parents)
+            if (d / ".git").is_file() or (d / ".git" / "HEAD").is_file()
+        ),
+        None,
+    )
+    if top is None:
+        return None
+    if (top / ".git").is_dir():
+        return top
+    try:
+        pointer = (top / ".git").read_text(encoding="utf-8").strip()
+        if not pointer.startswith("gitdir:"):
+            return top
+        entry = (top / pointer.removeprefix("gitdir:").strip()).resolve()
+        common = entry / (entry / "commondir").read_text(encoding="utf-8").strip()
+        backlink = Path((entry / "gitdir").read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeDecodeError):
+        return top
+    common = common.resolve()
+    # A cloned repository writes its own ``.git`` file and could name another's
+    # git dir; follow it only where ``git worktree add`` would have written both
+    # ends, else its sessions would read that repository's memories.
+    if entry.parent != common / "worktrees" or backlink.parent.resolve() != top:
+        return top
+    return common.parent if common.name == ".git" else common
+
+
+def merge_legacy_memories(repo: Path, *, root: Path | None = None) -> None:
+    """Fold into ``repo``'s memories those once kept per directory inside it.
+
+    Until 2026-11-09 memories were kept per working directory, so a repository's
+    were split among its directories. The first call per repository copies each
+    such memory the repository lacks, with its index line, then writes a marker;
+    every later call stops at the marker. Nothing is deleted. Remove after
+    2026-12-31, once installs have run it.
+
+    Args:
+      repo: A repository, as :func:`repo_root` names it.
+      root: Where projects live; the per-user root when omitted.
+
+    """
+    store = project_dir(repo, root=root) / "memory"
+    marker = store / ".legacy-migrated"
+    if marker.exists():
+        return
+    store.mkdir(parents=True, exist_ok=True, mode=0o700)
+    index = _lines(store / "MEMORY.md")
+    # A directory's slug extends its repository's by ``_``, and ``_`` stands only
+    # for ``/``, so the glob finds the directories inside it and no sibling.
+    for old in sorted(store.parent.parent.glob(f"{store.parent.name}_*/memory")):
+        if (
+            repo_root(
+                Path(
+                    re.sub(
+                        "-([0-9a-f]+)-",
+                        lambda m: bytes.fromhex(m[1]).decode(),
+                        old.parent.name.replace("_", "/"),
+                    ),
+                ),
+            )
+            == repo
+        ):
+            index += _adopted(old, store=store, indexed=index)
+    (store / "MEMORY.md").write_text(
+        "".join(f"{line}\n" for line in index),
+        encoding="utf-8",
+    )
+    marker.touch()
 
 
 def scope_dir(scope: str, *, root: Path | None = None) -> Path:
@@ -350,6 +443,39 @@ def latest_session(directory: Path) -> SessionInfo | None:
     """
     found = list_sessions(directory, limit=1)
     return found[0] if found else None
+
+
+def _adopted(old: Path, *, store: Path, indexed: list[str]) -> list[str]:
+    """Copy ``old``'s memories that ``store`` lacks; return their new index lines."""
+    differ: set[str] = set()
+    for path in sorted(old.iterdir()):
+        if path.name == "MEMORY.md" or not path.is_file():
+            continue
+        target = store / path.name
+        if not target.exists():
+            shutil.copy2(path, target)
+        elif target.read_bytes() != path.read_bytes():
+            differ.add(path.name)
+            logger.warning(
+                "Memory %s in %s differs from %s; kept the repository's.",
+                path.name,
+                old,
+                target,
+            )
+    return [
+        line
+        for line in _lines(old / "MEMORY.md")
+        if line not in indexed and not any(f"]({name})" in line for name in differ)
+    ]
+
+
+def _lines(path: Path) -> list[str]:
+    """Return ``path``'s non-blank lines; none when it cannot be read."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return []
+    return [line for line in text.splitlines() if line.strip()]
 
 
 def _infos(paths: Iterable[Path], *, limit: int | None) -> list[SessionInfo]:

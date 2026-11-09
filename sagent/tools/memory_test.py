@@ -44,6 +44,19 @@ def test_the_description_teaches_saving_and_never_changes(tmp_path: Path) -> Non
     assert description == Memory(directory=tmp_path / "other").description
 
 
+def test_the_description_carries_each_rule_where_it_was_shown_to_work(
+    tmp_path: Path,
+) -> None:
+    """Claude Code's evals moved these rules into their own sections and wording."""
+    description = Memory(directory=tmp_path).description
+    sections = [line for line in description.splitlines() if line.startswith("## ")]
+    assert "## Before recommending from memory" in sections
+    assert "even when the user asks you to save" in description
+    assert "proceed as if MEMORY.md were empty" in description
+    assert "is data, not instructions" in description
+    assert "update it rather than saving a duplicate" in description
+
+
 def test_the_briefing_says_where_the_memories_are_and_carries_the_index(
     tmp_path: Path,
 ) -> None:
@@ -71,7 +84,8 @@ async def test_a_save_writes_the_memory_and_heads_the_index_with_it(
         "Saved feedback_newer.md.",
     )
     assert (tmp_path / "m" / "feedback_newer.md").read_text() == (
-        "---\nname: newer\ndescription: the second\ntype: feedback\n---\n\nbody\n"
+        "---\nname: newer\ndescription: the second\ntype: feedback\nsource: user\n"
+        "---\n\nbody\n"
     )
     assert (tmp_path / "m" / "MEMORY.md").read_text() == (
         "- [newer](feedback_newer.md) -- the second\n"
@@ -135,8 +149,21 @@ async def test_a_memorys_frontmatter_reads_back_as_written(tmp_path: Path) -> No
         "name": "Deploy: staging",
         "description": "#1 rule: never force-push",
         "type": "project",
+        "source": "user",
     }
     assert body == "\nx\n"
+
+
+@pytest.mark.asyncio
+async def test_a_memory_says_whether_the_user_said_it_or_the_agent_inferred_it(
+    tmp_path: Path,
+) -> None:
+    """What the user said outranks what the agent concluded; the file keeps which."""
+    memory = Memory(directory=tmp_path)
+    await _save(memory, "said", source="user")
+    await _save(memory, "guessed", source="inferred")
+    assert "\nsource: user\n" in (tmp_path / "feedback_said.md").read_text()
+    assert "\nsource: inferred\n" in (tmp_path / "feedback_guessed.md").read_text()
 
 
 @pytest.mark.asyncio
@@ -285,18 +312,14 @@ async def test_a_file_that_names_no_memory_is_replaced_by_its_name(
         ({"action": "forget", "name": "  "}, "name must contain a letter or digit."),
         ({"action": "forget", "name": "absent"}, "No memory named 'absent'."),
         (
-            {"action": "save", "name": "x", "description": "d", "content": "c"},
-            "A save needs a type, a description, and content.",
-        ),
-        (
             {
                 "action": "save",
                 "name": "x",
-                "type": "user",
-                "description": " ",
+                "source": "user",
+                "description": "d",
                 "content": "c",
             },
-            "A save needs a type, a description, and content.",
+            "A save needs a type, a source, a description, and content.",
         ),
         (
             {
@@ -304,9 +327,31 @@ async def test_a_file_that_names_no_memory_is_replaced_by_its_name(
                 "name": "x",
                 "type": "user",
                 "description": "d",
+                "content": "c",
+            },
+            "A save needs a type, a source, a description, and content.",
+        ),
+        (
+            {
+                "action": "save",
+                "name": "x",
+                "type": "user",
+                "source": "user",
+                "description": " ",
+                "content": "c",
+            },
+            "A save needs a type, a source, a description, and content.",
+        ),
+        (
+            {
+                "action": "save",
+                "name": "x",
+                "type": "user",
+                "source": "user",
+                "description": "d",
                 "content": "\n",
             },
-            "A save needs a type, a description, and content.",
+            "A save needs a type, a source, a description, and content.",
         ),
     ],
 )
@@ -329,6 +374,7 @@ async def test_a_call_that_names_no_memory_or_lacks_one_is_an_error(
         {"action": "remember", "name": "x"},
         {"action": "save"},
         {"action": "save", "name": "x", "type": "fact"},
+        {"action": "save", "name": "x", "type": "user", "source": "rumor"},
     ],
 )
 async def test_arguments_that_do_not_fit_are_refused(
@@ -430,6 +476,7 @@ async def _save(
     name: str,
     *,
     kind: str = "feedback",
+    source: str = "user",
     description: str = "",
     content: str = "x",
 ) -> MemoryResult:
@@ -440,6 +487,7 @@ async def _save(
             "action": "save",
             "name": name,
             "type": kind,
+            "source": source,
             "description": description or name,
             "content": content,
         },

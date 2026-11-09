@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 import json
 import os
+import time
 
 from PIL import Image
 
@@ -823,6 +824,57 @@ async def test_a_page_is_rendered_at_twice_72_dpi_as_a_quality_85_jpeg(
     image.save(want, format="JPEG", quality=85, optimize=True)
     assert attachment.data == want.getvalue()
     assert Image.open(BytesIO(attachment.data)).size == (72, 72)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("days", "note"),
+    [
+        (0, ""),
+        (1, ""),
+        (
+            2,
+            (
+                "[This memory is 2 days old. Memories are point-in-time observations,"
+                " not live state: claims about code behavior or file:line citations may"
+                " be outdated. Verify against current code before asserting as fact.]\n"
+            ),
+        ),
+    ],
+)
+async def test_a_memory_older_than_a_day_says_how_old_it_is(
+    tmp_path: Path,
+    days: int,
+    note: str,
+) -> None:
+    """Models do not reason about staleness from a date the way they do from an age."""
+    (tmp_path / "MEMORY.md").write_text("- [role](user_role_lead.md) -- Leads\n")
+    memory = tmp_path / "user_role_lead.md"
+    memory.write_text("Leads the team.\n")
+    then = time.time() - days * 86_400 - 1
+    os.utime(memory, (then, then))
+    context = ToolContext(cwd=tmp_path)
+    result = await Read().call(context, {"file_path": "user_role_lead.md"})
+    again = await Read().call(context, {"file_path": "user_role_lead.md"})
+    assert result.text() == f"{note}1\tLeads the team.\n"
+    assert again.status == "unchanged"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "name",
+    ["user_role.md", "notes_role.md", "user_role.txt"],
+    ids=["no-index", "no-type", "not-markdown"],
+)
+async def test_a_file_that_is_no_memory_carries_no_age(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    if name != "user_role.md":
+        (tmp_path / "MEMORY.md").write_text("")
+    (tmp_path / name).write_text("x\n")
+    os.utime(tmp_path / name, (0, 0))
+    assert (await _read(tmp_path, file_path=name)).text() == "1\tx\n"
 
 
 async def _read(

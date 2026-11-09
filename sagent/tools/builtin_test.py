@@ -8,6 +8,7 @@ from sagent.agent.team import Team
 from sagent.host.wire import ToolSpec
 from sagent.model.scripted import ScriptedProvider
 from sagent.providers.catalog import ModelCatalog
+from sagent.session.projects import project_dir
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.agent_send import AgentSend
 from sagent.tools.agent_session import AgentSession
@@ -49,7 +50,27 @@ def test_bash_shares_its_peers_and_memory_is_the_project_s(tmp_path: Path) -> No
     assert isinstance(bash, Bash)
     assert isinstance(memory, Memory)
     assert all(peer is built[peer.name] for peer in bash.peers)
-    assert memory.directory.name == "memory"
+    assert memory.directory == project_dir(tmp_path) / "memory"
+
+
+def test_memory_is_the_repository_s_wherever_in_it_the_agent_starts(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "repo" / ".git").mkdir(parents=True)
+    (tmp_path / "repo" / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (tmp_path / "repo" / "sub").mkdir()
+    memory = _built(tmp_path / "repo" / "sub")["Memory"]
+    assert isinstance(memory, Memory)
+    assert memory.directory == project_dir(tmp_path / "repo") / "memory"
+    assert (memory.directory / ".legacy-migrated").exists()
+
+
+def test_outside_a_repository_memory_is_the_directory_s_and_nothing_folds(
+    tmp_path: Path,
+) -> None:
+    memory = _built(tmp_path)["Memory"]
+    assert isinstance(memory, Memory)
+    assert not memory.directory.exists()
 
 
 def test_remote_tool_knows_each_local_tool_but_itself(tmp_path: Path) -> None:
