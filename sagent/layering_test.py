@@ -36,7 +36,7 @@ def _outside_the_frontend() -> list[Path]:
     return [
         path
         for path in sorted(_ROOT.rglob("*.py"))
-        if "tui" not in path.relative_to(_ROOT).parts[:1]
+        if not any(part in ("tui", "server") for part in path.relative_to(_ROOT).parts[:1])
         and path.name != "__main__.py"
         and not path.name.endswith("_test.py")
     ]

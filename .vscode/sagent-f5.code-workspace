@@ -15,7 +15,7 @@
       "python",
       "-m",
       "sagent",
-      "vscode-server"
+      "daemon"
     ],
     "workbench.secondarySideBar.defaultVisibility": "visible",
     "workbench.colorCustomizations": {

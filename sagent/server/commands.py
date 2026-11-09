@@ -1,8 +1,8 @@
-"""VS Code's adapter for Sagent's native user command surface.
+"""Headless daemon adapter for Sagent's native user command surface.
 
-The command semantics remain in :mod:`sagent.tui.slash`.  This module supplies
+The command semantics remain in :mod:`sagent.tui.slash`. This module supplies
 the non-terminal callbacks that the existing command engine needs and projects
-its native ``Setting`` metadata over the VS Code process protocol.  It must not
+its native ``Setting`` metadata over the daemon RPC protocol. It must not
 parse, validate, or reimplement command arguments.
 """
 
@@ -26,34 +26,21 @@ if TYPE_CHECKING:
     from sagent.tui.types import CommandOutput
 
 
-__all__ = ["SagentVscodeCommandService"]
+__all__ = ["SagentCommandService"]
 
-# These commands remain implemented by Sagent's native command engine, but are
-# temporarily hidden from the VS Code command picker until their UI behavior is
-# adapted or verified. Do not delete the native commands.
-_HIDDEN_COMMANDS = frozenset({
-    # Confirmed incompatible or incomplete in VS Code:
-    "login",  # provider login still writes to terminal stdout/input
-    "quit",  # terminal lifecycle; VS Code does not handle the done result
-    "exit",  # terminal lifecycle; VS Code does not handle the done result
-    "focus",  # agent.focused is emitted but not applied by the VS Code host
-    "screen.thinking",  # the webview does not yet honor this display setting
-    # Untested or still missing a complete VS Code presentation:
-    "defer",  # the TUI deferred pane has no VS Code equivalent yet
-    "halt",  # needs verification during an active model turn
-    "kill",  # needs verification with running tools or persistent children
-    "send",  # needs verification with a live child agent
-    "watcher",  # swarm watcher behavior has not been verified in VS Code
-    "mcp.login",  # interactive MCP authentication flow is not verified
+# Terminal lifecycle commands that do not apply to an external RPC daemon:
+_TERMINAL_ONLY_COMMANDS = frozenset({
+    "quit",  # terminal lifecycle; daemon lifecycle is controlled via shutdown RPC
+    "exit",  # terminal lifecycle
 })
 
 
 @dataclass(slots=True)
-class _VscodeThinkingView(ThinkingView):
+class _DaemonThinkingView(ThinkingView):
     """Real per-agent screen state for Sagent's native ``screen`` settings.
 
-    VS Code does not have a terminal printer, but the setting still has a real
-    meaning: the webview decides whether to display structured thinking events.
+    Headless clients do not have a terminal printer, but the setting still has a real
+    meaning: the client decides whether to display structured thinking events.
     Keeping this state here lets the native ``ScreenSettings`` implementation
     remain authoritative without inventing a second settings model.
     """
@@ -62,7 +49,7 @@ class _VscodeThinkingView(ThinkingView):
 
     @property
     def show_thinking(self) -> bool:
-        """Whether the VS Code client should display thinking events."""
+        """Whether the client should display thinking events."""
         return self._show_thinking
 
     @show_thinking.setter
@@ -70,8 +57,8 @@ class _VscodeThinkingView(ThinkingView):
         self._show_thinking = show
 
 
-class SagentVscodeCommandService:
-    """Adapt Sagent's existing ``Commands`` engine to the VS Code transport."""
+class SagentCommandService:
+    """Adapt Sagent's existing ``Commands`` engine to the daemon transport."""
 
     def __init__(
         self,
@@ -81,12 +68,14 @@ class SagentVscodeCommandService:
         catalog: ModelCatalog,
         output: Callable[[str, CommandOutput], None],
         focus: Callable[[str], None],
+        hidden_commands: frozenset[str] = _TERMINAL_ONLY_COMMANDS,
     ) -> None:
         self._team = team
         self._catalog = catalog
         self._output = output
         self._focus = focus
-        self._screens: dict[str, _VscodeThinkingView] = {}
+        self._hidden_commands = hidden_commands
+        self._screens: dict[str, _DaemonThinkingView] = {}
         self._commands = Commands(
             agent,
             catalog=catalog,
@@ -98,8 +87,8 @@ class SagentVscodeCommandService:
             screens=self._screen,
         )
 
-    def _screen(self, label: str) -> _VscodeThinkingView:
-        return self._screens.setdefault(label, _VscodeThinkingView())
+    def _screen(self, label: str) -> _DaemonThinkingView:
+        return self._screens.setdefault(label, _DaemonThinkingView())
 
     async def _commands_for(self, label: str) -> Commands:
         if label not in self._team:
@@ -108,7 +97,7 @@ class SagentVscodeCommandService:
             return self._commands
         commands = await self._commands.commands_for(self._team, label)
         # ``Commands.commands_for`` intentionally inherits the parent's output
-        # callback for the TUI. VS Code needs the selected agent on each
+        # callback for the TUI. Frontends need the selected agent on each
         # notification so command feedback stays attached to the right view.
         commands.say = lambda result, agent_label=label: self._output(agent_label, result)
         return commands
@@ -119,7 +108,7 @@ class SagentVscodeCommandService:
         descriptors: list[dict[str, object]] = []
         for setting in harvest(commands.owners()):
             name = ".".join(setting.name)
-            if name in _HIDDEN_COMMANDS:
+            if name in self._hidden_commands:
                 continue
             options = tuple(setting.options())
             descriptors.append(

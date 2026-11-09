@@ -215,11 +215,11 @@ def main() -> int:
 
     """
     argv = sys.argv[1:]
-    if argv and argv[0] == "vscode-server":
+    if argv and argv[0] in ("daemon", "server"):
         # Keep the server's provider imports out of the normal terminal startup.
-        from sagent.vscode.server import main as vscode_server  # noqa: PLC0415
+        from sagent.server.server import main as daemon_server  # noqa: PLC0415
 
-        return vscode_server(argv[1:])
+        return daemon_server(argv[1:])
     if argv and not argv[0].startswith("-"):
         command = _action(argv)
     else:

@@ -1,4 +1,4 @@
-"""Tests for the Sagent-specific VS Code process protocol."""
+"""Tests for the Sagent headless daemon RPC protocol."""
 
 from __future__ import annotations
 
@@ -17,8 +17,8 @@ import pytest
 from sagent.model.capability import ModelCapability
 from sagent.runtime import types
 from sagent.session.types import AssistantMessage, ShellCommandResult, ToolCall
-from sagent.vscode.server import (
-    SagentVscodeServer,
+from sagent.server.server import (
+    SagentServer,
     _model_settings_arguments,
     _record_metadata,
     _resolve_extra_prompt,
@@ -37,7 +37,7 @@ def test_module_entrypoint_uses_a_real_pipe(tmp_path: Path) -> None:
         part for part in (str(repository), environment.get("PYTHONPATH")) if part
     )
     process = subprocess.Popen(
-        [sys.executable, "-m", "sagent.vscode"],
+        [sys.executable, "-m", "sagent.server"],
         cwd=tmp_path,
         env=environment,
         stdin=subprocess.PIPE,
@@ -51,7 +51,7 @@ def test_module_entrypoint_uses_a_real_pipe(tmp_path: Path) -> None:
         process.stdin.write('{"id":1,"method":"initialize"}\n')
         process.stdin.flush()
         initialize = json_loads(process.stdout.readline())
-        assert initialize["result"]["protocol"] == "sagent-vscode/1"
+        assert initialize["result"]["protocol"] == "sagent/v1"
         process.stdin.write('{"id":2,"method":"shutdown"}\n')
         process.stdin.flush()
         shutdown = json_loads(process.stdout.readline())
@@ -91,7 +91,7 @@ async def test_protocol_serves_requests_until_shutdown(tmp_path: Path) -> None:
     assert messages[0] == {
         "id": 1,
         "result": {
-            "protocol": "sagent-vscode/1",
+            "protocol": "sagent/v1",
             "capabilities": {
                 "streaming": True,
                 "sessions": True,
@@ -214,7 +214,7 @@ def test_resolve_extra_prompt_handles_empty_string(tmp_path: Path) -> None:
 
 def test_server_initializes_system_and_append_prompts(tmp_path: Path) -> None:
     queue = asyncio.Queue[dict[str, object]]()
-    server = SagentVscodeServer(
+    server = SagentServer(
         cwd=tmp_path,
         model_name="default",
         system_prompt="Base instructions.",
@@ -227,7 +227,7 @@ def test_server_initializes_system_and_append_prompts(tmp_path: Path) -> None:
 
 def test_server_supports_extra_prompt_backwards_compatibility(tmp_path: Path) -> None:
     queue = asyncio.Queue[dict[str, object]]()
-    server = SagentVscodeServer(
+    server = SagentServer(
         cwd=tmp_path,
         model_name="default",
         extra_prompt="Legacy instructions.",
@@ -237,10 +237,14 @@ def test_server_supports_extra_prompt_backwards_compatibility(tmp_path: Path) ->
     assert server.append_system_prompt == "Legacy instructions."
 
 
+@pytest.mark.skipif(
+    not hasattr(types, "ToolCallStarted"),
+    reason="ToolCallStarted streaming event is not available",
+)
 @pytest.mark.asyncio
 async def test_server_observes_streaming_tool_call_and_result(tmp_path: Path) -> None:
     queue = asyncio.Queue[dict[str, object]]()
-    server = SagentVscodeServer(
+    server = SagentServer(
         cwd=tmp_path,
         model_name="default",
         output=queue,

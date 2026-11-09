@@ -95,13 +95,13 @@ export class SagentClient implements vscode.Disposable {
   public canInstallNativeSagent(): boolean {
     const configuration = vscode.workspace.getConfiguration("sagent");
     const command = configuration.get<string>("command", "sagent");
-    const argumentsValue = configuration.get<unknown[]>("commandArguments", ["vscode-server"]);
+    const argumentsValue = configuration.get<unknown[]>("commandArguments", ["daemon"]);
     const commandArguments = argumentsValue.filter(
       (value): value is string => typeof value === "string",
     );
     return command === "sagent"
       && commandArguments.length === 1
-      && commandArguments[0] === "vscode-server";
+      && commandArguments[0] === "daemon";
   }
 
   public async installNativeSagent(cwd: string): Promise<void> {
@@ -118,7 +118,7 @@ export class SagentClient implements vscode.Disposable {
     const configuration = vscode.workspace.getConfiguration("sagent");
     const configuredCommand = configuration.get<string>("command", "sagent");
     const argumentsValue = configuration.get<unknown[]>("commandArguments", [
-      "vscode-server",
+      "daemon",
     ]);
     const configuredArguments = argumentsValue.filter(
       (value): value is string => typeof value === "string",

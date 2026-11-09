@@ -1,4 +1,4 @@
-"""Long-lived Sagent process for the native VS Code extension.
+"""Long-lived headless Sagent daemon and RPC protocol process.
 
 This is a transport adapter, not another agent implementation. Sagent owns the
 model loop, tools, team, journal, and runtime; this module only turns requests
@@ -45,7 +45,7 @@ from sagent.session.types import (
 )
 from sagent.tools.agent_self import AgentSelf
 from sagent.tools.skill import Skill
-from sagent.vscode.commands import SagentVscodeCommandService
+from sagent.server.commands import SagentCommandService
 
 if TYPE_CHECKING:
     from treekle import PlainTree
@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from sagent.tui.types import CommandOutput
 
 
-__all__ = ["SagentVscodeServer", "main", "serve"]
+__all__ = ["SagentServer", "main", "serve"]
 
 
 def _resolve_prompt_text(prompt: str | None, cwd: Path) -> str | None:
@@ -78,7 +78,7 @@ def _resolve_prompt_text(prompt: str | None, cwd: Path) -> str | None:
 _resolve_extra_prompt = _resolve_prompt_text
 
 
-class SagentVscodeServer:
+class SagentServer:
     """Own one Sagent session and expose it through request/notification messages."""
 
     def __init__(
@@ -113,7 +113,7 @@ class SagentVscodeServer:
         self._resources: AsyncExitStack | None = None
         self._agent: Agent | None = None
         self._team: Team | None = None
-        self._command_service: SagentVscodeCommandService | None = None
+        self._command_service: SagentCommandService | None = None
         self._session_path: Path | None = None
         self._observer: Any = None
         self._turn: asyncio.Task[str] | None = None
@@ -145,7 +145,7 @@ class SagentVscodeServer:
     ) -> dict[str, object]:
         if method == "initialize":
             return {
-                "protocol": "sagent-vscode/1",
+                "protocol": "sagent/v1",
                 "capabilities": {
                     "streaming": True,
                     "sessions": True,
@@ -317,7 +317,7 @@ class SagentVscodeServer:
         self._team = team
         self._session_path = path
         self._observer = observer
-        self._command_service = SagentVscodeCommandService(
+        self._command_service = SagentCommandService(
             agent=agent,
             team=team,
             catalog=catalog,
@@ -607,7 +607,7 @@ class SagentVscodeServer:
                             "status": "running",
                         },
                     )
-        elif isinstance(event, types.ToolCallStarted):
+        elif hasattr(types, "ToolCallStarted") and isinstance(event, types.ToolCallStarted):
             source_agent = self._team[agent_label] if self._team else None
             tool = source_agent.tools.get(event.call.name) if source_agent else None
             summary = (
@@ -735,7 +735,7 @@ class SagentVscodeServer:
         """Return useful child details without flattening child state into the UI."""
         if isinstance(event, types.ModelResponsePartial | types.ModelResponseThinking):
             return {"text": event.text, "record": event.record}
-        if isinstance(event, types.ToolCallStarted):
+        if hasattr(types, "ToolCallStarted") and isinstance(event, types.ToolCallStarted):
             return {"kind": "tool", "callId": event.call.call_id, "name": event.call.name}
         if isinstance(event, types.ModelResponseComplete):
             return {
@@ -1122,7 +1122,7 @@ async def serve(
 ) -> None:
     """Serve newline-delimited requests until stdin closes or shutdown is requested."""
     output: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-    server = SagentVscodeServer(
+    server = SagentServer(
         cwd=cwd,
         model_name=model_name,
         allowed_providers=allowed_providers,

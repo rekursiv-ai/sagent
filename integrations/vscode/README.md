@@ -8,7 +8,7 @@ provider, conversation state, and Sagent session; they are not separate
 implementations. The extension does not hide or modify Chat, Codex, or other
 extensions' views.
 
-The extension host launches one `sagent vscode-server` process for the active
+The extension host launches one `sagent daemon` process for the active
 workspace. The process uses Sagent's existing model catalog, tools, team, runtime,
 and JSONL journal. The webview is only a presentation layer; it sends requests
 through the extension host and receives streamed runtime notifications.
@@ -40,7 +40,7 @@ both extensions can remain installed and active together.
 
 The installed extension launches Sagent on the same VS Code host when its view
 is opened. The default configuration runs the native `sagent` executable with
-the `vscode-server` argument. The extension does not cross between operating
+the `daemon` argument. The extension does not cross between operating
 systems or remote hosts, and it does not bundle Python or the Sagent runtime.
 
 Install Sagent natively for the environment hosting VS Code and make sure its
@@ -62,7 +62,7 @@ with settings when using a non-standard installation:
     "python",
     "-m",
     "sagent",
-    "vscode-server"
+    "daemon"
   ]
 }
 ```
@@ -81,7 +81,7 @@ start the Secondary Side Bar visible. For this source worktree, the F5
 workspace launches the server through the repository's standard `uv` runner:
 
 ```text
-uv run --frozen --no-dev python -m sagent vscode-server
+uv run --frozen --no-dev python -m sagent daemon
 ```
 
 This keeps the development launch independent of a globally installed

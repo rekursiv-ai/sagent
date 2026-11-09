@@ -102,7 +102,7 @@
             "type": "string"
           },
           "default": [
-            "vscode-server"
+            "daemon"
           ],
           "description": "Arguments passed to the Sagent server executable."
         },
