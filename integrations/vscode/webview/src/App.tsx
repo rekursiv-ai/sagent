@@ -16,6 +16,7 @@ import { ConversationView } from "./components/ConversationView";
 import type { ChangeReviewAction } from "./components/changeReview/changeReviewContract";
 import type { ModelSettingsAction } from "../../src/shared/modelSettings/modelSettingsContract";
 import { ModelSettingsDialog } from "./components/modelSettings/ModelSettingsDialog";
+import { RekursivDialog } from "./components/rekursiv/RekursivDialog";
 import { Button } from "./components/ui/Button";
 import { Icon } from "./components/ui/Icon";
 import sagentLogoUrl from "./assets/sagent-logo.png";
@@ -36,8 +37,17 @@ export function App(): ReactElement {
   );
   const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [modelSettingsAnchor, setModelSettingsAnchor] = useState<HTMLButtonElement | null>(null);
+  const [rekursivSettingsOpen, setRekursivSettingsOpen] = useState(false);
+  const [rekursivSettingsAnchor, setRekursivSettingsAnchor] = useState<HTMLButtonElement | null>(null);
   const [changePreviews, setChangePreviews] = useState<Record<string, ChangePreview>>({});
-  const conversationRef = useRef<HTMLElement>(null);
+  const conversationRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const conversation = conversationRef.current;
+    if (conversation) {
+      conversation.scrollTop = conversation.scrollHeight;
+    }
+  }, [state.turns, state.timeline]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent<ExtensionToWebviewMessage>) => {
@@ -59,10 +69,6 @@ export function App(): ReactElement {
 
   useEffect(() => {
     vscode.setState(state);
-    const conversation = conversationRef.current;
-    if (conversation) {
-      conversation.scrollTop = conversation.scrollHeight;
-    }
   }, [state]);
 
   const isBusy = ["starting", "working", "cancelling"].includes(state.connection);
@@ -122,28 +128,30 @@ export function App(): ReactElement {
          */}
 
         <main className="conversation" ref={conversationRef} aria-live="polite">
-          {state.timeline.length === 0 && state.connection !== "error" ? (
-            <Welcome />
-          ) : (
-            <ConversationView
-              agents={state.agents}
-              changeReview={state.changeReview}
-              commandOutputs={state.commandOutputs}
-              onDeleteCommandOutput={(id) =>
-                vscode.postMessage({ type: "remove-command-output", id })
-              }
-              runtimeActivity={state.runtimeActivity}
-              onOpenFile={(path) => vscode.postMessage({ type: "open-file", path })}
-              onRequestPreview={(changeId) =>
-                vscode.postMessage({ type: "preview-change", changeId })
-              }
-              onReview={(path) => vscode.postMessage({ type: "review", path })}
-              previews={changePreviews}
-              timeline={state.timeline}
-              turns={state.turns}
-            />
-          )}
-          {state.lastError && <div className="error-message">{state.lastError}</div>}
+          <div className="conversation-content">
+            {state.timeline.length === 0 && state.connection !== "error" ? (
+              <Welcome />
+            ) : (
+              <ConversationView
+                agents={state.agents}
+                changeReview={state.changeReview}
+                commandOutputs={state.commandOutputs}
+                onDeleteCommandOutput={(id) =>
+                  vscode.postMessage({ type: "remove-command-output", id })
+                }
+                runtimeActivity={state.runtimeActivity}
+                onOpenFile={(path) => vscode.postMessage({ type: "open-file", path })}
+                onRequestPreview={(changeId) =>
+                  vscode.postMessage({ type: "preview-change", changeId })
+                }
+                onReview={(path) => vscode.postMessage({ type: "review", path })}
+                previews={changePreviews}
+                timeline={state.timeline}
+                turns={state.turns}
+              />
+            )}
+            {state.lastError && <div className="error-message">{state.lastError}</div>}
+          </div>
         </main>
       </div>
 
@@ -163,6 +171,11 @@ export function App(): ReactElement {
         modelLabel={modelButtonLabel(state)}
         modelDiagnostics={modelDiagnostics(state)}
         modelSettingsAvailable={state.modelSettings !== undefined}
+        onOpenRekursivSettings={(anchor) => {
+          setRekursivSettingsAnchor(anchor);
+          setRekursivSettingsOpen(true);
+        }}
+        rekursivLabel={state.rekursivContext?.mode === "rekursiv" ? "Rekursiv" : "Standard"}
         commandDescriptors={state.commandDescriptors}
         onSubmit={(text) => {
           if (text.trimStart().startsWith("/")) {
@@ -182,6 +195,21 @@ export function App(): ReactElement {
           onClose={() => setModelSettingsOpen(false)}
         />
       )}
+      <RekursivDialog
+        anchor={rekursivSettingsAnchor}
+        candidates={state.rekursivCandidates}
+        context={state.rekursivContext}
+        open={rekursivSettingsOpen}
+        onClose={() => setRekursivSettingsOpen(false)}
+        onDisable={() => {
+          setRekursivSettingsOpen(false);
+          vscode.postMessage({ type: "rekursiv.disable" });
+        }}
+        onSetup={(skills) => {
+          setRekursivSettingsOpen(false);
+          vscode.postMessage({ type: "rekursiv.setup", skills });
+        }}
+      />
     </div>
   );
 }
@@ -212,6 +240,7 @@ function normalizeConversationState(
     runtimeActivity: persistedState.runtimeActivity ?? createInitialConversationState().runtimeActivity,
     commandDescriptors: persistedState.commandDescriptors ?? [],
     commandOutputs: persistedState.commandOutputs ?? [],
+    rekursivCandidates: persistedState.rekursivCandidates ?? [],
     timeline: persistedState.timeline ?? legacyTimeline(persistedState),
     changeReview:
       persistedState.changeReview ?? createChangeReviewModel([]),

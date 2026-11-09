@@ -18,6 +18,8 @@ export type WebviewToExtensionMessage =
   | { type: "select-agent"; label: string }
   | { type: "refresh-team" }
   | { type: "refresh-model-settings" }
+  | { type: "rekursiv.setup"; skills: string[] }
+  | { type: "rekursiv.disable" }
   | {
       type: "model-settings";
       scope: ModelSettingsScope;

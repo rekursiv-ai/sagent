@@ -66,7 +66,8 @@ button:disabled {
   border-bottom: 1px solid var(--vscode-panel-border);
 }
 
-.model-settings-dialog {
+.model-settings-dialog,
+.rekursiv-dialog {
   position: fixed;
   top: 12px;
   left: 12px;
@@ -84,7 +85,13 @@ button:disabled {
   box-shadow: 0 12px 32px rgb(0 0 0 / 35%);
 }
 
-.model-settings-dialog::backdrop {
+.rekursiv-dialog {
+  width: min(420px, calc(100vw - 32px));
+  overflow: visible;
+}
+
+.model-settings-dialog::backdrop,
+.rekursiv-dialog::backdrop {
   background: rgb(0 0 0 / 35%);
 }
 
@@ -262,10 +269,33 @@ button:disabled {
 }
 
 .conversation {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   padding: 20px 14px 24px;
+}
+
+.scroll-to-latest {
+  position: sticky;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid var(--vscode-button-border, transparent);
+  border-radius: 999px;
+  color: var(--vscode-button-foreground);
+  background: color-mix(in srgb, var(--vscode-button-background) 35%, transparent);
+  cursor: pointer;
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--vscode-widget-shadow) 70%, transparent);
+}
+
+.scroll-to-latest:hover {
+  background: color-mix(in srgb, var(--vscode-button-hoverBackground) 60%, transparent);
 }
 
 .welcome {
@@ -297,8 +327,8 @@ button:disabled {
 }
 
 .turn {
-  max-width: 760px;
-  margin: 0 auto 24px;
+  width: 100%;
+  margin: 0 0 24px;
 }
 
 .message-label {
@@ -317,6 +347,208 @@ button:disabled {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   line-height: 1.5;
+}
+
+.rekursiv-context {
+  margin: 10px 12px 0;
+  padding: 10px;
+}
+
+.rekursiv-context-header,
+.rekursiv-context-grid {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.rekursiv-context-count {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+}
+
+.rekursiv-context-description {
+  color: var(--vscode-descriptionForeground);
+  font-size: 12px;
+  line-height: 1.4;
+  margin: 8px 0;
+}
+
+.rekursiv-context-candidates {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+
+.rekursiv-context-candidate-wrap {
+  position: relative;
+}
+
+.rekursiv-context-candidate {
+  align-items: flex-start;
+  display: flex;
+  gap: 7px;
+  font-size: 12px;
+}
+
+.rekursiv-context-candidate input {
+  margin-top: 2px;
+}
+
+.rekursiv-context-candidate small {
+  color: var(--vscode-descriptionForeground);
+  display: block;
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.rekursiv-context-unavailable {
+  color: var(--vscode-errorForeground);
+  font-style: normal;
+  font-weight: normal;
+}
+
+.rekursiv-context-popover {
+  position: fixed;
+  min-width: 260px;
+  max-width: 360px;
+  padding: 10px;
+  border: 1px solid var(--vscode-editorWidget-border, var(--vscode-panel-border));
+  border-radius: 4px;
+  background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+  color: var(--vscode-editorWidget-foreground, var(--vscode-foreground));
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+  font-size: 11px;
+}
+
+.rekursiv-context-popover > strong {
+  display: block;
+  font-size: 12px;
+  margin-bottom: 7px;
+}
+
+.rekursiv-context-popover ul {
+  display: grid;
+  gap: 7px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.rekursiv-context-popover li {
+  align-items: flex-start;
+  display: flex;
+  gap: 7px;
+}
+
+.rekursiv-context-popover li > span:last-child {
+  min-width: 0;
+}
+
+.rekursiv-context-popover b,
+.rekursiv-context-popover small {
+  display: block;
+}
+
+.rekursiv-context-popover small {
+  color: var(--vscode-descriptionForeground);
+  line-height: 1.35;
+  margin-top: 2px;
+}
+
+.rekursiv-context-action {
+  margin-top: 8px;
+}
+
+.rekursiv-context-header .rekursiv-context-action {
+  margin-top: 0;
+}
+
+.rekursiv-context-header > .rekursiv-context-action:first-of-type {
+  margin-left: auto;
+}
+
+.rekursiv-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+}
+
+.rekursiv-status {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--vscode-descriptionForeground);
+}
+
+.rekursiv-status-configured,
+.rekursiv-status-available {
+  background: var(--vscode-testing-iconPassed);
+}
+
+.rekursiv-status-missing,
+.rekursiv-status-not-configured,
+.rekursiv-status-unavailable,
+.rekursiv-status-error {
+  background: var(--vscode-errorForeground);
+}
+
+.rekursiv-context-skills {
+  margin-top: 8px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+}
+
+.rekursiv-context-skills ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+}
+
+.rekursiv-context-skills li {
+  margin: 3px 0;
+}
+
+.rekursiv-context-skills li details summary {
+  color: var(--vscode-foreground);
+  cursor: pointer;
+}
+
+.rekursiv-context-skills > summary {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.rekursiv-context-skills > summary::-webkit-details-marker {
+  display: none;
+}
+
+.rekursiv-context-skills > summary::before {
+  color: var(--vscode-descriptionForeground);
+  content: "▸";
+  flex: 0 0 10px;
+  font-size: 12px;
+  line-height: 1;
+  text-align: center;
+}
+
+.rekursiv-context-skills[open] > summary::before {
+  content: "▾";
+}
+
+.rekursiv-context-skills > summary .rekursiv-context-count {
+  margin-left: auto;
+}
+
+.rekursiv-context-skills small {
+  display: block;
+  margin: 3px 0 5px 16px;
+  color: var(--vscode-descriptionForeground);
 }
 
 .command-completion {
@@ -491,6 +723,12 @@ button:disabled {
   margin-top: 2px;
 }
 
+.message-timestamp {
+  padding: 0 4px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 0.78em;
+}
+
 .message-action-button {
   min-width: 24px;
   min-height: 24px;
@@ -502,6 +740,25 @@ button:disabled {
   opacity: 0;
   pointer-events: none;
   transition: opacity 120ms ease;
+}
+
+.copy-button-feedback {
+  transform: scale(1);
+  transition: opacity 120ms ease, background-color 120ms ease, color 120ms ease, transform 90ms ease;
+}
+
+.copy-button-feedback:active {
+  transform: scale(0.92);
+}
+
+.copy-button-copied {
+  color: var(--vscode-testing-iconPassed);
+  background: color-mix(in srgb, var(--vscode-testing-iconPassed) 16%, transparent);
+}
+
+.copy-button-failed {
+  color: var(--vscode-errorForeground);
+  background: color-mix(in srgb, var(--vscode-errorForeground) 12%, transparent);
 }
 
 .copy-hover-target:hover .copy-hover-action,

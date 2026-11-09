@@ -5,7 +5,11 @@ import {
 } from "./runtimeActivity/runtimeActivityModel";
 import type { ModelSettingsSnapshot } from "./modelSettings/modelSettingsContract";
 import type { SessionNavigationState } from "./sessionNavigation";
-import type { SagentCommandDescriptor } from "./sagentProtocol";
+import type {
+  SagentCommandDescriptor,
+  SagentRekursivContext,
+  SagentRekursivSkillCandidate,
+} from "./sagentProtocol";
 
 export type ConnectionState =
   | "starting"
@@ -29,6 +33,7 @@ export type AgentMessage = {
   text: string;
   sender?: string;
   recipient?: string;
+  timestamp?: string;
 };
 
 export type AgentActivityState = "working" | "completed" | "failed";
@@ -84,6 +89,9 @@ export type ConversationTurn = {
   /** Local presentation clock for the current turn; not agent runtime state. */
   startedAtMs?: number;
   elapsedSeconds?: number;
+  /** Native Sagent journal timestamps for the visible messages. */
+  userTimestamp?: string;
+  assistantTimestamp?: string;
   /** The native Sagent model captured when this turn started. */
   modelIdentity?: ConversationModelIdentity;
   error?: string;
@@ -117,6 +125,9 @@ export type ConversationState = {
   selectedAgentLabel: string;
   /** Live settings are optional for compatibility with persisted webview state. */
   modelSettings?: ModelSettingsSnapshot;
+  /** Optional environment/skill projection for the Rekursiv context surface. */
+  rekursivContext?: SagentRekursivContext;
+  rekursivCandidates: SagentRekursivSkillCandidate[];
   commandDescriptors: SagentCommandDescriptor[];
   commandOutputs: CommandOutputRecord[];
   timeline: ConversationTimelineItem[];
@@ -139,6 +150,8 @@ export function createInitialConversationState(): ConversationState {
     teamOpen: false,
     teamAgents: [],
     selectedAgentLabel: "Agent",
+    rekursivContext: undefined,
+    rekursivCandidates: [],
     runtimeActivity: createInitialRuntimeActivityState(),
     changeReview: {
       status: "empty",

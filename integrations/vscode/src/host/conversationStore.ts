@@ -20,6 +20,10 @@ import type {
   SagentTeamState,
 } from "../shared/sagentProtocol";
 import type { SagentCommandDescriptor } from "../shared/sagentProtocol";
+import type {
+  SagentRekursivContext,
+  SagentRekursivSkillCandidate,
+} from "../shared/sagentProtocol";
 import type { ModelSettingsSnapshot } from "../shared/modelSettings/modelSettingsContract";
 import type { RuntimeActivityState } from "../shared/runtimeActivity/runtimeActivityModel";
 import {
@@ -62,6 +66,8 @@ export type ConversationAction =
   | { type: "agent.session.opened"; label: string; path?: string; snapshot: SagentSessionSnapshot }
   | { type: "team.updated"; team: SagentTeamState }
   | { type: "model.settings.updated"; snapshot: ModelSettingsSnapshot }
+  | { type: "rekursiv.context.updated"; context: SagentRekursivContext }
+  | { type: "rekursiv.candidates.updated"; candidates: SagentRekursivSkillCandidate[] }
   | { type: "commands.updated"; descriptors: SagentCommandDescriptor[] }
   | { type: "command.output"; output: CommandOutputRecord }
   | { type: "command.output.removed"; id: string }
@@ -74,10 +80,11 @@ export type ConversationAction =
       turnId?: string;
       agentLabel?: string;
       modelIdentity?: ConversationModelIdentity;
+      timestamp?: string;
     }
   | { type: "turn.cancelling" }
   | { type: "assistant.delta"; text: string; agentLabel?: string }
-  | { type: "assistant.completed"; text: string; record?: string; agentLabel?: string }
+  | { type: "assistant.completed"; text: string; record?: string; agentLabel?: string; timestamp?: string }
   | { type: "assistant.thinking"; text: string; agentLabel?: string }
   | {
       type: "message.created";
@@ -88,6 +95,7 @@ export type ConversationAction =
       sender?: string;
       recipient?: string;
       agentLabel?: string;
+      timestamp?: string;
     }
   | {
       type: "tool.started";
@@ -227,6 +235,10 @@ export function reduceConversation(
       };
     case "model.settings.updated":
       return { ...state, modelSettings: action.snapshot };
+    case "rekursiv.context.updated":
+      return { ...state, rekursivContext: action.context };
+    case "rekursiv.candidates.updated":
+      return { ...state, rekursivCandidates: action.candidates };
     case "commands.updated":
       return { ...state, commandDescriptors: action.descriptors };
     case "command.output": {
@@ -280,6 +292,7 @@ export function reduceConversation(
               id: turnId,
               state: "running",
               startedAtMs: Date.now(),
+              ...(action.timestamp ? { userTimestamp: action.timestamp } : {}),
               ...(action.modelIdentity ? { modelIdentity: action.modelIdentity } : {}),
             })),
             active.id,
@@ -289,6 +302,9 @@ export function reduceConversation(
         };
       }
       const turn = createTurn(action.text, "running", action.turnId, action.modelIdentity);
+      if (action.timestamp) {
+        turn.userTimestamp = action.timestamp;
+      }
       return {
         ...state,
         connection: "working",
@@ -318,6 +334,7 @@ export function reduceConversation(
         ...turn,
         state: "running",
         assistantText: turn.assistantText || action.text,
+        ...(action.timestamp ? { assistantTimestamp: action.timestamp } : {}),
         items: completeAssistantText(turn.items, action.text),
       }));
     case "assistant.thinking":
@@ -333,7 +350,7 @@ export function reduceConversation(
         return state;
       }
       if (action.kind === "user") {
-        return state;
+        return updateUserTimestamp(state, action);
       }
       return appendAgentMessage(state, action);
     case "tool.started":
@@ -584,6 +601,7 @@ function applySessionItem(
         ...turn,
         ...modelIdentity,
         userText: item.text ?? "",
+        ...(item.timestamp ? { userTimestamp: item.timestamp } : {}),
       };
     case "agent":
       return {
@@ -596,6 +614,7 @@ function applySessionItem(
             text: item.text ?? "",
             ...(item.sender ? { sender: item.sender } : {}),
             ...(item.recipient ? { recipient: item.recipient } : {}),
+            ...(item.timestamp ? { timestamp: item.timestamp } : {}),
           },
         ],
       };
@@ -603,6 +622,7 @@ function applySessionItem(
       return {
         ...turn,
         assistantText: turn.assistantText + (item.text ?? ""),
+        ...(item.timestamp ? { assistantTimestamp: item.timestamp } : {}),
         items: appendAssistantItem(turn.items, item.id, item.text ?? ""),
       };
     case "thinking":
@@ -718,8 +738,26 @@ function addAgentMessage(
     text: action.text,
     ...(action.sender ? { sender: action.sender } : {}),
     ...(action.recipient ? { recipient: action.recipient } : {}),
+    ...(action.timestamp ? { timestamp: action.timestamp } : {}),
   };
   return { ...turn, agentMessages: [...turn.agentMessages, message] };
+}
+
+function updateUserTimestamp(
+  state: ConversationState,
+  action: Extract<ConversationAction, { type: "message.created" }>,
+): ConversationState {
+  if (!action.timestamp) {
+    return state;
+  }
+  const targetId = action.turnId ?? state.activeTurnId;
+  if (!targetId || !state.turns.some((turn) => turn.id === targetId)) {
+    return state;
+  }
+  return updateTurn(state, targetId, (turn) => ({
+    ...turn,
+    userTimestamp: action.timestamp,
+  }));
 }
 
 function upsertAgent(

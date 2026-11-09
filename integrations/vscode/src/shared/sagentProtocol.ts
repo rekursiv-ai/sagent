@@ -146,6 +146,31 @@ export type SagentCommandList = {
   commands: SagentCommandDescriptor[];
 };
 
+export type SagentSkillInfo = {
+  name: string;
+  description: string;
+  source: "project" | "user" | "builtin";
+};
+
+export type SagentRekursivSkillCandidate = {
+  id: string;
+  label: string;
+  description: string;
+  path: string;
+};
+
+export type SagentRekursivContext = {
+  mode: "standard" | "rekursiv";
+  orientation: boolean;
+  skillDirectories: string[];
+  skills: SagentSkillInfo[];
+  environment: Record<string, {
+    status: string;
+    url?: string;
+    checks?: Array<{ name: string; status: string; detail: string }>;
+  }>;
+};
+
 export function parseSagentSessionState(
   response: Record<string, unknown>,
 ): SagentSessionState {
@@ -209,6 +234,66 @@ export function parseSagentCommandList(
   return {
     agentLabel: requiredString(response.agentLabel, "agentLabel"),
     commands,
+  };
+}
+
+export function parseSagentSkillList(
+  response: Record<string, unknown>,
+): SagentSkillInfo[] {
+  if (!Array.isArray(response.skills)) return [];
+  return response.skills.flatMap((value) => {
+    if (!isRecord(value) || typeof value.name !== "string") return [];
+    return [{
+      name: value.name,
+      description: typeof value.description === "string" ? value.description : "",
+      source: value.source === "project" || value.source === "builtin" ? value.source : "user",
+    } satisfies SagentSkillInfo];
+  });
+}
+
+export function parseSagentRekursivContext(
+  response: Record<string, unknown>,
+): SagentRekursivContext {
+  const mode = response.mode === "rekursiv" ? "rekursiv" : "standard";
+  const skills = Array.isArray(response.skills)
+    ? response.skills.flatMap((value) => {
+        if (!isRecord(value) || typeof value.name !== "string") return [];
+        return [{
+          name: value.name,
+          description: typeof value.description === "string" ? value.description : "",
+          source: value.source === "project" || value.source === "builtin" ? value.source : "user",
+        } satisfies SagentSkillInfo];
+      })
+    : [];
+  const environment: SagentRekursivContext["environment"] = {};
+  if (isRecord(response.environment)) {
+    for (const [name, value] of Object.entries(response.environment)) {
+      if (isRecord(value) && typeof value.status === "string") {
+        const checks = Array.isArray(value.checks)
+          ? value.checks.flatMap((check) => {
+              if (!isRecord(check)
+                || typeof check.name !== "string"
+                || typeof check.status !== "string"
+                || typeof check.detail !== "string") {
+                return [];
+              }
+              return [{ name: check.name, status: check.status, detail: check.detail }];
+            })
+          : undefined;
+        environment[name] = {
+          status: value.status,
+          ...(typeof value.url === "string" ? { url: value.url } : {}),
+          ...(checks ? { checks } : {}),
+        };
+      }
+    }
+  }
+  return {
+    mode,
+    orientation: response.orientation === true,
+    skillDirectories: stringArray(response.skillDirectories),
+    skills,
+    environment,
   };
 }
 
@@ -311,6 +396,8 @@ function parseProviderState(value: Record<string, unknown>): SagentProviderState
     currentProvider: requiredString(value.currentProvider, "currentProvider"),
     accounts: stringArray(value.accounts),
     currentAccount: requiredString(value.currentAccount, "currentAccount"),
+    ...(Array.isArray(value.acpServers) ? { acpServers: stringArray(value.acpServers) } : {}),
+    ...(typeof value.currentAcpServer === "string" ? { currentAcpServer: value.currentAcpServer } : {}),
   };
 }
 

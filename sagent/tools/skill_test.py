@@ -127,6 +127,45 @@ def test_the_skills_sagent_ships_are_found_last(
     assert (mine.source, mine.description) == ("project", "Mine.")
 
 
+def test_additional_skill_roots_are_discovered_before_user_and_builtin(
+    tmp_path: Path,
+) -> None:
+    extra = tmp_path / "rekursiv-skills"
+    directory = extra / "trax"
+    directory.mkdir(parents=True)
+    (directory / "SKILL.md").write_text(
+        "---\nname: trax\ndescription: Track durable work.\n---\n\nUse trax.\n",
+        encoding="utf-8",
+    )
+
+    discovered = Skill(
+        user_dir=tmp_path / "user",
+        builtin_dir=tmp_path / "builtin",
+        additional_dirs=(extra,),
+    ).discover(tmp_path / "workspace")
+
+    assert [(info.name, info.source) for info in discovered] == [("trax", "user")]
+
+
+def test_additional_skill_root_can_be_a_native_direct_skill_directory(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "configgle-docs"
+    root.mkdir()
+    (root / "SKILL.md").write_text(
+        "---\nname: configgle\ndescription: Configure experiments.\n---\n\nUse Configgle.\n",
+        encoding="utf-8",
+    )
+
+    discovered = Skill(
+        user_dir=tmp_path / "user",
+        builtin_dir=tmp_path / "builtin",
+        additional_dirs=(root,),
+    ).discover(tmp_path / "workspace")
+
+    assert [(info.name, info.source) for info in discovered] == [("configgle", "user")]
+
+
 def test_the_watch_skill_sends_findings_to_the_agent_not_the_user() -> None:
     body = (_CWD.parent / "skills" / "watch" / "SKILL.md").read_text(encoding="utf-8")
     act = " ".join(body.split("## Act", 1)[1].split())

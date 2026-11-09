@@ -4,13 +4,17 @@ export function ModelDialog({
   anchor,
   ariaLabel,
   children,
+  className = "model-settings-dialog",
   open,
+  onDialogReady,
   onClose,
 }: {
   readonly anchor: HTMLElement | null;
   readonly ariaLabel: string;
   readonly children: ReactNode;
+  readonly className?: string;
   readonly open: boolean;
+  readonly onDialogReady?: (dialog: HTMLDialogElement) => void;
   readonly onClose: () => void;
 }): ReactElement {
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -21,6 +25,12 @@ export function ModelDialog({
     if (open && !dialog.open) dialog.showModal();
     else if (!open && dialog.open) dialog.close();
   }, [open]);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    onDialogReady?.(dialog);
+  }, [onDialogReady]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -79,7 +89,7 @@ export function ModelDialog({
     <dialog
       ref={dialogRef}
       aria-label={ariaLabel}
-      className="model-settings-dialog"
+      className={className}
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose();
       }}

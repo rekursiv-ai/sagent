@@ -115,6 +115,9 @@ class Skill:
     """The skills sagent ships, found last: a project's or the user's of the same
     name is found first."""
 
+    additional_dirs: tuple[Path, ...] = ()
+    """Extra skill roots supplied by a frontend or workspace profile."""
+
     display: ToolDisplay = field(default=ToolDisplay())
 
     _scans: dict[Path, _Scan] = field(
@@ -149,6 +152,7 @@ class Skill:
                 (d / ".sagent" / "skills", "project")
                 for d in (resolved, *resolved.parents)
             ),
+            *((directory, "user") for directory in self.additional_dirs),
             (self.user_dir, "user"),
             (self.builtin_dir, "builtin"),
         ]
@@ -259,17 +263,21 @@ def _skills_under(
     skipped: list[str],
 ) -> Iterator[SkillInfo]:
     """Yield every skill below ``root``, depth first, in name order; stamp each path read."""
+    resolved_root = root.resolve()
+    if resolved_root in visited:
+        return
+    visited.add(resolved_root)
     # Stamped before reading: a write landing between them then shows as a change.
     stamps.append((root, _stamp(root)))
-    for child in _subdirs(root):
-        resolved = child.resolve()
-        if resolved in visited:
-            continue
-        visited.add(resolved)
-        stamps.append((child / "SKILL.md", _stamp(child / "SKILL.md")))
-        info = _load(child, source, skipped)
+    # Support skill directories that place a SKILL.md directly at the
+    # configured root, as well as nested <root>/<name>/SKILL.md structures.
+    direct_skill = root / "SKILL.md"
+    if direct_skill.is_file():
+        stamps.append((direct_skill, _stamp(direct_skill)))
+        info = _load(root, source, skipped)
         if info is not None:
             yield info
+    for child in _subdirs(root):
         yield from _skills_under(child, source, visited, stamps, skipped)
 
 

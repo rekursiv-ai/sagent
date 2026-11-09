@@ -31,6 +31,8 @@ export type ComposerProps = {
   sessionLabel?: string;
   onCancel: () => void;
   onOpenModelSettings?: (anchor: HTMLButtonElement) => void;
+  onOpenRekursivSettings?: (anchor: HTMLButtonElement) => void;
+  rekursivLabel?: string;
   modelLabel?: string;
   modelDiagnostics?: string;
   modelSettingsAvailable?: boolean;
@@ -58,6 +60,8 @@ export function Composer({
   sessionLabel = "Current session",
   onCancel,
   onOpenModelSettings,
+  onOpenRekursivSettings,
+  rekursivLabel = "Rekursiv",
   modelLabel = "Model",
   modelDiagnostics,
   modelSettingsAvailable = false,
@@ -167,7 +171,7 @@ export function Composer({
     >
       <div
         aria-label={`Message ${targetAgentLabel} in ${targetSessionLabel}`}
-        className="relative overflow-hidden rounded-md border border-sagent-border bg-sagent-input shadow-sm focus-within:border-sagent-focus"
+        className="relative overflow-visible rounded-md border border-sagent-border bg-sagent-input shadow-sm focus-within:border-sagent-focus"
         role="group"
       >
         {showCommandMenu && (
@@ -199,8 +203,7 @@ export function Composer({
           aria-label={`Message ${targetAgentLabel}`}
           aria-invalid={error ? true : undefined}
           className={joinClasses(
-            "block max-h-[220px] min-h-[72px] w-full resize-none px-3 py-2.5 pb-12 pr-40 outline-none placeholder:text-sagent-muted-foreground disabled:cursor-not-allowed",
-            sagentUiTokens.focus,
+            "block max-h-[220px] min-h-[72px] w-full resize-none border-0 px-3 py-2.5 outline-none placeholder:text-sagent-muted-foreground disabled:cursor-not-allowed",
             sagentUiTokens.input,
           )}
           disabled={disabled}
@@ -213,39 +216,53 @@ export function Composer({
         <span className="sr-only" id={statusId} role="status" aria-live="polite">
           {statusText}
         </span>
-        <div className="absolute bottom-2 right-2 flex max-w-[calc(100%-1rem)] items-center gap-1">
-          <Button
-            aria-haspopup="dialog"
-            aria-label={`Open model settings: ${modelLabel}`}
-            className="max-w-56 truncate px-2 text-xs"
-            disabled={!modelSettingsAvailable}
-            onClick={(event) => onOpenModelSettings?.(event.currentTarget)}
-            title={modelSettingsAvailable ? modelDiagnostics ?? modelLabel : "Model settings are loading"}
-            variant="ghost"
-          >
-            {modelLabel}
-          </Button>
-          {busy ? (
+        <div className="flex items-center justify-between gap-2 px-2 pb-2">
+          <div className="min-w-0 flex items-center gap-1">
             <Button
-              aria-label={cancelling ? "Stopping Sagent" : "Stop Sagent"}
-              disabled={cancelling}
-              onClick={onCancel}
-              title={cancelling ? "Stopping Sagent" : "Stop Sagent"}
-              variant="secondary"
+              aria-haspopup="dialog"
+              aria-label={`Open Rekursiv settings: ${rekursivLabel}`}
+              className="max-w-40 truncate px-2 text-xs"
+              onClick={(event) => onOpenRekursivSettings?.(event.currentTarget)}
+              title="Rekursiv capabilities"
+              variant="ghost"
             >
-              <Icon name={cancelling ? "loading" : "debug-stop"} />
+              {rekursivLabel}
             </Button>
-          ) : (
+          </div>
+          <div className="flex min-w-0 items-center gap-1">
             <Button
-              aria-label="Send message to Sagent"
-              disabled={!canSend}
-              onClick={submit}
-              title="Send message"
-              variant="primary"
+              aria-haspopup="dialog"
+              aria-label={`Open model settings: ${modelLabel}`}
+              className="max-w-56 truncate px-2 text-xs"
+              disabled={!modelSettingsAvailable}
+              onClick={(event) => onOpenModelSettings?.(event.currentTarget)}
+              title={modelSettingsAvailable ? modelDiagnostics ?? modelLabel : "Model settings are loading"}
+              variant="ghost"
             >
-              <Icon name="send" />
+              {modelLabel}
             </Button>
-          )}
+            {busy ? (
+              <Button
+                aria-label={cancelling ? "Stopping Sagent" : "Stop Sagent"}
+                disabled={cancelling}
+                onClick={onCancel}
+                title={cancelling ? "Stopping Sagent" : "Stop Sagent"}
+                variant="secondary"
+              >
+                <Icon name={cancelling ? "loading" : "debug-stop"} />
+              </Button>
+            ) : (
+              <Button
+                aria-label="Send message to Sagent"
+                disabled={!canSend}
+                onClick={submit}
+                title="Send message"
+                variant="primary"
+              >
+                <Icon name="send" />
+              </Button>
+            )}
+          </div>
         </div>
       </div>
       {error && (

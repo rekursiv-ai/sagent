@@ -38,6 +38,7 @@ def built_in_tool_builders(
     cwd: Path,
     team: Team,
     session: FetchSession,
+    skill_directories: Sequence[Path] = (),
 ) -> dict[str, Callable[[], Tool]]:
     """Return constructors for every built-in tool in Sagent's normal order.
 
@@ -89,7 +90,7 @@ def built_in_tool_builders(
         "AgentSend": lambda: AgentSend(team=team),
         "AgentSelf": lambda: AgentSelf(team=team),
         "Session": lambda: Session(team=team),
-        "Skill": Skill,
+        "Skill": lambda: Skill(additional_dirs=tuple(skill_directories)),
         "BackgroundTask": BackgroundTask,
     }
 
@@ -100,9 +101,15 @@ def build_tools(
     team: Team,
     session: FetchSession,
     names: Sequence[str] | None = None,
+    skill_directories: Sequence[Path] = (),
 ) -> list[Tool]:
     """Build the selected built-in tools, or all of them when omitted."""
-    builders = built_in_tool_builders(cwd=cwd, team=team, session=session)
+    builders = built_in_tool_builders(
+        cwd=cwd,
+        team=team,
+        session=session,
+        skill_directories=skill_directories,
+    )
     selected = list(builders) if names is None else list(names)
     if selected == ["none"]:
         return []

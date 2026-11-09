@@ -7,19 +7,10 @@ export function activate(context: vscode.ExtensionContext): void {
   const provider = new SagentViewProvider(context.extensionUri, context.workspaceState);
   context.subscriptions.push(
     provider,
-    registerSagentView("sagent.chat", provider),
     registerSagentView("sagent.chatSecondary", provider),
-    vscode.window.registerTreeDataProvider(
-      "sagent.sessions",
-      provider.getSessionTreeDataProvider(),
-    ),
     vscode.window.registerTreeDataProvider(
       "sagent.sessionsSecondary",
       provider.getSessionTreeDataProvider(),
-    ),
-    vscode.window.registerTreeDataProvider(
-      "sagent.swarm",
-      provider.getSwarmTreeDataProvider(),
     ),
     vscode.window.registerTreeDataProvider(
       "sagent.swarmSecondary",

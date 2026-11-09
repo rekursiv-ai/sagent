@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from contextlib import AsyncExitStack
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO, cast
 
@@ -20,7 +21,7 @@ import sys
 from treekle import json_dumps, json_loads
 from wesearch.fetch import FetchSession
 
-from sagent.agent.agent import Agent
+from sagent.agent.agent import Agent, default_system_prompt
 from sagent.agent.agents_md import AgentsMdConfig
 from sagent.agent.compactor import SummaryCompactor
 from sagent.agent.default_tools import build_tools, preload_builtin_tools
@@ -43,15 +44,38 @@ from sagent.session.types import (
     UserMessage,
 )
 from sagent.tools.agent_self import AgentSelf
+from sagent.tools.skill import Skill
 from sagent.vscode.commands import SagentVscodeCommandService
 
-
 if TYPE_CHECKING:
+    from treekle import PlainTree
+
     from sagent.model.capability import ModelCapability, ModelSettingName
     from sagent.tui.types import CommandOutput
 
 
 __all__ = ["SagentVscodeServer", "main", "serve"]
+
+
+def _resolve_prompt_text(prompt: str | None, cwd: Path) -> str | None:
+    """Resolve prompt text, reading from a file if the path exists."""
+    if prompt is None:
+        return None
+    stripped = prompt.strip()
+    if not stripped:
+        return ""
+    candidate_path = Path(stripped)
+    if not candidate_path.is_absolute():
+        candidate_path = cwd / candidate_path
+    if candidate_path.is_file():
+        try:
+            return candidate_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    return stripped
+
+
+_resolve_extra_prompt = _resolve_prompt_text
 
 
 class SagentVscodeServer:
@@ -64,6 +88,10 @@ class SagentVscodeServer:
         model_name: str,
         allowed_providers: str = "",
         tool_names: Sequence[str] | None = None,
+        system_prompt: str | None = None,
+        append_system_prompt: str = "",
+        extra_prompt: str = "",
+        skill_directories: Sequence[Path] = (),
         output: asyncio.Queue[dict[str, object]],
     ) -> None:
         # These tool modules have existing Agent/Team import dependencies. Load
@@ -74,6 +102,13 @@ class SagentVscodeServer:
         self.model_name = model_name
         self.allowed_providers = allowed_providers
         self.tool_names = tuple(tool_names) if tool_names is not None else None
+        self.system_prompt = _resolve_prompt_text(system_prompt, cwd)
+        prompt_to_append = append_system_prompt or extra_prompt
+        self.append_system_prompt = _resolve_prompt_text(prompt_to_append, cwd) or ""
+        self.skill_directories = tuple(
+            path if path.is_absolute() else cwd / path
+            for path in skill_directories
+        )
         self.output = output
         self._resources: AsyncExitStack | None = None
         self._agent: Agent | None = None
@@ -119,8 +154,11 @@ class SagentVscodeServer:
                     "modelSettings": True,
                     "commands": True,
                     "nativeWorkspace": True,
+                    "skills": True,
                 },
             }
+        if method == "getSkills":
+            return self._get_skills()
         if method == "openSession":
             return await self._open_session(params)
         if method == "listSessions":
@@ -150,6 +188,21 @@ class SagentVscodeServer:
             await self.close()
             return {"stopped": True}
         raise ValueError(f"unknown method {method!r}")
+
+    def _get_skills(self) -> dict[str, object]:
+        """Return all discovered skills across project, user, and additional skill directories."""
+        skill = Skill(additional_dirs=self.skill_directories)
+        skills = skill.discover(self.cwd)
+        return {
+            "skills": [
+                {
+                    "name": info.name,
+                    "description": info.description,
+                    "source": info.source,
+                }
+                for info in skills
+            ]
+        }
 
     def _list_sessions(self) -> dict[str, object]:
         """Project Sagent's native session index for the VS Code navigator.
@@ -215,6 +268,11 @@ class SagentVscodeServer:
             fetch = await resources.enter_async_context(FetchSession())
             journal = await resources.enter_async_context(JsonlJournal(path))
             model = catalog.model(model_name, current=default_provider())
+            system: str | None = self.system_prompt
+            if self.append_system_prompt:
+                base = system if system is not None else default_system_prompt()
+                system = f"{base}\n\n{self.append_system_prompt}"
+
             agent = Agent(
                 model=model,
                 tools=build_tools(
@@ -222,12 +280,14 @@ class SagentVscodeServer:
                     team=team,
                     session=fetch,
                     names=cast("Sequence[str] | None", tool_names),
+                    skill_directories=self.skill_directories,
                 ),
                 journal=journal,
                 compactor=SummaryCompactor,
                 pruner=Pruner,
                 cwd=self.cwd,
                 agents_md=AgentsMdConfig(),
+                system_prompt=system,
                 persistent_retry=True,
             )
             await agent.recall(catalog)
@@ -302,6 +362,7 @@ class SagentVscodeServer:
                 "turnId": turn_id,
                 "text": text,
                 "agentLabel": agent_label,
+                "timestamp": datetime.now(UTC).isoformat(),
                 **_agent_model_identity(agent),
             },
         )
@@ -337,9 +398,12 @@ class SagentVscodeServer:
         return {"text": reply}
 
     def _cancel_turn(self) -> dict[str, object]:
+        active_label = self._active_agent_label
         agent = (
-            self._team[self._active_agent_label]
-            if self._team is not None and self._active_agent_label in self._team
+            self._team[active_label]
+            if self._team is not None
+            and active_label is not None
+            and active_label in self._team
             else self._agent
         )
         if self._turn is None or self._turn.done() or agent is None:
@@ -352,9 +416,12 @@ class SagentVscodeServer:
         turn = self._turn
         self._turn = None
         if turn is not None and not turn.done():
+            active_label = self._active_agent_label
             active_agent = (
-                self._team[self._active_agent_label]
-                if self._team is not None and self._active_agent_label in self._team
+                self._team[active_label]
+                if self._team is not None
+                and active_label is not None
+                and active_label in self._team
                 else self._agent
             )
             if active_agent is not None:
@@ -373,9 +440,12 @@ class SagentVscodeServer:
                 # Keep the references intact if cleanup itself fails. The
                 # caller may still need to report or retry closing this
                 # session, and replacement cleanup must not erase its handle.
-                if agent is not None and observer is not None:
-                    if observer not in agent.runtime.observers:
-                        agent.runtime.observers.append(observer)
+                if (
+                    agent is not None
+                    and observer is not None
+                    and observer not in agent.runtime.observers
+                ):
+                    agent.runtime.observers.append(observer)
                 raise
         self._agent = None
         self._resources = None
@@ -497,12 +567,17 @@ class SagentVscodeServer:
         elif isinstance(event, types.ModelResponseComplete):
             for record in event.response.records:
                 if isinstance(record, AssistantMessage):
+                    metadata = _record_metadata(
+                        record,
+                        fallback_timestamp=datetime.now(UTC).isoformat(),
+                    )
                     self._notify(
                         "assistant.completed",
                         {
                             "turnId": turn_id,
                             "record": _event_id(record),
                             "text": record.content or "",
+                            **metadata,
                         },
                     )
                 elif isinstance(record, Thinking):
@@ -532,6 +607,32 @@ class SagentVscodeServer:
                             "status": "running",
                         },
                     )
+        elif isinstance(event, types.ToolCallStarted):
+            source_agent = self._team[agent_label] if self._team else None
+            tool = source_agent.tools.get(event.call.name) if source_agent else None
+            summary = (
+                event.title
+                or (tool.summary(event.call.arguments) if tool else None)
+                or str(event.call.arguments.get("toolSummary") or "")
+                or str(event.call.arguments.get("CommandLine") or "")
+                or event.call.name
+            )
+            self._notify(
+                "tool.started",
+                {
+                    "turnId": turn_id,
+                    "callId": event.call.call_id,
+                    "name": event.call.name,
+                    "arguments": dict(event.call.arguments),
+                    "summary": summary,
+                    "status": "running",
+                    **(
+                        {"agentLabel": self._notification_agent_label}
+                        if self._notification_agent_label
+                        else {}
+                    ),
+                },
+            )
         elif isinstance(event, types.DetachedResult):
             self._notify("tool.completed", self._tool_result_params(event.result))
         elif isinstance(event, ToolResult):
@@ -634,6 +735,8 @@ class SagentVscodeServer:
         """Return useful child details without flattening child state into the UI."""
         if isinstance(event, types.ModelResponsePartial | types.ModelResponseThinking):
             return {"text": event.text, "record": event.record}
+        if isinstance(event, types.ToolCallStarted):
+            return {"kind": "tool", "callId": event.call.call_id, "name": event.call.name}
         if isinstance(event, types.ModelResponseComplete):
             return {
                 "records": [
@@ -756,6 +859,10 @@ class SagentVscodeServer:
         accounts = ["default"]
         if isinstance(provider, HasLogin):
             accounts.extend(account for account in provider.logins.accounts() if account != "default")
+        acp_servers = ["agy"] if provider_name == "acp" else []
+        current_acp_server = (
+            getattr(model, "acp_server", "agy") if provider_name == "acp" else ""
+        )
         context_sizes = tuple(
             _context_size_payload(size, is_default=size == capability.default.context_size)
             for size in capability.prices.sizes(settings.service_tier)
@@ -770,6 +877,8 @@ class SagentVscodeServer:
                 "currentProvider": provider_name,
                 "accounts": accounts,
                 "currentAccount": agent.account or team.catalog.account or "default",
+                "acpServers": acp_servers,
+                "currentAcpServer": current_acp_server,
             },
             "model": {
                 "models": list(provider),
@@ -858,7 +967,10 @@ class SagentVscodeServer:
             tool = agent.tools.get("AgentSelf")
             if not isinstance(tool, AgentSelf):
                 raise RuntimeError("AgentSelf is not enabled for this Sagent agent")
-            await tool.call(agent.runtime.tool_context, arguments)
+            await tool.call(
+                agent.runtime.tool_context,
+                cast("Mapping[str, PlainTree]", arguments),
+            )
         return self._model_settings({"agentLabel": agent.runtime.tool_context.label})
 
     def _session_snapshot(self, agent: Agent | None = None) -> dict[str, object]:
@@ -917,13 +1029,20 @@ class SagentVscodeServer:
                 if record.call_id.endswith(types.Markers().arrival):
                     continue
                 tool = target_agent.tools.get(record.name)
+                summary = (
+                    str(record.extra.get("title") or "")
+                    or (tool.summary(record.arguments) if tool else None)
+                    or str(record.arguments.get("toolSummary") or "")
+                    or str(record.arguments.get("CommandLine") or "")
+                    or record.name
+                )
                 item = {
                     "id": f"tool-{record.call_id}",
                     "type": "tool",
                     "turnId": f"turn-{turn}",
                     "callId": record.call_id,
                     "name": record.name,
-                    "summary": tool.summary(record.arguments) if tool else record.name,
+                    "summary": summary,
                     "arguments": dict(record.arguments),
                     "status": "running",
                     **_record_metadata(record),
@@ -996,6 +1115,10 @@ async def serve(
     model_name: str,
     allowed_providers: str = "",
     tool_names: Sequence[str] | None = None,
+    system_prompt: str | None = None,
+    append_system_prompt: str = "",
+    extra_prompt: str = "",
+    skill_directories: Sequence[Path] = (),
 ) -> None:
     """Serve newline-delimited requests until stdin closes or shutdown is requested."""
     output: asyncio.Queue[dict[str, object]] = asyncio.Queue()
@@ -1004,6 +1127,10 @@ async def serve(
         model_name=model_name,
         allowed_providers=allowed_providers,
         tool_names=tool_names,
+        system_prompt=system_prompt,
+        append_system_prompt=append_system_prompt,
+        extra_prompt=extra_prompt,
+        skill_directories=skill_directories,
         output=output,
     )
     stop = asyncio.Event()
@@ -1090,6 +1217,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--model", default="default")
     parser.add_argument("--allow-providers", default="")
     parser.add_argument("--tools", nargs="+", default=None)
+    parser.add_argument(
+        "--system-prompt",
+        default=None,
+        help="System prompt replacing the default one, or path to prompt file",
+    )
+    parser.add_argument(
+        "--append-system-prompt",
+        "--extra-prompt",
+        dest="append_system_prompt",
+        default="",
+        help="Instructions or path to prompt file to append to the system prompt",
+    )
+    parser.add_argument(
+        "--skill-dir",
+        action="append",
+        default=[],
+        help="Additional directory containing SKILL.md bundles",
+    )
     args = parser.parse_args(argv)
     asyncio.run(
         serve(
@@ -1099,6 +1244,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             model_name=args.model,
             allowed_providers=args.allow_providers,
             tool_names=args.tools,
+            system_prompt=args.system_prompt,
+            append_system_prompt=args.append_system_prompt,
+            skill_directories=tuple(Path(path) for path in args.skill_dir),
         ),
     )
     return 0
@@ -1182,6 +1330,12 @@ def _model_settings_arguments(action: Mapping[str, object]) -> dict[str, object]
             "provider": _required_action_string(action, "provider"),
             "model": "default",
         }
+    if action_type == "select-acp-server":
+        # Reset to default model under the ACP provider when server changes
+        return {
+            "provider": "acp",
+            "model": "default",
+        }
     if action_type == "select-model":
         return {"model": _required_action_string(action, "model")}
     if action_type == "set-setting":
@@ -1221,8 +1375,12 @@ def _event_id(record: object) -> str | None:
     return f"record-{context_id}" if context_id is not None else None
 
 
-def _record_metadata(record: object) -> dict[str, object]:
-    """Return record metadata without inventing timestamps or identifiers."""
+def _record_metadata(
+    record: object,
+    *,
+    fallback_timestamp: str | None = None,
+) -> dict[str, object]:
+    """Return record metadata, preserving native timestamps when available."""
     metadata: dict[str, object] = {}
     context_id = getattr(record, "context_id", None)
     timestamp = getattr(record, "timestamp", None)
@@ -1230,6 +1388,8 @@ def _record_metadata(record: object) -> dict[str, object]:
         metadata["contextId"] = context_id
     if timestamp is not None:
         metadata["timestamp"] = timestamp
+    elif fallback_timestamp is not None:
+        metadata["timestamp"] = fallback_timestamp
     return metadata
 
 

@@ -4,12 +4,15 @@
 
 import { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import * as vscode from "vscode";
 
 import {
   parseSagentAgentSessionState,
   parseSagentCommandList,
   parseModelSettingsSnapshot,
+  parseSagentSkillList,
   parseSagentSessionList,
   parseSagentSessionState,
   parseSagentTeamState,
@@ -19,6 +22,7 @@ import {
   type SagentSessionList,
   type SagentSessionState,
   type SagentTeamState,
+  type SagentSkillInfo,
 } from "../shared/sagentProtocol";
 import type {
   ModelSettingsAction,
@@ -27,6 +31,25 @@ import type {
 } from "../shared/modelSettings/modelSettingsContract";
 
 const defaultVscodeModel = "google-cli/gemini-flash-3.8";
+const defaultTrackinizerUrl = "http://127.0.0.1:8765";
+
+export const REKURSIV_ORIENTATION_PROMPT = `You are working in the Rekursiv AI stack.
+
+Sagent coordinates agents and tools. Trackinizer preserves work, evidence,
+findings, beliefs, and agent sessions. Priml runs reusable experiments and
+evaluations. Configgle provides reproducible experiment configuration.
+Wesearch supports web and paper research.
+
+In Rekursiv mode, use the Skill tool to discover and load the authoritative
+workflow before acting in one of those domains. Do not recreate any Rekursiv
+system in the extension or in a custom tool. Preserve useful failures,
+provenance, evidence, and handoffs when the native skills call for them.
+
+Load the Trackinizer/trax router before durable work, records, evidence,
+campaigns, or sessions. Load Priml before Priml experiments or evaluations,
+Configgle before experiment configuration work, and Wesearch before web or
+paper research. Read workspace AGENTS.md files and challenge-specific skills
+before changing or running the project.`;
 
 type SagentMessage = {
   id?: number;
@@ -41,6 +64,13 @@ type PendingRequest = {
   reject: (error: Error) => void;
 };
 
+export class SagentExecutableMissingError extends Error {
+  public constructor(message: string) {
+    super(message);
+    this.name = "SagentExecutableMissingError";
+  }
+}
+
 export class SagentClient implements vscode.Disposable {
   private process: ChildProcessWithoutNullStreams | undefined;
   private disposing = false;
@@ -48,6 +78,8 @@ export class SagentClient implements vscode.Disposable {
   private nextRequestId = 1;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly events = new EventEmitter();
+
+  public constructor(private readonly extensionUri: vscode.Uri) {}
 
   public onEvent(listener: (event: SagentEvent) => void): vscode.Disposable {
     this.events.on("event", listener);
@@ -75,6 +107,20 @@ export class SagentClient implements vscode.Disposable {
     const tools = configuration.get<unknown[]>("tools", []).filter(
       (value): value is string => typeof value === "string",
     );
+    const mode = configuration.get<string>("mode", "standard");
+    const skillDirectories = configuration.get<unknown[]>("rekursivSkillDirectories", []).filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    const selectedSkills = configuration.get<unknown[]>("rekursivSkills", []).filter(
+      (value): value is string => typeof value === "string" && value.length > 0,
+    );
+    const trackinizerUrl = configuration.get<string>("trackinizerUrl", "") || defaultTrackinizerUrl;
+    const bundledSkillDirectories = this.bundledSkillDirectories(
+      selectedSkills.length > 0 ? selectedSkills : ["trackinizer", "priml", "configgle"],
+    );
+    const configuredSkillDirectories = mode === "rekursiv"
+      ? [...skillDirectories, ...bundledSkillDirectories]
+      : [];
 
     const serverArguments = [
       ...commandArguments,
@@ -82,10 +128,16 @@ export class SagentClient implements vscode.Disposable {
       model,
       ...(allowedProviders ? ["--allow-providers", allowedProviders] : []),
       ...(tools.length > 0 ? ["--tools", ...tools] : []),
+      ...(mode === "rekursiv" ? ["--append-system-prompt", REKURSIV_ORIENTATION_PROMPT] : []),
+      ...configuredSkillDirectories.flatMap((directory) => ["--skill-dir", directory]),
     ];
     const child = spawn(command, serverArguments, {
       cwd,
       shell: false,
+      env: {
+        ...process.env,
+        TRACKINIZER_URL: trackinizerUrl,
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
     this.disposing = false;
@@ -108,9 +160,12 @@ export class SagentClient implements vscode.Disposable {
       if (this.process !== child) {
         return;
       }
-      this.failPending(error);
+      this.process = undefined;
+      this.lineBuffer = "";
+      const launchError = formatLaunchError(error, command, cwd);
+      this.failPending(launchError);
       if (!this.disposing) {
-        this.events.emit("event", { type: "connection.error", message: error.message });
+        this.events.emit("event", { type: "connection.error", message: launchError.message });
       }
     });
     child.on("exit", (code, signal) => {
@@ -147,6 +202,17 @@ export class SagentClient implements vscode.Disposable {
 
   public async getTeam(): Promise<SagentTeamState> {
     return parseSagentTeamState(await this.request("getTeam", {}));
+  }
+
+  public async getSkills(): Promise<SagentSkillInfo[]> {
+    return parseSagentSkillList(await this.request("getSkills", {}));
+  }
+
+  private bundledSkillDirectories(skillIds: string[]): string[] {
+    const root = join(this.extensionUri.fsPath, "resources", "rekursiv-skills");
+    return skillIds
+      .map((skillId) => join(root, skillId))
+      .filter((directory) => existsSync(directory));
   }
 
   public async getAgentSession(label: string): Promise<SagentAgentSessionState> {
@@ -274,4 +340,22 @@ export class SagentClient implements vscode.Disposable {
     }
     this.pending.clear();
   }
+}
+
+function formatLaunchError(error: Error & { code?: string }, command: string, cwd: string): Error {
+  if (error.code === "ENOENT") {
+    return new SagentExecutableMissingError(
+      `Sagent is not installed or is not available on this VS Code host's PATH. `
+      + `The extension tried to run '${command}' from '${cwd}'. `
+      + "Install Sagent natively for this host, then reload VS Code. "
+      + "The extension does not cross between Windows and WSL automatically.",
+    );
+  }
+  if (error.code === "EACCES") {
+    return new Error(
+      `Sagent could not be executed from '${command}' on this VS Code host `
+      + `(permission denied). Check the native Sagent installation and PATH.`,
+    );
+  }
+  return error;
 }

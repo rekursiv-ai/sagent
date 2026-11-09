@@ -5,6 +5,7 @@
   "version": "0.1.0",
   "publisher": "rekursiv-ai",
   "license": "Apache-2.0",
+  "icon": "./media/sagent-logo.png",
   "repository": {
     "type": "git",
     "url": "https://github.com/rekursiv-ai/sagent.git",
@@ -21,11 +22,8 @@
   ],
   "main": "./out/extension.js",
   "activationEvents": [
-    "onView:sagent.chat",
     "onView:sagent.chatSecondary",
-    "onView:sagent.sessions",
     "onView:sagent.sessionsSecondary",
-    "onView:sagent.swarm",
     "onView:sagent.swarmSecondary",
     "onCommand:sagent.open",
     "onCommand:sagent.newSession",
@@ -58,13 +56,6 @@
       }
     ],
     "viewsContainers": {
-      "activitybar": [
-        {
-          "id": "sagent",
-          "title": "Sagent",
-          "icon": "./media/sagent.png"
-        }
-      ],
       "secondarySidebar": [
         {
           "id": "sagentSecondary",
@@ -74,23 +65,6 @@
       ]
     },
     "views": {
-      "sagent": [
-        {
-          "id": "sagent.sessions",
-          "name": "Sessions",
-          "type": "tree"
-        },
-        {
-          "id": "sagent.chat",
-          "name": "Chat",
-          "type": "webview"
-        },
-        {
-          "id": "sagent.swarm",
-          "name": "Swarm",
-          "type": "tree"
-        }
-      ],
       "sagentSecondary": [
         {
           "id": "sagent.sessionsSecondary",
@@ -144,15 +118,41 @@
           },
           "default": [],
           "description": "Optional Sagent built-in tool names; an empty list uses Sagent's default set."
+        },
+        "sagent.mode": {
+          "type": "string",
+          "enum": [
+            "standard",
+            "rekursiv"
+          ],
+          "default": "standard",
+          "description": "Sagent operating context. Rekursiv mode enables the Rekursiv orientation and configured skill roots."
+        },
+        "sagent.rekursivSkillDirectories": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Additional directories containing native Rekursiv SKILL.md bundles."
+        },
+        "sagent.rekursivSkills": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Bundled Rekursiv capabilities enabled for this workspace. Empty uses all bundled capabilities."
+        },
+        "sagent.trackinizerUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8765",
+          "description": "Optional Trackinizer server URL exported to the Sagent process as TRACKINIZER_URL."
         }
       }
     },
     "menus": {
       "view/item/context": [
-        {
-          "command": "sagent.renameSession",
-          "when": "view == sagent.sessions && viewItem == sagentSession"
-        },
         {
           "command": "sagent.renameSession",
           "when": "view == sagent.sessionsSecondary && viewItem == sagentSession"
@@ -161,14 +161,15 @@
       "view/title": [
         {
           "command": "sagent.newSession",
-          "when": "view == sagent.sessions || view == sagent.sessionsSecondary",
+          "when": "view == sagent.sessionsSecondary",
           "group": "navigation@1"
         }
       ]
     }
   },
   "scripts": {
-    "compile": "npm run compile:webview && npm run compile:extension",
+    "compile": "npm run generate:rekursiv-skills && npm run compile:webview && npm run compile:extension",
+    "generate:rekursiv-skills": "node scripts/generate-rekursiv-skills.mjs",
     "compile:extension": "tsc -p ./",
     "compile:webview": "vite build --config vite.config.ts",
     "check": "tsc -p ./ --noEmit && tsc -p webview/tsconfig.json --noEmit",

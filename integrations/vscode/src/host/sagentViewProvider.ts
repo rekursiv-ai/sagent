@@ -1,4 +1,7 @@
 import * as vscode from "vscode";
+import * as net from "node:net";
+import { existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 import {
   ConversationStore,
@@ -15,6 +18,10 @@ import type {
   ModelSettingsAction,
   ModelSettingsScope,
 } from "../shared/modelSettings/modelSettingsContract";
+import type {
+  SagentRekursivContext,
+  SagentRekursivSkillCandidate,
+} from "../shared/sagentProtocol";
 import {
   applyRuntimeActivityEvent,
   setChangeReviewTargets,
@@ -30,12 +37,43 @@ import { toChangeReviewPresentationTarget } from "../shared/changeReviewModel";
 import { createSagentWebviewHtml } from "./webviewHtml";
 import { SagentSessionTreeDataProvider, type SagentSessionItem } from "./sessionTreeProvider";
 import { SagentSwarmTreeDataProvider } from "./swarmTreeProvider";
+import type { ExtensionToWebviewMessage } from "../shared/webviewProtocol";
+
+const DEFAULT_TRACKINIZER_URL = "http://127.0.0.1:8765";
+
+async function isUrlReachable(targetUrl: string, timeoutMs = 250): Promise<boolean> {
+  try {
+    const parsed = new URL(targetUrl);
+    const host = parsed.hostname;
+    if (!host) {
+      return false;
+    }
+    const port = parsed.port ? parseInt(parsed.port, 10) : (parsed.protocol === "https:" ? 443 : 80);
+    return await new Promise<boolean>((resolve) => {
+      const socket = net.createConnection({ host, port }, () => {
+        socket.destroy();
+        resolve(true);
+      });
+      socket.setTimeout(timeoutMs);
+      socket.on("timeout", () => {
+        socket.destroy();
+        resolve(false);
+      });
+      socket.on("error", () => {
+        socket.destroy();
+        resolve(false);
+      });
+    });
+  } catch {
+    return false;
+  }
+}
 
 let nextCommandOutputId = 1;
 
 export class SagentViewProvider implements vscode.WebviewViewProvider, vscode.Disposable {
   private readonly views = new Set<vscode.WebviewView>();
-  private readonly client = new SagentClient();
+  private readonly client: SagentClient;
   private readonly changeReviewService = new SagentChangeReviewService();
   private readonly store = new ConversationStore();
   private readonly eventSubscription: vscode.Disposable;
@@ -53,6 +91,7 @@ export class SagentViewProvider implements vscode.WebviewViewProvider, vscode.Di
     private readonly extensionUri: vscode.Uri,
     workspaceState: vscode.Memento,
   ) {
+    this.client = new SagentClient(extensionUri);
     this.eventSubscription = this.client.onEvent((event) => this.handleSagentEvent(event));
     this.sessionTreeProvider = new SagentSessionTreeDataProvider(
       () => this.loadSessionsForTree(),
@@ -145,6 +184,12 @@ export class SagentViewProvider implements vscode.WebviewViewProvider, vscode.Di
       await this.refreshTeamForView();
     } else if (message.type === "refresh-model-settings") {
       await this.refreshModelSettings();
+    } else if (message.type === "rekursiv.setup") {
+      if (Array.isArray(message.skills) && message.skills.every((skill) => typeof skill === "string")) {
+        await this.setupRekursiv(message.skills);
+      }
+    } else if (message.type === "rekursiv.disable") {
+      await this.disableRekursiv();
     } else if (
       message.type === "model-settings"
       && isModelSettingsScope(message.scope)
@@ -187,13 +232,122 @@ export class SagentViewProvider implements vscode.WebviewViewProvider, vscode.Di
     this.store.dispatch({ type: "connection.started" });
     try {
       this.client.start(folder.uri.fsPath);
-      await this.client.initialize();
+      const initResult = await this.client.initialize();
+      const capabilities = isRecord(initResult.capabilities) ? initResult.capabilities : undefined;
+      const skills = capabilities?.skills === true
+        ? await this.client.getSkills()
+        : [];
+
+      const configuration = vscode.workspace.getConfiguration("sagent");
+      const mode = configuration.get<string>("mode", "standard") === "rekursiv" ? "rekursiv" : "standard";
+      const configuredSkillDirectories = configuration.get<string[]>("rekursivSkillDirectories", []);
+      const trackinizerUrl = configuration.get<string>("trackinizerUrl", "") || DEFAULT_TRACKINIZER_URL;
+      const isTrackinizerReachable = await isUrlReachable(trackinizerUrl);
+
+      const trackinizerChecks = [
+        {
+          name: "Trackinizer server URL",
+          status: isTrackinizerReachable ? "available" : "unavailable",
+          detail: isTrackinizerReachable
+            ? `Server is listening at ${trackinizerUrl}`
+            : `Could not connect to ${trackinizerUrl}`,
+        },
+      ];
+
+      const rekursivContext: SagentRekursivContext = {
+        mode,
+        orientation: mode === "rekursiv",
+        skillDirectories: configuredSkillDirectories,
+        skills,
+        environment: {
+          trackinizer: {
+            status: isTrackinizerReachable ? "available" : "unavailable",
+            url: trackinizerUrl,
+            checks: trackinizerChecks,
+          },
+          wesearch: {
+            status: "available",
+            checks: [
+              {
+                name: "Wesearch native tools",
+                status: "available",
+                detail: "Wesearch is provided by Sagent's native research tools",
+              },
+            ],
+          },
+        },
+      };
+
+      this.store.dispatch({ type: "rekursiv.context.updated", context: rekursivContext });
+      this.store.dispatch({
+        type: "rekursiv.candidates.updated",
+        candidates: discoverRekursivSkillCandidates(folder.uri.fsPath, this.extensionUri.fsPath),
+      });
       await this.openSession(sessionPath);
     } catch (error) {
       const message = errorMessage(error);
       this.store.dispatch({ type: "connection.error", message });
       this.store.dispatch({ type: "sessions.failed", message });
     }
+  }
+
+  private async setupRekursiv(skills: string[]): Promise<void> {
+    if (["starting", "working", "cancelling"].includes(this.store.getState().connection)) {
+      void vscode.window.showWarningMessage(
+        "Wait for the current Sagent operation to finish before changing Rekursiv mode.",
+      );
+      return;
+    }
+    const candidates = discoverRekursivSkillCandidates(
+      vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "",
+      this.extensionUri.fsPath,
+    );
+    const selected = new Set(skills);
+    if (skills.length === 0 || skills.some((id) => !candidates.some((candidate) => candidate.id === id))) {
+      void vscode.window.showWarningMessage(
+        "No valid native Rekursiv skill bundles were selected.",
+      );
+      return;
+    }
+    const configuration = vscode.workspace.getConfiguration("sagent");
+    const trackinizerUrl = configuration.get<string>("trackinizerUrl", "") || DEFAULT_TRACKINIZER_URL;
+    await configuration.update(
+      "mode",
+      "rekursiv",
+      vscode.ConfigurationTarget.Workspace,
+    );
+    await configuration.update(
+      "rekursivSkills",
+      [...selected],
+      vscode.ConfigurationTarget.Workspace,
+    );
+    await configuration.update(
+      "trackinizerUrl",
+      trackinizerUrl.trim() || DEFAULT_TRACKINIZER_URL,
+      vscode.ConfigurationTarget.Workspace,
+    );
+    await this.restartSagent();
+  }
+
+  private async disableRekursiv(): Promise<void> {
+    if (["starting", "working", "cancelling"].includes(this.store.getState().connection)) {
+      void vscode.window.showWarningMessage(
+        "Wait for the current Sagent operation to finish before changing Rekursiv mode.",
+      );
+      return;
+    }
+    await vscode.workspace.getConfiguration("sagent").update(
+      "mode",
+      "standard",
+      vscode.ConfigurationTarget.Workspace,
+    );
+    await this.restartSagent();
+  }
+
+  private async restartSagent(): Promise<void> {
+    const sessionPath = this.store.getState().sessionPath;
+    this.client.dispose();
+    await this.start(true, sessionPath);
   }
 
   public async selectSession(sessionPath?: string): Promise<void> {
@@ -547,6 +701,7 @@ function toConversationAction(event: SagentEvent): ConversationAction | undefine
         type: "turn.started",
         text: stringValue(event.text),
         ...(typeof event.turnId === "string" ? { turnId: event.turnId } : {}),
+        ...(typeof event.timestamp === "string" ? { timestamp: event.timestamp } : {}),
         ...(agentLabel(event) ? { agentLabel: agentLabel(event) } : {}),
         ...(modelIdentity(event) ? { modelIdentity: modelIdentity(event) } : {}),
       };
@@ -576,6 +731,7 @@ function toConversationAction(event: SagentEvent): ConversationAction | undefine
         ...(typeof event.turnId === "string" ? { turnId: event.turnId } : {}),
         ...(typeof event.sender === "string" ? { sender: event.sender } : {}),
         ...(typeof event.recipient === "string" ? { recipient: event.recipient } : {}),
+        ...(typeof event.timestamp === "string" ? { timestamp: event.timestamp } : {}),
         ...(agentLabel(event) ? { agentLabel: agentLabel(event) } : {}),
       };
     }
@@ -586,6 +742,7 @@ function toConversationAction(event: SagentEvent): ConversationAction | undefine
         type: "assistant.completed",
         text: stringValue(event.text),
         ...(typeof event.record === "string" ? { record: event.record } : {}),
+        ...(typeof event.timestamp === "string" ? { timestamp: event.timestamp } : {}),
         ...(agentLabel(event) ? { agentLabel: agentLabel(event) } : {}),
       };
     case "assistant.thinking":
@@ -728,12 +885,115 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function discoverRekursivSkillCandidates(
+  cwd: string,
+  extensionPath?: string,
+): SagentRekursivSkillCandidate[] {
+  const roots = new Set<string>();
+  const seenIds = new Set<string>();
+  const discoveredCandidates: SagentRekursivSkillCandidate[] = [];
+  const candidateDefinitions = [
+    {
+      id: "trackinizer",
+      label: "Trackinizer / Trax",
+      description: "Durable work, evidence, sessions, issues, and experiments.",
+      relativePaths: [
+        ["trackinizer", "trackinizer", "trax", "docs", "skills"],
+        ["trackinizer", "trax", "docs", "skills"],
+      ],
+    },
+    {
+      id: "priml",
+      label: "Priml",
+      description: "Reusable experiments and evaluations.",
+      relativePaths: [["priml", "docs"]],
+    },
+    {
+      id: "configgle",
+      label: "Configgle",
+      description: "Reproducible experiment configuration.",
+      relativePaths: [["configgle", "docs"]],
+    },
+  ];
+  const searchRoots: string[] = [];
+  if (process.env.REKURSIV_HOME) {
+    searchRoots.push(resolve(process.env.REKURSIV_HOME));
+  }
+  if (cwd) {
+    let current = resolve(cwd);
+    while (true) {
+      searchRoots.push(current);
+      const parent = dirname(current);
+      if (parent === current) {
+        break;
+      }
+      current = parent;
+    }
+  }
+  for (const root of searchRoots) {
+    for (const definition of candidateDefinitions) {
+      if (seenIds.has(definition.id)) {
+        continue;
+      }
+      for (const relativePath of definition.relativePaths) {
+        const path = join(root, ...relativePath);
+        if (!existsSync(path)) {
+          continue;
+        }
+        const normalized = resolve(path);
+        if (roots.has(normalized)) {
+          continue;
+        }
+        roots.add(normalized);
+        seenIds.add(definition.id);
+        discoveredCandidates.push({
+          id: definition.id,
+          label: definition.label,
+          description: definition.description,
+          path: normalized,
+        });
+        break;
+      }
+    }
+  }
+  if (extensionPath) {
+    const bundledRoot = join(extensionPath, "resources", "rekursiv-skills");
+    for (const definition of candidateDefinitions) {
+      if (seenIds.has(definition.id)) {
+        continue;
+      }
+      const path = resolve(join(bundledRoot, definition.id));
+      if (!existsSync(path)) {
+        continue;
+      }
+      roots.add(path);
+      seenIds.add(definition.id);
+      discoveredCandidates.push({
+        id: definition.id,
+        label: definition.label,
+        description: definition.description,
+        path,
+      });
+    }
+  }
+  if (!seenIds.has("wesearch")) {
+    discoveredCandidates.push({
+      id: "wesearch",
+      label: "Wesearch",
+      description: "Web and paper research through Sagent's native tools.",
+      path: "",
+    });
+  }
+  return discoveredCandidates;
+}
+
 function isMessage(value: unknown): value is {
   type: string;
   text?: unknown;
   line?: unknown;
   id?: unknown;
   path?: unknown;
+  skills?: unknown;
   label?: unknown;
   changeId?: unknown;
   scope?: unknown;

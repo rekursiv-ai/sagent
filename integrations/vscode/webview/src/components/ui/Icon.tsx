@@ -3,6 +3,8 @@ import type { ReactElement } from "react";
 export type CodiconName =
   | "add"
   | "close"
+  | "check"
+  | "chevron-down"
   | "copy"
   | "debug-stop"
   | "loading"
@@ -12,7 +14,11 @@ export type CodiconName =
   | "settings"
   | "diff"
   | "file"
-  | "symbol-event";
+  | "symbol-event"
+  | "screen-full"
+  | "screen-normal"
+  | "zoom-in"
+  | "zoom-out";
 
 export function Icon({
   name,
