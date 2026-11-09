@@ -88,6 +88,9 @@ async def test_a_write_waits_for_another_agents_hold_then_sees_its_change(
             await contending.wait()
         assert not writing.done()
         path.write_text("theirs")
+        # Two writes can share an mtime tick, and the tracker trusts an unmoved mtime.
+        later = path.stat().st_mtime + 100
+        os.utime(path, (later, later))
     result = writing.result()
 
     assert calls == [file_lock_path(path)] * 2

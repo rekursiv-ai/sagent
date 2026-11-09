@@ -38,8 +38,11 @@ def configure_hypothesis() -> None:  # pragma: no mutate block
     # Timing checks flake under shared-runner contention: deadlines, and too_slow,
     # which a cold run's first text draw (building the charmap) trips under coverage.
     # Repeat inputs across runs so local and CI failures can be reproduced.
+    # Each profile names its parent: on CI Hypothesis loads its own "ci" profile at
+    # import, and a profile with none would inherit print_blob=True from it.
     hypothesis.settings.register_profile(
         "dev",
+        hypothesis.settings.get_profile("default"),
         deadline=None,
         derandomize=True,
         max_examples=20,
@@ -47,6 +50,7 @@ def configure_hypothesis() -> None:  # pragma: no mutate block
     )
     hypothesis.settings.register_profile(
         "ci",
+        hypothesis.settings.get_profile("ci"),
         deadline=None,
         derandomize=True,
         max_examples=200,
