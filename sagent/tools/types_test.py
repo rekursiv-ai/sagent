@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Final, Literal
 from unittest.mock import Mock
 
 import os
@@ -16,7 +16,14 @@ from wesearch.fetch.session import default_session
 
 import pytest
 
-from sagent.tools.types import Arg, FileTracker, ToolContext, json_schema, parse
+from sagent.tools.types import (
+    Arg,
+    FileTracker,
+    ToolContext,
+    checked,
+    json_schema,
+    parse,
+)
 
 
 type _Color = Literal["red", "green"]
@@ -222,11 +229,14 @@ def test_parse_widens_an_integer_to_a_float() -> None:
         ({"text": "x", "loud": 1}, "'loud' must be boolean"),
         ({"text": "x", "ratio": True}, "'ratio' must be number"),
         ({"text": "x", "ratio": "1"}, "'ratio' must be number"),
-        ({"text": "x", "color": "blue"}, r"'color' must be one of \['red', 'green'\]"),
+        (
+            {"text": "x", "color": "blue"},
+            r"'color' must be one of \['red', 'green'\], got 'blue'",
+        ),
         ({"text": "x", "level": True}, r"'level' must be one of \[1, 2\]"),
         ({"text": "x", "names": "ab"}, "'names' must be array"),
         ({"text": "x", "either": None}, "'either' must be array"),
-        ({"text": "x", "headers": ["k"]}, "'headers' must be object"),
+        ({"text": "x", "headers": ["k"]}, r"'headers' must be object, got \['k'\]"),
         ({"text": "x", "headers": {"k": 1}}, "'headers' must be string"),
         ({"text": "x", "times": 0}, "'times' must be at least 1, got 0"),
         ({"text": "x", "times": 4}, "'times' must be at most 3, got 4"),
@@ -239,6 +249,86 @@ def test_parse_rejects_arguments_that_do_not_fit(
 ) -> None:
     with pytest.raises(ValueError, match=message):
         parse(arguments, _Arguments)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Inner:
+    name: str
+    data: bytes = b""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Deeper(_Inner):
+    count: Annotated[int, "A count."] = 0
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Other:
+    name: str
+
+
+def _holding[R](record: R, **fields: object) -> R:
+    """Return ``record`` with ``fields`` set past their types, as a decoded peer's may."""
+    for name, value in fields.items():
+        object.__setattr__(record, name, value)
+    return record
+
+
+_INNER: Final = _Inner(name="a")
+
+
+@pytest.mark.parametrize(
+    ("hint", "value", "expected"),
+    [
+        (Annotated[int, "A count."], 1, 1),
+        (bytes, b"\x00", b"\x00"),
+        (tuple[int, str], [1, "a"], (1, "a")),
+        (frozenset[str], {"a"}, frozenset({"a"})),
+        (Mapping[str, int], {"a": 1}, {"a": 1}),
+        (_Inner, _INNER, _INNER),
+        (_Inner, _Deeper(name="a", count=2), _Deeper(name="a", count=2)),
+        (_Inner | _Other | None, _INNER, _INNER),
+    ],
+)
+def test_checked_takes_what_wire_records_hold(
+    hint: object,
+    value: object,
+    expected: object,
+) -> None:
+    assert checked(value, hint, key="x") == expected
+
+
+@pytest.mark.parametrize(
+    ("hint", "value", "message"),
+    [
+        (bytes, "a", "'x' must be bytes, got 'a'"),
+        (tuple[str, ...], b"ab", "'x' must be array"),
+        (tuple[int, str], (1,), "'x' must be 2 items, got"),
+        (tuple[int, str], (1, 2), "'x' must be string, got 2"),
+        (frozenset[str], ["a"], r"'x' must be set, got \['a'\]"),
+        (frozenset[str], frozenset({1}), "'x' must be string, got 1"),
+        (Mapping[str, int], {1: 1}, "'x' must be string, got 1"),
+        (_Inner, _Other(name="a"), "'x' must be _Inner, got _Other"),
+        (_Inner, _holding(_Inner(name="a"), name=1), r"^'x\.name' must be string"),
+        (_Inner, _holding(_Deeper(name="a"), count="2"), r"'x\.count' must be integer"),
+        # Only the member a record is an instance of judges it.
+        (_Inner | _Other, _holding(_Inner(name="a"), name=1), r"^'x\.name'[^_]*$"),
+        (_Other | None, _INNER, "'x' must be a record of its type, got _Inner"),
+        (int, "y" * 1000, r"^'x' must be integer, got .{0,60}$"),
+    ],
+)
+def test_checked_says_where_a_value_is_not_of_its_type(
+    hint: object,
+    value: object,
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        _ = checked(value, hint, key="x")
+
+
+def test_checked_refuses_a_type_it_cannot_check() -> None:
+    with pytest.raises(TypeError, match="No JSON schema"):
+        _ = checked(1j, complex, key="x")
 
 
 def test_parse_accepts_the_bounds_themselves() -> None:

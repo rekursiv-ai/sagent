@@ -40,8 +40,13 @@ Typical usage example:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
-from dataclasses import MISSING, dataclass, field, fields, replace
+from collections.abc import (
+    Callable,
+    Mapping,
+    Sequence,
+    Set as AbstractSet,
+)
+from dataclasses import MISSING, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from types import NoneType, UnionType
 from typing import (
@@ -50,6 +55,7 @@ from typing import (
     Literal,
     Protocol,
     TypeAliasType,
+    TypeGuard,
     cast,
     get_args,
     get_origin,
@@ -58,7 +64,9 @@ from typing import (
 )
 
 import difflib
+import functools
 import hashlib
+import reprlib
 import uuid
 
 from treekle import PlainTree
@@ -83,6 +91,7 @@ __all__ = [
     "Skipping",
     "Tool",
     "ToolContext",
+    "checked",
     "json_schema",
     "parse",
 ]
@@ -268,7 +277,7 @@ def parse[A: DataclassInstance](arguments: Mapping[str, PlainTree], kind: type[A
             if f.required:
                 raise ValueError(f"Missing argument {f.key!r}.")
             continue
-        values[f.name] = _check(arguments[f.key], f.hint, key=f.key)
+        values[f.name] = checked(arguments[f.key], f.hint, key=f.key)
         _bound(arguments[f.key], f)
     return kind(**values)
 
@@ -507,6 +516,167 @@ class _Field:
     required: bool
 
 
+def checked(value: object, hint: object, *, key: str) -> object:
+    """Return ``value`` as ``hint``, a sequence as a tuple; raise if it is not one.
+
+    A tool's arguments arrive as JSON, so a sequence may be a list and a number an
+    ``int``. A wire message arrives decoded, so a field may hold a record: it is checked
+    field by field, as treekle does not below the root.
+
+    Args:
+      value: What to check.
+      hint: The type it must be.
+      key: What names it in an error: an argument, or a record and its fields' path.
+
+    Returns:
+      value: ``value`` as ``hint``: a sequence as a tuple, a number as a ``float``
+        where one is asked for, a record as it is.
+
+    Raises:
+      ValueError: ``value``, or a part of it, is not of its type; ``key`` says where.
+      TypeError: ``hint`` is a type this does not check.
+
+    """
+    if hint is PlainTree:
+        return value
+    if isinstance(hint, TypeAliasType):
+        return checked(value, _value(hint), key=key)
+    origin, args = get_origin(hint), _args(hint)
+    if origin is Annotated:
+        return checked(value, args[0], key=key)
+    if origin is Literal:
+        # ``True == 1``, so the type must match as well as the value.
+        if any(value == a and type(value) is type(a) for a in args):
+            return value
+        raise _misfit(key, f"one of {list(args)}", value)
+    if _is_union(origin):
+        return _checked_member(value, args, key=key)
+    if origin in {tuple, list, Sequence}:
+        return _checked_items(value, origin, args, key=key)
+    if origin in {dict, Mapping}:
+        if not isinstance(value, Mapping):
+            raise _misfit(key, "object", value)
+        entries = cast("Mapping[object, object]", value)
+        return {
+            checked(k, args[0], key=key): checked(v, args[1], key=key)
+            for k, v in entries.items()
+        }
+    if origin is frozenset:
+        if not isinstance(value, AbstractSet):
+            raise _misfit(key, "set", value)
+        return frozenset(checked(v, args[0], key=key) for v in value)
+    if _is_record(hint):
+        return _checked_record(value, hint, key=key)
+    if (
+        (hint is bool and isinstance(value, bool))
+        or (hint is str and isinstance(value, str))
+        or (hint is bytes and isinstance(value, bytes))
+    ):
+        return value
+    if hint is int and isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if hint is float and isinstance(value, int | float) and not isinstance(value, bool):
+        return float(value)
+    raise _misfit(key, "bytes" if hint is bytes else _schema(hint).get("type"), value)
+
+
+def _checked_member(value: object, args: tuple[object, ...], *, key: str) -> object:
+    """Return ``value`` as the first member of a union it is; raise if it is none."""
+    if value is None and NoneType in args:
+        return None
+    members: list[object] = [a for a in args if a is not NoneType]
+    # A record is of its own class: a record member it is no instance of cannot hold it.
+    if is_dataclass(value) and not isinstance(value, type):
+        members = [m for m in members if not _is_record(m) or isinstance(value, m)]
+        if not members:
+            raise _misfit(key, "a record of its type", value)
+    errors: list[str] = []
+    for member in members:
+        try:
+            return checked(value, member, key=key)
+        except ValueError as e:
+            errors.append(str(e))
+    raise ValueError(" ".join(errors))
+
+
+def _checked_items(
+    value: object,
+    origin: object,
+    args: tuple[object, ...],
+    *,
+    key: str,
+) -> tuple[object, ...]:
+    """Return ``value`` as a tuple of its items, each checked; raise if it is none."""
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        raise _misfit(key, "array", value)
+    if origin is not tuple or args[-1:] == (Ellipsis,):
+        return tuple(checked(v, args[0], key=key) for v in value)
+    if len(value) != len(args):
+        raise _misfit(key, f"{len(args)} items", value)
+    return tuple(checked(v, args[i], key=key) for i, v in enumerate(value))
+
+
+def _checked_record[R: DataclassInstance](
+    value: object,
+    kind: type[R],
+    *,
+    key: str,
+) -> R:
+    """Return ``value``, a ``kind``, once each of its fields is of its type."""
+    if not isinstance(value, kind):
+        raise _misfit(key, kind.__name__, value)
+    # ``value`` may be a subclass of ``kind``, whose fields are its own.
+    hints = _hints(type(value))
+    for f in fields(value):
+        _ = checked(
+            cast(object, getattr(value, f.name)),
+            hints[f.name],
+            key=f"{key}.{f.name}",
+        )
+    return value
+
+
+def _is_record(hint: object) -> TypeGuard[type[DataclassInstance]]:
+    """Return whether ``hint`` is a record class."""
+    return isinstance(hint, type) and is_dataclass(hint)
+
+
+def _misfit(key: str, expected: object, value: object) -> ValueError:
+    """Return the error saying ``key`` holds ``value``, which is no ``expected``."""
+    # A value is shown cut short: a peer's may be megabytes.
+    return ValueError(f"{key!r} must be {expected}, got {reprlib.repr(value)}.")
+
+
+# Before 3.14, ``Literal[...] | None`` is a ``typing.Union``, not a ``UnionType``.
+def _is_union(origin: object) -> bool:
+    """Return whether ``origin`` is either spelling of a union."""
+    return origin is UnionType or origin is get_origin(Literal[0] | None)
+
+
+# Typeshed types ``typing``'s introspection as ``Any``; called directly, it
+# would leave its callers untyped. Resolving a class's hints costs as much as
+# checking the rest of a record, and ``checked`` reads them for every one.
+@functools.cache
+def _hints(kind: type[DataclassInstance]) -> Mapping[str, object]:
+    return get_type_hints(kind, include_extras=True)
+
+
+def _args(hint: object) -> tuple[object, ...]:
+    return get_args(hint)
+
+
+def _value(alias: TypeAliasType) -> object:
+    """Return what a ``type X = ...`` alias stands for."""
+    return cast(object, alias.__value__)
+
+
+def _leaf(value: object) -> PlainTree:
+    """Return a ``Literal`` member as a JSON value."""
+    if value is None or isinstance(value, str | int | float):
+        return value
+    raise TypeError(f"Literal member {value!r} is not a JSON value.")
+
+
 @dataclass(frozen=True, slots=True, kw_only=True)
 class _Snapshot:
     """A file as the model last saw it."""
@@ -607,74 +777,3 @@ def _schema(hint: object) -> dict[str, PlainTree]:
         if hint is kind:
             return {"type": name}
     raise TypeError(f"No JSON schema for {hint!r}.")
-
-
-def _check(value: PlainTree, hint: object, *, key: str) -> object:
-    """Return ``value`` as ``hint``, a sequence as a tuple; raise if it is not one."""
-    if hint is PlainTree:
-        return value
-    if isinstance(hint, TypeAliasType):
-        return _check(value, _value(hint), key=key)
-    origin, args = get_origin(hint), _args(hint)
-    if origin is Literal:
-        # ``True == 1``, so the type must match as well as the value.
-        if any(value == a and type(value) is type(a) for a in args):
-            return value
-        raise ValueError(f"{key!r} must be one of {list(args)}, got {value!r}.")
-    if _is_union(origin):
-        if value is None and NoneType in args:
-            return None
-        errors: list[str] = []
-        for member in (a for a in args if a is not NoneType):
-            try:
-                return _check(value, member, key=key)
-            except ValueError as e:
-                errors.append(str(e))
-        raise ValueError(" ".join(errors))
-    if (
-        origin in {tuple, list, Sequence}
-        and isinstance(value, Sequence)
-        and not isinstance(value, str)
-    ):
-        return tuple(_check(v, args[0], key=key) for v in value)
-    if origin in {dict, Mapping} and isinstance(value, Mapping):
-        return {k: _check(v, args[1], key=key) for k, v in value.items()}
-    if (hint is bool and isinstance(value, bool)) or (
-        hint is str and isinstance(value, str)
-    ):
-        return value
-    if hint is int and isinstance(value, int) and not isinstance(value, bool):
-        return value
-    if hint is float and isinstance(value, int | float) and not isinstance(value, bool):
-        return float(value)
-    raise ValueError(
-        f"{key!r} must be {_schema(hint).get('type', hint)}, got {value!r}.",
-    )
-
-
-# Before 3.14, ``Literal[...] | None`` is a ``typing.Union``, not a ``UnionType``.
-def _is_union(origin: object) -> bool:
-    """Return whether ``origin`` is either spelling of a union."""
-    return origin is UnionType or origin is get_origin(Literal[0] | None)
-
-
-# Typeshed types ``typing``'s introspection as ``Any``; called directly, it
-# would leave its callers untyped.
-def _hints(kind: type[DataclassInstance]) -> Mapping[str, object]:
-    return get_type_hints(kind, include_extras=True)
-
-
-def _args(hint: object) -> tuple[object, ...]:
-    return get_args(hint)
-
-
-def _value(alias: TypeAliasType) -> object:
-    """Return what a ``type X = ...`` alias stands for."""
-    return cast(object, alias.__value__)
-
-
-def _leaf(value: object) -> PlainTree:
-    """Return a ``Literal`` member as a JSON value."""
-    if value is None or isinstance(value, str | int | float):
-        return value
-    raise TypeError(f"Literal member {value!r} is not a JSON value.")

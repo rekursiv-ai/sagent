@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import (
     TYPE_CHECKING,
     Final,
@@ -15,6 +15,7 @@ from typing import (
 from unittest.mock import AsyncMock, Mock, call, patch
 
 import asyncio
+import contextlib
 import json
 import re
 import secrets
@@ -71,6 +72,7 @@ from sagent.session.types import (
     stored_plain,
 )
 from sagent.tools.read import Read
+from sagent.tools.types import checked
 
 
 if TYPE_CHECKING:
@@ -268,6 +270,8 @@ _RESULT = Result(
         attachments=(Attachment(mime_descriptor="image/png", data=b"\x00"),),
     ),
 )
+_NOTE = Note(id="n1", sender="a", recipient="b", content="hi", kind="tell")
+_HELLO = Hello(version=VERSION, token="", session_id="s", client="c", tools=("Read",))
 _ADDED: Final = {"py/object": "AddedByANewerSagent", "deep": [1, "x"]}
 """A field a newer sagent writes, holding a class this one does not know."""
 
@@ -384,6 +388,44 @@ def test_an_unknown_kind_or_class_or_a_misshapen_line_is_refused(
         _ = decoded((json.dumps({**plain, **change}) + "\n").encode())
 
 
+_RECORD: Final = {"py/object": "Ping"}
+"""A record no text field may hold, which treekle builds below the root all the same."""
+
+
+@pytest.mark.parametrize(
+    ("message", "field", "value"),
+    [
+        (_CALL, "id", _RECORD),
+        (_CALL, "agent", {"py/path": "/etc/passwd"}),
+        (_CALL, "address_book", [_RECORD]),
+        (_CALL, "granted", ["Read", {"py/object": "DaemonControl", "stop": True}]),
+        (_NOTE, "sender", _RECORD),
+        (_NOTE, "kind", _RECORD),
+        (_HELLO, "tools", [_RECORD]),
+        (_HELLO, "version", {"py/path": "/1"}),
+        (_RESULT, "id", {"py/b64": "AA=="}),
+        (Peers(labels=("a",)), "public", {"py/tuple": [_RECORD]}),
+    ],
+)
+def test_a_field_holding_what_its_type_is_not_is_refused(
+    message: Message,
+    field: str,
+    value: object,
+) -> None:
+    plain = cast("_Plain", json.loads(encoded(message)))
+    line = (json.dumps({**plain, field: value}) + "\n").encode()
+    with pytest.raises(ValueError, match=rf"^'{type(message).__name__}\.{field}' must"):
+        _ = decoded(line)
+
+
+def test_a_record_inside_a_message_is_checked_field_by_field() -> None:
+    plain = cast("_Plain", json.loads(encoded(_RESULT)))
+    record = cast("_Plain", plain["record"])
+    line = json.dumps({**plain, "record": {**record, "path": _RECORD}}) + "\n"
+    with pytest.raises(ValueError, match=r"^'Result\.record\.path' must be string"):
+        _ = decoded(line.encode())
+
+
 def test_a_line_nested_too_deep_in_its_records_is_refused() -> None:
     depth = 100_000
     line = encoded(_RESULT).replace(
@@ -411,6 +453,20 @@ _LINE_CLASSES: Final = [
 def test_the_fields_of_each_class_a_line_may_name_resolve(kind: type) -> None:
     """The reader looks up each class's fields' types to know what it holds."""
     _ = get_type_hints(kind)
+
+
+class _Unnamed:
+    """A value no field's type names."""
+
+
+@pytest.mark.parametrize("kind", _LINE_CLASSES)
+def test_each_field_a_line_may_name_is_of_a_type_the_reader_checks(kind: type) -> None:
+    """A type ``checked`` does not know fails every line, not only a misfit's."""
+    assert is_dataclass(kind)
+    hints = cast("dict[str, object]", get_type_hints(kind, include_extras=True))
+    for f in fields(kind):
+        with contextlib.suppress(ValueError):
+            _ = checked(_Unnamed(), hints[f.name], key=f.name)
 
 
 _SENT_BY_ITS_OWN_HOST: Final = frozenset({("Tools", "tools")})
