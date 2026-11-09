@@ -7,6 +7,7 @@ import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import * as vscode from "vscode";
+import { installSagent } from "./sagentInstaller";
 
 import {
   parseSagentAgentSessionState,
@@ -78,6 +79,7 @@ export class SagentClient implements vscode.Disposable {
   private nextRequestId = 1;
   private readonly pending = new Map<number, PendingRequest>();
   private readonly events = new EventEmitter();
+  private launchOverride: { command: string; arguments: string[] } | undefined;
 
   public constructor(private readonly extensionUri: vscode.Uri) {}
 
@@ -90,18 +92,39 @@ export class SagentClient implements vscode.Disposable {
     return this.process !== undefined;
   }
 
+  public canInstallNativeSagent(): boolean {
+    const configuration = vscode.workspace.getConfiguration("sagent");
+    const command = configuration.get<string>("command", "sagent");
+    const argumentsValue = configuration.get<unknown[]>("commandArguments", ["vscode-server"]);
+    const commandArguments = argumentsValue.filter(
+      (value): value is string => typeof value === "string",
+    );
+    return command === "sagent"
+      && commandArguments.length === 1
+      && commandArguments[0] === "vscode-server";
+  }
+
+  public async installNativeSagent(cwd: string): Promise<void> {
+    await installSagent(cwd);
+    // uv may install its executable directory after this extension host's PATH
+    // was created. Run through uv for this process, without changing settings.
+    this.launchOverride = { command: "uv", arguments: ["tool", "run", "sagent"] };
+  }
+
   public start(cwd: string): void {
     if (this.process) {
       return;
     }
     const configuration = vscode.workspace.getConfiguration("sagent");
-    const command = configuration.get<string>("command", "sagent");
+    const configuredCommand = configuration.get<string>("command", "sagent");
     const argumentsValue = configuration.get<unknown[]>("commandArguments", [
       "vscode-server",
     ]);
-    const commandArguments = argumentsValue.filter(
+    const configuredArguments = argumentsValue.filter(
       (value): value is string => typeof value === "string",
     );
+    const command = this.launchOverride?.command ?? configuredCommand;
+    const commandArguments = this.launchOverride?.arguments ?? configuredArguments;
     const model = configuration.get<string>("model", defaultVscodeModel);
     const allowedProviders = configuration.get<string>("allowedProviders", "");
     const tools = configuration.get<unknown[]>("tools", []).filter(

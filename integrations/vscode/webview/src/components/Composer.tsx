@@ -13,6 +13,10 @@ import { joinClasses, sagentUiTokens } from "../ui";
 import { useComposerDraft } from "./composer/useComposerDraft";
 import { useAutosizeTextarea } from "./composer/useAutosizeTextarea";
 import {
+  formatComposerSelection,
+  type ComposerSelection,
+} from "../../../src/shared/composerSelection";
+import {
   commandCompletionContext,
   commandCompletionItems,
   type SagentCommandDescriptor,
@@ -38,6 +42,8 @@ export type ComposerProps = {
   modelSettingsAvailable?: boolean;
   onDraftChange?: (draft: string) => void;
   onInputKeyDown?: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  annotations?: readonly ComposerSelection[];
+  onRemoveAnnotations?: (source: ComposerSelection["source"]) => void;
   onSubmit: (text: string) => void;
   placeholder?: string;
   commandDescriptors?: readonly SagentCommandDescriptor[];
@@ -67,6 +73,8 @@ export function Composer({
   modelSettingsAvailable = false,
   onDraftChange,
   onInputKeyDown,
+  annotations = [],
+  onRemoveAnnotations,
   onSubmit,
   placeholder,
   commandDescriptors = [],
@@ -88,12 +96,28 @@ export function Composer({
 
   const targetAgentLabel = agentLabel || "Sagent";
   const targetSessionLabel = sessionLabel || "Current session";
-  const canSend = !disabled && !busy && draft.trim().length > 0;
+  const canSend = !disabled && !busy && (draft.trim().length > 0 || annotations.length > 0);
   const commandContext = commandCompletionContext(draft);
   const commandItems = commandContext
     ? commandCompletionItems(commandDescriptors, commandContext)
     : [];
   const showCommandMenu = commandContext !== undefined && commandItems.length > 0;
+  const annotationGroups = [
+    {
+      source: "chat" as const,
+      label: annotations.filter((annotation) => annotation.source === "chat").length === 1
+        ? "1 annotation"
+        : `${annotations.filter((annotation) => annotation.source === "chat").length} annotations`,
+      items: annotations.filter((annotation) => annotation.source === "chat"),
+    },
+    {
+      source: "editor" as const,
+      label: annotations.filter((annotation) => annotation.source === "editor").length === 1
+        ? "1 file selection"
+        : `${annotations.filter((annotation) => annotation.source === "editor").length} file selections`,
+      items: annotations.filter((annotation) => annotation.source === "editor"),
+    },
+  ].filter((group) => group.items.length > 0);
 
   useEffect(() => setActiveCommandIndex(0), [draft]);
   const statusText = disabled
@@ -105,7 +129,8 @@ export function Composer({
         : `Message ${targetAgentLabel}`;
 
   const submit = (): void => {
-    const text = draft.trim();
+    const attachedContext = annotations.map(formatComposerSelection).join("");
+    const text = `${attachedContext}${draft}`.trim();
     if (!text || !canSend) {
       return;
     }
@@ -193,6 +218,43 @@ export function Composer({
                 <code>{item.label}</code>
                 <span>{item.detail}</span>
               </button>
+            ))}
+          </div>
+        )}
+        {annotations.length > 0 && (
+          <div aria-label="Attached context" className="composer-annotation-list">
+            {annotationGroups.map((group) => (
+              <div
+                className="composer-annotation-chip group rounded-full border border-sagent-border bg-sagent-raised-surface px-2 py-1 text-xs text-sagent-muted-foreground"
+                key={group.source}
+              >
+                <span className="min-w-0 truncate">{group.label}</span>
+                <button
+                  aria-label={`Remove ${group.label}`}
+                  className="absolute right-1 top-1/2 -translate-y-1/2 rounded-full bg-sagent-raised-surface p-0.5 opacity-0 transition-opacity hover:bg-sagent-hover focus:opacity-100 group-hover:opacity-100"
+                  onClick={() => onRemoveAnnotations?.(group.source)}
+                  title="Remove attached context"
+                  type="button"
+                >
+                  <Icon name="close" />
+                </button>
+                <span className="composer-annotation-tooltip" role="tooltip">
+                  <strong>{group.source === "chat" ? "Chat annotations" : "File selections"}</strong>
+                  {group.items.map((annotation, index) => (
+                    <span className="composer-annotation-entry" key={`${annotation.filePath ?? "chat"}-${annotation.startLine ?? index}-${index}`}>
+                      {annotation.filePath && (
+                        <span>
+                          {annotation.filePath}
+                          {annotation.startLine !== undefined
+                            ? `:${annotation.startLine}${annotation.endLine !== undefined && annotation.endLine !== annotation.startLine ? `-${annotation.endLine}` : ""}`
+                            : ""}
+                        </span>
+                      )}
+                      <span className="composer-annotation-preview">{annotation.text}</span>
+                    </span>
+                  ))}
+                </span>
+              </div>
             ))}
           </div>
         )}

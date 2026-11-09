@@ -8,7 +8,7 @@ import {
   type ConversationAction,
 } from "./conversationStore";
 import type { AgentActivityRecord } from "../shared/conversationTypes";
-import { SagentClient } from "./sagentClient";
+import { SagentClient, SagentExecutableMissingError } from "./sagentClient";
 import {
   parseSagentFileChange,
   type SagentEvent,
@@ -81,6 +81,7 @@ export class SagentViewProvider implements vscode.WebviewViewProvider, vscode.Di
   private readonly sessionTreeProvider: SagentSessionTreeDataProvider;
   private readonly swarmTreeProvider: SagentSwarmTreeDataProvider;
   private readonly viewSubscriptions = new Map<vscode.WebviewView, vscode.Disposable>();
+  private readonly pendingComposerInsertions: ExtensionToWebviewMessage[] = [];
   private changeReviewTargets = new Map<string, SagentChangeReviewTarget>();
   private startPromise: Promise<void> | undefined;
   private teamRefreshPromise: Promise<void> | undefined;
@@ -138,7 +139,22 @@ export class SagentViewProvider implements vscode.WebviewViewProvider, vscode.Di
   }
 
   public async open(): Promise<void> {
-    await vscode.commands.executeCommand("workbench.view.extension.sagent");
+    for (const view of this.views) {
+      view.show(false);
+    }
+    try {
+      await vscode.commands.executeCommand("sagent.chatSecondary.focus");
+    } catch {
+      try {
+        await vscode.commands.executeCommand("workbench.view.extension.sagentSecondary");
+      } catch {
+        try {
+          await vscode.commands.executeCommand("workbench.view.extension.sagent");
+        } catch {
+          // View cannot be revealed directly
+        }
+      }
+    }
   }
 
   public dispose(): void {
@@ -160,6 +176,12 @@ export class SagentViewProvider implements vscode.WebviewViewProvider, vscode.Di
     }
     if (message.type === "ready") {
       this.post({ type: "state", state: this.store.getState() });
+      while (this.pendingComposerInsertions.length > 0) {
+        const insertion = this.pendingComposerInsertions.shift();
+        if (insertion) {
+          this.post(insertion);
+        }
+      }
       await this.start();
     } else if (message.type === "send" && typeof message.text === "string") {
       await this.send(message.text);
@@ -285,6 +307,36 @@ export class SagentViewProvider implements vscode.WebviewViewProvider, vscode.Di
       });
       await this.openSession(sessionPath);
     } catch (error) {
+      if (error instanceof SagentExecutableMissingError && this.client.canInstallNativeSagent()) {
+        const action = await vscode.window.showErrorMessage(
+          error.message,
+          "Install Sagent",
+        );
+        if (action === "Install Sagent") {
+          try {
+            await vscode.window.withProgress(
+              {
+                location: vscode.ProgressLocation.Notification,
+                title: "Installing Sagent on this VS Code host…",
+                cancellable: false,
+              },
+              () => this.client.installNativeSagent(folder.uri.fsPath),
+            );
+            void vscode.window.showInformationMessage(
+              "Sagent was installed. Starting the native Sagent server…",
+            );
+            await this.startProcess(sessionPath);
+          } catch (installError) {
+            const message = errorMessage(installError);
+            this.store.dispatch({ type: "connection.error", message });
+            this.store.dispatch({ type: "sessions.failed", message });
+          }
+        } else {
+          this.store.dispatch({ type: "connection.error", message: error.message });
+          this.store.dispatch({ type: "sessions.failed", message: error.message });
+        }
+        return;
+      }
       const message = errorMessage(error);
       this.store.dispatch({ type: "connection.error", message });
       this.store.dispatch({ type: "sessions.failed", message });
@@ -385,6 +437,43 @@ export class SagentViewProvider implements vscode.WebviewViewProvider, vscode.Di
   public async renameSession(item: SagentSessionItem): Promise<void> {
     await this.sessionTreeProvider.renameSession(item);
     await this.sessionTreeProvider.refresh();
+  }
+
+  /** Add the current public VS Code editor selection to the active composer. */
+  public async addEditorSelectionToChat(uri?: vscode.Uri): Promise<void> {
+    let editor = vscode.window.activeTextEditor;
+    if (uri && (!editor || editor.document.uri.toString() !== uri.toString())) {
+      editor = vscode.window.visibleTextEditors.find(
+        (candidate) => candidate.document.uri.toString() === uri.toString(),
+      );
+    }
+    if (!editor || editor.selection.isEmpty) {
+      return;
+    }
+    const text = editor.document.getText(editor.selection);
+    if (!text.trim()) {
+      return;
+    }
+
+    await this.open();
+    await this.start();
+    const startLine = editor.selection.start.line + 1;
+    const endLine = editor.selection.end.line + 1;
+    const message: ExtensionToWebviewMessage = {
+      type: "composer.insert",
+      text,
+      source: "editor",
+      label: vscode.workspace.asRelativePath(editor.document.uri, false),
+      languageId: editor.document.languageId,
+      filePath: vscode.workspace.asRelativePath(editor.document.uri, false),
+      startLine,
+      endLine,
+    };
+    if (this.views.size === 0) {
+      this.pendingComposerInsertions.push(message);
+    } else {
+      this.post(message);
+    }
   }
 
   private async openSession(

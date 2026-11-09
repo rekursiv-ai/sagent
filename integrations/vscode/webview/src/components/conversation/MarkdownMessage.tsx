@@ -1,36 +1,42 @@
 import {
   Children,
   isValidElement,
-  useState,
+  useMemo,
   type ReactElement,
   type ReactNode,
 } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
-import { Button } from "../ui/Button";
-import { Icon } from "../ui/Icon";
+import remarkMath from "remark-math";
+import "katex/dist/katex.min.css";
+import { CopyButton } from "../ui/CopyButton";
+import { MermaidCodeBlock } from "./MermaidCodeBlock";
 
 export type MarkdownMessageProps = {
   content: string;
+  isStreaming?: boolean;
 };
 
-const markdownComponents: Components = {
-  a({ children, href, ...props }) {
-    if (!isWebUrl(href)) {
-      return <>{children}</>;
-    }
+function createMarkdownComponents(isStreaming: boolean): Components {
+  return {
+    a({ children, href, ...props }) {
+      if (!isWebUrl(href)) {
+        return <>{children}</>;
+      }
 
-    return (
-      <a {...props} href={href}>
-        {children}
-      </a>
-    );
-  },
-  pre({ children }) {
-    return <MarkdownCodeBlock>{children}</MarkdownCodeBlock>;
-  },
-};
+      return (
+        <a {...props} href={href}>
+          {children}
+        </a>
+      );
+    },
+    pre({ children }) {
+      return <MarkdownCodeBlock isStreaming={isStreaming}>{children}</MarkdownCodeBlock>;
+    },
+  };
+}
 
 /**
  * Render assistant-authored Markdown through the standard Markdown AST
@@ -45,14 +51,19 @@ const markdownComponents: Components = {
  * for HTML in assistant messages. Enabling raw HTML would require a separate
  * sanitization policy and review.
  */
-export function MarkdownMessage({ content }: MarkdownMessageProps): ReactElement {
+export function MarkdownMessage({ content, isStreaming = false }: MarkdownMessageProps): ReactElement {
+  const markdownComponents = useMemo(
+    () => createMarkdownComponents(isStreaming),
+    [isStreaming],
+  );
+
   return (
     <div className="markdown-message">
       <ReactMarkdown
         components={markdownComponents}
         skipHtml
-        remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeHighlight]}
+        remarkPlugins={[remarkGfm, remarkMath]}
+        rehypePlugins={[rehypeKatex, rehypeHighlight]}
       >
         {content}
       </ReactMarkdown>
@@ -60,36 +71,21 @@ export function MarkdownMessage({ content }: MarkdownMessageProps): ReactElement
   );
 }
 
-function MarkdownCodeBlock({ children }: { children?: ReactNode }): ReactElement {
-  const [copied, setCopied] = useState(false);
+function MarkdownCodeBlock({ children, isStreaming }: { children?: ReactNode; isStreaming: boolean }): ReactElement {
   const codeElement = Children.toArray(children).find(isCodeElement);
   const className = codeElement?.props.className;
   const language = getLanguage(className);
   const code = codeElement ? getTextContent(codeElement.props.children) : "";
 
-  async function copyCode(): Promise<void> {
-    try {
-      await copyText(code);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1_500);
-    } catch {
-      setCopied(false);
-    }
+  if (language.toLowerCase() === "mermaid") {
+    return <MermaidCodeBlock code={code} isStreaming={isStreaming} />;
   }
 
   return (
     <div className="markdown-code-block copy-hover-target">
       <div className="markdown-code-block-header">
         <span>{language}</span>
-        <Button
-          aria-label={copied ? "Code copied" : "Copy code"}
-          className="markdown-code-copy-button copy-hover-action"
-          onClick={() => void copyCode()}
-          title={copied ? "Copied" : "Copy code"}
-          variant="ghost"
-        >
-          <Icon name="copy" />
-        </Button>
+        <CopyButton className="markdown-code-copy-button" label="Copy code" text={code} />
       </div>
       <pre>{children}</pre>
     </div>
@@ -117,22 +113,6 @@ function getTextContent(value: ReactNode): string {
       return "";
     })
     .join("");
-}
-
-async function copyText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  document.execCommand("copy");
-  textarea.remove();
 }
 
 function isWebUrl(href: string | undefined): boolean {

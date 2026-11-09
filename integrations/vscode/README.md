@@ -38,14 +38,17 @@ You can also install the VSIX from VS Code's Extensions view with `Extensions:
 Install from VSIX...`. Installing the VSIX does not disable or replace Codex;
 both extensions can remain installed and active together.
 
-The installed extension launches the configured Sagent executable when its
-view is opened. The default configuration expects the Sagent CLI to be
-available as `sagent` and starts it with the `vscode-server` argument. The
-extension does not bundle Python or the Sagent runtime.
+The installed extension launches Sagent on the same VS Code host when its view
+is opened. The default configuration runs the native `sagent` executable with
+the `vscode-server` argument. The extension does not cross between operating
+systems or remote hosts, and it does not bundle Python or the Sagent runtime.
 
-If Sagent is not on your PATH, configure these settings in VS Code's user or
-workspace settings, adapting the executable and arguments to your local
-installation:
+Install Sagent natively for the environment hosting VS Code and make sure its
+`sagent` executable is on that host's `PATH`. No VS Code settings changes are
+needed for a standard installation. If Sagent is unavailable and the default
+launch configuration is active, the extension offers to install it with the
+host's `uv` tool in one click. Advanced users can still override the command
+with settings when using a non-standard installation:
 
 ```json
 {

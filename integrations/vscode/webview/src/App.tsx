@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactElement } from "react";
+import { useEffect, useState, type ReactElement } from "react";
 
 import {
   createInitialConversationState,
@@ -20,6 +20,9 @@ import { RekursivDialog } from "./components/rekursiv/RekursivDialog";
 import { Button } from "./components/ui/Button";
 import { Icon } from "./components/ui/Icon";
 import sagentLogoUrl from "./assets/sagent-logo.png";
+import { useConversationScroll } from "./useConversationScroll";
+import type { ComposerSelection } from "../../src/shared/composerSelection";
+import { SelectionAction } from "./components/conversation/SelectionAction";
 
 type VsCodeApi = {
   getState(): ConversationState | undefined;
@@ -40,14 +43,13 @@ export function App(): ReactElement {
   const [rekursivSettingsOpen, setRekursivSettingsOpen] = useState(false);
   const [rekursivSettingsAnchor, setRekursivSettingsAnchor] = useState<HTMLButtonElement | null>(null);
   const [changePreviews, setChangePreviews] = useState<Record<string, ChangePreview>>({});
-  const conversationRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const conversation = conversationRef.current;
-    if (conversation) {
-      conversation.scrollTop = conversation.scrollHeight;
-    }
-  }, [state.turns, state.timeline]);
+  const [composerAnnotations, setComposerAnnotations] = useState<ComposerSelection[]>([]);
+  const {
+    containerRef: conversationRef,
+    contentRef: conversationContentRef,
+    showScrollToLatest,
+    scrollToLatest,
+  } = useConversationScroll(state);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent<ExtensionToWebviewMessage>) => {
@@ -59,6 +61,20 @@ export function App(): ReactElement {
           ...previews,
           [preview.changeId]: preview,
         }));
+      } else if (event.data.type === "composer.insert") {
+        const insertion = event.data;
+        setComposerAnnotations((annotations) => [
+          ...annotations,
+          {
+            text: insertion.text,
+            source: insertion.source,
+            label: insertion.label,
+            languageId: insertion.languageId,
+            filePath: insertion.filePath,
+            startLine: insertion.startLine,
+            endLine: insertion.endLine,
+          },
+        ]);
       }
     };
 
@@ -128,30 +144,45 @@ export function App(): ReactElement {
          */}
 
         <main className="conversation" ref={conversationRef} aria-live="polite">
-          <div className="conversation-content">
+          <div className="conversation-content" ref={conversationContentRef}>
             {state.timeline.length === 0 && state.connection !== "error" ? (
               <Welcome />
             ) : (
-              <ConversationView
-                agents={state.agents}
-                changeReview={state.changeReview}
-                commandOutputs={state.commandOutputs}
-                onDeleteCommandOutput={(id) =>
-                  vscode.postMessage({ type: "remove-command-output", id })
-                }
-                runtimeActivity={state.runtimeActivity}
-                onOpenFile={(path) => vscode.postMessage({ type: "open-file", path })}
-                onRequestPreview={(changeId) =>
-                  vscode.postMessage({ type: "preview-change", changeId })
-                }
-                onReview={(path) => vscode.postMessage({ type: "review", path })}
-                previews={changePreviews}
-                timeline={state.timeline}
-                turns={state.turns}
-              />
+              <SelectionAction
+                onAdd={(selection) => setComposerAnnotations((annotations) => [...annotations, selection])}
+              >
+                <ConversationView
+                  agents={state.agents}
+                  changeReview={state.changeReview}
+                  commandOutputs={state.commandOutputs}
+                  onDeleteCommandOutput={(id) =>
+                    vscode.postMessage({ type: "remove-command-output", id })
+                  }
+                  runtimeActivity={state.runtimeActivity}
+                  onOpenFile={(path) => vscode.postMessage({ type: "open-file", path })}
+                  onRequestPreview={(changeId) =>
+                    vscode.postMessage({ type: "preview-change", changeId })
+                  }
+                  onReview={(path) => vscode.postMessage({ type: "review", path })}
+                  previews={changePreviews}
+                  timeline={state.timeline}
+                  turns={state.turns}
+                />
+              </SelectionAction>
             )}
             {state.lastError && <div className="error-message">{state.lastError}</div>}
           </div>
+          {showScrollToLatest && (
+            <button
+              aria-label="Jump to latest"
+              className="scroll-to-latest"
+              onClick={scrollToLatest}
+              title="Jump to latest"
+              type="button"
+            >
+              <Icon name="chevron-down" />
+            </button>
+          )}
         </main>
       </div>
 
@@ -164,6 +195,10 @@ export function App(): ReactElement {
         sessionKey={state.sessionPath}
         sessionLabel={activeSession?.title ?? "Current session"}
         onCancel={() => vscode.postMessage({ type: "cancel" })}
+        annotations={composerAnnotations}
+        onRemoveAnnotations={(source) => {
+          setComposerAnnotations((annotations) => annotations.filter((annotation) => annotation.source !== source));
+        }}
         onOpenModelSettings={(anchor) => {
           setModelSettingsAnchor(anchor);
           setModelSettingsOpen(true);
@@ -178,7 +213,8 @@ export function App(): ReactElement {
         rekursivLabel={state.rekursivContext?.mode === "rekursiv" ? "Rekursiv" : "Standard"}
         commandDescriptors={state.commandDescriptors}
         onSubmit={(text) => {
-          if (text.trimStart().startsWith("/")) {
+          setComposerAnnotations([]);
+          if (composerAnnotations.length === 0 && text.trimStart().startsWith("/")) {
             vscode.postMessage({ type: "command", line: text });
           } else {
             vscode.postMessage({ type: "send", text });

@@ -29,7 +29,8 @@
     "onCommand:sagent.newSession",
     "onCommand:sagent.renameSession",
     "onCommand:sagent.selectSession",
-    "onCommand:sagent.selectAgent"
+    "onCommand:sagent.selectAgent",
+    "onCommand:sagent.addSelectionToChat"
   ],
   "contributes": {
     "commands": [
@@ -53,6 +54,10 @@
       {
         "command": "sagent.selectAgent",
         "title": "Sagent: Focus Agent"
+      },
+      {
+        "command": "sagent.addSelectionToChat",
+        "title": "Sagent: Add Selection to Chat"
       }
     ],
     "viewsContainers": {
@@ -163,6 +168,13 @@
           "command": "sagent.newSession",
           "when": "view == sagent.sessionsSecondary",
           "group": "navigation@1"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "sagent.addSelectionToChat",
+          "when": "editorHasSelection",
+          "group": "sagent"
         }
       ]
     }

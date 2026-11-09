@@ -36,6 +36,10 @@ export function activate(context: vscode.ExtensionContext): void {
       (label: unknown) =>
         typeof label === "string" ? provider.selectAgentFromTree(label) : undefined,
     ),
+    vscode.commands.registerCommand(
+      "sagent.addSelectionToChat",
+      (uri?: vscode.Uri) => provider.addEditorSelectionToChat(uri),
+    ),
   );
 }
 

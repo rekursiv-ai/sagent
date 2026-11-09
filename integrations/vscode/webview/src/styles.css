@@ -1288,3 +1288,98 @@ button:disabled {
   background: var(--vscode-inputValidation-errorBackground);
   border: 1px solid var(--vscode-inputValidation-errorBorder);
 }
+
+.chat-selection-surface {
+  position: relative;
+}
+
+.chat-selection-action {
+  position: fixed;
+  z-index: 100;
+}
+
+.composer-annotation-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 8px 8px 0;
+}
+
+.composer-annotation-chip {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  width: fit-content;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+  overflow: visible;
+}
+
+.composer-annotation-chip > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-annotation-tooltip {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 100;
+  display: flex;
+  width: max-content;
+  max-width: min(360px, calc(100vw - 32px));
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  color: var(--vscode-foreground);
+  background: var(--vscode-editorHoverWidget-background, var(--vscode-editor-background));
+  border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-widget-border));
+  border-radius: 4px;
+  box-shadow: 0 4px 12px var(--vscode-widget-shadow);
+  font-size: var(--vscode-font-size);
+  line-height: 1.35;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition: opacity 120ms ease, transform 120ms ease;
+  visibility: hidden;
+}
+
+.composer-annotation-tooltip span {
+  overflow-wrap: anywhere;
+}
+
+.composer-annotation-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-top: 4px;
+  border-top: 1px solid var(--vscode-widget-border, var(--vscode-panel-border));
+}
+
+.composer-annotation-entry:first-of-type {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.composer-annotation-preview {
+  max-height: 160px;
+  overflow: auto;
+  padding-top: 2px;
+  color: var(--vscode-descriptionForeground);
+  white-space: pre-wrap;
+}
+
+.composer-annotation-chip:hover .composer-annotation-tooltip,
+.composer-annotation-chip:focus-within .composer-annotation-tooltip {
+  opacity: 1;
+  transform: translateY(0);
+  visibility: visible;
+}

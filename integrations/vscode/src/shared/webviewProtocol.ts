@@ -32,4 +32,14 @@ export type WebviewToExtensionMessage =
 
 export type ExtensionToWebviewMessage =
   | { type: "state"; state: ConversationState }
-  | { type: "change-preview"; preview: ChangePreview };
+  | { type: "change-preview"; preview: ChangePreview }
+  | {
+      type: "composer.insert";
+      text: string;
+      source: "editor" | "chat";
+      label?: string;
+      languageId?: string;
+      filePath?: string;
+      startLine?: number;
+      endLine?: number;
+    };

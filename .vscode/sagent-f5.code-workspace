@@ -28,6 +28,15 @@
       "statusBar.background": "#1565C0",
       "statusBar.foreground": "#FFFFFF"
     },
-    "window.title": "Sagent F5 Host — ${activeEditorShort} — ${rootName}"
+    "window.title": "Sagent F5 Host — ${activeEditorShort} — ${rootName}",
+    "sagent.mode": "rekursiv",
+    "sagent.rekursivSkills": [
+      "trackinizer",
+      "priml",
+      "configgle",
+      "wesearch"
+    ],
+    "sagent.trackinizerUrl": "http://127.0.0.1:8765",
+    "sagent.rekursivSkillDirectories": []
   }
 }

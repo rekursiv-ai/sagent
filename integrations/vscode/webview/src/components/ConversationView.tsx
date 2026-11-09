@@ -19,6 +19,7 @@ import { CommandOutputEntry } from "./command/CommandOutputList";
 import { MarkdownMessage } from "./conversation/MarkdownMessage";
 import { DiffHoverPreview } from "./changeReview/DiffHoverPreview";
 import { Button } from "./ui/Button";
+import { CopyButton } from "./ui/CopyButton";
 import { Icon } from "./ui/Icon";
 
 export type ConversationViewProps = {
@@ -126,54 +127,21 @@ function TurnView({
   previews: Readonly<Record<string, ChangePreview>>;
   turn: ConversationTurn;
 }): ReactElement {
-  const [copied, setCopied] = useState(false);
-  const [copiedUser, setCopiedUser] = useState(false);
-
-  async function copyUserInput(): Promise<void> {
-    try {
-      await copyText(turn.userText);
-      setCopiedUser(true);
-      window.setTimeout(() => setCopiedUser(false), 1_500);
-    } catch {
-      setCopiedUser(false);
-    }
-  }
-
-  async function copyAssistantOutput(): Promise<void> {
-    if (!turn.assistantText) {
-      return;
-    }
-    try {
-      await copyText(turn.assistantText);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1_500);
-    } catch {
-      setCopied(false);
-    }
-  }
-
   return (
     <article className="turn" data-turn-id={turn.id}>
       <div className="user-message-group copy-hover-target">
         <div className="user-message">
-          <div className="message-text">{turn.userText}</div>
+        <div className="message-text" data-chat-selection>{turn.userText}</div>
         </div>
         <div className="user-message-actions" aria-label="User input actions">
           <div className="message-actions">
-            <Button
-              aria-label={copiedUser ? "User input copied" : "Copy user input"}
-              className="message-action-button copy-hover-action"
-              onClick={() => void copyUserInput()}
-              title={copiedUser ? "Copied" : "Copy user input"}
-              variant="ghost"
-            >
-              <Icon name="copy" />
-            </Button>
+            <MessageTimestamp timestamp={turn.userTimestamp} />
+            <CopyButton className="message-action-button" label="Copy user input" text={turn.userText} />
           </div>
         </div>
       </div>
 
-      <div className="assistant-message" aria-label="Sagent response">
+      <div className="assistant-message" aria-label="Sagent response" data-chat-selection>
         <div className="assistant-message-header">
           <div
             className="message-label assistant-message-label"
@@ -185,17 +153,16 @@ function TurnView({
         </div>
         <TurnActivityItems
           assistantText={turn.assistantText}
+          isStreaming={turn.state !== "completed"}
           assistantCopyButton={turn.state === "completed" && turn.assistantText ? (
             <div className="message-actions" aria-label="Agent output actions">
-              <Button
-                aria-label={copied ? "Agent output copied" : "Copy agent output"}
-                className={`message-action-button copy-hover-action${persistentAssistantCopy ? " copy-action-persistent" : ""}`}
-                onClick={() => void copyAssistantOutput()}
-                title={copied ? "Copied" : "Copy agent output"}
-                variant="ghost"
-              >
-                <Icon name="copy" />
-              </Button>
+              <CopyButton
+                className="message-action-button"
+                label="Copy agent output"
+                persistent={persistentAssistantCopy}
+                text={turn.assistantText}
+              />
+              <MessageTimestamp timestamp={turn.assistantTimestamp} />
             </div>
           ) : undefined}
           items={turn.items}
@@ -216,7 +183,7 @@ function TurnView({
           <summary>{turn.agentMessages.length} agent messages</summary>
           <div className="activity-content">
             {turn.agentMessages.map((message) => (
-              <div className="agent-message" key={message.id}>
+              <div className="agent-message" data-chat-selection key={message.id}>
                 <div className="message-label">
                   {message.sender ?? "Agent"}
                   {message.recipient ? ` → ${message.recipient}` : ""}
@@ -271,15 +238,36 @@ function TurnView({
   );
 }
 
+function MessageTimestamp({ timestamp }: { timestamp?: string }): ReactElement | null {
+  if (!timestamp) {
+    return null;
+  }
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  return (
+    <time
+      className="message-timestamp copy-hover-action"
+      dateTime={date.toISOString()}
+      title={date.toLocaleString()}
+    >
+      {date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}
+    </time>
+  );
+}
+
 function TurnActivityItems({
   assistantCopyButton,
   assistantText,
+  isStreaming,
   items,
   onOpenFile,
   onReview,
 }: {
   assistantCopyButton?: ReactElement;
   assistantText: string;
+  isStreaming: boolean;
   items: ConversationTurnItem[];
   onOpenFile: (path: string) => void;
   onReview: (path: string) => void;
@@ -287,7 +275,7 @@ function TurnActivityItems({
   if (items.length === 0) {
     return (
       <div className="assistant-output-copy-surface copy-hover-target">
-        <MarkdownMessage content={assistantText} />
+        <MarkdownMessage content={assistantText} isStreaming={isStreaming} />
         {assistantCopyButton}
       </div>
     );
@@ -302,7 +290,7 @@ function TurnActivityItems({
       );
       rendered.push(
         <div className="assistant-output-copy-surface copy-hover-target" key={item.id}>
-          <MarkdownMessage content={item.text} />
+          <MarkdownMessage content={item.text} isStreaming={isStreaming} />
           {!hasLaterAssistant && assistantCopyButton}
         </div>,
       );
@@ -319,7 +307,7 @@ function TurnActivityItems({
     }
     const running = tools.some((tool) => tool.state === "running");
     rendered.push(
-      <details className="activity-panel tool-group" key={`tools-${tools[0]!.callId}`} open={running}>
+      <details className="activity-panel tool-group" key={`tools-${tools[0]!.callId}`}>
         <summary>
           {running ? "Working with tools…" : `${tools.length} tool action${tools.length === 1 ? "" : "s"}`}
         </summary>
@@ -338,25 +326,6 @@ function TurnActivityItems({
   }
 
   return <>{rendered}</>;
-}
-
-async function copyText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.style.position = "fixed";
-  textarea.style.opacity = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-  const copied = document.execCommand("copy");
-  textarea.remove();
-  if (!copied) {
-    throw new Error("Could not copy agent output");
-  }
 }
 
 function TurnRuntimeSummary({
@@ -452,20 +421,9 @@ function ToolActivityView({
 }): ReactElement {
   const stateLabel = activity.state === "running" ? "Running" : activity.state;
   const invocation = toolInvocationLabel(activity);
-  const [copied, setCopied] = useState(false);
-
-  async function copyToolOutput(): Promise<void> {
-    try {
-      await copyText(activity.text);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1_500);
-    } catch {
-      setCopied(false);
-    }
-  }
 
   return (
-    <details className="tool-activity" open={activity.state === "running"}>
+    <details className="tool-activity">
       <summary className="tool-summary-row">
         <span className="tool-invocation" title={invocation}>{invocation}</span>
         <span className="tool-state">{stateLabel}</span>
@@ -473,15 +431,7 @@ function ToolActivityView({
       <div className="tool-details">
         {activity.text !== undefined && (
           <div className="tool-result-shell copy-hover-target">
-            <Button
-              aria-label={copied ? "Tool output copied" : "Copy tool output"}
-              className="tool-output-copy-button copy-hover-action"
-              onClick={() => void copyToolOutput()}
-              title={copied ? "Copied" : "Copy tool output"}
-              variant="ghost"
-            >
-              <Icon name="copy" />
-            </Button>
+            <CopyButton className="tool-output-copy-button" label="Copy tool output" text={activity.text} />
             <div className="tool-result">{activity.text}</div>
           </div>
         )}
