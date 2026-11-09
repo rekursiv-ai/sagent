@@ -32,7 +32,8 @@ for a tool whose digest matches none of its own. A ``Note`` is acked as a
 ``Result`` is, and kept until then by whoever sent it, across a drop.
 
 A reader ignores a field its class lacks, at any depth, so a newer peer may add
-one; a message or class it does not know still fails the line.
+one; a message or class it does not know still fails the line, as does a field
+holding what its type is not.
 
 Typical usage example:
 
@@ -61,6 +62,7 @@ from sagent.session.types import (
     stored_plain,
     stored_record,
 )
+from sagent.tools.types import checked
 
 
 if TYPE_CHECKING:
@@ -474,7 +476,7 @@ def decoded(line: bytes) -> Message:
     A field this sagent's class lacks, as a newer peer's, is left unread.
 
     Raises:
-      ValueError: The line is no message.
+      ValueError: The line is no message, or a field holds what its type is not.
 
     """
     classes = _classes()
@@ -484,6 +486,9 @@ def decoded(line: bytes) -> Message:
     except RecursionError as error:
         raise ValueError("The line is nested too deep.") from error
     assert isinstance(message, _KINDS)
+    # Below the root a tag decides what treekle builds, whatever the field declares,
+    # so a peer's ``Call`` may hold a record where it declares text.
+    _ = checked(message, type(message), key=type(message).__name__)
     return message
 
 
