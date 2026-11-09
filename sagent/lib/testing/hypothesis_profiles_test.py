@@ -77,6 +77,13 @@ class TestConfigureHypothesis:
                 (HealthCheck.too_slow,),
             ), name
 
+    def test_the_profiles_do_not_depend_on_the_profile_loaded_before(self) -> None:
+        # On CI, Hypothesis loads its own "ci" profile at import, before conftest runs.
+        hypothesis.settings.load_profile("ci")
+        configure_hypothesis()
+
+        assert (_profile("dev").print_blob, _profile("ci").print_blob) == (False, True)
+
     def test_the_example_database_lives_in_the_users_cache(self) -> None:
         assert configuration.storage_directory().home_directory == Path(
             cache_dir() / "rekursiv-ai" / "hypothesis",

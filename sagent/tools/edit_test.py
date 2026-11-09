@@ -418,6 +418,9 @@ async def test_two_agents_editing_one_file_never_lose_an_edit(
             writing.set()
             assert written.wait(5)
         write_file(target, data)
+        # Two writes can share an mtime tick, and the tracker trusts an unmoved mtime.
+        later = target.stat().st_mtime + 100
+        os.utime(target, (later, later))
 
     monkeypatch.setattr(edit, "file_lock", lock)
     monkeypatch.setattr(edit, "write_file", held)
