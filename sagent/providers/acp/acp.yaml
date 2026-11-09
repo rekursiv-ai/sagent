@@ -1,0 +1,104 @@
+sources: {}
+
+roles:
+  default: gemini-flash
+  best: claude-opus
+  everyday: gemini-flash
+  utility: gemini-flash
+  agy: gemini-flash
+
+reference:
+  thinking_effort_default: high
+  thinking_budget_default: auto
+  effort_as_level: true
+  limits:
+    max_request_tokens: 1_048_576
+    max_response_tokens: 65_536
+    truncates_at_context: true
+  thinking:
+    effort: [low, medium, high]
+    budget: [auto]
+    output: [none, text]
+
+models:
+- model_id: gemini-flash-3.8
+  wire_model_id: gemini-3.8-flash-high
+  prices:
+  - service_tier: auto
+    request: 0.0
+    response: 0.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: gemini-flash-medium-3.8
+  wire_model_id: gemini-3.8-flash-medium
+  prices:
+  - service_tier: auto
+    request: 0.0
+    response: 0.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: gemini-flash-low-3.8
+  wire_model_id: gemini-3.8-flash-low
+  prices:
+  - service_tier: auto
+    request: 0.0
+    response: 0.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: claude-sonnet-4.6
+  wire_model_id: claude-sonnet-4-6
+  prices:
+  - service_tier: auto
+    request: 0.0
+    response: 0.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: claude-opus-4.6
+  wire_model_id: claude-opus-4-6-thinking
+  prices:
+  - service_tier: auto
+    request: 0.0
+    response: 0.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+- model_id: gpt-oss-120.0
+  wire_model_id: gpt-oss-120b-medium
+  prices:
+  - service_tier: auto
+    request: 0.0
+    response: 0.0
+    cache_write: 0.0
+    cache_write_1h: 0.0
+    cache_read: 0.0
+
+providers:
+  acp:
+    sends: [thinking_effort]
+    roles:
+      default: gemini-flash
+      best: claude-opus
+      utility: gemini-flash
+      agy: gemini-flash
+    thinking_effort_default: high
+    thinking:
+      effort: [low, medium, high]
+      output: [none, text]
+    manage_context_server_side: [true]
+    account_auth: true
+    models:
+      gemini-flash-3.8:
+      gemini-flash-medium-3.8:
+      gemini-flash-low-3.8:
+      claude-sonnet-4.6:
+      claude-opus-4.6:
+      gpt-oss-120.0:

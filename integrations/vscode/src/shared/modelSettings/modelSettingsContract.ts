@@ -74,6 +74,9 @@ export type SagentProviderState = {
   /** Accounts exposed by the current provider's native `Logins` object. */
   accounts: readonly string[];
   currentAccount: string;
+  /** When provider is 'acp', available ACP agent servers (e.g. ['agy']). */
+  acpServers?: readonly string[];
+  currentAcpServer?: string;
 };
 
 export type SagentModelState = {
@@ -139,6 +142,11 @@ export type ModelSettingsAction =
       type: "select-provider";
       scope: ModelSettingsScope;
       provider: string;
+    }
+  | {
+      type: "select-acp-server";
+      scope: ModelSettingsScope;
+      server: string;
     }
   | {
       type: "select-account";

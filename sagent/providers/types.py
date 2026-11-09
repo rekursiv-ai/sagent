@@ -12,6 +12,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, ClassVar, Protocol, runtime_checkable
 
+from sagent.providers.usage import ProviderUsage, UsageReporter
 from sagent.types import Resource
 
 
@@ -22,7 +23,13 @@ if TYPE_CHECKING:
     import httpx2
 
     from sagent.model.capability import ModelCapability, ModelSettings
-    from sagent.model.types import Request, Response, TextChunk
+    from sagent.model.types import (
+        Request,
+        Response,
+        TextChunk,
+        ToolCallChunk,
+        ToolResultChunk,
+    )
     from sagent.providers.login import Logins
     from sagent.session.types import AnyToolResult, Attachment, ToolCall
     from sagent.tools.types import Tool
@@ -36,8 +43,10 @@ __all__ = [
     "Provider",
     "ProviderFactory",
     "ProviderSharedResources",
+    "ProviderUsage",
     "ToolMount",
     "ToolServer",
+    "UsageReporter",
     "UsageWindow",
 ]
 
@@ -195,6 +204,14 @@ class Provider(Resource, Protocol):
         """Return the account's rate-limit windows, as last reported."""
         ...
 
+    def native_usage(self) -> ProviderUsage | None:
+        """Return the provider's native quota and rate-limit state, if known."""
+        ...
+
+    async def refresh_usage(self) -> ProviderUsage | None:
+        """Fetch and return the freshest native quota state; default returns native_usage()."""
+        ...
+
     def __getitem__(self, model: str) -> Model:
         """Return the model ``model`` names; this does no I/O."""
         ...
@@ -235,7 +252,9 @@ class Model(Resource, Protocol):
         """Return about how many tokens ``attachment`` adds, by the vendor's formula."""
         ...
 
-    def stream(self, request: Request) -> AsyncIterator[TextChunk | Response]:
+    def stream(
+        self, request: Request
+    ) -> AsyncIterator[TextChunk | ToolCallChunk | ToolResultChunk | Response]:
         """Yield the reply as it is written, then the finished ``Response``."""
         ...
 

@@ -26,6 +26,7 @@ export type ModelSettingsViewModel = {
   availableScopes: ModelSettingsSnapshot["availableScopes"];
   selectedScope: ModelSettingsSnapshot["selectedScope"];
   providerOptions: readonly ModelSettingsSelectOption[];
+  acpServerOptions: readonly ModelSettingsSelectOption[];
   accountOptions: readonly ModelSettingsSelectOption[];
   modelOptions: readonly ModelSettingsSelectOption[];
   controls: readonly ModelSettingsControl[];
@@ -48,6 +49,13 @@ export function createModelSettingsViewModel(
     availableScopes: snapshot.availableScopes,
     selectedScope: snapshot.selectedScope,
     providerOptions: options(provider.providers),
+    acpServerOptions: options(
+      provider.acpServers && provider.acpServers.length > 0
+        ? provider.acpServers
+        : (provider.currentProvider === "acp" ? ["agy"] : []),
+      provider.currentAcpServer ?? "agy",
+      (server) => (server === "agy" ? "Google Antigravity (agy)" : String(server)),
+    ),
     accountOptions: options(provider.accounts),
     modelOptions: options(model.models),
     controls: [

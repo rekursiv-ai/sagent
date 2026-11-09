@@ -25,6 +25,7 @@ from sagent.model.capability import (
     ModelSettings,
 )
 from sagent.model.exceptions import UnknownModelError, UnknownProviderError
+from sagent.providers.acp.provider import Acp
 from sagent.providers.anthropic.api import Anthropic
 from sagent.providers.anthropic.cli import AnthropicCLI
 from sagent.providers.dashscope.api import DashScope
@@ -109,6 +110,7 @@ def listings() -> tuple[Listed, ...]:
         Moonshot,
         LlamaCpp,
         SelfHosted,
+        Acp,
     )
 
 

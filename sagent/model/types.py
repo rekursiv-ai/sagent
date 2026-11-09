@@ -23,6 +23,7 @@ import uuid
 
 from sagent.model.cost import TokenCost, TokenCount
 from sagent.session.types import (
+    AnyToolResult,
     AssistantMessage,
     SessionRecord,
     Thinking,
@@ -39,6 +40,8 @@ __all__ = [
     "Request",
     "Response",
     "TextChunk",
+    "ToolCallChunk",
+    "ToolResultChunk",
 ]
 
 
@@ -124,6 +127,21 @@ class TextChunk:
 
     record: int = 0
     """The index in ``Response.records`` of the record the words join."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolCallChunk:
+    """A tool invocation started during the stream (e.g. from an ACP agent)."""
+
+    call: ToolCall
+    title: str = ""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ToolResultChunk:
+    """A tool invocation completed during the stream (e.g. from an ACP agent)."""
+
+    result: AnyToolResult
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

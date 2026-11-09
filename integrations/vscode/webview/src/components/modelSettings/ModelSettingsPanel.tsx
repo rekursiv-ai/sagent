@@ -124,6 +124,17 @@ export function ModelSettingsPanel({
             onAction({ type: "select-provider", scope: view.selectedScope, provider })
           }
         />
+        {snapshot.provider.currentProvider === "acp" && (
+          <ModelSelectField
+            label="ACP Agent"
+            description="ACP harness or agent server (e.g. Google Antigravity)."
+            value={snapshot.provider.currentAcpServer || "agy"}
+            options={view.acpServerOptions}
+            onChange={(server) =>
+              onAction({ type: "select-acp-server", scope: view.selectedScope, server })
+            }
+          />
+        )}
         <ModelSelectField
           label="Model"
           description="Exact model ID offered by the selected provider."
