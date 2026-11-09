@@ -76,6 +76,23 @@ profiles:
       output: [none, text, redacted]
 
 models:
+- model_id: fable-5.2
+  wire_model_id: claude-fable-5-2
+  knowledge_cutoff: June 2026
+  prices:
+  - service_tier: auto
+    request: 8.0
+    response: 40.0
+    cache_write: 10.0
+    cache_write_1h: 16.0
+    cache_read: 0.2
+  - service_tier: priority
+    request: 16.0
+    response: 80.0
+    cache_write: 20.0
+    cache_write_1h: 32.0
+    cache_read: 0.4
+
 - model_id: fable-5.1
   wire_model_id: claude-fable-5-1
   knowledge_cutoff: June 2026
@@ -301,6 +318,7 @@ providers:
     cache_ttl_sec: [300.0, 3600.0]
     retries_internally: true
     models:
+      fable-5.2:
       fable-5.1:
       fable-5.0:
       mythos-5.1:
@@ -326,6 +344,7 @@ providers:
     thinking:
       output: [none, text]
     models:
+      fable-5.2:
       fable-5.1:
       fable-5.0:
       mythos-5.1:

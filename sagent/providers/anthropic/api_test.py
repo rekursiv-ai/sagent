@@ -526,7 +526,9 @@ async def test_the_cache_lapses_only_after_an_answer_left_idle(
         ("opus-5.0", "opus-5.0"),
         ("claude-opus-4-8", "opus-4.8"),
         ("default", "opus-5.5"),
-        ("best", "fable-5.1"),
+        ("best", "fable-5.2"),
+        ("fable", "fable-5.2"),
+        ("claude-fable-5-2", "fable-5.2"),
         ("everyday", "sonnet-5.5"),
         ("utility", "haiku-5.5"),
     ],
@@ -550,8 +552,8 @@ def test_a_context_tag_selects_its_size() -> None:
 
 def test_iterating_lists_the_sections_models() -> None:
     names = list(Anthropic())
-    assert names[:3] == ["fable-5.1", "fable-5.0", "mythos-5.1"]
-    assert len(names) == 16
+    assert names[:3] == ["fable-5.2", "fable-5.1", "fable-5.0"]
+    assert len(names) == 17
     assert "default" not in names
 
 
@@ -576,6 +578,7 @@ async def test_a_provider_closes_only_resources_it_made() -> None:
 @pytest.mark.parametrize(
     ("model_id", "cutoff"),
     [
+        ("fable-5.2", "June 2026"),
         ("fable-5.1", "June 2026"),
         ("opus-5.0", "May 2026"),
         ("opus-4.6", "May 2025"),
@@ -590,6 +593,7 @@ def test_every_row_states_its_published_cutoff(model_id: str, cutoff: str) -> No
 @pytest.mark.parametrize(
     ("model_id", "rates"),
     [
+        ("fable-5.2", (8.0, 40.0, 10.0, 16.0, 0.2)),
         ("fable-5.1", (10.0, 50.0, 12.5, 20.0, 0.25)),
         ("opus-5.5", (4.0, 20.0, 5.0, 8.0, 0.2)),
         ("sonnet-4.6", (3.0, 15.0, 3.75, 6.0, 0.3)),
@@ -610,12 +614,21 @@ def test_a_row_bills_the_published_standard_card(
     ) == rates
 
 
-def test_only_the_fast_mode_opus_models_offer_priority() -> None:
+def test_only_the_fast_mode_models_offer_priority() -> None:
     table = Anthropic.models()
     fast = {name for name, row in table.items() if "priority" in row.service_tier}
-    assert fast == {"opus-5.5", "opus-5.0", "opus-4.8"}
+    assert fast == {"fable-5.2", "opus-5.5", "opus-5.0", "opus-4.8"}
     card = table["opus-5.0"].prices["priority", 1, date(2026, 10, 22)]
     assert (card.request, card.cache_write, card.cache_read) == (10.0, 12.5, 1.0)
+    # Fast mode's $16 / $80 card, with the caching multipliers on top.
+    card = table["fable-5.2"].prices["priority", 1, date(2026, 11, 9)]
+    assert (
+        card.request,
+        card.response,
+        card.cache_write,
+        card.cache_write_1h,
+        card.cache_read,
+    ) == (16.0, 80.0, 20.0, 32.0, 0.4)
 
 
 def test_dated_and_banded_cards_bill_their_published_rates() -> None:
@@ -630,7 +643,10 @@ def test_dated_and_banded_cards_bill_their_published_rates() -> None:
     assert haiku["auto", 100_001, at].request == 0.5
 
 
-@pytest.mark.parametrize("model_id", ["fable-5.1", "opus-5.5", "sonnet-5.0"])
+@pytest.mark.parametrize(
+    "model_id",
+    ["fable-5.2", "fable-5.1", "opus-5.5", "sonnet-5.0"],
+)
 def test_1m_models_serve_1m(model_id: str) -> None:
     limits = Anthropic.models()[model_id].limits
     assert limits.max_request_tokens == 1_000_000
@@ -655,6 +671,7 @@ def test_small_is_haikus_cheaper_band_and_opus_has_none() -> None:
     ("model_id", "budget"),
     [
         # ``enabled`` is rejected from 4.7 on: adaptive only.
+        ("fable-5.2", {"none", "auto"}),
         ("fable-5.1", {"none", "auto"}),
         ("opus-4.8", {"none", "auto"}),
         ("opus-4.6", {"none", "auto", "fixed"}),
