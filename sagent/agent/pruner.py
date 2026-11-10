@@ -251,7 +251,9 @@ def superseded(context: Sequence[ModelContextEvent]) -> set[int]:
     A read of a file is superseded once later reads of it have returned, between
     them, every line it did; a whole read covers any. A read is also superseded
     once a later edit or write modifies that file, since the prior read is now
-    stale. A command's output is superseded once the same command runs again.
+    stale. A command's output is superseded once the same command runs again, or
+    when a successful command has been followed by subsequent tool actions
+    (leaving downstream :func:`cut` to balance cache prefix rewrite costs).
     Dropping one loses nothing.
 
     Args:
@@ -265,10 +267,12 @@ def superseded(context: Sequence[ModelContextEvent]) -> set[int]:
     later: dict[str, list[tuple[float, float]]] = {}
     modified: set[str] = set()
     commands: set[tuple[str, ...]] = set()
+    subsequent_tool_action = False
     for i in reversed(range(len(context))):
         entry = context[i]
         if isinstance(entry, (EditResult, WriteResult)) and entry.path is not None:
             modified.add(entry.path)
+            subsequent_tool_action = True
         elif isinstance(entry, ReadResult) and entry.path is not None:
             if entry.path in modified:
                 gone.add(i)
@@ -278,10 +282,19 @@ def superseded(context: Sequence[ModelContextEvent]) -> set[int]:
             if all(_covered(span, shown) for span in spans):
                 gone.add(i)
             shown.extend(spans)
-        elif isinstance(entry, BashResult) and entry.command is not None:
-            if entry.command in commands:
+            subsequent_tool_action = True
+        elif isinstance(entry, BashResult):
+            if entry.command is not None:
+                if entry.command in commands:
+                    gone.add(i)
+                commands.add(entry.command)
+            if (
+                entry.exit_code == 0
+                and entry.is_error is not True
+                and subsequent_tool_action
+            ):
                 gone.add(i)
-            commands.add(entry.command)
+            subsequent_tool_action = True
     return gone
 
 

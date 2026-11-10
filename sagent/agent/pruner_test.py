@@ -11,6 +11,12 @@ from unittest.mock import AsyncMock, Mock
 import math
 import time
 
+from hypothesis import (
+    given,
+    settings,
+    strategies as st,
+)
+
 import pytest
 
 from sagent.agent import pruner as pruner_module
@@ -160,6 +166,25 @@ def _shell(call_id: str, command: str) -> list[SessionRecord]:
     ]
 
 
+def _bash(
+    call_id: str,
+    command: str,
+    *,
+    exit_code: int = 0,
+    is_error: bool | None = None,
+) -> list[SessionRecord]:
+    return [
+        ToolCall(call_id=call_id, name="Bash", arguments={"command": command}),
+        BashResult(
+            call_id=call_id,
+            command=("bash", "-c", command),
+            stdout="o" * 4000,
+            exit_code=exit_code,
+            is_error=is_error,
+        ),
+    ]
+
+
 def _edit(call_id: str, path: str) -> list[SessionRecord]:
     return [
         ToolCall(call_id=call_id, name="Edit", arguments={"file_path": path}),
@@ -250,6 +275,51 @@ def test_read_superseded_by_subsequent_edit_drops_on_prune(tmp_path: Path) -> No
     assert results["edit_a"] == "Edited /repo/a.py."
 
 
+def test_successful_command_superseded_by_subsequent_action_drops_on_prune(
+    tmp_path: Path,
+) -> None:
+    agent, pruner, _ = _agent(tmp_path)
+    agent.model.settings = replace(
+        agent.model.settings,
+        pruning=PruningPolicy(keep_recent=0, expiry=100.0),
+    )
+    agent.session.append(
+        UserMessage(content="run build and tests"),
+        ToolCall(call_id="build", name="Bash", arguments={"command": "npm install"}),
+        BashResult(
+            call_id="build",
+            command=("npm", "install"),
+            stdout="installed\n" * 4000,
+            exit_code=0,
+        ),
+        AssistantMessage(content="build finished. running tests."),
+        ToolCall(call_id="test", name="Bash", arguments={"command": "pytest"}),
+        BashResult(
+            call_id="test",
+            command=("pytest",),
+            stdout="AssertionError: failed\n" * 100,
+            exit_code=1,
+        ),
+        AssistantMessage(content="test failed. editing file."),
+        ToolCall(call_id="edit", name="Edit", arguments={"file_path": "/repo/x.py"}),
+        EditResult(call_id="edit", path="/repo/x.py"),
+        AssistantMessage(content="done editing."),
+    )
+    for i in range(20):
+        agent.session.append(
+            UserMessage(content=f"q{i}"),
+            AssistantMessage(content=f"a{i}"),
+        )
+
+    assert pruner.prune()
+    results = _results(agent)
+    # Successful build followed by test/edit actions is superseded and pruned.
+    assert results["build"] == _STUB
+    # Failed test is NEVER superseded; full traceback is retained.
+    assert "AssertionError" in results["test"]
+    assert results["edit"] == "Edited /repo/x.py."
+
+
 def test_a_drop_waits_until_the_reads_paid_cover_the_rewrite(tmp_path: Path) -> None:
     agent, pruner, _ = _agent(tmp_path)
     # Twenty requests so far forecast twenty more, but one request has read the
@@ -338,6 +408,23 @@ _P = "/home/me/repo/agent/x.py"
         ([*_read("a", _P), *_edit("b", "/repo/agent/y.py")], set[str]()),
         ([*_edit("a", _P), *_read("b", _P)], set[str]()),
         ([*_read("a", _P), *_edit("b", _P), *_read("c", _P)], {"a"}),
+        # A successful shell command is superseded once subsequent actions run.
+        ([*_bash("a", "npm install", exit_code=0), *_edit("b", _P)], {"a"}),
+        (
+            [
+                *_bash("a", "pytest", exit_code=0),
+                *_bash("b", "git status", exit_code=0),
+            ],
+            {"a"},
+        ),
+        # A failed shell command is never superseded by subsequent actions.
+        ([*_bash("a", "pytest", exit_code=1), *_edit("b", _P)], set[str]()),
+        (
+            [*_bash("a", "pytest", exit_code=0, is_error=True), *_edit("b", _P)],
+            set[str](),
+        ),
+        # The most recent shell command has no subsequent actions and is not superseded.
+        ([*_bash("a", "npm install", exit_code=0)], set[str]()),
     ],
 )
 def test_a_result_is_superseded_once_all_it_showed_is_shown_again(
@@ -1137,6 +1224,56 @@ async def test_a_pruner_takes_no_instructions() -> None:
         await pruner.run("keep the plan")
 
     scheduled.assert_not_awaited()
+
+
+@given(
+    st.lists(
+        st.one_of(
+            st.builds(
+                BashResult,
+                call_id=st.text(min_size=1, max_size=10),
+                command=st.tuples(st.text(min_size=1, max_size=5)),
+                stdout=st.text(max_size=500),
+                exit_code=st.sampled_from([0, 1, 2, 127]),
+                is_error=st.sampled_from([None, False, True]),
+            ),
+            st.builds(
+                ReadResult,
+                call_id=st.text(min_size=1, max_size=10),
+                path=st.sampled_from(["/repo/a.py", "/repo/b.py", "/repo/c.py"]),
+                content=st.text(max_size=500),
+            ),
+            st.builds(
+                EditResult,
+                call_id=st.text(min_size=1, max_size=10),
+                path=st.sampled_from(["/repo/a.py", "/repo/b.py", "/repo/c.py"]),
+            ),
+        ),
+        min_size=1,
+        max_size=40,
+    )
+)
+@settings(max_examples=300)
+def test_superseded_invariants_hold_under_arbitrary_sequences(
+    context: list[ModelContextEvent],
+) -> None:
+    gone = superseded(context)
+    # Invariant 1: All indices returned are valid context indices
+    assert gone.issubset(range(len(context)))
+
+    # Invariant 2: A failed command is NEVER superseded unless an identical command ran again
+    commands_seen: set[tuple[str, ...]] = set()
+    for i in reversed(range(len(context))):
+        ev = context[i]
+        if isinstance(ev, BashResult) and (ev.exit_code != 0 or ev.is_error is True):
+            if ev.command is not None and ev.command in commands_seen:
+                continue
+            assert i not in gone
+        if isinstance(ev, BashResult) and ev.command is not None:
+            commands_seen.add(ev.command)
+
+    # Invariant 3: Idempotence
+    assert superseded(context) == gone
 
 
 if __name__ == "__main__":
