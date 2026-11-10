@@ -5,6 +5,12 @@ All notable sagent changes are documented here. This project follows
 
 ## Unreleased
 
+### Added
+
+- Models: Claude Fable 5.2 (`fable-5.2`), at $8 / $40 per MTok with
+  $0.20 cache reads, and fast mode (`service_tier: priority`) at $16 / $80.
+  `best` and `fable` now resolve to it.
+
 ### Fixed
 
 - A rate limit one agent meets holds back every agent on the host calling the

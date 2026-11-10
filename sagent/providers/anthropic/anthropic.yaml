@@ -86,6 +86,12 @@ models:
     cache_write: 10.0
     cache_write_1h: 16.0
     cache_read: 0.2
+  - service_tier: priority
+    request: 16.0
+    response: 80.0
+    cache_write: 20.0
+    cache_write_1h: 32.0
+    cache_read: 0.4
 
 - model_id: fable-5.1
   wire_model_id: claude-fable-5-1
@@ -312,6 +318,7 @@ providers:
     cache_ttl_sec: [300.0, 3600.0]
     retries_internally: true
     models:
+      fable-5.2:
       fable-5.1:
       fable-5.0:
       mythos-5.1:
@@ -337,6 +344,7 @@ providers:
     thinking:
       output: [none, text]
     models:
+      fable-5.2:
       fable-5.1:
       fable-5.0:
       mythos-5.1:
@@ -355,8 +363,7 @@ providers:
       haiku-4.5:
   # The ``claude`` a person runs, not sagent's transport above: what Chat offers a
   # claude chat (``chat_commands.py``) and what Trackinizer prices its sessions at
-  # (``session_usage.py``). Fable 5.2 is offered to a claude chat only, so it is
-  # listed here and in no section a sagent provider serves.
+  # (``session_usage.py``).
   claude-code:
     sends: [thinking_effort, thinking_output]
     manage_context_server_side: [true]

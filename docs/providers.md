@@ -6,7 +6,7 @@ Sagent separates providers from models. A provider owns authentication and creat
 
 | Provider class | Environment variable | Default model | Utility model | Notes |
 | --- | --- | --- | --- | --- |
-| `Anthropic` | `ANTHROPIC_API_KEY`, or workload identity | `opus-5.5` | `haiku-5.5` | Anthropic API-key provider; `best` resolves to `fable-5.1`. |
+| `Anthropic` | `ANTHROPIC_API_KEY`, or workload identity | `opus-5.5` | `haiku-5.5` | Anthropic API-key provider; `best` resolves to `fable-5.2`. |
 | `OpenAI` | `OPENAI_API_KEY`, or workload identity | `sol-6.1` | `luna-6.0` | OpenAI API provider; `best` resolves to `astra-6.0`. |
 | `Google` | `GOOGLE_API_KEY` or `GEMINI_API_KEY` | `gemini-argon-4.0` | `gemini-flash-lite-3.5` | Google Gemini provider. |
 | `Moonshot` | `MOONSHOT_API_KEY` | `kimi-3.0` | `kimi-2.6` | OpenAI-compatible Kimi provider. |
