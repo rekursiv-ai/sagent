@@ -284,15 +284,11 @@ def superseded(context: Sequence[ModelContextEvent]) -> set[int]:
             shown.extend(spans)
             subsequent_tool_action = True
         elif isinstance(entry, BashResult):
+            is_duplicate = entry.command is not None and entry.command in commands
             if entry.command is not None:
-                if entry.command in commands:
-                    gone.add(i)
                 commands.add(entry.command)
-            if (
-                entry.exit_code == 0
-                and entry.is_error is not True
-                and subsequent_tool_action
-            ):
+            is_successful = entry.exit_code == 0 and entry.is_error is not True
+            if is_duplicate or (is_successful and subsequent_tool_action):
                 gone.add(i)
             subsequent_tool_action = True
     return gone

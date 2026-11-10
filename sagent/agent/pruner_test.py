@@ -1248,6 +1248,11 @@ async def test_a_pruner_takes_no_instructions() -> None:
                 call_id=st.text(min_size=1, max_size=10),
                 path=st.sampled_from(["/repo/a.py", "/repo/b.py", "/repo/c.py"]),
             ),
+            st.builds(
+                WriteResult,
+                call_id=st.text(min_size=1, max_size=10),
+                path=st.sampled_from(["/repo/a.py", "/repo/b.py", "/repo/c.py"]),
+            ),
         ),
         min_size=1,
         max_size=40,
@@ -1258,21 +1263,48 @@ def test_superseded_invariants_hold_under_arbitrary_sequences(
     context: list[ModelContextEvent],
 ) -> None:
     gone = superseded(context)
-    # Invariant 1: All indices returned are valid context indices
+    # Invariant 1: All indices returned are valid context indices.
     assert gone.issubset(range(len(context)))
 
-    # Invariant 2: A failed command is NEVER superseded unless an identical command ran again
+    # Invariant 2: A failed command is NEVER superseded unless an identical command ran
+    # later (i.e. appears at a higher index, since the list is chronological).
+    # Walk forward so commands_seen accumulates commands that come *after* each entry.
     commands_seen: set[tuple[str, ...]] = set()
     for i in reversed(range(len(context))):
         ev = context[i]
-        if isinstance(ev, BashResult) and (ev.exit_code != 0 or ev.is_error is True):
-            if ev.command is not None and ev.command in commands_seen:
-                continue
-            assert i not in gone
+        if (
+            isinstance(ev, BashResult)
+            and (ev.exit_code != 0 or ev.is_error is True)
+            and (ev.command is None or ev.command not in commands_seen)
+        ):
+            assert i not in gone, f"Failed command at index {i} was wrongly superseded"
         if isinstance(ev, BashResult) and ev.command is not None:
             commands_seen.add(ev.command)
 
-    # Invariant 3: Idempotence
+    # Invariant 3: A successful command IS superseded when a later tool action exists,
+    # regardless of whether an identical command also ran (both paths lead to gone).
+    has_later_action: set[int] = set()
+    seen_any_tool: bool = False
+    for i in reversed(range(len(context))):
+        if seen_any_tool:
+            has_later_action.add(i)
+        ev = context[i]
+        if isinstance(ev, (BashResult, ReadResult, EditResult, WriteResult)):
+            seen_any_tool = True
+
+    for i in reversed(range(len(context))):
+        ev = context[i]
+        if (
+            isinstance(ev, BashResult)
+            and ev.exit_code == 0
+            and ev.is_error is not True
+            and i in has_later_action
+        ):
+            assert i in gone, (
+                f"Successful command at index {i} with later actions was not superseded"
+            )
+
+    # Invariant 4: Idempotence — calling superseded twice gives the same result.
     assert superseded(context) == gone
 
 
