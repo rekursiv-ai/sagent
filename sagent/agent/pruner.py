@@ -249,8 +249,10 @@ def superseded(context: Sequence[ModelContextEvent]) -> set[int]:
     """Return the results whose every line a later result shows again.
 
     A read of a file is superseded once later reads of it have returned, between
-    them, every line it did; a whole read covers any. A command's output is
-    superseded once the same command runs again. Dropping one loses nothing.
+    them, every line it did; a whole read covers any. A read is also superseded
+    once a later edit or write modifies that file, since the prior read is now
+    stale. A command's output is superseded once the same command runs again.
+    Dropping one loses nothing.
 
     Args:
       context: The entries.
@@ -261,10 +263,16 @@ def superseded(context: Sequence[ModelContextEvent]) -> set[int]:
     """
     gone: set[int] = set()
     later: dict[str, list[tuple[float, float]]] = {}
+    modified: set[str] = set()
     commands: set[tuple[str, ...]] = set()
     for i in reversed(range(len(context))):
         entry = context[i]
-        if isinstance(entry, ReadResult) and entry.path is not None:
+        if isinstance(entry, (EditResult, WriteResult)) and entry.path is not None:
+            modified.add(entry.path)
+        elif isinstance(entry, ReadResult) and entry.path is not None:
+            if entry.path in modified:
+                gone.add(i)
+                continue
             shown = later.setdefault(entry.path, [])
             spans = _spans(entry.ranges)
             if all(_covered(span, shown) for span in spans):

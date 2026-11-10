@@ -52,6 +52,7 @@ from sagent.session.types import (
     ToolResult,
     UncategorizedToolResult,
     UserMessage,
+    WriteResult,
 )
 from sagent.tools.types import ToolContext
 
@@ -159,6 +160,20 @@ def _shell(call_id: str, command: str) -> list[SessionRecord]:
     ]
 
 
+def _edit(call_id: str, path: str) -> list[SessionRecord]:
+    return [
+        ToolCall(call_id=call_id, name="Edit", arguments={"file_path": path}),
+        EditResult(call_id=call_id, path=path),
+    ]
+
+
+def _write(call_id: str, path: str) -> list[SessionRecord]:
+    return [
+        ToolCall(call_id=call_id, name="Write", arguments={"file_path": path}),
+        WriteResult(call_id=call_id, path=path),
+    ]
+
+
 def _ids(context: Sequence[ModelContextEvent], indices: Collection[int]) -> set[str]:
     return {
         entry.call_id for i in indices if isinstance(entry := context[i], ToolResult)
@@ -199,6 +214,40 @@ def test_a_drop_pays_once_enough_requests_will_read_it(tmp_path: Path) -> None:
 
     assert _results(agent) == {"c0": _STUB}
     assert len(_prunes(agent)) == 1
+
+
+def test_read_superseded_by_subsequent_edit_drops_on_prune(tmp_path: Path) -> None:
+    agent, pruner, _ = _agent(tmp_path)
+    # High expiry so results do not expire purely from idleness; only superseded drops.
+    agent.model.settings = replace(
+        agent.model.settings,
+        pruning=PruningPolicy(keep_recent=0, expiry=100.0),
+    )
+    file_a = "/repo/a.py"
+    file_b = "/repo/b.py"
+    agent.session.append(
+        UserMessage(content="read both"),
+        ToolCall(call_id="read_a", name="Read", arguments={"file_path": file_a}),
+        ReadResult(call_id="read_a", path=file_a, content="a" * 40_000),
+        ToolCall(call_id="read_b", name="Read", arguments={"file_path": file_b}),
+        ReadResult(call_id="read_b", path=file_b, content="b" * 40_000),
+        AssistantMessage(content="I read both. Now editing a.py."),
+        UserMessage(content="edit a.py"),
+        ToolCall(call_id="edit_a", name="Edit", arguments={"file_path": file_a}),
+        EditResult(call_id="edit_a", path=file_a),
+        AssistantMessage(content="done editing a.py"),
+    )
+    for i in range(20):
+        agent.session.append(
+            UserMessage(content=f"q{i}"),
+            AssistantMessage(content=f"a{i}"),
+        )
+
+    assert pruner.prune()
+    results = _results(agent)
+    assert results["read_a"] == _STUB
+    assert results["read_b"] == "b" * 40_000
+    assert results["edit_a"] == "Edited /repo/a.py."
 
 
 def test_a_drop_waits_until_the_reads_paid_cover_the_rewrite(tmp_path: Path) -> None:
@@ -283,6 +332,12 @@ _P = "/home/me/repo/agent/x.py"
         ([*_read("a", _P), *_read("b", "/repo/agent/y.py")], set[str]()),
         ([*_shell("a", "ls"), *_shell("b", "ls")], {"a"}),
         ([*_shell("a", "ls"), *_shell("b", "ls -a")], set[str]()),
+        # A file modification supersedes earlier reads of that file.
+        ([*_read("a", _P), *_edit("b", _P)], {"a"}),
+        ([*_read("a", _P), *_write("b", _P)], {"a"}),
+        ([*_read("a", _P), *_edit("b", "/repo/agent/y.py")], set[str]()),
+        ([*_edit("a", _P), *_read("b", _P)], set[str]()),
+        ([*_read("a", _P), *_edit("b", _P), *_read("c", _P)], {"a"}),
     ],
 )
 def test_a_result_is_superseded_once_all_it_showed_is_shown_again(
