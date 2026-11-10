@@ -109,7 +109,24 @@ class Status:
             self.spend += event.usd
 
     def frame(self) -> str:
-        """Return the status line.
+        """Return the status line, a spinner first while a call or a compaction runs.
+
+        Returns:
+          frame: ``line()``, after the spinner's turn while anything runs.
+
+        """
+        line = self.line()
+        start = next(
+            (t for t in (self._compact, self._call, self._tools) if t is not None),
+            None,
+        )
+        if not line or start is None:
+            return line
+        now = time.monotonic()
+        return f"{self.spinner[int((now - start) * 5) % len(self.spinner)]} {line}"
+
+    def line(self) -> str:
+        """Return the status line with no spinner, for a view that turns its own.
 
         Returns:
           line: The totals, the wait once named, and the calls running in the
@@ -161,14 +178,7 @@ class Status:
             )
             if part
         )
-        line = f"[{metrics}{f'; {reason}' if reason else ''}]"
-        start = next(
-            (t for t in (self._compact, self._call, self._tools) if t is not None),
-            None,
-        )
-        if start is None:
-            return line
-        return f"{self.spinner[int((now - start) * 5) % len(self.spinner)]} {line}"
+        return f"[{metrics}{f'; {reason}' if reason else ''}]"
 
     def _wait(self, running: float, *, now: float) -> str:
         """Return what the agent waits on, once that is worth saying."""
