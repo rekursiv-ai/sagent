@@ -361,29 +361,3 @@ providers:
       sonnet-4.5:
       haiku-5.5:
       haiku-4.5:
-  # The ``claude`` a person runs, not sagent's transport above: what Chat offers a
-  # claude chat (``chat_commands.py``) and what Trackinizer prices its sessions at
-  # (``session_usage.py``).
-  claude-code:
-    sends: [thinking_effort, thinking_output]
-    manage_context_server_side: [true]
-    thinking:
-      output: [none, text]
-    models:
-      fable-5.2:
-      fable-5.1:
-      fable-5.0:
-      mythos-5.1:
-      mythos-5.0:
-      opus-5.5:
-      opus-5.0:
-      opus-4.8:
-      opus-4.7:
-      opus-4.6:
-      opus-4.5:
-      sonnet-5.5:
-      sonnet-5.0:
-      sonnet-4.6:
-      sonnet-4.5:
-      haiku-5.5:
-      haiku-4.5:
