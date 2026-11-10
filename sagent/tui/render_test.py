@@ -51,7 +51,13 @@ from sagent.tools.grep import Grep
 from sagent.tools.read import Read
 from sagent.tools.write import Write
 from sagent.tui.recording import RecordingPrinter
-from sagent.tui.render import Scrollback, call_header, error_text, show_result
+from sagent.tui.render import (
+    Scrollback,
+    call_header,
+    error_text,
+    show_result,
+    stamped,
+)
 from sagent.tui.types import CommandOutput, Header, Printer
 
 
@@ -1162,6 +1168,28 @@ def test_a_header_is_its_tool_s_label_and_display_or_the_call_s_name() -> None:
     gone = call_header(call("Gone", "2"), tools=_tools(), agent="c")
     assert echo == Header(key="1", label="Echo hi", display=_SHOWN)
     assert gone == Header(key="c: 2", label="c: Gone", display=ToolDisplay())
+
+
+def test_a_stamped_call_keeps_its_label_and_display_beside_what_it_had() -> None:
+    echo = replace(call("Echo", "1", text="hi"), extra={"kept": 1})
+    assert stamped(echo, tools=_tools()).extra == {
+        "kept": 1,
+        "$summary": "Echo hi",
+        "$display": {"command": {"lines": None}, "output": {"lines": None}},
+    }
+
+
+def test_a_stamped_call_names_a_path_below_where_sagent_started_relative_to_it() -> (
+    None
+):
+    read = ToolCall(call_id="1", name="Read", arguments={"file_path": "/h/r/a.py"})
+    shown = stamped(read, tools={"Read": Read()}, home=Path("/h/r"))
+    assert shown.extra["$summary"] == "Read a.py"
+
+
+def test_a_call_of_an_unknown_tool_is_stamped_with_nothing() -> None:
+    gone = call("Gone", "2")
+    assert stamped(gone, tools=_tools()) is gone
 
 
 def test_show_result_shows_a_failure_whatever_the_display() -> None:

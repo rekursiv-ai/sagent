@@ -29,6 +29,8 @@ import logging
 import re
 import time
 
+from treekle import to_plain
+
 from sagent.model.exceptions import (
     AuthError,
     ContextOverflowError,
@@ -73,6 +75,7 @@ __all__ = [
     "call_header",
     "error_text",
     "show_result",
+    "stamped",
     "suspended_text",
 ]
 
@@ -505,6 +508,41 @@ def call_header(
         key=_key(call.call_id, agent),
         label=f"{agent}: {label}" if agent else label,
         display=tool.display if tool is not None else ToolDisplay(),
+    )
+
+
+def stamped(
+    call: ToolCall,
+    *,
+    tools: Mapping[str, Tool],
+    home: Path | None = None,
+) -> ToolCall:
+    """Return ``call`` carrying its label and its tool's display, as a journal keeps it.
+
+    A reader with no tools, such as a web view of the journal, labels a call by
+    ``extra["$summary"]`` and sizes its result by ``extra["$display"]``, what
+    ``call_header`` gives here. A call of a tool not in ``tools`` is returned as it is:
+    its name is its label.
+
+    Args:
+      call: The call.
+      tools: The agent's tools.
+      home: Where sagent was started; a path below it is kept relative to it.
+
+    Returns:
+      call: ``call``, its ``extra`` holding both.
+
+    """
+    tool = tools.get(call.name)
+    if tool is None:
+        return call
+    return replace(
+        call,
+        extra={
+            **call.extra,
+            "$summary": _label(call, tools=tools, home=home),
+            "$display": to_plain(tool.display, target=ToolDisplay),
+        },
     )
 
 
