@@ -76,6 +76,17 @@ profiles:
       output: [none, text, redacted]
 
 models:
+- model_id: fable-5.2
+  wire_model_id: claude-fable-5-2
+  knowledge_cutoff: June 2026
+  prices:
+  - service_tier: auto
+    request: 8.0
+    response: 40.0
+    cache_write: 10.0
+    cache_write_1h: 16.0
+    cache_read: 0.2
+
 - model_id: fable-5.1
   wire_model_id: claude-fable-5-1
   knowledge_cutoff: June 2026
@@ -326,6 +337,33 @@ providers:
     thinking:
       output: [none, text]
     models:
+      fable-5.1:
+      fable-5.0:
+      mythos-5.1:
+      mythos-5.0:
+      opus-5.5:
+      opus-5.0:
+      opus-4.8:
+      opus-4.7:
+      opus-4.6:
+      opus-4.5:
+      sonnet-5.5:
+      sonnet-5.0:
+      sonnet-4.6:
+      sonnet-4.5:
+      haiku-5.5:
+      haiku-4.5:
+  # The ``claude`` a person runs, not sagent's transport above: what Chat offers a
+  # claude chat (``chat_commands.py``) and what Trackinizer prices its sessions at
+  # (``session_usage.py``). Fable 5.2 is offered to a claude chat only, so it is
+  # listed here and in no section a sagent provider serves.
+  claude-code:
+    sends: [thinking_effort, thinking_output]
+    manage_context_server_side: [true]
+    thinking:
+      output: [none, text]
+    models:
+      fable-5.2:
       fable-5.1:
       fable-5.0:
       mythos-5.1:
