@@ -337,7 +337,9 @@ def _script(sentinel: str, *, nice: int | None = None) -> str:
     """Return the script that runs the command ``$1`` and reports where it ended."""
     # The leading newline keeps output without a final one off the report.
     autogroup = (
-        f"echo {nice} 2>/dev/null >/proc/self/autogroup || true\n" if nice else ""
+        f"echo {nice} 2>/dev/null >/proc/self/autogroup || true\n"
+        if nice is not None
+        else ""
     )
     report = f'printf "\\n%s=%s\\n" "{sentinel}" "$(pwd)"'
     return (
@@ -357,11 +359,6 @@ def _script(sentinel: str, *, nice: int | None = None) -> str:
         "__sagent_report\n"
         "exit $__rc"
     )
-
-
-def _omitted(count: int, *, note: str) -> str:
-    """Return the line that ends a cut output: how many lines it left out."""
-    return f"\n... ({count:,} more lines omitted{note})\n"
 
 
 def _spill(path: Path, stdout: Sequence[str]) -> None:

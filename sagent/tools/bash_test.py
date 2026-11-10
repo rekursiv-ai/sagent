@@ -1414,6 +1414,11 @@ def test_bash_script_autogroup_prelude() -> None:
     assert "echo 19" in script
     assert "/proc/self/autogroup" in script
 
+    # nice=0 is a valid value and must still emit the autogroup prelude.
+    script_zero = bash._script("SENTINEL", nice=0)
+    assert "echo 0" in script_zero
+    assert "/proc/self/autogroup" in script_zero
+
     script_default = bash._script("SENTINEL", nice=None)
     assert "/proc/self/autogroup" not in script_default
 

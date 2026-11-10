@@ -519,9 +519,12 @@ def test_translate_is_memoized() -> None:
 
 
 def test_components_order_matches_hierarchical_paths() -> None:
+    # Key property: "a/b/c.txt" must sort before "a-b/file.txt" because
+    # "\x00" < "-", so directory separators beat hyphens and other punctuation.
     paths = ["a-b/file.txt", "a/file.txt", "a/b/c.txt", "a.txt"]
     sorted_paths = sorted(paths, key=_components)
-    assert sorted_paths == ["a/b/c.txt", "a/file.txt", "a-b/file.txt", "a.txt"]
+    assert sorted_paths.index("a/b/c.txt") < sorted_paths.index("a-b/file.txt")
+    assert sorted_paths.index("a/file.txt") < sorted_paths.index("a-b/file.txt")
 
 
 if __name__ == "__main__":

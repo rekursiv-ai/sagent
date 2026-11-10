@@ -160,10 +160,10 @@ def _glob_fd(
     return [root / rel for rel in rels]
 
 
-# Replaces "/" with "\x00" (NUL, ordinal 0) which sorts before any printable
-# character, preserving hierarchical directory-first order without allocating
-# a list of split strings per path.
 def _components(rel: str) -> str:
+    # Replace "/" with "\x00" (NUL, ordinal 0) which sorts before any printable
+    # character, so "a/b" < "a-b": directory separators win over hyphens and
+    # other punctuation, giving hierarchical order without allocating a split list.
     return rel.replace("/", "\x00")
 
 
