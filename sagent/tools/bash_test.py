@@ -454,7 +454,8 @@ async def test_long_output_is_cut_on_a_line_and_says_how_much_was_omitted(
     assert result.stdout.startswith("line1\nline2\n")
     kept = sum(row.startswith("line") for row in result.stdout.splitlines())
     assert 0 < kept < 100
-    assert result.stdout.endswith(f"\n... ({100 - kept} more lines omitted)\n")
+    assert f"\n... ({100 - kept} lines omitted)\n" in result.stdout
+    assert result.stdout.endswith("line100\n")
     assert result.stderr == "boom"
     assert result.text().endswith("boom\n[exit 3]")
     assert len(result.stdout) + len(result.stderr) <= context.max_result_chars
@@ -471,8 +472,9 @@ async def test_output_past_bash_s_own_cap_is_cut_and_spilled_whole(
         _arguments("for i in $(seq 1 14); do echo line-$i-padding; done"),
     )
     assert len(result.stdout) <= tool.max_result_chars
-    spilled = re.search(r"; full output: (\S+)\)\n$", result.stdout)
+    spilled = re.search(r"; full output: (\S+)\)", result.stdout)
     assert spilled is not None
+    assert result.stdout.endswith("line-14-padding\n")
     whole = await asyncio.to_thread(Path(spilled[1]).read_text, encoding="utf-8")
     assert whole.splitlines() == [f"line-{i}-padding" for i in range(1, 15)]
     # A short name, as the model reads it in every cut result.
@@ -496,7 +498,8 @@ async def test_output_cut_with_nowhere_to_spill_names_no_file(tmp_path: Path) ->
         ToolContext(cwd=tmp_path),
         _arguments("seq 1 1000"),
     )
-    assert re.search(r"\.\.\. \(\d+ more lines omitted\)\n$", result.stdout)
+    assert re.search(r"\.\.\. \(\d+ lines omitted\)", result.stdout)
+    assert result.stdout.endswith("1000\n")
     assert len(result.stdout) <= 200
 
 
@@ -1206,7 +1209,8 @@ async def test_a_cut_output_fills_the_cap_but_for_its_last_line_s_slack(
         "for i in $(seq 1 1000); do echo x; done; echo boom >&2",
         tool=Bash(max_result_chars=200),
     )
-    assert result.stdout.endswith(" more lines omitted)\n")
+    assert re.search(r"\.\.\. \(\d+ lines omitted\)", result.stdout)
+    assert result.stdout.endswith("x\n")
     assert 200 - 4 <= len(result.stdout) + len(result.stderr) <= 200
 
 
@@ -1412,6 +1416,30 @@ def test_bash_script_autogroup_prelude() -> None:
 
     script_default = bash._script("SENTINEL", nice=None)
     assert "/proc/self/autogroup" not in script_default
+
+
+@pytest.mark.asyncio
+async def test_bash_preserves_head_and_tail_on_overflow(tmp_path: Path) -> None:
+    tool = Bash(max_result_chars=500)
+    context = ToolContext(
+        cwd=tmp_path, max_result_chars=500, spill_dir=tmp_path / "spill"
+    )
+    # Emit 50 setup lines, then a critical failure traceback at the end
+    command = 'python3 -c \'for i in range(50): print(f"PASS test_{i:03d}"); print("CRITICAL_ASSERTION_FAILURE: test_999 failed!")\''
+    result = await tool.call(context, {"command": command, "description": "run test"})
+    stdout = result.stdout
+    # Length bounded by cap
+    assert len(stdout) <= 500
+    # Head line preserved
+    assert "PASS test_000" in stdout
+    # Tail critical assertion preserved
+    assert "CRITICAL_ASSERTION_FAILURE: test_999 failed!" in stdout
+    # Middle omission marker included
+    assert "lines omitted" in stdout
+    # Spill directory contains full output
+    spill_files = list((tmp_path / "spill").glob("bash-*.txt"))
+    assert len(spill_files) == 1
+    assert "PASS test_025" in spill_files[0].read_text()
 
 
 if __name__ == "__main__":

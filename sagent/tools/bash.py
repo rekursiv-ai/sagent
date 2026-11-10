@@ -268,19 +268,15 @@ class Bash:
             else None
         )
         note = f"; full output: {spill}" if spill is not None else ""
-        # Room for the longest the cut can say it left out: every line.
-        body, kept = context.fit(
+        body, kept = context.fit_head_tail(
             stdout,
-            reserve=len(diagnostics) + len(_omitted(len(stdout), note=note)),
+            reserve=len(diagnostics),
             cap=cap,
+            omission_note=note,
         )
-        body = body.strip()
-        if kept < len(stdout):
-            if spill is not None:
-                await asyncio.to_thread(_spill, spill, stdout)
-            shown = f"{body}{_omitted(len(stdout) - kept, note=note)}"
-        else:
-            shown = f"{body}\n" if body else ""
+        if kept < len(stdout) and spill is not None:
+            await asyncio.to_thread(_spill, spill, stdout)
+        shown = f"{body.strip()}\n" if body.strip() else ""
         return BashResult(
             call_id="",
             command=("bash", "-c", a.command),
@@ -340,11 +336,12 @@ class _HeldPipe:
 def _script(sentinel: str, *, nice: int | None = None) -> str:
     """Return the script that runs the command ``$1`` and reports where it ended."""
     # The leading newline keeps output without a final one off the report.
-    autogroup = f"echo {nice} 2>/dev/null >/proc/self/autogroup || true\n" if nice else ""
+    autogroup = (
+        f"echo {nice} 2>/dev/null >/proc/self/autogroup || true\n" if nice else ""
+    )
     report = f'printf "\\n%s=%s\\n" "{sentinel}" "$(pwd)"'
     return (
-        autogroup
-        + f"__sagent_report() {{ local rc=$?; {report}; return $rc; }}\n"
+        autogroup + f"__sagent_report() {{ local rc=$?; {report}; return $rc; }}\n"
         "builtin trap __sagent_report EXIT\n"  # pragma: no mutate -- bash reads trap signal names case-insensitively.
         "trap() {\n"
         '  builtin trap "$@" || return\n'
