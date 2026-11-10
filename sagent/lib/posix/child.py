@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from asyncio.subprocess import Process
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import IO, TYPE_CHECKING, Self
 
 import asyncio
@@ -29,7 +30,6 @@ import signal
 if TYPE_CHECKING:
     from asyncio import Future
     from collections.abc import Awaitable, Collection, Mapping
-    from pathlib import Path
 
 
 __all__ = [
@@ -64,6 +64,7 @@ class Child:
         *argv: str,
         group: bool = False,
         grace_sec: float = 1.0,
+        nice: int | None = None,
         stdin: int | IO[bytes] | None = None,
         stdout: int | IO[bytes] | None = None,
         stderr: int | IO[bytes] | None = None,
@@ -79,6 +80,12 @@ class Child:
           group: Whether it leads a new session, and so a process group of its
             own, which ``stop`` ends whole.
           grace_sec: How long ``stop`` gives it, after TERM, before KILL.
+          nice: CPU scheduling priority increment (0 to 19). Uses ``nice(1)``
+            to lower the child's priority so heavy tool calls do not starve an
+            interactive desktop. On Linux, when ``group`` is also set the new
+            session's autogroup weight is updated from the parent after the
+            child starts, giving the whole process tree a proportionally lower
+            CPU share without interfering with any other session.
           stdin: As ``asyncio.create_subprocess_exec`` takes it.
           stdout: As ``asyncio.create_subprocess_exec`` takes it.
           stderr: As ``asyncio.create_subprocess_exec`` takes it.
@@ -90,10 +97,20 @@ class Child:
         Returns:
           child: The started process.
 
+        Raises:
+          ValueError: ``nice`` is outside 0..19.
+
         """
+        if nice is not None and not (0 <= nice <= 19):
+            raise ValueError(f"nice must be between 0 and 19, got {nice}")
+        actual_argv = (
+            ("nice", "-n", str(nice), "--", *argv)
+            if nice is not None
+            else tuple(argv)
+        )
         starting = asyncio.ensure_future(
             asyncio.create_subprocess_exec(
-                *argv,
+                *actual_argv,
                 stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,
@@ -109,6 +126,8 @@ class Child:
         except asyncio.CancelledError:
             await finish(cls._abandon(starting, group=group))
             raise
+        if nice is not None and group:
+            _set_autogroup(process.pid, nice)
         return cls(process=process, group=group, grace_sec=grace_sec)
 
     @classmethod
@@ -192,6 +211,30 @@ class Child:
         if self.process.returncode is None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 self.process.send_signal(sig)
+
+
+def _set_autogroup(pid: int, nice: int) -> None:
+    """Write ``nice`` to the Linux scheduler autogroup of the process ``pid``.
+
+    Each new session created with ``start_new_session=True`` gets its own
+    autogroup under ``/proc/<pid>/autogroup``. Writing a nice increment there
+    lowers the scheduling weight of the entire process tree in that session,
+    so a heavy compile or test run does not starve the developer's desktop.
+
+    The write is done from the parent after the child starts: no fork-safety
+    concerns, no race between ``fork`` and ``exec``. Silently ignored on
+    kernels without ``CONFIG_SCHED_AUTOGROUP`` and on non-Linux platforms.
+
+    Args:
+      pid: The child process id.
+      nice: The CPU scheduling weight increment (0 to 19).
+
+    """
+    autogroup = Path(f"/proc/{pid}/autogroup")
+    if not autogroup.exists():
+        return
+    with contextlib.suppress(OSError):
+        autogroup.write_text(f"{nice}\n", encoding="ascii")
 
 
 async def finish[T](work: Awaitable[T]) -> T:

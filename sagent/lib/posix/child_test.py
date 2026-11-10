@@ -505,6 +505,44 @@ async def test_finished_work_is_its_result_and_a_cancel_waits_for_it() -> None:
     assert done == ["done"]
 
 
+@pytest.mark.asyncio
+async def test_child_runs_with_lowered_niceness(started: list[int]) -> None:
+    """A child started with nice runs at the requested priority."""
+    child = await Child.start(
+        "nice",
+        nice=15,
+        stdout=asyncio.subprocess.PIPE,
+    )
+    started.append(child.process.pid)
+    out, _ = await child.process.communicate()
+    assert int(out.decode().strip()) == min(19, os.nice(0) + 15)
+
+
+@pytest.mark.parametrize("bad_nice", [-1, 20])
+@pytest.mark.asyncio
+async def test_child_rejects_out_of_range_nice(bad_nice: int) -> None:
+    with pytest.raises(ValueError, match="nice must be between 0 and 19"):
+        _ = await Child.start("echo", "hi", nice=bad_nice)
+
+
+@pytest.mark.asyncio
+async def test_child_with_nice_and_group_terminates_on_cancel(
+    started: list[int],
+) -> None:
+    """A niced process group leader and its spawned workers terminate upon stop."""
+    child = await Child.start(
+        "/bin/sh",
+        "-c",
+        "sleep 30 & wait",
+        group=True,
+        nice=10,
+    )
+    started.append(child.process.pid)
+    await asyncio.sleep(0.05)
+    await child.stop()
+    assert await gone_within(started)
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 

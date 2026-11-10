@@ -1388,6 +1388,32 @@ async def _running_in(group: int) -> set[int]:
     }
 
 
+@pytest.mark.asyncio
+async def test_bash_runs_with_nice(tmp_path: Path) -> None:
+    tool = Bash(nice=15)
+    result = await tool.call(
+        ToolContext(cwd=tmp_path),
+        {"command": "ps -o ni= -p $$", "description": "check nice"},
+    )
+    expected = min(19, os.nice(0) + 15)
+    assert str(expected) in result.text()
+
+
+@pytest.mark.parametrize("bad_nice", [-1, 20])
+def test_bash_rejects_out_of_range_nice(bad_nice: int) -> None:
+    with pytest.raises(ValueError, match=r"Bash\.nice must be between 0 and 19"):
+        _ = Bash(nice=bad_nice)
+
+
+def test_bash_script_autogroup_prelude() -> None:
+    script = bash._script("SENTINEL", nice=19)
+    assert "echo 19" in script
+    assert "/proc/self/autogroup" in script
+
+    script_default = bash._script("SENTINEL", nice=None)
+    assert "/proc/self/autogroup" not in script_default
+
+
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 
