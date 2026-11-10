@@ -238,6 +238,7 @@ def test_a_running_call_spins_and_counts_its_time(clock: _Clock) -> None:
     assert line.frame() == "c [10s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00]"
     clock.mono += 2.7
     assert line.frame() == "a [13s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00]"
+    assert line.line() == "[13s 0↑ 0↓ 0↟ 0↡ (0%↡ 0%↔) $0.00]"
 
 
 def test_a_running_call_estimates_what_it_streamed() -> None:
