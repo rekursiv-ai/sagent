@@ -13,7 +13,8 @@ Up and Down walk one cursor over the stops ``[input, queued?, deferred?,
 sent[-1], sent[-2], ...]``. The buffer holds the stop the cursor is on; each
 stop keeps its own edits, so Down replays them. Leaving a pane's stop upward
 unchanged puts its message back; leaving it edited or cleared empties the
-pane for good, the edit riding the cursor.
+pane for good, the edit riding the cursor. Down at the input abandons the
+line to history, where Up finds it.
 
 Keys: Enter sends or queues (``foo\`` Enter is a newline), Tab defers,
 Alt+Enter is a newline, as is Shift+Enter where the terminal tells it from Enter,
@@ -576,11 +577,11 @@ def _down(
     nav: Navigation,
     event: KeyPressEvent,
 ) -> None:
-    """Move the cursor back toward the input, each stop's edits intact."""
+    """Move the cursor back toward the input; at it, abandon the line to history."""
     buf = event.current_buffer
     if not nav.cursor:
         if buf.text:
-            buf.reset()
+            buf.reset(append_to_history=True)
         return
     stop = nav.stops[nav.cursor]
     stop.current = buf.text

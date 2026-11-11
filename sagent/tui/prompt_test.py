@@ -491,13 +491,17 @@ def test_up_with_nothing_to_walk_does_nothing() -> None:
 
 
 @pytest.mark.asyncio
-async def test_down_at_the_input_clears_it(busy: _Prompt) -> None:
+async def test_down_at_the_input_abandons_the_line_and_up_brings_it_back(
+    busy: _Prompt,
+) -> None:
     busy.press(Keys.Down)
     assert busy.buffer.text == ""
     busy.type("typed")
     busy.press(Keys.Down)
     assert busy.buffer.text == ""
     assert busy.nav.cursor == 0
+    busy.press(Keys.Up)
+    assert busy.buffer.text == "typed"
 
 
 @pytest.mark.asyncio
