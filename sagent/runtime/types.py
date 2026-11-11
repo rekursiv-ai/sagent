@@ -589,7 +589,7 @@ class Job(Protocol):
 
     @property
     def started(self) -> float:
-        """When it started, in seconds since the epoch."""
+        """When it was asked for, in seconds since the epoch."""
         ...
 
     @property

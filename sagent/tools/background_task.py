@@ -295,7 +295,7 @@ def _listing(jobs: Mapping[str, Job]) -> BackgroundTaskResult:
 
 
 def _phase(job: Job) -> str:
-    """Return ``sleeping`` until a delayed job starts, then ``running``."""
+    """Return ``sleeping`` until a job starts, then ``running``."""
     return "sleeping" if job.state == "sleeping" else "running"
 
 
