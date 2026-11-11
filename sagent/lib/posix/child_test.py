@@ -7,7 +7,9 @@ from typing import IO, TYPE_CHECKING, Final
 
 import asyncio
 import os
+import shutil
 import signal
+import stat
 
 import pytest
 
@@ -592,6 +594,74 @@ async def test_a_niced_group_lowers_the_jobs_it_started_first(
     await child.stop()
 
 
+@pytest.mark.parametrize("group", [True, False])
+@pytest.mark.asyncio
+async def test_a_niced_child_reaped_before_it_is_lowered_still_starts(
+    monkeypatch: pytest.MonkeyPatch,
+    group: bool,
+) -> None:
+    """A command as quick as ``true`` may be gone, and reaped, by then."""
+    spawn = asyncio.create_subprocess_exec
+
+    async def reaped(
+        *argv: str,
+        stdin: int | IO[bytes] | None,
+        stdout: int | IO[bytes] | None,
+        stderr: int | IO[bytes] | None,
+        cwd: str | Path | None,
+        env: Mapping[str, str] | None,
+        pass_fds: Collection[int],
+        limit: int,
+        start_new_session: bool,
+    ) -> Process:
+        process = await spawn(
+            *argv,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            cwd=cwd,
+            env=env,
+            pass_fds=pass_fds,
+            limit=limit,
+            start_new_session=start_new_session,
+        )
+        _ = await process.wait()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", reaped)
+    child = await Child.start("true", group=group, nice=10)
+    assert await child.stop() == 0
+
+
+@pytest.mark.skipif(
+    (su := shutil.which("su")) is None or not os.stat(su).st_mode & stat.S_ISUID,
+    reason="no setuid su",
+)
+@pytest.mark.parametrize("group", [True, False])
+@pytest.mark.asyncio
+async def test_a_niced_child_this_program_may_not_lower_still_starts(
+    started: list[int],
+    group: bool,
+) -> None:
+    """``su`` runs as root, as a ``sudo`` would, so it keeps its priority."""
+    child = await Child.start(
+        "su",
+        "-c",
+        "true",
+        group=group,
+        nice=10,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    started.append(child.process.pid)
+    try:
+        assert child.process.returncode is None
+        assert os.getpriority(os.PRIO_PROCESS, child.process.pid) == 0
+    finally:
+        await child.stop()
+
+
 @pytest.mark.asyncio
 async def test_a_niced_program_that_is_missing_still_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
@@ -628,11 +698,11 @@ async def test_a_niced_group_lowers_its_session_s_autogroup(
 @_AUTOGROUPS
 @pytest.mark.parametrize("group", [True, False])
 @pytest.mark.asyncio
-async def test_niced_children_start_though_the_kernel_refuses_some_autogroups(
+async def test_niced_children_started_together_all_run_lower(
     started: list[int],
     group: bool,
 ) -> None:
-    """Started faster than one per 100ms; this program's autogroup is never theirs."""
+    """Faster than the kernel takes autogroup changes; this program's stays its own."""
     mine = _autogroup("self")
     before = os.nice(0)
     children = [await Child.start("sleep", "30", group=group, nice=7) for _ in range(4)]

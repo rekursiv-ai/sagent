@@ -115,15 +115,8 @@ class Child:
         except asyncio.CancelledError:
             await finish(cls._abandon(starting, group=group))
             raise
-        # The kernel caps a priority past the lowest at the lowest.
         if nice is not None:
-            os.setpriority(
-                os.PRIO_PGRP if group else os.PRIO_PROCESS,
-                process.pid,
-                os.getpriority(os.PRIO_PROCESS, 0) + nice,
-            )
-            if group:
-                _lower_autogroup(process.pid, nice)
+            _lower(process.pid, nice, group=group)
         return cls(process=process, group=group, grace_sec=grace_sec)
 
     @classmethod
@@ -233,13 +226,25 @@ async def finish[T](work: Awaitable[T]) -> T:
     return result
 
 
-# Linux's (``man 7 sched``): without it lowered, the kernel shares the CPU among
-# sessions alike, whatever each process's nice value. Elsewhere, or with
-# autogroups off, there is no file. Unprivileged, the kernel takes one such write
-# per 100ms across the system (``proc_sched_autogroup_set_nice``), refusing the
-# rest with EAGAIN; such a group keeps the desktop's share, its processes still
-# niced within it.
-def _lower_autogroup(pid: int, nice: int) -> None:
-    """Lower the scheduler autogroup of the session ``pid`` leads to ``nice``."""
-    with contextlib.suppress(OSError):
-        Path(f"/proc/{pid}/autogroup").write_text(f"{nice}\n", encoding="ascii")
+# Lowering is a courtesy, after the start, so it never fails one: a command as
+# quick as ``true`` may be gone and reaped by now, and one that runs as root, as a
+# ``sudo`` does, is not this program's to lower. Either keeps the priority it had.
+# The kernel caps a priority past the lowest at the lowest.
+#
+# The autogroup is Linux's (``man 7 sched``): without it lowered, the kernel shares
+# the CPU among sessions alike, whatever each process's nice value. Elsewhere, or
+# with autogroups off, there is no file. Unprivileged, the kernel takes one such
+# write per 100ms across the system (``proc_sched_autogroup_set_nice``), refusing
+# the rest with EAGAIN; such a group keeps the desktop's share, its processes
+# still niced within it.
+def _lower(pid: int, nice: int, *, group: bool) -> None:
+    """Run ``pid``, and its group and session if it leads them, ``nice`` lower."""
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.setpriority(
+            os.PRIO_PGRP if group else os.PRIO_PROCESS,
+            pid,
+            os.getpriority(os.PRIO_PROCESS, 0) + nice,
+        )
+    if group:
+        with contextlib.suppress(OSError):
+            Path(f"/proc/{pid}/autogroup").write_bytes(b"%d\n" % nice)

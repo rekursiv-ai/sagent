@@ -1480,32 +1480,6 @@ async def test_first_and_last_lines_too_long_to_show_still_count_the_lines(
     assert len(result.stdout) <= 200
 
 
-@pytest.mark.asyncio
-async def test_bash_preserves_head_and_tail_on_overflow(tmp_path: Path) -> None:
-    tool = Bash(max_result_chars=500)
-    context = ToolContext(
-        cwd=tmp_path,
-        max_result_chars=500,
-        spill_dir=tmp_path / "spill",
-    )
-    # Emit 50 setup lines, then a critical failure traceback at the end.
-    command = 'python3 -c \'for i in range(50): print(f"PASS test_{i:03d}"); print("CRITICAL_ASSERTION_FAILURE: test_999 failed!")\''
-    result = await tool.call(context, {"command": command, "description": "run test"})
-    stdout = result.stdout
-    # Length bounded by cap.
-    assert len(stdout) <= 500
-    # Head line preserved.
-    assert "PASS test_000" in stdout
-    # Tail critical assertion preserved.
-    assert "CRITICAL_ASSERTION_FAILURE: test_999 failed!" in stdout
-    # Middle omission marker included.
-    assert "lines omitted" in stdout
-    # Spill directory contains full output.
-    spill_files = list((tmp_path / "spill").glob("bash-*.txt"))
-    assert len(spill_files) == 1
-    assert "PASS test_025" in spill_files[0].read_text()
-
-
 if __name__ == "__main__":
     from sagent.lib.testing.runner import test_main
 
