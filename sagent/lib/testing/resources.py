@@ -42,7 +42,7 @@ from collections.abc import Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cache
-from importlib import util
+from importlib import machinery
 from itertools import compress, islice, product
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, Protocol, cast
@@ -78,6 +78,7 @@ _KEYWORDS: Final = frozenset(("and", "or", "not", "True", "False"))
 
 
 _LAST_ROOT: Final = pytest.StashKey[Path]()
+_MARKED: Final = pytest.StashKey[None]()
 """The XDG root ``isolate_user_dirs`` made for this process's previous test."""
 
 
@@ -394,6 +395,12 @@ def pytest_collection_modifyitems(
       items: Items.
 
     """
+    # Every package conftest re-exports this hook so its export runs it, and pytest
+    # calls each binding on the session's whole item list: five in the monorepo,
+    # each walking all ~100k items again.
+    if _MARKED in config.stash:
+        return
+    config.stash[_MARKED] = None
     marker = "golden: tests that assert against a golden"
     if marker not in config.getini("markers"):
         config.addinivalue_line("markers", marker)
@@ -434,6 +441,10 @@ def apply_golden_marker(items: Sequence[GoldenMarkedItem]) -> None:
 def module_path(module_name: str) -> Path | None:
     """Return the in-repo ``.py`` file behind ``module_name``, without importing it.
 
+    ``util.find_spec`` imports every package above a dotted name -- the collection
+    hook paid a second for torch's ``__init__`` -- so each name is looked for on
+    the search path its parent's spec names, and nothing runs.
+
     Args:
       module_name: Dotted module name.
 
@@ -442,11 +453,15 @@ def module_path(module_name: str) -> Path | None:
         the repository.
 
     """
-    try:
-        spec = util.find_spec(module_name)
-    except (ImportError, ValueError):
-        return None
-    if spec is None or spec.origin is None or spec.origin in {"built-in", "frozen"}:
+    search: Sequence[str] | None = None
+    parts = module_name.split(".")
+    for depth in range(1, len(parts)):
+        package = machinery.PathFinder.find_spec(".".join(parts[:depth]), search)
+        if package is None or package.submodule_search_locations is None:
+            return None
+        search = package.submodule_search_locations
+    spec = machinery.PathFinder.find_spec(module_name, search)
+    if spec is None or spec.origin is None:
         return None
     path = Path(spec.origin)
     if path.suffix != ".py" or not path.is_relative_to(_CWD.parents[2]):

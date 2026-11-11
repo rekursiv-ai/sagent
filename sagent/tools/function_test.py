@@ -6,7 +6,6 @@ from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal
 
-import gc
 import weakref
 
 from treekle import PlainTree, from_plain
@@ -371,7 +370,6 @@ def test_the_object_a_dropped_tool_was_bound_to_is_let_go() -> None:
     gone = weakref.ref(greeter)
 
     del greeter, made
-    _ = gc.collect()
 
     assert gone() is None
 

@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from importlib import machinery, util
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, override
 from unittest.mock import patch
 
 import inspect
 import locale
 import os
-import subprocess
 import sys
 import textwrap
 import traceback
@@ -38,6 +36,9 @@ if TYPE_CHECKING:
     from collections.abc import Iterator
 
 
+pytest_plugins = ("pytester",)
+
+
 @pytest.fixture(autouse=True)
 def fresh_call_graph() -> Iterator[None]:
     """Forget cached sources: each test writes its own modules under tmp_path."""
@@ -55,28 +56,21 @@ def fresh_call_graph() -> Iterator[None]:
         cached.cache_clear()
 
 
-def _run_pytest(tmp_path: Path, *, bindings: int) -> subprocess.CompletedProcess[str]:
+def _run_pytest(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    bindings: int,
+) -> pytest.RunResult:
     """Collect a tree carrying an unregistered marker under ``bindings`` hooks."""
-    conftest = textwrap.dedent(
-        """
-        import sys
-
-        sys.path.insert(0, {root!r})
-
-        from sagent.lib.testing.resources import pytest_collection_modifyitems
-
-        __all__ = ["pytest_collection_modifyitems"]
-        """,
-    ).format(
-        root=str(
-            Path(resources.__file__).resolve().parents[resources.__name__.count(".")],
-        ),
+    conftest = (
+        "from sagent.lib.testing.resources import pytest_collection_modifyitems\n\n"
+        '__all__ = ["pytest_collection_modifyitems"]\n'
     )
-    package = tmp_path / "pkg"
-    package.mkdir()
+    package = pytester.mkpydir("pkg")
     (package / "conftest.py").write_text(conftest, encoding="utf-8")
     if bindings > 1:
-        (tmp_path / "conftest.py").write_text(conftest, encoding="utf-8")
+        pytester.makeconftest(conftest)
     (package / "probe_test.py").write_text(
         textwrap.dedent(
             """
@@ -89,26 +83,26 @@ def _run_pytest(tmp_path: Path, *, bindings: int) -> subprocess.CompletedProcess
         ),
         encoding="utf-8",
     )
-    return subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "pytest",
-            "pkg/probe_test.py",
-            "--collect-only",
-            "-q",
-            "-p",
-            "no:cacheprovider",
-        ],
-        cwd=tmp_path,
-        capture_output=True,
-        text=True,
-        check=False,
+    # The installed plugins are no part of how the hook's error surfaces, nor is
+    # pytest's own warning for the unregistered mark, which this run's warnings-as-
+    # errors would raise before the hook sees it.
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    pytester.makeini(
+        "[pytest]\nfilterwarnings =\n    ignore::pytest.PytestUnknownMarkWarning\n",
+    )
+    return pytester.runpytest_inprocess(
+        "pkg/probe_test.py",
+        "--collect-only",
+        "-q",
+        "-p",
+        "no:cacheprovider",
     )
 
 
-@pytest.mark.cli_python_subprocess
-def test_unknown_resource_marker_reports_a_usage_error(tmp_path: Path) -> None:
+def test_unknown_resource_marker_reports_a_usage_error(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An unregistered resource marker must report, not crash the runner.
 
     The check runs inside ``pytest_collection_modifyitems``. pytest turns an
@@ -116,26 +110,28 @@ def test_unknown_resource_marker_reports_a_usage_error(tmp_path: Path) -> None:
     buries the one line naming the offending marker; ``UsageError`` is the
     exception it renders as a plain message instead.
     """
-    result = _run_pytest(tmp_path, bindings=1)
+    result = _run_pytest(pytester, monkeypatch, bindings=1)
 
-    output = result.stdout + result.stderr
-    assert result.returncode == pytest.ExitCode.USAGE_ERROR
+    output = "\n".join([*result.outlines, *result.errlines])
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
     assert "INTERNALERROR" not in output
     assert "Unknown resource marker: network_notreal" in output
 
 
-@pytest.mark.cli_python_subprocess
-def test_double_bound_hook_reports_a_usage_error(tmp_path: Path) -> None:
+def test_double_bound_hook_reports_a_usage_error(
+    pytester: pytest.Pytester,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Two conftests binding the hook report the same way as one.
 
     A root conftest and a package conftest both bind it whenever the export
     ships tests outside the package directory, so the second binding must not
     change how a bad marker surfaces.
     """
-    result = _run_pytest(tmp_path, bindings=2)
+    result = _run_pytest(pytester, monkeypatch, bindings=2)
 
-    output = result.stdout + result.stderr
-    assert result.returncode == pytest.ExitCode.USAGE_ERROR
+    output = "\n".join([*result.outlines, *result.errlines])
+    assert result.ret == pytest.ExitCode.USAGE_ERROR
     assert "INTERNALERROR" not in output
     assert "Unknown resource marker: network_notreal" in output
 
@@ -148,6 +144,26 @@ def test_collection_hook_registers_the_golden_marker() -> None:
     pytest_collection_modifyitems(cast(pytest.Config, cast(object, config)), [])
 
     assert registered == [("markers", "golden: tests that assert against a golden")]
+
+
+def test_each_binding_after_the_first_walks_no_item() -> None:
+    """Every package conftest re-exports the hook, and pytest calls each one."""
+    config = cast(pytest.Config, cast(object, _Config([])))
+    walked: list[None] = []
+
+    class _Counted(_Item):
+        @override
+        def iter_markers(self, name: str | None = None) -> Iterator[pytest.Mark]:
+            walked.append(None)
+            return super().iter_markers(name)
+
+    items = cast(list[pytest.Item], cast(object, [_Counted()]))
+    pytest_collection_modifyitems(config, items)
+    pytest_collection_modifyitems(config, items)
+
+    assert len(walked) == 1
+    pytest_collection_modifyitems(cast(pytest.Config, cast(object, _Config([]))), items)
+    assert len(walked) == 2
 
 
 @pytest.mark.parametrize(("markexpr", "marked"), [("golden", True), ("", False)])
@@ -334,28 +350,44 @@ def test_module_path_ignores_invalid_and_external_specs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def invalid_spec(name: str) -> object:
-        del name
-        raise ValueError("module __spec__ is None")
+    (tmp_path / "external.py").write_text("", encoding="utf-8")
+    # A namespace package: a directory with no ``__init__.py`` has no source.
+    (tmp_path / "spaced").mkdir()
+    monkeypatch.syspath_prepend(str(tmp_path))
 
-    monkeypatch.setattr(util, "find_spec", invalid_spec)
-    assert module_path("torch._C._jit_tree_views") is None
-
-    external = tmp_path / "external.py"
-    external.write_text("", encoding="utf-8")
-    spec = util.spec_from_file_location("external", external)
-    assert spec is not None
-
-    def external_spec(name: str) -> machinery.ModuleSpec:
-        del name
-        return spec
-
-    monkeypatch.setattr(util, "find_spec", external_spec)
     assert module_path("external") is None
-
-    monkeypatch.undo()
+    assert module_path("spaced") is None
     assert module_path("no_such_module_anywhere") is None
     assert module_path("sys") is None
+    assert module_path("") is None
+    # A module, not a package: nothing can sit below it.
+    assert module_path("external.inner") is None
+
+
+def test_module_path_finds_an_in_repo_module(tmp_path: Path) -> None:
+    del tmp_path
+    assert module_path("sagent.lib.testing.resources") == Path(resources.__file__)
+    assert module_path("sagent.lib.testing") == Path(resources.__file__).with_name(
+        "__init__.py",
+    )
+
+
+def test_module_path_imports_no_package_above_the_module(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``util.find_spec`` runs every parent's ``__init__``: torch's took a second."""
+    package = tmp_path / "loud_package"
+    package.mkdir()
+    (package / "__init__.py").write_text(
+        "raise AssertionError('imported')\n",
+        encoding="utf-8",
+    )
+    (package / "quiet.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    assert module_path("loud_package.quiet") is None
+    assert "loud_package" not in sys.modules
 
 
 def test_openml_cold_fetch_keeps_its_hosted_runner_timeout_budget() -> None:
@@ -500,6 +532,7 @@ class _Config:
         self.markers: list[str] = []
         self.registered = registered
         self.markexpr = markexpr
+        self.stash = pytest.Stash()
 
     def getini(self, name: str) -> list[str]:
         if name == "markers":
