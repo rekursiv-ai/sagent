@@ -34,6 +34,7 @@ def claimed_directory(
     *,
     prefix: str,
     max_age_sec: float = 86_400,
+    id_length: int = 32,
 ) -> Generator[Path]:
     """Sweep ``parent``'s abandoned claims, then hold a fresh directory in it.
 
@@ -42,13 +43,15 @@ def claimed_directory(
       prefix: Name prefix shared by every claim this caller makes; the sweep
         considers only entries carrying it.
       max_age_sec: Age past which an unlocked entry is presumed abandoned.
+      id_length: Hex digits after ``prefix``; fewer keep a path under a length
+        limit. A name already taken raises rather than sharing a directory.
 
     Yields:
       directory: The new, empty directory, removed on exit.
 
     """
     sweep(parent, prefix=prefix, max_age_sec=max_age_sec)
-    directory = parent / f"{prefix}{uuid.uuid4().hex}"
+    directory = parent / f"{prefix}{uuid.uuid4().hex[:id_length]}"
     lock = _lock(directory)
     try:
         directory.mkdir(mode=stat.S_IRWXU)
