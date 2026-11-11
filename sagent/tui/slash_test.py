@@ -968,14 +968,14 @@ async def test_kill_cancels_one_call_or_all_and_all_empties_the_panes(
     )
     first.reset_mock()
     assert await commands("/kill all") is False
-    assert first.mock_calls == [("cancel", (), {})]
-    assert second.mock_calls == [("cancel", (), {})]
+    assert first.mock_calls == []
+    assert second.mock_calls == []
     assert (commands.panes.queue, commands.panes.deferred) == (None, None)
     assert said == [
         CommandOutput(tone="note", command="/kill", text="cancelled c1"),
         CommandOutput(tone="note", command="/kill", text="cancelled all tool calls"),
     ]
-    assert runtime.mock_calls == []
+    assert runtime.mock_calls == [("push", (types.Kill(),), {})]
 
 
 @pytest.mark.asyncio
@@ -1761,7 +1761,7 @@ async def test_a_command_run_on_an_agent_reaches_its_team_but_not_these_panes() 
     await desk.commands("/send a /kill all")
     await desk.commands("/send a /halt a")
     assert desk.pushed(members["b"]) == [types.Halt()]
-    assert desk.pushed(members["a"]) == []
+    assert desk.pushed(members["a"]) == [types.Kill()]
     assert desk.panes.queue == Staged(text="mine")
     assert desk.printer.said == [
         ("note", "[/halt] halted b"),

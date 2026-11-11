@@ -891,7 +891,7 @@ async def test_a_background_task_that_crashes_is_logged_by_its_tool(
         reply("done"),
         tools=[Gated()],
     ) as h:
-        monkeypatch.setattr(h.runtime, "_run_tool_group_and_post", crash)
+        monkeypatch.setattr(h.runtime, "_run_tool_and_post", crash)
         with caplog.at_level(logging.ERROR, logger=runtime.__name__):
             h.push(_user("go"))
             await h.seen(ModelIdle)
@@ -993,8 +993,68 @@ async def test_an_exclusive_call_serializes_with_every_keyed_call() -> None:
 
 
 @pytest.mark.asyncio
-async def test_killing_a_serialized_call_skips_the_rest_of_its_group() -> None:
-    """The group shares one resource; the next edit must not start."""
+async def test_calls_on_either_side_of_an_exclusive_call_run_in_parallel() -> None:
+    tool = Gated(hold=True)
+    script = reply(
+        calls=[
+            call("echo", "e1", tag="e1", key="/f"),
+            call("echo", "e2", tag="e2", key="/g"),
+            call("echo", "bash", tag="bash", key="*"),
+            call("echo", "e3", tag="e3", key="/f"),
+            call("echo", "e4", tag="e4", key="/g"),
+        ],
+    )
+    async with Harness(script, reply("done"), tools=[tool]) as h:
+        h.push(_user("go"))
+        await until(lambda: len(tool.started) == 2)
+        await spin()
+        assert sorted(tool.started) == ["e1", "e2"]
+        tool.release.set()
+        await h.seen(ModelIdle)
+    assert sorted(tool.finished[:2]) == ["e1", "e2"]
+    assert tool.finished[2] == "bash"
+    assert sorted(tool.finished[3:]) == ["e3", "e4"]
+
+
+@pytest.mark.asyncio
+async def test_an_unkeyed_call_waits_for_an_exclusive_call_before_it() -> None:
+    tool = Gated(hold=True)
+    script = reply(
+        calls=[
+            call("echo", "bash", tag="bash", key="*"),
+            call("echo", "r", tag="r"),
+        ],
+    )
+    async with Harness(script, reply("done"), tools=[tool]) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        await spin()
+        assert tool.started == ["bash"]
+        tool.release.set()
+        await h.seen(ModelIdle)
+    assert tool.finished == ["bash", "r"]
+
+
+@pytest.mark.asyncio
+async def test_an_exclusive_call_does_not_wait_for_an_unkeyed_call_before_it() -> None:
+    tool = Gated(hold=True)
+    script = reply(
+        calls=[
+            call("echo", "r", tag="r"),
+            call("echo", "bash", tag="bash", key="*"),
+        ],
+    )
+    async with Harness(script, reply("done"), tools=[tool]) as h:
+        h.push(_user("go"))
+        await until(lambda: len(tool.started) == 2)
+        tool.release.set()
+        await h.seen(ModelIdle)
+    assert sorted(tool.started) == ["bash", "r"]
+
+
+@pytest.mark.asyncio
+async def test_killing_a_serialized_call_runs_the_rest_of_its_group() -> None:
+    """``a ; b``: killing ``a`` stops only ``a``."""
     tool = Gated(hold=True)
     script = reply(
         calls=[
@@ -1006,11 +1066,312 @@ async def test_killing_a_serialized_call_skips_the_rest_of_its_group() -> None:
         h.push(_user("go"))
         await until(lambda: bool(tool.started))
         h.push(Kill(call_id="e1"))
+        await until(lambda: tool.started == ["one", "two"])
+        tool.release.set()
         await h.seen(ModelIdle)
-    assert tool.started == ["one"]
+    assert tool.finished == ["two"]
     assert [r.text() for r in h.results("e1")] == [Markers().cancelled]
+    assert [r.text() for r in h.results("e2")] == ["ok"]
+    assert _arrival_turns_of_any(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_each_call_logs_how_it_ran(caplog: pytest.LogCaptureFixture) -> None:
+    async with Harness(
+        reply(
+            calls=[
+                call("echo", "t1"),
+                call("boom", "f1"),
+                call("nope", "u1"),
+                call(Markers().arrived, "m1"),
+            ],
+        ),
+        reply("done"),
+        tools=[Gated(), Gated(name="boom", fail=True)],
+    ) as h:
+        with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+            h.push(_user("go"))
+            await h.seen(ModelIdle)
+    assert {
+        f"runtime detached-arrived mimic: call_id={Markers().mimic}0",
+        "runtime tool not run: call_id=u1 tool=nope refused=False",
+        "runtime tool start: call_id=t1 tool=echo",
+        "runtime tool complete cohort: call_id=t1 tool=echo is_error=None",
+        "runtime tool failed: call_id=f1 tool=boom error=RuntimeError",
+        "runtime tool complete cohort: call_id=f1 tool=boom is_error=True",
+    } <= set(caplog.messages)
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.asyncio
+async def test_a_detached_call_logs_its_completion(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tool = Gated(hold=True, fail=True)
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        *_replies(3),
+        tools=[tool],
+    ) as h:
+        h.runtime.detach_after_sec = 0.01
+        with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+            h.push(_user("go"))
+            await h.seen(ModelIdle)
+            tool.release.set()
+            await h.seen(DetachedResult)
+    assert (
+        "runtime tool complete detached: call_id=t1 tool=echo is_error=True"
+        in caplog.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_background_call_waits_for_the_calls_before_it() -> None:
+    """``e1 ; e2 &``: the job keeps its place behind what it contends with."""
+    tool = Gated(hold=True)
+    script = reply(
+        calls=[
+            call("echo", "e1", tag="e1", key="/f"),
+            call("echo", "e2", tag="e2", key="/f", background=True),
+        ],
+    )
+    async with Harness(script, *_replies(3), tools=[tool]) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        await spin()
+        assert tool.started == ["e1"]
+        tool.release.set()
+        await until(lambda: tool.finished == ["e1", "e2"])
+
+
+@pytest.mark.asyncio
+async def test_nothing_waits_for_a_background_call() -> None:
+    """``e1 & r ; e2``: ``&`` asks not to wait, whatever the calls touch."""
+    tool = Gated(hold=True)
+    script = reply(
+        calls=[
+            call("echo", "e1", tag="e1", key="*", background=True),
+            call("echo", "r", tag="r"),
+            call("echo", "e2", tag="e2", key="*"),
+        ],
+    )
+    async with Harness(script, *_replies(3), tools=[tool]) as h:
+        h.push(_user("go"))
+        await until(lambda: sorted(tool.started) == ["e1", "e2", "r"])
+        tool.release.set()
+        await until(lambda: len(tool.finished) == 3)
+
+
+@pytest.mark.asyncio
+async def test_a_background_call_does_not_split_a_group() -> None:
+    """``(e1 ; e3) & (b &)``: the group still detaches as one."""
+    tool = Gated(hold=True)
+    script = reply(
+        calls=[
+            call("echo", "e1", tag="e1", key="/f"),
+            call("echo", "b", tag="b", key="/g", background=True),
+            call("echo", "e3", tag="e3", key="/f"),
+        ],
+    )
+    async with Harness(script, reply("moved on"), reply("seen"), tools=[tool]) as h:
+        h.push(_user("go"))
+        await until(lambda: "e1" in tool.started)
+        h.push(Detach(call_id="e1"))
+        await until(lambda: bool(h.results("e1")))
+        await spin()
+        assert [r.stub for r in h.results("e3")] == ["pending"]
+        tool.release.set()
+        await until(lambda: len(tool.finished) == 3)
+
+
+@pytest.mark.asyncio
+async def test_a_refused_call_is_answered_without_waiting() -> None:
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "w", tag="w", key="*"), call("nope", "u")]),
+        reply("done"),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        await until(lambda: bool(h.results("u")))
+        tool.release.set()
+        await h.seen(ModelIdle)
+
+
+@pytest.mark.asyncio
+async def test_a_queued_call_is_a_job() -> None:
+    """Waiting its turn, a waited-on call runs; a background one sleeps."""
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(
+            calls=[
+                call("echo", "w", tag="w", key="*"),
+                call("echo", "q", tag="q", key="/f"),
+                call("echo", "b", tag="b", key="/f", background=True),
+            ],
+        ),
+        reply("done"),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await until(lambda: tool.started == ["w"])
+        await spin()
+        assert {cid: job.state for cid, job in h.runtime.jobs.items()} == {
+            "w": "running",
+            "q": "running",
+            "b": "sleeping",
+        }
+        tool.release.set()
+        await h.seen(ModelIdle)
+        await until(lambda: not h.runtime.jobs)
+    assert sorted(tool.finished) == ["b", "q", "w"]
+
+
+@pytest.mark.asyncio
+async def test_a_queued_background_call_is_listed_and_cancellable() -> None:
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(
+            calls=[
+                call("echo", "w", tag="w", key="/f"),
+                call("echo", "b", tag="b", key="/f", background=True),
+                call("BackgroundTask", "l1", operation="list"),
+                call("BackgroundTask", "c1", operation="cancel", id="b"),
+            ],
+        ),
+        reply("done"),
+        tools=[tool, BackgroundTask()],
+    ) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(h.results("c1")))
+        tool.release.set()
+        await h.seen(ModelIdle)
+    _, *rows = h.results("l1")[0].text().splitlines()
+    assert [row.split()[:3] for row in rows] == [["b", "echo", "sleeping"]]
+    assert [r.text() for r in h.results("c1")] == ["Cancelling echo (b)."]
+    assert tool.started == ["w"]
+
+
+@pytest.mark.asyncio
+async def test_kill_all_stops_the_queued_calls_of_a_group() -> None:
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(
+            calls=[
+                call("echo", "e1", tag="one", key="f"),
+                call("echo", "e2", tag="two", key="f"),
+            ],
+        ),
+        reply("stopped"),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        h.push(Kill())
+        await h.seen(ModelIdle)
+        await spin()
+    assert tool.started == ["one"]
+    assert [r.stub for c in ("e1", "e2") for r in h.results(c)] == [
+        "cancelled",
+        "cancelled",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_unkeyed_background_call_waits_for_an_exclusive_call_before_it() -> (
+    None
+):
+    tool = Gated(hold=True)
+    script = reply(
+        calls=[
+            call("echo", "bash", tag="bash", key="*"),
+            call("echo", "r", tag="r", background=True),
+        ],
+    )
+    async with Harness(script, *_replies(3), tools=[tool]) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        await spin()
+        assert tool.started == ["bash"]
+        tool.release.set()
+        await until(lambda: tool.finished == ["bash", "r"])
+
+
+@pytest.mark.asyncio
+async def test_a_detach_after_its_group_stopped_keeps_the_cohort_complete() -> None:
+    tool = Gated(hold=True)
+    script = reply(
+        calls=[
+            call("echo", "e1", tag="one", key="f"),
+            call("echo", "e2", tag="two", key="f"),
+        ],
+    )
+    async with Harness(script, reply("stopped"), tools=[tool]) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        h.push(Kill(call_id="e1"), Kill(call_id="e2"), Detach(call_id="e1"))
+        await h.seen(ModelIdle)
+    assert h.count(CohortComplete) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_killed_call_is_answered_once() -> None:
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        *_replies(2),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        h.push(Kill(call_id="t1"))
+        await h.seen(ModelIdle)
+        await h.seen(AgentIdle)
+    assert len(h.requests()) == 2
+    assert [r.stub for r in h.results("t1")] == ["cancelled"]
+    assert _arrival_turns_of_any(h) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_group_detaches_by_a_call_already_killed() -> None:
+    """The detach timer names the group's first call, which may be gone."""
+    tool = Gated(hold=True)
+    script = reply(
+        calls=[
+            call("echo", "e1", tag="one", key="f"),
+            call("echo", "e2", tag="two", key="f"),
+        ],
+    )
+    async with Harness(script, reply("moved on"), reply("seen"), tools=[tool]) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        h.push(Kill(call_id="e1"), Detach(call_id="e1"))
+        await h.seen(ModelIdle)
+        assert [r.stub for r in h.results("e2")] == ["pending"]
+        tool.release.set()
+        await until(lambda: tool.finished == ["two"])
+
+
+@pytest.mark.asyncio
+async def test_killing_a_queued_call_runs_the_rest_of_its_group() -> None:
+    tool = Gated(hold=True)
+    script = reply(
+        calls=[
+            call("echo", "e1", tag="one", key="f"),
+            call("echo", "e2", tag="two", key="f"),
+            call("echo", "e3", tag="three", key="f"),
+        ],
+    )
+    async with Harness(script, reply("stopped"), tools=[tool]) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        h.push(Kill(call_id="e2"))
+        await until(lambda: bool(h.results("e2")))
+        tool.release.set()
+        await h.seen(ModelIdle)
+    assert tool.finished == ["one", "three"]
     assert [r.text() for r in h.results("e2")] == [Markers().cancelled]
-    assert all(r.stub == "cancelled" and r.is_error for r in h.results("e2"))
     assert _arrival_turns_of_any(h) == 0
 
 
@@ -1202,11 +1563,11 @@ async def test_a_call_is_waited_for_when_it_may_not_be_detached(limited: bool) -
     [("/f", "/f"), ("*", "/g"), ("/g", "*"), ("*", "*")],
 )
 @pytest.mark.asyncio
-async def test_a_call_detached_after_the_limit_holds_nothing(
+async def test_a_later_reply_does_not_wait_for_a_call_detached_after_the_limit(
     first: str,
     second: str,
 ) -> None:
-    """Detached, nothing waits on it: a later call on what it touches runs at once."""
+    """A later line does not wait for an earlier line's ``&`` job."""
     tool = Gated(hold=True)
     async with Harness(
         reply(calls=[call("echo", "a", key=first, tag="a")]),
@@ -1222,13 +1583,16 @@ async def test_a_call_detached_after_the_limit_holds_nothing(
         await until(lambda: sorted(tool.finished) == ["a", "b"])
 
 
+@pytest.mark.parametrize("key", ["*", "/f", None])
 @pytest.mark.asyncio
-async def test_a_call_the_user_detached_holds_nothing() -> None:
+async def test_a_later_reply_does_not_wait_for_a_call_the_user_detached(
+    key: str | None,
+) -> None:
     writer = Gated(name="writer", hold=True)
     reader = Gated(name="reader")
     async with Harness(
         reply(calls=[call("writer", "w", key="*")]),
-        reply(calls=[call("reader", "r", key="/f")]),
+        reply(calls=[call("reader", "r", **({} if key is None else {"key": key}))]),
         *_replies(4),
         tools=[writer, reader],
     ) as h:
@@ -1239,6 +1603,76 @@ async def test_a_call_the_user_detached_holds_nothing() -> None:
         assert writer.finished == []
         writer.release.set()
         await until(lambda: bool(_arrival(h, "w")))
+
+
+@pytest.mark.parametrize("key", ["*", None])
+@pytest.mark.asyncio
+async def test_a_later_reply_does_not_wait_for_a_background_call(
+    key: str | None,
+) -> None:
+    """A server run in the background blocks nothing after it."""
+    server = Gated(name="server", hold=True)
+    reader = Gated(name="reader")
+    async with Harness(
+        reply(calls=[call("server", "s1", key="*", background=True)]),
+        reply("started"),
+        reply(calls=[call("reader", "r1", **({} if key is None else {"key": key}))]),
+        reply("read"),
+        tools=[server, reader],
+    ) as h:
+        h.push(_user("start the server"))
+        await until(lambda: bool(server.started))
+        h.push(_user("now read"))
+        await until(lambda: reader.started == ["reader"])
+        server.release.set()
+        await until(lambda: bool(_arrival(h, "s1")))
+
+
+@pytest.mark.parametrize("same_reply", [True, False])
+@pytest.mark.asyncio
+async def test_the_model_can_cancel_a_background_writer(same_reply: bool) -> None:
+    server = Gated(name="server", hold=True)
+    cancel = call("BackgroundTask", "c1", operation="cancel", id="s1")
+    start = call("server", "s1", key="*", background=True)
+    replies = (
+        [reply(calls=[start, cancel]), reply("cancelled")]
+        if same_reply
+        else [reply(calls=[start]), reply("started"), reply(calls=[cancel])]
+    )
+    async with Harness(
+        *replies,
+        reply("cancelled"),
+        tools=[server, BackgroundTask()],
+    ) as h:
+        h.push(_user("start the server"))
+        if not same_reply:
+            await until(lambda: bool(server.started))
+            h.push(_user("stop it"))
+        await until(lambda: bool(_arrival(h, "s1")))
+    assert [r.text() for r in h.results("c1")] == ["Cancelling server (s1)."]
+    assert [r.stub for r in _arrival(h, "s1")] == ["cancelled"]
+    assert server.finished == []
+
+
+@pytest.mark.asyncio
+async def test_a_detached_call_still_holds_its_reply_s_next_call() -> None:
+    """``e1 ; bash``: detaching ``e1`` does not start ``bash``."""
+    tool = Gated(hold=True)
+    script = reply(
+        calls=[
+            call("echo", "e1", tag="one", key="/f"),
+            call("echo", "bash", tag="bash", key="*"),
+        ],
+    )
+    async with Harness(script, *_replies(3), tools=[tool]) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        h.push(Detach(call_id="e1"))
+        await until(lambda: bool(h.results("e1")))
+        await spin()
+        assert tool.started == ["one"]
+        tool.release.set()
+        await until(lambda: tool.finished == ["one", "bash"])
 
 
 @pytest.mark.asyncio
@@ -1261,6 +1695,42 @@ async def test_a_killed_call_holds_what_it_touches_until_it_stops() -> None:
         tool.stopped.set()
         await until(lambda: [r.text() for r in h.results("b")] == ["b done"])
     assert tool.started == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_a_kill_of_a_call_already_done_holds_nothing() -> None:
+    """Its result was queued behind the ``Kill``; nothing is left to stop."""
+    h = Harness(reply(calls=[call("echo", "t1", key="/f")]), *_replies(3))
+    h.runtime.tools["echo"] = Gated(on_call=lambda: h.runtime.push(Kill(call_id="t1")))
+    async with h:
+        h.push(_user("go"))
+        await h.seen(ModelIdle)
+        assert h.runtime._stopping == {}
+        assert h.runtime._calls == {}
+    assert [r.stub for r in h.results("t1")] == ["cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_a_call_killed_twice_is_forgotten_once_it_stops(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tool = Stopping(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "a", key="/f", tag="a")]),
+        *_replies(4),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        with caplog.at_level(logging.ERROR):
+            h.push(Kill(call_id="a"), Kill(call_id="a"))
+            await h.seen(ModelIdle)
+            assert list(h.runtime._stopping.values()) == ["/f"]
+            tool.stopped.set()
+            await until(lambda: not h.runtime._stopping)
+            await spin()
+        assert h.runtime._calls == {}
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
 
 @pytest.mark.asyncio
@@ -1754,14 +2224,19 @@ async def test_a_result_racing_its_detach_is_delivered_forward() -> None:
 
 @pytest.mark.asyncio
 async def test_a_detached_result_survives_compaction() -> None:
-    summarizer = Summarizer()
-    h = Harness(reply("done"), reply("saw it"), compactor=summarizer)
-    await _with_stub(h, "t1")
-    async with h:
-        h.runtime.detached["t1"] = asyncio.create_task(_forever())
+    tool = Gated(hold=True, output="REAL")
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        reply("done"),
+        reply("saw it"),
+        tools=[tool],
+        compactor=Summarizer(),
+    ) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
         h.push(Compact())
         await h.seen(ModelIdle)
-        h.push(DetachedResult(result=_result("t1", "REAL")))
+        tool.release.set()
         await h.seen(ModelIdle, 2)
     assert h.results("t1") == []
     assert [r.text() for r in _arrival(h, "t1")] == ["REAL"]
@@ -1881,8 +2356,9 @@ async def test_a_forged_arrival_call_is_answered_on_the_next_real_turn() -> None
     assert h.results("m1") == []
     (err,) = h.results(f"{Markers().mimic}0")
     assert err.is_error is True
-    assert Markers().arrived in err.text()
-    assert "Unknown tool" not in err.text()
+    assert err.text() == (
+        f"{Markers().arrived} is not callable; detached results arrive automatically."
+    )
     assert h.answers() == ["", "answer"]
     validate_context(h.history())
 
@@ -3439,10 +3915,11 @@ async def test_a_cd_to_where_bash_starts_is_dropped(tmp_path: Path) -> None:
     ("first", "second"),
     [
         ({"command": "cd sub && echo moved"}, {"command": "cd {here} && pwd"}),
-        ({"command": "cd {here} && pwd", "delay": 1}, {"command": "cd sub && echo m"}),
+        ({"command": "cd {here} && pwd"}, {"command": "cd sub && echo m"}),
         ({"command": "cd {here} && pwd", "background": True}, {"command": "echo x"}),
+        ({"command": "cd {here} && pwd", "delay": 0.01}, {"command": "echo x"}),
     ],
-    ids=["after-a-move", "before-a-move", "in-the-background"],
+    ids=["after-a-move", "before-a-move", "in-the-background", "delayed"],
 )
 async def test_a_cd_is_kept_where_the_shell_may_have_moved_when_it_runs(
     tmp_path: Path,
@@ -4296,7 +4773,6 @@ class _Unkeyable(Gated):
     """A tool whose ``serialize_key`` raises."""
 
     name: str = "bad"
-    fail_after: int = 0
     key_calls: int = 0
 
     @override
@@ -4307,17 +4783,14 @@ class _Unkeyable(Gated):
     ) -> str | None:
         del context, arguments
         self.key_calls += 1
-        if self.key_calls > self.fail_after:
-            raise RuntimeError("no key")
-        return "shared"
+        raise RuntimeError("no key")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("fail_after", [0, 1], ids=["partition", "hold"])
-async def test_a_scheduling_failure_answers_only_its_call_and_the_round_continues(
-    fail_after: int,
-) -> None:
-    bad = _Unkeyable(fail_after=fail_after)
+async def test_a_scheduling_failure_answers_only_its_call_and_the_round_continues() -> (
+    None
+):
+    bad = _Unkeyable()
     good = Gated()
     h = Harness(
         reply(calls=[call("bad", "b1"), call("echo", "g1", key="shared")]),
@@ -4330,12 +4803,15 @@ async def test_a_scheduling_failure_answers_only_its_call_and_the_round_continue
         ToolErrorResult(call_id="b1", content="RuntimeError: no key", is_error=True),
     ]
     assert bad.started == []
-    assert bad.key_calls == fail_after + 1
+    assert bad.key_calls == 1
     assert good.finished == ["echo"]
     assert [r.text() for r in h.results("g1")] == ["ok"]
     assert h.answers()[-1] == "recovered"
     assert h.runtime._refusals == {}
-    assert h.runtime._holding == []
+    assert h.runtime._stopping == {}
+    assert h.runtime._groups == {}
+    assert h.runtime._calls == {}
+    assert h.runtime.jobs == {}
     assert h.runtime.running_tools == {}
     assert h.runtime.cohort == set()
     validate_context(h.history())
@@ -4695,6 +5171,7 @@ async def test_a_delayed_call_sleeps_then_runs() -> None:
         assert tool.started == []
         await h.runtime.detached["d1"]
         await h.seen(ModelIdle, 2)
+        assert h.runtime.jobs == {}
     assert [r.text() for r in _arrival(h, "d1")] == ["later"]
 
 
@@ -4762,13 +5239,19 @@ async def test_a_redirect_keeps_a_background_calls_delay() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "timing",
+    [{"background": True}, {"delay": 0.01}],
+    ids=["background", "delay"],
+)
 async def test_a_bash_read_in_the_background_stays_in_the_background(
     tmp_path: Path,
+    timing: dict[str, PlainTree],
 ) -> None:
     (tmp_path / "a.txt").write_text("alpha\n")
     tools: list[Tool] = [Bash(peers=(Read(),)), Read()]
     async with Harness(
-        reply(calls=[call("Bash", "b1", command="cat a.txt", background=True)]),
+        reply(calls=[call("Bash", "b1", command="cat a.txt", **timing)]),
         reply("waiting"),
         reply("read it"),
         tools=tools,
@@ -4781,7 +5264,7 @@ async def test_a_bash_read_in_the_background_stays_in_the_background(
     (recorded,) = calls(turn.records)
     assert (recorded.name, dict(recorded.arguments)) == (
         "Read",
-        {"file_path": "a.txt", "background": True},
+        {"file_path": "a.txt", **timing},
     )
     (arrival,) = _arrival(h, "b1")
     assert "alpha" in arrival.text()
