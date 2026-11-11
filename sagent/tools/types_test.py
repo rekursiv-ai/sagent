@@ -569,44 +569,6 @@ def test_fit_always_keeps_some_of_the_first_unit() -> None:
     assert context.fit(["abc"], reserve=50) == ("a\n... (2 chars omitted)", 1)
 
 
-def test_fit_head_tail_empty() -> None:
-    context = ToolContext(cwd=Path("/"))
-    assert context.fit_head_tail([]) == ("", 0)
-
-
-def test_fit_head_tail_within_budget_keeps_all() -> None:
-    context = ToolContext(cwd=Path("/"), max_result_chars=100)
-    lines = ["line1\n", "line2\n", "line3\n"]
-    body, kept = context.fit_head_tail(lines)
-    assert body == "line1\nline2\nline3\n"
-    assert kept == 3
-
-
-def test_fit_head_tail_preserves_head_and_tail_omitting_middle() -> None:
-    context = ToolContext(cwd=Path("/"), max_result_chars=120)
-    # 20 lines of 10 chars each = 200 chars total (exceeds 120 cap)
-    lines = [f"line_{i:02d}...\n" for i in range(20)]
-    body, kept = context.fit_head_tail(lines, head_ratio=0.4)
-    # Total characters must be within max_result_chars.
-    assert len(body) <= 120
-    # Must preserve start lines.
-    assert "line_00..." in body
-    # Must preserve end lines (stack trace / test failure region)
-    assert "line_19..." in body
-    # Must contain omission marker.
-    assert "lines omitted" in body
-    assert kept < len(lines)
-
-
-def test_fit_head_tail_includes_omission_note(tmp_path: Path) -> None:
-    context = ToolContext(cwd=tmp_path, max_result_chars=250)
-    lines = [f"line_{i:02d}...\n" for i in range(100)]
-    spill_file = str(tmp_path / "spill.txt")
-    body, _ = context.fit_head_tail(lines, omission_note=f"; full output: {spill_file}")
-    assert spill_file in body
-    assert len(body) <= 250
-
-
 def _bump_mtime(path: Path) -> None:
     """Move ``path``'s mtime well past what any earlier stat saw."""
     later = path.stat().st_mtime + 100

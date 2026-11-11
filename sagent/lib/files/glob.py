@@ -160,11 +160,8 @@ def _glob_fd(
     return [root / rel for rel in rels]
 
 
-def _components(rel: str) -> str:
-    # Replace "/" with "\x00" (NUL, ordinal 0) which sorts before any printable
-    # character, so "a/b" < "a-b": directory separators win over hyphens and
-    # other punctuation, giving hierarchical order without allocating a split list.
-    return rel.replace("/", "\x00")
+def _components(rel: str) -> list[str]:
+    return rel.split("/")
 
 
 # One ignore-honouring walk, each kept entry matched against the glob in Python.

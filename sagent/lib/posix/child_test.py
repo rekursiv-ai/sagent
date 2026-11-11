@@ -505,6 +505,37 @@ async def test_finished_work_is_its_result_and_a_cancel_waits_for_it() -> None:
     assert done == ["done"]
 
 
+@pytest.mark.parametrize(
+    ("group", "which"),
+    [(True, os.PRIO_PGRP), (False, os.PRIO_PROCESS)],
+)
+@pytest.mark.asyncio
+async def test_a_niced_child_asks_the_kernel_to_lower_its_group_or_itself(
+    started: list[int],
+    monkeypatch: pytest.MonkeyPatch,
+    group: bool,
+    which: int,
+) -> None:
+    """Asked as the kernel sees it: a run already at the lowest shows no change."""
+    asked: list[tuple[int, int, int]] = []
+
+    def setpriority(which: int, who: int, priority: int) -> None:
+        asked.append((which, who, priority))
+
+    monkeypatch.setattr(os, "setpriority", setpriority)
+    child = await Child.start("sleep", "30", group=group, nice=5)
+    started.append(child.process.pid)
+    await child.stop()
+    assert asked == [(which, child.process.pid, os.nice(0) + 5)]
+
+
+_CAN_LOWER: Final = pytest.mark.skipif(
+    os.nice(0) + 15 > 19,
+    reason="already near the lowest priority, as under the gates",
+)
+
+
+@_CAN_LOWER
 @pytest.mark.parametrize(("group", "lowered"), [(True, True), (False, False)])
 @pytest.mark.asyncio
 async def test_a_niced_group_lowers_the_jobs_it_started_first(

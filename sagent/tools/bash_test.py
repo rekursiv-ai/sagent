@@ -1411,6 +1411,75 @@ async def test_commands_defer_to_the_desktop_unless_told_not_to(
     assert result.stdout == "ok\n"
 
 
+@pytest.mark.parametrize(("tool", "asked"), [(Bash(), [10]), (Bash(nice=None), [])])
+@pytest.mark.asyncio
+async def test_a_command_asks_the_kernel_to_run_below_this_program(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: Bash,
+    asked: list[int],
+) -> None:
+    """Asked as the kernel sees it: a run already at the lowest shows no change."""
+    lowered: list[int] = []
+
+    def setpriority(which: int, who: int, priority: int) -> None:
+        del which, who
+        lowered.append(priority - os.nice(0))
+
+    monkeypatch.setattr(os, "setpriority", setpriority)
+    await _run(tmp_path, "true", tool=tool)
+    assert lowered == asked
+
+
+@pytest.mark.asyncio
+async def test_output_that_fits_alone_is_cut_to_leave_room_for_stderr(
+    tmp_path: Path,
+) -> None:
+    result = await _run(
+        tmp_path,
+        # 191 characters of output, under the cap alone but over it with stderr.
+        "for i in $(seq 1 20); do echo line-$i--; done; echo errors-here >&2",
+        tool=Bash(max_result_chars=200),
+    )
+    assert "lines omitted" in result.stdout
+    assert len(result.stdout) + len(result.stderr) <= 200
+
+
+@pytest.mark.parametrize("last", ["y" * 20, "z" * 400])
+@pytest.mark.asyncio
+async def test_a_cut_output_keeps_its_end_and_counts_every_line_left_out(
+    tmp_path: Path,
+    last: str,
+) -> None:
+    """The start, the end a failure prints last, and how many lines are between."""
+    result = await _run(
+        tmp_path,
+        f"for i in $(seq 1 100); do echo line-$i; done; echo {last}",
+        tool=Bash(max_result_chars=200),
+    )
+    kept = re.findall(r"^line-\d+$", result.stdout, flags=re.MULTILINE)
+    shown_last = last in result.stdout
+    (omitted,) = re.findall(r"\.\.\. \((\d+) lines omitted\)", result.stdout)
+    assert result.stdout.startswith("line-1\n")
+    assert int(omitted) == 101 - len(kept) - shown_last
+    assert shown_last is (len(last) < 100)
+    assert len(result.stdout) <= 200
+
+
+@pytest.mark.asyncio
+async def test_first_and_last_lines_too_long_to_show_still_count_the_lines(
+    tmp_path: Path,
+) -> None:
+    result = await _run(
+        tmp_path,
+        f"echo {'x' * 400}; seq 1 50; echo {'z' * 400}",
+        tool=Bash(max_result_chars=200),
+    )
+    assert result.stdout.startswith("xxx")
+    assert re.search(r"\.\.\. \(5[12] lines omitted\)", result.stdout)
+    assert len(result.stdout) <= 200
+
+
 @pytest.mark.asyncio
 async def test_bash_preserves_head_and_tail_on_overflow(tmp_path: Path) -> None:
     tool = Bash(max_result_chars=500)

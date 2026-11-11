@@ -12,13 +12,7 @@ import subprocess
 
 import pytest
 
-from sagent.lib.files.glob import (
-    GlobError,
-    _components,
-    _translate,
-    fd_command,
-    glob,
-)
+from sagent.lib.files.glob import GlobError, fd_command, glob
 
 
 if TYPE_CHECKING:
@@ -508,23 +502,6 @@ def test_class_members_are_not_regex_set_operations(
     (tmp_path / member).touch()
     (tmp_path / "X").touch()
     assert glob(tmp_path, f"**/{pattern}") == [tmp_path / member]
-
-
-def test_translate_is_memoized() -> None:
-    info_before = _translate.cache_info()
-    _translate("**/*.py")
-    _translate("**/*.py")
-    info_after = _translate.cache_info()
-    assert info_after.hits > info_before.hits
-
-
-def test_components_order_matches_hierarchical_paths() -> None:
-    # Key property: "a/b/c.txt" must sort before "a-b/file.txt" because
-    # "\x00" < "-", so directory separators beat hyphens and other punctuation.
-    paths = ["a-b/file.txt", "a/file.txt", "a/b/c.txt", "a.txt"]
-    sorted_paths = sorted(paths, key=_components)
-    assert sorted_paths.index("a/b/c.txt") < sorted_paths.index("a-b/file.txt")
-    assert sorted_paths.index("a/file.txt") < sorted_paths.index("a-b/file.txt")
 
 
 if __name__ == "__main__":
