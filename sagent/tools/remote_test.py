@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from functools import partial
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, Mock, call
 
@@ -1117,9 +1118,11 @@ async def test_a_call_out_of_contact_past_its_grace_fails_as_unknown_with_no_bye
 @pytest.mark.asyncio
 async def test_a_call_that_resumes_inside_its_grace_is_unaffected(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     grace_sec = 0.01
     ids: list[str] = []
+    clock = _clock(monkeypatch)
 
     async def take(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         writer.write(_welcome_line(tools={"Gate": "d"}))
@@ -1131,12 +1134,16 @@ async def test_a_call_that_resumes_inside_its_grace_is_unaffected(
     ) -> None:
         writer.write(_welcome_line(*ids, tools={"Gate": "d"}))
         # Up again in time, the grace running out while it is up ends nothing.
-        # Times the fake server against the grace window under test.
-        await asyncio.sleep(10 * grace_sec)  # house-ignore[sleep] -- See above.
+        clock.now += 10 * grace_sec
         writer.write(encoded(Result(id=ids[0], record=_DONE)))
         _ = await reader.read()
 
-    async with _scripted(tmp_path, take, resume, grace_sec=grace_sec) as session:
+    async with _scripted(
+        tmp_path,
+        take,
+        resume,
+        grace_sec=grace_sec,
+    ) as session:
         endpoint = await _until(session, lambda e: e.up)
         assert await _ran(endpoint) == _DONE
 
@@ -1362,18 +1369,20 @@ async def test_only_a_new_session_s_welcome_forgets_the_agents_there(
 @pytest.mark.asyncio
 async def test_a_call_made_after_an_outage_with_no_call_has_its_whole_grace(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An outage nothing waited on counts against no call made after it."""
     grace_sec = 0.05
     ids: list[str] = []
+    clock = _clock(monkeypatch)
 
     async def drop(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         del reader
         writer.write(_welcome_line())
 
     async def take(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        # Times the fake server against the grace window under test.
-        await asyncio.sleep(grace_sec)  # house-ignore[sleep] -- See above.
+        # A whole grace passes in the outage before the call is made.
+        clock.now += grace_sec
         writer.write(_welcome_line(tools={"Gate": "d"}))
         ids.append(_called(await received(reader)))
 
@@ -1385,7 +1394,13 @@ async def test_a_call_made_after_an_outage_with_no_call_has_its_whole_grace(
         writer.write(encoded(Result(id=ids[0], record=_DONE)))
         _ = await reader.read()
 
-    async with _scripted(tmp_path, drop, take, resume, grace_sec=grace_sec) as session:
+    async with _scripted(
+        tmp_path,
+        drop,
+        take,
+        resume,
+        grace_sec=grace_sec,
+    ) as session:
         endpoint = await _until(session, lambda e: e.up and "Gate" in e.tools)
         assert await _ran(endpoint) == _DONE
 
@@ -1512,9 +1527,11 @@ async def test_an_answer_this_sagent_cannot_read_fails_its_question(
 @pytest.mark.asyncio
 async def test_a_ping_restores_contact_so_a_later_outage_has_its_own_grace(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     grace_sec = 0.05
     ids: list[str] = []
+    clock = _clock(monkeypatch)
 
     async def take(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         writer.write(_welcome_line(tools={"Gate": "d"}))
@@ -1524,8 +1541,8 @@ async def test_a_ping_restores_contact_so_a_later_outage_has_its_own_grace(
         del reader
         writer.write(_welcome_line(*ids, tools={"Gate": "d"}))
         writer.write(encoded(Ping()))
-        # Times the fake server against the grace window under test.
-        await asyncio.sleep(2 * grace_sec)  # house-ignore[sleep] -- See above.
+        # Two graces past the first outage: only the ping's restored contact saves it.
+        clock.now += 2 * grace_sec
 
     async def resume(
         reader: asyncio.StreamReader,
@@ -1535,7 +1552,13 @@ async def test_a_ping_restores_contact_so_a_later_outage_has_its_own_grace(
         writer.write(encoded(Result(id=ids[0], record=_DONE)))
         _ = await reader.read()
 
-    async with _scripted(tmp_path, take, ping, resume, grace_sec=grace_sec) as session:
+    async with _scripted(
+        tmp_path,
+        take,
+        ping,
+        resume,
+        grace_sec=grace_sec,
+    ) as session:
         endpoint = await _until(session, lambda e: e.up)
         assert await _ran(endpoint) == _DONE
 
@@ -2008,6 +2031,23 @@ async def test_the_session_records_a_call_by_the_models_id_and_its_id_on_the_wir
         if isinstance(r, ReadResult)
     ]
     assert (record.call_id, record.wire_id, record.path) == ("toolu_1", ids[0], "/done")
+
+
+class _Clock:
+    """A monotonic clock that moves only when a test moves it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def _clock(monkeypatch: pytest.MonkeyPatch) -> _Clock:
+    """Measure the endpoints' grace on a clock the test moves."""
+    clock = _Clock()
+    monkeypatch.setattr(remote, "time", SimpleNamespace(monotonic=clock))
+    return clock
 
 
 if __name__ == "__main__":
