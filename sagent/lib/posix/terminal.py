@@ -449,7 +449,10 @@ class Terminal:
             # Enter is suppressed and the line never submits. The delay is
             # deliberately OUTSIDE ``_write_lock`` -- holding that across the
             # sleep stalls every peer keystroke for the full delay.
-            await asyncio.sleep(self._enter_delay_sec)
+            # The child's paste-burst window is a duration, not an event.
+            await asyncio.sleep(
+                self._enter_delay_sec,
+            )  # house-ignore[sleep] -- See above.
             async with self._write_lock:
                 _ = await self._write(SUBMIT)
             self._submitted += 1
@@ -523,7 +526,8 @@ class Terminal:
                 break
             # A cooperative child is gone within a millisecond of TERM; the
             # tick is the floor on every teardown.
-            await asyncio.sleep(0.001)
+            # Reaping would end the wait but frees the group id this KILL needs.
+            await asyncio.sleep(0.001)  # house-ignore[sleep] -- See above.
         # The whole group received TERM; once its leader is gone, the rest are
         # stragglers with no reason to outlive it.
         if self._signal(signal.SIGKILL):

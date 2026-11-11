@@ -15,7 +15,8 @@ from sagent.lib.asyncio_stalls import watch_stalls
 
 def _hog_the_loop(seconds: float) -> None:
     """Hold the loop's thread, as synchronous work in a callback does."""
-    time.sleep(seconds)
+    # The stall is what is measured: wall time the loop's thread is held.
+    time.sleep(seconds)  # house-ignore[sleep] -- See above.
 
 
 @pytest.mark.asyncio
@@ -23,9 +24,8 @@ async def test_a_stall_is_logged_once_with_its_length_and_the_code_holding_the_l
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     with caplog.at_level(logging.WARNING), watch_stalls(threshold_sec=0.005):
-        await asyncio.sleep(0.002)
+        # The block's end joins the watcher, so its report is in before the assert.
         _hog_the_loop(0.04)
-        await asyncio.sleep(0.01)
     (stalled,) = caplog.records
     said = stalled.getMessage()
     first, stack = said.split("\n", 1)
@@ -42,9 +42,9 @@ async def test_a_stall_is_logged_once_with_its_length_and_the_code_holding_the_l
 async def test_a_loop_that_keeps_up_logs_nothing(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    with caplog.at_level(logging.WARNING), watch_stalls(threshold_sec=0.05):
-        for _ in range(5):
-            await asyncio.sleep(0.005)
+    with caplog.at_level(logging.WARNING), watch_stalls(threshold_sec=0.01):
+        # Idle across several of the watcher's pings, each answered at once.
+        await asyncio.sleep(0.05)  # house-ignore[sleep] -- See above.
     assert caplog.records == []
 
 
@@ -55,7 +55,6 @@ def test_a_block_ending_in_a_stall_ends_and_logs_it(
 
     async def stall_to_the_end() -> None:
         with watch_stalls(threshold_sec=0.01):
-            await asyncio.sleep(0.02)
             _hog_the_loop(0.05)
 
     ending = threading.Thread(target=asyncio.run, args=(stall_to_the_end(),))

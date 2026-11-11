@@ -251,7 +251,8 @@ class LlamaCpp(OpenAICompatible):
                 while True:
                     if await self._answers(url):
                         return
-                    await asyncio.sleep(0.05)
+                    # A starting server has no way to say it is up.
+                    await asyncio.sleep(0.05)  # house-ignore[sleep] -- See above.
         except TimeoutError:
             raise RuntimeError(
                 self._log.failure("llama-server did not come up"),

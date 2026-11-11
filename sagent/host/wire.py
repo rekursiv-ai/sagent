@@ -423,7 +423,8 @@ _KINDS: Final = (
 async def ping(writer: asyncio.StreamWriter, *, every_sec: float) -> None:
     """Say ``Ping`` every ``every_sec``, so a silent peer reads as gone."""
     while True:
-        await asyncio.sleep(every_sec)
+        # A heartbeat; the interval is the protocol.
+        await asyncio.sleep(every_sec)  # house-ignore[sleep] -- See above.
         writer.write(encoded(Ping()))
 
 

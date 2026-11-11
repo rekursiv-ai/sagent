@@ -851,7 +851,8 @@ class _ClosingWriter(asyncio.StreamWriter):
 
     @override
     async def wait_closed(self) -> None:
-        await asyncio.sleep(self._delay_sec)
+        # Models a slow peer close; the code under test bounds it by a duration.
+        await asyncio.sleep(self._delay_sec)  # house-ignore[sleep] -- See above.
         if self._error is not None:
             raise self._error
         self.closed = True
@@ -1021,7 +1022,8 @@ async def _wait_for(predicate: Callable[[], bool], timeout_sec: float) -> None:
     while loop.time() < deadline:
         if predicate():
             return
-        await asyncio.sleep(0.01)
+        # Its predicates read other processes, which signal nothing here.
+        await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
     raise TimeoutError(f"condition not met within {timeout_sec}s")
 
 

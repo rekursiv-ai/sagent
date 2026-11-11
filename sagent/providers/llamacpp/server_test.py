@@ -490,7 +490,7 @@ async def test_a_close_cancelled_midway_still_stops_the_server(
         assert process is not None
         assert reading is not None
         closing = asyncio.create_task(local.aclose())
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0)
         closing.cancel()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(closing, timeout=5)
@@ -621,7 +621,8 @@ async def _written(path: Path) -> None:
         while True:
             if _has_text(path):
                 return
-            await asyncio.sleep(0.005)
+            # The stand-in is another process; only its file says what it did.
+            await asyncio.sleep(0.005)  # house-ignore[sleep] -- See above.
 
 
 def _has_text(path: Path) -> bool:

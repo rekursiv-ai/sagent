@@ -1912,7 +1912,8 @@ def _wait(predicate: Callable[[], bool], timeout_sec: float) -> None:
     while time.monotonic() < deadline:
         if predicate():
             return
-        time.sleep(0.01)
+        # Its predicates read other processes, which signal nothing here.
+        time.sleep(0.01)  # house-ignore[sleep] -- See above.
 
 
 def _wait_running(relay: ThreadedRelay, timeout_sec: float) -> None:
@@ -1927,7 +1928,8 @@ async def _wait_for(predicate: Callable[[], bool], timeout_sec: float) -> None:
     while loop.time() < deadline:
         if predicate():
             return
-        await asyncio.sleep(0.02)
+        # Its predicates read other processes, which signal nothing here.
+        await asyncio.sleep(0.02)  # house-ignore[sleep] -- See above.
 
 
 if __name__ == "__main__":

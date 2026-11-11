@@ -122,7 +122,8 @@ async def ensure(dirs: ServeDirs, *, version: str = "") -> DaemonStatus:
             else:
                 if not status.restarting:
                     return status
-            await asyncio.sleep(0.02)
+            # The daemon is another process; only its socket reports its status.
+            await asyncio.sleep(0.02)  # house-ignore[sleep] -- See above.
         raise TimeoutError(
             f"The sagent daemon did not become ready; see {dirs.state / 'daemon.log'}.",
         )

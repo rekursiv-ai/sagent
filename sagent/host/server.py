@@ -1054,7 +1054,8 @@ class Server(AsyncResource):
     async def _watch(self, mtime: float) -> None:
         """Take each change to the strings, read last at ``mtime``; expire the gone."""
         while True:
-            await asyncio.sleep(self._poll_sec)
+            # Other processes write the strings file; polling its mtime is the watch.
+            await asyncio.sleep(self._poll_sec)  # house-ignore[sleep] -- See above.
             if (now_mtime := self._mtime()) != mtime:
                 mtime = now_mtime
                 await self._regrant()

@@ -2533,7 +2533,9 @@ class Runtime:
         if after:
             _ = await asyncio.wait(after)
         if wake_at is not None:
-            await asyncio.sleep(wake_at - time.time())
+            await asyncio.sleep(
+                wake_at - time.time(),
+            )  # house-ignore[sleep] -- The schedule.
         self._calls[call.call_id].waiting = False
         await self._run_tool_and_post(call)
 

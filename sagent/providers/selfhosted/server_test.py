@@ -117,7 +117,8 @@ class _Generator:
             while time.monotonic() < deadline:
                 if any(bool(stop(inputs, None).all()) for stop in stops):
                     break
-                time.sleep(0.001)
+                # The fake generates until stopped or out of time, as a model does.
+                time.sleep(0.001)  # house-ignore[sleep] -- See above.
             added = torch.arange(self.new).unsqueeze(0) + 100
             return torch.cat([inputs, added], dim=-1)
         finally:

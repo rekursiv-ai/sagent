@@ -1131,7 +1131,8 @@ async def test_a_call_that_resumes_inside_its_grace_is_unaffected(
     ) -> None:
         writer.write(_welcome_line(*ids, tools={"Gate": "d"}))
         # Up again in time, the grace running out while it is up ends nothing.
-        await asyncio.sleep(10 * grace_sec)
+        # Times the fake server against the grace window under test.
+        await asyncio.sleep(10 * grace_sec)  # house-ignore[sleep] -- See above.
         writer.write(encoded(Result(id=ids[0], record=_DONE)))
         _ = await reader.read()
 
@@ -1371,7 +1372,8 @@ async def test_a_call_made_after_an_outage_with_no_call_has_its_whole_grace(
         writer.write(_welcome_line())
 
     async def take(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await asyncio.sleep(grace_sec)
+        # Times the fake server against the grace window under test.
+        await asyncio.sleep(grace_sec)  # house-ignore[sleep] -- See above.
         writer.write(_welcome_line(tools={"Gate": "d"}))
         ids.append(_called(await received(reader)))
 
@@ -1522,7 +1524,8 @@ async def test_a_ping_restores_contact_so_a_later_outage_has_its_own_grace(
         del reader
         writer.write(_welcome_line(*ids, tools={"Gate": "d"}))
         writer.write(encoded(Ping()))
-        await asyncio.sleep(2 * grace_sec)
+        # Times the fake server against the grace window under test.
+        await asyncio.sleep(2 * grace_sec)  # house-ignore[sleep] -- See above.
 
     async def resume(
         reader: asyncio.StreamReader,

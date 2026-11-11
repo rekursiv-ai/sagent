@@ -331,7 +331,10 @@ class Endpoint:
                 self.error = "the server closed the connection"
             self._writer, self.tried = None, True
             await self._note()
-            await asyncio.sleep(self._out_of_contact())
+            # Reconnect backoff while the server is out of contact.
+            await asyncio.sleep(
+                self._out_of_contact(),
+            )  # house-ignore[sleep] -- See above.
 
     async def call(
         self,

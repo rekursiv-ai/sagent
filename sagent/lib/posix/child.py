@@ -139,7 +139,8 @@ class Child:
     async def exited(self, *, poll_sec: float = 0.01) -> int:
         """Return the exit status once the process has exited, its pipes open or not."""
         while self.process.returncode is None:  # noqa: ASYNC110 -- No public event marks a reap but the pipe-bound wait.
-            await asyncio.sleep(poll_sec)
+            # No public event marks a reap but the pipe-bound wait.
+            await asyncio.sleep(poll_sec)  # house-ignore[sleep] -- See above.
         return self.process.returncode
 
     async def stop(self) -> int:
@@ -184,7 +185,8 @@ class Child:
     async def _ended(self) -> None:
         """Return once no signal would reach anything left to stop."""
         while self._reachable():  # noqa: ASYNC110 -- No event marks the exit of a group's last job.
-            await asyncio.sleep(0.01)
+            # No event marks the exit of a group's last job.
+            await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
 
     def _signal(self, sig: int) -> None:
         """Send ``sig`` to the group, else to the process; one that has gone is fine."""

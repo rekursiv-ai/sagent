@@ -209,7 +209,8 @@ class Views:
     async def watch(self, interval_sec: float = 0.2) -> None:
         """Call ``follow`` each ``interval_sec``, until cancelled."""
         while True:
-            await asyncio.sleep(interval_sec)
+            # A redraw tick; the screen has no change event.
+            await asyncio.sleep(interval_sec)  # house-ignore[sleep] -- See above.
             self.follow()
 
     def hold(self) -> None:

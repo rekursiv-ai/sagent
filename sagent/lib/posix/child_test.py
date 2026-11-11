@@ -113,13 +113,44 @@ async def test_a_second_cancel_while_a_child_starts_still_stops_it(
     )
     started.append(await written_pid(tmp_path / "shell.pid"))
     starting.cancel()
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0)
     starting.cancel()
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0)
     handed.set()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(starting, timeout=5)
     assert await gone_within(started)
+
+
+@pytest.mark.parametrize(("nice", "lowered"), [(10, [10]), (None, [])])
+@pytest.mark.asyncio
+async def test_a_nice_child_runs_that_far_below_this_process(
+    monkeypatch: pytest.MonkeyPatch,
+    nice: int | None,
+    lowered: list[int],
+) -> None:
+    asked: list[tuple[int, int, int]] = []
+
+    def setpriority(which: int, who: int, priority: int) -> None:
+        asked.append((which, who, priority - os.nice(0)))
+
+    monkeypatch.setattr(os, "setpriority", setpriority)
+    async with await Child.start("true", nice=nice) as child:
+        pid = child.process.pid
+    assert asked == [(os.PRIO_PROCESS, pid, n) for n in lowered]
+
+
+@pytest.mark.asyncio
+async def test_a_child_that_ended_before_its_priority_was_set_still_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def gone(which: int, who: int, priority: int) -> None:
+        del which, who, priority
+        raise ProcessLookupError
+
+    monkeypatch.setattr(os, "setpriority", gone)
+    async with await Child.start("true", nice=10) as child:
+        assert await child.exited() == 0
 
 
 @pytest.mark.asyncio
@@ -257,7 +288,7 @@ async def test_a_stop_cancelled_midway_still_ends_the_child(
     )
     started.extend([child.process.pid, await written_pid(tmp_path / "shell.pid")])
     stopping = asyncio.create_task(child.stop())
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0)
     stopping.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(stopping, timeout=5)
@@ -693,7 +724,8 @@ async def test_a_niced_group_lowers_its_session_s_autogroup(
             started.append(child.process.pid)
             seen.append(_autogroup(child.process.pid))
             await child.stop()
-            await asyncio.sleep(0.1)
+            # The kernel takes one autogroup change per 100 ms; the retry waits it out.
+            await asyncio.sleep(0.1)  # house-ignore[sleep] -- See above.
 
 
 @_AUTOGROUPS

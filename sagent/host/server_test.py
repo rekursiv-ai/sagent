@@ -2747,7 +2747,8 @@ async def test_closing_cancels_an_adoption_still_waiting_for_its_hello(
         waiting = asyncio.create_task(
             served.server.adopt(streams, peer="relay:tok", grant=_GRANT),
         )
-        await asyncio.sleep(0.05)
+        while not served.server._connections:  # noqa: ASYNC110 -- The server marks a connection's start with no event.
+            await asyncio.sleep(0)
     assert waiting.done()
     far.close()
     assert served.host.started == []
@@ -2764,7 +2765,7 @@ async def test_a_hello_arriving_as_the_server_stops_opens_no_host(
         adopted = asyncio.create_task(
             served.server.adopt(streams, peer="relay:tok", grant=_GRANT),
         )
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         served.server._closing = True
         writer.write(
             encoded(
