@@ -194,6 +194,26 @@ def test_a_claim_names_itself_with_as_many_hex_digits_as_asked(
     assert list(tmp_path.iterdir()) == []
 
 
+def test_a_process_sweeps_a_parent_once_per_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A sweep lists the whole parent; a busy ``/tmp`` makes each one ~35 ms."""
+    swept: list[tuple[Path, str]] = []
+    real = tempclaim.sweep
+
+    def counted(parent: Path, *, prefix: str, max_age_sec: float = 86_400) -> None:
+        swept.append((parent, prefix))
+        real(parent, prefix=prefix, max_age_sec=max_age_sec)
+
+    monkeypatch.setattr(tempclaim, "sweep", counted)
+    for prefix in ("run-", "run-", "other-"):
+        with tempclaim.claimed_directory(tmp_path, prefix=prefix):
+            pass
+
+    assert swept == [(tmp_path, "run-"), (tmp_path, "other-")]
+
+
 def test_a_lock_is_readable_by_its_owner_alone(tmp_path: Path) -> None:
     with tempclaim.claimed_directory(tmp_path, prefix="run-") as directory:
         mode = directory.with_name(f"{directory.name}.lock").stat().st_mode
