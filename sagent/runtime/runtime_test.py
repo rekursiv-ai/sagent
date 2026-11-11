@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Literal, Self, override
 
@@ -1523,24 +1524,32 @@ async def test_a_call_past_the_limit_is_answered_and_runs_on() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_call_done_in_time_is_waited_for() -> None:
+async def test_a_call_done_in_time_is_waited_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timers = _detach_timers(monkeypatch)
     async with Harness(
         reply(calls=[call("echo", "t1")]),
         reply("ok"),
         tools=[Gated()],
     ) as h:
-        h.runtime.detach_after_sec = 0.05
+        h.runtime.detach_after_sec = 60.0
         h.push(_user("go"))
         await h.seen(ModelIdle)
-        await asyncio.sleep(0.08)
+        # The call's own end cancelled its detach: it can never fire.
+        assert [timer.cancelled() for timer in timers] == [True]
     assert [(r.stub, r.text()) for r in h.results("t1")] == [(None, "ok")]
     assert _arrival(h, "t1") == []
 
 
 @pytest.mark.parametrize("limited", [True, False], ids=["job-tool", "no-limit"])
 @pytest.mark.asyncio
-async def test_a_call_is_waited_for_when_it_may_not_be_detached(limited: bool) -> None:
+async def test_a_call_is_waited_for_when_it_may_not_be_detached(
+    limited: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A tool that manages jobs keeps the model waiting; so does no limit."""
+    timers = _detach_timers(monkeypatch)
     schema: dict[str, PlainTree] = {"properties": {"delay": {}}} if limited else {}
     tool = Gated(hold=True, schema=schema)
     async with Harness(
@@ -1551,7 +1560,8 @@ async def test_a_call_is_waited_for_when_it_may_not_be_detached(limited: bool) -
         h.runtime.detach_after_sec = 0.01 if limited else None
         h.push(_user("go"))
         await until(lambda: bool(tool.started))
-        await asyncio.sleep(0.05)
+        # No detach was ever set to fire.
+        assert timers == []
         assert h.runtime.cohort == {"t1"}
         tool.release.set()
         await h.seen(ModelIdle)
@@ -3255,7 +3265,7 @@ async def test_settling_kills_only_the_stubbed_calls_nothing_runs() -> None:
     async with h:
         h.push(DetachedResult(result=_result("delivered", "out")))
         await h.seen(ModelIdle)
-        running = asyncio.create_task(asyncio.sleep(1))
+        running = asyncio.create_task(_forever())
         h.runtime.detached["running"] = running
         h.runtime.settle_detached()
         h.runtime.settle_detached()
@@ -6611,6 +6621,28 @@ def test_sanitizing_an_alternating_history_gives_a_valid_context(
 ) -> None:
     """On the shape the runtime tapes, the rescue closes every pairing gap."""
     validate_context(splice_safe_repair(history))
+
+
+def _detach_timers(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.TimerHandle]:
+    """Collect each detach timer the runtime sets on the running loop."""
+    timers: list[asyncio.TimerHandle] = []
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(loop, "call_later", partial(_later, timers, loop.call_later))
+    return timers
+
+
+def _later(
+    timers: list[asyncio.TimerHandle],
+    later: Callable[..., asyncio.TimerHandle],
+    delay: float,
+    callback: Callable[..., object],
+    *args: object,
+) -> asyncio.TimerHandle:
+    """Schedule as ``later`` does, noting the handle when it would push a Detach."""
+    handle = later(delay, callback, *args)
+    if any(isinstance(arg, Detach) for arg in args):
+        timers.append(handle)
+    return handle
 
 
 if __name__ == "__main__":

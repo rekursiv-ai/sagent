@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import asyncio
 import fcntl
@@ -30,18 +33,27 @@ from sagent.lib.posix.pids import (
 )
 
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "proc",
     [Path("/proc"), Path("/nonexistent/proc")],
     ids=["proc", "kill"],
 )
-async def test_a_process_runs_until_it_has_exited(proc: Path) -> None:
+async def test_a_process_runs_until_it_has_exited(
+    proc: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     child = await asyncio.create_subprocess_exec("/bin/sh", "-c", "exec sleep 60")
+    sent: list[int] = []
+    monkeypatch.setattr(os, "kill", partial(_kill_noting, sent, os.kill))
     try:
         assert running(child.pid, proc=proc)
-        # Asking signals nothing: the process is left as it was.
-        await asyncio.sleep(0.02)
+        # Asking signals nothing: at most the existence probe, signal 0.
+        assert set(sent) <= {0}
         assert running(child.pid)
         child.kill()
         _ = await child.wait()
@@ -216,12 +228,21 @@ def test_a_process_long_gone_is_passed_over(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 @pytest.mark.asyncio
-async def test_a_pid_is_read_once_its_file_holds_one(tmp_path: Path) -> None:
+async def test_a_pid_is_read_once_its_file_holds_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     path = tmp_path / "job.pid"
+    polls = _Polls()
+    monkeypatch.setattr(
+        pids,
+        "asyncio",
+        SimpleNamespace(timeout=asyncio.timeout, sleep=polls.sleep),
+    )
     reading = asyncio.create_task(written_pid(path))
-    await asyncio.sleep(0.01)
+    await polls.after(1)
     path.write_text("")
-    await asyncio.sleep(0.01)
+    await polls.after(polls.count + 1)
     assert not reading.done()
     path.write_text("4242\n")
     assert await asyncio.wait_for(reading, timeout=0.5) == 4242
@@ -317,7 +338,8 @@ def test_a_process_on_a_terminal_names_it_and_a_daemon_has_none() -> None:
         deadline = time.monotonic() + 10
         while controlling_terminal(on_terminal.pid) is None:
             assert time.monotonic() < deadline
-            time.sleep(0.01)
+            # The child's terminal is set by another process; nothing signals it.
+            time.sleep(0.01)  # house-ignore[sleep] -- See above.
         assert controlling_terminal(on_terminal.pid) == os.ttyname(follower)
     finally:
         for process in (daemon, on_terminal):
@@ -469,6 +491,38 @@ def test_children_gathers_every_thread_s_and_skips_one_gone_mid_read(
     monkeypatch.setattr(Path, "read_text", racing)
 
     assert sorted(children(42, proc=tmp_path)) == [5, 6, 7]
+
+
+def _kill_noting(
+    sent: list[int],
+    kill: Callable[[int, int], None],
+    pid: int,
+    number: int,
+) -> None:
+    """Send as ``kill`` does, noting each signal number in ``sent``."""
+    sent.append(number)
+    kill(pid, number)
+
+
+class _Polls:
+    """Stands in for ``pids``' wait between reads, counting each read that found nothing."""
+
+    def __init__(self) -> None:
+        self.count = 0
+        self._polled = asyncio.Event()
+
+    async def sleep(self, seconds: float) -> None:
+        del seconds
+        self.count += 1
+        self._polled.set()
+        await asyncio.sleep(0)
+
+    async def after(self, count: int) -> None:
+        """Return once ``count`` reads have found nothing."""
+        async with asyncio.timeout(5):
+            while self.count < count:
+                self._polled.clear()
+                _ = await self._polled.wait()
 
 
 if __name__ == "__main__":

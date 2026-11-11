@@ -830,7 +830,8 @@ async def test_a_wrapped_call_leaves_no_descriptor_open(
     for _ in range(5000):
         if _open_descriptors() == before:
             break
-        await asyncio.sleep(0.001)
+        # The loop closes the descriptors on its own schedule; nothing signals it.
+        await asyncio.sleep(0.001)  # house-ignore[sleep] -- See above.
     assert _open_descriptors() == before
 
 
@@ -1294,7 +1295,8 @@ async def _written_pids(directory: Path, *names: str) -> list[int]:
             texts = [_read_text(directory / name) for name in names]
             if all(texts):
                 return [int(text) for text in texts]
-            await asyncio.sleep(0.01)
+            # The shell's jobs are other processes; only their files say what they did.
+            await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
 
 
 async def _written_text(path: Path) -> str:
@@ -1304,7 +1306,8 @@ async def _written_text(path: Path) -> str:
             text = _read_text(path)
             if text:
                 return text
-            await asyncio.sleep(0.01)
+            # The shell's jobs are other processes; only their files say what they did.
+            await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
 
 
 async def _collected_within(pid: int, *, seconds: float = 3.0) -> bool:
@@ -1313,7 +1316,8 @@ async def _collected_within(pid: int, *, seconds: float = 3.0) -> bool:
     while _is_listed(pid):
         if time.monotonic() > deadline:
             return False
-        await asyncio.sleep(0.01)
+        # The shell's jobs are other processes; only their files say what they did.
+        await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
     return True
 
 
@@ -1365,7 +1369,8 @@ async def _alone_within(pid: int, *, seconds: float = 3.0) -> bool:
     while await _running_in(group) - {pid}:
         if time.monotonic() > deadline:
             return False
-        await asyncio.sleep(0.005)
+        # The shell's jobs are other processes; only their files say what they did.
+        await asyncio.sleep(0.005)  # house-ignore[sleep] -- See above.
     return True
 
 

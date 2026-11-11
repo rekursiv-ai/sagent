@@ -49,7 +49,8 @@ async def written_pid(path: Path, *, timeout_sec: float = 5.0) -> int:
             text = _text(path)
             if text:
                 return int(text)
-            await asyncio.sleep(0.01)
+            # Another process writes the file; no portable event says when.
+            await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
 
 
 # A zombie has exited and waits only for its parent to collect it; ``kill(pid,
@@ -99,7 +100,8 @@ async def gone_within(pids: list[int], *, seconds: float = 3.0) -> bool:
     while any(running(pid) for pid in pids):
         if time.monotonic() > deadline:
             return False
-        await asyncio.sleep(0.01)
+        # No portable event marks the exit of a process that is not our child.
+        await asyncio.sleep(0.01)  # house-ignore[sleep] -- See above.
     return True
 
 
@@ -186,7 +188,8 @@ def unlocked_within(path: Path, *, seconds: float) -> bool:
     while locked(path):
         if time.monotonic() > deadline:
             return False
-        time.sleep(0.005)
+        # No event marks an flock's release by another process.
+        time.sleep(0.005)  # house-ignore[sleep] -- See above.
     return True
 
 

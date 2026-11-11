@@ -257,7 +257,10 @@ class CodexLogin:
         show(f"Open {code.verification_url} and enter the code {code.user_code}.\n")
         async with asyncio.timeout(900.0):
             while True:
-                await asyncio.sleep(max(code.interval_sec, 1.0))
+                # OAuth device flow sets the poll interval.
+                await asyncio.sleep(
+                    max(code.interval_sec, 1.0),
+                )  # house-ignore[sleep] -- See above.
                 tokens = await poll_device_code(http, code)
                 if tokens is not None:
                     break

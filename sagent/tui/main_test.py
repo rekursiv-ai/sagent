@@ -3051,7 +3051,7 @@ async def test_the_first_signal_cancels_the_run_and_the_second_exits(
         with main._signals():
             signal.raise_signal(signal.SIGTERM)
             signal.raise_signal(signal.SIGINT)
-            await asyncio.sleep(10)
+            _ = await asyncio.Event().wait()
 
     task = asyncio.create_task(guarded())
     with pytest.raises(asyncio.CancelledError):
@@ -5257,7 +5257,8 @@ def _poll(ready: Callable[[], bool], *, timeout_sec: float) -> bool:
     while not ready():
         if time.monotonic() > deadline:
             return False
-        time.sleep(0.01)
+        # Polls state another loop's thread changes; nothing signals across them.
+        time.sleep(0.01)  # house-ignore[sleep] -- See above.
     return True
 
 

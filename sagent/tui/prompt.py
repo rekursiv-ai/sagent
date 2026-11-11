@@ -344,7 +344,8 @@ async def repaint_on_change(
     """
     last = frame()
     while True:
-        await asyncio.sleep(interval_sec)
+        # A redraw tick; the screen has no change event.
+        await asyncio.sleep(interval_sec)  # house-ignore[sleep] -- See above.
         if (now := frame()) != last:
             last = now
             invalidate()
