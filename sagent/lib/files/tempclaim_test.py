@@ -184,6 +184,16 @@ def test_a_claim_dying_before_its_lock_is_in_view_leaves_a_pending_file(
     assert len(left.stem) == len("run-") + 32
 
 
+def test_a_claim_names_itself_with_as_many_hex_digits_as_asked(
+    tmp_path: Path,
+) -> None:
+    """A short id keeps a socket under the claim inside ``sun_path``."""
+    with tempclaim.claimed_directory(tmp_path, prefix="run-", id_length=12) as short:
+        assert len(short.name) == len("run-") + 12
+        assert short.with_name(f"{short.name}.lock").is_file()
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_a_lock_is_readable_by_its_owner_alone(tmp_path: Path) -> None:
     with tempclaim.claimed_directory(tmp_path, prefix="run-") as directory:
         mode = directory.with_name(f"{directory.name}.lock").stat().st_mode

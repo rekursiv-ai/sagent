@@ -301,8 +301,27 @@ def test_a_failed_build_says_what_the_build_said(
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     root = _project(tmp_path / "broken", _BUILDABLE)
 
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     with pytest.raises(RuntimeError, match=r"(?s)exit 2.*npm error ERESOLVE"):
         built_wheel(root)
+    assert list(tmp_path.glob("wheel-*")) == []
+
+
+def test_a_built_wheel_is_claimed_for_the_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lock beside it keeps a live process's wheel from the next sweep."""
+    _fake_uv(tmp_path, monkeypatch)
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    wheel = built_wheel(_project(tmp_path / "claimed", _BUILDABLE))
+
+    claim = wheel.path.parent
+    assert claim.parent == scratch
+    assert claim.name.startswith("wheel-")
+    assert claim.with_name(f"{claim.name}.lock").is_file()
 
 
 def test_the_wheel_names_its_top_level_modules_and_scripts(

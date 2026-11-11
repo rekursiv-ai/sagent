@@ -15,6 +15,7 @@ package's pre-push stage runs.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass
 from email import parser
 from fnmatch import fnmatch
@@ -22,6 +23,7 @@ from functools import cache
 from pathlib import Path
 from typing import Final, cast, override
 
+import atexit
 import configparser
 import subprocess
 import tempfile
@@ -29,6 +31,8 @@ import tomllib
 import zipfile
 
 import pytest
+
+from sagent.lib.files import tempclaim
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -268,8 +272,14 @@ class _CaseSensitiveParser(configparser.ConfigParser):
 
 @cache
 def _build(project: Path) -> Wheel:
-    """Build ``project``'s wheel into a fresh directory."""
-    out_dir = Path(tempfile.mkdtemp(prefix="wheel-"))
+    """Build ``project``'s wheel into a directory claimed until the process exits."""
+    claim = ExitStack()
+    # The cached wheel is handed out until exit; a killed process's claim is
+    # swept by the next one.
+    atexit.register(claim.close)
+    out_dir = claim.enter_context(
+        tempclaim.claimed_directory(Path(tempfile.gettempdir()), prefix="wheel-"),
+    )
     done = subprocess.run(  # noqa: S603 -- Fixed uv argv over a project directory.
         ["uv", "build", "--wheel", "--out-dir", str(out_dir), str(project)],  # noqa: S607 -- uv from PATH, as every gate runs it.
         check=False,
@@ -278,6 +288,7 @@ def _build(project: Path) -> Wheel:
     )
     # A CI log keeps only the exception, so it carries what the build said.
     if done.returncode:
+        claim.close()
         raise RuntimeError(
             f"uv build of {project} failed (exit {done.returncode}):\n{done.stderr}",
         )
