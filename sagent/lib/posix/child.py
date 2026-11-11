@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from asyncio.subprocess import Process
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import IO, TYPE_CHECKING, Self
 
 import asyncio
@@ -30,6 +29,7 @@ import signal
 if TYPE_CHECKING:
     from asyncio import Future
     from collections.abc import Awaitable, Collection, Mapping
+    from pathlib import Path
 
 
 __all__ = [
@@ -64,7 +64,6 @@ class Child:
         *argv: str,
         group: bool = False,
         grace_sec: float = 1.0,
-        nice: int | None = None,
         stdin: int | IO[bytes] | None = None,
         stdout: int | IO[bytes] | None = None,
         stderr: int | IO[bytes] | None = None,
@@ -80,11 +79,6 @@ class Child:
           group: Whether it leads a new session, and so a process group of its
             own, which ``stop`` ends whole.
           grace_sec: How long ``stop`` gives it, after TERM, before KILL.
-          nice: How far below this program's CPU priority it runs; ``None``
-            for the same. Set as it starts: a ``group`` is lowered
-            whole, jobs it started already included, and its session's
-            scheduler autogroup too, without which the kernel shares the CPU
-            among sessions alike; otherwise only the process is.
           stdin: As ``asyncio.create_subprocess_exec`` takes it.
           stdout: As ``asyncio.create_subprocess_exec`` takes it.
           stderr: As ``asyncio.create_subprocess_exec`` takes it.
@@ -115,8 +109,6 @@ class Child:
         except asyncio.CancelledError:
             await finish(cls._abandon(starting, group=group))
             raise
-        if nice is not None:
-            _lower(process.pid, nice, group=group)
         return cls(process=process, group=group, grace_sec=grace_sec)
 
     @classmethod
@@ -224,27 +216,3 @@ async def finish[T](work: Awaitable[T]) -> T:
     if cancelled:
         raise asyncio.CancelledError
     return result
-
-
-# Lowering is a courtesy, after the start, so it never fails one: a command as
-# quick as ``true`` may be gone and reaped by now, and one that runs as root, as a
-# ``sudo`` does, is not this program's to lower. Either keeps the priority it had.
-# The kernel caps a priority past the lowest at the lowest.
-#
-# The autogroup is Linux's (``man 7 sched``): without it lowered, the kernel shares
-# the CPU among sessions alike, whatever each process's nice value. Elsewhere, or
-# with autogroups off, there is no file. Unprivileged, the kernel takes one such
-# write per 100ms across the system (``proc_sched_autogroup_set_nice``), refusing
-# the rest with EAGAIN; such a group keeps the desktop's share, its processes
-# still niced within it.
-def _lower(pid: int, nice: int, *, group: bool) -> None:
-    """Run ``pid``, and its group and session if it leads them, ``nice`` lower."""
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.setpriority(
-            os.PRIO_PGRP if group else os.PRIO_PROCESS,
-            pid,
-            os.getpriority(os.PRIO_PROCESS, 0) + nice,
-        )
-    if group:
-        with contextlib.suppress(OSError):
-            Path(f"/proc/{pid}/autogroup").write_bytes(b"%d\n" % nice)
