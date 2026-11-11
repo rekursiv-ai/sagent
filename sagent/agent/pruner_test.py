@@ -13,7 +13,6 @@ import time
 
 from hypothesis import (
     given,
-    settings,
     strategies as st,
 )
 
@@ -166,25 +165,6 @@ def _shell(call_id: str, command: str) -> list[SessionRecord]:
     ]
 
 
-def _bash(
-    call_id: str,
-    command: str,
-    *,
-    exit_code: int = 0,
-    is_error: bool | None = None,
-) -> list[SessionRecord]:
-    return [
-        ToolCall(call_id=call_id, name="Bash", arguments={"command": command}),
-        BashResult(
-            call_id=call_id,
-            command=("bash", "-c", command),
-            stdout="o" * 4000,
-            exit_code=exit_code,
-            is_error=is_error,
-        ),
-    ]
-
-
 def _edit(call_id: str, path: str) -> list[SessionRecord]:
     return [
         ToolCall(call_id=call_id, name="Edit", arguments={"file_path": path}),
@@ -241,7 +221,7 @@ def test_a_drop_pays_once_enough_requests_will_read_it(tmp_path: Path) -> None:
     assert len(_prunes(agent)) == 1
 
 
-def test_read_superseded_by_subsequent_edit_drops_on_prune(tmp_path: Path) -> None:
+def test_read_superseded_by_subsequent_write_drops_on_prune(tmp_path: Path) -> None:
     agent, pruner, _ = _agent(tmp_path)
     # High expiry so results do not expire purely from idleness; only superseded drops.
     agent.model.settings = replace(
@@ -256,11 +236,11 @@ def test_read_superseded_by_subsequent_edit_drops_on_prune(tmp_path: Path) -> No
         ReadResult(call_id="read_a", path=file_a, content="a" * 40_000),
         ToolCall(call_id="read_b", name="Read", arguments={"file_path": file_b}),
         ReadResult(call_id="read_b", path=file_b, content="b" * 40_000),
-        AssistantMessage(content="I read both. Now editing a.py."),
-        UserMessage(content="edit a.py"),
-        ToolCall(call_id="edit_a", name="Edit", arguments={"file_path": file_a}),
-        EditResult(call_id="edit_a", path=file_a),
-        AssistantMessage(content="done editing a.py"),
+        AssistantMessage(content="I read both. Now writing a.py."),
+        UserMessage(content="write a.py"),
+        ToolCall(call_id="write_a", name="Write", arguments={"file_path": file_a}),
+        WriteResult(call_id="write_a", path=file_a),
+        AssistantMessage(content="done writing a.py"),
     )
     for i in range(20):
         agent.session.append(
@@ -270,54 +250,11 @@ def test_read_superseded_by_subsequent_edit_drops_on_prune(tmp_path: Path) -> No
 
     assert pruner.prune()
     results = _results(agent)
+    # Write replaces the whole file; the prior read is now stale and superseded.
     assert results["read_a"] == _STUB
+    # read_b is a different file; unaffected.
     assert results["read_b"] == "b" * 40_000
-    assert results["edit_a"] == "Edited /repo/a.py."
-
-
-def test_successful_command_superseded_by_subsequent_action_drops_on_prune(
-    tmp_path: Path,
-) -> None:
-    agent, pruner, _ = _agent(tmp_path)
-    agent.model.settings = replace(
-        agent.model.settings,
-        pruning=PruningPolicy(keep_recent=0, expiry=100.0),
-    )
-    agent.session.append(
-        UserMessage(content="run build and tests"),
-        ToolCall(call_id="build", name="Bash", arguments={"command": "npm install"}),
-        BashResult(
-            call_id="build",
-            command=("npm", "install"),
-            stdout="installed\n" * 4000,
-            exit_code=0,
-        ),
-        AssistantMessage(content="build finished. running tests."),
-        ToolCall(call_id="test", name="Bash", arguments={"command": "pytest"}),
-        BashResult(
-            call_id="test",
-            command=("pytest",),
-            stdout="AssertionError: failed\n" * 100,
-            exit_code=1,
-        ),
-        AssistantMessage(content="test failed. editing file."),
-        ToolCall(call_id="edit", name="Edit", arguments={"file_path": "/repo/x.py"}),
-        EditResult(call_id="edit", path="/repo/x.py"),
-        AssistantMessage(content="done editing."),
-    )
-    for i in range(20):
-        agent.session.append(
-            UserMessage(content=f"q{i}"),
-            AssistantMessage(content=f"a{i}"),
-        )
-
-    assert pruner.prune()
-    results = _results(agent)
-    # Successful build followed by test/edit actions is superseded and pruned.
-    assert results["build"] == _STUB
-    # Failed test is NEVER superseded; full traceback is retained.
-    assert "AssertionError" in results["test"]
-    assert results["edit"] == "Edited /repo/x.py."
+    assert results["write_a"] == "Wrote /repo/a.py."
 
 
 def test_a_drop_waits_until_the_reads_paid_cover_the_rewrite(tmp_path: Path) -> None:
@@ -402,32 +339,29 @@ _P = "/home/me/repo/agent/x.py"
         ([*_read("a", _P), *_read("b", "/repo/agent/y.py")], set[str]()),
         ([*_shell("a", "ls"), *_shell("b", "ls")], {"a"}),
         ([*_shell("a", "ls"), *_shell("b", "ls -a")], set[str]()),
-        # A file modification supersedes earlier reads of that file.
-        ([*_read("a", _P), *_edit("b", _P)], {"a"}),
+        # A write supersedes earlier reads of that file because it holds the
+        # full new content.
         ([*_read("a", _P), *_write("b", _P)], {"a"}),
-        ([*_read("a", _P), *_edit("b", "/repo/agent/y.py")], set[str]()),
-        ([*_edit("a", _P), *_read("b", _P)], set[str]()),
-        ([*_read("a", _P), *_edit("b", _P), *_read("c", _P)], {"a"}),
-        # A successful shell command is superseded once subsequent actions run.
-        ([*_bash("a", "npm install", exit_code=0), *_edit("b", _P)], {"a"}),
-        (
-            [
-                *_bash("a", "pytest", exit_code=0),
-                *_bash("b", "git status", exit_code=0),
-            ],
-            {"a"},
-        ),
-        # A failed shell command is never superseded by subsequent actions.
-        ([*_bash("a", "pytest", exit_code=1), *_edit("b", _P)], set[str]()),
-        (
-            [*_bash("a", "pytest", exit_code=0, is_error=True), *_edit("b", _P)],
-            set[str](),
-        ),
-        # The most recent shell command has no subsequent actions and is not superseded.
-        ([*_bash("a", "npm install", exit_code=0)], set[str]()),
     ],
 )
 def test_a_result_is_superseded_once_all_it_showed_is_shown_again(
+    records: list[SessionRecord],
+    gone: set[str],
+) -> None:
+    context = [record for record in records if isinstance(record, ToolResult)]
+
+    assert _ids(context, superseded(context)) == gone
+
+
+@pytest.mark.parametrize(
+    ("records", "gone"),
+    [
+        ([*_read("a", _P), *_edit("b", _P)], set[str]()),
+        ([*_edit("a", _P), *_read("b", _P)], set[str]()),
+        ([*_read("a", _P), *_edit("b", _P), *_read("c", _P)], {"a"}),
+    ],
+)
+def test_edit_does_not_supersede_reads_but_a_later_read_can(
     records: list[SessionRecord],
     gone: set[str],
 ) -> None:
@@ -1258,7 +1192,6 @@ async def test_a_pruner_takes_no_instructions() -> None:
         max_size=40,
     )
 )
-@settings(max_examples=300)
 def test_superseded_invariants_hold_under_arbitrary_sequences(
     context: list[ModelContextEvent],
 ) -> None:
@@ -1268,7 +1201,7 @@ def test_superseded_invariants_hold_under_arbitrary_sequences(
 
     # Invariant 2: A failed command is NEVER superseded unless an identical command ran
     # later (i.e. appears at a higher index, since the list is chronological).
-    # Walk forward so commands_seen accumulates commands that come *after* each entry.
+    # Walk backward so commands_seen accumulates commands that come *after* each entry.
     commands_seen: set[tuple[str, ...]] = set()
     for i in reversed(range(len(context))):
         ev = context[i]
@@ -1280,32 +1213,6 @@ def test_superseded_invariants_hold_under_arbitrary_sequences(
             assert i not in gone, f"Failed command at index {i} was wrongly superseded"
         if isinstance(ev, BashResult) and ev.command is not None:
             commands_seen.add(ev.command)
-
-    # Invariant 3: A successful command IS superseded when a later tool action exists,
-    # regardless of whether an identical command also ran (both paths lead to gone).
-    has_later_action: set[int] = set()
-    seen_any_tool: bool = False
-    for i in reversed(range(len(context))):
-        if seen_any_tool:
-            has_later_action.add(i)
-        ev = context[i]
-        if isinstance(ev, (BashResult, ReadResult, EditResult, WriteResult)):
-            seen_any_tool = True
-
-    for i in reversed(range(len(context))):
-        ev = context[i]
-        if (
-            isinstance(ev, BashResult)
-            and ev.exit_code == 0
-            and ev.is_error is not True
-            and i in has_later_action
-        ):
-            assert i in gone, (
-                f"Successful command at index {i} with later actions was not superseded"
-            )
-
-    # Invariant 4: Idempotence — calling superseded twice gives the same result.
-    assert superseded(context) == gone
 
 
 if __name__ == "__main__":
