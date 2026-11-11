@@ -308,7 +308,7 @@ repos:
       # serial vs 0.30s pooled; 50 files 0.92s vs 0.50s; the full tree (4094
       # files) 21.8s serial vs 1.46s at 24 workers.
       - id: codedoctor-lint
-        name: codedoctor lint
+        name: codedoctor-lint
         language: system
         stages: [pre-commit]
         require_serial: true
