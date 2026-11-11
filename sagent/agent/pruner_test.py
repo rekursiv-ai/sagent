@@ -11,6 +11,11 @@ from unittest.mock import AsyncMock, Mock
 import math
 import time
 
+from hypothesis import (
+    given,
+    strategies as st,
+)
+
 import pytest
 
 from sagent.agent import pruner as pruner_module
@@ -52,6 +57,7 @@ from sagent.session.types import (
     ToolResult,
     UncategorizedToolResult,
     UserMessage,
+    WriteResult,
 )
 from sagent.tools.types import ToolContext
 
@@ -159,6 +165,20 @@ def _shell(call_id: str, command: str) -> list[SessionRecord]:
     ]
 
 
+def _edit(call_id: str, path: str) -> list[SessionRecord]:
+    return [
+        ToolCall(call_id=call_id, name="Edit", arguments={"file_path": path}),
+        EditResult(call_id=call_id, path=path),
+    ]
+
+
+def _write(call_id: str, path: str) -> list[SessionRecord]:
+    return [
+        ToolCall(call_id=call_id, name="Write", arguments={"file_path": path}),
+        WriteResult(call_id=call_id, path=path),
+    ]
+
+
 def _ids(context: Sequence[ModelContextEvent], indices: Collection[int]) -> set[str]:
     return {
         entry.call_id for i in indices if isinstance(entry := context[i], ToolResult)
@@ -199,6 +219,42 @@ def test_a_drop_pays_once_enough_requests_will_read_it(tmp_path: Path) -> None:
 
     assert _results(agent) == {"c0": _STUB}
     assert len(_prunes(agent)) == 1
+
+
+def test_read_superseded_by_subsequent_write_drops_on_prune(tmp_path: Path) -> None:
+    agent, pruner, _ = _agent(tmp_path)
+    # High expiry so results do not expire purely from idleness; only superseded drops.
+    agent.model.settings = replace(
+        agent.model.settings,
+        pruning=PruningPolicy(keep_recent=0, expiry=100.0),
+    )
+    file_a = "/repo/a.py"
+    file_b = "/repo/b.py"
+    agent.session.append(
+        UserMessage(content="read both"),
+        ToolCall(call_id="read_a", name="Read", arguments={"file_path": file_a}),
+        ReadResult(call_id="read_a", path=file_a, content="a" * 40_000),
+        ToolCall(call_id="read_b", name="Read", arguments={"file_path": file_b}),
+        ReadResult(call_id="read_b", path=file_b, content="b" * 40_000),
+        AssistantMessage(content="I read both. Now writing a.py."),
+        UserMessage(content="write a.py"),
+        ToolCall(call_id="write_a", name="Write", arguments={"file_path": file_a}),
+        WriteResult(call_id="write_a", path=file_a),
+        AssistantMessage(content="done writing a.py"),
+    )
+    for i in range(20):
+        agent.session.append(
+            UserMessage(content=f"q{i}"),
+            AssistantMessage(content=f"a{i}"),
+        )
+
+    assert pruner.prune()
+    results = _results(agent)
+    # Write replaces the whole file; the prior read is now stale and superseded.
+    assert results["read_a"] == _STUB
+    # read_b is a different file; unaffected.
+    assert results["read_b"] == "b" * 40_000
+    assert results["write_a"] == "Wrote /repo/a.py."
 
 
 def test_a_drop_waits_until_the_reads_paid_cover_the_rewrite(tmp_path: Path) -> None:
@@ -283,9 +339,29 @@ _P = "/home/me/repo/agent/x.py"
         ([*_read("a", _P), *_read("b", "/repo/agent/y.py")], set[str]()),
         ([*_shell("a", "ls"), *_shell("b", "ls")], {"a"}),
         ([*_shell("a", "ls"), *_shell("b", "ls -a")], set[str]()),
+        # A write supersedes earlier reads of that file because it holds the
+        # full new content.
+        ([*_read("a", _P), *_write("b", _P)], {"a"}),
     ],
 )
 def test_a_result_is_superseded_once_all_it_showed_is_shown_again(
+    records: list[SessionRecord],
+    gone: set[str],
+) -> None:
+    context = [record for record in records if isinstance(record, ToolResult)]
+
+    assert _ids(context, superseded(context)) == gone
+
+
+@pytest.mark.parametrize(
+    ("records", "gone"),
+    [
+        ([*_read("a", _P), *_edit("b", _P)], set[str]()),
+        ([*_edit("a", _P), *_read("b", _P)], set[str]()),
+        ([*_read("a", _P), *_edit("b", _P), *_read("c", _P)], {"a"}),
+    ],
+)
+def test_edit_does_not_supersede_reads_but_a_later_read_can(
     records: list[SessionRecord],
     gone: set[str],
 ) -> None:
@@ -1082,6 +1158,61 @@ async def test_a_pruner_takes_no_instructions() -> None:
         await pruner.run("keep the plan")
 
     scheduled.assert_not_awaited()
+
+
+@given(
+    st.lists(
+        st.one_of(
+            st.builds(
+                BashResult,
+                call_id=st.text(min_size=1, max_size=10),
+                command=st.tuples(st.text(min_size=1, max_size=5)),
+                stdout=st.text(max_size=500),
+                exit_code=st.sampled_from([0, 1, 2, 127]),
+                is_error=st.sampled_from([None, False, True]),
+            ),
+            st.builds(
+                ReadResult,
+                call_id=st.text(min_size=1, max_size=10),
+                path=st.sampled_from(["/repo/a.py", "/repo/b.py", "/repo/c.py"]),
+                content=st.text(max_size=500),
+            ),
+            st.builds(
+                EditResult,
+                call_id=st.text(min_size=1, max_size=10),
+                path=st.sampled_from(["/repo/a.py", "/repo/b.py", "/repo/c.py"]),
+            ),
+            st.builds(
+                WriteResult,
+                call_id=st.text(min_size=1, max_size=10),
+                path=st.sampled_from(["/repo/a.py", "/repo/b.py", "/repo/c.py"]),
+            ),
+        ),
+        min_size=1,
+        max_size=40,
+    )
+)
+def test_superseded_invariants_hold_under_arbitrary_sequences(
+    context: list[ModelContextEvent],
+) -> None:
+    gone = superseded(context)
+    # Invariant 1: All indices returned are valid context indices.
+    assert gone.issubset(range(len(context)))
+
+    # Invariant 2: A failed command is NEVER superseded unless an identical command ran
+    # later (i.e. appears at a higher index, since the list is chronological).
+    # Walk backward so commands_seen accumulates commands that come *after* each entry.
+    commands_seen: set[tuple[str, ...]] = set()
+    for i in reversed(range(len(context))):
+        ev = context[i]
+        if (
+            isinstance(ev, BashResult)
+            and (ev.exit_code != 0 or ev.is_error is True)
+            and (ev.command is None or ev.command not in commands_seen)
+        ):
+            assert i not in gone, f"Failed command at index {i} was wrongly superseded"
+        if isinstance(ev, BashResult) and ev.command is not None:
+            commands_seen.add(ev.command)
 
 
 if __name__ == "__main__":
