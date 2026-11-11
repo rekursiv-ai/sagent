@@ -12,6 +12,7 @@ from pathlib import Path
 from stat import S_ISDIR
 from typing import Final
 
+import functools
 import re
 import shutil
 import subprocess
@@ -52,7 +53,11 @@ def glob(root: Path, pattern: str, /, *, timeout_sec: float = 30) -> list[Path]:
     parts = [part for part in pattern.split("/") if part != "."]
     hidden = any(part.startswith(".") and part != ".." for part in parts)
     fixed = next(
-        (i for i, part in enumerate(parts[:-1]) if re.search(r"[*?\[{]", part)),
+        (
+            i
+            for i, part in enumerate(parts[:-1])
+            if "*" in part or "?" in part or "[" in part or "{" in part
+        ),
         len(parts) - 1,
     )
     # Judging each named directory would list every sibling: all of ``/tmp`` to
@@ -198,6 +203,7 @@ def _glob_rignore(
 
 # Gitignore semantics, as fd and rignore read a glob: ``*`` and ``?`` stop at
 # ``/``, ``**`` spans directories (``**/`` also matches none), ``{a,b}`` picks one.
+@functools.lru_cache(maxsize=1024)
 def _translate(pattern: str) -> str:
     """Return a regex matching exactly the root-relative paths ``pattern`` names."""
     out: list[str] = []
