@@ -614,8 +614,7 @@ class Commands:
         if not args:
             raise SettingError("needs an ID, a LABEL, or all")
         if args == "all":
-            for job in jobs.values():
-                job.cancel()
+            self.agent.runtime.push(types.Kill())
             self.panes.clear()
             return "cancelled all tool calls"
         if args in jobs:
