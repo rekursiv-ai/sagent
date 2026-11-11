@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import timedelta
 from importlib.resources import files
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated
@@ -99,6 +100,10 @@ class Bash:
 
     max_result_chars: int = 30_000
     """How much text one result may hold, if below the context's."""
+
+    nice: int | None = 10
+    """How far below this program's CPU priority commands run, so a build defers to
+    the desktop; ``None`` runs them at its own."""
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
         """Return ``Bash <description>``, then the command's lines."""
@@ -198,6 +203,7 @@ class Bash:
                 *argv,
                 group=True,
                 grace_sec=self.grace_sec,
+                nice=self.nice,
                 stdin=asyncio.subprocess.DEVNULL if held is None else held.reader,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -210,7 +216,7 @@ class Bash:
             try:
                 out, err = await asyncio.wait_for(
                     asyncio.shield(communicate),
-                    timeout=a.timeout / 1000,
+                    timeout=timedelta(milliseconds=a.timeout).total_seconds(),
                 )
             except TimeoutError:
                 await finish(_stop(child, held=held, output=communicate))
@@ -260,19 +266,12 @@ class Bash:
             else None
         )
         note = f"; full output: {spill}" if spill is not None else ""
-        # Room for the longest the cut can say it left out: every line.
-        body, kept = context.fit(
-            stdout,
-            reserve=len(diagnostics) + len(_omitted(len(stdout), note=note)),
-            cap=cap,
-        )
-        body = body.strip()
+        body, kept = context.fit(stdout, reserve=len(diagnostics), cap=cap)
         if kept < len(stdout):
             if spill is not None:
                 await asyncio.to_thread(_spill, spill, stdout)
-            shown = f"{body}{_omitted(len(stdout) - kept, note=note)}"
-        else:
-            shown = f"{body}\n" if body else ""
+            body = _ends(context, stdout, reserve=len(diagnostics), cap=cap, note=note)
+        shown = f"{body.strip()}\n" if body.strip() else ""
         return BashResult(
             call_id="",
             command=("bash", "-c", a.command),
@@ -352,9 +351,36 @@ def _script(sentinel: str) -> str:
     )
 
 
+# A failure prints last, so the end is kept as well as the start: the end gets the
+# larger share, but no line too long for it, and the start keeps at least part of
+# its first line. Room is left for the longest the cut can say: every line.
+def _ends(
+    context: ToolContext,
+    lines: Sequence[str],
+    *,
+    reserve: int,
+    cap: int,
+    note: str,
+) -> str:
+    """Return the start and end of ``lines``, and how many lines between are left out."""
+    reserve += len(_omitted(len(lines), note=note))
+    room = min(cap, context.max_result_chars) - reserve
+    tail_room = room * 3 // 5
+    _, tail = context.fit(reversed(lines[1:]), cap=max(1, tail_room))
+    if len(lines[-1]) > tail_room:
+        tail = 0
+    end = "".join(lines[len(lines) - tail :])
+    reserve += len(end)
+    # A first line cut short says so, past the room ``fit`` was given.
+    if len(lines[0]) > room - len(end):
+        reserve += len(f"\n... ({len(lines[0]):,} chars omitted)")
+    head, kept = context.fit(lines[: len(lines) - tail], reserve=reserve, cap=cap)
+    return f"{head.rstrip()}{_omitted(len(lines) - kept - tail, note=note)}{end}"
+
+
 def _omitted(count: int, *, note: str) -> str:
-    """Return the line that ends a cut output: how many lines it left out."""
-    return f"\n... ({count:,} more lines omitted{note})\n"
+    """Return the line between a cut output's start and end: how many lines it left out."""
+    return f"\n... ({count:,} lines omitted{note})\n"
 
 
 def _spill(path: Path, stdout: Sequence[str]) -> None:

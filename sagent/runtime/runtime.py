@@ -14,9 +14,16 @@ Tool calls run in one of two registries:
 A call goes to ``detached`` when the model asks for ``background`` or
 ``delay``, when it runs past ``detach_after_sec``, or when the user interrupts
 its cohort: a message, ``Compact``, or ``Clear``. ``Kill`` cancels calls in
-either. A call the model waits on holds what it touches (its ``serialize_key``),
-and a later call contending for that waits; detached, it lets go, as nothing
-waits on it any more. A killed call holds on until it has stopped.
+either.
+
+A reply's calls run as a shell line. Calls sharing a ``serialize_key`` run as
+``a ; b``, a group; other calls run beside them, as ``&``. A ``"*"`` call, whose
+resources are unknown, runs after every keyed call before it, and every call
+after it waits for it. Each call waits for those before it to stop, detached or
+not; ``Kill`` stops one call, ``Detach`` the whole group. A call run in the
+background is a trailing ``&``: it waits for what is before it, and nothing
+waits for it. A later reply is a new line: it waits only for a killed call still
+stopping.
 
 What the user sends while the model streams is answered next: the reply's calls
 start, detached, and their results arrive later.
@@ -576,8 +583,8 @@ class Runtime:
         self.persistent_retry = False
         # Where tools run, and what the model has read; one per agent.
         self.tool_context = tool_context or ToolContext(cwd=Path.cwd())
-        # Each running call, and when it started, for ``jobs``.
-        self._started: dict[str, tuple[ToolCall, float]] = {}
+        # Each call the runtime runs, until its task ends.
+        self._calls: dict[str, _Call] = {}
         # Bash calls that are other tools' work but no one call: the refusal.
         self._refusals: dict[str, str] = {}
         # Characters the model call in flight has streamed so far.
@@ -586,18 +593,17 @@ class Runtime:
         self._scheduled: list[Scheduled] = []
         # Whether a call may ask to run in the background, or after a delay.
         self.allow_background = True
-        # When each delayed background call may start, until it does.
-        self._wake_at: dict[str, float] = {}
         # Callers waiting on a background call's result instead of its delivery.
         self._foreground_waiters: dict[str, list[asyncio.Future[AnyToolResult]]] = {}
         # How long a call the model waits on may run before it is answered by a stub
         # and left to finish, its result delivered later; ``None`` waits for each.
         self.detach_after_sec: float | None = None
-        # What each group of calls the model waits on touches, in the order they
-        # started: a later call contending for any of it waits.
-        self._holding: list[_Hold] = []
-        # Each such group's hold, by its task, so detaching the group lets go.
-        self._holds: dict[asyncio.Task[None], _Hold] = {}
+        # Each killed call still stopping, and its key: its process may still be
+        # writing, so a later reply's call contending with it waits.
+        self._stopping: dict[asyncio.Task[None], str | None] = {}
+        # Each waited-on call's group, by call id: a detach of one detaches the
+        # group.
+        self._groups: dict[str, tuple[ToolCall, ...]] = {}
 
     # Background work does not hold the model back: the gate waits on the cohort only.
     @property
@@ -737,20 +743,19 @@ class Runtime:
 
     @property
     def jobs(self) -> Mapping[str, Job]:
-        """Tool calls still running, by call id."""
-        now = time.time()
+        """Tool calls not yet stopped, by call id: waited on, waiting to start, or apart."""
         return {
             cid: _RunningJob(
-                call=call,
-                started=started,
-                state="sleeping"
-                if self._wake_at.get(cid, now) > now
-                else "detached"
-                if cid in self.detached and cid not in self.cohort
-                else "running",
+                call=c.call,
+                started=c.started,
+                state="running"
+                if cid in self.cohort
+                else "sleeping"
+                if c.waiting
+                else "detached",
                 runtime=self,
             )
-            for cid, (call, started) in self._started.items()
+            for cid, c in self._calls.items()
         }
 
     async def foreground(self, call_id: str) -> AnyToolResult | None:
@@ -1509,21 +1514,25 @@ class Runtime:
                                         cid,
                                     )
 
-                        case Detach(call_id=cid) if cid in self.cohort:
-                            task = self.running_tools[cid]
-                            for member, held in list(self.running_tools.items()):
-                                if held is task:
-                                    logger.debug(
-                                        "runtime tool detached after %ss: call_id=%s",
-                                        self.detach_after_sec,
-                                        member,
-                                    )
-                                    self._stop_tool(
-                                        member,
-                                        self.running_tools.pop(member),
-                                        mode="detach",
-                                    )
-                                    self.cohort.discard(member)
+                        # The group goes as one, whichever of its calls is named.
+                        case Detach(call_id=cid) if cid in self._groups and any(
+                            c.call_id in self.cohort for c in self._groups[cid]
+                        ):
+                            for member in self._groups[cid]:
+                                mid = member.call_id
+                                if mid not in self.cohort:
+                                    continue
+                                logger.debug(
+                                    "runtime tool detached after %ss: call_id=%s",
+                                    self.detach_after_sec,
+                                    mid,
+                                )
+                                self._stop_tool(
+                                    mid,
+                                    self.running_tools.pop(mid),
+                                    mode="detach",
+                                )
+                                self.cohort.discard(mid)
                             if not self.cohort:
                                 self._cohort_seen = False
 
@@ -1667,10 +1676,7 @@ class Runtime:
                                 # next; the reply's calls run on, detached, and no
                                 # wait on them begins.
                                 cut = bool(self._mid_stream_queue)
-                                self._start_cohort(
-                                    self._start_background(calls(msg.records)),
-                                    waited=not cut,
-                                )
+                                self._start_calls(calls(msg.records), waited=not cut)
                                 if cut:
                                     self._stop_all_tools(mode="detach")
                                     _ = self._drain_mid_stream_queue()
@@ -2022,9 +2028,7 @@ class Runtime:
         self.publish(stub)
         self.detached[cid] = task
         if mode == "kill":
-            task.cancel()
-        else:
-            self._release(self._holds.get(task))
+            self._stop(cid, task)
 
     def _stop_all_tools(self, *, mode: Literal["detach", "kill"]) -> None:
         """Run :meth:`_stop_tool` for every cohort tool; reset cohort state."""
@@ -2175,45 +2179,110 @@ class Runtime:
                     f"{tc.name} is not available to this agent.",
                 )
 
-    # ``waited`` false starts them only to detach them at once: no wait begins, so
-    # ``CohortStarted`` is not told.
-    def _start_cohort(self, cohort: Sequence[ToolCall], *, waited: bool = True) -> None:
-        """Run ``cohort``, the calls the next model round waits on."""
-        if not cohort:
-            return
-        self._cohort_seen = True
-        if waited:
-            self.publish(CohortStarted())
-        logger.debug(
-            "runtime cohort start: tools=%s",
-            [(tc.call_id, tc.name) for tc in cohort],
-        )
-        for tc in cohort:
-            self.cohort.add(tc.call_id)
-        for group in self._partition_cohort(cohort):
-            names = "+".join(tc.name for tc in group)
-            hold = self._hold(group)
-            tool_task = asyncio.create_task(
-                self._run_tool_group_and_post(group, hold=hold),
+    # The line the module docstring describes. Each call is its own task, waiting
+    # on the tasks of the earlier calls it contends with, so a ``Kill`` stops one
+    # call and the next starts once it has stopped. ``waited`` false starts the
+    # cohort only to detach it at once: no wait begins, so ``CohortStarted`` is not
+    # told.
+    def _start_calls(self, tool_calls: Sequence[ToolCall], *, waited: bool) -> None:
+        """Run a reply's calls, each after the earlier ones it contends with."""
+        delays = {
+            tc.call_id: delay
+            for tc in tool_calls
+            if (delay := self._background_delay(tc)) is not None
+        }
+        cohort = [tc for tc in tool_calls if tc.call_id not in delays]
+        if cohort:
+            self._cohort_seen = True
+            if waited:
+                self.publish(CohortStarted())
+            logger.debug(
+                "runtime cohort start: tools=%s",
+                [(tc.call_id, tc.name) for tc in cohort],
             )
-            tool_task.add_done_callback(
-                log_task_exception(logger, f"cohort tool {names!r} crashed"),
+            self.cohort.update(tc.call_id for tc in cohort)
+        now = time.time()
+        waited_on: list[tuple[str | None, asyncio.Task[None]]] = []
+        tasks: dict[str, asyncio.Task[None]] = {}
+        groups: list[list[ToolCall]] = []
+        by_key: dict[str, list[ToolCall]] = {}
+        for tc in tool_calls:
+            cid = tc.call_id
+            key = self._serialize_key(tc)
+            delay = delays.get(cid)
+            # A call answered without running waits for nothing.
+            after = (
+                []
+                if cid in self._refusals or tc.name not in self.tools
+                else [
+                    *(t for k, t in waited_on if _contend(key, k)),
+                    *(t for t, k in self._stopping.items() if _contend(key, k)),
+                ]
             )
-            if hold is not None:
-                self._holds[tool_task] = hold
-                tool_task.add_done_callback(self._holds.pop)
-            # A ``Kill`` of any member stops the group's task.
-            for tc in group:
-                self.running_tools[tc.call_id] = tool_task
-            self._detach_later(group, tool_task)
+            task = asyncio.create_task(
+                self._run_queued(
+                    tc,
+                    after=after,
+                    wake_at=None if delay is None else now + delay,
+                ),
+            )
+            task.add_done_callback(
+                log_task_exception(
+                    logger,
+                    f"{'cohort' if delay is None else 'background'} tool"
+                    f" {tc.name!r} crashed",
+                ),
+            )
+            task.add_done_callback(lambda _, cid=cid: self._forget(cid))
+            self._calls[cid] = _Call(call=tc, started=now, key=key)
+            tasks[cid] = task
+            if delay is not None:
+                self._start_background(tc, task)
+                continue
+            self.running_tools[cid] = task
+            waited_on.append((key, task))
+            if key == "*":
+                groups.extend(by_key.values())
+                by_key = {}
+            if key is None or key == "*":
+                groups.append([tc])
+            else:
+                by_key.setdefault(key, []).append(tc)
+        groups.extend(by_key.values())
+        for members in groups:
+            self._start_group(tuple(members), [tasks[m.call_id] for m in members])
+
+    def _forget(self, call_id: str) -> None:
+        """Drop what the runtime knows of ``call_id``, once its task has ended."""
+        del self._calls[call_id]
+
+    # A group is what detaches as one: the calls of one key between ``"*"`` calls.
+    def _start_group(
+        self,
+        group: tuple[ToolCall, ...],
+        tasks: Sequence[asyncio.Task[None]],
+    ) -> None:
+        """Know ``group`` by each of its calls until they have all stopped."""
+        for tc in group:
+            self._groups[tc.call_id] = group
+        done = asyncio.gather(*tasks, return_exceptions=True)
+        done.add_done_callback(lambda _: self._end_group(group))
+        self._detach_later(group, done)
+
+    def _end_group(self, group: tuple[ToolCall, ...]) -> None:
+        """Forget ``group``, once every call in it has stopped."""
+        for tc in group:
+            # A later reply may reuse the id while this group runs on, detached.
+            if self._groups.get(tc.call_id) is group:
+                del self._groups[tc.call_id]
 
     # A tool that manages jobs, such as waiting for one, is waited on to its end.
     def _detach_later(
         self,
-        group: Sequence[ToolCall],
-        task: asyncio.Task[None],
+        group: tuple[ToolCall, ...],
+        done: asyncio.Future[list[BaseException | None]],
     ) -> None:
-        """Detach ``group`` if its task outlives ``detach_after_sec``."""
+        """Detach ``group`` if it outlives ``detach_after_sec``."""
         tools = [self.tools.get(tc.name) for tc in group]
         if (
             self.detach_after_sec is None
@@ -2226,38 +2295,36 @@ class Runtime:
             self.push,
             Detach(call_id=group[0].call_id),
         )
-        task.add_done_callback(lambda _: timer.cancel())
+        done.add_done_callback(lambda _: timer.cancel())
 
-    # Each runs as its own task: the call was promised to run apart.
-    def _start_background(self, tool_calls: Sequence[ToolCall]) -> list[ToolCall]:
-        """Start each call that asks to run in the background; return the others."""
-        foreground: list[ToolCall] = []
-        for tc in tool_calls:
-            tool = self.tools.get(tc.name)
-            delay = None
-            if tool is not None and self.allow_background and backgroundable(tool):
-                try:
-                    delay = background_delay(tc.arguments)
-                except (TypeError, ValueError) as exc:
-                    self._refusals[tc.call_id] = str(exc)
-            if delay is None:
-                foreground.append(tc)
-                continue
-            stub = ToolResult(
-                call_id=tc.call_id,
-                stub="pending",
-                shown=f"{self.markers.running}{tc.name} as job {tc.call_id}]",
-            )
-            self.append_history(stub)
-            self.publish(stub)
-            task = asyncio.create_task(
-                self._run_tool_group_and_post([tc], wake_at=time.time() + delay),
-            )
-            task.add_done_callback(
-                log_task_exception(logger, f"background tool {tc.name!r} crashed"),
-            )
-            self.detached[tc.call_id] = task
-        return foreground
+    def _background_delay(self, call: ToolCall) -> float | None:
+        """Return the delay ``call`` asks to run in the background after, or ``None``."""
+        tool = self.tools.get(call.name)
+        if tool is None or not self.allow_background or not backgroundable(tool):
+            return None
+        try:
+            return background_delay(call.arguments)
+        except (TypeError, ValueError) as exc:
+            self._refusals[call.call_id] = str(exc)
+            return None
+
+    def _start_background(self, call: ToolCall, task: asyncio.Task[None]) -> None:
+        """Answer ``call``, which ``task`` runs apart, with a stub."""
+        stub = ToolResult(
+            call_id=call.call_id,
+            stub="pending",
+            shown=f"{self.markers.running}{call.name} as job {call.call_id}]",
+        )
+        self.append_history(stub)
+        self.publish(stub)
+        self.detached[call.call_id] = task
+
+    def _stop(self, call_id: str, task: asyncio.Task[None]) -> None:
+        """Cancel ``task``; until it stops, a later contending call waits for it."""
+        # A task already done, its result still queued, has nothing to stop.
+        if task.cancel():
+            self._stopping[task] = self._calls[call_id].key
+            task.add_done_callback(lambda _: self._stopping.pop(task, None))
 
     def _drain_mid_stream_queue(self) -> bool:
         """Commit and publish any buffered mid-stream input; return whether any was."""
@@ -2282,7 +2349,7 @@ class Runtime:
         """Cancel a detached call's task and deliver its cancellation."""
         if task.done():
             return
-        _ = task.cancel()
+        self._stop(cid, task)
         self._deliver_detached(
             self._cancelled(cid),
         )
@@ -2435,28 +2502,6 @@ class Runtime:
             measurement=self.token_accounting.observe(snapshot, tokens=response.tokens),
         )
 
-    # Calls sharing a ``serialize_key``, such as Edits of one file, run one after
-    # another; the rest run in parallel. A ``"*"`` key, a Bash writer's, contends with
-    # every keyed call, so then all of them form one group, in submission order.
-    def _partition_cohort(self, calls: Sequence[ToolCall]) -> list[list[ToolCall]]:
-        """Split a cohort into serialized groups, preserving submission order."""
-        keys = [self._serialize_key(call) for call in calls]
-        exclusive = "*" in keys
-        groups: list[list[ToolCall]] = []
-        by_key: dict[str, list[ToolCall]] = {}
-        for call, key in zip(calls, keys, strict=True):
-            if key is None:
-                groups.append([call])
-                continue
-            slot = "*" if exclusive else key
-            group = by_key.get(slot)
-            if group is None:
-                group = by_key[slot] = [call]
-                groups.append(group)
-            else:
-                group.append(call)
-        return groups
-
     def _serialize_key(self, call: ToolCall) -> str | None:
         """Return the serialization key, refusing calls whose scheduling fails."""
         if call.call_id in self._refusals:
@@ -2475,59 +2520,22 @@ class Runtime:
             self._refusals[call.call_id] = describe(exc)
             return None
 
-    # One coroutine awaits each call in turn, so order never rests on lock fairness.
-    # Released at the end, so a killed call holds on until it has stopped.
-    async def _run_tool_group_and_post(
+    # It waits on tasks, not a lock, so order never rests on lock fairness. A call
+    # killed before it starts was answered by whatever killed it.
+    async def _run_queued(
         self,
-        group: Sequence[ToolCall],
+        call: ToolCall,
         *,
-        wake_at: float | None = None,
-        hold: _Hold | None = None,
+        after: Sequence[asyncio.Task[None]],
+        wake_at: float | None,
     ) -> None:
-        """Run a serialized group of calls one at a time, in order, from ``wake_at``."""
-        try:
-            if hold is not None and not await self._wait_for(hold, group):
-                return
-            for index, call in enumerate(group):
-                if await self._run_tool_and_post(call, wake_at=wake_at):
-                    continue
-                # Cancelling one call of a group stops the resource they share,
-                # so the next Edit of the file the user just stopped never starts.
-                for skipped in group[index + 1 :]:
-                    self._post_cancelled(skipped)
-                return
-        finally:
-            self._release(hold)
-
-    def _hold(self, group: Sequence[ToolCall]) -> _Hold | None:
-        """Register what ``group`` touches, behind every earlier holder of any of it."""
-        keys = frozenset(k for k in map(self._serialize_key, group) if k is not None)
-        if not keys:
-            return None
-        hold = _Hold(
-            keys=keys,
-            after=tuple(h for h in self._holding if _contend(keys, h.keys)),
-        )
-        self._holding.append(hold)
-        return hold
-
-    def _release(self, hold: _Hold | None) -> None:
-        """Let the calls waiting on ``hold`` go; once, however often it is asked."""
-        if hold is None or hold.released.is_set():
-            return
-        self._holding.remove(hold)
-        hold.released.set()
-
-    async def _wait_for(self, hold: _Hold, group: Sequence[ToolCall]) -> bool:
-        """Wait out each earlier holder; ``False``, each call answered, if cancelled."""
-        try:
-            for earlier in hold.after:
-                _ = await earlier.released.wait()
-        except asyncio.CancelledError:
-            for call in group:
-                self._post_cancelled(call)
-            return False
-        return True
+        """Run ``call`` once ``after`` has stopped and ``wake_at`` has passed."""
+        if after:
+            _ = await asyncio.wait(after)
+        if wake_at is not None:
+            await asyncio.sleep(wake_at - time.time())
+        self._calls[call.call_id].waiting = False
+        await self._run_tool_and_post(call)
 
     def _cancelled(self, call_id: str) -> ToolResult:
         """Return the stand-in that answers a call killed before it finished."""
@@ -2538,22 +2546,13 @@ class Runtime:
             shown=self.markers.cancelled,
         )
 
-    def _post_cancelled(self, call: ToolCall) -> None:
-        """Post a ``[cancelled]`` result for a call that never ran."""
-        logger.debug("runtime group skipped after cancel: call_id=%s", call.call_id)
-        self.inbox.push_back(
-            self._cancelled(call.call_id),
-        )
-
     # A failure or a cancellation is still a result, so every call is answered; a call
     # detached meanwhile is delivered forward.
     async def _run_tool_and_post(
         self,
         call: ToolCall,
-        *,
-        wake_at: float | None = None,
-    ) -> bool:
-        """Run one tool invocation from ``wake_at``, post the ``ToolResult`` to the inbox."""
+    ) -> None:
+        """Run one tool invocation, post the ``ToolResult`` to the inbox."""
         if call.name == self.markers.arrived:
             # No tool has this name; the model copied a delivery. Its answer waits
             # for the next real round, so it spends no round of its own.
@@ -2568,7 +2567,7 @@ class Runtime:
                     ),
                 ),
             )
-            return True
+            return
         tool = self.tools.get(call.name)
         refused = self._refusals.pop(call.call_id, None)
         if tool is None or refused is not None:
@@ -2587,14 +2586,7 @@ class Runtime:
                     is_error=True,
                 ),
             )
-            return True
-        # Listed from here to the post below, with no ``await`` outside the
-        # ``try``: a call refused, or cancelled before its task ran a step, is
-        # never listed, and every listed one is released.
-        self._started[call.call_id] = (call, time.time())
-        if wake_at is not None:
-            self._wake_at[call.call_id] = wake_at
-        completed = True
+            return
         result: AnyToolResult
         try:
             logger.debug(
@@ -2602,10 +2594,6 @@ class Runtime:
                 call.call_id,
                 call.name,
             )
-            # Asleep inside the ``try``, so a job cancelled before it starts is
-            # still answered, as cancelled.
-            if wake_at is not None and (wait_sec := wake_at - time.time()) > 0:
-                await asyncio.sleep(wait_sec)
             arguments = (
                 without_controls(call.arguments)
                 if backgroundable(tool)
@@ -2623,7 +2611,6 @@ class Runtime:
                 call.call_id,
                 call.name,
             )
-            completed = False
             result = self._cancelled(call.call_id)
         except Exception as exc:  # noqa: BLE001 -- Tool failures must be recorded without stopping the dispatch engine.
             logger.debug(
@@ -2654,9 +2641,6 @@ class Runtime:
                 result.is_error,
             )
             self.inbox.push_back(result)
-        self._started.pop(call.call_id, None)
-        self._wake_at.pop(call.call_id, None)
-        return completed
 
     # A compaction cancelled by ``Halt`` or ``Clear`` has its failure published
     # already, so its late outcome is dropped.
@@ -2810,21 +2794,27 @@ class _PendingCommit:
     entry: AnyToolResult
 
 
-@dataclass(frozen=True, slots=True, kw_only=True)
-class _Hold:
-    """What a running group of the model's calls touches."""
+@dataclass(slots=True, kw_only=True)
+class _Call:
+    """A call the runtime runs, as ``Runtime.jobs`` lists it."""
 
-    keys: frozenset[str]
-    after: tuple[_Hold, ...]
-    """The earlier holders of any of it, which the group waits out first."""
+    call: ToolCall
+    started: float
+    """When it was asked for, in seconds since the epoch."""
 
-    released: asyncio.Event = dataclasses.field(default_factory=asyncio.Event)
+    key: str | None
+    """What it touches, its ``serialize_key``."""
+
+    waiting: bool = True
+    """Whether it still waits for the calls before it, or for its delay."""
 
 
-# ``"*"`` is a call whose resources are unknown, so it contends with every keyed call.
-def _contend(keys: frozenset[str], held: frozenset[str]) -> bool:
-    """Return whether calls touching ``keys`` must wait for ones touching ``held``."""
-    return bool(keys & held) or "*" in keys or "*" in held
+# ``"*"`` is a call whose resources are unknown: it waits for every keyed call before
+# it, and every call after it waits for it. An unkeyed call touches nothing another
+# does, so nothing waits for it.
+def _contend(key: str | None, earlier: str | None) -> bool:
+    """Return whether a call keyed ``key`` must wait for an earlier one keyed ``earlier``."""
+    return earlier is not None and (key in (earlier, "*") or earlier == "*")
 
 
 def _message_from_queued(

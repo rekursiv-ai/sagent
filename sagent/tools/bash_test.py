@@ -454,7 +454,8 @@ async def test_long_output_is_cut_on_a_line_and_says_how_much_was_omitted(
     assert result.stdout.startswith("line1\nline2\n")
     kept = sum(row.startswith("line") for row in result.stdout.splitlines())
     assert 0 < kept < 100
-    assert result.stdout.endswith(f"\n... ({100 - kept} more lines omitted)\n")
+    assert f"\n... ({100 - kept} lines omitted)\n" in result.stdout
+    assert result.stdout.endswith("line100\n")
     assert result.stderr == "boom"
     assert result.text().endswith("boom\n[exit 3]")
     assert len(result.stdout) + len(result.stderr) <= context.max_result_chars
@@ -471,8 +472,9 @@ async def test_output_past_bash_s_own_cap_is_cut_and_spilled_whole(
         _arguments("for i in $(seq 1 14); do echo line-$i-padding; done"),
     )
     assert len(result.stdout) <= tool.max_result_chars
-    spilled = re.search(r"; full output: (\S+)\)\n$", result.stdout)
+    spilled = re.search(r"; full output: (\S+)\)", result.stdout)
     assert spilled is not None
+    assert result.stdout.endswith("line-14-padding\n")
     whole = await asyncio.to_thread(Path(spilled[1]).read_text, encoding="utf-8")
     assert whole.splitlines() == [f"line-{i}-padding" for i in range(1, 15)]
     # A short name, as the model reads it in every cut result.
@@ -496,7 +498,8 @@ async def test_output_cut_with_nowhere_to_spill_names_no_file(tmp_path: Path) ->
         ToolContext(cwd=tmp_path),
         _arguments("seq 1 1000"),
     )
-    assert re.search(r"\.\.\. \(\d+ more lines omitted\)\n$", result.stdout)
+    assert re.search(r"\.\.\. \(\d+ lines omitted\)", result.stdout)
+    assert result.stdout.endswith("1000\n")
     assert len(result.stdout) <= 200
 
 
@@ -1206,7 +1209,8 @@ async def test_a_cut_output_fills_the_cap_but_for_its_last_line_s_slack(
         "for i in $(seq 1 1000); do echo x; done; echo boom >&2",
         tool=Bash(max_result_chars=200),
     )
-    assert result.stdout.endswith(" more lines omitted)\n")
+    assert re.search(r"\.\.\. \(\d+ lines omitted\)", result.stdout)
+    assert result.stdout.endswith("x\n")
     assert 200 - 4 <= len(result.stdout) + len(result.stderr) <= 200
 
 
@@ -1386,6 +1390,94 @@ async def _running_in(group: int) -> set[int]:
         for pid, pgid, state in rows
         if int(pgid) == group and not state.startswith("Z")
     }
+
+
+@pytest.mark.parametrize(("tool", "added"), [(Bash(), 10), (Bash(nice=None), 0)])
+@pytest.mark.asyncio
+async def test_commands_defer_to_the_desktop_unless_told_not_to(
+    tmp_path: Path,
+    tool: Bash,
+    added: int,
+) -> None:
+    want = min(19, os.nice(0) + added)
+    # The priority is set as the shell starts: wait for it, and fail on time.
+    result = await tool.call(
+        ToolContext(cwd=tmp_path),
+        {
+            **_arguments(f'until [ "$(nice)" = {want} ]; do sleep 0.01; done; echo ok'),
+            "timeout": 2_000,
+        },
+    )
+    assert result.stdout == "ok\n"
+
+
+@pytest.mark.parametrize(("tool", "asked"), [(Bash(), [10]), (Bash(nice=None), [])])
+@pytest.mark.asyncio
+async def test_a_command_asks_the_kernel_to_run_below_this_program(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool: Bash,
+    asked: list[int],
+) -> None:
+    """Asked as the kernel sees it: a run already at the lowest shows no change."""
+    lowered: list[int] = []
+
+    def setpriority(which: int, who: int, priority: int) -> None:
+        del which, who
+        lowered.append(priority - os.nice(0))
+
+    monkeypatch.setattr(os, "setpriority", setpriority)
+    await _run(tmp_path, "true", tool=tool)
+    assert lowered == asked
+
+
+@pytest.mark.asyncio
+async def test_output_that_fits_alone_is_cut_to_leave_room_for_stderr(
+    tmp_path: Path,
+) -> None:
+    result = await _run(
+        tmp_path,
+        # 191 characters of output, under the cap alone but over it with stderr.
+        "for i in $(seq 1 20); do echo line-$i--; done; echo errors-here >&2",
+        tool=Bash(max_result_chars=200),
+    )
+    assert "lines omitted" in result.stdout
+    assert len(result.stdout) + len(result.stderr) <= 200
+
+
+@pytest.mark.parametrize("last", ["y" * 20, "z" * 400])
+@pytest.mark.asyncio
+async def test_a_cut_output_keeps_its_end_and_counts_every_line_left_out(
+    tmp_path: Path,
+    last: str,
+) -> None:
+    """The start, the end a failure prints last, and how many lines are between."""
+    result = await _run(
+        tmp_path,
+        f"for i in $(seq 1 100); do echo line-$i; done; echo {last}",
+        tool=Bash(max_result_chars=200),
+    )
+    kept = re.findall(r"^line-\d+$", result.stdout, flags=re.MULTILINE)
+    shown_last = last in result.stdout
+    (omitted,) = re.findall(r"\.\.\. \((\d+) lines omitted\)", result.stdout)
+    assert result.stdout.startswith("line-1\n")
+    assert int(omitted) == 101 - len(kept) - shown_last
+    assert shown_last is (len(last) < 100)
+    assert len(result.stdout) <= 200
+
+
+@pytest.mark.asyncio
+async def test_first_and_last_lines_too_long_to_show_still_count_the_lines(
+    tmp_path: Path,
+) -> None:
+    result = await _run(
+        tmp_path,
+        f"echo {'x' * 400}; seq 1 50; echo {'z' * 400}",
+        tool=Bash(max_result_chars=200),
+    )
+    assert result.stdout.startswith("xxx")
+    assert re.search(r"\.\.\. \(5[12] lines omitted\)", result.stdout)
+    assert len(result.stdout) <= 200
 
 
 if __name__ == "__main__":
