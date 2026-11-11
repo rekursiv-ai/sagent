@@ -31,6 +31,7 @@ import asyncio
 import contextlib
 import logging
 import socket
+import time
 import uuid
 
 from treekle import PlainTree, json_dumps, json_loads
@@ -539,7 +540,7 @@ class Endpoint:
 
     def _out_of_contact(self) -> float:
         """Fail each call waiting past the grace; return how long until the next redial."""
-        now = asyncio.get_running_loop().time()
+        now = time.monotonic()
         if self._lost_at is None:
             self._lost_at = now
         # ``>`` would do as well: the clock never lands exactly on the grace.

@@ -68,7 +68,7 @@ from sagent.tools.remote import Link, RemoteSession
 
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator, Mapping, Sequence
+    from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
     from sagent.host.server import HostStarter
@@ -2740,15 +2740,22 @@ async def test_a_closed_server_adopts_nothing(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_closing_cancels_an_adoption_still_waiting_for_its_hello(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    reading = asyncio.Event()
+    monkeypatch.setattr(
+        host_server,
+        "received",
+        partial(_noted_read, reading, received),
+    )
     async with _adopting(tmp_path) as served:
         near, far = socket.socketpair()
         streams = await asyncio.open_connection(sock=near, limit=MAX_LINE_BYTES)
         waiting = asyncio.create_task(
             served.server.adopt(streams, peer="relay:tok", grant=_GRANT),
         )
-        while not served.server._connections:  # noqa: ASYNC110 -- The server marks a connection's start with no event.
-            await asyncio.sleep(0)
+        # Waiting for its hello, the connection is one the close must end.
+        await asyncio.wait_for(reading.wait(), 5)
     assert waiting.done()
     far.close()
     assert served.host.started == []
@@ -3087,6 +3094,16 @@ async def test_closing_ends_a_session_that_opened_while_connections_were_cancell
     logged = (dirs.state / "server.jsonl").read_text().splitlines()
     events = [json_loads(line, dict[str, str])["event"] for line in logged]
     assert events[-2:] == ["end", "stop"]
+
+
+async def _noted_read(
+    reading: asyncio.Event,
+    read: Callable[[asyncio.StreamReader], Awaitable[Message | None]],
+    reader: asyncio.StreamReader,
+) -> Message | None:
+    """Set ``reading``, then read the next message as ``read`` does."""
+    reading.set()
+    return await read(reader)
 
 
 if __name__ == "__main__":
