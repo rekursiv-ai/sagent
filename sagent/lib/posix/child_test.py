@@ -634,7 +634,7 @@ async def test_a_niced_child_reaped_before_it_is_lowered_still_starts(
 
 
 @pytest.mark.skipif(
-    (su := shutil.which("su")) is None or not os.stat(su).st_mode & stat.S_ISUID,
+    (su := shutil.which("su")) is None or not Path(su).stat().st_mode & stat.S_ISUID,
     reason="no setuid su",
 )
 @pytest.mark.parametrize("group", [True, False])
@@ -644,6 +644,7 @@ async def test_a_niced_child_this_program_may_not_lower_still_starts(
     group: bool,
 ) -> None:
     """``su`` runs as root, as a ``sudo`` would, so it keeps its priority."""
+    before = os.nice(0)
     child = await Child.start(
         "su",
         "-c",
@@ -657,7 +658,7 @@ async def test_a_niced_child_this_program_may_not_lower_still_starts(
     started.append(child.process.pid)
     try:
         assert child.process.returncode is None
-        assert os.getpriority(os.PRIO_PROCESS, child.process.pid) == 0
+        assert os.getpriority(os.PRIO_PROCESS, child.process.pid) == before
     finally:
         await child.stop()
 
