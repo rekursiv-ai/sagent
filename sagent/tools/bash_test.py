@@ -1459,7 +1459,8 @@ async def test_a_cut_output_keeps_its_end_and_counts_every_line_left_out(
     )
     kept = re.findall(r"^line-\d+$", result.stdout, flags=re.MULTILINE)
     shown_last = last in result.stdout
-    (omitted,) = re.findall(r"\.\.\. \((\d+) lines omitted\)", result.stdout)
+    assert result.stdout.count(" lines omitted)") == 1
+    omitted = result.stdout.partition(" lines omitted)")[0].rpartition("... (")[2]
     assert result.stdout.startswith("line-1\n")
     assert int(omitted) == 101 - len(kept) - shown_last
     assert shown_last is (len(last) < 100)
