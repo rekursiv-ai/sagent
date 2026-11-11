@@ -568,7 +568,7 @@ class ToolContext:
             tail_used += len(u)
         tail.reverse()
 
-        # If strict ratio left both empty, guarantee at least the first unit partially
+        # If strict ratio left both empty, guarantee at least the first unit partially.
         if not head and not tail:
             first = units[0]
             omitted = max(0, len(first) - content_budget)

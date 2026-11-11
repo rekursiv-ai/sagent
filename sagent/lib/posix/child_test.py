@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import IO, TYPE_CHECKING
+from pathlib import Path
+from typing import IO, TYPE_CHECKING, Final
 
 import asyncio
 import os
@@ -17,7 +18,6 @@ from sagent.lib.posix.pids import gone_within, kill_and_reap, written_pid
 if TYPE_CHECKING:
     from asyncio.subprocess import Process
     from collections.abc import Collection, Iterator, Mapping
-    from pathlib import Path
 
 
 @pytest.fixture
@@ -505,42 +505,112 @@ async def test_finished_work_is_its_result_and_a_cancel_waits_for_it() -> None:
     assert done == ["done"]
 
 
+@pytest.mark.parametrize(("group", "lowered"), [(True, True), (False, False)])
 @pytest.mark.asyncio
-async def test_child_runs_with_lowered_niceness(started: list[int]) -> None:
-    """A child started with nice runs at the requested priority."""
-    child = await Child.start(
-        "nice",
-        nice=15,
-        stdout=asyncio.subprocess.PIPE,
-    )
-    started.append(child.process.pid)
-    out, _ = await child.process.communicate()
-    assert int(out.decode().strip()) == min(19, os.nice(0) + 15)
-
-
-@pytest.mark.parametrize("bad_nice", [-1, 20])
-@pytest.mark.asyncio
-async def test_child_rejects_out_of_range_nice(bad_nice: int) -> None:
-    with pytest.raises(ValueError, match="nice must be between 0 and 19"):
-        _ = await Child.start("echo", "hi", nice=bad_nice)
-
-
-@pytest.mark.asyncio
-async def test_child_with_nice_and_group_terminates_on_cancel(
+async def test_a_niced_group_lowers_the_jobs_it_started_first(
     started: list[int],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    group: bool,
+    lowered: bool,
 ) -> None:
-    """A niced process group leader and its spawned workers terminate upon stop."""
+    """Its job is running before the start returns, so before it is lowered."""
+    job = tmp_path / "job.pid"
+    spawn = asyncio.create_subprocess_exec
+
+    async def after_its_job(
+        *argv: str,
+        stdin: int | IO[bytes] | None,
+        stdout: int | IO[bytes] | None,
+        stderr: int | IO[bytes] | None,
+        cwd: str | Path | None,
+        env: Mapping[str, str] | None,
+        pass_fds: Collection[int],
+        limit: int,
+        start_new_session: bool,
+    ) -> Process:
+        process = await spawn(
+            *argv,
+            stdin=stdin,
+            stdout=stdout,
+            stderr=stderr,
+            cwd=cwd,
+            env=env,
+            pass_fds=pass_fds,
+            limit=limit,
+            start_new_session=start_new_session,
+        )
+        started.append(await written_pid(job))
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", after_its_job)
+    before = os.nice(0)
     child = await Child.start(
         "/bin/sh",
         "-c",
-        "sleep 30 & wait",
-        group=True,
-        nice=10,
+        f'sleep 30 & echo $! >"{job}"; wait',
+        group=group,
+        nice=15,
     )
     started.append(child.process.pid)
-    await asyncio.sleep(0.05)
+    jid = started[-2]
+    assert os.getpriority(os.PRIO_PROCESS, child.process.pid) == min(19, before + 15)
+    assert os.getpriority(os.PRIO_PROCESS, jid) == (
+        min(19, before + 15) if lowered else before
+    )
     await child.stop()
-    assert await gone_within(started)
+
+
+@pytest.mark.asyncio
+async def test_a_niced_program_that_is_missing_still_raises(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        _ = await Child.start(str(tmp_path / "none"), nice=10)
+
+
+def _autogroup(pid: int | str) -> str:
+    """Return the scheduler autogroup of ``pid``, as the kernel shows it."""
+    return Path(f"/proc/{pid}/autogroup").read_text(encoding="ascii")
+
+
+_AUTOGROUPS: Final = pytest.mark.skipif(
+    not Path("/proc/self/autogroup").exists(),
+    reason="no scheduler autogroups",
+)
+
+
+@_AUTOGROUPS
+@pytest.mark.asyncio
+async def test_a_niced_group_lowers_its_session_s_autogroup(
+    started: list[int],
+) -> None:
+    """The kernel takes one such change per 100ms system-wide: another may win."""
+    seen: list[str] = []
+    async with asyncio.timeout(3):
+        while not seen or not seen[-1].endswith(" nice 7\n"):
+            child = await Child.start("sleep", "30", group=True, nice=7)
+            started.append(child.process.pid)
+            seen.append(_autogroup(child.process.pid))
+            await child.stop()
+            await asyncio.sleep(0.1)
+
+
+@_AUTOGROUPS
+@pytest.mark.parametrize("group", [True, False])
+@pytest.mark.asyncio
+async def test_niced_children_start_though_the_kernel_refuses_some_autogroups(
+    started: list[int],
+    group: bool,
+) -> None:
+    """Started faster than one per 100ms; this program's autogroup is never theirs."""
+    mine = _autogroup("self")
+    before = os.nice(0)
+    children = [await Child.start("sleep", "30", group=group, nice=7) for _ in range(4)]
+    started.extend(c.process.pid for c in children)
+    niced = [os.getpriority(os.PRIO_PROCESS, c.process.pid) for c in children]
+    for child in children:
+        await child.stop()
+    assert niced == [min(19, before + 7)] * 4
+    assert _autogroup("self") == mine
 
 
 if __name__ == "__main__":

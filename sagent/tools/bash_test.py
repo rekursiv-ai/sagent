@@ -1392,56 +1392,46 @@ async def _running_in(group: int) -> set[int]:
     }
 
 
+@pytest.mark.parametrize(("tool", "added"), [(Bash(), 10), (Bash(nice=None), 0)])
 @pytest.mark.asyncio
-async def test_bash_runs_with_nice(tmp_path: Path) -> None:
-    tool = Bash(nice=15)
+async def test_commands_defer_to_the_desktop_unless_told_not_to(
+    tmp_path: Path,
+    tool: Bash,
+    added: int,
+) -> None:
+    want = min(19, os.nice(0) + added)
+    # The priority is set as the shell starts: wait for it, and fail on time.
     result = await tool.call(
         ToolContext(cwd=tmp_path),
-        {"command": "ps -o ni= -p $$", "description": "check nice"},
+        {
+            **_arguments(f'until [ "$(nice)" = {want} ]; do sleep 0.01; done; echo ok'),
+            "timeout": 2_000,
+        },
     )
-    expected = min(19, os.nice(0) + 15)
-    assert str(expected) in result.text()
-
-
-@pytest.mark.parametrize("bad_nice", [-1, 20])
-def test_bash_rejects_out_of_range_nice(bad_nice: int) -> None:
-    with pytest.raises(ValueError, match=r"Bash\.nice must be between 0 and 19"):
-        _ = Bash(nice=bad_nice)
-
-
-def test_bash_script_autogroup_prelude() -> None:
-    script = bash._script("SENTINEL", nice=19)
-    assert "echo 19" in script
-    assert "/proc/self/autogroup" in script
-
-    # nice=0 is a valid value and must still emit the autogroup prelude.
-    script_zero = bash._script("SENTINEL", nice=0)
-    assert "echo 0" in script_zero
-    assert "/proc/self/autogroup" in script_zero
-
-    script_default = bash._script("SENTINEL", nice=None)
-    assert "/proc/self/autogroup" not in script_default
+    assert result.stdout == "ok\n"
 
 
 @pytest.mark.asyncio
 async def test_bash_preserves_head_and_tail_on_overflow(tmp_path: Path) -> None:
     tool = Bash(max_result_chars=500)
     context = ToolContext(
-        cwd=tmp_path, max_result_chars=500, spill_dir=tmp_path / "spill"
+        cwd=tmp_path,
+        max_result_chars=500,
+        spill_dir=tmp_path / "spill",
     )
-    # Emit 50 setup lines, then a critical failure traceback at the end
+    # Emit 50 setup lines, then a critical failure traceback at the end.
     command = 'python3 -c \'for i in range(50): print(f"PASS test_{i:03d}"); print("CRITICAL_ASSERTION_FAILURE: test_999 failed!")\''
     result = await tool.call(context, {"command": command, "description": "run test"})
     stdout = result.stdout
-    # Length bounded by cap
+    # Length bounded by cap.
     assert len(stdout) <= 500
-    # Head line preserved
+    # Head line preserved.
     assert "PASS test_000" in stdout
-    # Tail critical assertion preserved
+    # Tail critical assertion preserved.
     assert "CRITICAL_ASSERTION_FAILURE: test_999 failed!" in stdout
-    # Middle omission marker included
+    # Middle omission marker included.
     assert "lines omitted" in stdout
-    # Spill directory contains full output
+    # Spill directory contains full output.
     spill_files = list((tmp_path / "spill").glob("bash-*.txt"))
     assert len(spill_files) == 1
     assert "PASS test_025" in spill_files[0].read_text()

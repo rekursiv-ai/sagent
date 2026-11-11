@@ -80,12 +80,11 @@ class Child:
           group: Whether it leads a new session, and so a process group of its
             own, which ``stop`` ends whole.
           grace_sec: How long ``stop`` gives it, after TERM, before KILL.
-          nice: CPU scheduling priority increment (0 to 19). Uses ``nice(1)``
-            to lower the child's priority so heavy tool calls do not starve an
-            interactive desktop. On Linux, when ``group`` is also set the new
-            session's autogroup weight is updated from the parent after the
-            child starts, giving the whole process tree a proportionally lower
-            CPU share without interfering with any other session.
+          nice: How far below this program's CPU priority it runs; ``None``
+            for the same. Set as it starts: a ``group`` is lowered
+            whole, jobs it started already included, and its session's
+            scheduler autogroup too, without which the kernel shares the CPU
+            among sessions alike; otherwise only the process is.
           stdin: As ``asyncio.create_subprocess_exec`` takes it.
           stdout: As ``asyncio.create_subprocess_exec`` takes it.
           stderr: As ``asyncio.create_subprocess_exec`` takes it.
@@ -97,20 +96,10 @@ class Child:
         Returns:
           child: The started process.
 
-        Raises:
-          ValueError: ``nice`` is outside 0..19.
-
         """
-        if nice is not None and not (0 <= nice <= 19):
-            raise ValueError(f"nice must be between 0 and 19, got {nice}")
-        actual_argv = (
-            ("nice", "-n", str(nice), "--", *argv)
-            if nice is not None
-            else tuple(argv)
-        )
         starting = asyncio.ensure_future(
             asyncio.create_subprocess_exec(
-                *actual_argv,
+                *argv,
                 stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,
@@ -126,8 +115,15 @@ class Child:
         except asyncio.CancelledError:
             await finish(cls._abandon(starting, group=group))
             raise
-        if nice is not None and group:
-            _set_autogroup(process.pid, nice)
+        # The kernel caps a priority past the lowest at the lowest.
+        if nice is not None:
+            os.setpriority(
+                os.PRIO_PGRP if group else os.PRIO_PROCESS,
+                process.pid,
+                os.getpriority(os.PRIO_PROCESS, 0) + nice,
+            )
+            if group:
+                _lower_autogroup(process.pid, nice)
         return cls(process=process, group=group, grace_sec=grace_sec)
 
     @classmethod
@@ -213,30 +209,6 @@ class Child:
                 self.process.send_signal(sig)
 
 
-def _set_autogroup(pid: int, nice: int) -> None:
-    """Write ``nice`` to the Linux scheduler autogroup of the process ``pid``.
-
-    Each new session created with ``start_new_session=True`` gets its own
-    autogroup under ``/proc/<pid>/autogroup``. Writing a nice increment there
-    lowers the scheduling weight of the entire process tree in that session,
-    so a heavy compile or test run does not starve the developer's desktop.
-
-    The write is done from the parent after the child starts: no fork-safety
-    concerns, no race between ``fork`` and ``exec``. Silently ignored on
-    kernels without ``CONFIG_SCHED_AUTOGROUP`` and on non-Linux platforms.
-
-    Args:
-      pid: The child process id.
-      nice: The CPU scheduling weight increment (0 to 19).
-
-    """
-    autogroup = Path(f"/proc/{pid}/autogroup")
-    if not autogroup.exists():
-        return
-    with contextlib.suppress(OSError):
-        autogroup.write_text(f"{nice}\n", encoding="ascii")
-
-
 async def finish[T](work: Awaitable[T]) -> T:
     """Return what ``work`` returns; a cancel meanwhile waits for it, then raises.
 
@@ -259,3 +231,15 @@ async def finish[T](work: Awaitable[T]) -> T:
     if cancelled:
         raise asyncio.CancelledError
     return result
+
+
+# Linux's (``man 7 sched``): without it lowered, the kernel shares the CPU among
+# sessions alike, whatever each process's nice value. Elsewhere, or with
+# autogroups off, there is no file. Unprivileged, the kernel takes one such write
+# per 100ms across the system (``proc_sched_autogroup_set_nice``), refusing the
+# rest with EAGAIN; such a group keeps the desktop's share, its processes still
+# niced within it.
+def _lower_autogroup(pid: int, nice: int) -> None:
+    """Lower the scheduler autogroup of the session ``pid`` leads to ``nice``."""
+    with contextlib.suppress(OSError):
+        Path(f"/proc/{pid}/autogroup").write_text(f"{nice}\n", encoding="ascii")

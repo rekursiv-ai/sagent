@@ -100,12 +100,9 @@ class Bash:
     max_result_chars: int = 30_000
     """How much text one result may hold, if below the context's."""
 
-    nice: int | None = field(default=None)
-    """CPU scheduling priority (0 to 19); None inherits priority."""
-
-    def __post_init__(self) -> None:
-        if self.nice is not None and not (0 <= self.nice <= 19):
-            raise ValueError(f"Bash.nice must be between 0 and 19, got {self.nice}")
+    nice: int | None = 10
+    """How far below this program's CPU priority commands run, so a build defers to
+    the desktop; ``None`` runs them at its own."""
 
     def summary(self, arguments: Mapping[str, PlainTree]) -> str:
         """Return ``Bash <description>``, then the command's lines."""
@@ -183,7 +180,7 @@ class Bash:
         if not self.exec_prefix:
             context.cwd = await asyncio.to_thread(_existing, context.cwd)
         sentinel = f"__SAGENT_CWD_{secrets.token_hex()}__"
-        script = _script(sentinel, nice=self.nice)
+        script = _script(sentinel)
         held = _HeldPipe() if self.exec_prefix else None
         argv = (
             ["/bin/bash", "-c", script, "bash", a.command]
@@ -333,17 +330,12 @@ class _HeldPipe:
 # Only the shell's own trap: a subshell's ``cd`` never moved the shell.
 # ``eval "$1"`` stops a trailing ``\\`` from joining the next line, and
 # ``exit $__rc`` keeps the command's status.
-def _script(sentinel: str, *, nice: int | None = None) -> str:
+def _script(sentinel: str) -> str:
     """Return the script that runs the command ``$1`` and reports where it ended."""
     # The leading newline keeps output without a final one off the report.
-    autogroup = (
-        f"echo {nice} 2>/dev/null >/proc/self/autogroup || true\n"
-        if nice is not None
-        else ""
-    )
     report = f'printf "\\n%s=%s\\n" "{sentinel}" "$(pwd)"'
     return (
-        autogroup + f"__sagent_report() {{ local rc=$?; {report}; return $rc; }}\n"
+        f"__sagent_report() {{ local rc=$?; {report}; return $rc; }}\n"
         "builtin trap __sagent_report EXIT\n"  # pragma: no mutate -- bash reads trap signal names case-insensitively.
         "trap() {\n"
         '  builtin trap "$@" || return\n'

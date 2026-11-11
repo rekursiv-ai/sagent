@@ -587,13 +587,13 @@ def test_fit_head_tail_preserves_head_and_tail_omitting_middle() -> None:
     # 20 lines of 10 chars each = 200 chars total (exceeds 120 cap)
     lines = [f"line_{i:02d}...\n" for i in range(20)]
     body, kept = context.fit_head_tail(lines, head_ratio=0.4)
-    # Total characters must be within max_result_chars
+    # Total characters must be within max_result_chars.
     assert len(body) <= 120
-    # Must preserve start lines
+    # Must preserve start lines.
     assert "line_00..." in body
     # Must preserve end lines (stack trace / test failure region)
     assert "line_19..." in body
-    # Must contain omission marker
+    # Must contain omission marker.
     assert "lines omitted" in body
     assert kept < len(lines)
 
