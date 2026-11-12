@@ -389,7 +389,7 @@ def literal_members[T](alias: object) -> tuple[T, ...]:
 
 def model_setting_names() -> tuple[ModelSettingName, ...]:
     """Return each ``ModelSettings`` field a model offers a choice of, in order."""
-    return cast(tuple[ModelSettingName, ...], literal_members(ModelSettingName))
+    return literal_members(ModelSettingName)
 
 
 def typed_text(value: object) -> str:

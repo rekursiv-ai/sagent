@@ -22,7 +22,7 @@ from sagent.tools.skill import Skill, SkillInfo
 from sagent.tools.types import ToolContext, json_schema
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Mapping

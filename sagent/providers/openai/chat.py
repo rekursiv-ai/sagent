@@ -292,7 +292,7 @@ class StreamReader:
                 for block in from_plain(
                     delta.get("content"),
                     list[dict[str, PlainTree]],
-                    default=[],
+                    default=list[dict[str, PlainTree]](),
                 )
                 if block.get("type") == "thinking"
             )
@@ -300,7 +300,7 @@ class StreamReader:
             for fragment in from_plain(
                 delta.get(self._details_field),
                 list[dict[str, PlainTree]],
-                default=[],
+                default=list[dict[str, PlainTree]](),
             ):
                 index = from_plain(
                     fragment.get("index"),

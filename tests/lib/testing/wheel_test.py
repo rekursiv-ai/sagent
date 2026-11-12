@@ -30,7 +30,7 @@ from sagent.lib.testing.wheel import (
 )
 
 
-_THIS: Final = Path(__file__).resolve()
+_THIS: Final[Path] = Path(__file__).resolve()
 
 _PYPROJECT = """\
 [project]

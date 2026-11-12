@@ -29,7 +29,7 @@ from sagent.lib.userdirs import config_dir, state_dir
 from sagent.lib.yaml import parse
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import Generator, Mapping
