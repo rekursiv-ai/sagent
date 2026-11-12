@@ -30,7 +30,7 @@ from sagent.lib.files.source_version import source_version
 from sagent.lib.posix.sockets import socket_address
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:

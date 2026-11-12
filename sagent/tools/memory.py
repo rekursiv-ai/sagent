@@ -294,7 +294,11 @@ def _stored_name(path: Path) -> str | None:
             None,
         )
     try:
-        meta = from_plain(split[0] if split else None, dict[str, object], default={})
+        meta = from_plain(
+            split[0] if split else None,
+            dict[str, object],
+            default=dict[str, object](),
+        )
     except ReadError:  # A list or a scalar names nothing.
         return None
     name = meta.get("name")

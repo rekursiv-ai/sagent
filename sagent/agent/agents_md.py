@@ -306,7 +306,7 @@ def _globs(meta: dict[str, object]) -> tuple[str, ...]:
     parts = (
         paths.replace("\n", ",").split(",")
         if isinstance(paths, str)
-        else from_plain(paths, list[str], default=[])
+        else from_plain(paths, list[str], default=list[str]())
     )
     globs = [p for part in parts if (p := part.strip())]
     return () if all(g == "**" for g in globs) else tuple(globs)

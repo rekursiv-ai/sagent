@@ -66,7 +66,7 @@ if TYPE_CHECKING:
     from collections.abc import Generator, Iterator
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 _IDENT: Final = re.compile(r"[A-Za-z_][\w:.+-]*")

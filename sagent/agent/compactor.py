@@ -1139,7 +1139,11 @@ def _skills_loaded(history: Sequence[ModelContextEvent]) -> list[str]:
         elif isinstance(entry, (UserMessage, AgentToAgentMessage)):
             # Restored blocks are written newest first. The names ride with the
             # message, not its text, which a user could have pasted.
-            restored = from_plain(entry.extra.get("skills"), list[str], default=[])
+            restored = from_plain(
+                entry.extra.get("skills"),
+                list[str],
+                default=list[str](),
+            )
             seen.extend(reversed(restored))
     return list(dict.fromkeys(reversed(seen)))
 

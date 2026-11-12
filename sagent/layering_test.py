@@ -11,7 +11,7 @@ import ast
 import pytest
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 _ROOT = _CWD
 _FRONTEND = "sagent.tui"

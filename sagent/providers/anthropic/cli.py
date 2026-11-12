@@ -636,7 +636,11 @@ class _Claude:
                 return
             if event.get("type") != "stream_event":
                 continue
-            inner = from_plain(event.get("event"), dict[str, object], default={})
+            inner = from_plain(
+                event.get("event"),
+                dict[str, object],
+                default=dict[str, object](),
+            )
             chunk = reader.feed(inner)
             if chunk is not None:
                 yield chunk
@@ -737,7 +741,11 @@ def _digest(tools: Sequence[Tool]) -> str:
 
 def _unified_headers(event: dict[str, object]) -> dict[str, str]:
     """Return a ``rate_limit_event`` as the API's headers say it; ``wire`` judges it."""
-    info = from_plain(event.get("rate_limit_info"), dict[str, object], default={})
+    info = from_plain(
+        event.get("rate_limit_info"),
+        dict[str, object],
+        default=dict[str, object](),
+    )
     headers = {
         "anthropic-ratelimit-unified-status": str(info.get("status") or ""),
         "anthropic-ratelimit-unified-representative-claim": str(

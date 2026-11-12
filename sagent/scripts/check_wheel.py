@@ -80,7 +80,9 @@ def expected_modules() -> frozenset[str]:
     # TOML is UTF-8 by spec; bytes skip the locale.
     table: object = tomllib.loads(Path("pyproject.toml").read_bytes().decode())
     for key in ("tool", "hatch", "build", "targets", "wheel"):
-        table = from_plain(table, dict[str, object], default={}).get(key)
+        table = from_plain(table, dict[str, object], default=dict[str, object]()).get(
+            key,
+        )
     wheel = from_plain(table, _WheelTarget, default=_WheelTarget())
     packages: list[str] = wheel.get("packages", [])
     excludes: list[str] = wheel.get("exclude", [])

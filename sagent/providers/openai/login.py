@@ -315,7 +315,11 @@ class CodexLogin:
     async def _tokens(self) -> dict[str, object]:
         """Return the stored tokens."""
         stored = await asyncio.to_thread(_stored, self.path)
-        tokens = from_plain(stored.get("tokens"), dict[str, object], default={})
+        tokens = from_plain(
+            stored.get("tokens"),
+            dict[str, object],
+            default=dict[str, object](),
+        )
         if _text(tokens, "refresh_token"):
             return tokens
         if (
@@ -330,7 +334,11 @@ class CodexLogin:
     async def _save(self, issued: CodexTokens) -> None:
         """Store tokens, keeping every other field ``codex`` keeps beside them."""
         stored = await asyncio.to_thread(_stored, self.path)
-        tokens = from_plain(stored.get("tokens"), dict[str, object], default={})
+        tokens = from_plain(
+            stored.get("tokens"),
+            dict[str, object],
+            default=dict[str, object](),
+        )
         tokens["access_token"] = issued.access_token
         for name, value in (
             ("refresh_token", issued.refresh_token),

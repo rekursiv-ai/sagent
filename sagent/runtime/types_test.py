@@ -31,7 +31,7 @@ from sagent.session.types import (
 )
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 
 def test_whatever_watches_a_call_fail_decides_about_a_suspended_one_too() -> None:

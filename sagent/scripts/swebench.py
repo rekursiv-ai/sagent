@@ -55,7 +55,7 @@ from sagent.session.jsonl import read_record
 from sagent.session.types import TokenUsage
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 _DOCKER_SOCKET: Final = Path("/var/run/docker.sock")
 _DEVNULL: Final = Path(os.devnull)
 _OUT: Final = Path("/opt/scratch/artifacts/sagent/swebench")

@@ -222,7 +222,7 @@ class ClaudeLogin:
         organization = from_plain(
             profile.get("organization"),
             dict[str, object],
-            default={},
+            default=dict[str, object](),
         )
         return {
             "subscriptionType": organization.get("organization_type"),
@@ -376,7 +376,11 @@ def _document(text: str) -> dict[str, object]:
 
 def _claude_login(text: str) -> dict[str, object]:
     stored = _document(text)
-    return from_plain(stored.get("claudeAiOauth"), dict[str, object], default={})
+    return from_plain(
+        stored.get("claudeAiOauth"),
+        dict[str, object],
+        default=dict[str, object](),
+    )
 
 
 def _read_text(path: Path) -> str:

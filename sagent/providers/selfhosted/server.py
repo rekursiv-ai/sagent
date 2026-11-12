@@ -689,7 +689,11 @@ def _window(path: str, *, trust_remote_code: bool) -> int:
             trust_remote_code=trust_remote_code,
         ).to_dict(),
     )
-    text = from_plain(config.get("text_config"), dict[str, object], default={})
+    text = from_plain(
+        config.get("text_config"),
+        dict[str, object],
+        default=dict[str, object](),
+    )
     stated = config.get("max_position_embeddings", text.get("max_position_embeddings"))
     if stated is None:
         raise ValueError(f"{path!r}'s config states no max_position_embeddings.")

@@ -34,7 +34,7 @@ from sagent.lib.posix.host import Frame, Host, HostSpec, encode_frame, encode_wi
 from sagent.lib.posix.terminal import Terminal
 
 
-_CWD: Final = Path(__file__).resolve().parent
+_CWD: Final[Path] = Path(__file__).resolve().parent
 
 if TYPE_CHECKING:
     from collections.abc import (

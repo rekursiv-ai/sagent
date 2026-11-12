@@ -89,7 +89,7 @@ test = [
 typecheck = [
     "basedpyright>=1.40.2",
     "pyrefly>=1.4.0",
-    "ty>=0.0.95",
+    "ty>=0.0.101",
     "rekursiv-ai-typings>=0.1.11",
 ]
 "pre-commit" = [
@@ -731,13 +731,13 @@ all = "warn"
 # https://github.com/astral-sh/ty/issues/4711 (fix: astral-sh/ruff#29346).
 # Re-enable once a ty release includes the fix; pyrefly's bad-override still
 # checks overrides meanwhile.
-invalid-attribute-override = "ignore"
+incompatible-attribute-override = "ignore"
 
 [[tool.ty.overrides]]
 include = ["*_test.py"]
 
 [tool.ty.overrides.rules]
-invalid-key = "ignore"
+invalid-typed-dict-key = "ignore"
 
 [tool.ty.terminal]
 error-on-warning = true
