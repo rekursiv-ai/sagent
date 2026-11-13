@@ -96,7 +96,7 @@ async def test_a_write_waits_for_another_agents_hold_then_sees_its_change(
     result = writing.result()
 
     assert calls == [file_lock_path(path)] * 2
-    assert result.is_error is True
+    assert (result.is_error, result.result) == (True, WriteResult(exit_code=1))
     assert "changed since it was read" in result.text()
     assert path.read_text() == "theirs"
 
@@ -143,7 +143,7 @@ async def test_an_existing_file_must_be_read_before_it_is_replaced(
     (tmp_path / "a.md").write_text("theirs")
     context = ToolContext(cwd=tmp_path)
     refused = await _write(context, "a.md", "mine")
-    assert refused.is_error is True
+    assert (refused.is_error, refused.result) == (True, WriteResult(exit_code=1))
     assert (
         refused.text()
         == f"{tmp_path / 'a.md'} exists and has not been read. Read it first."
@@ -178,7 +178,7 @@ async def test_a_file_changed_since_it_was_read_is_not_replaced(tmp_path: Path) 
     later = f.stat().st_mtime + 100
     os.utime(f, (later, later))
     result = await _write(context, "a.md", "mine")
-    assert result.is_error is True
+    assert (result.is_error, result.result) == (True, WriteResult(exit_code=1))
     assert result.text() == (
         f"{f} changed since it was read, by the user, a linter, or another agent."
         " Read it again before writing it."
@@ -190,7 +190,7 @@ async def test_a_file_changed_since_it_was_read_is_not_replaced(tmp_path: Path) 
 async def test_a_directory_is_not_written(tmp_path: Path) -> None:
     (tmp_path / "d").mkdir()
     result = await _write(ToolContext(cwd=tmp_path), "d", "x")
-    assert result.is_error is True
+    assert (result.is_error, result.result) == (True, WriteResult(exit_code=1))
     assert result.text() == f"{tmp_path / 'd'} is a directory, not a file."
 
 

@@ -196,7 +196,7 @@ async def test_what_is_no_wav_file_is_an_error(
 
     result = await settled(PlayAudio().call(ToolContext(cwd=tmp_path), {"path": name}))
 
-    assert result.is_error is True
+    assert (result.is_error, result.result) == (True, PlayAudioResult(exit_code=1))
     assert result.call_id == ""
     assert result.text() == message.format(tmp_path / name)
     play.assert_not_called()

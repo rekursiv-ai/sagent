@@ -140,7 +140,7 @@ async def test_a_file_changed_since_it_was_read_is_not_edited(tmp_path: Path) ->
     later = f.stat().st_mtime + 100
     os.utime(f, (later, later))
     result = await _edit(context, "a.py", "1", "2")
-    assert result.is_error is True
+    assert (result.is_error, result.result) == (True, EditResult(exit_code=1))
     assert result.text() == (
         f"{f} changed since it was read, by the user, a linter, or another agent."
         " Read it again before editing it."
@@ -191,7 +191,7 @@ async def test_an_edit_that_cannot_be_made_changes_nothing(
         "new",
         replace_all=replace_all,
     )
-    assert result.is_error is True
+    assert (result.is_error, result.result) == (True, EditResult(exit_code=1))
     assert result.text() == message.format(f)
     assert (f.read_bytes() if f.is_file() else None) == before
 
@@ -468,7 +468,7 @@ async def test_two_agents_editing_one_file_never_lose_an_edit(
 
     assert calls == [file_lock_path(path)] * 2
     assert done.is_error is False
-    assert theirs.is_error is True
+    assert (theirs.is_error, theirs.result) == (True, EditResult(exit_code=1))
     assert "changed since it was read" in theirs.text()
     assert path.read_text() == "A = 1\nb = 1\n"
 

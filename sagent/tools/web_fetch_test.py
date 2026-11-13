@@ -76,15 +76,6 @@ def fetches(monkeypatch: pytest.MonkeyPatch) -> Fetches:
 _CONTEXT = ToolContext(cwd=Path("/"), fetch_session=FetchSession())
 
 
-def _error(text: str) -> ToolResult:
-    return ToolResult(
-        call_id="",
-        state="done",
-        stderr=(text,),
-        result=WebFetchResult(exit_code=1),
-    )
-
-
 @pytest.mark.parametrize(
     "flag",
     [
@@ -232,7 +223,12 @@ async def test_a_body_must_fit_the_method(
             {"url": "https://e.com", **arguments},
         ),
     )
-    assert result == _error(error)
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stderr=(error,),
+        result=WebFetchResult(exit_code=1),
+    )
     assert fetches.seen == []
 
 
@@ -333,7 +329,12 @@ async def test_a_bot_block_says_how_to_clear_it(fetches: Fetches) -> None:
             {"url": "https://e.com"},
         ),
     )
-    assert result == _error(CloudflareChallengeError.explain("https://e.com"))
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stderr=(CloudflareChallengeError.explain("https://e.com"),),
+        result=WebFetchResult(exit_code=1),
+    )
 
 
 @pytest.mark.parametrize(
@@ -349,7 +350,12 @@ async def test_a_failed_fetch_says_why(fetches: Fetches, error: Exception) -> No
     fetches.error = error
     tool = WebFetch()
     result = await settled(tool.call(_CONTEXT, {"url": "https://e.com"}))
-    assert result == _error(f"Fetch failed: {error}")
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stderr=(f"Fetch failed: {error}",),
+        result=WebFetchResult(exit_code=1),
+    )
     fetches.error = None
     await settled(tool.call(_CONTEXT, {"url": "https://e.com"}))
     assert len(fetches.seen) == 2

@@ -262,7 +262,12 @@ def test_background_task_describes_itself() -> None:
 @pytest.mark.asyncio
 async def test_background_task_alone_has_no_jobs_to_manage() -> None:
     result = await settled(BackgroundTask().call(_CONTEXT, {"operation": "list"}))
-    assert result == _error("BackgroundTask runs only inside an agent's runtime.")
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stderr=("BackgroundTask runs only inside an agent's runtime.",),
+        result=BackgroundTaskResult(exit_code=1),
+    )
 
 
 @pytest.mark.asyncio
@@ -337,7 +342,12 @@ async def test_foreground_returns_the_jobs_result(listed: bool) -> None:
 @pytest.mark.asyncio
 async def test_an_operation_on_a_job_needs_its_id(operation: str) -> None:
     result = await BackgroundTask().manage(FakeTable(), {"operation": operation})
-    assert result == _error(f"{operation} requires an id.")
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stderr=(f"{operation} requires an id.",),
+        result=BackgroundTaskResult(exit_code=1),
+    )
 
 
 @pytest.mark.parametrize("operation", ["cancel", "foreground"])
@@ -346,7 +356,12 @@ async def test_only_background_jobs_can_be_managed(operation: str) -> None:
     job = _job("Read", "running", 0)
     table = FakeTable(listed={"fg": job})
     result = await BackgroundTask().manage(table, {"operation": operation, "id": "fg"})
-    assert result == _error("No background job 'fg'; list shows them.")
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stderr=("No background job 'fg'; list shows them.",),
+        result=BackgroundTaskResult(exit_code=1),
+    )
     assert job.cancelled == []
     assert table.waited == []
 
@@ -366,15 +381,6 @@ async def test_a_job_that_ends_with_no_result_is_unknown() -> None:
 async def test_an_unknown_operation_is_an_argument_error() -> None:
     with pytest.raises(ValueError, match="'operation' must be one of"):
         _ = await BackgroundTask().manage(FakeTable(), {"operation": "fg"})
-
-
-def _error(text: str) -> ToolResult:
-    return ToolResult(
-        call_id="",
-        state="done",
-        stderr=(text,),
-        result=BackgroundTaskResult(exit_code=1),
-    )
 
 
 def _properties(tool: Tool) -> Mapping[str, PlainTree]:

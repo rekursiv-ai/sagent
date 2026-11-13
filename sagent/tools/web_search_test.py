@@ -80,15 +80,6 @@ def searches(monkeypatch: pytest.MonkeyPatch) -> Searches:
 _CONTEXT = ToolContext(cwd=Path("/"), fetch_session=FetchSession())
 
 
-def _error(text: str) -> ToolResult:
-    return ToolResult(
-        call_id="",
-        state="done",
-        stderr=(text,),
-        result=WebSearchResult(exit_code=1),
-    )
-
-
 def test_websearch_describes_itself() -> None:
     tool = WebSearch()
     assert tool.name == "WebSearch"
@@ -194,7 +185,12 @@ async def test_a_domain_that_is_not_a_hostname_is_refused(
                 {"query": "q", key: [domain]},
             ),
         )
-        assert result == _error(f"Not a hostname: {domain!r}.")
+        assert result == ToolResult(
+            call_id="",
+            state="done",
+            stderr=(f"Not a hostname: {domain!r}.",),
+            result=WebSearchResult(exit_code=1),
+        )
     assert searches.seen == []
 
 
@@ -244,7 +240,12 @@ async def test_a_failed_search_says_why(
 ) -> None:
     searches.error = error
     result = await settled(WebSearch().call(_CONTEXT, {"query": "q"}))
-    assert result == _error(message)
+    assert result == ToolResult(
+        call_id="",
+        state="done",
+        stderr=(message,),
+        result=WebSearchResult(exit_code=1),
+    )
 
 
 @pytest.mark.parametrize(

@@ -2387,15 +2387,6 @@ def test_a_pruned_result_is_journaled_as_itself_and_resumes_pruned(
     ) in list(session)
 
 
-def _result(n: int) -> ToolResult:
-    return ToolResult(
-        call_id=f"c{n}",
-        state="done",
-        stdout=(f"output {n}",),
-        result=UncategorizedToolResult(exit_code=1),
-    )
-
-
 def test_a_result_pruned_in_the_pass_it_came_is_journaled_whole(
     tmp_path: Path,
 ) -> None:
@@ -2405,17 +2396,47 @@ def test_a_result_pruned_in_the_pass_it_came_is_journaled_whole(
     session.resume()
     _ = agent.runtime.append_history(UserMessage(content="go"))
     _ = agent.runtime.append_history(reply(calls=[call("Echo", "c1")]))
-    _ = agent.runtime.append_history(_result(1))
+    _ = agent.runtime.append_history(
+        ToolResult(
+            call_id=f"c{1}",
+            state="done",
+            stdout=(f"output {1}",),
+            result=UncategorizedToolResult(exit_code=1),
+        ),
+    )
     drop(agent.runtime, [2], stub="[pruned]")
     _ = agent.runtime.append_history(reply(calls=[call("Echo", "c2")]))
-    _ = agent.runtime.append_history(_result(2))
+    _ = agent.runtime.append_history(
+        ToolResult(
+            call_id=f"c{2}",
+            state="done",
+            stdout=(f"output {2}",),
+            result=UncategorizedToolResult(exit_code=1),
+        ),
+    )
     drop(agent.runtime, [4], stub="[pruned]")
     _ = agent.runtime.append_history(reply("done"))
     session.persist()
 
     kept = list(journal.history())
-    assert _result(1) in kept
-    assert _result(2) in kept
+    assert (
+        ToolResult(
+            call_id=f"c{1}",
+            state="done",
+            stdout=(f"output {1}",),
+            result=UncategorizedToolResult(exit_code=1),
+        )
+        in kept
+    )
+    assert (
+        ToolResult(
+            call_id=f"c{2}",
+            state="done",
+            stdout=(f"output {2}",),
+            result=UncategorizedToolResult(exit_code=1),
+        )
+        in kept
+    )
     assert sum(isinstance(r, ContextClear) for r in kept) == 1
     _, resumed = _agent(tmp_path, journal=journal)
     _session(resumed).resume()
@@ -2433,7 +2454,14 @@ def test_a_result_edited_away_in_the_pass_it_came_is_journaled_whole(
     session.resume()
     first = agent.runtime.append_history(UserMessage(content="go"))
     _ = agent.runtime.append_history(reply(calls=[call("Echo", "c1")]))
-    last = agent.runtime.append_history(_result(1))
+    last = agent.runtime.append_history(
+        ToolResult(
+            call_id=f"c{1}",
+            state="done",
+            stdout=(f"output {1}",),
+            result=UncategorizedToolResult(exit_code=1),
+        ),
+    )
     _ = agent.runtime.append_splice(
         mask=(MaskRange(session_id="", lo=first.ordinal, hi=last.ordinal),),
         payload=(UserMessage(content="summary"),),
@@ -2442,7 +2470,12 @@ def test_a_result_edited_away_in_the_pass_it_came_is_journaled_whole(
     )
     session.persist()
 
-    assert _result(1) in list(journal.history())
+    assert ToolResult(
+        call_id=f"c{1}",
+        state="done",
+        stdout=(f"output {1}",),
+        result=UncategorizedToolResult(exit_code=1),
+    ) in list(journal.history())
     (window,) = _own(journal)
     assert isinstance(window, ContextClear)
     assert window.history == (UserMessage(content="summary"),)

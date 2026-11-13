@@ -169,13 +169,21 @@ def _write(
 ) -> ToolOutput[WriteResult, str, str]:
     """Write ``content`` to ``path`` if the model has seen what it replaces."""
     if path.is_dir():
-        return _error(f"{path} is a directory, not a file.")
+        return ToolOutput(
+            stderr=(f"{path} is a directory, not a file.",),
+            result=WriteResult(exit_code=1),
+        )
     if path.exists() and path not in context.files:
-        return _error(f"{path} exists and has not been read. Read it first.")
+        return ToolOutput(
+            stderr=(f"{path} exists and has not been read. Read it first.",),
+            result=WriteResult(exit_code=1),
+        )
     if context.files.changed(path):
-        return _error(
-            f"{path} changed since it was read, by the user, a linter, or"
-            " another agent. Read it again before writing it.",
+        return ToolOutput(
+            stderr=(
+                f"{path} changed since it was read, by the user, a linter, or another agent. Read it again before writing it.",
+            ),
+            result=WriteResult(exit_code=1),
         )
     write_file(path, content.encode())
     context.files.saw(path)
@@ -183,7 +191,3 @@ def _write(
         stdout=(f"Wrote {path}.",),
         result=WriteResult(path=str(path), content=content),
     )
-
-
-def _error(message: str) -> ToolOutput[WriteResult, str, str]:
-    return ToolOutput(stderr=(message,), result=WriteResult(exit_code=1))

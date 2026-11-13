@@ -138,9 +138,19 @@ class BackgroundTask:
         if a.operation == "list":
             return _listing(jobs)
         if not a.id:
-            return _error(f"{a.operation} requires an id.")
+            return ToolResult(
+                call_id="",
+                state="done",
+                stderr=(f"{a.operation} requires an id.",),
+                result=BackgroundTaskResult(exit_code=1),
+            )
         job = jobs.get(a.id)
-        unknown = _error(f"No background job {a.id!r}; list shows them.")
+        unknown = ToolResult(
+            call_id="",
+            state="done",
+            stderr=(f"No background job {a.id!r}; list shows them.",),
+            result=BackgroundTaskResult(exit_code=1),
+        )
         # A call the model waits on already is no background job to manage.
         if a.operation == "cancel" or (job is None and a.id in table.jobs):
             if job is None:
@@ -301,16 +311,6 @@ def _listing(jobs: Mapping[str, Job]) -> ToolResult[BackgroundTaskResult]:
 def _phase(job: Job) -> str:
     """Return ``sleeping`` until a job starts, then ``running``."""
     return "sleeping" if job.state == "sleeping" else "running"
-
-
-def _error(text: str) -> ToolResult[BackgroundTaskResult]:
-    """Return a done record with exit code 1 and ``text`` on standard error."""
-    return ToolResult(
-        call_id="",
-        state="done",
-        stderr=(text,),
-        result=BackgroundTaskResult(exit_code=1),
-    )
 
 
 async def _refused() -> ToolOutput[BackgroundTaskResult, str, str]:

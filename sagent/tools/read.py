@@ -219,7 +219,10 @@ class Read:
         try:
             return await asyncio.to_thread(self._read, context, a)
         except OSError as e:
-            return _error(f"Error reading {a.file_path}: {e}")
+            return ToolOutput(
+                stderr=(f"Error reading {a.file_path}: {e}",),
+                result=ReadResult(exit_code=1),
+            )
 
     def _read(
         self,
@@ -229,9 +232,15 @@ class Read:
         """Read the file ``a`` names, by its kind."""
         path = context.path(a.file_path)
         if not path.exists():
-            return _error(f"File not found: {path}")
+            return ToolOutput(
+                stderr=(f"File not found: {path}",),
+                result=ReadResult(exit_code=1),
+            )
         if path.is_dir():
-            return _error(f"{path} is a directory. Use List or Glob.")
+            return ToolOutput(
+                stderr=(f"{path} is a directory. Use List or Glob.",),
+                result=ReadResult(exit_code=1),
+            )
         if path.suffix.lower() == ".pdf":
             return self._read_pdf(context, path, pages=a.pages)
         if path.suffix.lower() == ".ipynb":
@@ -241,9 +250,11 @@ class Read:
         if mime in {"image/png", "image/jpeg", "image/gif", "image/bmp", "image/webp"}:
             size = path.stat().st_size
             if size > self.max_image_bytes:
-                return _error(
-                    f"{path} is {size:,} bytes, over the {self.max_image_bytes:,}"
-                    " a read takes. Shrink it with Bash first.",
+                return ToolOutput(
+                    stderr=(
+                        f"{path} is {size:,} bytes, over the {self.max_image_bytes:,} a read takes. Shrink it with Bash first.",
+                    ),
+                    result=ReadResult(exit_code=1),
                 )
             context.files.saw(path)
             return ToolOutput(
@@ -271,27 +282,41 @@ class Read:
         """Render a PDF's pages as JPEGs, as many as fit the byte budget."""
         with path.open("rb") as f:
             if f.read(5) != b"%PDF-":
-                return _error(f"{path} is not a PDF: it lacks the %PDF- header.")
+                return ToolOutput(
+                    stderr=(f"{path} is not a PDF: it lacks the %PDF- header.",),
+                    result=ReadResult(exit_code=1),
+                )
         size = path.stat().st_size
         if size > self.max_pdf_bytes:
-            return _error(
-                f"{path} is {size:,} bytes, over the {self.max_pdf_bytes:,} a read opens.",
+            return ToolOutput(
+                stderr=(
+                    f"{path} is {size:,} bytes, over the {self.max_pdf_bytes:,} a read opens.",
+                ),
+                result=ReadResult(exit_code=1),
             )
         match = re.fullmatch(r"(\d+)(?:-(\d*))?", pages.strip())
         if pages and match is None:
-            return _error(f'Invalid pages {pages!r}: use "N", "N-M", or "N-".')
+            return ToolOutput(
+                stderr=(f'Invalid pages {pages!r}: use "N", "N-M", or "N-".',),
+                result=ReadResult(exit_code=1),
+            )
         with PDFIUM:
             try:
                 doc = pdfium.PdfDocument(str(path))
             except pdfium.PdfiumError as e:
-                return _error(f"{path} is not a readable PDF: {e}")
+                return ToolOutput(
+                    stderr=(f"{path} is not a readable PDF: {e}",),
+                    result=ReadResult(exit_code=1),
+                )
             try:
                 total = len(doc)
                 if match is None:
                     if total > self.max_pdf_pages:
-                        return _error(
-                            f"{path} has {total} pages, over {self.max_pdf_pages}."
-                            ' Pass pages="1-N" to read some.',
+                        return ToolOutput(
+                            stderr=(
+                                f'{path} has {total} pages, over {self.max_pdf_pages}. Pass pages="1-N" to read some.',
+                            ),
+                            result=ReadResult(exit_code=1),
                         )
                     first, last = 1, total
                 elif match[2] is None:
@@ -300,7 +325,10 @@ class Read:
                     first = int(match[1])
                     last = min(int(match[2]), total) if match[2] else total
                 if first < 1 or last < first or last > total:
-                    return _error(f"{path} has no pages {pages} (it has {total}).")
+                    return ToolOutput(
+                        stderr=(f"{path} has no pages {pages} (it has {total}).",),
+                        result=ReadResult(exit_code=1),
+                    )
                 jpegs = _render(
                     doc,
                     first=first,
@@ -310,7 +338,10 @@ class Read:
             finally:
                 doc.close()
         if not jpegs:
-            return _error(f"Page {first} of {path} alone is too large to send.")
+            return ToolOutput(
+                stderr=(f"Page {first} of {path} alone is too large to send.",),
+                result=ReadResult(exit_code=1),
+            )
         context.files.saw(path)
         end = first + len(jpegs) - 1
         note = f"[PDF: {path.name}, pages {first}-{end} of {total}]"
@@ -507,7 +538,10 @@ def _read_notebook(
         notebook = json_loads(path.read_text(encoding="utf-8"), dict[str, object])
         cells = from_plain(notebook.get("cells", []), list[dict[str, object]])
     except (json.JSONDecodeError, UnicodeDecodeError, ReadError) as e:
-        return _error(f"{path} is not a Jupyter notebook: {e}")
+        return ToolOutput(
+            stderr=(f"{path} is not a Jupyter notebook: {e}",),
+            result=ReadResult(exit_code=1),
+        )
     context.files.saw(path)
     parts: list[str] = []
     for i, cell in enumerate(cells):
@@ -579,7 +613,3 @@ def _render(
         used += buf.tell()
         jpegs.append(buf.getvalue())
     return jpegs
-
-
-def _error(message: str) -> ToolOutput[ReadResult, str, str]:
-    return ToolOutput(stderr=(message,), result=ReadResult(exit_code=1))

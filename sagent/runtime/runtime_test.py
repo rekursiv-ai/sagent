@@ -475,20 +475,6 @@ def _user(text: str) -> UserMessage:
     return UserMessage(content=text)
 
 
-def _result(
-    call_id: str,
-    text: str = "ok",
-    *,
-    stub: Literal["pending", "cancelled"] | None = None,
-) -> ToolResult:
-    return ToolResult(
-        call_id=call_id,
-        state=stub or "done",
-        stdout=(text,),
-        result=None if stub else UncategorizedToolResult(),
-    )
-
-
 def _arrival(h: Harness, call_id: str) -> list[ToolResult]:
     return h.results(f"{call_id}{Markers().arrival}")
 
@@ -957,7 +943,15 @@ async def test_a_result_pushed_for_a_running_call_answers_it() -> None:
 @pytest.mark.asyncio
 async def test_a_result_for_no_running_call_is_dropped() -> None:
     async with Harness(reply("hi")) as h:
-        h.push(_user("go"), _result("bogus", "orphan"))
+        h.push(
+            _user("go"),
+            ToolResult(
+                call_id="bogus",
+                state="done",
+                stdout=("orphan",),
+                result=UncategorizedToolResult(),
+            ),
+        )
         await h.seen(ModelIdle)
     assert h.results("bogus") == []
 
@@ -2117,10 +2111,11 @@ async def _with_stub(
     h.runtime.append_history(_user("go"))
     h.runtime.append_history(reply(calls=[call("echo", call_id)]))
     h.runtime.append_history(
-        _result(
-            call_id,
-            Markers().detached if stub == "pending" else Markers().cancelled,
-            stub=stub,
+        ToolResult(
+            call_id=call_id,
+            state=stub or "done",
+            stdout=(Markers().detached if stub == "pending" else Markers().cancelled,),
+            result=None,
         ),
     )
     h.runtime.append_history(reply("noted"))
@@ -2132,12 +2127,33 @@ async def test_a_second_delivery_for_one_call_is_dropped() -> None:
     await _with_stub(h)
     async with h:
         h.push(
-            DetachedResult(result=_result("c1", "producer-1")),
-            DetachedResult(result=_result("c1", "producer-2")),
+            DetachedResult(
+                result=ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("producer-1",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+            DetachedResult(
+                result=ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("producer-2",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
         )
         await h.seen(ModelIdle)
         h.push(
-            DetachedResult(result=_result("c1", "producer-3")),
+            DetachedResult(
+                result=ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("producer-3",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
             _user("still there?"),
         )
         await h.seen(ModelIdle, 2)
@@ -2154,12 +2170,25 @@ async def test_a_pending_stub_is_never_delivered_and_never_consumes_the_call() -
     async with h:
         h.push(
             DetachedResult(
-                result=_result("c1", "[Running in background: T]", stub="pending"),
+                result=ToolResult(
+                    call_id="c1",
+                    state="pending",
+                    stdout=("[Running in background: T]",),
+                ),
             ),
         )
         await spin()
         assert h.runtime._pending_commits == []
-        h.push(DetachedResult(result=_result("c1", "REAL")))
+        h.push(
+            DetachedResult(
+                result=ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("REAL",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        )
         await h.seen(ModelIdle)
     assert [r.text() for r in _arrival(h, "c1")] == ["REAL"]
 
@@ -2171,7 +2200,11 @@ async def test_a_cancellation_already_answered_is_not_delivered_again() -> None:
     async with h:
         h.push(
             DetachedResult(
-                result=_result("c1", Markers().cancelled, stub="cancelled"),
+                result=ToolResult(
+                    call_id="c1",
+                    state="cancelled",
+                    stdout=(Markers().cancelled,),
+                ),
             ),
         )
         await h.seen(DetachedResult)
@@ -2187,7 +2220,11 @@ async def test_a_background_cancellation_is_delivered() -> None:
     async with h:
         h.push(
             DetachedResult(
-                result=_result("c1", Markers().cancelled, stub="cancelled"),
+                result=ToolResult(
+                    call_id="c1",
+                    state="cancelled",
+                    stdout=(Markers().cancelled,),
+                ),
             ),
         )
         await h.seen(ModelIdle)
@@ -2237,14 +2274,20 @@ async def test_a_terminal_answer_inside_a_splice_blocks_redelivery() -> None:
     parent = h.runtime.append_history(reply(calls=[call("echo", "c1")]))
     h.runtime.append_splice(
         insert_after=parent,
-        payload=(_result("c1", Markers().cancelled, stub="cancelled"),),
+        payload=(
+            ToolResult(call_id="c1", state="cancelled", stdout=(Markers().cancelled,)),
+        ),
         strategy="lazy_pairing",
         paired_externally=frozenset({"c1"}),
     )
     async with h:
         h.push(
             DetachedResult(
-                result=_result("c1", Markers().cancelled, stub="cancelled"),
+                result=ToolResult(
+                    call_id="c1",
+                    state="cancelled",
+                    stdout=(Markers().cancelled,),
+                ),
             ),
         )
         await h.seen(DetachedResult)
@@ -2313,7 +2356,17 @@ async def test_a_result_queued_behind_a_clear_delivers_nothing() -> None:
     h = Harness(reply("fresh"))
     await _with_stub(h, "t1")
     async with h:
-        h.push(Clear(), DetachedResult(result=_result("t1", "late")))
+        h.push(
+            Clear(),
+            DetachedResult(
+                result=ToolResult(
+                    call_id="t1",
+                    state="done",
+                    stdout=("late",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        )
         await h.seen(ClearComplete)
         h.push(_user("fresh"))
         await h.seen(ModelIdle)
@@ -2425,7 +2478,17 @@ async def test_a_forged_pairing_survives_an_interleaved_delivery() -> None:
     ) as h:
         h.push(_user("go"))
         await h.seen(AgentIdle)
-        h.push(DetachedResult(result=_result("d1", "real-d1")), _user("real follow-up"))
+        h.push(
+            DetachedResult(
+                result=ToolResult(
+                    call_id="d1",
+                    state="done",
+                    stdout=("real-d1",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+            _user("real follow-up"),
+        )
         await h.seen(ModelIdle)
     (err,) = h.results(f"{Markers().mimic}0")
     assert "[interrupted]" not in err.text()
@@ -2488,14 +2551,42 @@ async def test_the_rename_skips_every_mimic_id_on_the_tape() -> None:
     h.runtime.append_history(
         reply(calls=[call(Markers().arrived, f"{Markers().mimic}4")]),
     )
-    h.runtime.append_history(_result(f"{Markers().mimic}6"))
+    h.runtime.append_history(
+        ToolResult(
+            call_id=f"{Markers().mimic}6",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     h.runtime.append_splice(
-        payload=(_result(f"{Markers().mimic}9"),),
+        payload=(
+            ToolResult(
+                call_id=f"{Markers().mimic}9",
+                state="done",
+                stdout=("ok",),
+                result=UncategorizedToolResult(),
+            ),
+        ),
         strategy="lazy_pairing",
         paired_externally=frozenset({f"{Markers().mimic}9"}),
     )
-    h.runtime.append_history(_result(f"{Markers().mimic}²"))
-    h.runtime.append_history(_result("call_99"))
+    h.runtime.append_history(
+        ToolResult(
+            call_id=f"{Markers().mimic}²",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
+    )
+    h.runtime.append_history(
+        ToolResult(
+            call_id="call_99",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     h.runtime.append_history(_user("go"))
     async with h:
         h.push(SaveSession())
@@ -2512,7 +2603,12 @@ async def test_a_forged_rename_skips_ids_a_resumed_history_holds() -> None:
     for entry in (
         _user("before"),
         reply(calls=[call(Markers().arrived, taken)]),
-        _result(taken, "not callable"),
+        ToolResult(
+            call_id=taken,
+            state="done",
+            stdout=("not callable",),
+            result=UncategorizedToolResult(),
+        ),
         reply("earlier"),
     ):
         _ = h.runtime.append_history(entry)
@@ -3307,7 +3403,16 @@ async def test_settling_kills_only_the_stubbed_calls_nothing_runs() -> None:
     for cid in ("lost", "delivered", "running"):
         await _with_stub(h, cid)
     async with h:
-        h.push(DetachedResult(result=_result("delivered", "out")))
+        h.push(
+            DetachedResult(
+                result=ToolResult(
+                    call_id="delivered",
+                    state="done",
+                    stdout=("out",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        )
         await h.seen(ModelIdle)
         running = asyncio.create_task(_forever())
         h.runtime.detached["running"] = running
@@ -3324,13 +3429,34 @@ async def test_clear_forgets_delivered_calls() -> None:
     h = Harness(reply("saw"), reply("saw again"))
     await _with_stub(h)
     async with h:
-        h.push(DetachedResult(result=_result("c1", "first")))
+        h.push(
+            DetachedResult(
+                result=ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("first",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        )
         await h.seen(ModelIdle)
         h.push(Clear())
         await h.seen(ClearComplete)
         h.runtime.append_history(reply(calls=[call("echo", "c1")]))
-        h.runtime.append_history(_result("c1", Markers().detached, stub="pending"))
-        h.push(DetachedResult(result=_result("c1", "second")), _user("go"))
+        h.runtime.append_history(
+            ToolResult(call_id="c1", state="pending", stdout=(Markers().detached,)),
+        )
+        h.push(
+            DetachedResult(
+                result=ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("second",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+            _user("go"),
+        )
         await h.seen(ModelIdle, 2)
     assert [r.text() for r in _arrival(h, "c1")] == ["second"]
 
@@ -4104,7 +4230,14 @@ async def test_the_gate_answers_an_orphan_call() -> None:
 async def test_the_gate_drops_an_orphan_result() -> None:
     h = Harness(reply("acknowledged"))
     h.runtime.append_history(_user("kick off"))
-    h.runtime.append_history(_result("ghost_1", "oops"))
+    h.runtime.append_history(
+        ToolResult(
+            call_id="ghost_1",
+            state="done",
+            stdout=("oops",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     async with h:
         h.push(_user("please retry"))
         await h.seen(ModelIdle)
@@ -4124,7 +4257,14 @@ async def test_the_gate_rescues_splices_whose_partners_never_came() -> None:
         paired_externally=frozenset({"toolu_X"}),
     )
     h.runtime.append_splice(
-        payload=(_result("ghost", "dangling"),),
+        payload=(
+            ToolResult(
+                call_id="ghost",
+                state="done",
+                stdout=("dangling",),
+                result=UncategorizedToolResult(),
+            ),
+        ),
         strategy="lazy_pairing",
         paired_externally=frozenset({"ghost"}),
     )
@@ -4414,7 +4554,14 @@ def test_a_splice_payload_turn_anchors_its_calls() -> None:
         paired_externally=frozenset({"c1"}),
         discards_content=True,
     )
-    h.runtime._commit_pairing(_result("c1", "late"))
+    h.runtime._commit_pairing(
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("late",),
+            result=UncategorizedToolResult(),
+        ),
+    )
     assert h.texts() == ["kept", "", "late"]
     validate_context(h.history())
 
@@ -5010,7 +5157,11 @@ async def test_a_cancellation_with_no_answer_on_tape_is_delivered() -> None:
         await h.seen(ModelIdle)
         h.push(
             DetachedResult(
-                result=_result("t1", Markers().cancelled, stub="cancelled"),
+                result=ToolResult(
+                    call_id="t1",
+                    state="cancelled",
+                    stdout=(Markers().cancelled,),
+                ),
             ),
         )
         await h.seen(ModelIdle, 2)
@@ -5052,7 +5203,12 @@ def test_absorbing_a_splice_must_carry_its_results_and_settings() -> None:
         payload=(
             _user("a"),
             reply(calls=[call("echo", "c1")]),
-            _result("c1", "tool says"),
+            ToolResult(
+                call_id="c1",
+                state="done",
+                stdout=("tool says",),
+                result=UncategorizedToolResult(),
+            ),
             TurnContext(cwd="/x"),
         ),
         strategy="summary",
@@ -5064,7 +5220,12 @@ def test_absorbing_a_splice_must_carry_its_results_and_settings() -> None:
             payload=(
                 _user("a"),
                 reply(calls=[call("echo", "c1")]),
-                _result("c1", "other"),
+                ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("other",),
+                    result=UncategorizedToolResult(),
+                ),
                 TurnContext(cwd="/x"),
             ),
             strategy="careless",
@@ -5075,7 +5236,12 @@ def test_absorbing_a_splice_must_carry_its_results_and_settings() -> None:
             payload=(
                 _user("a"),
                 reply(calls=[call("echo", "c1")]),
-                _result("c1", "tool says"),
+                ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("tool says",),
+                    result=UncategorizedToolResult(),
+                ),
             ),
             strategy="careless",
         )
@@ -5412,10 +5578,24 @@ async def test_foreground_of_a_delivered_result_returns_it() -> None:
     h = Harness(reply("saw"))
     await _with_stub(h)
     async with h:
-        h.push(DetachedResult(result=_result("c1", "REAL")))
+        h.push(
+            DetachedResult(
+                result=ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("REAL",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        )
         await h.seen(ModelIdle)
         result = await h.runtime.foreground("c1")
-    assert result == _result("c1", "REAL")
+    assert result == ToolResult(
+        call_id="c1",
+        state="done",
+        stdout=("REAL",),
+        result=UncategorizedToolResult(),
+    )
 
 
 @pytest.mark.asyncio
@@ -5424,13 +5604,32 @@ async def test_foreground_takes_a_result_waiting_to_be_delivered() -> None:
     await _with_stub(h)
     async with h:
         h.push(
-            DetachedResult(result=_result("c0", "OTHER")),
-            DetachedResult(result=_result("c1", "REAL")),
+            DetachedResult(
+                result=ToolResult(
+                    call_id="c0",
+                    state="done",
+                    stdout=("OTHER",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+            DetachedResult(
+                result=ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("REAL",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
             Halt(),
         )
         await h.seen(Halt)
         assert len(h.runtime._pending_commits) == 2
-        assert await h.runtime.foreground("c1") == _result("c1", "REAL")
+        assert await h.runtime.foreground("c1") == ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("REAL",),
+            result=UncategorizedToolResult(),
+        )
         h.push(_user("go on"))
         await h.seen(ModelIdle)
     assert _arrival(h, "c1") == []
@@ -6006,7 +6205,16 @@ async def test_an_arrival_turn_costs_nothing() -> None:
     h = Harness(reply("saw"))
     await _with_stub(h)
     async with h:
-        h.push(DetachedResult(result=_result("c1", "REAL")))
+        h.push(
+            DetachedResult(
+                result=ToolResult(
+                    call_id="c1",
+                    state="done",
+                    stdout=("REAL",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        )
         await h.seen(ModelIdle)
     turn = h.history()[-3]
     assert isinstance(turn, Response)
@@ -6046,7 +6254,16 @@ async def test_a_foregrounded_result_is_never_delivered_again() -> None:
         await until(lambda: "b1" in h.runtime._foreground_waiters)
         tool.release.set()
         await h.seen(ModelIdle)
-        h.push(DetachedResult(result=_result("b1", "again")))
+        h.push(
+            DetachedResult(
+                result=ToolResult(
+                    call_id="b1",
+                    state="done",
+                    stdout=("again",),
+                    result=UncategorizedToolResult(),
+                ),
+            ),
+        )
         await spin()
     assert _arrival(h, "b1") == []
 
@@ -6060,7 +6277,11 @@ async def test_a_cancellation_whose_answer_was_compacted_away_is_delivered() -> 
         await h.seen(ModelIdle)
         h.push(
             DetachedResult(
-                result=_result("t1", Markers().cancelled, stub="cancelled"),
+                result=ToolResult(
+                    call_id="t1",
+                    state="cancelled",
+                    stdout=(Markers().cancelled,),
+                ),
             ),
         )
         await h.seen(ModelIdle, 2)
@@ -6073,13 +6294,28 @@ async def test_the_gate_repairs_every_orphan_on_a_long_tape() -> None:
     for entry in (
         _user("a"),
         reply(calls=[call("echo", "c1")]),
-        _result("c1", "ok"),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
         reply(calls=[call("echo", "c2")]),
         SystemMessage(content="note"),
         _user("b"),
-        _result("ghost", "stray"),
+        ToolResult(
+            call_id="ghost",
+            state="done",
+            stdout=("stray",),
+            result=UncategorizedToolResult(),
+        ),
         reply(calls=[call("echo", "c3")]),
-        _result("c1", "dup"),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("dup",),
+            result=UncategorizedToolResult(),
+        ),
     ):
         h.runtime.append_history(entry)
     async with h:
@@ -6314,9 +6550,19 @@ async def test_the_gate_answers_calls_a_later_turn_or_the_end_left_open() -> Non
     for entry in (
         _user("a"),
         reply(calls=[call("echo", "c1"), call("echo", "c2")]),
-        _result("c1", "ok"),
+        ToolResult(
+            call_id="c1",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
         reply(calls=[call("echo", "c3"), call("echo", "c4")]),
-        _result("c3", "ok"),
+        ToolResult(
+            call_id="c3",
+            state="done",
+            stdout=("ok",),
+            result=UncategorizedToolResult(),
+        ),
     ):
         h.runtime.append_history(entry)
     async with h:
@@ -6417,8 +6663,23 @@ def _message_history(draw: st.DrawFn) -> list[ModelContextEvent]:
         elif kind == "note":
             history.append(_note(draw(_TEXT)))
         elif pending:
-            history.append(_result(pending.pop(0), draw(_TEXT)))
-    history.extend(_result(cid, "[orphan]") for cid in pending)
+            history.append(
+                ToolResult(
+                    call_id=pending.pop(0),
+                    state="done",
+                    stdout=(draw(_TEXT),),
+                    result=UncategorizedToolResult(),
+                ),
+            )
+    history.extend(
+        ToolResult(
+            call_id=cid,
+            state="done",
+            stdout=("[orphan]",),
+            result=UncategorizedToolResult(),
+        )
+        for cid in pending
+    )
     return history
 
 
@@ -6450,9 +6711,23 @@ def _unique_id_history(
         elif kind == "note":
             history.append(_note(draw(_TEXT)))
         elif pending:
-            history.append(_result(pending.pop(0), draw(_TEXT)))
+            history.append(
+                ToolResult(
+                    call_id=pending.pop(0),
+                    state="done",
+                    stdout=(draw(_TEXT),),
+                    result=UncategorizedToolResult(),
+                ),
+            )
     if draw(st.booleans()):
-        history.append(_result(f"orphan{counter}", draw(_TEXT)))
+        history.append(
+            ToolResult(
+                call_id=f"orphan{counter}",
+                state="done",
+                stdout=(draw(_TEXT),),
+                result=UncategorizedToolResult(),
+            ),
+        )
     return history
 
 
@@ -6477,7 +6752,14 @@ def _alternating_history(draw: st.DrawFn) -> list[ModelContextEvent]:
             counter += len(ids)
             history.append(_turn(draw(_TEXT), ids))
             history.extend(
-                _result(cid, draw(_TEXT)) for cid in ids if draw(st.booleans())
+                ToolResult(
+                    call_id=cid,
+                    state="done",
+                    stdout=(draw(_TEXT),),
+                    result=UncategorizedToolResult(),
+                )
+                for cid in ids
+                if draw(st.booleans())
             )
             previous = None if ids else "assistant"
     return history
@@ -6491,7 +6773,13 @@ _ENTRY = st.one_of(
         _TEXT,
         st.lists(st.sampled_from(("c0", "c1", "c2")), max_size=2, unique=True),
     ),
-    st.builds(_result, st.sampled_from(("c0", "c1", "c2")), _TEXT),
+    st.builds(
+        ToolResult,
+        call_id=st.sampled_from(("c0", "c1", "c2")),
+        state=st.just("done"),
+        stdout=st.tuples(_TEXT),
+        result=st.just(UncategorizedToolResult()),
+    ),
     st.builds(_note, _TEXT),
 )
 

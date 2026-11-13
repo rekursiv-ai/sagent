@@ -170,10 +170,10 @@ async def test_a_file_with_nothing_to_number_says_why(
 @pytest.mark.asyncio
 async def test_a_missing_path_or_a_directory_is_an_error(tmp_path: Path) -> None:
     missing = await _read(tmp_path, file_path="nope.txt")
-    assert missing.is_error is True
+    assert (missing.is_error, missing.result) == (True, ReadResult(exit_code=1))
     assert missing.text() == f"File not found: {tmp_path / 'nope.txt'}"
     directory = await _read(tmp_path, file_path=".")
-    assert directory.is_error is True
+    assert (directory.is_error, directory.result) == (True, ReadResult(exit_code=1))
     assert "is a directory. Use List or Glob." in directory.text()
 
 
@@ -186,7 +186,7 @@ async def test_an_unreadable_file_is_an_error_not_an_exception(tmp_path: Path) -
         result = await _read(tmp_path, file_path="locked.txt")
     finally:
         locked.chmod(0o600)
-    assert result.is_error is True
+    assert (result.is_error, result.result) == (True, ReadResult(exit_code=1))
     assert result.text().startswith("Error reading locked.txt: ")
 
 
@@ -295,7 +295,7 @@ async def test_an_image_over_the_cap_is_refused(tmp_path: Path) -> None:
             {"file_path": "pic.png"},
         ),
     )
-    assert result.is_error is True
+    assert (result.is_error, result.result) == (True, ReadResult(exit_code=1))
     assert not result.attachments
     assert result.text() == (
         f"{tmp_path / 'pic.png'} is {size:,} bytes, over the {size - 1:,} a read"
@@ -391,7 +391,7 @@ async def test_an_unreadable_notebook_is_an_error(
 ) -> None:
     (tmp_path / "n.ipynb").write_bytes(payload)
     result = await _read(tmp_path, file_path="n.ipynb")
-    assert result.is_error is True
+    assert (result.is_error, result.result) == (True, ReadResult(exit_code=1))
     assert result.text().startswith(
         f"{tmp_path / 'n.ipynb'} is not a Jupyter notebook: ",
     )
@@ -450,7 +450,7 @@ async def test_a_page_range_the_pdf_cannot_meet_is_an_error(
 ) -> None:
     _pdf(tmp_path / "doc.pdf", pages=4)
     result = await _read(tmp_path, file_path="doc.pdf", pages=pages)
-    assert result.is_error is True
+    assert (result.is_error, result.result) == (True, ReadResult(exit_code=1))
     assert result.text().endswith(message)
 
 
@@ -461,7 +461,7 @@ async def test_a_long_pdf_needs_a_range(tmp_path: Path) -> None:
     refused = await settled(
         tool.call(ToolContext(cwd=tmp_path), {"file_path": "doc.pdf"}),
     )
-    assert refused.is_error is True
+    assert (refused.is_error, refused.result) == (True, ReadResult(exit_code=1))
     assert refused.text().endswith(
         'has 3 pages, over 2. Pass pages="1-N" to read some.',
     )
@@ -532,7 +532,7 @@ async def test_pages_past_the_byte_budget_are_left_for_another_read(
             {"file_path": "doc.pdf", "pages": "2"},
         ),
     )
-    assert alone.is_error is True
+    assert (alone.is_error, alone.result) == (True, ReadResult(exit_code=1))
     assert (
         alone.text() == f"Page 2 of {tmp_path / 'doc.pdf'} alone is too large to send."
     )
@@ -543,11 +543,11 @@ async def test_a_pdf_that_is_not_one_or_too_big_is_an_error(tmp_path: Path) -> N
     for name, head in (("fake.pdf", b"not a pdf"), ("almost.pdf", b"%PDFX-1.4")):
         (tmp_path / name).write_bytes(head)
         fake = await _read(tmp_path, file_path=name)
-        assert fake.is_error is True
+        assert (fake.is_error, fake.result) == (True, ReadResult(exit_code=1))
         assert fake.text().endswith("is not a PDF: it lacks the %PDF- header.")
     (tmp_path / "broken.pdf").write_bytes(b"%PDF-1.4\n%EOF\n")
     broken = await _read(tmp_path, file_path="broken.pdf")
-    assert broken.is_error is True
+    assert (broken.is_error, broken.result) == (True, ReadResult(exit_code=1))
     assert f"{tmp_path / 'broken.pdf'} is not a readable PDF: " in broken.text()
     _pdf(tmp_path / "doc.pdf", pages=1)
     size = (tmp_path / "doc.pdf").stat().st_size
@@ -557,7 +557,7 @@ async def test_a_pdf_that_is_not_one_or_too_big_is_an_error(tmp_path: Path) -> N
             {"file_path": "doc.pdf"},
         ),
     )
-    assert big.is_error is True
+    assert (big.is_error, big.result) == (True, ReadResult(exit_code=1))
     assert big.text().endswith(
         f"is {size:,} bytes, over the {size - 1:,} a read opens.",
     )

@@ -129,7 +129,10 @@ class WebSearch:
         hostname = re.compile(r"(?:\*\.)?[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::\d+)?")
         for domain in (*a.allowed_domains, *a.blocked_domains):
             if not hostname.fullmatch(domain.strip()):
-                return _error(f"Not a hostname: {domain!r}.")
+                return ToolOutput(
+                    stderr=(f"Not a hostname: {domain!r}.",),
+                    result=WebSearchResult(exit_code=1),
+                )
         scoped = " ".join(
             (
                 a.query,
@@ -151,9 +154,12 @@ class WebSearch:
             # The instance may say more than its class does, such as how long
             # a cooldown lasts on this IP.
             reason = str(e)
-            return _error(f"{reason} {e.guidance}" if reason != e.guidance else reason)
+            return ToolOutput(
+                stderr=(f"{reason} {e.guidance}" if reason != e.guidance else reason,),
+                result=WebSearchResult(exit_code=1),
+            )
         except (RuntimeError, ValueError) as e:
-            return _error(str(e))
+            return ToolOutput(stderr=(str(e),), result=WebSearchResult(exit_code=1))
         if not hits:
             return ToolOutput(
                 stdout=("(no results)",),
@@ -181,7 +187,3 @@ class WebSearch:
                 duration_sec=time.monotonic() - started,
             ),
         )
-
-
-def _error(message: str) -> ToolOutput[WebSearchResult, str, str]:
-    return ToolOutput(stderr=(message,), result=WebSearchResult(exit_code=1))
