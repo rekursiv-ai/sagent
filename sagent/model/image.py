@@ -171,7 +171,7 @@ def _webp(image: Image.Image, *, edge: int) -> bytes:
     size = (max(1, width * edge // longest), max(1, height * edge // longest))
     out = io.BytesIO()
     resized = image.resize(size, Image.Resampling.LANCZOS)
-    # pragma: no mutate start -- Pillow reads format names in any case.
+    # pragma: no mutate[case-insensitive] start
     resized.save(out, format="WEBP", quality=85)
     # pragma: no mutate end
     return out.getvalue()

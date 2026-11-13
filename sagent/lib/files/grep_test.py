@@ -688,6 +688,22 @@ def test_a_big_endian_utf16_file_is_read(tmp_path: Path) -> None:
     assert grep(f, Query(pattern="^hit$", output_mode="content")) == [f"{f}:1:hit"]
 
 
+@pytest.mark.parametrize(
+    "raw",
+    [
+        b"\xff\xfeh\x00i\x00t\x00 \x00\x00\xd8\n\x00",
+        b"\xfe\xff\x00h\x00i\x00t\x00 \xd8\x00\x00\n",
+    ],
+    ids=["little-endian", "big-endian"],
+)
+def test_invalid_utf16_bytes_are_replaced(tmp_path: Path, raw: bytes) -> None:
+    f = tmp_path / "malformed.txt"
+    f.write_bytes(raw)
+    assert grep(f, Query(pattern="hit", output_mode="content")) == [
+        f"{f}:1:hit \ufffd",
+    ]
+
+
 @_BOTH
 def test_dot_crosses_lines_and_case_folds_only_when_asked(tmp_path: Path) -> None:
     f = tmp_path / "f.txt"
