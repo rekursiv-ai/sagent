@@ -336,9 +336,9 @@ providers:
       haiku-5.5:
       haiku-4.5:
   # The ``claude`` a person runs, not sagent's anthropic-cli transport below: what
-  # Chat offers a claude chat (``chat_commands.py``) and what Trackinizer prices
-  # its sessions at (``session_usage.py``). Unfenced: trackinizer's export ships
-  # ``session_usage.py`` and this file, so it needs the section; sagent reads none.
+  # Trackinizer prices its sessions at (``session_usage.py``). Unfenced:
+  # trackinizer's export ships ``session_usage.py`` and this file, so it needs the
+  # section; sagent reads none.
   claude-code:
     sends: [thinking_effort, thinking_output]
     manage_context_server_side: [true]

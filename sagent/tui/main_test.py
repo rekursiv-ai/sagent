@@ -106,10 +106,12 @@ from sagent.tools.paper_fetch import PaperFetch
 from sagent.tools.paper_search import PaperSearch
 from sagent.tools.read import Read
 from sagent.tools.remote import Link, RemoteSession, RemoteTool, local_link
+from sagent.tools.skill import Skill
 from sagent.tools.types import (
     ToolContext,
     ToolOutput,
     ToolStreamingResult,
+    settled,
     whole_output,
 )
 from sagent.tools.web_fetch import WebFetch
@@ -1875,6 +1877,47 @@ def test_add_dir_extends_where_agents_md_is_read(
     del script
 
 
+def test_directives_names_the_tiers_the_agent_and_its_skills_read(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _argv(
+        monkeypatch,
+        "--provider",
+        "scripted",
+        "--model",
+        "scripted",
+        "--ephemeral",
+        "--directives",
+        "Project, Managed",
+    )
+    _stdin(monkeypatch, "hi")
+    read: list[tuple[frozenset[str], object]] = []
+
+    async def headless(agent: Agent, flags: main.Flags) -> int:
+        del flags
+        skill = agent.tools["Skill"]
+        assert isinstance(skill, Skill)
+        read.append((agent.agents_md.tiers, skill.tiers))
+        return 0
+
+    monkeypatch.setattr(main, "_headless", headless)
+    assert main.main() == 0
+    assert read == [(frozenset({"Managed", "Project"}),) * 2]
+    del script
+
+
+@pytest.mark.parametrize("given", ["", "Managed,Nope"])
+def test_directives_that_name_no_tier_are_refused(
+    capsys: pytest.CaptureFixture[str],
+    given: str,
+) -> None:
+    with pytest.raises(SystemExit) as refused:
+        _ = main.parse_flags(["--directives", given])
+    assert refused.value.code == 2
+    assert "names no tiers of: Local, Managed, Project, User" in capsys.readouterr().err
+
+
 def test_the_fetch_session_is_closed_when_the_run_ends(
     script: _Script,
     monkeypatch: pytest.MonkeyPatch,
@@ -2177,6 +2220,155 @@ def test_the_cli_configures_its_daemon_connection_and_applies_peer_flags(
     )
     _stdin(monkeypatch, "hi")
     assert main.main() == 0
+    del script
+
+
+@pytest.mark.asyncio
+async def test_an_agent_opened_by_default_starts_and_links_this_machine_s_daemon(
+    script: _Script,
+    offline_daemon: AsyncMock,
+) -> None:
+    flags = _flags("--ephemeral", "--tools", "Read")
+    async with main.opened(flags, given=(), interactive=False) as o:
+        offline_daemon.assert_awaited_once_with(
+            ServeDirs(
+                secrets=config_dir() / "rekursiv-ai" / "secrets" / "sagent" / "serve",
+                state=state_dir() / "rekursiv-ai" / "sagent" / "serve",
+            ),
+        )
+        assert [link.where for link in o.links] == ["local"]
+        assert [e.where for e in o.remote.endpoints().values()] == ["local"]
+    del script
+
+
+@pytest.mark.asyncio
+async def test_an_agent_opened_without_the_daemon_starts_and_links_none(
+    script: _Script,
+    offline_daemon: AsyncMock,
+) -> None:
+    """Its tools are what the flags ask for, as with the daemon."""
+    flags = _flags("--ephemeral", "--tools", "Read")
+    async with main.opened(
+        flags,
+        given=(),
+        interactive=False,
+        use_daemon=False,
+    ) as o:
+        offline_daemon.assert_not_awaited()
+        assert list(o.links) == []
+        assert o.remote.endpoints() == {}
+        assert list(o.agent.tools) == ["Read"]
+    del script
+
+
+@dataclass(slots=True, kw_only=True)
+class _Echo:
+    """A tool's function as a program gives it: says back what it is given."""
+
+    said: list[str] = field(default_factory=list[str])
+    """What each call was given, in order."""
+
+    def __call__(self, text: str) -> str:
+        """Say ``text`` back.
+
+        Args:
+          text: What to say.
+
+        """
+        self.said.append(text)
+        return text
+
+
+@pytest.mark.asyncio
+async def test_a_tool_the_caller_gives_is_called_by_the_model(script: _Script) -> None:
+    """``--tools`` names it before the session starts, as a built-in."""
+    echo = _Echo()
+    given = tool(echo, name="Echo")
+    script.replies.extend([reply(calls=[call("Echo", text="hi")]), reply("done")])
+    flags = _flags("--ephemeral", "--tools", "Echo")
+    async with main.opened(flags, given=(), interactive=False, tools=[given]) as o:
+        assert list(o.agent.tools) == ["Echo"]
+        assert o.agent.tools["Echo"] is given
+        assert await o.agent.send("go") == "done"
+    assert echo.said == ["hi"]
+
+
+@pytest.mark.asyncio
+async def test_a_child_shares_the_given_tool_its_parent_holds(script: _Script) -> None:
+    """The child calls the parent's object, so what the tool keeps is one for both."""
+    echo = _Echo()
+    given = tool(echo, name="Echo")
+    script.replies.extend([reply(calls=[call("Echo", text="kid")]), reply("done")])
+    async with main.opened(
+        _flags("--ephemeral"),
+        given=(),
+        interactive=False,
+        tools=[given],
+    ) as o:
+        spawn = o.agent.tools["AgentSpawn"]
+        assert isinstance(spawn, AgentSpawn)
+        result = await settled(
+            spawn.call(
+                o.agent.runtime.tool_context,
+                {"prompt": "go", "tools": ["Echo"], "label": "kid"},
+            ),
+        )
+        assert result.text() == "done"
+        kid = o.team["kid"]
+        assert kid.tools["Echo"] is given
+        assert kid.allowed == {"Echo", "AgentSend"}
+    assert echo.said == ["kid"]
+
+
+@pytest.mark.asyncio
+async def test_every_listing_of_the_agent_s_tools_shows_a_given_one(
+    script: _Script,
+) -> None:
+    given = tool(lambda: "x", name="Echo")
+    flags = _flags("--ephemeral", "--tools", "Echo", "AgentSpawn")
+    async with main.opened(flags, given=(), interactive=False, tools=[given]) as o:
+        commands = Commands(
+            o.agent,
+            catalog=o.catalog,
+            say=main._dropped,
+            screen=o.screen,
+            panes=Panes(),
+        )
+        reachable = commands.reachable()
+        assert ("tool", "Echo", "display", "output", "lines") in [
+            s.name for s in reachable
+        ]
+        assert slash.help_text(reachable, "tool.Echo").startswith(
+            "tool.Echo commands\n  /tool.Echo.display.command.lines ",
+        )
+        spawn = o.agent.tools["AgentSpawn"]
+        assert isinstance(spawn, AgentSpawn)
+        watcher = await spawn.watch("Agent")
+        assert o.team[watcher].tools["Echo"] is given
+    del script
+
+
+@pytest.mark.asyncio
+async def test_a_given_tool_named_as_a_built_in_is_refused_before_a_session_is_made(
+    script: _Script,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    flags = _flags()
+    with pytest.raises(
+        main.StartError,
+        match=r"^ValueError: tool Read is given twice: by sagent's built-ins and by"
+        r" opened\(tools=\.\.\.\)$",
+    ):
+        async with main.opened(
+            flags,
+            given=(),
+            interactive=False,
+            tools=[tool(lambda: "x", name="Read")],
+        ):
+            pass
+    assert not project_dir(tmp_path).exists()
     del script
 
 
@@ -2585,6 +2777,66 @@ def test_mcp_tools_join_the_built_in_ones_and_tools_can_name_them() -> None:
     assert names() == [*_DEFAULT_TOOLS, "mcp__srv__echo"]
     assert names("--tools", "Read", "mcp__srv__echo") == ["Read", "mcp__srv__echo"]
     assert names("--tools", "Read") == ["Read"]
+
+
+def test_given_tools_follow_the_servers_and_tools_names_them_as_any_other() -> None:
+    catalog = _Script().catalog()
+    team = Team(catalog=catalog)
+    served, given = (
+        tool(lambda: "x", name="mcp__srv__echo"),
+        tool(lambda: "y", name="Echo"),
+    )
+
+    def chosen(*argv: str) -> list[Tool]:
+        return main._tools(
+            _flags(*argv),
+            cwd=Path("/w"),
+            team=team,
+            remote=RemoteSession([]),
+            mcp=[served],
+            tools=[given],
+        )
+
+    assert [t.name for t in chosen()] == [*_DEFAULT_TOOLS, "mcp__srv__echo", "Echo"]
+    assert chosen()[-1] is given
+    assert chosen("--tools", "Echo", "mcp__srv__echo") == [given, served]
+    assert [t.name for t in chosen("--tools", "Read")] == ["Read"]
+    assert chosen("--tools", "none") == []
+    with pytest.raises(
+        ValueError,
+        match=r"^unknown tools Nope; known: Bash, .*, RemoteTool, mcp__srv__echo, Echo$",
+    ):
+        chosen("--tools", "Echo", "Nope")
+
+
+@pytest.mark.parametrize(
+    ("served", "given", "sources"),
+    [
+        ((), ("Read",), "sagent's built-ins and by opened(tools=...)"),
+        (
+            ("mcp__srv__echo",),
+            ("mcp__srv__echo",),
+            "an MCP server and by opened(tools=...)",
+        ),
+        ((), ("Echo", "Echo"), "opened(tools=...) and by opened(tools=...)"),
+    ],
+)
+def test_a_given_tool_whose_name_another_holds_is_refused_naming_both(
+    served: tuple[str, ...],
+    given: tuple[str, ...],
+    sources: str,
+) -> None:
+    catalog = _Script().catalog()
+    message = f"tool {given[-1]} is given twice: by {sources}"
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        main._tools(
+            _flags(),
+            cwd=Path("/w"),
+            team=Team(catalog=catalog),
+            remote=RemoteSession([]),
+            mcp=[tool(lambda: "x", name=name) for name in served],
+            tools=[tool(lambda: "y", name=name) for name in given],
+        )
 
 
 def test_mcp_config_flags_parse() -> None:
@@ -3053,7 +3305,7 @@ async def test_the_first_signal_cancels_the_run_and_the_second_exits(
     monkeypatch.setattr(os, "_exit", exits.append)
 
     async def guarded() -> None:
-        with main._signals():
+        with main.signals():
             signal.raise_signal(signal.SIGTERM)
             signal.raise_signal(signal.SIGINT)
             _ = await asyncio.Event().wait()
@@ -3583,6 +3835,39 @@ async def test_a_quit_with_words_after_it_still_quits(tmp_path: Path) -> None:
                 ),
                 timeout=5,
             )
+
+
+@pytest.mark.asyncio
+async def test_run_builds_each_view_s_commands_with_what_it_is_handed(
+    tmp_path: Path,
+) -> None:
+    typed: list[str] = []
+
+    class _Heard(Commands):
+        @override
+        async def __call__(self, line: str) -> bool:
+            typed.append(line)
+            return await super().__call__(line)
+
+    async with Agent(model=ScriptedProvider()["scripted"]) as agent:
+        with (
+            create_pipe_input() as pipe,
+            create_app_session(input=pipe, output=PlainTextOutput(io.StringIO())),
+        ):
+            pipe.send_text("/tasks\r/quit\r")
+            await asyncio.wait_for(
+                main.run(
+                    agent,
+                    catalog=_Script().catalog(),
+                    history=tmp_path / "h",
+                    print_batch_sec=0,
+                    commands=_Heard,
+                ),
+                timeout=5,
+            )
+
+    # The prompt itself ends at ``/quit``; every other line runs on the commands.
+    assert typed == ["/tasks"]
 
 
 @pytest.mark.parametrize(

@@ -126,7 +126,7 @@ async def test_an_agent_on_another_machine_is_listed_and_sent_to(
     said = await settled(
         send.call(_context(tmp_path), {"to": "worker", "content": "go"}),
     )
-    assert said.text() == "Delivered to worker."
+    assert said.text() == "Sent to worker; you are told if it does not arrive."
     assert relay.sent == [("Agent", "worker", "go", "ask")]
 
 
@@ -154,6 +154,41 @@ async def test_a_delayed_reply_crosses_to_another_machine_as_a_reply(
     ((deliver, args),) = scheduled
     deliver(*args)
     assert relay.sent == [("Agent", "worker", "[delayed 1s] yes", "reply")]
+
+
+@pytest.mark.asyncio
+async def test_another_session_s_agent_is_sent_to_now_or_later_and_never_listed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scheduled: list[tuple[Callable[..., object], tuple[object, ...]]] = []
+
+    def later(delay: float, callback: Callable[..., object], *args: object) -> None:
+        del delay
+        scheduled.append((callback, args))
+
+    monkeypatch.setattr(asyncio.get_running_loop(), "call_later", later)
+    team, relay = _team(tmp_path), _Relayed()
+    team.relay = relay
+    send = AgentSend(team=team)
+    now = await settled(
+        send.call(_context(tmp_path), {"to": "lead#412", "content": "status?"}),
+    )
+    team.receive(sender="worker#415", recipient="Agent", content="ok?", kind="ask")
+    _ = await settled(
+        send.call(
+            _context(tmp_path),
+            {"to": "worker#415", "content": "yes", "delay": 1},
+        ),
+    )
+    ((deliver, args),) = scheduled
+    deliver(*args)
+    assert now.text() == "Sent to lead#412; you are told if it does not arrive."
+    assert send.reminder(_context(tmp_path)) == "Your agent label is 'Agent'."
+    assert relay.sent == [
+        ("Agent", "lead#412", "status?", "ask"),
+        ("Agent", "worker#415", "[delayed 1s] yes", "reply"),
+    ]
 
 
 def test_a_child_is_told_its_parent_and_whom_it_owes(tmp_path: Path) -> None:

@@ -719,8 +719,7 @@ async def test_duplicate_notes_are_delivered_once_and_acknowledged_every_time(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("local", [False, True])
-@pytest.mark.parametrize("sender_present", [False, True])
-async def test_refusal_withdraws_the_peer_and_notifies_only_a_present_sender(
+async def test_refusal_withdraws_the_peer_and_tells_the_team_it_was_refused(
     endpoint: Endpoint,
     connection: _Connection,
     team: MagicMock,
@@ -728,7 +727,6 @@ async def test_refusal_withdraws_the_peer_and_notifies_only_a_present_sender(
     tmp_path: Path,
     *,
     local: bool,
-    sender_present: bool,
 ) -> None:
     if local:
         endpoint = _endpoint_on(
@@ -737,10 +735,8 @@ async def test_refusal_withdraws_the_peer_and_notifies_only_a_present_sender(
         )
     sender = "Agent@laptop" if local else "Agent"
     recipient = "worker" if local else "worker@gpu1"
-    present = {sender} if sender_present else set[str]()
-    team.__contains__ = Mock(side_effect=present.__contains__)
-    withdraw, tell = Mock(), Mock()
-    team.unreach, team.tell = withdraw, tell
+    withdraw, refuse = Mock(), Mock()
+    team.unreach, team.refuse = withdraw, refuse
     endpoint.send(sender=sender, recipient=recipient, content="look", kind="ask")
     (note,) = endpoint._notes.values()
     monkeypatch.setattr(
@@ -757,14 +753,7 @@ async def test_refusal_withdraws_the_peer_and_notifies_only_a_present_sender(
     await endpoint._read(connection.reader, connection.writer)
     withdraw.assert_called_once_with(recipient)
     assert endpoint._notes == {}
-    if sender_present:
-        tell.assert_called_once_with(
-            recipient,
-            recipient=sender,
-            content="[message refused] withdrawn",
-        )
-    else:
-        tell.assert_not_called()
+    refuse.assert_called_once_with(sender, recipient, "withdrawn")
     assert connection.lines == []
 
 

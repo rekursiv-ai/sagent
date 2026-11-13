@@ -28,6 +28,10 @@ takes its parent's again; on a root it is a fresh model's.
 ``/children.effort high``, ``/parent.watcher off``. ``/send parent`` from a
 root with no parent starts its watcher first.
 
+Commands made with ``allowed`` run only the settings and actions it names, on this
+agent and on each it sends a line to; every other is refused with one line, and
+``/help`` lists only what they run.
+
 Typical usage example:
 
   commands = Commands(agent, catalog=catalog, say=scrollback.show, screen=printer,
@@ -88,6 +92,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "Action",
+    "Allowed",
     "Commands",
     "apply_setting",
     "help_text",
@@ -119,6 +124,7 @@ class Commands:
         there is no screen to show it.
       screens: Each agent's screen settings, by label; ``None`` shares ``screen``.
       theme: The terminal's color theme, shared across agent views.
+      allowed: The only settings and actions a line runs; ``None`` runs every one.
 
     """
 
@@ -134,6 +140,7 @@ class Commands:
         focus: Callable[[str], None] | None = None,
         screens: Callable[[str], ThinkingView] | None = None,
         theme: ThemeState | None = None,
+        allowed: Allowed | None = None,
     ) -> None:
         self.theme = theme if theme is not None else ThemeState()
         self.agent = agent
@@ -144,6 +151,7 @@ class Commands:
         self.panes = panes
         self.focus = focus
         self.screens = screens
+        self.allowed = allowed
         self.done = False
         """Whether ``/quit`` or ``/exit`` ran."""
         self._tasks: set[asyncio.Task[None]] = set()
@@ -172,6 +180,21 @@ class Commands:
                 say=self.say,
             ),
         ]
+
+    def reachable(self) -> list[Setting]:
+        """Return the settings and actions a line runs: every one, or those allowed.
+
+        Returns:
+          settings: Harvested from :meth:`owners`, in order, less what is not allowed.
+
+        """
+        allowed = self.allowed
+        settings = harvest(self.owners())
+        return (
+            settings
+            if allowed is None
+            else [s for s in settings if allowed.allows(s.name)]
+        )
 
     def settings(self) -> list[Setting]:
         """Return the actions, first, so a short name reaches them before a setting.
@@ -382,6 +405,8 @@ class Commands:
             send = next(s for s in self.settings() if s.name == ("send",))
             await self._run(send, f"{head} /{rest} {args.strip()}".strip())
             return self.done
+        # Matched against every setting, so a line is refused by the name it means,
+        # not run as whatever allowed setting its letters happen to spell.
         setting = match(harvest(self.owners()), typed)
         if setting is None:
             self._say("error", f"unknown command: /{typed}; see /help")
@@ -401,6 +426,9 @@ class Commands:
         """Show ``setting``, or apply ``args`` to it; say what came of it."""
         key = ".".join(setting.name)
         shown = f"/{key}"
+        if self.allowed is not None and not self.allowed.allows(setting.name):
+            self._say("error", f"{shown} {self.allowed.refusal}")
+            return
         if not args and setting.value is not None:
             self._say("note", _valued(setting.value, setting.options), command=shown)
             return
@@ -441,7 +469,7 @@ class Commands:
 
         """
         setting = next(
-            (s for s in harvest(self.owners()) if ".".join(s.name) == key),
+            (s for s in self.reachable() if ".".join(s.name) == key),
             None,
         )
         if setting is None:
@@ -492,7 +520,7 @@ class Commands:
         return ""
 
     async def _help(self, args: str) -> str:
-        return help_text(harvest(self.owners()), args)
+        return help_text(self.reachable(), args)
 
     async def _clear(self, args: str) -> str:
         del args
@@ -565,6 +593,7 @@ class Commands:
                 focus=self.focus,
                 screens=self.screens,
                 theme=self.theme,
+                allowed=self.allowed,
             )
             await commands.inherit()
         return commands
@@ -728,6 +757,31 @@ class Action:
     value: Callable[[Commands], str] | None = None
     cli: bool = False
     flags: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Allowed:
+    """The only settings and actions a line runs; the rest are refused, saying why."""
+
+    names: frozenset[str]
+    """Each a pattern of dotted names, ``*`` for any run of letters or dots:
+    ``compact``, ``tool.*.display.*``."""
+
+    refusal: str
+    """What a refused line is told after its name: ``is not available here``."""
+
+    def allows(self, name: tuple[str, ...]) -> bool:
+        """Say whether a line may run the setting or action ``name``.
+
+        Args:
+          name: Its segments, as harvested.
+
+        Returns:
+          allowed: Whether a pattern of :attr:`names` matches the dotted name.
+
+        """
+        dotted = ".".join(name)
+        return any(fnmatch.fnmatchcase(dotted, pattern) for pattern in self.names)
 
 
 def owners_without_agent(

@@ -142,12 +142,7 @@ async def serve(
                 note = wire.pending.pop(message.id, None)
                 if note is not None:
                     team.unreach(note.recipient)
-                    if note.sender in team:
-                        team.tell(
-                            note.recipient,
-                            recipient=note.sender,
-                            content=f"[message refused] {message.reason}",
-                        )
+                    team.refuse(note.sender, note.recipient, message.reason)
     finally:
         team.changes.discard(wire.peers)
         output.resume()

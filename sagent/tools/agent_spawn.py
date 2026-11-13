@@ -429,7 +429,10 @@ class AgentSpawn:
         """
         target = self.team[watched]
         skill = target.tools.get("Skill")
-        loader = skill if isinstance(skill, Skill) else Skill()
+        # Read from the tiers the watched agent reads, its own Skill tool's or none.
+        loader = (
+            skill if isinstance(skill, Skill) else Skill(tiers=target.agents_md.tiers)
+        )
         how = await settled(
             loader.call(
                 target.runtime.tool_context,

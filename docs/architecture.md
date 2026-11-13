@@ -57,6 +57,8 @@ A call is detached when the model asks for `background` or `delay`, when it runs
 
 A `Team` holds the live agents of one session, by label, and who spawned whom. Together, these primitives support isolated review, map-reduce work, persistent background agents, and inbox-based coordination.
 
+An agent of another session is `label#session`. A host's daemon names the ones it links, each reached by its link; an embedder may give the team one default `Relay` (`Team.relay`) for every other `label#session`, which AgentSend then books and sends through as it does to a linked agent. A team with none refuses such a label as unknown.
+
 ## Providers and models
 
 Providers own authentication and serve models by name. A model's `stream(request)` yields text chunks, then a `Response` with records, token counts, spend, and stop reason.
