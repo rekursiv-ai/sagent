@@ -1992,6 +1992,9 @@ async def test_set_links_drops_the_agents_of_a_removed_name() -> None:
         assert endpoint.up
         session.set_links([_plain_link(other, "other")])
         assert "Agent_0@gone" not in team.outside
+        # Leaving mid-dial would close ``other`` as it accepts: asyncio then
+        # holds a connection no handler ever ran for, open until collected.
+        _ = await _until(session, lambda e: e.up)
 
 
 @pytest.mark.asyncio

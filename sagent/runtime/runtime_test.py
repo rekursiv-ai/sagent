@@ -1091,14 +1091,18 @@ async def test_each_call_logs_how_it_ran(caplog: pytest.LogCaptureFixture) -> No
                 call("boom", "f1"),
                 call("nope", "u1"),
                 call(Markers().arrived, "m1"),
+                call("Read", "r1", unknown=1),
             ],
         ),
         reply("done"),
-        tools=[Gated(), Gated(name="boom", fail=True)],
+        tools=[Gated(), Gated(name="boom", fail=True), Read()],
     ) as h:
         with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
             h.push(_user("go"))
             await h.seen(ModelIdle)
+    assert [r.text() for r in h.results("r1")] == [
+        "ValueError: Unknown arguments: unknown.",
+    ]
     assert {
         f"runtime detached-arrived mimic: call_id={Markers().mimic}0",
         "runtime tool not run: call_id=u1 tool=nope refused=False",
@@ -1106,6 +1110,10 @@ async def test_each_call_logs_how_it_ran(caplog: pytest.LogCaptureFixture) -> No
         "runtime tool complete cohort: call_id=t1 tool=echo is_error=False",
         "runtime tool failed: call_id=f1 tool=boom error=RuntimeError",
         "runtime tool complete cohort: call_id=f1 tool=boom is_error=True",
+        # Only the error's type: its message may hold the tool's output.
+        "runtime tool failed: call_id=r1 tool=Read error=ValueError",
+        "runtime model call start: history=1 detached=0 queued=0",
+        "runtime cohort complete: running_tools=0 detached=0",
     } <= set(caplog.messages)
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
@@ -1512,21 +1520,27 @@ def _replies(n: int) -> list[Response]:
 
 
 @pytest.mark.asyncio
-async def test_a_call_past_the_limit_is_answered_and_runs_on() -> None:
+async def test_a_call_past_the_limit_is_answered_and_runs_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """The model goes on after a stub; the call's result arrives forward."""
     tool = Gated(hold=True, output="REAL")
-    async with Harness(
-        reply(calls=[call("echo", "t1")]),
-        *_replies(3),
-        tools=[tool],
-    ) as h:
-        h.runtime.detach_after_sec = 0.01
-        h.push(_user("go"))
-        await h.seen(ModelIdle)
-        assert [r.state for r in h.results("t1")] == ["pending"]
-        tool.release.set()
-        await h.seen(ModelIdle, 2)
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+        async with Harness(
+            reply(calls=[call("echo", "t1")]),
+            *_replies(3),
+            tools=[tool],
+        ) as h:
+            h.runtime.detach_after_sec = 0.01
+            h.push(_user("go"))
+            await h.seen(ModelIdle)
+            assert [r.state for r in h.results("t1")] == ["pending"]
+            tool.release.set()
+            await h.seen(ModelIdle, 2)
     assert [r.text() for r in _arrival(h, "t1")] == ["REAL"]
+    assert "runtime tool detached after 0.01s: call_id=t1" in caplog.messages
+    # Detached, the cohort was not waited out, so it never completes.
+    assert h.count(CohortComplete) == 0
 
 
 @pytest.mark.asyncio
@@ -1939,10 +1953,15 @@ async def test_a_detached_result_waits_for_the_running_cohort() -> None:
 
 
 @pytest.mark.asyncio
-async def test_killing_an_unknown_call_changes_nothing() -> None:
-    async with Harness(reply("ok")) as h:
-        h.push(Kill(call_id="nope"), _user("go"))
-        await h.seen(ModelIdle)
+async def test_killing_an_unknown_call_changes_nothing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+        async with Harness(reply("ok")) as h:
+            h.push(Kill(call_id="nope"), _user("go"))
+            await h.seen(ModelIdle)
+    assert "runtime kill missed tool: call_id=nope" in caplog.messages
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert h.texts() == ["go", "ok"]
 
 
@@ -2021,29 +2040,78 @@ async def test_kill_all_logs_the_cohort_it_started_and_stopped(
             await h.seen(ModelIdle)
     messages = [r.getMessage() for r in caplog.records]
     assert "runtime cohort start: tools=[('t1', 'echo')]" in messages
-    assert any(m.startswith("runtime kill all tools:") for m in messages)
+    assert "runtime kill all tools: running_tools=1 cohort=1 detached=0" in messages
     assert "runtime tool cancelled: call_id=t1 tool=echo" in messages
 
 
 @pytest.mark.asyncio
-async def test_kill_by_id_cancels_a_detached_call_and_says_so() -> None:
+@pytest.mark.parametrize(
+    ("calls", "killed"),
+    [
+        ([call("echo", "t1")], "t1"),
+        (
+            [
+                call("echo", "b1", background=True),
+                call("BackgroundTask", "w1", operation="foreground", id="b1"),
+            ],
+            "w1",
+        ),
+    ],
+    ids=["tool", "wait-for-a-job"],
+)
+async def test_a_running_call_killed_by_id_publishes_its_own_end(
+    caplog: pytest.LogCaptureFixture,
+    calls: list[ToolCall],
+    killed: str,
+) -> None:
+    """Observers are told when the call itself stopped, reading as the model was told."""
     tool = Gated(hold=True)
-    async with Harness(
-        reply(calls=[call("echo", "t1")]),
-        reply("answering"),
-        reply("noted"),
-        tools=[tool],
-    ) as h:
-        h.push(_user("go"))
-        await until(lambda: bool(tool.started))
-        h.push(_user("redirect"))
-        await h.seen(ModelIdle)
-        task = h.runtime.detached["t1"]
-        h.push(Kill(call_id="t1"))
-        await h.seen(ModelIdle, 2)
-        await until(lambda: h.runtime.jobs == {})
-        assert task.done()
-        assert "t1" not in h.runtime.detached
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+        async with Harness(
+            reply(calls=calls),
+            reply("killed"),
+            tools=[tool, BackgroundTask()],
+        ) as h:
+            h.push(_user("go"))
+            await until(lambda: bool(tool.started))
+            await spin()
+            h.push(Kill(call_id=killed))
+            await h.seen(DetachedResult)
+    assert f"runtime kill tool: call_id={killed}" in caplog.messages
+    assert [e for e in h.events if isinstance(e, DetachedResult)] == [
+        DetachedResult(
+            result=ToolResult(
+                call_id=killed,
+                state="cancelled",
+                shown=Markers().cancelled,
+            ),
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_kill_by_id_cancels_a_detached_call_and_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    tool = Gated(hold=True)
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+        async with Harness(
+            reply(calls=[call("echo", "t1")]),
+            reply("answering"),
+            reply("noted"),
+            tools=[tool],
+        ) as h:
+            h.push(_user("go"))
+            await until(lambda: bool(tool.started))
+            h.push(_user("redirect"))
+            await h.seen(ModelIdle)
+            task = h.runtime.detached["t1"]
+            h.push(Kill(call_id="t1"))
+            await h.seen(ModelIdle, 2)
+            await until(lambda: h.runtime.jobs == {})
+            assert task.done()
+            assert "t1" not in h.runtime.detached
+    assert "runtime kill detached tool: call_id=t1" in caplog.messages
     assert tool.finished == []
     (killed,) = _arrival(h, "t1")
     assert (killed.text(), killed.state, killed.is_error) == (
@@ -2085,6 +2153,7 @@ async def test_quit_cancels_running_and_detached_tools() -> None:
 @pytest.mark.asyncio
 async def test_quit_stops_waiting_for_a_tool_that_does_not_stop(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(runtime, "_QUIT_WAIT_SEC", 0.01)
     tool = Stopping(hold=True)
@@ -2094,9 +2163,13 @@ async def test_quit_stops_waiting_for_a_tool_that_does_not_stop(
     await until(lambda: len(tool.started) == 1)
     running = h.runtime.running_tools["t1"]
 
-    h.push(Quit())
-    await asyncio.wait_for(task, timeout=0.5)
+    with caplog.at_level(logging.WARNING, logger=runtime.__name__):
+        h.push(Quit())
+        await asyncio.wait_for(task, timeout=0.5)
 
+    assert caplog.record_tuples == [
+        (runtime.__name__, logging.WARNING, "runtime quit: 1 tool(s) did not stop"),
+    ]
     assert not running.done()
     tool.stopped.set()
     _ = await asyncio.wait({running})
@@ -2122,9 +2195,12 @@ async def _with_stub(
 
 
 @pytest.mark.asyncio
-async def test_a_second_delivery_for_one_call_is_dropped() -> None:
+async def test_a_second_delivery_for_one_call_is_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     h = Harness(reply("saw"), reply("again"))
     await _with_stub(h)
+    caplog.set_level(logging.DEBUG, logger=runtime.__name__)
     async with h:
         h.push(
             DetachedResult(
@@ -2160,13 +2236,20 @@ async def test_a_second_delivery_for_one_call_is_dropped() -> None:
     assert _arrival_turns(h, "c1") == 1
     assert [r.text() for r in _arrival(h, "c1")] == ["producer-1"]
     assert not _rescued(h)
+    assert [m for m in caplog.messages if "detached forward" in m] == [
+        "runtime detached forward suppressed (already delivered): call_id=c1",
+        "runtime detached forward suppressed (already delivered): call_id=c1",
+    ]
     validate_context(h.history())
 
 
 @pytest.mark.asyncio
-async def test_a_pending_stub_is_never_delivered_and_never_consumes_the_call() -> None:
+async def test_a_pending_stub_is_never_delivered_and_never_consumes_the_call(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     h = Harness(reply("saw"))
     await _with_stub(h)
+    caplog.set_level(logging.DEBUG, logger=runtime.__name__)
     async with h:
         h.push(
             DetachedResult(
@@ -2191,12 +2274,18 @@ async def test_a_pending_stub_is_never_delivered_and_never_consumes_the_call() -
         )
         await h.seen(ModelIdle)
     assert [r.text() for r in _arrival(h, "c1")] == ["REAL"]
+    assert [m for m in caplog.messages if "detached forward" in m] == [
+        "runtime detached forward skipped (pending stub, not real result): call_id=c1",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_a_cancellation_already_answered_is_not_delivered_again() -> None:
+async def test_a_cancellation_already_answered_is_not_delivered_again(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     h = Harness()
     await _with_stub(h, stub="cancelled")
+    caplog.set_level(logging.DEBUG, logger=runtime.__name__)
     async with h:
         h.push(
             DetachedResult(
@@ -2211,6 +2300,12 @@ async def test_a_cancellation_already_answered_is_not_delivered_again() -> None:
         await spin()
     assert _arrival(h, "c1") == []
     assert h.requests() == []
+    assert [m for m in caplog.messages if "detached forward" in m] == [
+        (
+            "runtime detached forward skipped (cancellation already answered in-slot):"
+            " call_id=c1"
+        ),
+    ]
 
 
 @pytest.mark.asyncio
@@ -2308,6 +2403,32 @@ async def test_a_result_racing_its_detach_is_delivered_forward() -> None:
     assert [r.text() for r in h.results("c1")] == [Markers().detached]
     assert [r.text() for r in _arrival(h, "c1")] == ["pinged"]
     assert h.said(1) == ["go", "self-ping"]
+
+
+@pytest.mark.asyncio
+async def test_a_result_posted_behind_the_message_that_detached_its_call_is_published() -> (
+    None
+):
+    """Both land in one drain: the call is detached first, so its result goes forward."""
+    tool = Gated(hold=True)
+    posted = ToolResult(
+        call_id="t1",
+        state="done",
+        stdout=("early",),
+        result=UncategorizedToolResult(),
+    )
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        *_replies(2),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        h.push(_user("redirect"), posted)
+        await until(lambda: bool(_arrival(h, "t1")))
+    assert posted in h.events
+    assert [r.text() for r in h.results("t1")] == [Markers().detached]
+    assert [r.text() for r in _arrival(h, "t1")] == ["early"]
 
 
 @pytest.mark.asyncio
@@ -2467,6 +2588,7 @@ async def test_a_forged_arrival_call_is_answered_on_the_next_real_turn() -> None
         f"{Markers().arrived} is not callable; detached results arrive automatically."
     )
     assert h.answers() == ["", "answer"]
+    assert _splice_strategies(h) == ["lazy_pairing"]
     validate_context(h.history())
 
 
@@ -2791,13 +2913,18 @@ async def test_a_reply_with_no_message_waits_on_its_calls() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_stale_reply_is_ignored() -> None:
-    async with Harness(reply("ok")) as h:
-        h.push(
-            ModelResponseComplete(response=reply("stale"), generation=7),
-            _user("go"),
-        )
-        await h.seen(ModelIdle)
+async def test_a_stale_reply_is_ignored(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+        async with Harness(reply("ok")) as h:
+            h.push(
+                ModelResponseComplete(response=reply("stale"), generation=7),
+                _user("go"),
+            )
+            await h.seen(ModelIdle)
+    assert (
+        "runtime stale model response ignored: generation=7 current=0"
+        in caplog.messages
+    )
     assert h.texts() == ["go", "ok"]
 
 
@@ -3533,16 +3660,20 @@ async def test_a_failed_compaction_keeps_the_tape_and_frees_the_gate() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_second_compact_while_compacting_is_dropped() -> None:
+async def test_a_second_compact_while_compacting_is_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     summarizer = Summarizer(hold=True)
-    async with Harness(reply("post"), compactor=summarizer) as h:
-        h.runtime.append_history(_user("old"))
-        h.push(Compact())
-        await summarizer.entered.wait()
-        h.push(Compact())
-        await spin()
-        summarizer.release.set()
-        await h.seen(ModelIdle)
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+        async with Harness(reply("post"), compactor=summarizer) as h:
+            h.runtime.append_history(_user("old"))
+            h.push(Compact())
+            await summarizer.entered.wait()
+            h.push(Compact())
+            await spin()
+            summarizer.release.set()
+            await h.seen(ModelIdle)
+    assert "runtime compact ignored while compact_task active" in caplog.messages
     assert len(summarizer.instructions) == 1
 
 
@@ -3639,6 +3770,8 @@ async def test_compact_takes_mid_stream_input_into_its_snapshot() -> None:
         h.push(_user("go"))
         await h.seen(ModelIdle)
     assert [_text(e) for e in summarizer.contexts[0]] == ["go", "typed"]
+    shown = [e for e in h.events if isinstance(e, (UserMessage, CompactStarted))]
+    assert [type(e) for e in shown] == [UserMessage, UserMessage, CompactStarted]
 
 
 @pytest.mark.asyncio
@@ -4223,7 +4356,7 @@ async def test_the_gate_answers_an_orphan_call() -> None:
     ]
     (synthesized,) = h.results("toolu_1")
     assert synthesized.is_error is True
-    assert not _rescued(h)
+    assert _splice_strategies(h) == ["orphan_tool_use_repair"]
 
 
 @pytest.mark.asyncio
@@ -4243,6 +4376,7 @@ async def test_the_gate_drops_an_orphan_result() -> None:
         await h.seen(ModelIdle)
     assert h.results("ghost_1") == []
     assert h.answers() == ["acknowledged"]
+    assert _splice_strategies(h) == ["orphan_tool_result_repair"]
     validate_context(h.history())
 
 
@@ -4271,7 +4405,8 @@ async def test_the_gate_rescues_splices_whose_partners_never_came() -> None:
     async with h:
         h.push(_user("please retry"))
         await h.seen(ModelIdle)
-    assert _rescued(h)
+    # No repair is anchored at a splice: what a splice shows is the rebuild's.
+    assert _splice_strategies(h) == ["summary", "lazy_pairing", "context_rescue"]
     assert h.results("ghost") == []
     assert [r.text() for r in h.results("toolu_X")] == ["[interrupted]"]
     assert h.texts()[0] == "[summary]"
@@ -4286,6 +4421,7 @@ async def test_the_gate_rescues_splices_whose_partners_never_came() -> None:
 @pytest.mark.asyncio
 async def test_an_unrepairable_context_is_reported_not_sent(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     error: type[ValueError],
 ) -> None:
     h = Harness(reply("never"))
@@ -4294,6 +4430,7 @@ async def test_an_unrepairable_context_is_reported_not_sent(
         raise error("unrepairable context")
 
     monkeypatch.setattr(h.runtime, "_assert_alternation_invariant", unrepairable)
+    caplog.set_level(logging.ERROR, logger=runtime.__name__)
     async with h:
         h.push(_user("please proceed"))
         await h.seen(ModelResponseError)
@@ -4303,6 +4440,9 @@ async def test_an_unrepairable_context_is_reported_not_sent(
         await h.seen(ClearComplete)
     assert h.count(ModelCallStarted) == 0
     assert h.requests() == []
+    assert caplog.messages == [
+        "model-call gate context unrepairable: unrepairable context",
+    ]
 
 
 @pytest.mark.asyncio
@@ -4862,7 +5002,10 @@ async def test_a_failing_dispatch_is_logged_and_the_loop_goes_on(
             h.push(_user("go"))
             await h.seen(ModelResponseError)
             assert "dispatching ModelResponseComplete raised" in caplog.text
+            # Asked again at once, it would fail again: the runtime waits.
+            await spin()
             assert len(h.requests()) == 1
+            assert h.runtime.inbox.gate_armed
             h.runtime.before_tool_spawn = None
             h.push(_user("again"))
             await h.seen(ModelIdle)
@@ -4885,7 +5028,8 @@ async def test_a_pass_that_fails_after_its_events_is_logged_and_the_next_goes_on
         async with Harness(reply("answered")) as h:
             h.runtime.prune = broken
             h.push(_user("go"))
-            await until(lambda: "dispatch loop iteration raised" in caplog.text)
+            await until(lambda: bool(caplog.messages))
+            assert caplog.messages == ["dispatch loop iteration raised: prune broke"]
             assert h.requests() == []
             h.push(_user("again"))
             await h.seen(ModelIdle)
@@ -5169,19 +5313,23 @@ async def test_a_cancellation_with_no_answer_on_tape_is_delivered() -> None:
 
 
 @pytest.mark.asyncio
-async def test_a_forged_pairing_whose_call_was_compacted_away_is_dropped() -> None:
-    async with Harness(
-        reply(calls=[call(Markers().arrived, "m1")]),
-        reply("after compaction"),
-        compactor=Summarizer(),
-    ) as h:
-        h.push(_user("go"))
-        await h.seen(AgentIdle)
-        h.push(Compact())
-        await h.seen(ModelIdle)
+async def test_a_forged_pairing_whose_call_was_compacted_away_is_dropped(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger=runtime.__name__):
+        async with Harness(
+            reply(calls=[call(Markers().arrived, "m1")]),
+            reply("after compaction"),
+            compactor=Summarizer(),
+        ) as h:
+            h.push(_user("go"))
+            await h.seen(AgentIdle)
+            h.push(Compact())
+            await h.seen(ModelIdle)
     assert h.texts() == ["[summary]", "after compaction"]
     assert h.runtime._pending_commits == []
-    assert not _rescued(h)
+    assert _splice_strategies(h) == ["summary"]
+    assert caplog.records == []
 
 
 def test_adopting_a_taped_event_appends_it() -> None:
@@ -7028,6 +7176,722 @@ def test_sanitizing_an_alternating_history_gives_a_valid_context(
 ) -> None:
     """On the shape the runtime tapes, the rescue closes every pairing gap."""
     validate_context(splice_safe_repair(history))
+
+
+def test_a_new_runtime_asks_as_a_root_that_has_not_begun() -> None:
+    model = ScriptedProvider()["scripted"]
+    rt = Runtime(model=model)
+
+    request = rt.tagged(rt.request())
+
+    assert (
+        request.session,
+        request.agent,
+        request.parent,
+        request.parent_turn,
+        request.root_prompt,
+        request.name,
+    ) == ("", "", "", 0, "", "/root")
+    assert (request.window, request.turn, request.turn_started_ms, request.step) == (
+        0,
+        0,
+        0,
+        0,
+    )
+    assert rt.agent == ""
+
+
+@pytest.mark.asyncio
+async def test_a_failure_before_any_call_is_the_model_s_own() -> None:
+    """Nothing was switched away from, so the failure ends the turn as any does."""
+    async with Harness() as h:
+        h.push(ModelResponseError(exception=RuntimeError("early")))
+        await h.seen(ModelResponseError)
+        await spin()
+        assert h.runtime.inbox.gate_armed
+        assert h.runtime.stopped
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_history_s_first_call_backs_off_from_the_start(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No user message came first to reset the backoff or to ask for a quota check."""
+    timers = _recording_timers(monkeypatch)
+    h = Harness(OverloadedError("busy"))
+    h.runtime.append_history(_user("resumed"))
+    h.runtime.persistent_retry = True
+    async with h:
+        h.push(SaveSession())
+        await h.seen(ModelCallSuspended)
+    (suspended,) = [e for e in h.events if isinstance(e, ModelCallSuspended)]
+    assert suspended.attempt == 1
+    assert [delay for delay, _, _ in timers] == [5.0]
+    assert [request.recheck_quota for request in h.requests()] == [False]
+
+
+@pytest.mark.asyncio
+async def test_quit_logs_what_is_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    h = Harness()
+    blocking = Blocking(answers=[])
+    monkeypatch.setattr(h.runtime.model, "stream", blocking.stream)
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+        async with h:
+            h.push(_user("go"))
+            await blocking.entered.wait()
+    assert (
+        "runtime quit: model_call=True compact_task=False running_tools=0 cohort=0"
+        " detached=0"
+    ) in caplog.messages
+
+
+@pytest.mark.asyncio
+async def test_quit_gives_up_all_the_work_queued_behind_it() -> None:
+    h = Harness()
+    first, second = asyncio.Future[None](), asyncio.Future[None]()
+    h.push(
+        Quit(),
+        Scheduled(work=_forever, done=first),
+        Scheduled(work=_forever, done=second),
+    )
+
+    await h.runtime.run_forever()
+
+    assert (first.cancelled(), second.cancelled()) == (True, True)
+
+
+@pytest.mark.asyncio
+async def test_halt_logs_what_is_in_flight(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    h = Harness()
+    blocking = Blocking(answers=[reply("after")])
+    monkeypatch.setattr(h.runtime.model, "stream", blocking.stream)
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+        async with h:
+            h.push(_user("go"))
+            await blocking.entered.wait()
+            h.push(_user("typed"), Halt())
+            await h.seen(ModelIdle)
+    assert (
+        "runtime halt: model_call=True compact_task=False running_tools=0 cohort=0"
+        " detached=0 mid_stream=1"
+    ) in caplog.messages
+    assert h.texts() == ["go", "typed", "after"]
+
+
+@pytest.mark.parametrize(
+    ("verb", "done"),
+    [(Halt(), Halt), (Clear(), ClearComplete)],
+    ids=["halt", "clear"],
+)
+@pytest.mark.asyncio
+async def test_a_verb_taking_the_turn_over_ends_a_failure_s_wait(
+    verb: RuntimeEvent,
+    done: type,
+) -> None:
+    """What the failure waited for no longer calls the model: nothing is stopped."""
+    async with Harness(AuthError("signed out")) as h:
+        h.push(_user("go"))
+        await h.seen(ModelResponseError)
+        await spin()
+        assert h.runtime.stopped
+        h.push(verb)
+        await h.seen(done)
+        await spin()
+        assert not h.runtime.stopped
+        h.runtime.retry()
+        assert h.runtime.inbox.empty()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_call_logs_what_was_in_flight_and_asks_no_hook(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+        async with Harness(RuntimeError("model exploded")) as h:
+            h.push(_user("go"))
+            await h.seen(ModelResponseError)
+    assert (
+        "runtime model response error: error=RuntimeError model_call=True"
+        " compact_task=False running_tools=0 cohort=0 detached=0"
+    ) in caplog.messages
+    # No hook was set, so none is asked, and none fails.
+    assert "after_failure raised" not in caplog.text
+    assert "before_call raised" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_failure_keeps_the_input_that_came_with_it() -> None:
+    """What was queued behind the error is taken once the wait it starts ends."""
+    async with Harness(reply("ok")) as h:
+        h.push(
+            ModelResponseError(exception=RuntimeError("model exploded")),
+            _user("b"),
+            _user("c"),
+        )
+        await h.seen(ModelIdle)
+    assert h.texts() == ["b", "c", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_an_overflow_logs_why_it_compacts_and_keeps_what_came_with_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    summarizer = Summarizer()
+    with caplog.at_level(logging.WARNING, logger=runtime.__name__):
+        async with Harness(reply("ok"), compactor=summarizer) as h:
+            h.runtime.append_history(_user("go"))
+            h.push(
+                ModelResponseError(exception=ContextOverflowError("too long")),
+                _user("b"),
+                _user("c"),
+            )
+            await h.seen(ModelIdle)
+    assert caplog.record_tuples == [
+        (
+            runtime.__name__,
+            logging.WARNING,
+            "model context overflowed; compacting: too long",
+        ),
+    ]
+    assert [m for m in h.published() if m in ("b", "c")] == ["b", "c"]
+    # The compaction the overflow started is the model's to be told of, as automatic.
+    assert [request.compaction for request in h.requests()] == ["auto"]
+
+
+@pytest.mark.asyncio
+async def test_the_gate_s_own_compaction_is_told_as_automatic() -> None:
+    due = [True]
+    async with Harness(reply("ok"), compactor=Summarizer()) as h:
+        h.runtime.compact_due = lambda: due.pop() if due else False
+        h.push(_user("a very long history"))
+        await h.seen(ModelIdle)
+    assert [request.compaction for request in h.requests()] == ["auto"]
+
+
+@pytest.mark.asyncio
+async def test_each_compaction_opens_the_next_window() -> None:
+    async with Harness(*_replies(3), compactor=Summarizer()) as h:
+        h.push(_user("go"))
+        await h.seen(ModelIdle)
+        h.push(Compact())
+        await h.seen(ModelIdle, 2)
+        h.push(Compact())
+        await h.seen(ModelIdle, 3)
+    assert [request.window for request in h.requests()] == [0, 1, 2]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_compaction_is_not_told_to_the_next_call() -> None:
+    summarizer = Summarizer(error=RuntimeError("compactor broke"))
+    async with Harness(reply("answered"), compactor=summarizer) as h:
+        h.push(Compact())
+        await h.seen(CompactFailed)
+        h.push(_user("next"))
+        await h.seen(ModelIdle)
+    assert [request.compaction for request in h.requests()] == [""]
+
+
+@pytest.mark.asyncio
+async def test_a_compaction_logs_its_start_and_asks_before_calling(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    asked: list[bool] = []
+
+    async def before(turn_start: bool) -> None:
+        asked.append(turn_start)
+
+    with caplog.at_level(logging.DEBUG, logger=runtime.__name__):
+        async with Harness(compactor=Summarizer()) as h:
+            h.runtime.before_call = before
+            h.runtime.append_history(_user("old"))
+            h.runtime.hold_for_user()
+            h.push(Compact(args="keep the plan"))
+            await h.seen(CompactComplete)
+    assert (
+        "runtime compact start: model_call=False running_tools=0 cohort=0 detached=0"
+        " args='keep the plan'"
+    ) in caplog.messages
+    # A compaction is no turn's first call.
+    assert asked == [False]
+
+
+@pytest.mark.asyncio
+async def test_before_call_is_told_which_call_opens_a_turn() -> None:
+    asked: list[bool] = []
+
+    async def before(turn_start: bool) -> None:
+        asked.append(turn_start)
+
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        reply("done"),
+        tools=[Gated()],
+    ) as h:
+        h.runtime.before_call = before
+        h.push(_user("go"))
+        await h.seen(ModelIdle)
+    assert asked == [True, False]
+
+
+@pytest.mark.parametrize(
+    ("crashing", "event", "where"),
+    [
+        ("_compact_and_post", Compact(), "compaction task crashed"),
+        ("_stream_and_post", UserMessage(content="go"), "model-call task crashed"),
+    ],
+    ids=["compaction", "model-call"],
+)
+@pytest.mark.asyncio
+async def test_a_task_of_the_loop_that_crashes_is_logged(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    crashing: str,
+    event: RuntimeEvent,
+    where: str,
+) -> None:
+    async def crash(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise RuntimeError("inner")
+
+    async with Harness(compactor=Summarizer()) as h:
+        monkeypatch.setattr(h.runtime, crashing, crash)
+        with caplog.at_level(logging.ERROR, logger=runtime.__name__):
+            h.push(event)
+            await until(lambda: bool(caplog.records))
+    (record,) = caplog.records
+    assert (record.name, record.levelno, record.getMessage()) == (
+        runtime.__name__,
+        logging.ERROR,
+        f"{where}: inner",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_reply_starts_the_backoff_afresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timers = _recording_timers(monkeypatch)
+    h = Harness(OverloadedError("busy"), reply("a"), OverloadedError("busy"))
+    h.runtime.append_history(_user("resumed"))
+    h.runtime.persistent_retry = True
+    async with h:
+        h.push(SaveSession())
+        await h.seen(ModelCallSuspended)
+        h.runtime.service_suspended_until = time.time() - 1
+        _, wake, args = timers[0]
+        wake(*args)
+        await h.seen(ModelIdle)
+        h.runtime.append_history(_user("resumed again"))
+        h.push(SaveSession())
+        await h.seen(ModelCallSuspended, 2)
+    attempts = [e.attempt for e in h.events if isinstance(e, ModelCallSuspended)]
+    assert attempts == [1, 1]
+    assert [delay for delay, _, _ in timers] == [5.0, 5.0]
+
+
+@pytest.mark.parametrize(
+    ("ahead_sec", "expected"),
+    [(100.0, pytest.approx(100.0, abs=1.0)), (-5.0, 0.0)],
+    ids=["later", "already-past"],
+)
+@pytest.mark.asyncio
+async def test_a_wait_the_failure_hook_names_is_the_one_kept(
+    monkeypatch: pytest.MonkeyPatch,
+    ahead_sec: float,
+    expected: float,
+) -> None:
+    seen: list[BaseException] = []
+
+    async def after(exc: BaseException) -> float | None:
+        seen.append(exc)
+        return time.time() + ahead_sec
+
+    timers = _recording_timers(monkeypatch)
+    limit = RateLimitedError("slow down", retry_after_sec=30)
+    async with Harness(limit) as h:
+        h.runtime.persistent_retry = True
+        h.runtime.after_failure = after
+        h.push(_user("go"))
+        await h.seen(ModelCallSuspended)
+    assert seen == [limit]
+    assert [delay for delay, _, _ in timers] == [expected]
+
+
+@pytest.mark.asyncio
+async def test_a_failure_of_the_model_switched_away_from_asks_no_hook_and_keeps_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[BaseException] = []
+
+    async def after(exc: BaseException) -> float | None:
+        seen.append(exc)
+        return None
+
+    _ = _recording_timers(monkeypatch)
+    async with Harness(reply("ok")) as h:
+        h.runtime.after_failure = after
+        h.runtime.persistent_retry = True
+        h.runtime.model = h.provider["scripted"]
+        h.push(
+            ModelResponseError(
+                exception=RateLimitedError("limit hit", retry_after_sec=7_423),
+            ),
+            _user("b"),
+        )
+        await h.seen(ModelIdle)
+    assert seen == []
+    assert h.texts() == ["b", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_a_suspension_keeps_the_input_that_came_with_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ = _recording_timers(monkeypatch)
+    async with Harness(reply("ok")) as h:
+        h.runtime.persistent_retry = True
+        h.push(
+            ModelResponseError(
+                exception=RateLimitedError("slow down", retry_after_sec=60),
+            ),
+            _user("b"),
+        )
+        await h.seen(ModelIdle)
+    assert h.count(ModelCallSuspended) == 1
+    assert h.texts() == ["b", "ok"]
+
+
+@pytest.mark.asyncio
+async def test_a_reply_not_taken_fails_once_and_keeps_what_came_with_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    broke = RuntimeError("hook broke")
+    raising = [broke]
+
+    def broken(response: Response) -> UserMessage | None:
+        del response
+        if raising:
+            raise raising.pop()
+        return None
+
+    with caplog.at_level(logging.ERROR, logger=runtime.__name__):
+        async with Harness(reply("answered")) as h:
+            h.runtime.before_tool_spawn = broken
+            h.runtime.append_history(_user("go"))
+            h.runtime.hold_for_user()
+            h.push(
+                ModelResponseComplete(response=reply("lost"), generation=-1),
+                _user("b"),
+                _user("c"),
+            )
+            await h.seen(ModelIdle)
+    (record,) = caplog.records
+    assert record.getMessage() == "dispatching ModelResponseComplete raised: hook broke"
+    assert isinstance(record.exc_info, tuple)
+    assert record.exc_info[1] is broke
+    assert [e.exception for e in h.events if isinstance(e, ModelResponseError)] == [
+        broke,
+    ]
+    assert h.texts() == ["go", "b", "c", "answered"]
+    # The reply not taken was not asked for again before the input behind it.
+    assert [h.said(i) for i in range(len(h.requests()))] == [["go\n\nb\n\nc"]]
+
+
+@pytest.mark.asyncio
+async def test_before_tool_spawn_is_given_the_reply_as_recorded() -> None:
+    given: list[Response] = []
+
+    def noting(response: Response) -> UserMessage | None:
+        given.append(response)
+        return None
+
+    async with Harness(reply("answer")) as h:
+        h.runtime.before_tool_spawn = noting
+        h.push(_user("go"))
+        await h.seen(ModelIdle)
+    assert given == [e for e in h.history() if isinstance(e, Response)]
+    assert len(given) == 1
+
+
+@pytest.mark.parametrize(
+    ("resume", "text"),
+    [(None, "hi"), (types.Nudge(content="you owe a reply"), "you owe a reply")],
+    ids=["retry", "nudge"],
+)
+@pytest.mark.asyncio
+async def test_input_queued_once_the_turn_goes_on_waits_for_it_to_end(
+    resume: RuntimeEvent | None,
+    text: str,
+) -> None:
+    """The wait for the user is over, so queued input is held for the idle again."""
+    h = Harness(AuthError("signed out"))
+    h.provider.replies.extend(
+        [
+            _pushing(h, UserQueuedMessage(text="later"), answer=reply("ok")),
+            reply("after"),
+        ],
+    )
+    async with h:
+        h.push(_user("hi"))
+        await h.seen(ModelResponseError)
+        await spin()
+        if resume is None:
+            h.runtime.retry()
+        else:
+            h.push(resume)
+        await h.seen(ModelIdle, 2)
+    assert [t for t in h.texts() if t != text] == [
+        *(["hi"] if text != "hi" else []),
+        "ok",
+        "later",
+        "after",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_only_the_first_queued_input_ends_a_wait_for_the_user() -> None:
+    h = Harness()
+    h.provider.replies.extend(
+        [
+            _pushing(h, Halt(), answer=reply("never-shown")),
+            _pushing(h, UserQueuedMessage(text="second"), answer=reply("ok")),
+            reply("after"),
+        ],
+    )
+    async with h:
+        h.push(_user("go"))
+        await h.seen(Halt)
+        h.push(UserQueuedMessage(text="first"))
+        await h.seen(ModelIdle, 2)
+    assert h.texts() == ["go", "first", "ok", "second", "after"]
+
+
+def _splice_strategies(h: Harness) -> list[str]:
+    """Return the strategy of each splice on the tape, in order."""
+    return [r.strategy for r in h.runtime.tape if isinstance(r, ContextSplice)]
+
+
+@pytest.mark.asyncio
+async def test_a_pending_stub_is_not_handed_to_a_caller_waiting_on_the_call() -> None:
+    tool = Gated(hold=True, output="REAL")
+    async with Harness(
+        reply(calls=[call("echo", "b1", background=True)]),
+        reply("going on"),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await h.seen(ModelIdle)
+        waiting = asyncio.create_task(h.runtime.foreground("b1"))
+        await spin()
+        h.push(DetachedResult(result=ToolResult(call_id="b1", state="pending")))
+        await h.seen(DetachedResult)
+        await spin()
+        assert not waiting.done()
+        tool.release.set()
+        result = await waiting
+    assert result is not None
+    assert result.text() == "REAL"
+
+
+@pytest.mark.asyncio
+async def test_a_detach_asked_by_no_task_running_a_call_detaches_nothing() -> None:
+    tool = Gated(hold=True)
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        reply("done"),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        h.runtime.detach(None)
+        h.runtime.detach(asyncio.create_task(asyncio.sleep(0)))
+        await spin()
+        assert h.runtime.cohort == {"t1"}
+        assert h.results("t1") == []
+        tool.release.set()
+        await h.seen(ModelIdle)
+    assert [r.text() for r in h.results("t1")] == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_the_gate_answers_a_recorded_call_past_one_a_splice_left_open() -> None:
+    """The splice's call is the rebuild's to answer; the recorded one is answered here."""
+    h = Harness(reply("acknowledged"))
+    h.runtime.append_splice(
+        payload=(_user("[summary]"), reply(calls=[call("Bash", "toolu_X")])),
+        strategy="summary",
+        paired_externally=frozenset({"toolu_X"}),
+    )
+    h.runtime.append_history(_user("next"))
+    h.runtime.append_history(reply(calls=[call("Bash", "toolu_Y")]))
+    async with h:
+        h.push(_user("please retry"))
+        await h.seen(ModelIdle)
+    assert _splice_strategies(h) == [
+        "summary",
+        "orphan_tool_use_repair",
+        "context_rescue",
+    ]
+    assert [r.text() for r in h.results("toolu_Y")] == ["[interrupted]"]
+    validate_context(h.history())
+
+
+@pytest.mark.asyncio
+async def test_a_peer_s_message_mid_cohort_detaches_the_running_tool() -> None:
+    tool = Gated(hold=True, output="REAL")
+    async with Harness(
+        reply(calls=[call("echo", "t1")]),
+        reply("answering"),
+        tools=[tool],
+    ) as h:
+        h.push(_user("go"))
+        await until(lambda: bool(tool.started))
+        h.push(AgentToAgentMessage(sender="Sender", content="redirect"))
+        await h.seen(ModelIdle)
+        assert [r.text() for r in h.results("t1")] == [Markers().detached]
+        tool.release.set()
+        await until(lambda: bool(tool.finished))
+
+
+@pytest.mark.parametrize(
+    "following",
+    [
+        UserMessage(content="next"),
+        AgentToAgentMessage(sender="Sender", content="next"),
+    ],
+    ids=["user", "peer"],
+)
+@pytest.mark.asyncio
+async def test_input_held_for_a_cancelled_reply_goes_ahead_of_what_follows_it(
+    following: UserMessage | AgentToAgentMessage,
+) -> None:
+    async with Harness(reply("answer")) as h:
+        h.runtime.model_call = asyncio.create_task(_forever())
+        h.push(_user("held"))
+        await until(lambda: bool(h.runtime.pending_mid_stream()))
+        h.push(ModelResponseCancelled(output_chars_estimate=0), following)
+        await h.seen(ModelIdle)
+    assert h.texts() == ["held", "next", "answer"]
+
+
+@pytest.mark.asyncio
+async def test_a_forged_call_cut_in_on_is_still_answered_as_forged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Its reply's calls were detached for the message typed, so none was running."""
+    h = Harness()
+    h.provider.replies.extend(
+        [
+            _pushing(
+                h,
+                _user("hey"),
+                answer=reply(calls=[call(Markers().arrived, "m1")]),
+            ),
+            reply("answer to hey"),
+            reply("answer to next"),
+        ],
+    )
+    with caplog.at_level(logging.WARNING, logger=runtime.__name__):
+        async with h:
+            h.push(_user("go"))
+            await h.seen(ModelIdle)
+            h.push(_user("next"))
+            await h.seen(ModelIdle, 2)
+    assert caplog.records == []
+    (err,) = h.results(f"{Markers().mimic}0")
+    assert err.text() == (
+        f"{Markers().arrived} is not callable; detached results arrive automatically."
+    )
+    validate_context(h.history())
+
+
+@pytest.mark.asyncio
+async def test_a_suspension_ends_at_the_time_it_was_told(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async with Harness(reply("ok")) as h:
+        h.runtime.append_history(_user("resumed"))
+        monkeypatch.setattr(time, "time", lambda: 1_000.0)
+        h.runtime.service_suspended_until = 1_000.5
+        h.push(SaveSession())
+        await spin()
+        assert h.requests() == []
+        h.runtime.service_suspended_until = 1_000.0
+        h.push(SaveSession())
+        await h.seen(ModelIdle)
+    assert h.answers() == ["ok"]
+
+
+@pytest.mark.asyncio
+async def test_the_first_input_after_a_clear_is_the_user_resuming() -> None:
+    """Deferred input would else wait for the idle after the queued input's round."""
+    async with Harness(*_replies(2)) as h:
+        h.push(Clear())
+        await h.seen(ClearComplete)
+        h.push(UserDeferredMessage(text="d"), UserQueuedMessage(text="q"))
+        await h.seen(ModelIdle, 2)
+    assert h.texts() == ["d", "r0", "q", "r1"]
+
+
+@pytest.mark.asyncio
+async def test_a_retry_ends_the_failure_s_hold_before_a_compaction_it_starts() -> None:
+    summarizer = Summarizer(hold=True)
+    due = [True]
+    async with Harness(
+        AuthError("signed out"),
+        reply("ok"),
+        compactor=summarizer,
+    ) as h:
+        h.push(_user("go"))
+        await h.seen(ModelResponseError)
+        await spin()
+        h.runtime.compact_due = lambda: due.pop() if due else False
+        h.runtime.retry()
+        await summarizer.entered.wait()
+        assert not h.runtime.stopped
+        summarizer.release.set()
+        await h.seen(ModelIdle)
+    assert h.answers() == ["ok"]
+
+
+@pytest.mark.parametrize(
+    "ending",
+    ["switched-away", "suspended", "calls"],
+)
+@pytest.mark.asyncio
+async def test_input_held_for_a_reply_is_taken_in_where_the_reply_ended(
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """Ahead of what was queued behind the reply's end, such as a nudge."""
+    _ = _recording_timers(monkeypatch)
+    tool = Gated(hold=True)
+    ended: RuntimeEvent = ModelResponseError(
+        exception=RateLimitedError("limit hit", retry_after_sec=60),
+    )
+    async with Harness(reply("ok"), tools=[tool]) as h:
+        h.runtime.persistent_retry = True
+        h.runtime.model_call = asyncio.create_task(_forever())
+        h.push(_user("typed"))
+        await until(lambda: bool(h.runtime.pending_mid_stream()))
+        if ending == "switched-away":
+            h.runtime.model = h.provider["scripted"]
+        if ending == "calls":
+            ended = ModelResponseComplete(
+                response=reply(calls=[call("echo", "t1")]),
+                generation=-1,
+            )
+        h.push(ended, types.Nudge(content="nudged"))
+        await until(lambda: "nudged" in h.texts())
+        await spin()
+        said = [t for t in h.texts() if t in ("typed", "nudged")]
+    assert said == ["typed", "nudged"]
 
 
 def _detach_timers(monkeypatch: pytest.MonkeyPatch) -> list[asyncio.TimerHandle]:

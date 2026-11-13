@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from importlib.resources import files
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Self
 
 import asyncio
 import contextlib
@@ -266,30 +266,36 @@ class Bash:
             ),
             report_prefix=f"{sentinel}=",
         )
-        stderr_writer = _EarlyWriter(stream=stderr, early_chars=cap // 4)
+        # Stderr gets its own quarter, so floods of stdout cannot hide the error.
+        stderr_cap = cap // 4
+        stderr_writer = _EarlyWriter(stream=stderr, early_chars=stderr_cap)
         started = time.monotonic()
         reason: str | None = None
+        pipes: list[_OutputPipe] = []
         try:
+            pipes.append(await _OutputPipe.open())
+            pipes.append(await _OutputPipe.open())
             child = await Child.start(
                 *argv,
                 group=True,
                 grace_sec=self.grace_sec,
                 nice=self.nice,
                 stdin=asyncio.subprocess.DEVNULL if held is None else held.reader,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stdout=pipes[0].writer,
+                stderr=pipes[1].writer,
                 cwd=cwd if held is None else "/",
                 env=_environment(self.env, columns=context.columns),
             )
-            proc = child.process
-            assert isinstance(proc.stdout, asyncio.StreamReader)
-            assert isinstance(proc.stderr, asyncio.StreamReader)
+            # The shell has its own copies: one held here would keep each pipe
+            # from ever reaching its end.
+            for pipe in pipes:
+                pipe.writer.close()
             # Shielded, so a timeout cancels the wait, not the read of what was written.
             read_task = asyncio.ensure_future(
                 _read_output(
                     child,
-                    (proc.stdout, stdout_lines.add_line),
-                    (proc.stderr, stderr_writer.add_line),
+                    (pipes[0].reader, stdout_lines.add_line),
+                    (pipes[1].reader, stderr_writer.add_line),
                 ),
             )
             try:
@@ -300,7 +306,7 @@ class Bash:
             except TimeoutError:
                 await finish(_stop(child, held=held, output=read_task))
                 reason = f"timeout after {time.monotonic() - started:.1f}s"
-                if not await _drain(proc, read_task, grace_sec=self.drain_sec):
+                if not await _drain(pipes, read_task, grace_sec=self.drain_sec):
                     reason += (
                         "; the shell did not stop, and the rest of its output is lost"
                     )
@@ -314,6 +320,8 @@ class Bash:
                 if held is not None:
                     held.release()
         finally:
+            for pipe in pipes:
+                pipe.close()
             if held is not None:
                 held.close()
         stdout_lines.finish()
@@ -322,21 +330,18 @@ class Bash:
         # A wrapped shell is compared with the directory asked for instead, since
         # ``_guard`` starts it in ``/`` when that directory is gone.
         reported_dirs = stdout_lines.reported_dirs
-        start_dir = (
-            str(cwd) if held is not None or not reported_dirs else reported_dirs[0]
-        )
+        start_dirs = [str(cwd)] if held is not None else reported_dirs[:1]
         for reported_dir in reported_dirs:
             end_cwd = Path(reported_dir)
             if (
-                reported_dir != start_dir
+                reported_dir not in start_dirs
                 and end_cwd.is_absolute()
                 and (held is not None or await asyncio.to_thread(end_cwd.is_dir))
             ):
                 context.cwd = end_cwd
-        # Stderr gets its own quarter, so floods of stdout cannot hide the error.
         diagnostics, _ = context.fit(
             [f"{line}\n" for line in "".join(stderr_writer.lines).strip().split("\n")],
-            cap=cap // 4,
+            cap=stderr_cap,
         )
         diagnostics = diagnostics.strip()
         if reason is not None:
@@ -353,7 +358,7 @@ class Bash:
             await asyncio.to_thread(_spill, spill, lines)
         stdout_lines.writer.write_rest(final_text)
         stderr_writer.write_rest(diagnostics.strip())
-        return proc.returncode
+        return child.process.returncode
 
 
 @dataclass(slots=True, kw_only=True)
@@ -470,7 +475,7 @@ async def _read_output(
 
 # A child that ran ``setsid`` survives the group kill and can hold the pipes open.
 async def _drain[T](
-    proc: asyncio.subprocess.Process,
+    pipes: Sequence[_OutputPipe],
     read_task: asyncio.Future[T],
     *,
     grace_sec: float,
@@ -479,9 +484,9 @@ async def _drain[T](
     try:
         await asyncio.wait_for(asyncio.shield(read_task), timeout=grace_sec)
     except TimeoutError:
-        for stream in (proc.stdout, proc.stderr):
-            if stream is not None:
-                stream.feed_eof()
+        # Closing a pipe here ends its read, with what was read already kept.
+        for pipe in pipes:
+            pipe.close()
     else:
         return True
     try:
@@ -490,6 +495,48 @@ async def _drain[T](
         logging.getLogger(__name__).warning("Shell outlived its stop; output lost")
         return False
     return True
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _OutputPipe:
+    """A pipe the shell writes to, whose read end this process closes itself.
+
+    asyncio closes a subprocess pipe of its own only at the pipe's end, or when
+    the process object is collected. A job that left the shell's group keeps
+    the pipe from ending, so its descriptor would stay open here until then.
+    """
+
+    reader: asyncio.StreamReader
+    transport: asyncio.ReadTransport
+    writer: io.FileIO
+    """The end the shell inherits."""
+
+    @classmethod
+    async def open(cls) -> Self:
+        """Open a pipe whose read end the running loop reads.
+
+        Returns:
+          pipe: The pipe, both ends open.
+
+        """
+        read_fd, write_fd = os.pipe()
+        read_end, writer = io.FileIO(read_fd), io.FileIO(write_fd, "w")
+        reader = asyncio.StreamReader()
+        try:
+            transport, _ = await asyncio.get_running_loop().connect_read_pipe(
+                lambda: asyncio.StreamReaderProtocol(reader),
+                read_end,
+            )
+        except BaseException:
+            read_end.close()
+            writer.close()
+            raise
+        return cls(reader=reader, transport=transport, writer=writer)
+
+    def close(self) -> None:
+        """Close both ends; the reader then ends after what it has read."""
+        self.writer.close()
+        self.transport.close()
 
 
 class _HeldPipe:

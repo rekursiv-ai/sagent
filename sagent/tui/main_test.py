@@ -46,7 +46,7 @@ from sagent.agent.pruner import Pruner
 from sagent.agent.team import Team
 from sagent.host import daemon
 from sagent.host.strings import ServeDirs
-from sagent.lib.posix.attach import stop
+from sagent.lib.posix.attach import stop, viewers
 from sagent.lib.posix.detached import await_ready
 from sagent.lib.posix.host import serve_command
 from sagent.lib.posix.sockets import accepts, socket_address
@@ -4714,12 +4714,9 @@ async def test_a_second_terminal_attaches_to_the_running_session(
     monkeypatch.setattr(main, "_ask", partial(_answer, asked, "a"))
     journal = tmp_path / "000000000001" / "session.jsonl"
     journal.parent.mkdir()
-    starts, attaches = tmp_path / "starts", tmp_path / "attaches"
-    # A host asks for a repaint, SIGWINCH, as each terminal attaches.
+    starts = tmp_path / "starts"
     script = (
         "import signal, sys;"
-        f"signal.signal(signal.SIGWINCH, lambda *_: open({str(attaches)!r}, 'a')"
-        ".write('a'));"
         "signal.signal(signal.SIGTERM, lambda *_: sys.exit(3));"
         "signal.signal(signal.SIGHUP, lambda *_: sys.exit(3));"
         f"open({str(starts)!r}, 'a').write('s');"
@@ -4730,13 +4727,17 @@ async def test_a_second_terminal_attaches_to_the_running_session(
     monkeypatch.setattr(main, "launch", _launch_here)
     first = asyncio.create_task(_resume(journal, command=command))
     await _once(lambda: _text(starts) == "s")
+    # The second is asked about the first only once the first has attached: the
+    # host starts its command before any terminal is attached to it.
+    await _once(lambda: asyncio.run(viewers(main._host_address(journal))) == 1)
     second = asyncio.create_task(_resume(journal, command=command))
-    await _once(lambda: "a" in _text(attaches))
+    # The first detaches when the second has taken the session over.
+    assert await asyncio.wait_for(asyncio.shield(first), 30) == 0
 
     # Ended from outside: a typed line waits out the host's paste-to-Enter delay.
     assert await stop(main._host_address(journal)) == 3
 
-    assert await asyncio.wait_for(asyncio.gather(first, second), 30) == [0, 3]
+    assert await asyncio.wait_for(second, 30) == 3
     assert _text(starts) == "s"
     assert asked == [
         (
