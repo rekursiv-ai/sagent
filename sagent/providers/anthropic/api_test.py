@@ -44,6 +44,7 @@ _REQUEST = Request(system=("Be terse.",), records=(UserMessage(content="hi"),))
 @pytest.fixture(autouse=True)
 def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
 
 
 @pytest.fixture
@@ -164,6 +165,22 @@ async def test_stream_posts_the_request_and_yields_text_then_the_response() -> N
     assert isinstance(response, Response)
     assert response.records == (AssistantMessage(content="Hello"),)
     assert (response.tokens.request, response.tokens.response) == (3, 1)
+
+
+@pytest.mark.asyncio
+async def test_requests_go_to_the_base_url_given_else_anthropic_base_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "http://gateway/anthropic/")
+    server = _Server(replies=[_ok(), _ok()])
+    async with _Served(server) as shared:
+        await _stream(Anthropic(resources=shared)["opus"])
+        await _stream(Anthropic(resources=shared, base_url="http://box/X/")["opus"])
+    # Only the trailing slash is dropped, never a path's last letter.
+    assert [str(sent.url) for sent in server.requests] == [
+        "http://gateway/anthropic/v1/messages",
+        "http://box/X/v1/messages",
+    ]
 
 
 @pytest.mark.asyncio

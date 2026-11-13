@@ -50,7 +50,8 @@ class OpenAI(ResponsesCompatible):
       resources: What this shares with other providers; ``None`` makes and
         closes its own.
       api_key: The key; empty reads ``OPENAI_API_KEY``.
-      base_url: The endpoint; empty uses OpenAI's.
+      base_url: The endpoint, up to and including ``/v1``; empty reads
+        ``OPENAI_BASE_URL``, as OpenAI's SDK does, then uses OpenAI's.
 
     """
 
@@ -59,6 +60,7 @@ class OpenAI(ResponsesCompatible):
     package: ClassVar[ModuleType] = openai
     url: ClassVar[str] = "https://api.openai.com/v1"
     key_variable: ClassVar[str] = "OPENAI_API_KEY"
+    base_url_variable: ClassVar[str] = "OPENAI_BASE_URL"
 
     _identity: WorkloadIdentity | None = None
 

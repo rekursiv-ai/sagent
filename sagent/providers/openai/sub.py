@@ -46,6 +46,8 @@ __all__ = [
 class OpenAISub(OpenAI):
     """OpenAI's models, billed to a ChatGPT plan.
 
+    ``OPENAI_SUB_BASE_URL``, when set, replaces ``url``, up to and including ``/codex``.
+
     Args:
       name: The name the catalog knows this provider by; the section by default.
       resources: What this shares with other providers; ``None`` makes and
@@ -61,6 +63,9 @@ class OpenAISub(OpenAI):
     aliases: ClassVar[tuple[str, ...]] = ("osub", "oaisub")
     url: ClassVar[str] = "https://chatgpt.com/backend-api/codex"
     key_variable: ClassVar[str] = ""
+    # Not the API's ``OPENAI_BASE_URL``, which it would inherit: that stands in
+    # for ``api.openai.com``, another endpoint than this one.
+    base_url_variable: ClassVar[str] = "OPENAI_SUB_BASE_URL"
     # The endpoint answers 400 "Unsupported parameter: temperature" for any model.
     temperature: ClassVar[float | None] = None
 

@@ -36,7 +36,8 @@ class Moonshot(OpenAICompatible):
       resources: What this shares with other providers; ``None`` makes and
         closes its own.
       api_key: The key; empty reads ``MOONSHOT_API_KEY``.
-      base_url: The endpoint; empty uses ``api.moonshot.ai``.
+      base_url: The endpoint, up to and including ``/v1``; empty reads
+        ``MOONSHOT_BASE_URL``, then uses ``api.moonshot.ai``.
 
     """
 
@@ -45,6 +46,7 @@ class Moonshot(OpenAICompatible):
     package: ClassVar[ModuleType] = moonshot
     url: ClassVar[str] = "https://api.moonshot.ai/v1"
     key_variable: ClassVar[str] = "MOONSHOT_API_KEY"
+    base_url_variable: ClassVar[str] = "MOONSHOT_BASE_URL"
     reasoning_field: ClassVar[str] = "reasoning_content"
     # K3 fixes its sampler and says to omit it; K2.x says the temperature
     # cannot be changed and is not to be passed.

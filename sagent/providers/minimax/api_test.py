@@ -28,9 +28,13 @@ def _body(model_id: str, **choices: object) -> dict[str, object]:
 async def test_the_provider_is_minimaxs_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("MINIMAX_BASE_URL", raising=False)
     minimax = MiniMax()
     assert minimax.name == "minimax"
     assert await minimax.endpoint() == "https://api.minimax.io/v1"
+    monkeypatch.setenv("MINIMAX_BASE_URL", "http://gateway/v1")
+    assert await minimax.endpoint() == "http://gateway/v1"
+    assert await MiniMax(base_url="http://box/v1").endpoint() == "http://box/v1"
     assert minimax.reasoning_field == "reasoning_content"
     assert minimax["default"].capability.wire_model_id == "MiniMax-M3"
     monkeypatch.setenv("MINIMAX_API_KEY", "sk-mm")

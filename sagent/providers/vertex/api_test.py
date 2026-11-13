@@ -63,6 +63,7 @@ def test_invalid_cloud_configuration_is_rejected(
 def test_regional_and_explicit_endpoints(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GOOGLE_CLOUD_PROJECT", "project")
     monkeypatch.setenv("GOOGLE_CLOUD_LOCATION", "us-central1")
+    monkeypatch.delenv("VERTEX_BASE_URL", raising=False)
     assert (
         Vertex()
         .endpoint("countTokens", model="x")
@@ -73,6 +74,18 @@ def test_regional_and_explicit_endpoints(monkeypatch: pytest.MonkeyPatch) -> Non
     assert (
         Vertex(base_url="https://proxy.example/v1/").endpoint("countTokens", model="x")
         == "https://proxy.example/v1/models/x:countTokens"
+    )
+    # Gemini's variable names another endpoint, which Vertex never follows.
+    monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", "https://gemini.example/v1beta")
+    monkeypatch.setenv("VERTEX_BASE_URL", "https://gateway.example/v1")
+    assert (
+        Vertex().endpoint("countTokens", model="x")
+        == "https://gateway.example/v1/models/x:countTokens"
+    )
+    # Only the trailing slash is dropped, never a path's last letter.
+    assert (
+        Vertex(base_url="https://proxy.example/X/").endpoint("countTokens", model="x")
+        == "https://proxy.example/X/models/x:countTokens"
     )
 
 

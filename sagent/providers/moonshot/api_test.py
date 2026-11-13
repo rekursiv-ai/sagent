@@ -28,9 +28,12 @@ def _body(model_id: str, **choices: object) -> dict[str, object]:
 async def test_the_provider_is_moonshots_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.delenv("MOONSHOT_BASE_URL", raising=False)
     moonshot = Moonshot()
     assert moonshot.name == "moonshot"
     assert await moonshot.endpoint() == "https://api.moonshot.ai/v1"
+    monkeypatch.setenv("MOONSHOT_BASE_URL", "http://gateway/v1")
+    assert await moonshot.endpoint() == "http://gateway/v1"
     assert await Moonshot(base_url="http://box/v1").endpoint() == "http://box/v1"
     assert moonshot.reasoning_field == "reasoning_content"
     assert moonshot["default"].capability.wire_model_id == "kimi-k3"

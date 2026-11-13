@@ -58,7 +58,9 @@ class Google(HasModels, AsyncResource):
       resources: What this shares with other providers; ``None`` makes and
         closes its own.
       api_key: The API key; empty reads Google's environment variables.
-      base_url: The endpoint; empty uses Google's Generative Language API.
+      base_url: The endpoint, up to and including its version (``/v1beta``);
+        empty reads ``base_url_variable``, then uses Google's Generative
+        Language API.
       models: A caller's priced model catalog; ``None`` uses the shipped catalog.
 
     """
@@ -66,6 +68,11 @@ class Google(HasModels, AsyncResource):
     section: ClassVar[str] = "google"
     aliases: ClassVar[tuple[str, ...]] = ("google-api", "gapi")
     package: ClassVar[ModuleType] = google
+
+    # Google's SDK names it, but holds the origin there and adds the version
+    # itself; here it holds what ``base_url`` holds.
+    base_url_variable: ClassVar[str] = "GOOGLE_GEMINI_BASE_URL"
+    """The environment variable overriding the endpoint, if any."""
 
     def __init__(
         self,
@@ -163,8 +170,21 @@ class Google(HasModels, AsyncResource):
         return False
 
     def endpoint(self, method: str, *, model: str) -> str:
-        """Return the URL of ``method`` (``countTokens``) for ``model``."""
-        base = self._base_url or "https://generativelanguage.googleapis.com/v1beta"
+        """Return the URL of ``method`` (``countTokens``) for ``model``.
+
+        Args:
+          method: The API method, such as ``streamGenerateContent``.
+          model: The vendor's id of the model.
+
+        Returns:
+          url: Under ``base_url``, else ``base_url_variable``, else Google's API.
+
+        """
+        base = (
+            self._base_url
+            or os.environ.get(self.base_url_variable)
+            or "https://generativelanguage.googleapis.com/v1beta"
+        )
         return f"{base.rstrip('/')}/models/{model}:{method}"
 
     async def envelope(
