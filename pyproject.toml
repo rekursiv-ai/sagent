@@ -242,7 +242,7 @@ markers = [
 # `-p no:py_pglite`: its auto-loaded plugin marks any test whose PATH contains
 # "benchmark"/"performance"/"integration", and the filter above then silently
 # deselected 82 unit tests. PGlite fixtures come from a conftest-registered plugin.
-addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=0 --durations-min=0.100 --dist=worksteal -p no:py_pglite"
+addopts = "-m 'not ci_smoke and not cuda and not integration and not performance and not cluster and not slow' --durations=0 --durations-min=0.250 --dist=worksteal -p no:py_pglite"
 timeout = 60
 # "error" = treat all warnings as errors (same as -Werror).
 # Using filterwarnings instead of addopts so we can add exceptions.
