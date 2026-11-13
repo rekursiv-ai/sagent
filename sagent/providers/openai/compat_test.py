@@ -73,6 +73,31 @@ class _Renewing(_Vendor):
         return True
 
 
+class _CredentialProbe(_Vendor):
+    """Record what credentials the first request gives the gate and transport."""
+
+    def __init__(self, *, resources: SharedResources) -> None:
+        super().__init__(resources=resources)
+        self.issued_credentials: list[str] = []
+        self.gate_key_calls: list[tuple[str | None, Mapping[str, str] | None]] = []
+
+    @override
+    async def credentials(self) -> dict[str, str]:
+        credential = f"Bearer token-{len(self.issued_credentials)}"
+        self.issued_credentials.append(credential)
+        return {"authorization": credential}
+
+    @override
+    def gate_key(
+        self,
+        model: str | None,
+        *,
+        credentials: Mapping[str, str] | None,
+    ) -> str:
+        self.gate_key_calls.append((model, credentials))
+        return "probe"
+
+
 @pytest.fixture(autouse=True)
 def api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VENDOR_API_KEY", "sk-vendor")
@@ -405,7 +430,9 @@ async def test_a_short_failure_before_the_first_event_is_retried(
 
 
 @pytest.mark.asyncio
-async def test_events_retry_by_default(slept: list[float]) -> None:
+async def test_events_retry_by_default_and_override_caller_accept(
+    slept: list[float],
+) -> None:
     server = _Server(replies=[_failed(503, "Busy"), _ok()])
     async with _Served(server) as shared:
         events = [
@@ -413,12 +440,71 @@ async def test_events_retry_by_default(slept: list[float]) -> None:
             async for event in _Vendor(resources=shared).events(
                 body={},
                 model="default",
-                headers={},
+                headers={"accept": "application/json"},
             )
         ]
     assert len(events) == len(_said("Hello"))
     assert len(server.requests) == 2
+    assert [request.headers["accept"] for request in server.requests] == [
+        "text/event-stream",
+        "text/event-stream",
+    ]
     assert slept == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_events_reuses_first_credentials_for_gate_and_request() -> None:
+    server = _Server(replies=[_ok()])
+    async with _Served(server) as shared:
+        provider = _CredentialProbe(resources=shared)
+        events = [
+            event
+            async for event in provider.events(
+                body={},
+                model="default",
+                headers={},
+                retry=False,
+            )
+        ]
+    assert len(events) == len(_said("Hello"))
+    assert provider.issued_credentials == ["Bearer token-0"]
+    assert provider.gate_key_calls == [
+        ("default", {"authorization": "Bearer token-0"}),
+    ]
+    assert len(server.requests) == 1
+    assert server.requests[0].headers["authorization"] == "Bearer token-0"
+
+
+@pytest.mark.asyncio
+async def test_events_default_does_not_recheck_a_cached_quota_hold(
+    slept: list[float],
+) -> None:
+    limited = _failed(429, "Spent", headers={"retry-after": "432000"})
+    server = _Server(replies=[limited, _ok()])
+    async with _Served(server) as shared:
+        provider = _Vendor(resources=shared)
+        with pytest.raises(RateLimitedError, match="Spent"):
+            [
+                event
+                async for event in provider.events(
+                    body={},
+                    model="default",
+                    headers={},
+                    retry=False,
+                )
+            ]
+        with pytest.raises(RateLimitedError, match="cooling down"):
+            [
+                event
+                async for event in provider.events(
+                    body={},
+                    model="default",
+                    headers={},
+                    retry=False,
+                )
+            ]
+    assert len(server.requests) == 1
+    assert slept == []
 
 
 @pytest.mark.asyncio

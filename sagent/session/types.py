@@ -1070,7 +1070,7 @@ def stored_plain(
     plain = to_plain(
         record,
         classes=classes or record_classes(),
-        sort=False,  # pragma: no mutate -- treekle reads ``sort`` by truth: None is False.
+        sort=False,  # pragma: no mutate[truthiness]
         default_concrete_types=CONCRETE_TYPES,
     )
     assert isinstance(plain, dict)

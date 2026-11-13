@@ -565,7 +565,7 @@ class Runtime:
         self._deferred: list[UserDeferredMessage | AgentSendDeferredMessage] = []
         # Whether the runtime waits for the user; input sent to wait is then
         # committed at once.
-        self._awaiting_user = False  # pragma: no mutate -- None is as false.
+        self._awaiting_user = False  # pragma: no mutate[truthiness]
         # What waits for the next model round to be committed (``_flush_pending``).
         self._pending_commits: list[_PendingCommit] = []
         # Calls whose result was delivered forward, or is queued to be: a second
@@ -582,7 +582,7 @@ class Runtime:
         self._retries = 0
         # Whether a failed call ended the turn, so it waits; a new model, or a
         # ``Retry``, may get past the failure, and so calls again.
-        self._failed = False  # pragma: no mutate -- read for truth; None is as false.
+        self._failed = False  # pragma: no mutate[truthiness]
         self.recheck_quota = False
         # The model the call in flight asked; a failure of one switched away from
         # says nothing of the model now in use.
@@ -1305,7 +1305,7 @@ class Runtime:
             if self._fully_drained():
                 self.publish(AgentIdle())
             items = await self.inbox.drain()
-            failed_reply = False  # pragma: no mutate -- None is as false.
+            failed_reply = False  # pragma: no mutate[truthiness]
 
             for item_idx, item in enumerate(items):
                 # One event that fails to dispatch is logged; the rest of
@@ -1336,8 +1336,8 @@ class Runtime:
                         case Retry():
                             self.recheck_quota = True
                             self._end_suspension()
-                            self._failed = False  # pragma: no mutate -- read for truth; None is as false.
-                            self._awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
+                            self._failed = False  # pragma: no mutate[truthiness]
+                            self._awaiting_user = False  # pragma: no mutate[truthiness]
 
                         case Kill():
                             self._on_kill(item)
@@ -1374,7 +1374,7 @@ class Runtime:
                                 self._stop_all_tools(mode="detach")
                                 _ = self._drain_mid_stream_queue()
                                 self._commit_user(item)
-                            self._awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
+                            self._awaiting_user = False  # pragma: no mutate[truthiness]
 
                         case AgentToAgentMessage():
                             if self.model_call is not None:
@@ -1383,7 +1383,7 @@ class Runtime:
                                 self._stop_all_tools(mode="detach")
                                 _ = self._drain_mid_stream_queue()
                                 self._commit_user(item)
-                            self._awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
+                            self._awaiting_user = False  # pragma: no mutate[truthiness]
 
                         # A nudge to a busy agent is moot: it is nudged again
                         # at its next idle if it still owes.
@@ -1392,7 +1392,7 @@ class Runtime:
                                 self.append_history(
                                     SystemMessage(content=content, subtype="nudge"),
                                 )
-                            self._awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
+                            self._awaiting_user = False  # pragma: no mutate[truthiness]
 
                         # Input that ends the wait for the user is the user
                         # resuming; held for idle, the halted turn would be
@@ -1404,7 +1404,7 @@ class Runtime:
                             | AgentSendDeferredMessage()
                         ) if self._awaiting_user:
                             self._commit_user(_message_from_queued(item))
-                            self._awaiting_user = False  # pragma: no mutate -- read for truth; None is as false.
+                            self._awaiting_user = False  # pragma: no mutate[truthiness]
 
                         case UserQueuedMessage() | AgentSendQueuedMessage():
                             self._queued.append(item)
@@ -1540,7 +1540,7 @@ class Runtime:
         # The user took the turn over: what a failure waited for no longer calls
         # the model.
         self._end_suspension()
-        self._failed = False  # pragma: no mutate -- read for truth; None is as false.
+        self._failed = False  # pragma: no mutate[truthiness]
         # Tools keep running. What the user typed during the stream is what the
         # runtime would wait for.
         if self._drain_mid_stream_queue():
@@ -1564,7 +1564,7 @@ class Runtime:
         # A new conversation does not inherit the old one's failure, or its wait
         # for a rate limit.
         self._end_suspension()
-        self._failed = False  # pragma: no mutate -- read for truth; None is as false.
+        self._failed = False  # pragma: no mutate[truthiness]
         self.append_clear()
         self.inbox.push_front(
             Await.user(),
@@ -1706,7 +1706,7 @@ class Runtime:
             self._stop_tool(mid, self.running_tools.pop(mid), mode="detach")
             self.cohort.discard(mid)
         if not self.cohort:
-            self._cohort_seen = False  # pragma: no mutate -- None is as false.
+            self._cohort_seen = False  # pragma: no mutate[truthiness]
 
     async def _on_compact(self, item: Compact) -> None:
         """Start a compaction, unless one runs; what the user typed goes into it."""
@@ -1788,7 +1788,7 @@ class Runtime:
                 len(self.detached),
             )
             self.publish(CohortComplete())
-            self._cohort_seen = False  # pragma: no mutate -- None is as false.
+            self._cohort_seen = False  # pragma: no mutate[truthiness]
 
         # What the user sent as the reply streamed, if no ending of the reply
         # took it in already.
@@ -1878,7 +1878,7 @@ class Runtime:
         else:
             # Whatever released a failure's wait, or ended a suspension's, the turn
             # goes on, on the model asked now.
-            self._failed = False  # pragma: no mutate -- None is as false.
+            self._failed = False  # pragma: no mutate[truthiness]
             self.service_suspended_until = None
             await self._before_call(turn_start=self._steps == 0)
             self._called_model = self.model
